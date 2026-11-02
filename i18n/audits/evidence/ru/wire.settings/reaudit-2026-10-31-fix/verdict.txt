@@ -1,0 +1,8 @@
+PASS
+BLOCKER=0 MAJOR=0 MINOR=0 NIT=0
+Head: 727e5b5b969da813e0cadf1fd1d9fbd1ae106665
+Scoped semantic re-audit: 13 changed Russian values. Terminal clean verdict.
+825 keys and order preserved; validator 0 problems; 825-key argument parity; 13/13 render checks pass.
+RU-S01/RU-S02/RU-S03/RU-S04 accepted; all three minor corrections accepted.
+No catalogue edit or ledger append; no rendered UI audit claimed.
+Actual auditor model: openai/gpt-6.1-sol (quota fallback; see record.json).

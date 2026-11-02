@@ -196,7 +196,12 @@ def action_tool_parameters(surface: ActionSurface) -> dict[str, Any]:
                 "type": "array",
                 "minItems": 1,
                 "maxItems": MAX_BATCH_SIZE,
-                "items": {"anyOf": [_projected_action_schema(model) for model in surface.models]},
+                "items": {
+                    "anyOf": [
+                        surface.project_action_schema(_projected_action_schema(model))
+                        for model in surface.models
+                    ]
+                },
             }
         },
     }

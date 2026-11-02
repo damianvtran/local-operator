@@ -1,0 +1,52 @@
+{
+  "cli.group_help.skills": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a command",
+    "note": "One-line summary of `lop skills` in the top-level command list. 'hub' is the Agent Hub product term; 'bundle' is a skill packaged with extra files. Keep `lop skills` style tokens out: this line carries none."
+  },
+  "cli.group_help.skills_description": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a command",
+    "note": "Body shown by `lop skills --help`. The execute bit is the Unix file-permission flag; keep the safety meaning: bundles with executables are refused, installing never runs code."
+  },
+  "cli.group_help.tunnel": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a command",
+    "note": "Summary of `lop tunnel`. Radient is a product name and stays; 'harness' is the local lop runtime, as in the glossary."
+  },
+  "cli.group_help.secret": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a command",
+    "note": "Summary of `lop secret`. 'Agent' is the AI agent; 'without a prompt' means the agent can fetch the value without asking the user each time."
+  },
+  "cli.group_help.network": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a command",
+    "note": "Summary of `lop network`. 'Mesh network' is the product term for the paired-device network; 'sessions' are lop conversations running on other devices."
+  },
+  "cli.group_help.disk": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a command",
+    "note": "Summary of `lop disk`. Safety meaning matters: it measures first and only reclaims what is provably safe to delete."
+  },
+  "cli.group_help.operator": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a command",
+    "note": "Summary of `lop operator`. 'Operator' is the human who owns the machine, not a telephone operator; 'approval gate' is the prompt that asks before a risky action runs."
+  },
+  "cli.group_help.pair": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a command",
+    "note": "Summary of `lop pair`. Pairs a phone so it can approve actions; the user's signature authorises the pairing, and only once."
+  },
+  "cli.group_help.search": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a command",
+    "note": "Summary of `lop search`. 'Load-balanced' means spreading queries across several search providers."
+  },
+  "cli.group_help.fetch": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a command",
+    "note": "Summary of `lop fetch`. 'Headless' means a browser with no visible window."
+  }
+}

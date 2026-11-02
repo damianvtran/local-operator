@@ -37,6 +37,7 @@ import queue
 import re
 import threading
 import time
+import weakref
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Final
@@ -84,6 +85,20 @@ THUMB_QUALITY: Final = 82
 #: spellings of one config share one worker (and one observer).
 _INSTANCES: dict[str, "LibraryIndexer"] = {}
 _INSTANCES_LOCK = threading.Lock()
+
+#: Every indexer with a started worker, whether or not it came through
+#: :func:`ensure_started`. WEAK on purpose: this set is a lifetime handle for
+#: :func:`reset_for_tests`, never an owner — a stopped instance the caller drops
+#: must stay collectable, and a strong set here would keep every worker of the
+#: process (and its observer, its SQLite handles) alive.
+#:
+#: WHY IT IS NOT ``_INSTANCES``. The cache is keyed by config root and only holds
+#: what :func:`ensure_started` built, so a worker a test started directly with
+#: ``LibraryIndexer(root).start()`` was invisible to the reset and outlived its
+#: test. It then kept reconciling a deleted ``tmp_path``, and its warning landed
+#: in whichever test was capturing stderr at that moment (the CLI entrypoint test
+#: that asserts an empty stderr was the one that caught it).
+_LIVE: weakref.WeakSet["LibraryIndexer"] = weakref.WeakSet()
 
 #: One writer per config root ACROSS PROCESSES. The desktop server, a TUI
 #: session and a measurement harness can all reach the same config, and three
@@ -196,11 +211,15 @@ def ensure_started(config_dir: str | Path) -> "LibraryIndexer":
 
 
 def reset_for_tests() -> None:
-    """Stop every indexer and forget them. Tests own the process lifetime."""
+    """Stop every indexer this process started, cached or not. Tests own the lifetime."""
     with _INSTANCES_LOCK:
-        instances = list(_INSTANCES.values())
+        # ``dict.fromkeys`` dedupes by identity (the class defines no ``__eq__``):
+        # an ``ensure_started`` instance is in BOTH the cache and the live set,
+        # and stopping it twice would be a second ``join`` for no reason.
+        targets = dict.fromkeys([*_INSTANCES.values(), *_LIVE])
         _INSTANCES.clear()
-    for instance in instances:
+        _LIVE.clear()
+    for instance in targets:
         instance.stop()
 
 
@@ -446,6 +465,11 @@ class LibraryIndexer:
             if not _acquire_writer(self.config_dir):
                 logger.info("library: another process owns the index; reader only")
             self._stop.clear()
+            # Registered BEFORE the threads start: from here on this instance can
+            # spawn a worker, and a reset that raced the start would otherwise
+            # leave that worker running with nothing left to stop it.
+            with _INSTANCES_LOCK:
+                _LIVE.add(self)
             self._thread = threading.Thread(target=self._run, name="library-indexer", daemon=True)
             self._thread.start()
             # NO thumbnail worker without the writer lock. It WRITES
@@ -479,6 +503,11 @@ class LibraryIndexer:
         # Another process may now take over. The lock is also released by the
         # kernel on exit, which is why a crashed run cannot wedge the next one.
         _release_writer(self.config_dir)
+        # Stopped is not live: leaving it in the set would make the next reset
+        # join threads that are already gone (harmless) and, worse, imply this
+        # instance still owns work.
+        with _INSTANCES_LOCK:
+            _LIVE.discard(self)
 
     def _stop_observer(self) -> None:
         observer = self._observer

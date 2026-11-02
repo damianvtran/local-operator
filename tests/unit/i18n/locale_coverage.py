@@ -14,26 +14,11 @@ checker and the runtime read — and the locale universe is the generated shipme
 ledger (``resolve.shipped_locales()``), never a list declared here or there. A
 ninth locale, or `hi`/`es` landing tomorrow, needs no edit in any caller.
 
-**Membership is per NAMESPACE FILE, not per message id.** `catalogues.namespaces`
-answers "does the locale ship this file", which is the question both callers ask:
-the route serves or 404s a whole file, and a fallback assertion over a whole
-namespace's keys is decided by whether the file exists. (A locale can carry a
-file and still lack a specific id; `messages.render_record` then falls back per
-id. Callers that need that finer question should read their own catalogue, as the
-byte-fidelity assertions in these files already do.)
-
-**The vacuity guard FAILS, and that is a decision.** "A locale without this
-namespace renders the English source" is only evidence while some shipped locale
-lacks the namespace; once every locale carries it, the loop compares nothing and
-passes for the wrong reason. :func:`require_nonempty` therefore FAILS that half,
-with the derived sets named in the message.
-
-Failing rather than skipping is deliberate: a skip is reported once and then reads
-as green on every subsequent run, which is exactly how the file this helper
-replaces rotted — its locale list stayed green while the corpus moved under it. A
-failure forces the loss of coverage to be dealt with. The fix it should prompt is
-to pin the fallback against a synthetic catalogue root (``test_catalogues.py``
-builds fixture trees that way), never to restore a locale list.
+Message expectations use the supported-language manifest and choose per key,
+not per file: a partial catalogue still falls back for missing keys. The legacy
+file-membership helpers below remain for catalogue inventory and provenance
+checks, not for deciding which messages must be English. A fully translated tree
+must be healthy; mechanism-only absence cases belong in synthetic fixture trees.
 
 Caches are keyed by the catalogue root, so a test that swaps the tree (as
 `test_catalogues.py` does with ``monkeypatch.setattr(catalogues, "_CATALOGUES")``)
@@ -43,9 +28,42 @@ is answered from that tree instead of from a stale reading of the shipped corpus
 from __future__ import annotations
 
 import functools
-from collections.abc import Iterable, Sequence
+import json
+from collections.abc import Iterable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
 
 from local_operator.i18n import catalogues, resolve
+
+
+def supported_targets() -> tuple[str, ...]:
+    """Read the product language contract, not today's translation coverage."""
+    manifest = Path(__file__).resolve().parents[3] / "i18n" / "languages.json"
+    return tuple(
+        item["code"]
+        for item in json.loads(manifest.read_text(encoding="utf-8"))["languages"]
+        if item["status"] == "supported"
+    )
+
+
+def expected_message(locale: str, namespace: str, key: str, params: Mapping[str, Any]) -> str:
+    """Choose the oracle per key; complete translation waves must stay green.
+
+    Read files independently of the runtime loader, so a broken fallback or a
+    loader returning English for every locale cannot redefine the expectation.
+    """
+    from local_operator.i18n.runtime import render_message
+
+    root = catalogues.catalogue_root()
+    english = json.loads((root / "en" / f"{namespace}.json").read_text(encoding="utf-8"))
+    path = root / locale / f"{namespace}.json"
+    carried = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    if key in carried:
+        assert (
+            carried[key] != english[key]
+        ), f"English-identical shipped copy: {locale}/{namespace}:{key}"
+        return render_message(carried[key], params, locale)
+    return render_message(english[key], params, "en")
 
 
 def targets() -> tuple[str, ...]:

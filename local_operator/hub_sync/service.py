@@ -5723,7 +5723,7 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
     from local_operator.hub_sync.budget import OperationBudget
     from local_operator.hub_sync.outbound import project_outbound, refuses
     from local_operator.hub_sync.outbox import Outbox
-    from local_operator.hub_sync.push import push_item
+    from local_operator.hub_sync.push import org_skill_operation_id, push_item
 
     def changed(message: str) -> LinkError:
         return LinkError("publication-preview-changed", message)
@@ -5805,9 +5805,11 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
         # hub's current content. Anything else (a later edit, a different reviewed
         # proposal, a hub that moved elsewhere) falls through to the normal path,
         # which pushes once or refuses -- never reports a push that did not happen.
-        reconciled, landed_revision = _reconcile_landed_commit(
-            ctx, check, f"push-skill-{check.local_id}", receipt
+        operation_id = f"push-skill-{check.local_id}"
+        reconcile_id = (
+            org_skill_operation_id(operation_id) if identity.visibility == "org" else operation_id
         )
+        reconciled, landed_revision = _reconcile_landed_commit(ctx, check, reconcile_id, receipt)
         if reconciled is not None:
             _delete_publication_preview(ctx.config_dir, preview_receipt, PUSH_PREVIEW_DIR)
             return _push_answer(identity, check, reconciled)
@@ -5881,6 +5883,7 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
                 ),
                 bundle_attested=not is_bundle or _capability_bundle(ctx.store().load(), identity),
                 bundle_upload=(bundle_upload_hook(ctx, identity, record) if is_bundle else None),
+                org_skill=identity.visibility == "org",
             )
         )
         record_push_outcome(ctx, check, outcome)

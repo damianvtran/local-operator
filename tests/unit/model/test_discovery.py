@@ -1847,7 +1847,9 @@ def test_a_background_revalidation_gets_the_full_default_timeout(tmp_path) -> No
         "anthropic", api_key="sk-ant", client=client, cache_dir=tmp_path, timeout=2.0
     )
     assert status == "ok"
-    assert client.calls[0][3] == 2.0
+    # Foreground cache/lease work spends the same deadline as HTTP; unlike
+    # revalidation above, the synchronous fetch cannot restart the full budget.
+    assert 0 < client.calls[0][3] <= 2.0
 
 
 def test_a_failed_want_id_refetch_keeps_the_document_and_reports_stale(tmp_path) -> None:

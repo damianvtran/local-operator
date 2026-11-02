@@ -1,0 +1,23 @@
+{
+  "locale": "ur",
+  "namespace": "wire.errors.session_host",
+  "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "50b1205a23e1",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "8a79664ef0c5",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "50b1205a23e1",
+    "actual_model_source": "Host model-switch messages: anthropic/claude-sonnet-5-5 -> anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider failure quota. Substantive audit performed under openai/gpt-6.1-sol.",
+    "date": "2026-10-31",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "note": "Second independent ur audit: passed 3/3; 0 blocker/major. Record: i18n/audits/evidence/ur/wire.errors.session_host/u31h8b/record.json. Source-only; no rendered fit/RTL proof."
+}

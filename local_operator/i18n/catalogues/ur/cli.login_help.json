@@ -1,0 +1,4 @@
+{
+  "cli.login_help.login": "کسی فراہم کنندہ میں لاگ اِن کریں (OAuth یا API کلید)",
+  "cli.login_help.provider": "جس فراہم کنندہ میں لاگ اِن کرنا ہے (مثلاً openai, anthropic, kimi, xai)۔ لاگ اِن کے قابل فراہم کنندگان کی فہرست کے لیے چھوڑ دیں۔"
+}

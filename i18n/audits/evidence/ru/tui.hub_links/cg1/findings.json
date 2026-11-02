@@ -1,0 +1,51 @@
+{
+  "locale": "ru",
+  "namespace": "tui.hub_links",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 2,
+    "minor": 0,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "RU-008",
+      "severity": "MAJOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.action.enable",
+      "english": "Enable auto-push",
+      "current": "Включить автопубликацию",
+      "problem": "Glossary 'Wave-2 kept-English set' keeps `push`/`pull` Latin for hub operations, and the existing ru neighbour wire.slash.hub already says «auto-push». The patch coins «автопубликация» throughout (also hint.auto_push, policy.auto_push.label, confirm.title, mark.healthy, refusal.ineligible, reason.no_receipt), so the /hub command description and the panel it opens name the feature differently.",
+      "suggested": "Включить auto-push; label «Auto-push»; hint «a auto-push»; confirm.title «Включить auto-push в {source}?»; mark.healthy «…; auto-push: {auto_push}»; refusal/reason «auto-push недоступен…» — apply consistently across all listed keys",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    },
+    {
+      "round": 1,
+      "id": "RU-009",
+      "severity": "MAJOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.action.pull",
+      "english": "Pull now",
+      "current": "Получить сейчас",
+      "problem": "Same glossary rule: hub 'pull' stays Latin (neighbours: «полученных через pull»). «Получить сейчас» / «Ручное получение» (policy.subscribe.help) / «получите обновления» (reason.baseline_unknown, reason.no_receipt) drop the term; reason.baseline_unknown also adds «разрешите конфликты», which English does not say ('resolve it').",
+      "suggested": "Выполнить pull; policy.subscribe.help «…Ручной pull остаётся доступным.»; reason.baseline_unknown «…Сначала выполните pull или разрешите её состояние.»; reason.no_receipt «…один раз выполните pull или опубликуйте…»",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    },
+    {
+      "round": 2,
+      "id": "RU2-008",
+      "severity": "NIT",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.action.pull",
+      "english": "Pull now",
+      "current": "Выполнить pull",
+      "problem": "«Выполнить pull» drops 'now', which separates the manual action from the scheduled subscription it sits beside.",
+      "suggested": "Выполнить pull сейчас",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ]
+}

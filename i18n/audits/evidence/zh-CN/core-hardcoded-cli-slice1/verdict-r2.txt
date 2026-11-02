@@ -1,0 +1,8 @@
+PASS
+BLOCKER: 0; MAJOR: 0; MINOR: 0; NIT: 0
+Agent: i18n-auditor; session: c4272e32ee6c; actual audit model: openai/gpt-6.1-sol (temporary quota fallback from anthropic/claude-sonnet-5-5; intervening anthropic/claude-opus-5-5 fallback did not read the target)
+Reader: read_public_copy for committed English and zh-CN key values; grep for context sidecar after read_public_copy refused its non-string metadata with: refused: catalogue keys and values must be strings
+Scope: cli.group_help.secret only; HEAD f5a23b78f034f58066e7c8fa65d61533dbddd016
+English placeholders: none. No ICU, markup, backticks, commands, flags, identifiers, or paths occur in this value. Terminology, semantic fidelity, terse grammatical register, punctuation, and safety claims all pass the scoped review. No stronger confidentiality or permission guarantee is added.
+Mechanical validation: shared repo .venv/bin/python scripts/i18n/check.py --catalogues-only exited 0: check.py: catalogue checks: 0 problem(s). Worktree .venv was absent; used primary checkout interpreter, without installing dependencies.
+No repository edits or ledger writes: read-only scoped task. These are audit notes, not an execution-log artifact; actual validator output is in this session transcript.

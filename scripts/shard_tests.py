@@ -17,7 +17,7 @@ fork would move the guard rails off the code that runs.
 
 WHY THIS EXISTS
 ---------------
-CI runs the unit suite as five parallel shards under a 25-minute cap (20 when
+CI runs the unit suite as six parallel shards under a 38-minute cap (20 when
 this was written; raised on 2026-09-28). The
 split used to be positional -- ``sorted(glob('tests/unit/**/test_*.py'))``
 then ``i % 5`` -- which balances the NUMBER of files and ignores what they
@@ -68,7 +68,7 @@ real test-isolation bug. That warning is narrowed by this change, not
 retired.
 
 ``--dist worksteal`` (in ``addopts``) cannot help here. It rebalances WITHIN
-one pytest process; this split happens across five machines before pytest
+one pytest process; this split happens across six machines before pytest
 starts.
 
 WHY THE E2E TREE IS SHARDED THE SAME WAY, AND WHY THAT IS SAFE
@@ -180,7 +180,7 @@ class Tree:
 
     ``default_shards`` is the count the matching CI job passes as ``--total``.
     It is per-tree because the two trees are split across different things --
-    five unit shards on one OS versus two e2e shards on EACH of two OSes --
+    six unit shards on one OS versus two e2e shards on EACH of two OSes --
     and a count that silently disagreed with the job's matrix is how a shard
     ends up orphaned (see `test_ci_shard_matrix_covers_every_shard_...`).
     """
@@ -209,7 +209,7 @@ TREES: dict[str, Tree] = {
         name="unit",
         glob="tests/unit/**/test_*.py",
         manifest=REPO / "tests" / "durations.json",
-        default_shards=5,
+        default_shards=6,
     ),
     # `tests/e2e` is globbed with `**` like the unit tree even though it is
     # flat today, so a future subdirectory is collected rather than silently

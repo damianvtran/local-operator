@@ -1,0 +1,22 @@
+{
+  "wire.errors.media.media_refusal": "{error}",
+  "wire.errors.media.provider_model_pair": "provider اور model ایک ساتھ دیے جائیں، یا دونوں نہیں۔",
+  "wire.errors.media.radient_key_missing": "سرور پر Radient API کلید کنفیگر نہیں ہے۔",
+  "wire.errors.media.save_audio_failed": "اپ لوڈ کی گئی آڈیو فائل محفوظ کرنے میں ناکامی: {error}",
+  "wire.errors.media.speech_generate_failed": "آواز تیار کرنے میں ناکامی: {error}",
+  "wire.errors.media.speech_no_credential": "بول کر سنانے کے لیے ترتیبات میں Radient میں سائن اِن کریں۔",
+  "wire.errors.media.speech_radient_credit_low": "آواز کے لیے آپ کا Radient کریڈٹ بیلنس بہت کم ہے۔ جاری رکھنے کے لیے Radient Console میں کریڈٹس شامل کریں۔",
+  "wire.errors.media.speech_radient_sign_in_failed": "آپ کا Radient سائن اِن کام کرنا بند ہو گیا ہے۔ ترتیبات میں دوبارہ سائن اِن کریں۔",
+  "wire.errors.media.speech_temporarily_unavailable": "آواز عارضی طور پر دستیاب نہیں۔ کچھ دیر بعد دوبارہ کوشش کریں۔",
+  "wire.errors.media.speech_unavailable": "آواز اس وقت دستیاب نہیں۔ کچھ دیر بعد دوبارہ کوشش کریں۔",
+  "wire.errors.media.speech_unknown_agent": "اس گفتگو کا ایجنٹ اب دستیاب نہیں۔",
+  "wire.errors.media.speech_upstream_no_response": "آواز کی تیاری اپ اسٹریم پر ناکام: اپ اسٹریم سے کوئی جواب نہیں ملا: {error}",
+  "wire.errors.media.speech_upstream_reported_error": "آواز کی تیاری اپ اسٹریم پر ناکام: Radient نے خرابی رپورٹ کی (HTTP {status}): {error}",
+  "wire.errors.media.speech_upstream_responded": "آواز کی تیاری اپ اسٹریم پر ناکام: اپ اسٹریم نے {status} جواب دیا: {error}",
+  "wire.errors.media.speech_vendor_credit_low": "آواز کے لیے آپ کا {vendor} کریڈٹ بیلنس بہت کم ہے۔ جاری رکھنے کے لیے {vendor} پر کریڈٹس شامل کریں۔",
+  "wire.errors.media.speech_vendor_key_refused": "{vendor} نے آپ کی API کلید مسترد کر دی۔ اسے تبدیل کریں۔",
+  "wire.errors.media.temp_audio_missing": "محفوظ کرنے کے بعد عارضی آڈیو فائل نہیں ملی۔",
+  "wire.errors.media.transcription_unexpected": "ٹرانسکرپشن کے دوران غیر متوقع خرابی پیش آئی: {error}",
+  "wire.errors.media.unknown_model": "نامعلوم ماڈل {provider}/{model}: {error}",
+  "wire.errors.media.unknown_provider": "نامعلوم provider {provider}۔"
+}

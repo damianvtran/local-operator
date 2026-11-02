@@ -1,0 +1,51 @@
+{
+  "locale": "vi",
+  "namespace": "cli.browser",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-027",
+      "severity": "MINOR",
+      "namespace": "cli.browser",
+      "key": "cli.browser.heartbeat_stale",
+      "english": "\n\u001b[1;33mheartbeat:           STALE by {age}s (discovery file is not being refreshed)\u001b[0m",
+      "current": "\n\u001b[1;33mnhịp tim:            CŨ {age}s (tệp khám phá không được làm mới)\u001b[0m",
+      "problem": "'nhịp tim' (biological heartbeat) is a calque for a liveness signal; es/fr keep 'heartbeat' and vi has no precedent (translator's ambiguous call — rejected; also applies to tui.small.info_panel.last_heartbeat_ago). 'CŨ {age}s' drops 'by', so it reads 'old 30s' rather than 'stale by 30s'.",
+      "suggested": "\\n\\x1b[1;33mheartbeat:           QUÁ HẠN {age}s (tệp khám phá không được làm mới)\\x1b[0m",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-028",
+      "severity": "MINOR",
+      "namespace": "cli.browser",
+      "key": "cli.browser.no_changes",
+      "english": "No changes. Repeat with --yes to approve this exact session and generation.",
+      "current": "Không có thay đổi. Lặp lại với --yes để chấp thuận đúng phiên và thế hệ này.",
+      "problem": "Glossary: approvals → «phê duyệt»; 'chấp thuận' is a second, unglossed term for the same act (also mobile.setup).",
+      "suggested": "Không có thay đổi. Lặp lại với --yes để phê duyệt đúng phiên và thế hệ này.",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-029",
+      "severity": "NIT",
+      "namespace": "cli.browser",
+      "key": "cli.browser.logs_missing",
+      "english": "no daemon log at {path}.\nThe bridge has not run under a service supervisor on this machine. Run `lop browser install`, or `lop browser serve` to run it in the foreground.",
+      "current": "không có nhật ký daemon tại {path}.\nCầu nối chưa chạy dưới trình giám sát dịch vụ trên máy này. Chạy `lop browser install`, hoặc `lop browser serve` để chạy ở foreground.",
+      "problem": "'chạy ở foreground' mixes an English word not on the kept-English list into prose.",
+      "suggested": "… hoặc `lop browser serve` để chạy ở tiền cảnh.",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    }
+  ]
+}

@@ -386,7 +386,7 @@ def _spawn_interpreter() -> str:
     return str(candidate) if candidate is not None else sys.executable
 
 
-def _spawn_runtime(
+def _runtime_env(
     session_id: str,
     cwd: str,
     *,
@@ -394,54 +394,22 @@ def _spawn_runtime(
     warm: bool = False,
     initial_model: Any = None,
     model_selection_override: bool = False,
-) -> "subprocess.Popen[bytes]":
-    """Start one detached runtime candidate for ``session_id``.
+) -> dict[str, str]:
+    """The environment a newly engaged runtime is born with.
 
-    Returns the ``Popen`` so the engage loop can tell a candidate that is
-    still CONSTRUCTING from one that died: the lease is acquired a few
-    hundred milliseconds after the exec, and in that window (no record) and
-    (no lease) is true of a perfectly healthy candidate — so liveness of the
-    process we spawned is the only sound death signal (round 2, Q8).
+    ONE BUILDER FOR EVERY SPAWN ROUTE. It used to be the first half of
+    ``_spawn_runtime``; it is a function of its own so that the route that forks
+    here (:func:`_spawn_runtime_local`) and the route that asks the session host
+    to fork (:func:`_spawn_runtime_hosted`) hand a runtime byte-for-byte the same
+    environment. A second copy would be free to drift, and the drift would be
+    silent: the scrubs below (daemon bearer, supervisor ownership token, the
+    ``LOP_MOBILE_CHILD_*`` birth sample, the engage claim) are what stop a child
+    spawned from inside another session inheriting that session's state.
 
-    Its stdio is CAPTURED to a file, recorded on the returned object as
-    ``lop_capture_path``. Both streams used to go
-    to ``DEVNULL``, which made a candidate that died before
-    ``logging.basicConfig`` ran completely silent — the failure had no
-    traceback, no message and no exit reason anywhere on the system, so a
-    session that could never start looked identical to a slow one. That
-    silence is what turned a clear "hosting is not configured" into a
-    30-second wait and an unexplained 503 (QA Q1).
-
-    The path rides on the Popen rather than widening the return type, so every
-    existing caller and test double keeps working with a plain process object.
-    The file is small, per-candidate, created 0600, and unlinked as soon as it
-    is read.
-
-    Only routing data enters the environment — prompt text, images and command
-    identity travel over the authenticated loopback socket, never through
-    ``ps``-readable state. Alongside identity and deferred-materialisation,
-    the optional birth model is routing data: it seeds only a new owner,
-    never an already-running session or a saved selection on resume. The birth
-    EFFORT rides the same channel and for the same reason (see
-    ``LOP_MOBILE_CHILD_EFFORT`` in ``process.amain``): the owner must be
-    CONSTRUCTED on the level the user chose, so its first frontend snapshot, its
-    first provider call and the selection row it journals at admission all
-    carry that level. Applying it afterwards over the model RPC would leave the
-    child briefly on the model's own default and would lose the level
-    altogether if the owner was already running. The birth FAST DIAL rides it
-    for exactly those reasons (``LOP_MOBILE_CHILD_FAST``): a conversation the
-    pane created with the toggle on must run its first turn on the tier, not
-    report one it is not sending (ui#1265).
-
-    ONE VALUE HERE IS NOT ROUTING DATA: the engage claim
-    (``types.ENGAGED_ENV``). It has to travel in the environment because it is a
-    fact about the SPAWN — a warm engage delivers no frame by design (see
-    ``engage_runtime``'s ``WarmErrand`` arm), so there is no socket it could
-    arrive on, and the child's reaper needs it before the first dial. It rides
-    the ``warm`` argument rather than ``defer_materialise`` beside it: the two
-    coincide at today's call sites and NOTHING makes that equivalence hold for
-    the next caller, and a window bought by a deferral nobody engaged for is
-    exactly the leak the scrub below exists to prevent (review round 1, M4).
+    The host receives this mapping whole in its request (design-surface-
+    independence §2): launchd gives it a bare ``PATH``, so the engaging
+    surface's environment — Homebrew, nvm, cargo — has to travel with the ask.
+    See :func:`_spawn_runtime_local` for the rationale of each value written.
     """
     env = dict(os.environ)
     # The session runtime never reads the daemon's desktop bearer, and anything it
@@ -535,6 +503,284 @@ def _spawn_runtime(
         # is why the scrub belongs to every runtime spawn path and not just this
         # one (``mobile/daemon.py``'s hand-built child environment is the other).
         env.pop(ENGAGED_ENV, None)
+    return env
+
+
+def _spawn_runtime(
+    session_id: str,
+    cwd: str,
+    *,
+    defer_materialise: bool,
+    config_dir: Path | None = None,
+    warm: bool = False,
+    initial_model: Any = None,
+    model_selection_override: bool = False,
+) -> "subprocess.Popen[bytes]":
+    """The spawn seam: start one runtime candidate, WHO FORKS IT DECIDED HERE.
+
+    Every engage reaches a runtime through this function, and it is the only one
+    that decides whether the fork happens in THIS process or in the launchd-owned
+    session host (``session_host``; design-surface-independence §2). On
+    2026-10-30 twelve workers and at least five runtimes died within 1.33 s of an
+    app force-quit because every victim descended from the app; a runtime forked
+    by the host has the app nowhere in its ancestry.
+
+    THERE IS NO LOCAL FALLBACK FROM THE HOST ROUTE, and that is the property the
+    whole design rests on (rule R4). When this process is configured to spawn
+    through the host, an unreachable host raises ``RuntimeStartupError`` — it does
+    not fall through to :func:`_spawn_runtime_local`. A "just fork it ourselves
+    when the host is down" rung would be taken exactly when the host is
+    unavailable, which is when a surface is most likely to be about to die, and it
+    would re-create the incident silently. The structure enforces it: the host
+    route is a ``return`` of its own call, inside no ``try``, with the local call
+    in the ``else`` arm — ``tests/unit/session/runtime/test_session_host.py``
+    pins that shape by AST as well as by behaviour.
+
+    ``config_dir`` is the engage store; direct callers default to the runtime
+    environment, just as the child environment builder does.
+    """
+    from local_operator.paths import config_dir as runtime_config_dir
+    from local_operator.session.runtime import session_host
+
+    # Resolve at the fork boundary, not in a producer: peer sends, panel binds,
+    # and API errands must all retain "no opinion" until this point. In
+    # particular HOME is a valid explicit override, never an omission sentinel.
+    # Converting omission to HOME anywhere upstream destroys a recorded move:
+    # by the time we see that path it is indistinguishable from a deliberate
+    # HOME request, which must supersede the move. Empty string is the sentinel.
+    # Exec constructs an in-process Session and the legacy daemon resume forks
+    # separately; those two bypass this boundary and retain their own resolver.
+    cwd = _engage_cwd_for_recorded_move(config_dir or runtime_config_dir(), session_id, cwd)
+    cwd = cwd or str(Path.home())
+    if session_host.spawn_authority() == session_host.AUTHORITY_HOST:
+        return _spawn_runtime_hosted(
+            session_id,
+            cwd,
+            defer_materialise=defer_materialise,
+            warm=warm,
+            initial_model=initial_model,
+            model_selection_override=model_selection_override,
+        )
+    else:
+        return _spawn_runtime_local(
+            session_id,
+            cwd,
+            defer_materialise=defer_materialise,
+            warm=warm,
+            initial_model=initial_model,
+            model_selection_override=model_selection_override,
+        )
+
+
+def _spawn_runtime_hosted(
+    session_id: str,
+    cwd: str,
+    *,
+    defer_materialise: bool,
+    warm: bool = False,
+    initial_model: Any = None,
+    model_selection_override: bool = False,
+) -> "subprocess.Popen[bytes]":
+    """Ask the session host to fork the runtime; this process forks NOTHING.
+
+    The operator capability is minted HERE and travels as a descriptor (design §4
+    option (b)): the child end of a socketpair rides ``SCM_RIGHTS`` to the host,
+    the host hands it to the runtime it forks and closes its own copy, and only
+    then — after the host has replied with the runtime's pid — does this process
+    write the 32-byte value into the parent end. So the host sees a descriptor,
+    never the value, and the value is written exactly where the local route
+    writes it (:meth:`OperatorCapHandoff.deliver`) and registered against the
+    same pid (``remember_operator_cap``): "the process that engaged presents the
+    proof", byte-for-byte today's semantics.
+
+    A request the host COALESCED onto a runtime another contender already asked
+    for gets that runtime's pid back with ``coalesced`` set. Its own descriptor
+    reaches no runtime, so the capability is neither delivered nor remembered —
+    leaving it unkeyed is the fail-closed reading (a console with nothing to
+    present is refused), where remembering a value the runtime never received
+    would only mislead the next proof.
+
+    Any failure — host unreachable, refusing, torn reply — leaves nothing behind
+    (capture unlinked, handoff closed undelivered) and raises; see
+    :func:`_spawn_runtime`.
+    """
+    from local_operator.paths import config_dir as _config_dir
+    from local_operator.session.runtime import session_host
+
+    env = _runtime_env(
+        session_id,
+        cwd,
+        defer_materialise=defer_materialise,
+        warm=warm,
+        initial_model=initial_model,
+        model_selection_override=model_selection_override,
+    )
+    # A HOST-FORKED RUNTIME IS NOT THE WAKE SUPERVISOR'S CHILD. ``_runtime_env``
+    # stamps the supervisor's ownership token when the supervisor itself engages,
+    # and ``owned_runtimes.sweep`` selects by that env marker, not by parentage --
+    # so a runtime the host forked on a wake's behalf would still be SIGTERMed on a
+    # supervisor stop, undercutting rule R3 (#3222 R-8a). The host's runtimes end
+    # only by their own residency policy or the stop ladder.
+    from local_operator.wakes.owned_runtimes import MARKER_ENVS
+
+    for marker in MARKER_ENVS:
+        env.pop(marker, None)
+    handle_fd, capture_path = tempfile.mkstemp(prefix="lop-runtime-", suffix=".log")
+    # Created here (0600, by mkstemp) and only NAMED to the host, exactly as
+    # ``standby.try_adopt`` is given it: this process stays the capture file's
+    # owner, reads it for the child's last words and unlinks it.
+    os.close(handle_fd)
+    capture = Path(capture_path)
+    operator_cap = mint_operator_cap()
+    handoff = open_operator_cap_handoff()
+    try:
+        process = session_host.request_spawn(
+            Path(env.get("LOCAL_OPERATOR_CONFIG_DIR") or _config_dir()),
+            session_id=session_id,
+            cwd=cwd,
+            env=env,
+            interpreter=_spawn_interpreter(),
+            capture=capture,
+            cap_fd=handoff.pass_fds[0] if handoff.pass_fds else None,
+        )
+    except session_host.SessionHostUnavailable as exc:
+        # NOT DELIVERED, and NOT FORKED HERE EITHER (rule R4). The only things
+        # this arm does are clean up and raise: no capability copy is left in a
+        # descriptor nobody will read, the capture file is not orphaned, and the
+        # caller gets a typed ``SessionHostStartupError`` -- never a local
+        # ``_spawn_runtime_local``. Its keyed, localised ``actionable`` sentence
+        # tells the facade that no runtime started; an empty sentence would
+        # incorrectly turn this permanent refusal into "reconnecting".
+        handoff.close()
+        capture.unlink(missing_ok=True)
+        logger.warning("engage: the session host could not start %s: %s", session_id, exc)
+        raise SessionHostStartupError(session_id, exc.code, exc.detail) from exc
+    except BaseException:
+        handoff.close()
+        capture.unlink(missing_ok=True)
+        raise
+    try:
+        if getattr(process, "lop_coalesced", False):
+            handoff.close()
+        else:
+            handoff.deliver(operator_cap)
+            remember_operator_cap(process.pid, operator_cap)
+    finally:
+        handoff.close()
+    setattr(process, "lop_capture_path", capture)
+    return cast("subprocess.Popen[bytes]", process)
+
+
+def runtime_command(
+    session_id: str, interpreter: str, operator_argv: "list[str]"
+) -> "tuple[list[str], str | None]":
+    """``(argv, executable)`` for one session runtime: the ONE definition of its command line.
+
+    Shared by the local fork (:func:`_spawn_runtime_local`) and the session host
+    (``host_service``) so the two routes cannot drift on the contract the census
+    matches on. Three independent properties, all required:
+
+    * ``SAFE_PATH_FLAG`` supplies import isolation. The spawn passes no ``cwd=``
+      that the interpreter would import from, and ``-m`` would put the working
+      directory on ``sys.path`` ahead of site-packages: a session whose cwd is a
+      checkout of this project would run the CHECKOUT rather than the install,
+      which is how live runtimes ended up pinned to a superseded build (see
+      :mod:`local_operator.interpreter`). It must stay at index 1 — interpreter
+      options are recognised only before ``-m``.
+    * ``argv[0]`` / ``executable`` supply the process NAME (:mod:`local_operator.procname`).
+      The label replaces argv[0] only and is a label only alongside a branded
+      image; the WHICH-BUILD axis is ``interpreter``, decided by the caller
+      (:func:`_spawn_interpreter`), and the name is asked for from that SAME
+      interpreter's tree so the two axes never disagree. Patching ``executable``
+      after the fact produced a labelled argv[0] on a ``python3.x`` image — the
+      row an EDR killed 1079 times on 2026-09-19.
+    * ``RUNTIME_MODULE`` is imported from ``session.runtime.types`` rather than
+      written here, because the SWEEP identifies a runtime by this exact ``-m``
+      word (``reclaim.runtime_processes``): a drift is silent in the worst
+      direction — the census matches nothing and the residency bound goes inert.
+
+    ``operator_argv`` is APPENDED AFTER ``-m RUNTIME_MODULE`` so the interpreter
+    still sees the module in the position the sweep matches and the descriptor
+    flag lands in the child's own ``sys.argv``.
+    """
+    from local_operator import procname
+
+    if interpreter != sys.executable:
+        argv0, executable = procname.spawn_identity_for_interpreter(
+            procname.LABEL_SESSION_ANON, interpreter, id=str(session_id)[:8]
+        )
+    else:
+        argv0, executable = procname.spawn_identity(
+            procname.LABEL_SESSION_ANON, id=str(session_id)[:8]
+        )
+    return [argv0, SAFE_PATH_FLAG, "-m", RUNTIME_MODULE, *operator_argv], executable
+
+
+def _spawn_runtime_local(
+    session_id: str,
+    cwd: str,
+    *,
+    defer_materialise: bool,
+    warm: bool = False,
+    initial_model: Any = None,
+    model_selection_override: bool = False,
+) -> "subprocess.Popen[bytes]":
+    """Start one detached runtime candidate for ``session_id``.
+
+    Returns the ``Popen`` so the engage loop can tell a candidate that is
+    still CONSTRUCTING from one that died: the lease is acquired a few
+    hundred milliseconds after the exec, and in that window (no record) and
+    (no lease) is true of a perfectly healthy candidate — so liveness of the
+    process we spawned is the only sound death signal (round 2, Q8).
+
+    Its stdio is CAPTURED to a file, recorded on the returned object as
+    ``lop_capture_path``. Both streams used to go
+    to ``DEVNULL``, which made a candidate that died before
+    ``logging.basicConfig`` ran completely silent — the failure had no
+    traceback, no message and no exit reason anywhere on the system, so a
+    session that could never start looked identical to a slow one. That
+    silence is what turned a clear "hosting is not configured" into a
+    30-second wait and an unexplained 503 (QA Q1).
+
+    The path rides on the Popen rather than widening the return type, so every
+    existing caller and test double keeps working with a plain process object.
+    The file is small, per-candidate, created 0600, and unlinked as soon as it
+    is read.
+
+    Only routing data enters the environment — prompt text, images and command
+    identity travel over the authenticated loopback socket, never through
+    ``ps``-readable state. Alongside identity and deferred-materialisation,
+    the optional birth model is routing data: it seeds only a new owner,
+    never an already-running session or a saved selection on resume. The birth
+    EFFORT rides the same channel and for the same reason (see
+    ``LOP_MOBILE_CHILD_EFFORT`` in ``process.amain``): the owner must be
+    CONSTRUCTED on the level the user chose, so its first frontend snapshot, its
+    first provider call and the selection row it journals at admission all
+    carry that level. Applying it afterwards over the model RPC would leave the
+    child briefly on the model's own default and would lose the level
+    altogether if the owner was already running. The birth FAST DIAL rides it
+    for exactly those reasons (``LOP_MOBILE_CHILD_FAST``): a conversation the
+    pane created with the toggle on must run its first turn on the tier, not
+    report one it is not sending (ui#1265).
+
+    ONE VALUE HERE IS NOT ROUTING DATA: the engage claim
+    (``types.ENGAGED_ENV``). It has to travel in the environment because it is a
+    fact about the SPAWN — a warm engage delivers no frame by design (see
+    ``engage_runtime``'s ``WarmErrand`` arm), so there is no socket it could
+    arrive on, and the child's reaper needs it before the first dial. It rides
+    the ``warm`` argument rather than ``defer_materialise`` beside it: the two
+    coincide at today's call sites and NOTHING makes that equivalence hold for
+    the next caller, and a window bought by a deferral nobody engaged for is
+    exactly the leak the scrub below exists to prevent (review round 1, M4).
+    """
+    env = _runtime_env(
+        session_id,
+        cwd,
+        defer_materialise=defer_materialise,
+        warm=warm,
+        initial_model=initial_model,
+        model_selection_override=model_selection_override,
+    )
     # 0600 at CREATION, via mkstemp. `Path.open("wb")` takes the process umask
     # (measured 0o644 here), leaving the child's entire stdout+stderr --
     # tracebacks, provider error bodies, config echoes -- world-readable in a
@@ -588,8 +834,9 @@ def _spawn_runtime(
     #    a LABELLED argv[0] on a `python3.x` image — the row an EDR killed 1079
     #    times on 2026-09-19, and a labelled `argv[0]` also empties the child's
     #    `sys.executable` on Linux (see `procname.spawn_identity`).
-    from local_operator import procname
-
+    #
+    # (The naming itself now lives in :func:`runtime_command`, shared with the
+    # session host; only the interpreter decision stays here.)
     interpreter = _spawn_interpreter()
     # A WARMED STANDBY FIRST (``session/runtime/standby.py``): the same spawn —
     # this exact environment, this capture file, the child end of a handoff this
@@ -635,14 +882,7 @@ def _spawn_runtime(
         # of this session's capability is left in a descriptor nobody will read.
         adopt_handoff.close()
     handoff = open_operator_cap_handoff()
-    if interpreter != sys.executable:
-        argv0, executable = procname.spawn_identity_for_interpreter(
-            procname.LABEL_SESSION_ANON, interpreter, id=str(session_id)[:8]
-        )
-    else:
-        argv0, executable = procname.spawn_identity(
-            procname.LABEL_SESSION_ANON, id=str(session_id)[:8]
-        )
+    argv, executable = runtime_command(session_id, interpreter, handoff.argv)
     try:
         process = spawn_disclaimed(
             # TWO INDEPENDENT PROPERTIES ON ONE SPAWN, both required.
@@ -675,7 +915,7 @@ def _spawn_runtime(
             # the sweep matches) and the operator-descriptor flag lands in the
             # child module's own ``sys.argv``. The two changes are orthogonal: one
             # names the module, the other carries a descriptor number.
-            [argv0, SAFE_PATH_FLAG, "-m", RUNTIME_MODULE, *handoff.argv],
+            argv,
             executable=executable,
             env=env,
             stdin=subprocess.DEVNULL,
@@ -806,6 +1046,33 @@ class RuntimeStartupError(RuntimeError):
         #: A vetted, user-facing sentence, or "" when the cause was not one of
         #: the known configuration conditions.
         self.actionable = actionable
+
+
+class SessionHostStartupError(RuntimeStartupError):
+    """A vetted, localised host refusal; never misreport it as reconnecting.
+
+    AttachedSession forwards ``actionable`` verbatim, whereas an empty value
+    becomes its generic reconnecting state. No runtime exists after a terminal
+    host refusal, so that fallback is false (#3222 R2-1/Q1). Only catalogue
+    guidance is safe to echo: host ``detail`` can contain paths or internal
+    errors and stays in the diagnostic message, never in the surface sentence.
+    """
+
+    def __init__(self, session_id: str, code: str, detail: str = "") -> None:
+        from local_operator.i18n.keys import wire_errors_session_host as copy
+        from local_operator.i18n.messages import render
+        from local_operator.i18n.resolve import resolve_language
+
+        message = {
+            "unsupported": copy.unsupported,
+            "refused": copy.refused,
+        }.get(code, copy.unavailable)()
+        super().__init__(
+            f"could not start a runtime for session {session_id}: the session host is "
+            f"{code}" + (f" ({detail})" if detail else ""),
+            actionable=render(message.code, message.params, locale=resolve_language()),
+        )
+        self.code = code
 
 
 class ActionableConnectionError(ConnectionError):
@@ -1052,6 +1319,23 @@ def _live_relay_instance(config_dir: Path) -> str:
     return str(getattr(record, "instance_id", "") or "")
 
 
+def _engage_cwd_for_recorded_move(config_dir: Path, session_id: str, cwd: str) -> str:
+    """Adapt the canonical cwd resolver to the spawn boundary's error vocabulary.
+
+    Exec's in-process lifetime and the legacy daemon's separate fork cannot use
+    ``_spawn_runtime``; they call the same resolver at their own start boundary.
+    ``actionable`` preserves recovery guidance through AttachedSession instead
+    of replacing the refusal with its generic connection-error sentence.
+    """
+    from local_operator.session import cwd_move
+
+    try:
+        return cwd_move.spawn_cwd_for_session(config_dir, session_id, cwd)
+    except cwd_move.HandoffRefused as refused:
+        logger.warning("engage: %s refused by a recorded move: %s", session_id, refused.message)
+        raise RuntimeStartupError(refused.message, actionable=refused.message) from refused
+
+
 async def engage_runtime(
     session_id: str,
     cwd: str,
@@ -1139,6 +1423,7 @@ async def engage_runtime(
     if handed_off:
         raise RuntimeStartupError(handed_off)
 
+    # Spawn cwd is resolved only if a candidate actually has to be started.
     if not getattr(work, "command_id", ""):
         # Identity is what makes a retry safe. A caller that did not supply one
         # gets one here rather than being silently non-idempotent.
@@ -1298,6 +1583,7 @@ async def engage_runtime(
                     session_id,
                     cwd,
                     defer_materialise=defer,
+                    config_dir=config_dir,
                     warm=isinstance(work, WarmErrand),
                     initial_model=work.initial_model if isinstance(work, WarmErrand) else None,
                     model_selection_override=(
@@ -1357,6 +1643,7 @@ async def engage_runtime(
                     session_id,
                     cwd,
                     defer_materialise=defer,
+                    config_dir=config_dir,
                     warm=isinstance(work, WarmErrand),
                     initial_model=work.initial_model if isinstance(work, WarmErrand) else None,
                     model_selection_override=(

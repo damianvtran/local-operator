@@ -446,6 +446,8 @@ class SessionSpec:
     #: Construction-time reasoning level (``spawn_owned_session``'s documented
     #: extra; clamped by the factory rather than refused).
     birth_effort: str | None = None
+    #: Conversation-scoped Saver choice; None follows global/profile resolution.
+    radient_saver: bool | None = None
     team: str | None = None
     profile: str | None = None
     #: The run's whole reach when set — exec ``--tools`` semantics, a one-way
@@ -625,6 +627,9 @@ class SessionSpec:
         return argparse.Namespace(
             **vars(self.to_namespace()),
             birth_effort=self.birth_effort,
+            saver=(
+                "inherit" if self.radient_saver is None else ("on" if self.radient_saver else "off")
+            ),
             profile=self.profile,
             # THE TEAM IS FORWARDED, so ``resolve_startup`` can resolve it, refuse
             # a name this root does not hold, and fire the #2014 pair refusal —

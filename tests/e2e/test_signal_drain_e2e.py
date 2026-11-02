@@ -361,6 +361,50 @@ async def test_an_unsanctioned_broadcast_sigterm_is_refused_and_every_turn_finis
 # ---------------------------------------------------------------------------
 
 
+def _idle_sigterm_timeout_evidence(child: subprocess.Popen[bytes], config: Path) -> str:
+    """Observe this rig's child BEFORE teardown destroys the CI failure evidence.
+
+    Isolated and predecessor-cluster replays did not reproduce the macOS CI
+    timeout (#3222). Keep the original exception/bound: this is evidence, not a
+    retry or a product fix. The exception note travels into pytest's failure and
+    the JUnit XML CI already uploads. Never discover or signal other processes.
+    Each diagnostic is bounded separately so a failed sampler cannot hide the
+    original timeout or prevent the rig's existing exact-child cleanup.
+    """
+    sections = [f"idle SIGTERM timeout: owned child pid={child.pid}"]
+    try:
+        sections.append("=== isolated runtime.log ===\n" + _runtime_log(config))
+    except OSError as error:
+        sections.append(f"runtime.log unavailable: {error!r}")
+    commands = [
+        (
+            "process identity",
+            ["ps", "-p", str(child.pid), "-o", "pid,ppid,pgid,state,etime,command"],
+        ),
+    ]
+    if sys.platform == "darwin":
+        # -file keeps sample's report in the isolated config instead of its
+        # default /tmp location; inline it below for the existing JUnit upload.
+        stack = config / "idle-sigterm-timeout-sample.txt"
+        commands.append(
+            ("Darwin stack", ["/usr/bin/sample", str(child.pid), "1", "1", "-file", str(stack)])
+        )
+    for label, argv in commands:
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=8)
+            sections.append(
+                f"=== {label} (rc={result.returncode}) ===\n{result.stdout}\n{result.stderr}"
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            sections.append(f"{label} unavailable: {error!r}")
+    if sys.platform == "darwin":
+        try:
+            sections.append("=== sample report ===\n" + stack.read_text(errors="replace"))
+        except OSError as error:
+            sections.append(f"sample report unavailable: {error!r}")
+    return "\n".join(sections)
+
+
 @pytest.mark.asyncio
 async def test_a_sigterm_with_nothing_in_flight_is_still_immediate(
     headless_tui_env: Path,
@@ -387,7 +431,11 @@ async def test_a_sigterm_with_nothing_in_flight_is_still_immediate(
 
             started = time.monotonic()
             os.kill(rig.children["drainsigidle"].pid, signal.SIGTERM)
-            code = rig.children["drainsigidle"].wait(timeout=30)
+            try:
+                code = rig.children["drainsigidle"].wait(timeout=30)
+            except subprocess.TimeoutExpired as error:
+                error.add_note(_idle_sigterm_timeout_evidence(rig.children["drainsigidle"], config))
+                raise
             latency = time.monotonic() - started
 
             appended = _runtime_log(config)[log_before:]

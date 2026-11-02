@@ -1,0 +1,141 @@
+{
+  "first_line": "PASS",
+  "scope": "Only 13 values changed by 727e5b5b969da813e0cadf1fd1d9fbd1ae106665 relative to its parent; no semantic re-audit of 812 unchanged values.",
+  "counts": {
+    "BLOCKER": 0,
+    "MAJOR": 0,
+    "MINOR": 0,
+    "NIT": 0
+  },
+  "findings": [],
+  "reviewed_values": [
+    {
+      "key": "wire.settings.compaction_keep_recent_tokens.help",
+      "prior_finding_or_minor": "accepted-minor-compaction",
+      "english": "Recent history kept verbatim across a pass.",
+      "current_text": "Недавняя история, сохраняемая дословно при сжатии.",
+      "context": null,
+      "assessment": "accepted",
+      "rationale": "«сохраняемая дословно при сжатии» correctly describes verbatim retention through a compaction pass, not an amount retained during one turn. No loss of history is implied."
+    },
+    {
+      "key": "wire.settings.librarian_cadence_at.help",
+      "prior_finding_or_minor": "accepted-minor-scheduling",
+      "english": "Local wall-clock HH:MM. An invalid value falls back to 03:30 at the next arm.",
+      "current_text": "Местное время в формате ЧЧ:ММ. Некорректное значение при следующем планировании заменяется на 03:30.",
+      "context": null,
+      "assessment": "accepted",
+      "rationale": "«при следующем планировании» correctly expresses the next scheduling/arming operation rather than software installation. HH:MM is expressed in conventional Russian ЧЧ:ММ, unchanged from the parent; 03:30 is preserved. The fallback is contextual to scheduling, consistent with next_cadence_ms in librarian/proactive.py:263–275."
+    },
+    {
+      "key": "wire.settings.monitor.description",
+      "prior_finding_or_minor": "RU-S02",
+      "english": "Delta-watching monitors: how often they check, how much they keep, and when they give up.",
+      "current_text": "Мониторинг изменений: частота проверок, объём хранимых данных и условия остановки.",
+      "context": null,
+      "assessment": "accepted",
+      "rationale": "«Мониторинг изменений» is idiomatic activity/feature naming; frequency, retained data volume and stop conditions retain all three source clauses. It avoids both a hardware-monitor reading and the literal «мониторы дельт»."
+    },
+    {
+      "key": "wire.settings.monitor.title",
+      "prior_finding_or_minor": "RU-S02",
+      "english": "Monitors",
+      "current_text": "Мониторинг",
+      "context": null,
+      "assessment": "accepted",
+      "rationale": "«Мониторинг» is the glossary feature/activity name and fits a settings-section title. The English plural names the objects collectively; Russian naturally names this settings category by its activity."
+    },
+    {
+      "key": "wire.settings.monitor_classifymaxchars.help",
+      "prior_finding_or_minor": "RU-S02",
+      "english": "Bound on the changed lines the materiality check receives (the monitor's name and purpose ride along, clipped separately).",
+      "current_text": "Ограничение на изменённые строки для проверки значимости (имя и назначение правила мониторинга передаются вместе и обрезаются отдельно).",
+      "context": null,
+      "assessment": "accepted",
+      "rationale": "«правила мониторинга» denotes the stored watch configuration, appropriately distinct from the monitoring activity. Name and purpose travel together and are clipped separately; the changed-line bound is preserved."
+    },
+    {
+      "key": "wire.settings.monitor_maxconsecutivefailures.help",
+      "prior_finding_or_minor": "RU-S02",
+      "english": "Consecutive check failures before a monitor is disabled.",
+      "current_text": "Число последовательных сбоев проверки, после которых правило мониторинга отключается.",
+      "context": null,
+      "assessment": "accepted",
+      "rationale": "«правило мониторинга» denotes an independently disableable stored watch, not a display or the whole monitoring subsystem. Consecutive failure count and disablement polarity are preserved."
+    },
+    {
+      "key": "wire.settings.monitor_maxdeliveriesperhour.help",
+      "prior_finding_or_minor": "RU-S02",
+      "english": "Per monitor; over the cap, changes are held and counted.",
+      "current_text": "Для каждого правила мониторинга; сверх лимита изменения удерживаются и подсчитываются.",
+      "context": null,
+      "assessment": "accepted",
+      "rationale": "«Для каждого правила мониторинга» preserves per-object, not global, quota scope. Holding and counting excess changes remain explicit. The extra noun «правило» disambiguates the countable object without substituting another glossary term."
+    },
+    {
+      "key": "wire.settings.providers.description",
+      "prior_finding_or_minor": "RU-S03",
+      "english": "How direct provider connections are made: API surface and cache TTL.",
+      "current_text": "Как устанавливаются прямые соединения с провайдерами: тип API и TTL кэша.",
+      "context": null,
+      "assessment": "accepted",
+      "rationale": "«тип API» is accurate in this concrete setting, not a generic translation of all uses of API surface: providers.openai.api is an ENUM selecting responses versus chat_completions. It names which OpenAI API is used, not how many endpoints/capabilities are exposed. The direct-connection scope and cache TTL remain present."
+    },
+    {
+      "key": "wire.settings.providers_openai_api.label",
+      "prior_finding_or_minor": "RU-S03",
+      "english": "OpenAI API surface",
+      "current_text": "Тип API OpenAI",
+      "context": null,
+      "assessment": "accepted",
+      "rationale": "«Тип API OpenAI» is an idiomatic short selector label for the Responses API versus Chat Completions API. Verified settings_io.py:1885–1904 and the adjacent English choice descriptions/help; this is not an API capability-surface editor. No meaning change from replacing «поверхность API»."
+    },
+    {
+      "key": "wire.settings.providers_openrouter_preferred_min_throughput.help",
+      "prior_finding_or_minor": "accepted-minor-throughput",
+      "english": "Prefer hosts serving at least this many output tokens/sec (p50). 0 sends no preference. A host below the bar is deprioritised, which may cost you a warm prompt cache.",
+      "current_text": "Предпочитать хосты, выдающие не меньше указанного числа выходных токенов/сек (p50). 0 не отправляет предпочтения. Хост ниже порога теряет приоритет — это может стоить вам тёплого кэша промптов.",
+      "context": null,
+      "assessment": "accepted",
+      "rationale": "«не меньше указанного числа» has the required genitive after the comparative and accurately expresses a minimum output-tokens/sec threshold. It fixes ungrammatical «не меньше столько». p50, zero preference, lower-priority routing and possible warm-cache loss are preserved."
+    },
+    {
+      "key": "wire.settings.remote_compute.description",
+      "prior_finding_or_minor": "RU-S04",
+      "english": "Preview: run agent work on Radient-hosted compute, bound to one of your mesh networks.",
+      "current_text": "Предварительная версия: работа агента выполняется на вычислительных ресурсах Radient и привязана к одной из ваших меш-сетей.",
+      "context": {
+        "role": "settings section description",
+        "tone": "plain, honest about preview status",
+        "note": "Desktop-only section header sentence. Must say the feature is a PREVIEW and that work runs on Radient-hosted compute. 'Mesh network' is the product term for the user's device network; do not translate it as a social network or a Wi-Fi network."
+      },
+      "assessment": "accepted",
+      "rationale": "«Предварительная версия» correctly conveys prerelease availability, not a visual preview. Agent work on Radient-hosted compute and binding to one of the user’s mesh networks remain explicit; Radient is unchanged."
+    },
+    {
+      "key": "wire.settings.remote_compute_enabled.help",
+      "prior_finding_or_minor": "RU-S04",
+      "english": "Preview: sends work to Radient compute, bound to one mesh network.",
+      "current_text": "Предварительная версия: работа на Radient с привязкой к одной меш-сети.",
+      "context": {
+        "role": "settings row help",
+        "tone": "plain, precise",
+        "note": "Must state this is a preview, that it sends the user's work to Radient-hosted compute, and that the run is bound to ONE of the user's mesh networks — the tenant claim. The old wording said 'in your mesh network', which read as containment and is not what the slice enforces. 'Radient' is a product name: keep it unchanged. Keep near 67 cells (en is 66; the 80x24 detail line sheds longer copy, so stay within 74)."
+      },
+      "assessment": "accepted",
+      "rationale": "«Предварительная версия» preserves prerelease status. In this remote-compute setting, «работа на Radient» tersely expresses work executed on Radient, with binding to exactly one mesh network. The fuller adjacent description explicitly names hosted compute. Measured 71 terminal cells, within the sidecar’s 74-cell prose limit."
+    },
+    {
+      "key": "wire.settings.web_fetch_enabled.help",
+      "prior_finding_or_minor": "RU-S01",
+      "english": "Offer the fetch tool and read <url>; off refuses every call.",
+      "current_text": "Предлагать инструмент fetch и read <url>; при отключении отклонять каждый вызов.",
+      "context": null,
+      "assessment": "accepted",
+      "rationale": "The invocation read <url> now survives verbatim. fetch is also unchanged. «при отключении отклонять каждый вызов» safely preserves refusal of every call when disabled, not merely hiding the tool."
+    }
+  ],
+  "method": "Independent reasoning from Russian style guide, glossary, English source/context and settings selector implementation. No translation/MT service or external model invocation. Linguistic assessments are audit notes, not command execution evidence.",
+  "fit_limits": "Only the two remote-compute entries have sidecar records among these 13 values. No changed entry has structured maxCells/maxChars; the remote help prose limit is 74 cells and it measures 71. Other long strings are descriptive/help copy, not tight buttons or tabs. No rendered UI claim.",
+  "record_reference": "record.json"
+}

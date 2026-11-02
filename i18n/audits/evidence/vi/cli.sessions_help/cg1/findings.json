@@ -1,0 +1,51 @@
+{
+  "locale": "vi",
+  "namespace": "cli.sessions_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 3,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-044",
+      "severity": "MAJOR",
+      "namespace": "cli.sessions_help",
+      "key": "cli.sessions_help.sync",
+      "english": "Pull a copy of a conversation another device owns",
+      "current": "Kéo một bản sao của cuộc trò chuyện do thiết bị khác sở hữu",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "Pull một bản sao của cuộc trò chuyện do thiết bị khác sở hữu",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-045",
+      "severity": "MAJOR",
+      "namespace": "cli.sessions_help",
+      "key": "cli.sessions_help.sync_session",
+      "english": "the conversation id to pull",
+      "current": "id cuộc trò chuyện cần kéo",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "id cuộc trò chuyện cần pull",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 2,
+      "id": "R2-VI-001",
+      "severity": "MAJOR",
+      "namespace": "cli.sessions_help",
+      "key": "cli.sessions_help.move_engage_on_arrival",
+      "english": "start the conversation on the destination as soon as it lands, so it is live there without a first prompt; a conversation whose turn is in flight is still refused rather than drained, and a failure to start it does not affect the move — so the exit status is the MOVE's: a script reads `engagement.engaged` in --json, and on a move to a peer that device's own log is where the outcome shows",
+      "current": "khởi động cuộc trò chuyện trên đích ngay khi nó tới nơi, để nó chạy ở đó mà không cần lời nhắc đầu tiên; cuộc trò chuyện đang có lượt chạy vẫn bị từ chối chứ không bị xả hết, và việc khởi động thất bại không ảnh hưởng đến việc chuyển — nên trạng thái thoát là của việc CHUYỂN: script đọc `engagement.engaged` trong --json, còn với việc chuyển sang thiết bị ngang hàng thì kết quả hiện trong nhật ký của chính thiết bị đó",
+      "problem": "Sweep (kept-English class): style guide kept-English list and glossary §2 (prompt → vi «prompt») — the LLM first prompt is rendered «lời nhắc đầu tiên». Same defect class as round-1 push/pull; vi main uses «prompt» (wire.errors.settings.system_prompt_*).",
+      "suggested": "Replace «mà không cần lời nhắc đầu tiên» with «mà không cần prompt đầu tiên»; rest unchanged.",
+      "disposition": "fixed (remediation core-fix2, session 053117b4ad36)"
+    }
+  ]
+}

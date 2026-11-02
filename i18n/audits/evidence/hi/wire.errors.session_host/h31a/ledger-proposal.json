@@ -1,0 +1,24 @@
+{
+  "proposal_only": true,
+  "publication_blocked_pending_second_independent_audit": true,
+  "row": {
+    "locale": "hi",
+    "namespace": "wire.errors.session_host",
+    "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+    "translator": {
+      "agent": "i18n-translator",
+      "session": "d2959affe186",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-10-31"
+    },
+    "auditor": {
+      "agent": "i18n-auditor",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-10-31",
+      "result": "passed",
+      "findings": 0
+    },
+    "status": "passed",
+    "note": "Audit A passed; 0 unresolved B/M. i18n/audits/evidence/hi/wire.errors.session_host/h31a/record.json. Second independent error-copy audit pending; do not publish passed row yet."
+  }
+}

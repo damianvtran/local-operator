@@ -1,0 +1,19 @@
+{
+  "cli.wake_help.wake": "Kiểm tra các lần thức dậy đã lên lịch và trình giám sát kích hoạt chúng",
+  "cli.wake_help.status": "trình giám sát đã được cài hay chưa, và nó sẽ kích hoạt gì tiếp theo",
+  "cli.wake_help.json": "đầu ra máy đọc được",
+  "cli.wake_help.status_install": "cài trình giám sát ngay thay vì chờ lịch kế tiếp",
+  "cli.wake_help.status_uninstall": "gỡ trình giám sát; các lần thức dậy đã lên lịch khi đó chỉ kích hoạt lúc có phiên đang mở",
+  "cli.wake_help.install": "cài hoặc sửa trình giám sát ngay (khởi động lại bản cũ hoặc đã dừng)",
+  "cli.wake_help.list": "mọi lần thức dậy đã lên lịch trên máy này, sớm nhất trước",
+  "cli.wake_help.create": "lên lịch một lần thức dậy cho một phiên (cài trình giám sát khi cần)",
+  "cli.wake_help.create_session": "id phiên cần đánh thức",
+  "cli.wake_help.create_when": "khi nào kích hoạt: một khoảng thời gian (\"in 2m\", \"45s\") hoặc một giờ trong ngày (\"at 09:30\")",
+  "cli.wake_help.create_message": "prompt tự gửi khi nó kích hoạt (tối đa {max} ký tự)",
+  "cli.wake_help.create_every": "lặp lại mỗi DURATION sau lần kích hoạt đầu (\"5m\", \"1h\", \"8h30m\")",
+  "cli.wake_help.create_until": "ngừng lặp sau thời điểm này (\"in 7d\", \"at 09:30\")",
+  "cli.wake_help.create_limit": "ngừng lặp sau N lần kích hoạt",
+  "cli.wake_help.create_notify": "thông báo khi lượt của lần thức dậy hoàn tất (mặc định im lặng: các lần thức dậy do script đặt khớp với quy ước này; lượt lỗi luôn thông báo)",
+  "cli.wake_help.serve": "chạy trình giám sát ở tiền cảnh (việc mà LaunchAgent chạy)",
+  "cli.wake_help.serve_once": "kích hoạt mọi thứ đang đến hạn ngay bây giờ, rồi thoát"
+}

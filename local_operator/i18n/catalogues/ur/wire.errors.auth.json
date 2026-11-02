@@ -1,0 +1,14 @@
+{
+  "wire.errors.auth.account_not_found": "فراہم کنندہ کا اکاؤنٹ نہیں ملا",
+  "wire.errors.auth.auth_refusal": "{error}",
+  "wire.errors.auth.credentials_missing": "اس فراہم کنندہ کے لیے کوئی محفوظ شدہ کریڈینشلز نہیں ملے۔",
+  "wire.errors.auth.input_invalid": "زیادہ سے زیادہ 32768 حروف کی غیر خالی ویلیو درج کریں۔",
+  "wire.errors.auth.key_not_accepted": "یہ فراہم کنندہ API کلید قبول نہیں کرتا۔",
+  "wire.errors.auth.key_rejected": "فراہم کنندہ نے اس API کلید کو مسترد کر دیا۔",
+  "wire.errors.auth.local_server_only": "صرف مقامی فراہم کنندہ کے سرور کی جانچ ہو سکتی ہے۔",
+  "wire.errors.auth.provider_refusal": "{error}",
+  "wire.errors.auth.server_address_missing": "اس فراہم کنندہ کا جانچنے کے لیے کوئی سرور ایڈریس نہیں۔",
+  "wire.errors.auth.sign_in_missing": "یہ سائن اِن اب دستیاب نہیں۔ دوبارہ شروع کریں۔",
+  "wire.errors.auth.sign_in_not_waiting": "یہ سائن اِن ان پٹ کا منتظر نہیں۔",
+  "wire.errors.auth.store_unreadable": "کریڈینشل اسٹور پڑھا نہیں جا سکا — فراہم کنندگان کی گنتی کو اس کی ضرورت ہے۔"
+}

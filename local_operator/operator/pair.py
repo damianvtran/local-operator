@@ -20,12 +20,15 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
+from local_operator.i18n.cli_help import help_text
+from local_operator.i18n.keys import cli_group_help as _gg
 
-def add_parser(subparsers: Any) -> None:
+
+def add_parser(subparsers: Any, *, help_locale: str | None = None) -> None:
     """Register ``lop pair``. Stdlib-only."""
     parser = subparsers.add_parser(
         "pair",
-        help="Pair a phone as an operator device: your signature authorises it, once",
+        help=help_text(_gg.pair(), help_locale),
     )
     parser.add_argument(
         "--timeout",

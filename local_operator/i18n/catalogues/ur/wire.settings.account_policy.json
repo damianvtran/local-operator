@@ -1,0 +1,16 @@
+{
+  "wire.settings.account_policy.label": "اکاؤنٹ انتخاب کی پالیسی",
+  "wire.settings.account_policy.help": "ایک ہی فراہم کنندہ اور کریڈینشل درجے کے اندر اہل ہم سطح اکاؤنٹس منتخب کرتا ہے۔ کامیاب درخواست سے ملنے والی مطابقت پذیر، غیر میعاد شدہ لیز ہر پالیسی میں ترجیح پاتی ہے؛ یہ کیش ہٹ کی ضمانت نہیں دیتی۔ جلد ری سیٹ قریب ترین ہفتہ وار ری فل کو ترجیح دیتی ہے، پھر ایک منٹ کے برابری کے دائرے میں پانچ گھنٹے کی ری فل۔ واضح پالیسی پرانی usage-aware اکاؤنٹ پک ترتیب کو اوور رائڈ کرتی ہے۔",
+  "wire.settings.account_policy.reset_soonest.label": "جلد ری سیٹ",
+  "wire.settings.account_policy.reset_soonest.description": "قریب ترین شامل پلان ری سیٹ کو ترجیح دیں؛ برابری اور نامعلوم رپورٹس کو متعین طریقے سے پھیلائیں۔ نئی کنفیگریشنز کے لیے ڈیفالٹ۔",
+  "wire.settings.account_policy.headroom.label": "سب سے زیادہ گنجائش",
+  "wire.settings.account_policy.headroom.description": "کیش شدہ بقیہ کوٹا کو ترجیح دیں، بہترین کے دس فیصد پوائنٹس کے اندر اکاؤنٹس کو پھیلاتے ہوئے۔",
+  "wire.settings.account_policy.fair.label": "منصفانہ تقسیم",
+  "wire.settings.account_policy.fair.description": "کیش شدہ ری سیٹس یا بقیہ کوٹا کی درجہ بندی کے بجائے مستحکم سیشن پر مبنی تقسیم استعمال کریں۔",
+  "wire.settings.account_policy.legacy.label": "پرانی usage-aware پک",
+  "wire.settings.account_policy.legacy.help": "مطابقت کی ترتیب، صرف تب استعمال ہوتی ہے جب اکاؤنٹ انتخاب کی پالیسی موجود نہ ہو: true سب سے زیادہ گنجائش منتخب کرتا ہے؛ false منصفانہ تقسیم۔ واضح اکاؤنٹ انتخاب کی پالیسی مقدم ہے۔ جلد ری سیٹ بحال کرنے اور پرانے اوور رائڈز صاف کرنے کے لیے اکاؤنٹ انتخاب کی پالیسی کی قطار ری سیٹ کریں۔",
+  "wire.settings.account_policy.error.unavailable": "اکاؤنٹ روٹنگ دستیاب نہیں۔",
+  "wire.settings.account_policy.error.invalid_shape": "صرف value فیلڈ متوقع تھا۔",
+  "wire.settings.account_policy.error.invalid_json": "JSON آبجیکٹ متوقع تھا۔",
+  "wire.settings.account_policy.error.write_failed": "ترتیب محفوظ نہیں ہو سکی۔ اس کمپیوٹر پر کنفیگریشن کی اجازتیں چیک کریں اور دوبارہ کوشش کریں۔"
+}

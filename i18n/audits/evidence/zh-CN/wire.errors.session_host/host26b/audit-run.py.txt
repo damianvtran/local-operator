@@ -1,0 +1,54 @@
+import os, sys, json, hashlib, subprocess, pathlib, datetime, re, unicodedata
+repo=pathlib.Path('/Users/damian/local-operator')
+root=pathlib.Path(os.environ['LOCAL_OPERATOR_SCRATCHPAD'])/'host-zh-CN-audit-b'
+root.mkdir(parents=True,exist_ok=True)
+snapshot=root/'validation-snapshot'
+commit='9c979a03d551020ce6ff1b16c8066aa69ce7bb2a'
+ns='wire.errors.session_host'
+en=f'local_operator/i18n/catalogues/en/{ns}.json'
+ctx=f'local_operator/i18n/catalogues/en/{ns}.context.json'
+zh=f'local_operator/i18n/catalogues/zh-CN/{ns}.json'
+candidate=pathlib.Path('/Users/damian/.local-operator/sessions/d90daece65d4/scratchpad/host-copy-zh/wire.errors.session_host.json')
+paths=subprocess.check_output(['git','ls-tree','-r','--name-only',commit],cwd=repo,text=True).splitlines()
+selected=[p for p in paths if p=='local_operator/__init__.py' or p in ('scripts/i18n/check.py','scripts/i18n/login.py',en,ctx) or (p.startswith('local_operator/i18n/') and '/catalogues/' not in p and (p.endswith('.py') or '/data/' in p))]
+import io, tarfile
+archive=subprocess.check_output(['git','archive',commit,'--',*selected],cwd=repo,timeout=90)
+snapshot.mkdir(parents=True,exist_ok=True)
+with tarfile.open(fileobj=io.BytesIO(archive)) as tf:
+    tf.extractall(snapshot,filter='data')
+(snapshot/zh).parent.mkdir(parents=True,exist_ok=True)
+(snapshot/zh).write_bytes(candidate.read_bytes())
+sha=lambda b:hashlib.sha256(b).hexdigest()
+expected={en:'b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0',ctx:'d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724',zh:'4205cc6feda10279c524d78ff95c450bbc50981a48d13e37f82849d1705860d4'}
+log=[f'Executed at {datetime.datetime.now(datetime.timezone.utc).isoformat()}',f'Source revision: {commit}', 'Scope: isolated committed validator/runtime; only en + zh-CN wire.errors.session_host; no installation, no shared tree or ledger writes.']
+for p,h in expected.items():
+    got=sha((snapshot/p).read_bytes()); assert got==h,(p,got)
+    log.append(f'SHA256 {p}: {got} PASS')
+cmd=[str(repo/'.venv/bin/python'),'scripts/i18n/check.py','--catalogues-only']
+env={k:v for k,v in os.environ.items() if not k.startswith('CMUX_')}
+env.pop('XPC_FLAGS',None);env['PYTHONDONTWRITEBYTECODE']='1'
+r=subprocess.run(cmd,cwd=snapshot,env=env,text=True,capture_output=True)
+log.extend(['Command: '+' '.join(cmd),'stdout:',r.stdout,'stderr:',r.stderr,f'Exit code: {r.returncode}'])
+assert r.returncode==0
+sys.path.insert(0,str(snapshot))
+from local_operator.i18n import runtime
+source=json.loads((snapshot/en).read_text());target=json.loads(candidate.read_text());context=json.loads((snapshot/ctx).read_text())
+assert source.keys()==target.keys()==context.keys()
+log.append('Independent checks: valid JSON; exact source/target/context key parity: 3/3 PASS')
+for key,value in source.items():
+    translated=target[key]
+    sa=runtime.message_arguments(value);ta=runtime.message_arguments(translated)
+    assert sa==ta
+    assert not sa
+    for literal in ('logs/session-host.log','Local Operator'):
+        assert value.count(literal)==translated.count(literal)
+    assert re.findall(r'`[^`]*`',value)==re.findall(r'`[^`]*`',translated)
+    assert not re.search(r'<[^>]+>',value+translated)
+    assert not re.search(r'[{}]',value+translated)
+    for bad in ('您','请','...','！'):
+        assert bad not in translated
+    width=sum(0 if unicodedata.combining(c) else (2 if unicodedata.east_asian_width(c) in ('W','F') else 1) for c in translated)
+    log.append(f'{key}: placeholder names/types {sa!r} == {ta!r}; no ICU/plural/select/markup/backtick spans; literal parity PASS; chars={len(translated)}, static East-Asian-width cells={width}; no maxCells/maxChars specified; NOT rendered-fit evidence')
+(root/'audit.log').write_text('\n'.join(log)+'\n')
+(root/'input-hashes.json').write_text(json.dumps({k:{'path':p,'sha256':expected[p]} for k,p in [('en',en),('context',ctx),('target',zh)]},indent=2)+'\n')
+print('\n'.join(log))

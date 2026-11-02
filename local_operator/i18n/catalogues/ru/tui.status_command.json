@@ -1,0 +1,3 @@
+{
+  "tui.status_command.failed": "Ошибка команды состояния ({error}). Проверьте display.composer.command."
+}

@@ -1,0 +1,11 @@
+{
+  "wire.settings.hub_defaults.agents.help": "Tắt tạm dừng cập nhật mọi liên kết tác nhân/kỹ năng; bật đăng ký mới.",
+  "wire.settings.hub_defaults.agents.label": "Tự động cập nhật liên kết tác nhân/kỹ năng",
+  "wire.settings.hub_defaults.agents.off.description": "tạm dừng cập nhật cho mọi liên kết tác nhân và kỹ năng",
+  "wire.settings.hub_defaults.agents.on.description": "đăng ký các liên kết tác nhân và kỹ năng mới",
+  "wire.settings.hub_defaults.model_default.note": "Các lần merge trên hub dùng mô hình mặc định hiện tại của bạn. Ghi đè mô hình hub cũ bị bỏ qua.",
+  "wire.settings.hub_defaults.teams.help": "Mặc định cho liên kết nhóm mới; liên kết hiện có giữ chính sách riêng.",
+  "wire.settings.hub_defaults.teams.label": "Đăng ký liên kết nhóm mới",
+  "wire.settings.hub_defaults.teams.off.description": "tạm dừng cập nhật đến cho liên kết nhóm mới",
+  "wire.settings.hub_defaults.teams.on.description": "đăng ký các liên kết nhóm mới"
+}

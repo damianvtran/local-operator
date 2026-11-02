@@ -1,0 +1,5 @@
+{
+  "wire.errors.session_host.unsupported": "此计算机无法运行后台会话托管服务，因此会话未启动。改用配有受支持后台服务管理器的计算机。",
+  "wire.errors.session_host.unavailable": "后台会话托管服务未响应，因此会话未启动。稍后再试。",
+  "wire.errors.session_host.refused": "后台会话托管服务拒绝启动此会话。会话未启动。重试前，查看Local Operator配置文件夹中的logs/session-host.log。"
+}

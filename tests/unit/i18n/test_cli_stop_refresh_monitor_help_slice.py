@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 from local_operator.i18n import catalogues
+from tests.unit.i18n import locale_coverage
 
 REPO = Path(__file__).resolve().parents[3]
 CLI = "local_operator/cli.py"
@@ -168,7 +169,7 @@ def test_owned_block_copy_is_exactly_the_pinned_envelopes():
     assert len(actual) == 23
 
 
-def test_french_locale_reaches_each_owned_message_and_falls_back(monkeypatch):
+def test_parser_reaches_owned_messages_and_supported_locales_use_tree_copy(monkeypatch):
     from local_operator.cli import build_cli_parser
     from local_operator.i18n.messages import Msg
 
@@ -186,21 +187,14 @@ def test_french_locale_reaches_each_owned_message_and_falls_back(monkeypatch):
     assert len(seen) == len(PINS)
     assert {locale for _, locale in seen} == {"fr"}
     for namespace in ("stop", "refresh", "monitor"):
-        assert (
-            REPO / "local_operator/i18n/catalogues/fr" / ("cli." + namespace + "_help.json")
-        ).is_file()
-        en_values = catalogues.load_catalogue("en", "cli." + namespace + "_help")
-        fr_values = catalogues.load_catalogue("fr", "cli." + namespace + "_help")
-        es_values = catalogues.load_catalogue("es", "cli." + namespace + "_help")
-        assert set(fr_values) == set(en_values)
-        assert set(es_values) == set(en_values)
+        full_namespace = "cli." + namespace + "_help"
+        en_values = catalogues.load_catalogue("en", full_namespace)
         alias = {"stop": "_st", "refresh": "_re", "monitor": "_mn"}[namespace]
-        for key, value in en_values.items():
-            message = getattr(MODULES[alias], key.rsplit(".", 1)[1])
-            assert message().envelope(locale="fr")["text"] == fr_values[key]
-            assert fr_values[key] != value
-            # Spanish carries this namespace after the es W2 wave: it reads its
-            # own copy, and that copy is not the English source.
-            assert message().envelope(locale="es")["text"] == es_values[key]
-            assert es_values[key] != value
+        for key in en_values:
+            message = getattr(MODULES[alias], key.rsplit(".", 1)[1])()
+            for locale in locale_coverage.supported_targets():
+                expected = locale_coverage.expected_message(
+                    locale, full_namespace, key, message.params
+                )
+                assert message.envelope(locale=locale)["text"] == expected, (locale, key)
     assert parser.prog

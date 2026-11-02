@@ -135,6 +135,8 @@ from local_operator.harness.wake import (
     build_wake_schedule,
     format_duration,
 )
+from local_operator.i18n.keys import wire_sessions as _ws
+from local_operator.i18n.text import tr
 from local_operator.imaging import (
     IMAGE_INGEST_MAX_EDGE,
     IMAGE_JPEG_QUALITY,
@@ -4353,6 +4355,7 @@ async def execute_bash(
         if wrapped is None:
             return _error(tool_call_id, "bash", shell_write.spawn_refusal())
         shell_argv = wrapped
+    spawn_options = detached_popen_kwargs()
     try:
         process = await asyncio.create_subprocess_exec(
             *shell_argv,
@@ -4368,7 +4371,7 @@ async def execute_bash(
             # could take it down. procstate.detached_popen_kwargs() returns the
             # kwargs that really detach on the host, and is exactly
             # `start_new_session=True` on POSIX.
-            **detached_popen_kwargs(),
+            **spawn_options,
         )
     except OSError as exc:
         # A `bash.shell` pointing at a missing or non-executable file made the
@@ -4437,22 +4440,31 @@ async def execute_bash(
     # and owner-liveness-only by construction: the group is reaped iff THIS
     # process is dead, never by runtime/CPU/idle, so a legit long-runner (a 10h
     # trainer) is safe while its session lives. See tools/group_reaper.py.
-    # suppress(Exception): os.getpgid is POSIX-only (absent on Windows), and
-    # registration must never be the reason a command fails to run. The pgid is
-    # held so the clean-death paths below can unregister the exact line.
-    spawned_pgid: int | None = None
-    with contextlib.suppress(Exception):
-        spawned_pgid = os.getpgid(process.pid)
-        group_reaper.register_group(
-            spawned_pgid,
-            params.command,
-            session_id=(context.session_id if context else "") or "",
-        )
+    # A successful POSIX start_new_session spawn proves PGID == child PID:
+    # setsid runs before exec and before the parent receives this Process. Do
+    # not look up the leader again: a short shell may already be reaped while
+    # its background children still hold the detached group. A late getpgid
+    # then raises and used to skip registration AND survivor settlement. This
+    # identity comes from our actual spawn options, never PID/PGID discovery;
+    # Windows detachment has no POSIX group and must not arm its memory guard.
+    # Registration remains best-effort; it must not prevent a command running.
+    spawned_pgid: int | None = (
+        process.pid
+        if os.name == "posix" and spawn_options.get("start_new_session") is True
+        else None
+    )
+    if spawned_pgid is not None:
+        with contextlib.suppress(Exception):
+            group_reaper.register_group(
+                spawned_pgid,
+                params.command,
+                session_id=(context.session_id if context else "") or "",
+            )
 
     # The memory guard, bound to EXACTLY the group we just spawned. It is built
-    # only when we actually captured a pgid AND the budget resolved to something
-    # armed: a command whose group id could not be read is Windows-shaped (the
-    # guard is a POSIX feature — os.killpg/getpgid do not exist there) and runs
+    # only when our POSIX detached spawn proved its pgid AND the budget resolved
+    # to something armed: a Windows-shaped spawn has no POSIX group (the guard
+    # relies on POSIX group sampling/signalling) and runs
     # unguarded, and a `source="disabled"` budget (config off, non-measurable
     # host) is the pre-guard behaviour. The guard can only ever read and kill
     # THIS pgid: it never discovers a group of its own, so it cannot touch the
@@ -9671,10 +9683,7 @@ class EditParams(BaseModel):
     path: str = Field(description="File to edit.")
     edits: list[EditHunk] = Field(
         default_factory=list,
-        description=(
-            "Hunks applied in order — the multi-edit form. Prefer this for "
-            "several changes to one file: it costs one call instead of N."
-        ),
+        description="Ordered hunks; prefer for several changes to one file (one call).",
     )
     old_text: str | None = Field(
         default=None,
@@ -9687,10 +9696,7 @@ class EditParams(BaseModel):
     )
     anchor_line: int | None = Field(
         default=None,
-        description=(
-            "Optional 1-based line that disambiguates a match that occurs in "
-            "several places: the window containing this line wins."
-        ),
+        description="Optional 1-based line to disambiguate repeated matches; its window wins.",
     )
 
     @model_validator(mode="after")
@@ -16746,13 +16752,18 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         ),
     ),
     "stop": _SessionsOpDoc(
-        summary="end a running session gracefully (the graceful ladder only — this"
-        " tool never SIGKILLs). With `peer`, ends it where it lives; the force"
-        " escalation stays the CLI's (`lop network sessions --stop <id> --force`).",
+        summary="end an IDLE local session and release its lease. It never signals"
+        " and never cuts work: a session that is working (a turn, an approval, a"
+        " subagent or a job), or one due a wake inside the hold window, is refused"
+        " with the reason. With `peer`, always refused — an idle-only remote stop is"
+        " not on the wire yet.",
         example="sessions(op='stop', session='a1b2c3d4e5f6')",
         refusals=(
             "needs an address; a stored (not running) session is refused; the"
-            " calling session cannot stop itself.",
+            " calling session cannot stop itself; a working or wake-due session is"
+            " refused; a remote (`peer`) target is always refused; an owner too old"
+            " to promise an idle-only stop is refused; an owner that does not answer"
+            " is refused rather than signalled.",
         ),
     ),
     "peek": _SessionsOpDoc(
@@ -16772,20 +16783,25 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         ),
     ),
     "move": _SessionsOpDoc(
-        summary="move THIS session's own working directory: queued, it takes effect at"
-        " the next idle point after the current turn, when the session restarts there;"
-        " until then the working directory is unchanged. It needs a viewer that can"
-        " follow it (the desktop app or a `lop` terminal) — a session not open now"
-        " moves when next opened; with none, the move is held, says why, and expires."
-        " Write-tier, approved like one where approval is required. Naming the current"
-        " directory cancels a queued move.",
+        summary="move THIS session's own working directory: queued, and it takes effect"
+        " when the session next runs in the destination; until then the working"
+        " directory is unchanged. WITH a viewer that can follow it (the desktop app or a"
+        " `lop` terminal) that is this session's next idle point: it restarts there and"
+        " carries on. With NOTHING attached it still moves: the destination is recorded,"
+        " the session stops at its next idle point, and the next engage — a message, a"
+        " wake, or `lop exec` — starts it there; it stays stopped until then. Nothing"
+        " expires; naming the current directory cancels a queued move. Write-tier,"
+        " approved like one where approval is required.",
         example="sessions(op='move', cwd='~/work/project'); back: cwd='.'",
         refusals=(
             "`cwd` alone: a move acts on THIS runtime, so a `session`, `pid`,"
             " `target` or `peer` field is refused, as is a delegated/background"
-            " child; the destination must already exist and be enterable, and naming"
-            " the directory the session is already in cancels a queued move (with"
-            " none queued it is refused).",
+            " child; the destination must already exist and be enterable; naming the"
+            " directory the session is already in cancels a queued move (with none"
+            " queued it is refused); `host_cannot_restart` when the program hosting"
+            " this session cannot restart it in another directory; and"
+            " `sessions_move_outside_confinement` when the session is confined and the"
+            " destination is outside its root.",
         ),
     ),
     "help": _SessionsOpDoc(
@@ -17269,14 +17285,26 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
             # NAMING THE CURRENT DIRECTORY CANCELS (U17): the call restarts
             # nothing, so the card must not promise a restart.
             return f"stay in {destination} — cancels any queued move; nothing restarts"
+        # WHAT IS GUARANTEED IS THE RESTART, NOT WHEN (agent review NIT-1; design
+        # review round 2, D9). A viewer that follows makes it seamless; with nothing
+        # attached the session stops first and starts there when it is next used. The
+        # card is the approval, so it says the guarantee and not the schedule — and
+        # "after this turn" no longer reads as the moment it happens, because a busy
+        # boundary defers the stop.
         return (
-            f"move to {destination} after this turn (now in {source}) — the session "
-            "restarts there"
+            f"move to {destination} (now in {source}) — the session restarts there; "
+            "with nothing attached, it stops and resumes there on the next engage"
         )
     if op == "stop":
         if peer:
-            return f"stop {address} on {peer}: ends its run on that device"
-        return f"stop {address}: ends its current run and releases the session lease"
+            # The remote form is refused unconditionally on this build, so the
+            # prompt says that instead of asking the operator to approve an act
+            # that will not happen (UX round 1 U3, design round 1 D5).
+            return _sessions_copy(_ws.approval_stop_peer(address=address, peer=peer))
+        # The idle-only precondition is the promise now: a working session is
+        # refused, so "ends its current run" over-promised (design round 1 D5,
+        # UX round 1 U5).
+        return _sessions_copy(_ws.approval_stop_local(address=address))
     if op == "resume":
         if peer:
             # The remote form: engage (warm) or a driven turn whose reply comes
@@ -18156,9 +18184,9 @@ def _sessions_pending_move_fields(
 
     session_dir_value = str(getattr(context, "session_dir", "") or "")
     root = Path(session_dir_value).parent.parent if session_dir_value else config_dir()
-    # THE SAME BOUNDED LIFE THE CONSUMER APPLIES (agent review round 2, m-e): a
-    # raw read reported a lapsed request as still queued until a runtime ticked.
-    intent = cwd_move.expire_stale_intent(root, session_id)
+    # ONE READ, THE SAME ONE THE CONSUMER MAKES: nothing ages a request any
+    # more, so a stage read here is the stage a runtime would act on.
+    intent = cwd_move.read_move_intent(root, session_id)
     if intent is None:
         return {}
     return {
@@ -18223,9 +18251,11 @@ def _sessions_move_state_sentence(extras: Mapping[str, Any]) -> str:
     """The pending move, in the words that stop a caller acting on a stale cwd.
 
     Model-facing, so plain English (AGENTS.md "Internationalization"); the point
-    is that "queued" is not "done" — the cwd in force is still the source until
-    the successor boots, and a hold (a runtime that could not guarantee one)
-    says so rather than looking like a move that simply has not happened yet.
+    is that "queued" is not "done": the cwd in force is still the source until
+    a successor is OBSERVED there, a transient hold says why nothing has
+    happened yet, and a HANDOFF says the session is going to stop rather than
+    restart in place — which is the one stage a caller must not misread as
+    "still running here".
     """
     stage = str(extras.get("move_stage") or "")
     # Spelled the way the card and the notices spell them (UX round 3, U19), so
@@ -18244,6 +18274,25 @@ def _sessions_move_state_sentence(extras: Mapping[str, Any]) -> str:
         return (
             f"a move from {source} to {destination} is queued: it happens at the next idle "
             f"point, when this session restarts there, and the working directory is still {source}"
+        )
+    if stage == "handoff":
+        # THE DESTINATION IS ALREADY RECORDED, and this is the shape that tells a
+        # caller the session will NOT be running here: it stops (or has stopped)
+        # and the next thing that starts it starts it in the destination. Nothing
+        # has been observed there yet — only a boot commits — so this is worded as
+        # recorded, not as done.
+        #
+        # THE STOP IS "WHEN IT IS IDLE", NOT "WHEN THE TURN ENDS" (design review
+        # round 1, D3): the retire keys on ``may_refresh``, so a parked gate, a
+        # goal loop, live subagents, a background job or a wake inside the warm
+        # window all defer it past the turn. One vocabulary with the tool's reply
+        # (D7: "attached", not "viewer"), and the "nothing runs" half is about THIS
+        # SESSION rather than both directories (D5).
+        return (
+            f"this session's move from {source} to {destination} is recorded and nothing is "
+            f"attached to follow it: once it is idle it stops, and the next thing to start it "
+            f"(a message, a wake, or `lop exec`) starts it in {destination}. Its working "
+            f"directory is still {source} until then, and nothing runs in {destination} yet"
         )
     if stage == "committed":
         return f"this session moved from {source} to {destination}"
@@ -18473,18 +18522,59 @@ async def _sessions_stop_mesh(
     return _text(tool_call_id, "sessions", text, details=details)
 
 
+#: The sessions tool's own receipts, resolved at render time so a live language
+#: change moves them without a restart (``tr``'s own contract). One namespace for
+#: the whole tool's operator-visible copy: ``wire.sessions``, the ``wire.host_speed``
+#: shape of an independently-owned namespace, so adding these receipts could not
+#: move any already-audited locale's bytes (agent review round 1 R2).
+_sessions_copy = tr("wire.sessions")
+
+
+def _sessions_receipt(outcome: Any, timeout_s: float) -> str:
+    """The operator-visible line for one ``StopOutcome``, keyed by OUTCOME.
+
+    ``method`` is the machine category every front end switches on and stays
+    English; this function is the only place the human sentence is chosen, so
+    the wording can be translated without any of that logic moving. The
+    `refused` branch splits on ``reason` — the owner's own account of why —
+    because the remedies differ: busy clears on its own, an older build never
+    will, and silence means the session may already be gone (UX round 1 U2,
+    design round 1 D2).
+
+    Every branch falls back to the ladder's own English line, which is the same
+    degrade path ``messages.render`` documents: a wheel without its catalogues
+    loses the translation, never the receipt.
+    """
+    from local_operator.session.runtime import control
+
+    if outcome.method == "pending":
+        return _sessions_copy(_ws.stop_pending(name=outcome.name, seconds=f"{timeout_s:g}"))
+    if outcome.method == "refused":
+        by_reason = {
+            control.REASON_BUSY: _ws.stop_refused_busy,
+            control.REASON_WAKE: _ws.stop_refused_wake,
+            control.REASON_OLD_OWNER: _ws.stop_refused_old_owner,
+            control.REASON_UNANSWERED: _ws.stop_refused_unanswered,
+        }
+        build = by_reason.get(outcome.reason)
+        if build is not None:
+            return _sessions_copy(build(name=outcome.name))
+    return outcome.line
+
+
 async def _sessions_stop(
     tool_call_id: str, params: SessionsParams, context: "ToolContext | None" = None
 ) -> ToolResult:
-    """End one running session via the existing kill-switch ladder.
+    """End an idle owner without inheriting the CLI's signal escalation.
 
-    ``force=False``: v1 is the graceful ladder only — no SIGKILL from the
-    tool (design §6.1). The outcome line is the ladder's own receipt, painted
-    verbatim, because the TUI, the CLI and this tool must report the same
-    event in the same words.
+    ``force=False`` alone still permits SIGKILL in the legacy ladder. The
+    explicit graceful-only mode also requires an owner-side idle latch, so
+    pending work is refused rather than discarded by a cooperative socket stop.
     """
     if str(params.peer or "").strip():
-        return await _sessions_stop_mesh(tool_call_id, params, context)
+        # The remote transport does not yet carry the idle-only capability.
+        # Refuse rather than forwarding a weaker stop under this tool's promise.
+        return _error(tool_call_id, "sessions", _sessions_copy(_ws.stop_remote_refused()))
     from local_operator.session.runtime import control
 
     target = await _sessions_target(params, context)
@@ -18506,19 +18596,14 @@ async def _sessions_stop(
         # session making the call. The ladder would socket-op (then signal)
         # our own runtime and the call would die mid-flight with no receipt —
         # refuse before the ladder (review round 1, R-2).
-        return _error(
-            tool_call_id,
-            "sessions",
-            "that target is this session; a session cannot stop itself — the ladder "
-            "would signal the very run making this call, which would die before it "
-            "could report anything back. Stop it from outside the session.",
-        )
+        return _error(tool_call_id, "sessions", _sessions_copy(_ws.stop_self_refused()))
 
     waited: list[str] = []
     outcome = await control.stop_session(
         target.record,
         timeout_s=control.DEFAULT_TIMEOUT_S,
         force=False,
+        graceful_only=True,
         _command="sessions tool",
         on_wait=waited.append,
     )
@@ -18531,7 +18616,22 @@ async def _sessions_stop(
         "wakes_dormant": outcome.wakes_dormant,
         "monitors_dormant": outcome.monitors_dormant,
     }
-    return _text(tool_call_id, "sessions", "\n".join([*waited, outcome.line]), details=details)
+    if outcome.reason:
+        # The same closed token the owner sent, carried out unchanged so a caller
+        # can switch on WHY without reading the sentence.
+        details["reason"] = outcome.reason
+    # THE RESULT LEADS. This card paints its first line as the collapsed
+    # headline (``tui/app.py``'s ``mark_failed(_first_line(text), text)``), and
+    # the wait lines describe an attempt while ``outcome.line`` describes what
+    # happened — the headline has to be the outcome, or the reader sees the
+    # interim step and has to expand to learn the result (design round 1 D4).
+    render = _error if outcome.method in ("refused", "busy", "draining") else _text
+    return render(
+        tool_call_id,
+        "sessions",
+        "\n".join([_sessions_receipt(outcome, control.DEFAULT_TIMEOUT_S), *waited]),
+        details=details,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -20466,6 +20566,16 @@ def _sessions_params_error(
 #: tool are full sentences that name the way out; ``move`` was the one op whose
 #: model was left to guess. Model-facing text, so it lives here in English rather
 #: than in the copy catalogue (AGENTS.md "Internationalization").
+#: ONE SENTENCE, TWO READERS: the refusal a tool call gets when its host can never
+#: restart the session, and the notice a runtime paints and journals when a marker
+#: queued by another host reaches one. Two copies of the same fact in two words is
+#: how the tool and the notice start disagreeing.
+_HOST_CANNOT_RESTART_SENTENCE = (
+    "the program hosting this session cannot restart it in another directory — open the "
+    "session from a `lop` terminal or the desktop app, which run it in a runtime that can move"
+)
+
+
 _SESSIONS_MOVE_REMEDIES: dict[str, str] = {
     "sessions_move_cwd_required": "`cwd` is required — the directory to move to, absolute or "
     "relative to this session's working directory",
@@ -20480,24 +20590,30 @@ _SESSIONS_MOVE_REMEDIES: dict[str, str] = {
     "to move — reopen the session and retry",
     "sessions_move_child_has_no_runtime": "a background job or delegated child has no runtime of "
     "its own to move — ask the parent session to move instead",
+    "host_cannot_restart": _HOST_CANNOT_RESTART_SENTENCE,
+    "sessions_move_outside_confinement": "this session is confined to its world root and that "
+    "directory is outside it — name a directory inside the confinement",
 }
 
 
-#: Why a queued move is HELD, and what to do about it — one sentence per hold
-#: code the runtime records (``RuntimeServer._apply_queued_cwd_move``).
+#: Why a move is WAITING right now, and what to do about it — one sentence per
+#: reason the runtime records (``RuntimeServer._apply_queued_cwd_move``).
 #:
 #: THE SAME CONVENTION AS :data:`_SESSIONS_MOVE_REMEDIES`: a bare code in ``info``
 #: told nobody anything (UX round 2, U10). Read by three surfaces — the tool
-#: result, ``info``, and the runtime's hold notice (painted for the user and
-#: journalled for the agent) — so they cannot word one hold three ways. English,
-#: because the same string is the model-facing incident (AGENTS.md
+#: result, ``info``, and the runtime's notice (painted for the user and journalled
+#: for the agent) — so they cannot word one reason three ways. English, because
+#: the same string is the model-facing incident (AGENTS.md
 #: "Internationalization": model-facing prompts stay English by design).
+#:
+#: ``no_capable_viewer`` is GONE with the wait it named: with nothing attached to
+#: follow, the destination is written to the marker and the next engage boots there,
+#: so the same fact is now a reply shape (``CWD_MOVE_HANDOFF``) rather than a hold.
+#: ``host_cannot_restart`` normally refuses the CALL these days, but a marker queued
+#: by another host still reaches a runtime that cannot act on it, and that reader
+#: needs the same sentence.
 _SESSIONS_MOVE_HOLDS: dict[str, str] = {
-    "no_capable_viewer": "nothing attached can follow it to the new directory — open this "
-    "session in the desktop app or a `lop` terminal and it moves once a turn ends",
-    "host_cannot_restart": "the program hosting this session cannot restart it in another "
-    "directory — open the session from a `lop` terminal or the desktop app, which run it "
-    "in a runtime that can move",
+    "host_cannot_restart": _HOST_CANNOT_RESTART_SENTENCE,
     "destination_unavailable": "that directory is gone or can no longer be entered — "
     "recreate it, or move somewhere else",
     "boundary_unreadable": "this runtime could not tell whether it is idle — it retries "
@@ -20506,11 +20622,13 @@ _SESSIONS_MOVE_HOLDS: dict[str, str] = {
 
 
 def sessions_move_hold_sentence(reason: str, destination: str) -> str:
-    """The user- and model-facing account of a held move (see ``_SESSIONS_MOVE_HOLDS``).
+    """The user- and model-facing account of a move that is waiting right now.
 
-    Names the destination, the reason in plain words, and both ways out —
-    resolve the reason, or cancel by naming the current directory — and that the
-    request lapses if the hold persists, so a hold is never a silent wait.
+    Names the destination, the reason in plain words, and the way out — resolve
+    the reason, or cancel by naming the current directory. There is no deadline
+    clause any more: nothing ages a request out, so saying "it is dropped after N
+    minutes" would be a promise the code no longer keeps (it was the TTL's
+    sentence, and the TTL is gone with the hold it bounded).
 
     ONE SENTENCE FOR BOTH READERS (painted for the user, journalled for the
     agent), so it is worded for both (UX round 3, U18): "this session's", not
@@ -20520,26 +20638,31 @@ def sessions_move_hold_sentence(reason: str, destination: str) -> str:
     every locale; this sentence stays model-facing English.
     """
     why = _SESSIONS_MOVE_HOLDS.get(reason, f"the runtime is holding it ({reason})")
-    minutes = int(_cwd_move_ttl_s() // 60)
+    # THE WAIT IS UNBOUNDED NOW, and the notice says so rather than dropping the
+    # only bound it used to carry. The deadline clause it replaces ("dropped after N
+    # minutes") was the TTL's promise, and the TTL is gone: a move waits until it
+    # happens or is cancelled. Both exits are named, one for each reader — the
+    # agent can cancel with ``cwd='.'``, the person reading the paint asks the agent
+    # to (design review round 1, D6).
     return (
         f"This session's move to {_approval_directory_label(destination)} is waiting: "
-        f"{why}. To cancel it, ask for a move back to the current directory (cwd='.'); "
-        f"it is dropped if still held after {minutes} minutes."
+        f"{why}. It stays queued until it happens, or until you ask the agent to cancel it "
+        f"(it cancels by moving back to the current directory, cwd='.')."
     )
 
 
 def sessions_move_expiry_sentence(destination: str, source: str) -> str:
-    """The account of a move that lapsed — announced, never deleted in silence."""
+    """The account of a move a PREVIOUS build let lapse — announced, not deleted.
+
+    Nothing expires a request any more (a move ends committed or at an explicit
+    reason), but a marker an older build aged out is still on disk, and silence
+    about it is exactly what U10 was about, so the one-time announcement stays.
+    """
     return (
-        f"The move to {_approval_directory_label(destination)} expired without happening; "
-        f"this session stays in {_approval_directory_label(source)}. Ask again to retry."
+        f"The move to {_approval_directory_label(destination)} expired without happening "
+        f"under an older build; this session stays in {_approval_directory_label(source)}. "
+        f"Ask again to retry."
     )
-
-
-def _cwd_move_ttl_s() -> float:
-    from local_operator.session.cwd_move import QUEUED_MOVE_TTL_S
-
-    return QUEUED_MOVE_TTL_S
 
 
 async def _sessions_move(
@@ -20568,16 +20691,27 @@ async def _sessions_move(
     """
     from local_operator.paths import config_dir
     from local_operator.session import cwd_move
-    from local_operator.session.runtime.server import CWD_MOVE_READY, notify_move_queued
+    from local_operator.session.runtime.server import (
+        CWD_MOVE_HANDOFF,
+        CWD_MOVE_READY,
+        move_host_refusal,
+        notify_move_queued,
+    )
+    from local_operator.tools.confinement import ToolConfinement
 
-    def refuse(code: str, **fields: Any) -> ToolResult:
+    def refuse(code: str, sentence: str = "", **fields: Any) -> ToolResult:
         # EVERY REFUSAL CARRIES ITS REMEDY. The code alone told a model nothing
         # it could act on, and the fields that would have helped live in
         # ``details``, which the model never sees (UX round 1, U5). Model-facing
         # text is exempt from the copy catalogue (AGENTS.md
         # "Internationalization"), so the sentence is written here rather than
         # keyed.
-        remedy = _SESSIONS_MOVE_REMEDIES.get(code, "correct the arguments and retry")
+        #
+        # ``sentence`` lets a refusal that has ALREADY been worded by the code
+        # that decided it — ``cwd_denial`` names the root and the path — speak for
+        # itself instead of being flattened into a static remedy (design review
+        # round 1, D2).
+        remedy = sentence or _SESSIONS_MOVE_REMEDIES.get(code, "correct the arguments and retry")
         return _error(
             tool_call_id,
             "sessions",
@@ -20597,6 +20731,53 @@ async def _sessions_move(
     effective_cwd = str(getattr(context, "cwd", "") or ".")
     session_dir_value = str(getattr(context, "session_dir", "") or "")
     root = Path(session_dir_value).parent.parent if session_dir_value else config_dir()
+    # ---------------------------------------------------------------------
+    # THE TWO REFUSALS THAT ARE DECIDABLE BEFORE ANYTHING IS RECORDED.
+    # ---------------------------------------------------------------------
+    # Both used to be discovered later — a hold that aged out, or a move that
+    # quietly relocated the session outside the boundary its own tools enforce —
+    # and neither can be left to later now that nothing expires a request: a
+    # marker written for a move that can never happen would sit `queued` for ever.
+    #
+    # THEY RUN BEFORE THE ENQUEUE (agent review round 1, NIT-3). Checking after it
+    # left a window in which a runtime in ANOTHER process could already be retiring
+    # toward a directory this call was about to refuse — the tool path is one
+    # synchronous block here, but ``notify_move_queued``'s own contract names hosts
+    # that drive tools from outside the runtime, so the window is not hypothetical.
+    #
+    # The destination is resolved HERE rather than by the enqueue because the
+    # boundary check needs the resolved path: ``cwd_denial`` resolves against the
+    # PROCESS's cwd for a relative argument, which is not what a session means by
+    # "..". ``enqueue_self_move`` resolves again, and resolving an already-resolved
+    # absolute path is idempotent.
+    try:
+        destination_cwd = cwd_move.resolve_destination(
+            str(params.cwd or ""), effective_cwd=effective_cwd
+        )
+    except cwd_move.CwdMoveRefused as refused:
+        return refuse(refused.code, **refused.fields)
+    # A CANCEL IS NEVER REFUSED: naming the directory the session is already in
+    # withdraws a request, which no boundary or host fact can make invalid.
+    is_cancel = cwd_move.same_directory(destination_cwd, effective_cwd)
+    if not is_cancel:
+        confinement = ToolConfinement.from_context(context)
+        denial = confinement.cwd_denial(destination_cwd) if confinement else None
+        if denial is not None:
+            # THE BOUNDARY CHECK ANSWERS IN ITS OWN WORDS, and those words are
+            # returned: ``cwd_denial`` names the root and the offending path, which
+            # is the only fact an agent needs to pick a directory it may use.
+            # Swapping it for a static remedy withheld exactly that (design review
+            # round 1, D2) — the same boundary the shell, the path tools and
+            # public_copy consult.
+            return refuse(
+                "sessions_move_outside_confinement", sentence=denial.removeprefix("refused: ")
+            )
+        # THE ANSWER IS READ BEFORE THE PROMISE IS WORDED, and what it says decides
+        # both. A process hosting no runtime answers "" — the durable marker is still
+        # exactly what the next open consumes. A host that cannot restart this runtime
+        # can never honour the request, so it is refused here instead of waiting.
+        if move_host_refusal(own_session_id, root):
+            return refuse("host_cannot_restart")
     try:
         intent = cwd_move.enqueue_self_move(
             root,
@@ -20621,27 +20802,49 @@ async def _sessions_move(
             f"{_approval_directory_label(source_label)} (request {intent.request_id})",
             details={"op": "move", **intent.as_fields(effective_cwd=effective_cwd)},
         )
-    # THE PROMISE IS WORDED FROM WHAT THE RUNTIME CAN DO, not from whether one
-    # exists (UX round 2, U9; agent review round 2, m-b; QA round 2, Q3). "At the
-    # next idle point" is said only when the hosting runtime can carry the move
-    # out; a hold — predicted now, or already recorded on a repeat call — is
-    # reported as a hold with its reason and next step; and a process hosting no
-    # runtime says the move waits for the next open.
     readiness = notify_move_queued(own_session_id, root)
-    hold = intent.blocked_reason or (readiness if readiness != CWD_MOVE_READY else "")
+
+    hold = intent.blocked_reason or (
+        readiness if readiness not in (CWD_MOVE_READY, CWD_MOVE_HANDOFF) else ""
+    )
     if hold:
         head = "queued but held"
         when = sessions_move_hold_sentence(hold, intent.destination_cwd)
+    elif readiness == CWD_MOVE_HANDOFF:
+        # NOBODY CAN FOLLOW THE SESSION, so the runtime records the destination and
+        # stops; the session then goes cold until it is engaged again. Two things
+        # this wording must not do:
+        #
+        # * promise a RESTART IN PLACE ("it happens at the next idle point, when the
+        #   session restarts there"). With no viewer it does not restart — it
+        #   stops — and a caller told otherwise reads a stopped session as a bug;
+        # * promise a stop WHEN THE TURN ENDS (design review round 1, D3). The
+        #   retire keys on ``may_refresh``, not on the turn: a parked gate, a goal
+        #   loop, live subagents, a background job or a wake inside the warm window
+        #   all defer it. "At the next idle point" is the true bound, which is why
+        #   the sibling shape above uses it too.
+        #
+        # ``handing off`` LEADS so the materially different future is where a
+        # reader decides, not in a third clause (design review round 1, D4).
+        head = "handing off"
+        when = (
+            "Nothing is attached to follow it, so at its next point of idleness — not "
+            "necessarily the end of this turn — it stops, and the next thing to start it "
+            "(a message, a wake, `lop exec`) starts it in the new directory."
+        )
     elif readiness:
         head = "queued"
-        when = "It happens at the next idle point after this turn, when the session restarts there."
+        when = "It happens at its next idle point, when the session restarts there."
     else:
+        # NO RUNTIME IN THIS PROCESS is watching it: the durable record is what a
+        # later open consumes, so the honest bound is that open, not an idle point
+        # of a runtime that does not exist here.
         head = "queued"
-        when = (
-            "It happens the next time this session opens (no runtime in this process is "
-            "watching it now)."
-        )
+        when = "It happens the next time this session opens."
     destination = _approval_directory_label(intent.destination_cwd)
+    # The working directory is still the source and NOTHING runs in the new one
+    # until a session actually starts there. Both halves are said, because a
+    # reader who only hears "queued" assumes the move already took effect.
     # The effective cwd is the context's, read back rather than assumed: this call
     # must not (and cannot) mutate it, so the field proves the intent is queued and
     # not applied. Both directories go through the SAME resolve-and-label as the
@@ -20651,13 +20854,14 @@ async def _sessions_move(
         "sessions",
         f"{head}: move this session from {_approval_directory_label(source_label)} to "
         f"{destination}. {when} Its working directory is still "
-        f"{_approval_directory_label(source_label)} until then; nothing runs in {destination} "
-        f"yet (request {intent.request_id})",
+        f"{_approval_directory_label(source_label)} until then, and nothing runs in "
+        f"{destination} yet (request {intent.request_id})",
         details={
             "op": "move",
             **intent.as_fields(effective_cwd=effective_cwd),
             "watcher_armed": bool(readiness),
             "held": hold,
+            "handoff": readiness == CWD_MOVE_HANDOFF,
         },
     )
 
@@ -21079,6 +21283,7 @@ BROWSER_ACTIONS = (
     "screenshot",
     "click",
     "type",
+    "press",
     "close",
     # scroll and logs are served by BOTH non-cmux hosts (the paired Local
     # Operator browser extension and the desktop app's browser host); the cmux
@@ -21172,6 +21377,7 @@ BROWSER_ACTIONS = (
 #: drift apart.
 CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
     {
+        "press",
         "scroll",
         "logs",
         "network_start",
@@ -21387,6 +21593,13 @@ class BrowserParams(BaseModel):
     # … expected one of …`), which is the self-correction path that makes the
     # cut safe (slimming wave, audit item 2).
     action: str = Field(description="The browser action to run.")
+    key: str = Field(
+        default="",
+        description=(
+            "'press': Tab, Shift+Tab, Enter, Escape, ArrowUp/Down/Left/Right; "
+            "keyboard input to the owned page (desktop app support required)."
+        ),
+    )
     url: str = Field(
         default="",
         description=(
@@ -22360,6 +22573,34 @@ def _validate_record_fields(action: str, params: BrowserParams) -> str:
                 f"default {_files.RECORD_DEFAULT_DURATION_S:g}); got {params.timeout_s:g}"
             )
     return ""
+
+
+# Exact spellings mirror desktop input.ts: Shift+Tab is one atomic chord, not
+# arbitrary modifier syntax. Validate before discovery and again at wire dispatch
+# so neither an unavailable host nor a direct internal caller bypasses the guard.
+_BROWSER_PRESS_KEYS = (
+    "Tab",
+    "Shift+Tab",
+    "Enter",
+    "Escape",
+    "ArrowUp",
+    "ArrowDown",
+    "ArrowLeft",
+    "ArrowRight",
+)
+
+
+def _browser_press_refusal(
+    tool_call_id: str, action: str, params: BrowserParams
+) -> ToolResult | None:
+    if action != "press" or params.key in _BROWSER_PRESS_KEYS:
+        return None
+    return _error(
+        tool_call_id,
+        "browser",
+        f"unsupported_key: {params.key!r}; 'press' accepts only " + ", ".join(_BROWSER_PRESS_KEYS),
+        details={"error_code": "unsupported_key", "key": params.key},
+    )
 
 
 def _validate_browser_args(action: str, params: BrowserParams) -> str:
@@ -26495,6 +26736,9 @@ async def _bridge_action(
     — so this function is shared rather than forked, and only the handful of
     sentences that name a PROCESS use the host.
     """
+    refusal = _browser_press_refusal(tool_call_id, action, params)
+    if refusal is not None:
+        return refusal
     host = _host_of_client(client)
     surface = state.surface_id
     if action in _NETWORK_ACTIONS:
@@ -26538,6 +26782,8 @@ async def _bridge_action(
         wire["selector"] = params.selector.strip()
         if action == "type":
             wire["text"] = params.text
+    elif action == "press":
+        wire["key"] = params.key
     elif action == "scroll":
         # Only send the params the caller actually set, so the extension's
         # precedence (selector > x/y > direction > default) sees an unset param
@@ -26685,6 +26931,13 @@ async def _bridge_action(
         return _bridge_logs_result(tool_call_id, params, result, details, title, href)
     if action in ("styles", "hit_test", "ancestors", "query"):
         return _bridge_geometry_result(tool_call_id, action, params, result, details)
+    if action == "press":
+        return _text(
+            tool_call_id,
+            "browser",
+            f"Pressed {params.key!r} in the owned page. Page: {_page_line(title, href)}",
+            details={**details, "key": params.key},
+        )
     if action == "click":
         navigation = "" if result.get("navigated") else " (no navigation)"
         return _text(
@@ -26904,6 +27157,17 @@ async def execute_browser(
             else {"version": 1, "local_scope_missing": True}
         )
         return _text(tool_call_id, "browser", json.dumps(result, sort_keys=True), details=result)
+    # Keyboard arguments must fail before ownership discovery/recovery can dial
+    # a peer. Keep the preflight specific to this additive action so existing
+    # actions retain their established validation/ownership ordering.
+    if str(args.get("action", "")).strip().lower() == "press":
+        try:
+            keyboard = BrowserParams(**args)
+        except ValidationError as exc:
+            return _validation_error(tool_call_id, "browser", exc)
+        refusal = _browser_press_refusal(tool_call_id, "press", keyboard)
+        if refusal is not None:
+            return refusal
     state = _browser_state(context)
     resource = getattr(state, "resource", None)
     if resource is None or state.surface_id.startswith("surface:"):
@@ -27511,6 +27775,9 @@ async def _execute_browser(
             "browser",
             f"unknown action: {action} (expected one of {', '.join(BROWSER_ACTIONS)})",
         )
+    refusal = _browser_press_refusal(tool_call_id, action, params)
+    if refusal is not None:
+        return refusal
     cmux_available = cmux_browser_available()
     # Classify EACH host ONCE per action and reuse that answer for both the
     # backend decision and the demotion diagnostic, so they can never describe
@@ -31859,18 +32126,16 @@ def build_jobs_tool(context: ToolContext) -> AgentTool | None:
     return AgentTool(
         name="jobs",
         label="List jobs",
+        # Age aliases and cursor semantics stay explicit; condense repeated
+        # explanations/examples because this metadata rides every root and child
+        # request. Keep the rationale outside the published description.
         description=(
-            "Inspect background jobs (task/bash/video). op='list' shows every "
-            "running and recently-settled job with its id, status and age — "
-            "'up' is how long a running job has been going, 'wait' is how long "
-            "a parked one has been waiting for a slot, 'ago' is how long since "
-            "a settled one finished, and 'old' is a settled job whose finish "
-            "time was not recorded. op='peek' (job_id, and since=<seq from the "
-            "last peek>) returns ONLY the output produced since that cursor, so "
-            "polling a long job stays cheap — use it to watch a build, a "
-            "training run, a terraform apply, or a pipeline poll without "
-            "blocking. op='cancel' (job_id) stops a running job and kills its "
-            "process tree."
+            "Inspect background jobs (task/bash/video). op='list': all running and recently "
+            "settled jobs with id, status and age: 'up'=runtime, 'wait'=time waiting for a "
+            "slot, 'ago'=time since finishing, 'old'=settled with no recorded finish time. "
+            "op='peek' requires job_id; since=<last seq> returns only newer output. Use it "
+            "for nonblocking build/training/pipeline progress. op='cancel' requires "
+            "job_id; stops a running job and kills its process tree."
         ),
         parameters=JobsParams.model_json_schema(),
         approval_tier="read",

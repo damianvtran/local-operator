@@ -5,9 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from local_operator.i18n.cli_help import help_text
+from local_operator.i18n.keys import cli_group_help as _gg
 
-def add_parser(subparsers: Any) -> None:
-    parser = subparsers.add_parser("tunnel", help="Radient remote access to your local harnesses")
+
+def add_parser(subparsers: Any, *, help_locale: str | None = None) -> None:
+    # ``help_locale`` is the ONE snapshot ``build_cli_parser`` resolved; ``None`` (a
+    # standalone caller) makes ``help_text`` resolve fresh.
+    parser = subparsers.add_parser("tunnel", help=help_text(_gg.tunnel(), help_locale))
     actions = parser.add_subparsers(dest="tunnel_command")
     for name in ("create", "connect", "configure"):
         child = actions.add_parser(name)

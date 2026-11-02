@@ -1,0 +1,23 @@
+{
+  "wire.errors.sdk_spec.agent_identity_conflict": "agent_name اور agent_id باہم مانع ہیں",
+  "wire.errors.sdk_spec.approval_callback_gate_required": "ApprovalPolicy.callback() کو قابلِ کال گیٹ درکار ہے",
+  "wire.errors.sdk_spec.approval_declared_tools_empty": "ApprovalPolicy.declared() میں کم از کم ایک ٹول کا نام ہونا چاہیے؛ غیر اعلان شدہ بند سیشن کے لیے ApprovalPolicy.refuse() استعمال کریں",
+  "wire.errors.sdk_spec.approval_handler_wrong_mode": "ApprovalPolicy.handler صرف موڈ ''callback'' کے لیے بامعنی ہے، {mode} کے لیے نہیں",
+  "wire.errors.sdk_spec.approval_tools_wrong_mode": "ApprovalPolicy.tools صرف موڈ ''declared'' کے لیے بامعنی ہے، {mode} کے لیے نہیں",
+  "wire.errors.sdk_spec.attach_fields_unsupported": "mode=''attach'' spec.resume کے لیے ایک viewer کھولتا ہے؛ یہ ٹیمیں، پروفائلز، ٹولز، نام، اہداف یا منظوری کی پالیسیاں منسلک نہیں کرتا — وہ مالک کی طرف کا کام ہے۔ اس spec پر صرف resume سیٹ کریں (یا mode=''own'' استعمال کریں)۔ اعتراض والے فیلڈز: {fields}۔",
+  "wire.errors.sdk_spec.attach_output_unsupported": "منسلک سیشن پر آؤٹ پٹ کی پابندی سیٹ نہیں ہو سکتی؛ اس کا فیصلہ مالک رن ٹائم کرتا ہے",
+  "wire.errors.sdk_spec.attach_resume_required": "mode=''attach'' کو spec.resume درکار ہے: viewer ایک id سے منسلک ہوتا ہے",
+  "wire.errors.sdk_spec.mode_invalid": "mode ''own'' یا ''attach'' ہونا چاہیے، {mode} نہیں",
+  "wire.errors.sdk_spec.output_format_invalid": "output_format {formats} میں سے کوئی ایک ہونا چاہیے",
+  "wire.errors.sdk_spec.output_retries_range": "output_retries کی قدر 0 سے 5 کے درمیان ہونی چاہیے",
+  "wire.errors.sdk_spec.output_retries_requires_format": "output_retries کو output_format درکار ہے",
+  "wire.errors.sdk_spec.output_schema_requires_format": "output_schema کو output_format درکار ہے",
+  "wire.errors.sdk_spec.resume_empty": "resume سیشن id یا \"@latest\" ہونا چاہیے، خالی اسٹرنگ نہیں",
+  "wire.errors.sdk_spec.spawn_birth_effort_pair_required": "نئے spawn کیے گئے سیشن کا birth_effort birth sample کے ساتھ جاتا ہے اور اسے ساتھ hosting/model جوڑا درکار ہے؛ تینوں بتائیں، یا ماڈل جوڑے کے بغیر birth لیول سیٹ کرنے کے لیے سیشن ان-پروسیس (open_session) کھولیں۔",
+  "wire.errors.sdk_spec.spawn_fields_unsupported": "spawn_session() نئے رن ٹائم چائلڈ کو پوسٹ-اوپن حالت نہیں پہنچا سکتا؛ اس spec کے غیر معاون فیلڈز: {fields}۔ سیشن ان-پروسیس (open_session) کھولیں، مطلوبہ چیزیں منسلک کریں، dispose کریں، پھر اسی id پر spawn_session() کریں — resume منسلکات بحال کرتا ہے؛ یا ان فیلڈز کے بغیر spawn کریں۔",
+  "wire.errors.sdk_spec.spawn_model_pair_required": "spawn_session() hosting/model کو نئے رن ٹائم تک ایک birth sample کے طور پر پہنچاتا ہے؛ دونوں بتائیں، یا دونوں نہیں (تب چائلڈ اپنا ماڈل روٹ کی کنفیگ سے حل کرتا ہے)۔",
+  "wire.errors.sdk_spec.spawn_output_unsupported": "spawn_session() آؤٹ پٹ کی پابندی ({fields}) نہیں اٹھا سکتا؛ سیشن open_session(..., mode=''own'') سے کھولیں اور بعد میں اسے engage کریں",
+  "wire.errors.sdk_spec.tools_empty": "tools میں کم از کم ایک ٹول کا نام ہونا چاہیے؛ بلا پابندی رکھنے کے لیے اسے None چھوڑیں",
+  "wire.errors.sdk_spec.world_root_empty": "world_root سیٹ ہونے پر غیر خالی پاتھ ہونا چاہیے",
+  "wire.errors.sdk_spec.yolo_approval_unreachable": "yolo=True ApprovalPolicy.{approval_mode}() گیٹ کو ناقابلِ رسائی بنا دیتا ہے؛ اس کی جگہ ApprovalPolicy.auto() استعمال کریں (یا yolo ہٹا دیں)"
+}

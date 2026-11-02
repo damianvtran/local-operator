@@ -1,0 +1,21 @@
+{
+  "cli.mcp_help.mcp": "MCP سرورز منظم کریں",
+  "cli.mcp_help.list": "کنفیگر شدہ MCP سرورز کی فہرست دکھائیں (تمام ذرائع ضم)",
+  "cli.mcp_help.add": "MCP سرور شامل کریں (stdio کمانڈ یا http/sse URL)",
+  "cli.mcp_help.add_name": "سرور کا نام",
+  "cli.mcp_help.add_command": "سرور چلانے کے لیے stdio کمانڈ",
+  "cli.mcp_help.add_arg": "stdio کمانڈ کا آرگومنٹ (دہرایا جا سکتا ہے)",
+  "cli.mcp_help.add_env": "stdio سرور کے لیے ماحولیاتی متغیر KEY=VALUE (دہرایا جا سکتا ہے)",
+  "cli.mcp_help.add_url": "HTTP/SSE سرور URL (--command کا متبادل)",
+  "cli.mcp_help.add_scope": "لکھنے کے لیے کنفیگ اسکوپ (ڈیفالٹ: global ~/.local-operator/mcp.json)",
+  "cli.mcp_help.add_oauth": "ریموٹ HTTP سرور کے لیے OAuth فعال کریں",
+  "cli.mcp_help.remove_server": "کنفیگ اسکوپ سے MCP سرور ہٹائیں",
+  "cli.mcp_help.remove_name": "ہٹائے جانے والے سرور کا نام",
+  "cli.mcp_help.remove_scope": "جس کنفیگ اسکوپ سے ہٹانا ہے (ڈیفالٹ: global)",
+  "cli.mcp_help.login": "ایک OAuth-فعال MCP سرور کی توثیق کریں",
+  "cli.mcp_help.login_name": "توثیق کیے جانے والے سرور کا نام",
+  "cli.mcp_help.logout": "ایک MCP سرور کا محفوظ شدہ OAuth کریڈینشل ہٹائیں",
+  "cli.mcp_help.logout_name": "لاگ آؤٹ کیے جانے والے سرور کا نام",
+  "cli.mcp_help.reauth": "ایک OAuth MCP سرور سے لاگ آؤٹ کریں اور نئی اجازت چلائیں",
+  "cli.mcp_help.reauth_name": "دوبارہ توثیق کیے جانے والے سرور کا نام"
+}

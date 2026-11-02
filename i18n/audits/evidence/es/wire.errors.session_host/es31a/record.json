@@ -1,0 +1,110 @@
+{
+  "locale": "es",
+  "namespace": "wire.errors.session_host",
+  "audit_id": "es31a",
+  "audit_date": "2026-10-31",
+  "key_count": 3,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task_label": "host-es-audit-a",
+    "session": "1436c962e633",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "056852035b33",
+    "actual_model_source": "Host model-switch notices: quota-triggered temporary fallback from anthropic/claude-sonnet-5-5 via anthropic/claude-opus-5-5 to openai/gpt-6.1-sol. Audit reasoning, validator execution and report performed on openai/gpt-6.1-sol."
+  },
+  "source_audit_revision": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "input_hashes": {
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "es": {
+      "candidate_path": "/Users/damian/.local-operator/sessions/056852035b33/scratchpad/host-copy-es/wire.errors.session_host.json",
+      "path": "local_operator/i18n/catalogues/es/wire.errors.session_host.json",
+      "sha256": "b27376785fe2c4bc4e3ca302e3f34097dad93bf483ccef5a921177ac6e8a00b8"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/report.json",
+      "sha256": "b6885d8de5b1146514f5ef141f4698e8c5923d75b02c7f64459245679094b845",
+      "current_scratch_path": "/Users/damian/.local-operator/sessions/1436c962e633/scratchpad/host-es-audit-a/report.json"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/report.md",
+      "sha256": "67e79366ed442fd060d50e23db139667a8154b08573c8459ce6db3975d73b52f",
+      "current_scratch_path": "/Users/damian/.local-operator/sessions/1436c962e633/scratchpad/host-es-audit-a/report.md"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/audit.log",
+      "sha256": "edada95785a776b41f86b43a7b11044d379a15230948bed8ac3cbb6bf818e545",
+      "current_scratch_path": "/Users/damian/.local-operator/sessions/1436c962e633/scratchpad/host-es-audit-a/audit.log"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/validate_audit.py.txt",
+      "sha256": "07d3664895306a88d7654656bf8a3ecf6ae5fca1075c084348decca96d19b288",
+      "current_scratch_path": "/Users/damian/.local-operator/sessions/1436c962e633/scratchpad/host-es-audit-a/validate_audit.py"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/validation-setup-attempt-1.log",
+      "sha256": "a737c948bea5d18b4fe2c672ea4f5c2a802a1f09f7d608c9417143362247ee72",
+      "current_scratch_path": "/Users/damian/.local-operator/sessions/1436c962e633/scratchpad/host-es-audit-a/validation-setup-attempt-1.log"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/translator-provenance.json",
+      "sha256": "c40948babc462d394184b2f50dbbe0ec52cfb9f309869a09d105dc98c3e66b4b",
+      "current_scratch_path": "/Users/damian/.local-operator/sessions/1436c962e633/scratchpad/host-es-audit-a/translator-provenance.json"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/translator-validation.log",
+      "sha256": "054477c441136cf2969edecb34e3f70a7b52da1dc6cc51600eb04083a838d860",
+      "current_scratch_path": "/Users/damian/.local-operator/sessions/1436c962e633/scratchpad/host-es-audit-a/translator-validation.log"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/ledger-proposal.json",
+      "sha256": "f5c2a694c4c5ee1def245850c5de4eef7f4f5922c80cbc4c460f3d13c33625a0",
+      "current_scratch_path": "/Users/damian/.local-operator/sessions/1436c962e633/scratchpad/host-es-audit-a/ledger-proposal.json"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "audit_pass": "A / first independent pass",
+  "second_independent_audit_required": true,
+  "second_independent_audit_performed": false,
+  "notes_classification": "report.json/report.md reasoning is audit_notes_not_execution_log; audit.log is actual execution output; translator-validation.log is attributed translator output, not auditor execution.",
+  "actual_execution_log": "i18n/audits/evidence/es/wire.errors.session_host/es31a/audit.log",
+  "planned_canonical_record_path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/record.json",
+  "retention_state": "scratch handoff only; not tracked, committed, or on main; coordinator must preserve canonical bundle",
+  "ledger_write_performed": false,
+  "original_lost_evidence": {
+    "status": "not_applicable_no_lost_original"
+  },
+  "integration": {
+    "integrated_from_session": "1436c962e633",
+    "original_record_sha256": "d479a0f6aa85c10c6d15b2549b0d5dfaf4d2837730aabff8624dd69bc6fbcd8a",
+    "original_receipt_sha256": "2cbd9feee20efac938e0e03dcb59d6159acd98c27d475d9f5266970fb71e340e",
+    "canonical_record": "i18n/audits/evidence/es/wire.errors.session_host/es31a/record.json",
+    "canonical_translator_provenance": "i18n/audits/evidence/es/wire.errors.session_host/es31a/translator/provenance.json",
+    "retention": "Retained in this PR; not claimed merged or on main. Historical commands/cwd/scratch input paths are preserved as executed, not claimed tracked.",
+    "integration_judgment": "No new audit; semantic pass/finding facts copied from independent original records.",
+    "retained_script_snapshots": [
+      {
+        "original_bundle_name": "validate_audit.py",
+        "retained_snapshot": "validate_audit.py.txt",
+        "sha256": "07d3664895306a88d7654656bf8a3ecf6ae5fca1075c084348decca96d19b288"
+      },
+      {
+        "original_bundle_name": "translator/validate.py",
+        "retained_snapshot": "translator/validate.py.txt",
+        "sha256": "de5a31e94aaad6db38a92e60b97675c026074509b4352476396a0feac9fd8ca5"
+      }
+    ]
+  }
+}

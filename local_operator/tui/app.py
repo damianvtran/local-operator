@@ -77,6 +77,7 @@ from textual.screen import Screen
 from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
+from textual.worker import Worker
 
 from local_operator import keymap as _keymap
 from local_operator.ansi import strip_control_sequences
@@ -137,8 +138,10 @@ from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
+from local_operator.i18n.keys import tui_setup_cues as _setup_keys
+from local_operator.i18n.keys import tui_status_command as _sc_keys
 from local_operator.i18n.keys import tui_tags as _tag_keys
-from local_operator.i18n.text import tr
+from local_operator.i18n.text import register_refresh, tr
 from local_operator.logger import current_log_file
 
 # The `/mcp` verb helpers live with the verbs they serve, so the terminal and
@@ -225,6 +228,7 @@ from local_operator.slash_commands import (
 from local_operator.supplements.contract import SUPERSEDED_ERROR, reader_disposition
 from local_operator.team_bridge.card import bridge_card_sender, bridge_card_text
 from local_operator.tui import images as images_mod
+from local_operator.tui import status_command as status_command_mod
 from local_operator.tui import supplements as supplement_mod
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.ask_open_policy import (
@@ -608,6 +612,10 @@ _t_tags = tr("tui.tags")
 #: The queued-ask surfaces' own namespace (R5). Read through the binding at every
 #: use site, never copied: a language move re-materialises the catalogue.
 _t_asks = tr("tui.asks")
+#: First-run setup cues (the composer placeholder and the no-provider cue). Read
+#: through the binding at every use, never copied: ``_reload_setup_cues`` re-points
+#: the two module constants below on a live language move.
+_t_setup = tr("tui.setup_cues")
 #: Fixed-width, non-colour membership markers. Width is the point: six rows with
 #: `[x]`/`[ ]` line up in monochrome and in an ASCII fallback, where a bullet or
 #: a coloured dot would carry the only copy of the state.
@@ -3148,7 +3156,7 @@ CREDENTIAL_PLACEHOLDER = "Type or paste the secret… — masked; Enter chips it
 
 #: The composer's placeholder in the first-run setup state (see
 #: ``_composer_placeholder_for``).
-SETUP_PLACEHOLDER = f"Type {RECOMMENDED_LOGIN_COMMAND} to begin"
+SETUP_PLACEHOLDER = _t_setup(_setup_keys.setup_placeholder(command=RECOMMENDED_LOGIN_COMMAND))
 
 #: How often the ask surfaces re-derive their countdown while a row is present.
 #:
@@ -4598,7 +4606,22 @@ class TranscriptScreen(Screen[None]):
 #: for someone who may have no AI account at all (audit D1/U2/U4/Q3). The
 #: command comes from ``providers.login_catalog`` so the splash, the hints,
 #: the CLI and the README cannot recommend different providers again.
-AIDA_NO_PROVIDER_CUE = f"Connect an AI account first: type {RECOMMENDED_LOGIN_COMMAND}"
+AIDA_NO_PROVIDER_CUE = _t_setup(_setup_keys.no_provider_cue(command=RECOMMENDED_LOGIN_COMMAND))
+
+
+def _reload_setup_cues() -> None:
+    """Follow backend locale moves for the two first-run cue constants.
+
+    They are module constants (tests and the e2e harness import them by name), so
+    a language change has to re-materialise them; every use site reads the module
+    global at call time and therefore sees the moved text.
+    """
+    global SETUP_PLACEHOLDER, AIDA_NO_PROVIDER_CUE
+    SETUP_PLACEHOLDER = _t_setup(_setup_keys.setup_placeholder(command=RECOMMENDED_LOGIN_COMMAND))
+    AIDA_NO_PROVIDER_CUE = _t_setup(_setup_keys.no_provider_cue(command=RECOMMENDED_LOGIN_COMMAND))
+
+
+register_refresh(_reload_setup_cues)
 
 
 def bridge_decision_target(
@@ -5209,6 +5232,18 @@ class OperatorApp(App[None]):
         self._session: SessionProtocol | None = None
         self._controller: EventController | None = None
         self._status: StatusLine | None = None
+        #: The ``(command, interval)`` the status-command timer was armed with,
+        #: ``None`` when no command is configured (`_arm_status_command`).
+        self._status_command_armed: tuple[str, int] | None = None
+        self._status_command_timer: Timer | None = None
+        #: The in-flight run, so a tick can skip while it is still going and a
+        #: command change can cancel it.
+        self._status_command_running: Worker[None] | None = None
+        #: Consecutive failed runs, and whether this armed command's failure
+        #: episode has been announced (`_apply_status_command_outcome`).
+        self._status_command_failures = 0
+        self._status_command_successes = 0
+        self._status_command_notified = False
         #: The park reason this app has already announced, so a 5-second poll
         #: raises one card per episode rather than holding the toast slot
         #: forever (see `_poll_tunnel_park`).
@@ -12783,6 +12818,10 @@ class OperatorApp(App[None]):
         # sidebar — the state the leak was reported from — stops reaping
         # entirely and keeps every runtime they ever clicked.
         self.set_interval(SIDEBAR_IDLE_SWEEP_S, self._sweep_idle_sidebar_sources)
+        # The operator's status command (``display.composer.command``): armed
+        # here for its first run and re-armed by `_apply_composer_settings`
+        # whenever the command or its interval moves.
+        self._arm_status_command()
 
         # Await the session in a worker so the app paints first.
         self.run_worker(self._boot_session(), thread=False, group="session")
@@ -13190,6 +13229,7 @@ class OperatorApp(App[None]):
             model_name=_model_name(session),
             effort=_effort_label(session),
             fast=_fast_label(session),
+            saver=_saver_label(session),
             # The active /agent profile and /team roster segments (U2). Read
             # defensively via getattr: an embedded-SDK or test double may not
             # expose these accessors, and a missing one must leave the segment
@@ -13571,6 +13611,7 @@ class OperatorApp(App[None]):
             ),
             effort=_effort_label(state),
             fast=_fast_label(state),
+            saver=_saver_label(state),
             agent_profile=str(getattr(state, "active_agent", "") or ""),
             team=self._team_band_text(str(getattr(state, "active_team", "") or "")),
             cwd=str(getattr(state, "cwd", "") or ""),
@@ -13843,6 +13884,7 @@ class OperatorApp(App[None]):
             model_name=_model_name(session),
             effort=_effort_label(session),
             fast=_fast_label(session),
+            saver=_saver_label(session),
             # The profile/team segments must survive the swap: takeover is a
             # transport rotation, not a conversation change, so the band may
             # not drop (and later re-add) segments the canonical state never
@@ -14446,7 +14488,10 @@ class OperatorApp(App[None]):
         for message in history:
             if getattr(message, "role", None) != "user":
                 continue
-            if is_harness_notice_row(message):
+            text = getattr(message, "text", "") or ""
+            if is_harness_notice_row(message) or (
+                isinstance(text, str) and is_harness_chrome(text)
+            ):
                 # A row the harness wrote — a stamped render of a
                 # ``CustomMessage`` (a failover model-switch notice, an
                 # incident), or a notice carried in from a compaction block —
@@ -14458,7 +14503,6 @@ class OperatorApp(App[None]):
                 # or with the elision notice's own prose, is the visible form of
                 # getting this wrong.
                 continue
-            text = getattr(message, "text", "") or ""
             if not isinstance(text, str) or not text.strip():
                 continue
             self._show_provisional_name(text)
@@ -19541,7 +19585,10 @@ class OperatorApp(App[None]):
                             remote = await AttachedSession.cold(
                                 concrete,
                                 config_dir=config_root,
-                                cwd=str(record.cwd or os.getcwd()),
+                                # A missing owner cwd is no opinion, not this
+                                # viewer's directory. Inventing one here can
+                                # supersede a recorded move when cold() engages.
+                                cwd=str(record.cwd or ""),
                                 takeover_factory=takeover_factory,
                             )
                             # Read by the engage that binds behind this paint,
@@ -44366,6 +44413,26 @@ class OperatorApp(App[None]):
             self._cmd_effort(arg, notice)
         elif command == "/fast":
             self._cmd_fast(arg, notice)
+        elif command in {"/saver", "/radient"}:
+            if command == "/radient":
+                word, _, rest = arg.partition(" ")
+                if word != "saver":
+                    from local_operator.i18n.keys import wire_radient_saver
+                    from local_operator.i18n.text import tr
+
+                    self._system_notice(
+                        str(tr("wire.radient_saver")(wire_radient_saver.command_usage())), "warning"
+                    )
+                    return
+                # A BARE NAMESPACE FORM REPORTS, IT NEVER TOGGLES (QA round 3, Q1).
+                # `/radient` accepts only `saver <value>`, and the picker completes
+                # it to a subject-less `/radient saver` — so two Enters on a bare
+                # `/radient` used to land on the bare-toggle path and turn a
+                # money-affecting feature ON from nothing but return keys. The
+                # alias may toggle when typed whole (`/saver`), because typing the
+                # whole word is the intent; the namespace needs its value said.
+                arg = (rest or "").strip() or "status"
+            self._cmd_saver(arg, notice)
         elif command == "/theme":
             self._cmd_theme(arg, notice)
         elif command == "/language":
@@ -46072,6 +46139,7 @@ class OperatorApp(App[None]):
                 model_name=_model_name(session),
                 effort=_effort_label(session),
                 fast=_fast_label(session),
+                saver=_saver_label(session),
                 context_window=_context_window(session),
             )
         # The access note answers "can I use the model I just switched to". On
@@ -46762,6 +46830,45 @@ class OperatorApp(App[None]):
             self._fast_choice = False
             return spec
         return spec.model_copy(update={"fast_mode": True})
+
+    def _cmd_saver(self, arg: str, notice: NoticeFn) -> None:
+        """Run the shared handler and publish ONLY after the journal write.
+
+        The handler is async because the write is. Painting the notice and the
+        band in the same tick as a scheduled write is what left both frontends
+        showing the pre-write state beside a notice claiming the new one
+        (review M2). The worker runs on this app's loop, so the notice, the
+        publish and the band update all land once the row exists.
+        """
+        if self._session is None:
+            # U11 (UX round 2): the worker dereferenced the session and killed the
+            # app with `AttributeError: 'NoneType' object has no attribute
+            # '_transcript'` — `/saver inherit` on the setup screen, `/saver off`
+            # on a signed-in but unbound session. The app already has ONE sentence
+            # for "no session yet", so this refuses with it instead of inventing a
+            # second wording.
+            self._system_notice(*self._no_session_notice())
+            return
+        self.run_worker(self._saver_command(arg, notice), thread=False, group="saver")
+
+    async def _saver_command(self, arg: str, notice: NoticeFn) -> None:
+        from dataclasses import dataclass
+
+        from local_operator.saver.command import saver_slash
+
+        @dataclass
+        class SaverNotice:
+            kind: str
+            text: str
+            style: str
+
+        result = await saver_slash(self._session, arg, SaverNotice)
+        self._system_notice(result.text, result.style)
+        # `_status` is built on mount; a slash that completes during teardown (or
+        # before the band exists) has no band to repaint, and the notice above is
+        # already the receipt, so skip the repaint rather than raise.
+        if self._status is not None:
+            self._status.update(saver=_saver_label(self._session))
 
     def _cmd_fast(self, arg: str, notice: NoticeFn) -> None:
         """``/fast`` — toggle fast mode; ``/fast on|off|status`` — set or report it.
@@ -47596,8 +47703,169 @@ class OperatorApp(App[None]):
             )
         except Exception:  # noqa: BLE001 — cosmetic; must never fail a boot
             logger.debug("composer settings: widget display not applied", exc_info=True)
+        self._arm_status_command()
         if self._status is not None:
             self._status.refresh()
+
+    def _arm_status_command(self) -> None:
+        """(Re)arm the status-command timer from the stored settings.
+
+        Idempotent like its caller: an unchanged ``(command, interval)`` pair
+        leaves the running timer alone, so the repaint every unrelated
+        ``display.composer.*`` edit triggers does not also reset the cadence
+        or fork a shell. A changed pair stops the old timer, clears a reading
+        when the command identity changes, and runs the new command at once
+        — waiting a full interval to see whether an edit worked is how a user
+        concludes it did not.
+        """
+        command = str(settings_get("display.composer.command", "") or "").strip()
+        interval = status_command_mod.clamp_interval(
+            settings_get("display.composer.command_interval", status_command_mod.DEFAULT_INTERVAL_S)
+        )
+        armed = (command, interval) if command else None
+        if armed == self._status_command_armed:
+            return
+        previous_command = self._status_command_armed[0] if self._status_command_armed else ""
+        self._status_command_armed = armed
+        # A reading belongs to its command, not the band: retaining it for a
+        # different account or script misrepresents the replacement's state.
+        if command != previous_command and self._status is not None:
+            self._status.update(custom="", custom_stale=False)
+        self._status_command_failures = 0
+        self._status_command_successes = 0
+        self._status_command_notified = False
+        if self._status_command_timer is not None:
+            self._status_command_timer.stop()
+            self._status_command_timer = None
+        if armed is None:
+            if self._status_command_running is not None:
+                self._status_command_running.cancel()
+                self._status_command_running = None
+            if self._status is not None:
+                self._status.update(custom="", custom_stale=False)
+            return
+        self._status_command_timer = self.set_interval(interval, self._tick_status_command)
+        self._restart_status_command()
+
+    def _tick_status_command(self) -> None:
+        """Interval callback: run the status command unless a run is in flight.
+
+        A tick that lands while the previous run is still going is SKIPPED, not
+        a cancellation: the runner's timeout (10 s) exceeds the shortest
+        interval (5 s), so cancelling on every tick meant a script slower than
+        its interval was killed every time and the segment never painted
+        (review round 1, m2). A run that hangs is still bounded by that
+        timeout. A COMMAND change does cancel (``_arm_status_command`` calls
+        :meth:`_restart_status_command`), because the old run's output is then
+        stale by definition.
+        """
+        if self._status_command_armed is None:
+            return
+        if (
+            self._status_command_running is not None
+            and not self._status_command_running.is_finished
+        ):
+            return
+        self._start_status_command_run()
+
+    def _restart_status_command(self) -> None:
+        """Cancel any in-flight run and start one for the newly armed command."""
+        if self._status_command_running is not None:
+            self._status_command_running.cancel()
+            self._status_command_running = None
+        self._start_status_command_run()
+
+    def _start_status_command_run(self) -> None:
+        assert self._status_command_armed is not None
+        command = self._status_command_armed[0]
+        # `exit_on_error=False`: this is a cosmetic surface, and Textual's
+        # default would end the whole app on an exception in it (review round
+        # 1, m1) — the cosmetic-worker rule the other band workers follow.
+        self._status_command_running = self.run_worker(
+            self._status_command_worker(command),
+            thread=False,
+            group="status-command",
+            exit_on_error=False,
+        )
+
+    async def _status_command_worker(self, command: str) -> None:
+        status = self._status
+        if status is None:
+            return
+        try:
+            # Guarded: `os.getcwd()` raises once the directory the TUI was
+            # started in is deleted (a removed git worktree), and the payload
+            # must never be the reason the segment stops updating.
+            cwd = _status_command_cwd()
+            facts = status.command_facts()
+            spec = _effective_spec(self._session)
+            payload = status_command_mod.build_payload(
+                session_id=str(getattr(self._session, "session_id", "") or ""),
+                cwd=cwd or "",
+                provider=str(getattr(spec, "provider", "") or ""),
+                model_id=str(getattr(spec, "model_id", "") or ""),
+                model_label=str(facts["model_label"]),
+                context_tokens=int(cast(int, facts["context_tokens"])),
+                context_window=int(cast(int, facts["context_window"])),
+                cost=str(facts["cost"]),
+                version=welcome_mod.app_version(),
+            )
+        except Exception:  # noqa: BLE001 — cosmetic; the segment just does not update
+            logger.debug("status command: payload not built", exc_info=True)
+            return
+        outcome = await status_command_mod.run(command, payload, cwd=cwd)
+        # The command may have been changed or removed while this run was in
+        # flight; its output must not overwrite the newer state.
+        if self._status_command_armed is None or self._status_command_armed[0] != command:
+            return
+        self._apply_status_command_outcome(command, outcome)
+
+    def _apply_status_command_outcome(
+        self, command: str, outcome: status_command_mod.Outcome
+    ) -> None:
+        """Paint one run's result, holding the last good line through a blip.
+
+        The band itself never paints an error (design round 1, T-2/T-3):
+
+        - success paints the line (or clears on empty output) and resets the
+          failure count;
+        - a failure KEEPS the last good line in the stale ink, so a flaky
+          network script does not make its siblings re-fit every interval,
+          and clears it only after ``STALE_AFTER_FAILURES`` in a row;
+        - the FIRST failure for an armed command raises one warning notice
+          naming why (``exit 127``, ``timed out after 10s``), so a mistyped
+          path is distinguishable from "not configured". Once per episode,
+          the ``_poll_tunnel_park`` rule: a script that keeps failing does not
+          re-announce itself every 30 s, and only ``STALE_AFTER_FAILURES``
+          successes in a row end the episode, so a flaky one does not either.
+        """
+        status = self._status
+        if status is None:
+            return
+        if not outcome.error:
+            self._status_command_failures = 0
+            # The episode ends only after a STREAK of successes (design round
+            # 2, T-9): resetting on every success let a script alternating
+            # success and failure write a warning per minute into the
+            # transcript. The same threshold that clears a stale reading
+            # re-arms the notice, so one number governs "this is flaky".
+            self._status_command_successes += 1
+            if self._status_command_successes >= status_command_mod.STALE_AFTER_FAILURES:
+                self._status_command_notified = False
+            status.update(custom=outcome.line, custom_stale=False)
+            return
+        self._status_command_successes = 0
+        self._status_command_failures += 1
+        if self._status_command_failures >= status_command_mod.STALE_AFTER_FAILURES:
+            status.update(custom="", custom_stale=False)
+        else:
+            status.update(custom_stale=True)
+        if not self._status_command_notified:
+            self._status_command_notified = True
+            self._notice(
+                tr("tui.status_command")(_sc_keys.failed(error=outcome.error)),
+                "warning",
+            )
 
     def action_keymap_new_session(self) -> None:
         """The remappable "new session" hotkey — ``ctrl+n`` unless remapped.
@@ -52762,6 +53030,13 @@ class OperatorApp(App[None]):
             label = getattr(self._session, "model_label", "") or "this model"
             picker.set_notice("" if levels else _effort_unavailable(label))
             return
+        if message.command in {"saver", "radient"}:
+            # Same reason `/fast` states its list here: the words ARE the
+            # command's whole argument grammar, and showing a provider list
+            # instead is what made `/saver on` unrunnable (UX round 1, U1).
+            picker.set_choices(self._saver_argument_choices(message.command))
+            picker.set_notice("")
+            return
         if message.command == "aida":
             # THE RESERVED WORDS, not the provider fall-through (UX round 1,
             # U1). The fall-through is the provider vocabulary and is wrong for
@@ -52819,6 +53094,44 @@ class OperatorApp(App[None]):
         # above.
         if message.command == "login" and choices:
             picker.set_notice_rungs(LOGIN_ORDERING_NOTICE_RUNGS)
+
+    def _saver_argument_choices(self, command: str) -> list[ArgumentChoice]:
+        """The words ``/saver`` accepts, offered at BOTH spellings (UX U1).
+
+        These commands had no branch in ``on_argument_query_opened``, so the
+        handler fell through to the PROVIDER list `/login` offers: typing
+        ``/saver on`` opened 16 providers, ``on`` fuzzy-matched a row, and Enter
+        rewrote the buffer to ``/saver openrouter``. The documented enable form
+        could not be typed at all. The `/aida` branch above is the same fix.
+
+        ``status`` sorts FIRST so Enter under ``/radient`` (where the rows are
+        compound, because the command takes its subcommand first) picks the
+        read-only word: filling ``saver status`` and running it reports state
+        instead of spending credit, which is the right default for a control
+        that changes what leaves the machine.
+        """
+        words = ("status", "on", "off", "inherit")
+        described = {
+            "status": "report this session's state, nothing changes",
+            "on": "shorten this conversation's history from the next turn",
+            "off": "send this conversation's full history",
+            "inherit": "follow the global setting and the agent's designation",
+        }
+        if command == "radient":
+            # ONE ROW, the word the handler parses (the `/aida` shape). The
+            # compound rows this replaced (`saver on`, `saver status`, …) made the
+            # first Enter complete FOUR TOKENS the user never typed — measured as
+            # `/radient` + Enter silently becoming `/radient saver status` (UX
+            # round 2, U9) — and then a second Enter ran a word they had not
+            # chosen. Offering only `saver` keeps the completion equal to what was
+            # asked for; the four words are `/saver `'s list, one command away.
+            return [
+                ArgumentChoice(
+                    name="saver",
+                    description="Radient Saver for this session: status, on, off or inherit",
+                )
+            ]
+        return [ArgumentChoice(name=word, description=described[word]) for word in words]
 
     def on_refresh_argument_choices(self, message: RefreshArgumentChoices) -> None:
         """Refill an open argument list whose rows depend on a sub-slot.
@@ -63599,6 +63912,20 @@ def _model_spec(session) -> Any | None:
     return getattr(session, "model", None)
 
 
+def _status_command_cwd() -> str | None:
+    """The TUI's working directory, or ``None`` once it has been deleted.
+
+    ``os.getcwd()`` raises after the directory the TUI started in is removed (a
+    deleted git worktree). The status command then runs without a ``cwd``
+    override and its payload carries an empty one, rather than the worker
+    failing every interval.
+    """
+    try:
+        return os.getcwd()
+    except OSError:
+        return None
+
+
 def _effective_spec(session) -> Any | None:
     """The spec of the model ACTUALLY serving requests, or ``None``.
 
@@ -63868,6 +64195,56 @@ def _read_stored_frontend_state(directory: Path, session_id: str) -> Any | None:
     except Exception:  # noqa: BLE001 — a cosmetic read must never fail an open
         logger.debug("stored frontend state unreadable for %s", session_id, exc_info=True)
         return None
+
+
+def _saver_label(subject: Any) -> str:
+    """The localized Saver badge, or "" when the NEXT REQUEST will not splice.
+
+    ONE RULE (design round 1, D1 + UX U4): the word is painted iff Saver is on
+    for this session, and off paints NOTHING rather than a reserved gap. The
+    reserved-gap version shipped a dim glyph with an empty value in every band
+    for every user, which is the one thing a band segment must not do — its
+    presence is the message.
+
+    TWO SHAPES, ONE ANSWER (review round 2, M2-2). A routed session is a
+    ``FrontendSessionState``: it carries no routing settings, no credential and
+    no live resolver attributes, so the only thing it can read is the published
+    ``saver_on`` — and the previous version ignored that field entirely,
+    which is how a routed badge came to paint an EMPTY label while the owner was
+    on. The owner shape has no such field and derives the same answer from
+    ``command.request_state``, the reading the publish itself uses, so parent and
+    follower cannot disagree.
+
+    NEVER PAINTS EMPTY: an empty or missing badge string returns "" instead of a
+    bare glyph, because a glyph with no word beside it is unreadable rather than
+    compact (the round-1 D1 defect at a different level).
+    """
+    # The parameter is deliberately not named ``session``: it holds either a real
+    # session or a ``FrontendSessionState``, and the host-read guard treats every
+    # ``session.member`` in this file as a duck-typed session read that has to be
+    # declared on one of the protocols. Naming it for what it is keeps the read
+    # typed (an isinstance against the concrete state class) instead of forcing a
+    # session-protocol declaration that would be false for both classes.
+    if subject is None:
+        return ""
+    from local_operator.i18n.keys import wire_radient_saver
+    from local_operator.i18n.text import tr
+    from local_operator.saver.command import request_state
+
+    word = str(tr("wire.radient_saver")(wire_radient_saver.command_badge())).strip()
+    if not word:
+        # A catalogue that lost the word must not leave a mark that says nothing.
+        return ""
+    # A ROUTED surface hands this function a ``FrontendSessionState``, which is
+    # where the owner's answer is published; the owner shape is a real session
+    # and is resolved locally. Typed as an isinstance rather than a duck probe so
+    # the read is checked against the field's own declaration (the protocol test
+    # treats an undeclared duck-typed read as a silent-None hazard).
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    if isinstance(subject, FrontendSessionState):
+        return word if subject.saver_on else ""
+    return word if request_state(subject).on else ""
 
 
 def _fast_label(session) -> str:

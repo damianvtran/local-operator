@@ -1,0 +1,30 @@
+{
+  "proposal_only": true,
+  "actual_ledger_modified": false,
+  "integration_requires": [
+    "Separate second independent high-visibility audit",
+    "Canonical evidence bundle integration"
+  ],
+  "append_to": "i18n/ledger/vi.json",
+  "row": {
+    "locale": "vi",
+    "namespace": "wire.errors.session_host",
+    "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+    "translator": {
+      "agent": "i18n-translator",
+      "session": "26368bfbce62",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-10-31"
+    },
+    "auditor": {
+      "agent": "i18n-auditor",
+      "session": "393a054d09f7",
+      "model": "openai/gpt-6.1-sol",
+      "date": "2026-10-31",
+      "result": "passed",
+      "findings": 0
+    },
+    "status": "passed",
+    "note": "Independent pass 1: 0 blocker/major; second high-visibility audit pending. Record: i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/record.json"
+  }
+}

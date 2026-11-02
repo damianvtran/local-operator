@@ -16,6 +16,8 @@ import types
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from local_operator.library import indexer, service
 from local_operator.library.metadata import MetadataStore
 from local_operator.library.store import IndexUnavailable, LibraryStore
@@ -932,3 +934,82 @@ def test_a_missing_derived_table_is_one_actionable_line_not_a_traceback(
     damaged, unexpected = caplog.records[1], caplog.records[2]
     assert damaged.exc_info is not None
     assert unexpected.exc_info is not None
+
+
+def test_a_periodic_reconcile_over_a_broken_index_still_warns(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """The WORKER still reaches the warning from a real file, not just the formatter.
+
+    The test above pins the formatter's contract by constructing the typed error,
+    because the store heals a table it finds missing from the handle it opens.
+    That leaves one arm unexercised: nothing proved the worker's own
+    ``periodic reconcile failed`` branch still fires against a file that is
+    genuinely broken, which is the arm that contaminated another test's captured
+    stderr in CI.
+
+    So this test breaks the file the way a live process meets one — a config root
+    restored from somewhere else, or another connection moving the derived schema
+    while this worker is parked on its timer — and drives ``_run``: the reconcile
+    raises out of a real SQLite handle, the handler logs, and the loop survives
+    the failure. ``idx_occurrences`` is the table dropped, never ``idx_sessions``:
+    the latter is the schema sentinel, so dropping it makes the next read migrate
+    the file instead of failing (see ``test_a_dropped_derived_table_is_migrated…``).
+    """
+    import shutil
+
+    root = config_root(monkeypatch, tmp_path)
+    directory = session(root, SESSION, write_rows("w1", 1.0, written(root, "keep.txt")))
+    indexer.rebuild_now(root)
+
+    index = indexer.LibraryIndexer(root)
+    ticks: list[int] = []
+
+    def the_file_changes_under_the_worker() -> None:
+        """Stand in for the observer: the session and a derived table both go."""
+        shutil.rmtree(directory)
+        raw = sqlite3.connect(index.store.path)
+        try:
+            raw.execute("DROP TABLE idx_occurrences")
+            raw.commit()
+        finally:
+            raw.close()
+        index.observer_failed = True
+
+    def idle() -> float:
+        # No clock anywhere: the idle arm is taken on the FIRST wait and the
+        # SECOND tick parks the worker, so exactly one periodic reconcile runs.
+        ticks.append(1)
+        if len(ticks) > 1:
+            index._stop.set()
+        return 0.0
+
+    monkeypatch.setattr(index, "_start_observer", the_file_changes_under_the_worker)
+    monkeypatch.setattr(index, "_idle_timeout", idle)
+    # Not this test's subject, and a real thumb worker would need its own reap.
+    monkeypatch.setattr(index, "_start_thumb_worker", lambda: None)
+
+    caplog.clear()
+    try:
+        with caplog.at_level(logging.WARNING, logger="local_operator.library.indexer"):
+            index._run()
+    finally:
+        index.stop()
+
+    failures = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and record.getMessage().startswith("library: periodic reconcile failed")
+    ]
+    assert len(failures) == 1, [record.getMessage() for record in caplog.records]
+    failure = failures[0]
+    assert failure.exc_info is None, "a missing derived table is not a traceback"
+    message = failure.getMessage()
+    assert "idx_occurrences" in message
+    assert str(index.store.path) in message
+
+    # The failure the worker logged is the product's typed refusal, raised by the
+    # store, not an arbitrary exception the worker happened to catch.
+    with pytest.raises(IndexUnavailable, match="no such table: idx_occurrences"):
+        index.reconcile()

@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from local_operator.memory import (
     MemoryIdentity,
     MemoryStore,
     guard,
+    structural_reference,
     validate_fact,
 )
 from local_operator.memory_cli import render_human, run
@@ -35,11 +37,17 @@ from local_operator.memory_inspect import (
     ENTRY_GATES,
     PREVIEW_CHARS,
     SCHEMA,
+    _gate_identifier,
     inspect_entries,
 )
 
 SENSITIVE_TITLE = "Card number 4111 1111 1111 1111"
 SENSITIVE_BODY = "Backup credentials: SSN 123-45-6789"
+
+#: The canonical-UUID spelling of ``memory._id()`` — the shape ``MemoryStore.put``
+#: mints for entity and operation ids, and the one ``memory_inspect`` admits as a
+#: structural reference without ever consulting the free-text guard.
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 #: Serialises the module-level stamp below; the store's rows are inserted from
 #: whichever thread the test draws, and the counter is shared across all of them.
@@ -84,6 +92,29 @@ def rig(tmp_path):
     return root, identity, store
 
 
+def _minted_reference_id(seed: str) -> str:
+    """The canonical-UUID spelling of an identifier this build really mints.
+
+    ``MemoryStore.put`` mints a UUID for both ``entity_id`` and ``op_id``
+    (``memory._id()``), and ``memory_inspect._gate_identifier`` admits that
+    shape verbatim as a structural reference — BEFORE the free-text guard runs.
+    Both halves are the point. A sliced digest (``hexdigest()[:26]``) is not a
+    structural reference, so the gate routes it through ``safe_segment`` /
+    ``guard``, whose IBAN mod-97 arm fires on random hex about once in every
+    1,500-2,000 ids; a refused id is listed as ``id: null`` and the row then
+    vanishes from ``next(entry for entry in entries if entry["id"] == minted)``
+    — a ``StopIteration`` in a test that was never about identifiers (measured
+    on CI run 41305186763; across this file's 10 seed sites, i.e. 20 minted ids,
+    that is about a 1-in-100 chance per full-suite run). Deriving the UUID from
+    a seed keeps a seeded row
+    reproducible while making the gate's verdict structural: with this shape a
+    refusal is impossible, not merely unlikely. Mint-and-retry would need an
+    arbitrary bound and would leave the failure a sampled outcome.
+    """
+    digest = hashlib.sha256(seed.encode()).hexdigest()
+    return f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-{digest[16:20]}-{digest[20:32]}"
+
+
 def _seed_legacy_row(
     store: MemoryStore,
     scope: str,
@@ -110,9 +141,19 @@ def _seed_legacy_row(
     which is not a shape any build wrote; ``lop memory show`` then failed with
     ``KeyError: 'scope'`` on rows minted here — a fixture defect, not a
     reachable bug (see the PR thread).
+
+    The ids are minted (``_minted_reference_id``), never sliced hex: this
+    helper seeds arbitrary CONTENT, so a reader that withholds the content must
+    still list the row, and an id the gate can refuse by chance would trade
+    that coverage for a random ``id: null``. A row whose id the gate must
+    genuinely REFUSE is seeded through ``_apply_imported_row``, which takes
+    ``entity_id``/``op_id`` explicitly — refusal is an opt-in, never a
+    side effect of the default.
     """
-    entity = hashlib.sha256(f"{scope}-{title}-{time.time_ns()}".encode()).hexdigest()[:26]
-    op_id = hashlib.sha256(f"op-{entity}".encode()).hexdigest()[:26]
+    # ``_strict_ms()`` seeds the id for the same reason it seeds ``seq``: it is
+    # the module's strictly increasing counter, so two rows never collide.
+    entity = _minted_reference_id(f"{scope}-{title}-{_strict_ms()}")
+    op_id = _minted_reference_id(f"op-{entity}")
     fact = {
         "title": title,
         "body": body,
@@ -821,6 +862,41 @@ def test_real_minted_identifiers_pass_the_identifier_gate(rig):
     assert json.loads(raw)["reference"] == promoted["reference"]
 
 
+def test_seeded_row_ids_can_never_be_refused_by_the_identifier_gate():
+    """A minted fixture id must be unrefusable, not merely usually admitted.
+
+    The regression this pins (CI run 41305186763): the seeded rows used a
+    sliced sha256 (26 hex) as ``entity_id``/``op_id``. That is not a structural
+    reference, so ``_gate_identifier`` fell through to "one safe segment" and
+    ``guard``'s IBAN mod-97 arm refused it by chance — measured at roughly one
+    id in 1,500-2,000, over ~11 seed sites, about a 1-in-100 chance per full
+    suite run. A refused row lists ``id: null``, so the page-order test died at
+    ``next(entry for entry in entries if entry["id"] == work)`` with
+    ``StopIteration`` — a fixture defect blamed on the reader.
+
+    Pure helper calls, no store writes: the invariant is the id's SHAPE (one
+    ``structural_reference`` admits verbatim, so the guard never sees it), and
+    a sweep proves the shape rather than sampling the guard's luck.
+    """
+    # Negative control: the shape this helper replaced is still refusable, so a
+    # future widening of the gate cannot make this test pass vacuously.
+    sliced = "ff202d402e69f0d8ba437e2f07"  # refused on the run named above
+    assert structural_reference(sliced) is False
+    assert _gate_identifier(sliced) is None
+
+    for n in range(20_000):
+        minted = _minted_reference_id(f"row-{n}")
+        # Production's wire shape, not merely a passing one: ``MemoryStore.put``
+        # mints canonical UUIDs, and a fixture whose ``entity_id`` were instead
+        # ``d_`` + 32 hex would pass this gate while modelling a row no build
+        # writes.
+        assert UUID_RE.fullmatch(minted)
+        assert structural_reference(minted) is True
+        # Round-trips UNCHANGED: nothing rewrites or normalises the printed id.
+        assert _gate_identifier(minted) == minted
+    assert _minted_reference_id("row-7") == _minted_reference_id("row-7"), "reproducible"
+
+
 def test_refused_identifier_is_not_the_paging_cursor(rig):
     """A gate-refused id must not ride out through ``next_cursor``/``More:``.
 
@@ -939,7 +1015,7 @@ def test_live_writer_sidecars_take_the_non_immutable_read_path(rig):
     """
     root, identity, store = rig
     _seed_all_scopes(store, identity)
-    entity = hashlib.sha256(b"wal-only-row").hexdigest()[:26]
+    entity = _minted_reference_id("wal-only-row")
     fact = json.dumps(
         {
             "title": "WAL-only fact",
@@ -988,7 +1064,7 @@ def test_live_writer_sidecars_take_the_non_immutable_read_path(rig):
 def test_corrupt_stored_fact_fails_closed_without_touching_the_store(rig):
     root, identity, store = rig
     _seed_all_scopes(store, identity)
-    entity = hashlib.sha256(b"corrupt-row").hexdigest()[:26]
+    entity = _minted_reference_id("corrupt-row")
     db = sqlite3.connect(store.path)
     try:
         db.execute(

@@ -55,6 +55,7 @@ from local_operator.compaction.cutpoint import (
 )
 from local_operator.compaction.marker import COMPACTION_REFUSED_TYPE
 from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
+from local_operator.harness.chrome_prompts import MISSING_ARGUMENTS_RECOVERY_PROMPT
 from local_operator.harness.comms import (
     PARENT_MESSAGE_CLOSE_TAG,
     PARENT_MESSAGE_TAG,
@@ -590,7 +591,8 @@ def test_no_harness_prompt_is_painted_as_the_users_words() -> None:
     # no-progress steer after unchanged repeated tool calls, then the steer
     # after the in-stream degeneration guard cut a looping response), so the
     # pin says what grew it rather than only how many there are.
-    assert len(prompts) == 9
+    assert len(prompts) == 11
+    assert MISSING_ARGUMENTS_RECOVERY_PROMPT in prompts
     assert WORDLESS_STOP_RECOVERY_PROMPT in prompts
     assert LENGTH_STOP_RECOVERY_PROMPT in prompts
     assert CONTINUE_TRUNCATED_ANSWER_PROMPT in prompts
@@ -598,6 +600,11 @@ def test_no_harness_prompt_is_painted_as_the_users_words() -> None:
     assert DEGENERATE_STREAM_RECOVERY_PROMPT in prompts
 
     assert _page_rows([Message.user(p) for p in prompts]) == []
+    assert _attach_rows([Message.user(p) for p in prompts]) == []
+    assert _live_rows([Message.user(p) for p in prompts]) == []
+    assert _live_rows([Message.user("Please investigate the tool warning")])[0].text == (
+        "Please investigate the tool warning"
+    )
 
 
 def test_every_connectivity_instruction_shape_is_chrome() -> None:

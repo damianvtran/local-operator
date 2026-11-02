@@ -1,0 +1,147 @@
+{
+  "locale": "vi",
+  "namespace": "tui.hub_links",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 11,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-012",
+      "severity": "MAJOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.action.enable",
+      "english": "Enable auto-push",
+      "current": "Bật tự động đẩy",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English, never translated; vi neighbours use push/pull (tui.review.activity_push, wire.settings.network_sync_debounce_s). 'đẩy'/'kéo về'/'hợp nhất' break the hub vocabulary shared with the `lop hub` CLI.",
+      "suggested": "Bật auto-push",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-013",
+      "severity": "MAJOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.action.pull",
+      "english": "Pull now",
+      "current": "Kéo về ngay",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English, never translated; vi neighbours use push/pull (tui.review.activity_push, wire.settings.network_sync_debounce_s). 'đẩy'/'kéo về'/'hợp nhất' break the hub vocabulary shared with the `lop hub` CLI.",
+      "suggested": "Pull ngay",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-014",
+      "severity": "MAJOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.policy.auto_push.label",
+      "english": "Auto-push",
+      "current": "Tự động đẩy",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English, never translated; vi neighbours use push/pull (tui.review.activity_push, wire.settings.network_sync_debounce_s). 'đẩy'/'kéo về'/'hợp nhất' break the hub vocabulary shared with the `lop hub` CLI.",
+      "suggested": "Auto-push",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-015",
+      "severity": "MAJOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.hint.auto_push",
+      "english": "a auto-push",
+      "current": "a tự động đẩy",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English, never translated; vi neighbours use push/pull (tui.review.activity_push, wire.settings.network_sync_debounce_s). 'đẩy'/'kéo về'/'hợp nhất' break the hub vocabulary shared with the `lop hub` CLI.",
+      "suggested": "a auto-push",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-016",
+      "severity": "MAJOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.confirm.title",
+      "english": "Enable auto-push to {source}?",
+      "current": "Bật tự động đẩy tới {source}?",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English, never translated; vi neighbours use push/pull (tui.review.activity_push, wire.settings.network_sync_debounce_s). 'đẩy'/'kéo về'/'hợp nhất' break the hub vocabulary shared with the `lop hub` CLI.",
+      "suggested": "Bật auto-push tới {source}?",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-017",
+      "severity": "MAJOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.mark.healthy",
+      "english": "{item}; {source}; Subscribe {subscribe}; Auto-push {auto_push}",
+      "current": "{item}; {source}; Đăng ký {subscribe}; Tự động đẩy {auto_push}",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English, never translated; vi neighbours use push/pull (tui.review.activity_push, wire.settings.network_sync_debounce_s). 'đẩy'/'kéo về'/'hợp nhất' break the hub vocabulary shared with the `lop hub` CLI.",
+      "suggested": "{item}; {source}; Đăng ký {subscribe}; Auto-push {auto_push}",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-018",
+      "severity": "MAJOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.reason.no_receipt",
+      "english": "Auto-push isn't available yet: pull or publish this item once to set a starting point, then try again.",
+      "current": "Chưa dùng được tự động đẩy: hãy kéo về hoặc xuất bản mục này một lần để tạo điểm xuất phát, rồi thử lại.",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English, never translated; vi neighbours use push/pull (tui.review.activity_push, wire.settings.network_sync_debounce_s). 'đẩy'/'kéo về'/'hợp nhất' break the hub vocabulary shared with the `lop hub` CLI.",
+      "suggested": "Chưa dùng được auto-push: hãy pull hoặc xuất bản mục này một lần để tạo điểm xuất phát, rồi thử lại.",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-019",
+      "severity": "MAJOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.refusal.ineligible",
+      "english": "Auto-push is not available for this link: {reason}.",
+      "current": "Không dùng được tự động đẩy cho liên kết này: {reason}.",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English, never translated; vi neighbours use push/pull (tui.review.activity_push, wire.settings.network_sync_debounce_s). 'đẩy'/'kéo về'/'hợp nhất' break the hub vocabulary shared with the `lop hub` CLI.",
+      "suggested": "Không dùng được auto-push cho liên kết này: {reason}.",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-020",
+      "severity": "MAJOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.policy.subscribe.help",
+      "english": "Receive updates from {source}. Manual pull stays available.",
+      "current": "Nhận cập nhật từ {source}. Vẫn có thể kéo về thủ công.",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English, never translated; vi neighbours use push/pull (tui.review.activity_push, wire.settings.network_sync_debounce_s). 'đẩy'/'kéo về'/'hợp nhất' break the hub vocabulary shared with the `lop hub` CLI.",
+      "suggested": "Nhận cập nhật từ {source}. Vẫn có thể pull thủ công.",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-021",
+      "severity": "MAJOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.reason.baseline_unknown",
+      "english": "This link's history isn't known yet, so it can't publish unattended. Pull or resolve it first.",
+      "current": "Chưa biết lịch sử của liên kết này nên không thể xuất bản khi không có người giám sát. Hãy kéo về hoặc giải quyết nó trước.",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English, never translated; vi neighbours use push/pull (tui.review.activity_push, wire.settings.network_sync_debounce_s). 'đẩy'/'kéo về'/'hợp nhất' break the hub vocabulary shared with the `lop hub` CLI.",
+      "suggested": "Chưa biết lịch sử của liên kết này nên không thể xuất bản khi không có người giám sát. Hãy pull hoặc giải quyết nó trước.",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-022",
+      "severity": "MAJOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.confirm.concurrent",
+      "english": "Concurrent hub changes are merged or paused for review, never overwritten silently.",
+      "current": "Các thay đổi đồng thời trên hub sẽ được hợp nhất hoặc tạm dừng để xem xét, không bao giờ bị ghi đè âm thầm.",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English, never translated; vi neighbours use push/pull (tui.review.activity_push, wire.settings.network_sync_debounce_s). 'đẩy'/'kéo về'/'hợp nhất' break the hub vocabulary shared with the `lop hub` CLI.",
+      "suggested": "Các thay đổi đồng thời trên hub sẽ được merge hoặc tạm dừng để xem xét, không bao giờ bị ghi đè âm thầm.",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    }
+  ]
+}

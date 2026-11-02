@@ -158,3 +158,49 @@ def test_drag_is_offered_only_when_the_backend_negotiates_it() -> None:
     assert canonical_digest("runner-tool-schema-v1", enabled.schema()) != canonical_digest(
         "runner-tool-schema-v1", legacy.schema()
     )
+
+
+def test_modifiers_require_negotiation_on_every_offer_and_before_dispatch() -> None:
+    from local_operator.evaluation.protocol import ClickAction
+    from local_operator.evaluation.runner.action_tool import action_tool_parameters
+    from local_operator.evaluation.runner.public_reply import public_reply_schema
+
+    legacy = AdapterCapabilities(routes=("computer",), ask_user=True, scoring=True).action_surface()
+    action = ClickAction(
+        observation_id="obs", frame_id="screen", x=1, y=2, button="left", modifiers=("SHIFT",)
+    )
+    assert '"modifiers"' not in build_system_prompt(legacy)
+    assert '"modifiers"' not in json.dumps(action_tool_parameters(legacy))
+    assert '"modifiers"' not in json.dumps(public_reply_schema(legacy))
+    assert '"modifiers"' not in json.dumps(legacy.schema())
+    with pytest.raises(ActionAdmissionError, match="modifiers capability"):
+        legacy.validate_batch(batch(action))
+    enabled = AdapterCapabilities(
+        routes=("computer",), ask_user=True, scoring=True, modifiers=True
+    ).action_surface()
+    assert '"modifiers"' in build_system_prompt(enabled)
+    assert '"modifiers"' in json.dumps(action_tool_parameters(enabled))
+    enabled.validate_batch(batch(action))
+    assert '"modifiers"' in json.dumps(public_reply_schema(enabled))
+    assert '"modifiers"' in json.dumps(enabled.schema())
+
+
+def test_disabled_modifiers_preserve_old_hello_and_enabled_fails_closed() -> None:
+    from pydantic import ConfigDict, create_model
+
+    # Model an old parent's strict hello contract, not a permissive JSON consumer.
+    fields = {}
+    for name, field in AdapterCapabilities.model_fields.items():
+        if name == "modifiers":
+            continue
+        # Concrete model fields must have a type before rebuilding the old contract.
+        annotation = field.annotation
+        assert annotation is not None
+        fields[name] = (annotation, field)
+    old = create_model("OldCapabilities", __config__=ConfigDict(extra="forbid"), **fields)
+    disabled = AdapterCapabilities(routes=("computer",), ask_user=True, scoring=True)
+    assert "modifiers" not in disabled.model_dump(mode="json")
+    old.model_validate(disabled.model_dump(mode="json"))
+    enabled = AdapterCapabilities(routes=("computer",), ask_user=True, scoring=True, modifiers=True)
+    with pytest.raises(ValidationError, match="modifiers"):
+        old.model_validate(enabled.model_dump(mode="json"))

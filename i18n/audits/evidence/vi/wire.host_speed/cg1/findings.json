@@ -1,0 +1,27 @@
+{
+  "locale": "vi",
+  "namespace": "wire.host_speed",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-025",
+      "severity": "NIT",
+      "namespace": "wire.host_speed",
+      "key": "wire.host_speed.retire_below_tps.help",
+      "english": "Experimental, off by default: evidence is from one model/run. A positive floor stops pinning a host after three long replies below this output-token/sec rate, excluding local consumer time. 0 clears speed exclusions on the next request; cache-miss exclusions remain. Moving hosts may start a cold prompt cache.",
+      "current": "Thử nghiệm, mặc định tắt: bằng chứng chỉ từ một mô hình/lần chạy. Ngưỡng dương sẽ ngừng ghim một host sau ba phản hồi dài dưới tốc độ token đầu ra/giây này, không tính thời gian tiêu thụ cục bộ. 0 xóa các loại trừ theo tốc độ ở yêu cầu kế tiếp; các loại trừ do trượt cache vẫn giữ. Chuyển host có thể làm bộ nhớ đệm prompt bắt đầu nguội.",
+      "problem": "Style guide keeps 'cache' English (and this same string uses 'trượt cache'); 'bộ nhớ đệm prompt' switches term mid-string.",
+      "suggested": "… Chuyển host có thể khiến prompt cache bắt đầu nguội.",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    }
+  ]
+}

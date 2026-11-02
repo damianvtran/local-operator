@@ -1,0 +1,23 @@
+{
+  "cli.agents_help.agents": "ایجنٹس منظم کریں",
+  "cli.agents_help.list": "تمام ایجنٹس دکھائیں",
+  "cli.agents_help.list_page": "دکھایا جانے والا صفحہ نمبر (ڈیفالٹ: 1)",
+  "cli.agents_help.list_perpage": "فی صفحہ ایجنٹس کی تعداد (ڈیفالٹ: 10)",
+  "cli.agents_help.create": "نیا ایجنٹ بنائیں",
+  "cli.agents_help.create_name": "بنائے جانے والے ایجنٹ کا نام",
+  "cli.agents_help.delete": "ایجنٹ حذف کریں (مقامی نام سے یا Radient ID سے)",
+  "cli.agents_help.delete_name": "مقامی طور پر حذف کیے جانے والے ایجنٹ کا نام",
+  "cli.agents_help.delete_id": "Radient سے حذف کیے جانے والے ایجنٹ کا ID",
+  "cli.agents_help.delete_org": "عوامی ہب کے بجائے اس تنظیم کے ورک اسپیس سے ایجنٹ حذف کریں (Agent Hub تنظیمی شیئرنگ؛ `lop login radient` درکار)",
+  "cli.agents_help.push": "ایجنٹ کو Radient پر push (اپ لوڈ) کریں؛ `--org` اور `--hub-id` پیش منظر/تصدیق کے مرحلے سے push کرتے ہیں (ایگزٹ کوڈز: 0 شائع ہوا، 1 خرابی، 2 صرف پیش منظر اور تبدیلیاں زیرِ التوا، 3 مسترد، 130 منسوخ)",
+  "cli.agents_help.push_name": "Radient پر push کیے جانے والے ایجنٹ کا نام",
+  "cli.agents_help.push_id": "Radient پر push کیے جانے والے ایجنٹ کا ID (واضح اوور رائٹ)",
+  "cli.agents_help.push_org": "عوامی ہب کے بجائے اس تنظیم کے ورک اسپیس میں شائع کریں (Agent Hub تنظیمی شیئرنگ؛ `lop login radient` درکار)",
+  "cli.agents_help.push_hub_id": "مقامی ایجنٹ سے اس ہب لسٹنگ کو دوبارہ شائع (اوور رائٹ) کریں (پہلے ذاتی حوالوں کی جانچ ہوتی ہے)؛ --name درکار (--id مقامی id ہے)",
+  "cli.agents_help.pull": "Radient سے ایجنٹ pull (ڈاؤن لوڈ) کریں",
+  "cli.agents_help.pull_id": "Radient سے pull کیے جانے والے ایجنٹ کا ID",
+  "cli.agents_help.pull_org": "عوامی ہب کے بجائے اس تنظیم کے ورک اسپیس سے pull کریں (Agent Hub تنظیمی شیئرنگ؛ `lop login radient` درکار)",
+  "cli.agents_help.sync": "انسٹال شدہ اسٹارٹرز اور ہب سے pull کیے گئے ایجنٹس کو ان کے تازہ ترین متن پر اپ ڈیٹ کریں",
+  "cli.agents_help.sync_name": "صرف اس نام والا انسٹال شدہ پروفائل sync کریں",
+  "cli.agents_help.sync_all": "ہر انسٹال شدہ اسٹارٹر اور ہب سے pull کیا گیا ایجنٹ sync کریں (--name نہ ہونے پر ڈیفالٹ)"
+}

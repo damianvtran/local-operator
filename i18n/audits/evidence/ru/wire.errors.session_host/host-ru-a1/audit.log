@@ -1,0 +1,8 @@
+Command: ['/Users/damian/local-operator/.venv/bin/python', '/Users/damian/.local-operator/sessions/bd43602aa8db/scratchpad/host-copy-ru/validation-tree/scripts/i18n/check.py', '--catalogues-only']
+Read-only reuse of translator isolated validation tree. Independent pinned-byte verification: check.py, English, context, Russian candidate. Other tree files not independently verified.
+Exit code: 0
+STDOUT:
+check.py: catalogue checks: 0 problem(s)
+STDERR:
+
+Earlier two broader source-verification attempts timed out before validator execution; no success claimed for those attempts.

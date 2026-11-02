@@ -329,6 +329,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="type",
                 blurb="Type text, or a stored secret via 'secret_ref', into a field.",
             ),
+            ToolDocOp(
+                op="press",
+                blurb="Keyboard input to the owned page; requires desktop app support.",
+            ),
             ToolDocOp(op="scroll", blurb="Move the viewport."),
             ToolDocOp(op="logs", blurb="Console + errors."),
             ToolDocOp(
@@ -718,7 +722,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                     "result carries `message_id`/`seq` so you can confirm it and "
                     "thread on it. `thread_root_id` posts as a reply in that "
                     "message's thread. This is the op for a ROOM, and for answering "
-                    "a DM, not `send`."
+                    "a DM, not `send`. Bind replies with `in_reply_to_message_id` "
+                    "(the exact admitted inbound message, not a thread root). "
+                    "A bridge-input run requires this or intentional `new_post: true`; "
+                    "new_post declares intent, not semantic isolation or authority."
                 ),
             ),
             ToolDocOp(

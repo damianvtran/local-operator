@@ -30,7 +30,7 @@ later must degrade to "unknown status" in the renderer, not fail the whole page.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -192,13 +192,17 @@ class OwnerAuditMessagePage(_HubShape):
 
 
 class OwnerAuditThread(_HubShape):
-    """``GET .../owner-audit/conversations/{id}/messages/{root}/replies``: oldest-first."""
+    """Root plus chronological replies within the requested window."""
 
     root: OwnerAuditMessage
     replies: list[OwnerAuditMessage]
     #: Pass back as ``after_seq`` for the next page. ``after_seq`` is INCLUSIVE
     #: (the hub's member history behaves the same).
     next_after_seq: int | None = None
+    #: Explicit backward mode is echoed even on empty/terminal pages, allowing
+    #: consumers to reject an old hub that silently ignored the new query.
+    next_before_seq: int | None = None
+    order: Literal["asc", "desc"] | None = None
     has_more: bool = False
 
 

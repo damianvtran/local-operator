@@ -292,7 +292,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # account). Worded to cost no more than the old text: the child-kind
     # context budget had 2 billed tokens of headroom. The ``team`` entry moves by
     # the same -1 for its twin field; the same printed table measured both.
-    "agent": 1408,
+    # RE-MEASURED (PR #3143, Radient Saver pins): 1408 -> 1441 (+33). The new
+    # optional ``saver`` param (on | off | inherit) and its one-line
+    # description; the ``team`` twin field moves +32 in the same printed table.
+    "agent": 1441,
     # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
     # restraint now says "decide, never for FYI" and "asking notifies: never
     # also `notify` it"; trims elsewhere in the same paragraph pay for it so
@@ -369,7 +372,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # name lives in dm's refusal, not in per-request schema prose. Measured by
     # this test's own printed table on the rebased head; the paired start-context
     # figure is in scripts/bench_context_budget.py.
-    "bridge": 1797,
+    "bridge": 1890,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -387,7 +390,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # 1801 -> 1803 (+2, review round 2 m2): "not expected in Chrome's <video>" replaces
     # "not Chrome's <video>", because Chrome playback was never tested. Measured by
     # this test's own print.
-    "browser": 1803,
+    "browser": 1863,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
@@ -398,7 +401,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # `console_cleanup` in the console doc — the ONLY entry that moved. The two
     # new methods and the capacity/cleanup detail are the whole delta.
     "console": 1228,
-    "edit": 347,
+    # The ordered-hunks and anchor-line descriptions were shortened without
+    # changing their contract; this is the measured tool://edit cost (347 -> 326).
+    "edit": 326,
     "eval": 372,
     #: Media wave-2 edit lane (2026-10-10): the source paragraph now names
     #: the by-reference input (``source_attachment``) and the edit rungs;
@@ -498,7 +503,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # 350 -> 351 (video phase, 2026-10-10): the ``jobs`` description now says
     # "(task/bash/video)" — the video job type is a model-visible part of what
     # ``op='list'`` shows. One token, re-measured.
-    "jobs": 347,
+    # 347 -> 292: compressing the shared jobs description removes repetition,
+    # not operations or authority. Re-measured through render_tool_doc and
+    # count_text_tokens; every other canonical ledger entry is unchanged.
+    "jobs": 292,
     "list_variables": 54,
     # NEW (Library): the six-op catalog tool's reference — filters, tag and
     # provenance rules, and the read-tier rationale. Measured through this
@@ -631,7 +639,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # the same printed table.
     # RE-MEASURED (F0, #3054): 1400 -> 1399 -- the ``scope`` default wording,
     # the same -1 as the agent twin.
-    "team": 1399,
+    # RE-MEASURED (PR #3143, Radient Saver pins): 1399 -> 1431 (+32), the
+    # per-slot ``saver`` member field; the same printed table as ``agent``.
+    "team": 1431,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -674,7 +684,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: takes because both arms render the completed notes; ``task`` stays 764.
 #: RE-MEASURED (F0, #3054): agent 1394 -> 1393, the same -1 ``scope``-default
 #: wording as the canonical arm; ``task`` stays 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1437, "task": 764}
+#: RE-MEASURED (PR #3143): agent 1437 -> 1470, the same +33 ``saver`` param
+#: as the canonical arm; ``task`` stays 764 (Saver is not a launch field).
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1470, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

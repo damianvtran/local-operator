@@ -1,0 +1,27 @@
+{
+  "locale": "ur",
+  "namespace": "wire.errors.auth",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 2,
+      "id": "UR2-004",
+      "severity": "NIT",
+      "namespace": "wire.errors.auth",
+      "key": "wire.errors.auth.credentials_missing",
+      "english": "No stored credentials were found for this provider.",
+      "current": "اس فراہم کنندہ کے لیے کوئی محفوظ شدہ کریڈینشلز نہیں ملے۔",
+      "problem": "After the UR-022 change, «کریڈینشل» has inconsistent grammatical gender. It is masculine here («نہیں ملے») and in cli.mcp_help.logout («کا … کریڈینشل»), but feminine in mobile.setup.owner_mismatch/activated («مالک کریڈینشل … تبدیل نہیں ہوئی»). Pick one gender for the locale.",
+      "suggested": "Keep masculine and align mobile.setup.activated: «…؛ مالک کریڈینشل تبدیل نہیں ہوا۔» (and owner_mismatch «کا مالک کریڈینشل»)",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ]
+}

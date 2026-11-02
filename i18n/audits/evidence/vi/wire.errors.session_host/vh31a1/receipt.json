@@ -1,0 +1,54 @@
+{
+  "record_reference": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/record.json",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "393a054d09f7",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "26368bfbce62",
+    "actual_model_source": "Session runtime model-switch notices: anthropic/claude-sonnet-5-5 -> anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider quota fallback; all substantive audit work after final switch.",
+    "fallback_used": true
+  },
+  "audit_date": "2026-10-31",
+  "draft_only": true,
+  "files": [
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/record.json",
+      "draft_path": "/Users/damian/.local-operator/sessions/393a054d09f7/scratchpad/vi-host-a1/record.json",
+      "sha256": "b0530f7caebb115aba7dbbdcdbb364574e0b2e58bdee8b5b50c9fb9cc5b4bd21"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/report.md",
+      "draft_path": "/Users/damian/.local-operator/sessions/393a054d09f7/scratchpad/vi-host-a1/report.md",
+      "sha256": "47cb8717e2f736d5a533b811b8be12378ed1eae4b37f188d970bca6687601077"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/audit.log",
+      "draft_path": "/Users/damian/.local-operator/sessions/393a054d09f7/scratchpad/vi-host-a1/audit.log",
+      "sha256": "c9201e6898b851fa97da913e4999ed88ef987b5dc118d14b388f4542216c4e4c"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/mechanical.json",
+      "draft_path": "/Users/damian/.local-operator/sessions/393a054d09f7/scratchpad/vi-host-a1/mechanical.json",
+      "sha256": "946915d383a5953862126f7dbb07b2213bf9e922ad30faabc5c1b84158b10792"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/ledger-row.proposal.json",
+      "draft_path": "/Users/damian/.local-operator/sessions/393a054d09f7/scratchpad/vi-host-a1/ledger-row.proposal.json",
+      "sha256": "a768898ab11a3d729de0c1c9ad6b05629f3b878a3f999a970a56e37e15662bee"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/checks.py.txt",
+      "draft_path": "/Users/damian/.local-operator/sessions/393a054d09f7/scratchpad/vi-host-a1/verify.py",
+      "sha256": "0737319c160963cc8804f1831249aa44d8aa02b3669f7ec2663cf441ae56aa0c"
+    }
+  ],
+  "integration": {
+    "integrated_from_session": "393a054d09f7",
+    "original_record_sha256": "b0530f7caebb115aba7dbbdcdbb364574e0b2e58bdee8b5b50c9fb9cc5b4bd21",
+    "original_receipt_sha256": "75bd6046c88ea5852ec3be56f96a91217153042411b2bd1e781de293590830ac",
+    "canonical_record": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/record.json",
+    "canonical_translator_provenance": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/translator/provenance.json",
+    "retention": "Retained in this PR; not claimed merged or on main. Historical commands/cwd/scratch input paths are preserved as executed, not claimed tracked.",
+    "integration_judgment": "No new audit; semantic pass/finding facts copied from independent original records."
+  }
+}

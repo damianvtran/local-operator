@@ -12,6 +12,7 @@ import struct
 import threading
 import zlib
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 import pytest
 from PIL import Image, ImageFilter
@@ -687,3 +688,417 @@ async def test_agent_banner_never_fetches_the_owners_photo(tmp_path, monkeypatch
     )
     await banner("person")
     assert reads == ["/v1/accounts/acc_2/avatar"]
+
+
+# -- An agent's OWN picture (2026-10-31) -------------------------------------
+#
+# The agent's endpoint picture arrives as ``agent_picture`` and is drawn under
+# the badge and the agent marker; the owner's ``photo`` still never is.
+
+
+def _agent(agent_picture=None, photo=None, theme: na.Theme = "light", size: int = 256) -> bytes:
+    return na.compose(
+        na.Variant("person_agent", theme, size, "DT"),
+        origin=ORIGIN,
+        account_id="acc_ben",
+        photo=photo,
+        agent_picture=agent_picture,
+    )
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("size", [64, 256])
+def test_agent_wears_its_own_picture_never_the_owners(theme: na.Theme, size: int):
+    """Owner photo red, agent picture blue: the face is blue, never red, and the
+    badge and agent marker still sit on top (their pixels equal the glyph's)."""
+
+    red, blue = (200, 40, 40), (30, 60, 210)
+    composite = Image.open(
+        io.BytesIO(_agent(agent_picture=_jpeg(blue), photo=_jpeg(red), theme=theme, size=size))
+    ).convert("RGBA")
+    face = (size // 4, size // 2)
+    assert _rgb(composite, face) == pytest.approx(blue, abs=16)
+    assert not any(
+        isinstance(p, tuple) and p[3] == 255 and all(abs(c - r) <= 24 for c, r in zip(p[:3], red))
+        for p in (composite.getpixel((x, y)) for x in range(size) for y in range(size))
+    )
+    glyph = Image.open(io.BytesIO(_agent(theme=theme, size=size))).convert("RGBA")
+    # Bottom-right badge and top-right agent marker are identical to the glyph
+    # composite: the picture never paints over either overlay.
+    for xy in [(size - size // 5, size - size // 5), (size - size // 7, size // 7)]:
+        assert composite.getpixel(xy) == glyph.getpixel(xy)
+
+
+def test_agent_picture_is_ignored_for_a_person():
+    """``agent_picture`` names an endpoint's bytes; a person never wears them."""
+
+    blue = (30, 60, 210)
+    with_picture = na.compose(
+        na.Variant("person", "light", 256, "BT"),
+        origin=ORIGIN,
+        account_id="acc_ben",
+        photo=None,
+        agent_picture=_jpeg(blue),
+    )
+    assert with_picture == na.compose(
+        na.Variant("person", "light", 256, "BT"), origin=ORIGIN, account_id="acc_ben", photo=None
+    )
+
+
+@pytest.mark.parametrize("bad", [b"", b"not an image", b"GIF89a" + b"\0" * 40])
+def test_undecodable_agent_picture_falls_back_to_the_glyph(bad):
+    assert _agent(agent_picture=bad) == _agent()
+
+
+def _directory(
+    account="acc_2",
+    endpoint="bep_1",
+    v="fedcba9876543210",
+    url=True,
+    structured=True,
+    hash=None,
+    url_shape=None,
+):
+    """The hub's tenant directory, as ``TeamBridgeClient.directory`` reads it.
+
+    The live hub publishes BOTH halves of a picture: ``agent.avatar.hash`` (the
+    16-hex value ``?v=`` carries) and the rendered ``avatar_url``.
+    ``structured=False`` models a hub that renders only the URL, which the
+    client still binds through as a fallback; ``hash`` overrides the structured
+    value alone, and ``url_shape`` re-renders the URL, so a test can hold one
+    half fixed while moving the other (security review round 2, S-3).
+    """
+
+    import httpx
+
+    agent: dict[str, Any] = {"endpoint_id": endpoint, "name": "Aida", "state": "active"}
+    if structured:
+        agent["avatar"] = {"hash": hash or v, "updated_at": "2026-10-01"}
+    if url:
+        shape = url_shape or "/v1/messaging/endpoints/{endpoint}/avatar?v={v}"
+        agent["avatar_url"] = shape.format(endpoint=endpoint, v=v)
+    members = [{"account_id": account, "display_label": "Damian", "agent": agent}]
+    return httpx.Response(200, json={"msg": "ok", "result": {"members": members}})
+
+
+def _endpoint_client(tmp_path, upstream, directory=None):
+    """``upstream`` serves the image routes; the directory read is answered by
+    ``directory`` (default: acc_2's agent bep_1 publishes fedcba98...)."""
+
+    answer = directory or _directory
+
+    def route(request):
+        if request.url.path == "/v1/messaging/directory":
+            return answer()
+        return upstream(request)
+
+    return _endpoint_client_raw(tmp_path, route)
+
+
+def _endpoint_client_raw(tmp_path, upstream):
+    import httpx
+
+    from local_operator.team_bridge.client import TeamBridgeClient
+    from tests.unit.team_bridge.test_avatar import AvatarStore
+
+    return TeamBridgeClient(tmp_path, store=AvatarStore(), transport=httpx.MockTransport(upstream))
+
+
+async def _agent_banner(client, endpoint=("bep_1", "fedcba9876543210"), v="0123456789abcdef"):
+    return await client.notification_avatar(
+        "acc_2",
+        tenant_id="tenant_a",
+        kind="person_agent",
+        theme="light",
+        size=64,
+        initials="DT",
+        v=v,
+        expected_account_id="acc_1",
+        endpoint=endpoint,
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_banner_reads_the_endpoint_route_and_never_the_owners(tmp_path, monkeypatch):
+    """Mutation guard: if the client read the account route (or passed the owner
+    photo to the face) for an agent, the path list or the pixels change."""
+
+    import httpx
+
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+    reads: list[str] = []
+    blue, red = (30, 60, 210), (200, 40, 40)
+
+    def upstream(request):
+        reads.append(f"{request.url.path}?{request.url.query.decode()}")
+        colour = blue if "/messaging/endpoints/" in request.url.path else red
+        return httpx.Response(200, content=_jpeg(colour), headers={"content-type": "image/jpeg"})
+
+    client = _endpoint_client(tmp_path, upstream)
+    data = await _agent_banner(client)
+    assert reads == ["/v1/messaging/endpoints/bep_1/avatar?v=fedcba9876543210&size=64"]
+    image = Image.open(io.BytesIO(data)).convert("RGBA")
+    assert _rgb(image, (16, 32)) == pytest.approx(blue, abs=16)
+    assert data == na.compose(
+        na.Variant("person_agent", "light", 64, "DT"),
+        origin=client._base_url,
+        account_id="acc_2",
+        photo=None,
+        agent_picture=_jpeg(blue),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["404", "500", "network", "svg"])
+async def test_agent_banner_falls_back_to_the_glyph_when_the_read_fails(
+    tmp_path, monkeypatch, failure
+):
+    import httpx
+
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+
+    def upstream(request):
+        if failure == "network":
+            raise httpx.ConnectError("down")
+        if failure == "svg":
+            return httpx.Response(200, content=b"<svg/>", headers={"content-type": "image/svg+xml"})
+        code = int(failure)
+        return httpx.Response(code, json={"code": "not_found", "error": "nope"})
+
+    client = _endpoint_client(tmp_path, upstream)
+    data = await _agent_banner(client)
+    assert data == na.compose(
+        na.Variant("person_agent", "light", 64, "DT"),
+        origin=client._base_url,
+        account_id="acc_2",
+        photo=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_banner_still_refuses_a_changed_login(tmp_path, monkeypatch):
+    """The fallback is for a cosmetic failure, never for a fence: a login that
+    changed mid-read refuses rather than drawing the glyph under it."""
+
+    import httpx
+
+    from local_operator.team_bridge.client import BridgeRefusal
+
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+    holder: dict[str, Any] = {}
+
+    def upstream(request):
+        # The login changes during the PICTURE read (after the directory bound
+        # the endpoint), which is the window the fallback must not swallow.
+        holder["store"].incarnation = "login-b"
+        return httpx.Response(200, content=_jpeg(), headers={"content-type": "image/jpeg"})
+
+    client = _endpoint_client(tmp_path, upstream)
+    holder["store"] = client._store
+    with pytest.raises(BridgeRefusal) as refused:
+        await _agent_banner(client)
+    assert refused.value.code == "account_mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind,endpoint",
+    [
+        ("person", ("bep_1", "fedcba9876543210")),
+        ("person_agent", ("bep/../acc", "fedcba9876543210")),
+        ("person_agent", ("bep_1", "FEDCBA9876543210")),
+    ],
+)
+async def test_agent_picture_request_is_closed(tmp_path, kind, endpoint):
+    client = _endpoint_client_raw(tmp_path, lambda _r: pytest.fail("no read"))
+    with pytest.raises(ValueError):
+        await client.notification_avatar(
+            "acc_2",
+            tenant_id="tenant_a",
+            kind=kind,
+            theme="light",
+            size=64,
+            initials="DT",
+            v=None,
+            expected_account_id="acc_1",
+            endpoint=endpoint,
+        )
+
+
+# -- Security review round 1, S-2: the endpoint is bound to the SENDER --------
+
+
+# -- Security review round 2, S-3: bind on the documented hash, not the URL ---
+
+
+def _blue_picture_upstream(reads):
+    import httpx
+
+    def upstream(request):
+        reads.append(request.url.path)
+        return httpx.Response(
+            200, content=_jpeg((30, 60, 210)), headers={"content-type": "image/jpeg"}
+        )
+
+    return upstream
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "directory",
+    [
+        # B's agent: the endpoint belongs to ANOTHER account in the directory.
+        lambda: _directory(account="acc_b", endpoint="bep_1"),
+        # A's agent is a different endpoint than the one named.
+        lambda: _directory(account="acc_2", endpoint="bep_other"),
+        # Right endpoint, but the hub publishes a different version.
+        lambda: _directory(v="0000000000000000"),
+        # Right endpoint, no published picture at all: neither half says so.
+        lambda: _directory(url=False, structured=False),
+        # A structured hash that disagrees, while the rendered URL is EXACTLY
+        # the string the old binding compared: a URL string alone must no longer
+        # bind a picture (S-3).
+        lambda: _directory(hash="0000000000000000"),
+    ],
+)
+async def test_a_composite_for_a_never_wears_another_endpoints_picture(
+    tmp_path, monkeypatch, directory
+):
+    """Sender A naming an endpoint the directory does not publish for A gets
+    A's glyph, and B's picture is never even read."""
+
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+    reads: list[str] = []
+    fell_back: list[bool] = []
+    client = _endpoint_client(tmp_path, _blue_picture_upstream(reads), directory)
+    data = await client.notification_avatar(
+        "acc_2",
+        tenant_id="tenant_a",
+        kind="person_agent",
+        theme="light",
+        size=64,
+        initials="DT",
+        v=None,
+        expected_account_id="acc_1",
+        endpoint=("bep_1", "fedcba9876543210"),
+        on_fallback=lambda: fell_back.append(True),
+    )
+    assert reads == [], "an unbound endpoint's picture was read"
+    assert fell_back == [True]
+    assert data == na.compose(
+        na.Variant("person_agent", "light", 64, "DT"),
+        origin=client._base_url,
+        account_id="acc_2",
+        photo=None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url_shape",
+    [
+        # A reshaped URL is agent-server's business, not this client's: the same
+        # picture must keep painting when the documented hash agrees.
+        "/v1/messaging/endpoints/{endpoint}/avatar?v={v}&s=1",
+        "/v2/messaging/endpoints/{endpoint}/picture/{v}",
+    ],
+)
+async def test_a_reshaped_avatar_url_does_not_glyph_an_agent_with_a_matching_hash(
+    tmp_path, monkeypatch, url_shape
+):
+    """S-3: the binding follows ``agent.avatar.hash``, so a change to how the
+    hub renders ``avatar_url`` cannot silently turn every agent face into a
+    glyph (which is what keying on the URL string would do, fail-closed)."""
+
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+    reads: list[str] = []
+    client = _endpoint_client(
+        tmp_path,
+        _blue_picture_upstream(reads),
+        lambda: _directory(url_shape=url_shape),
+    )
+    data = await _agent_banner(client)
+    assert reads == ["/v1/messaging/endpoints/bep_1/avatar"]
+    image = Image.open(io.BytesIO(data)).convert("RGBA")
+    assert _rgb(image, (16, 32)) == pytest.approx((30, 60, 210), abs=16)
+
+
+@pytest.mark.asyncio
+async def test_a_url_only_hub_still_binds_through_an_exactly_equal_url(tmp_path, monkeypatch):
+    """The fallback half: a hub that publishes no structured hash is bound by an
+    exactly equal ``avatar_url``, which pins the same version."""
+
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+    reads: list[str] = []
+    client = _endpoint_client(
+        tmp_path,
+        _blue_picture_upstream(reads),
+        lambda: _directory(structured=False),
+    )
+    data = await _agent_banner(client)
+    assert reads == ["/v1/messaging/endpoints/bep_1/avatar"]
+    image = Image.open(io.BytesIO(data)).convert("RGBA")
+    assert _rgb(image, (16, 32)) == pytest.approx((30, 60, 210), abs=16)
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_directory_draws_the_glyph(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+    reads: list[str] = []
+    client = _endpoint_client(
+        tmp_path,
+        _blue_picture_upstream(reads),
+        lambda: httpx.Response(503, json={"code": "messaging_unavailable", "error": "x"}),
+    )
+    data = await _agent_banner(client)
+    assert reads == []
+    assert data == na.compose(
+        na.Variant("person_agent", "light", 64, "DT"),
+        origin=client._base_url,
+        account_id="acc_2",
+        photo=None,
+    )
+
+
+# -- Code review round 1, F1: the fallback is signalled ----------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "serve,expect_fallback",
+    [("blue", False), ("404", True), ("garbage-jpeg", True)],
+)
+async def test_fallback_is_signalled_only_when_the_glyph_replaced_a_picture(
+    tmp_path, monkeypatch, serve, expect_fallback
+):
+    import httpx
+
+    monkeypatch.setattr(avatar_cache, "AVATAR_CACHE", avatar_cache.AvatarCache())
+
+    def upstream(request):
+        if serve == "404":
+            return httpx.Response(404, json={"code": "not_found", "error": "x"})
+        if serve == "garbage-jpeg":
+            # Passes the type sniff, fails the decode: the compositor's arm.
+            return httpx.Response(
+                200, content=b"\xff\xd8\xff" + b"\0" * 64, headers={"content-type": "image/jpeg"}
+            )
+        return httpx.Response(200, content=_jpeg(), headers={"content-type": "image/jpeg"})
+
+    fell_back: list[bool] = []
+    client = _endpoint_client(tmp_path, upstream)
+    await client.notification_avatar(
+        "acc_2",
+        tenant_id="tenant_a",
+        kind="person_agent",
+        theme="light",
+        size=64,
+        initials="DT",
+        v=None,
+        expected_account_id="acc_1",
+        endpoint=("bep_1", "fedcba9876543210"),
+        on_fallback=lambda: fell_back.append(True),
+    )
+    assert fell_back == ([True] if expect_fallback else [])

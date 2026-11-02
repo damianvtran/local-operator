@@ -73,7 +73,7 @@ this host, so the same command lands anywhere in that range (and it is the reaso
 `tests/durations.json` exists as the sharder's input). Do not treat the whole suite
 as a routine inner-loop step: run the targeted command for what you changed (see
 "Scoping the inner loop" below, and note which jobs still narrow), and let CI's
-five shards be the whole-tree run.
+six shards be the whole-tree run.
 
 **Every pytest invocation in this file is isolated, and that is not decoration.**
 Each block also carries its own `ISO=$(mktemp -d)`, because the variable lives in
@@ -652,7 +652,7 @@ narrowest scope that could hold the answer, and widen only when it shows nothing
 
 ### Running the suite locally: what it costs, and how to read a stall
 
-**CI's five shards are the whole-tree gate. A local whole-tree run is not one, and
+**CI's six shards are the whole-tree gate. A local whole-tree run is not one, and
 no session should block on it.** Measured 2026-09-24 at load average 140-200, the
 whole tree is **~84 minutes projected at the four workers this host's hook resolved**
 — the run's own line is `pytest worker cap: 4 (bound by memory, cpu arm 7, memory arm 4,
@@ -977,6 +977,42 @@ test_eval_tool.py` as **24 failures** that three agents in a row wrote off as
 "environmental". They were a broken venv, and they all pass once it points
 somewhere real. Treat a standing block of "known environmental" failures as an
 unverified claim, not as weather.
+
+### One stash list is shared by every worktree of a clone
+
+Worktrees share one `.git`, so `refs/stash` — and the `stash@{n}` index that
+addresses it — is shared with them. Every worktree of a clone answers
+`git stash list` with the same entries in the same order, which makes an
+unqualified two-command sequence unsafe wherever another agent (or person) is
+working: your `git stash push` lands at `stash@{0}`, a peer's push between it
+and your `git stash pop` renumbers yours to `stash@{1}`, and the bare `pop`
+then applies THEIR work to YOUR tree. Nothing in the output says it is not
+yours, and a `pop` drops the entry it applied, so the peer's own restore later
+finds their entry gone.
+
+**Rule: for anything you intend to restore, do not use a bare `git stash` in a
+shared checkout — and do not treat reading `stash@{0}` after a `push` as a
+capture.** That read is racy in exactly the way the push is: a peer's push can
+land between the two commands, and the id you then record is theirs. Take an id
+that cannot move instead. `git stash create` prints the commit id, adds nothing
+to the list and leaves the working tree untouched; store that commit under a
+message you recognise — `git stash store -m "<why>" <id>` — and it becomes the
+newest entry. Restore by value — `git stash apply <id>` — and the number stops
+mattering: it may change under you, the content will not. Four limits, all
+real. `create` SNAPSHOTS the tree rather than clearing it, so it does not
+replace `push` when the point is a clean tree — and clearing a tree you share is
+the whole-tree operation banned above. It holds the index and the TRACKED
+working tree only: it takes no `-u` (a bare `-u` is read as the message), so
+untracked files are not in that id at all — copy those aside instead, for
+example from `git ls-files --others --exclude-standard`. Being alone in YOUR
+worktree does not make push-then-capture safe either, because the list is
+clone-wide: only being alone in the CLONE would, which in a parallel fleet is
+not something to assume. And an id that is never stored is a dangling commit
+that `git gc` may prune; `store` is what makes it durable. This is a property of
+Git, not of this repository's layout: it applies to any clone running parallel
+agents. The conflict shape a foreign apply leaves, and how to recover path by
+path, are in "The stash list is repo-global, and `apply` lands whatever it
+resolves" under "Always capture before AND after".
 
 ### Isolating a run: `LOCAL_OPERATOR_CONFIG_DIR` alone is not enough
 
@@ -1998,7 +2034,7 @@ Warnings that still hold, each of which has already cost a release:
   rather than a stale local checkout — run it, do not read it:
 
   ```sh
-  python scripts/shard_tests.py --shard <I> --total 5 \
+  python scripts/shard_tests.py --shard <I> --total 6 \
     --out "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shard_<I>.txt"
   ```
 

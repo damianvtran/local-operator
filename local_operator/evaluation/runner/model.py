@@ -94,6 +94,8 @@ class ModelDecision(ProtocolModel):
     route: RouteIdentity
     usage: ModelUsage = Field(default_factory=ModelUsage)
     cost_micros: SafeCount = 0
+    # This is an internal subtotal, not a claim that missing prices were free.
+    cost_known: bool = True
     stop_reason: StrictIdentifier = "stop"
     provider_request_id: StrictIdentifier = "unknown"
     tool_call_count: SafeCount = 0
@@ -283,6 +285,7 @@ class DecisionRejected(Exception):
         route: RouteIdentity | None = None,
         usage: ModelUsage | None = None,
         cost_micros: int = 0,
+        cost_known: bool = True,
         stop_reason: str = "stop",
         provider_request_id: str = "unknown",
         tool_call_count: int = 0,
@@ -392,6 +395,7 @@ class DecisionRejected(Exception):
         self.route = route
         self.usage = usage or ModelUsage()
         self.cost_micros = cost_micros
+        self.cost_known = cost_known
         self.stop_reason = stop_reason
         self.provider_request_id = provider_request_id
         self.tool_call_count = tool_call_count

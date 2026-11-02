@@ -1,0 +1,65 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.errors.session_host",
+  "source_commit": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "translation_date": "2026-10-31",
+  "key_count": 3,
+  "translator": {
+    "agent": "i18n-translator (lopdev; host-copy-zh)",
+    "session": "d90daece65d4",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "actual_model_source": "Explicit runtime model-switch notice: temporary fallback to openai/gpt-6.1-sol after provider quota failure; prior notice named anthropic/claude-opus-5-5; requested primary anthropic/claude-sonnet-5-5. Translation authored after gpt-6.1-sol switch."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.errors.session_host.json",
+      "sha256": "4205cc6feda10279c524d78ff95c450bbc50981a48d13e37f82849d1705860d4"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/d90daece65d4/scratchpad/host-copy-zh/wire.errors.session_host.json",
+      "sha256": "4205cc6feda10279c524d78ff95c450bbc50981a48d13e37f82849d1705860d4"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/d90daece65d4/scratchpad/host-copy-zh/validator.log",
+      "sha256": "b956fe712f4145faaaeb30254fe675266bc962968e74204486b82923f77abc86"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/d90daece65d4/scratchpad/host-copy-zh/ledger-row.proposal.json",
+      "sha256": "b496d2d2f428617dc85b318afb1faa560e8f0b76a0ae91f54a5d0724d2c44f00"
+    }
+  ],
+  "status": "translated",
+  "independent_audit": "pending; translator did not audit own work",
+  "validator": {
+    "command": "scripts/i18n/check.py --catalogues-only",
+    "scope": "Isolated snapshot of committed validator/runtime and en+zh-CN namespace, not whole repository",
+    "exit_code": 0,
+    "stdout": "check.py: catalogue checks: 0 problem(s)\n"
+  },
+  "glossary_proposals": {
+    "background session host": "后台会话托管服务",
+    "background service manager": "后台服务管理器"
+  },
+  "ambiguity_notes": [
+    "host is a local background process/service, not a remote computer: 托管服务 avoids misleading 主机.",
+    "unsupported is terminal on this platform; remedy is another suitable computer, not retry.",
+    "unavailable says session never started and invites a later manual retry, not reconnect or continuing an existing session.",
+    "No maxCells/maxChars specified in context; no placeholders or plural arms occur."
+  ],
+  "execution_notes": [
+    "Initial staging call timed out before validator execution; resumed by exporting committed files in one git archive. Only final validator.log records actual validator execution."
+  ],
+  "shared_worktree_modified": false,
+  "committed": false
+}

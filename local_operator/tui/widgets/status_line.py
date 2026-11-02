@@ -105,6 +105,15 @@ ICON_EFFORT = "▴"
 #: is ``›``, and ``high › » fast`` read as two separators in a row (design
 #: D1).
 ICON_FAST = "↯"
+#: Saver's compression mark: one cell, distinct from the speed lightning.
+#:
+#: NOT ``≡`` (design round 2, D3): that is ``PLAIN_TOOL_ICONS["read"]``, the
+#: lines-of-text mark on the very same screen, and ``glyphs.py`` states the rule
+#: an icon may not break — it must not echo the shape of a different meaning. It
+#: also reads as a hamburger menu, which this band has no concept of. ``⊖`` (a
+#: minus inside a circle) says the one thing the feature does — FEWER tokens in
+#: the request — and collides with no tool icon, no separator and no verdict.
+ICON_SAVER = "⊖"
 ICON_CWD = "⌂"
 #: Active ``/agent`` profile governing THIS session (U2). A CATEGORY marker like
 #: every other icon here — the value is the profile name beside it (`◉ auditor`),
@@ -299,6 +308,11 @@ FORK_PENDING_TEXT = "forking \u00b7 esc"
 #: widest floor that still survives 100 columns with everything else on screen.
 NAME_CELLS = 40
 NAME_CELLS_FLOOR = 18
+#: The status command's floor once ``shorten-custom`` fires: the narrowest cut
+#: that still reads as a value (`acct 5h 42…`) rather than a stub. The full cap
+#: is the runner's own (``status_command.MAX_CELLS``), applied before the line
+#: reaches the band.
+CUSTOM_CELLS_FLOOR = 12
 
 #: Cells the row keeps free between its two groups for the LIVENESS SLOT — the
 #: ``connecting…`` caption a saved conversation paints while its owner binds.
@@ -449,6 +463,18 @@ _DROP_LADDER: tuple[str, ...] = (
     # whole word. A band tight enough to drop one static dial should keep the
     # expensive one visible.
     "fast",
+    # Beside `fast` and shed just AFTER it — later in this tuple means kept
+    # longer (design round 1, D2; the rung's direction was written backwards
+    # until design round 2's D7 caught it). The old placement put Saver directly
+    # under `duration`, so it survived to 96 columns while `fast` survived to 66:
+    # at 80 columns the indicator this feature exists to provide was gone and the
+    # dial next to it stayed. The old reason ("already visible in /saver status")
+    # separated nothing — `/fast status` is equally recoverable — and `fast`'s own
+    # stated reason ("the one segment COSTING MONEY while it shows") is equally
+    # true of Saver, which bills Radient credits per token removed. Saver now
+    # outlives `fast`: it is the CONSENT mark for sending history off the machine,
+    # so it is the last of the two a narrow band should drop.
+    "saver",
     # The active /team roster and /agent profile (U2). Both are STATIC session
     # settings the user chose — like `effort`, they do not change while the user
     # watches — so they belong in this static-settings band ahead of the live
@@ -499,6 +525,27 @@ _DROP_LADDER: tuple[str, ...] = (
     "last-rate",
     # The one figure that is not a live reading of this turn.
     "cost",
+    # The operator's own status command (``display.composer.command``). It
+    # outlasts the title, every static setting and the two re-derivable figures
+    # above (rate, cost) because the operator configured it ON PURPOSE to keep
+    # something in view the harness cannot tell them — a quota, a deploy state —
+    # and a band that drops the one reading they asked for to keep a tok/s
+    # figure has its priorities backwards (measured: at 80 columns the earlier
+    # placement painted `96 tok/s ‹ $3.18` and no command output). It still
+    # sheds before ``cwd`` and ``context``: those answer "where am I" and "how
+    # close is compaction" for THIS session, and the alarms below it outrank
+    # any reading. Inert (no cells, no effect on the walk) when unset, and
+    # BOUNDED (``status_command.MAX_CELLS``), so it is a legal neighbour of any
+    # rung under :data:`_UNBOUNDED_RUNGS`.
+    #
+    # SHORTEN BEFORE DROP, like cwd and the model label (design round 1, T-1):
+    # all-or-nothing meant a 40-cell reading vanished whole at 80 columns and
+    # left a 41-cell hole. ``shorten-custom`` caps the reading at
+    # :data:`CUSTOM_CELLS_FLOOR` and the fitting row regrows it into whatever is
+    # spare, so it is truncated with an ellipsis to the space left; only below
+    # the floor does ``custom`` drop.
+    "shorten-custom",
+    "custom",
     # The working directory goes before the context number. Its shorten step has
     # already reduced it to a basename by now, so what remains is ~7 cells of
     # "where am I" against ~9 cells of "how close is compaction" — and the second
@@ -1252,7 +1299,14 @@ class StatusLine:
         #: band never reaches into the session, so the source of truth stays the
         #: session's own spec and the app pushes the reading through ``update``.
         self._fast: str = ""
-        # The active /agent profile name and /team roster name governing this
+        # The localized word, or "" when this session is not occupying Saver.
+        # Off paints NOTHING (design round 1, D1): the reserved-five-cells
+        # version this replaced painted a dim glyph with an empty value in every
+        # band for every user, so presence stopped carrying information — and
+        # the reservation bought one 7-cell shift at a command the user typed, at
+        # the cost of a permanent hole. Every other segment in this band is
+        # gated on a non-empty reading; this is the one that was not.
+        self._saver: str = ""
         # session (U2), "" when unattached — the band's two static-identity
         # segments. Held as plain strings the app pushes through `update`, the
         # same shape as `effort`: the band never reaches into the session, so
@@ -1274,6 +1328,11 @@ class StatusLine:
         self._cost: str = ""
         self._last_rate: str = ""
         self._conversation_name: str = ""
+        #: The operator's status-command line (``tui/status_command.py``),
+        #: already sanitised and capped. Empty means no segment.
+        self._custom: str = ""
+        #: The reading is the last GOOD line, held through a failing run.
+        self._custom_stale: bool = False
         # True while this session is a FORK still wearing the title it inherited
         # from its parent. Only the terminal title reads it, and it is pushed by
         # the app rather than read off the session for the same reason every
@@ -1633,6 +1692,7 @@ class StatusLine:
         model_name: str | None = None,
         effort: str | None = None,
         fast: str | None = None,
+        saver: str | None = None,
         agent_profile: str | None = None,
         team: str | None = None,
         cwd: str | None = None,
@@ -1652,8 +1712,17 @@ class StatusLine:
         tunnel_parked: bool | None = None,
         approvals_auto: bool | None = None,
         approvals_always: bool | None = None,
+        custom: str | None = None,
+        custom_stale: bool | None = None,
     ) -> None:
         """Update any subset of segments and repaint the band."""
+        # "" is meaningful (clear the segment: the command failed, printed
+        # nothing, or was unset), so None stays leave-alone as for every other
+        # segment.
+        if custom is not None:
+            self._custom = custom
+        if custom_stale is not None:
+            self._custom_stale = custom_stale
         if connection is not None:
             self._connection = connection
         if connection_muted is not None:
@@ -1666,6 +1735,8 @@ class StatusLine:
             self._effort = effort
         if fast is not None:
             self._fast = fast
+        if saver is not None:
+            self._saver = saver
         # "" is a MEANINGFUL value here (detach), so these follow the same
         # None-means-leave-alone contract as every other segment: the app passes
         # "" to clear the segment on /agent clear or team detach, and None to
@@ -1951,6 +2022,25 @@ class StatusLine:
                 return self._model_name
             return ""
         return self._model_name
+
+    def command_facts(self) -> dict[str, object]:
+        """What the band is showing for THIS session, for the status command.
+
+        The status command's stdin payload is built from these rather than
+        from the session, so a script sees the same model, context and cost
+        the operator is reading on the row beside its output — never a figure
+        the band would spell differently. The main session's figures, not a
+        pinned child's: the command describes the conversation, and its
+        interval does not track pins.
+        """
+        return {
+            "model_label": self._model_label,
+            "model_name": self._model_name,
+            "cwd": self._cwd,
+            "context_tokens": self._context_tokens,
+            "context_window": self._context_window,
+            "cost": self._cost,
+        }
 
     def _shown_context(self) -> tuple[int, int]:
         """``(tokens, window)`` for the context segment."""
@@ -2315,8 +2405,9 @@ class StatusLine:
                 if "name" in dropped or not self._conversation_name
                 else NAME_CELLS_FLOOR if flexed else NAME_CELLS
             )
+            custom_cap = CUSTOM_CELLS_FLOOR if "custom" in short else 0
             left = self._left_text(dropped, short, dim, muted, seam, accent)
-            right = self._right_text(dropped, short, cap, dim, seam)
+            right = self._right_text(dropped, short, cap, dim, seam, custom_cap=custom_cap)
             # The fit test reserves the group gap rather than asking whether the
             # composed row happens to fit. `_compose` pads with `max(1, …)`, so a
             # row could "fit" with the two groups ONE cell apart — tighter than
@@ -2346,7 +2437,16 @@ class StatusLine:
                 # construction.
                 ink = cell_len(truncate_name(self._conversation_name, cap))
                 cap = min(NAME_CELLS, ink + slack)
-                right = self._right_text(dropped, short, cap, dim, seam)
+                right = self._right_text(dropped, short, cap, dim, seam, custom_cap=custom_cap)
+                slack = width - cell_len(left.plain) - cell_len(right.plain) - gap
+            full = cell_len(self._custom)
+            if custom_cap and slack > 0 and "custom" not in dropped and custom_cap < full:
+                # The same regrow for the command's reading, after the name's:
+                # from its measured ink, so the rebuilt row adds at most
+                # `slack` cells and fits by construction.
+                ink = cell_len(truncate_cells(self._custom, custom_cap))
+                custom_cap = min(full, ink + slack)
+                right = self._right_text(dropped, short, cap, dim, seam, custom_cap=custom_cap)
             return frozenset(dropped), left, right
         return None
 
@@ -2415,6 +2515,19 @@ class StatusLine:
                 # colour a user already reads as "this is costing you". It also
                 # separates the two adjacent dials at a glance.
                 (ICON_FAST, self._fast, Style(color=theme_mod.semantic_color("warning")), None)
+            )
+        # Value-gated exactly like `/effort` and `/fast` above: absent when off,
+        # which is what makes its presence the whole message. A subagent overlay
+        # suppresses it for the same reason `/fast` is suppressed — the parent's
+        # upload policy is not the child's request.
+        if self._saver and self._subagent is None and "saver" not in dropped:
+            parts.append(
+                (
+                    ICON_SAVER,
+                    self._saver,
+                    Style(color=theme_mod.semantic_color("label")),
+                    None,
+                )
             )
         # Active /team roster, then /agent profile (U2). Both are the SESSION's
         # own settings, never a subagent's: the overlay describes a CHILD's
@@ -2603,9 +2716,19 @@ class StatusLine:
         return left
 
     def _right_text(
-        self, dropped: set[str], short: set[str], name_cells: int, dim: Style, seam: Style
+        self,
+        dropped: set[str],
+        short: set[str],
+        name_cells: int,
+        dim: Style,
+        seam: Style,
+        *,
+        custom_cap: int = 0,
     ) -> Text:
-        """agents ‹ jobs ‹ context ‹ cost ‹ duration ‹ [!] ‹ name.
+        """agents ‹ jobs ‹ custom ‹ context ‹ rate ‹ cost ‹ duration ‹ [!] ‹ name.
+
+        ``custom_cap`` is the cell cap :meth:`_walk` granted the status
+        command's reading once ``shorten-custom`` fired; 0 means uncapped.
 
         ``name_cells`` is the CAP :meth:`_walk` granted the trailing name —
         zero when the ladder dropped it. The title is emitted unpadded and cut
@@ -2647,6 +2770,23 @@ class StatusLine:
         # transcript is still signalled by the in-transcript "older messages
         # above" notice on scroll, so the at-rest counter is not needed — do
         # not re-add it to "fix" discoverability.
+        if self._custom and "custom" not in dropped:
+            # NO icon: the text is the operator's script's own, and scripts that
+            # serve other harnesses already carry their own glyph, so a band icon
+            # in front of it would double up. Leftmost of the figures, so the
+            # session's own readings (context, cost, duration) stay together
+            # against the right edge and the command's reading — usually about
+            # an account or a project, not this session — sits apart from them.
+            #
+            # `muted`, not `fg` (design round 1, T-4): with no icon and no
+            # leading seam, ink is what separates it from the left group's `fg`
+            # model label when only the minimum gap stands between them. A
+            # Held data remains actionable, so retain the legible fresh ink:
+            # dim fails contrast on the band's actual dark and light surfaces.
+            # Italic distinguishes stale without relying on colour or NO_COLOR.
+            ink = Style(color=theme_mod.semantic_color("muted"), italic=self._custom_stale)
+            text = truncate_cells(self._custom, custom_cap) if custom_cap else self._custom
+            parts.append(("", text, ink))
         if "context" not in dropped:
             tokens, window = self._shown_context()
             usage = format_context_usage(tokens, window)

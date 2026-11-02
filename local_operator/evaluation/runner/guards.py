@@ -82,6 +82,8 @@ class GuardInput(ProtocolModel):
     max_steps: SafeCount | None = None
     model_cycles: SafeCount
     provider_cost_micros: SafeCount
+    # A subtotal cannot prove remaining budget when any billed call is unpriced.
+    provider_cost_known: bool = True
     elapsed_ms: SafeCount
     usage_totals: Mapping[str, int] = Field(default_factory=dict)
     recent_turns: tuple[EpisodeTurn, ...] = ()
@@ -149,6 +151,12 @@ class BudgetCapGuard:
             for allowance in snapshot.budget.allowances
             if isinstance(allowance, CappedAllowance)
         }
+        if "provider_usd_micros" in caps and not snapshot.provider_cost_known:
+            return GuardVerdict(
+                kind="truncate",
+                code="cost-unreported",
+                detail="Provider spend is incomplete; the monetary cap cannot be enforced safely",
+            )
         for resource, field in _ENFORCED:
             cap = caps.get(resource)
             if cap is None:

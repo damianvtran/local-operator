@@ -186,7 +186,10 @@ class DmClient:
         origin_session_id: str | None = None,
         thread_root_id: str | None = None,
         expected_account_id: str | None = None,
+        pre_http_guard: Any = None,
     ) -> Any:
+        if pre_http_guard is not None:
+            pre_http_guard()
         self.calls.append(
             {
                 "method": "conversation_send",

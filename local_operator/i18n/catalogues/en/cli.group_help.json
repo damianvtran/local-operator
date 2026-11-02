@@ -1,0 +1,12 @@
+{
+  "cli.group_help.skills": "Publish, pull and synchronize hub skills (documents and bundles)",
+  "cli.group_help.skills_description": "Bundle skills may not contain executables (any execute bit is refused), and installing one never runs code.",
+  "cli.group_help.tunnel": "Radient remote access to your local harnesses",
+  "cli.group_help.secret": "Encrypted long-term secrets an agent can retrieve without a prompt",
+  "cli.group_help.network": "Mesh networks: pair devices, drive sessions across them",
+  "cli.group_help.disk": "Disk-pressure tools: measure first, reclaim only what is provably safe",
+  "cli.group_help.operator": "Operator authority: the key that may loosen a running approval gate",
+  "cli.group_help.pair": "Pair a phone as an operator device: your signature authorises it, once",
+  "cli.group_help.search": "Configure and test load-balanced web search",
+  "cli.group_help.fetch": "Configure and test headless web fetching"
+}

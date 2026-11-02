@@ -1,0 +1,7 @@
+{
+  "cli.model_help.model": "کسی دوسرے چلتے lop سیشن کا ماڈل بدلیں (وہاں /model کی طرح)",
+  "cli.model_help.target": "گفتگو کا نام / سیشن id / cwd کا ذیلی متن (حروف کی بڑائی چھوٹائی سے بے نیاز)۔ --pid/--session سے مخاطب کرتے وقت چھوڑ دیں۔",
+  "cli.model_help.selector": "جس ماڈل پر جانا ہے، مثلاً deepseek/deepseek-flash",
+  "cli.model_help.pid": "عین pid سے ہدف بنائیں",
+  "cli.model_help.session": "عین سیشن id سے ہدف بنائیں"
+}

@@ -1,0 +1,39 @@
+{
+  "locale": "hi",
+  "namespace": "cli.mobile_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 1,
+    "minor": 0,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "HI-026",
+      "severity": "MAJOR",
+      "namespace": "cli.mobile_help",
+      "key": "cli.mobile_help.logs_lines",
+      "english": "Lines per file (up to two are read)",
+      "current": "प्रति फ़ाइल पंक्तियाँ (अधिकतम दो पढ़ी जाती हैं)",
+      "problem": "Meaning changed. In English \"up to two\" means FILES (the daemon log and the runtime log). The Hindi \"अधिकतम दो पढ़ी जाती हैं\" agrees in the feminine plural with पंक्तियाँ, so it reads \"at most two LINES are read\". That misstates what the flag does: a user would think --lines is capped at 2.",
+      "suggested": "\"प्रति फ़ाइल पंक्तियाँ (अधिकतम दो फ़ाइलें पढ़ी जाती हैं)\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    },
+    {
+      "round": 1,
+      "id": "HI-027",
+      "severity": "NIT",
+      "namespace": "cli.mobile_help",
+      "key": "cli.mobile_help.status",
+      "english": "Daemon health, gate and live sessions",
+      "current": "डेमन की सेहत, गेट और लाइव सत्र",
+      "problem": "\"सेहत\" is colloquial for daemon health; the patch elsewhere uses \"स्वस्थ\" (cli.browser).",
+      "suggested": "\"डेमन की स्थिति, गेट और लाइव सत्र\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    }
+  ]
+}

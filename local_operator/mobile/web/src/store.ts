@@ -400,6 +400,7 @@ function publishAsksRevision(rows: SessionSummary[]): void {
 const BACKOFF_MIN_MS = 250;
 const BACKOFF_MAX_MS = 10000;
 const SILENCE_MS = 35000;
+const WAKE_SILENCE_MS = 20000;
 const OUTAGE_GRACE_MS = 2500;
 // A seed is sent even by a leg that immediately dies. Require continuous
 // residency before calling it recovered; shorter than the outage grace so a
@@ -560,7 +561,7 @@ export function openEventStream(
 	};
 	const wake = () => {
 		if (closed || document.visibilityState === "hidden") return;
-		if (inBackoff || Date.now() - lastByte >= 20000) {
+		if (inBackoff || Date.now() - lastByte >= WAKE_SILENCE_MS) {
 			if (retry !== null) clearTimeout(retry);
 			retry = null; inBackoff = false;
 			unhealthy(); void connect();
@@ -703,24 +704,20 @@ function applyConfigFrame(data: string): Promise<void> | null {
    NETWORK failure is the same retry. A daemon that disappears AFTER a
    successful probe keeps the stream wrapper's normal reconnect behaviour;
    the probe covers the mixed-version load. */
-async function configEndpointPresence(): Promise<"present" | "absent" | "retry" | "unauthorized"> {
+async function configEndpointPresence(signal: AbortSignal): Promise<"present" | "absent" | "retry" | "unauthorized"> {
 	try {
 		const res = await fetch(CONFIG_STREAM_PATH, {
-			headers: { Accept: "text/event-stream" },
+			headers: { Accept: "text/event-stream" }, signal,
 		});
 		const isStream =
 			(res.headers.get("content-type") ?? "").includes("text/event-stream");
-		try {
-			await res.body?.cancel();
-		} catch {
-			/* dropping the probe's body is best-effort */
-		}
-		if (res.status === 401) {
-			// A pre-stream capability probe has the same dead-cookie rule as
-			// the stream itself; never retry it as a transient capability error.
-			handleUnauthorized();
-			return "unauthorized";
-		}
+		// Headers settle capability presence. Waiting for cancellation would let
+		// a stalled body strand negotiation after the headers already arrived.
+		void res.body?.cancel().catch(() => {});
+		if (signal.aborted) return "retry";
+		// The owning subscription must fence this result BEFORE auth cleanup:
+		// a late response from a disposed/replaced probe owns no current drafts.
+		if (res.status === 401) return "unauthorized";
 		if (res.ok && isStream) return "present";
 		return res.status === 404 ? "absent" : "retry";
 	} catch {
@@ -734,16 +731,32 @@ export function retainConfigStream(): () => void {
 		let disposed = false;
 		let attempt = 0;
 		let timer: ReturnType<typeof setTimeout> | null = null;
+		let probe: AbortController | null = null;
+		let probeDeadline: ReturnType<typeof setTimeout> | null = null;
+		let probeStarted = 0;
+		const stopProbe = () => {
+			probe?.abort(); probe = null;
+			if (probeDeadline !== null) clearTimeout(probeDeadline);
+			probeDeadline = null;
+		};
 		const start = async () => {
 			if (disposed) return;
-			const presence = await configEndpointPresence();
-			if (disposed) return;
+			stopProbe();
+			const controller = new AbortController(); probe = controller;
+			probeStarted = Date.now();
+			// Capability negotiation precedes openEventStream, so it needs the SAME
+			// silence bound; otherwise a fetch with no headers never reaches retry.
+			probeDeadline = setTimeout(() => controller.abort(), SILENCE_MS);
+			const presence = await configEndpointPresence(controller.signal);
+			if (disposed || probe !== controller) return;
+			stopProbe();
+			if (presence === "unauthorized") { handleUnauthorized(); return; }
 			if (presence === "retry") {
 				const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_MIN_MS * 2 ** attempt++);
-				timer = setTimeout(start, delay);
+				timer = setTimeout(() => { timer = null; void start(); }, delay);
 				return;
 			}
-			if (presence === "absent" || presence === "unauthorized") return; // terminal, no retries
+			if (presence === "absent") return; // terminal, no retries
 			configStreamClose = openEventStream(
 				CONFIG_STREAM_PATH,
 				"config",
@@ -754,9 +767,28 @@ export function retainConfigStream(): () => void {
 				() => {},
 			);
 		};
+		const wake = () => {
+			if (disposed || document.visibilityState === "hidden") return;
+			// Match ordinary SSE wakeups: skip a backoff or replace a silent leg,
+			// but never churn an established subscription on foreground events.
+			if (timer !== null || (probe !== null && Date.now() - probeStarted >= WAKE_SILENCE_MS)) {
+				if (timer !== null) clearTimeout(timer);
+				timer = null; void start();
+			}
+		};
+		const hasDOM = typeof window !== "undefined" && typeof document !== "undefined";
+		if (hasDOM) {
+			window.addEventListener("pageshow", wake); window.addEventListener("online", wake);
+			document.addEventListener("visibilitychange", wake);
+		}
 		configStreamCancel = () => {
 			disposed = true;
-			if (timer) clearTimeout(timer);
+			stopProbe();
+			if (timer !== null) clearTimeout(timer);
+			if (hasDOM) {
+				window.removeEventListener("pageshow", wake); window.removeEventListener("online", wake);
+				document.removeEventListener("visibilitychange", wake);
+			}
 			configStreamClose?.();
 			configStreamClose = null;
 		};

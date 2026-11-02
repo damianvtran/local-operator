@@ -1147,7 +1147,7 @@ class TestTheForkInheritsItsParentsCacheKey:
 
         body = client._build_responses_body(request)
         assert body["prompt_cache_key"] == PARENT_ID
-        assert body["prompt_cache_retention"] == "24h"
+        assert "prompt_cache_retention" not in body
 
 
 class TestTheForkMarkSurvivesTruncation:
@@ -1503,6 +1503,10 @@ def _band():
     band._model_name = ""
     band._effort = ""
     band._fast = ""
+    # This __new__ stand-in skips StatusLine.__init__, which initializes the
+    # optional Saver badge to "". Mirror that real constructor state here;
+    # the painter intentionally requires all its fields to be initialized.
+    band._saver = ""
     band._agent_profile = ""
     band._team = ""
     band._cwd = "/tmp"
@@ -1519,6 +1523,9 @@ def _band():
     # list caught the omission on CI rather than in a frame).
     band._last_rate = ""
     band._conversation_name = ""
+    # The painter reads both status-command fields even in this widget-free double.
+    band._custom = ""
+    band._custom_stale = False
     band._forked = False
     band._fork_pending = False
     band._mcp = McpStatus()

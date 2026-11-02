@@ -1499,10 +1499,10 @@ async def test_sdk4_execution_oracle_rejects_broken_consumers(
         ({"language": []}, {"LC_ALL": "ru_RU.UTF-8"}, "ru", "ru"),
         ({"language": "auto"}, {"LANG": "hi_IN.UTF-8"}, "hi", "hi"),
         ({}, {}, "en", "en"),
-        # zh-CN ships after its security disposition, and its `sdk_startup`
-        # child is English-only: the selected locale is zh-CN while the child
-        # copy falls back to en. The "unknown" arm below is the genuinely
-        # unshipped tag that exercises the English-only selection path.
+        # zh-CN: the selected locale is zh-CN; whether its `sdk_startup` child
+        # answers itself or falls back to en is read from the tree above. The
+        # "unknown" arm below is the genuinely unshipped tag that exercises the
+        # English-only selection path.
         ({"language": "zh-CN"}, {}, "zh-CN", "zh-CN"),
         ({"language": "ur"}, {}, "ur", "ur"),
         ({"language": "unknown"}, {}, "en", "en"),
@@ -1513,7 +1513,23 @@ async def test_sdk4_execution_oracle_rejects_broken_consumers(
 async def test_sdk4_explicit_locale_and_english_child_fallback(
     sdk4_boundary, monkeypatch, case, values, environ, resolved, rendered
 ):
-    from local_operator.i18n import messages, resolve
+    from local_operator.i18n import catalogues, messages, resolve
+    from local_operator.i18n import runtime as i18n_runtime
+
+    # The expectation is derived from the COMMITTED TREE, not from a belief about
+    # which locales are translated today: a locale whose `sdk_startup` file carries
+    # the case's key answers from itself (one lookup, its own wording); one that
+    # does not falls back to English (lookups `[rendered, "en"]`, English wording).
+    # Hand-listing the untranslated locales is what reddened every translation
+    # wave (ru/vi/hi/ur) that landed this namespace. The absent path is pinned
+    # independently of the tree by the synthetic-root test below.
+    code = f"{_SDK4_NAMESPACE}.{case}"
+    translated = None
+    if rendered != "en":
+        try:
+            translated = catalogues.load_catalogue(rendered, _SDK4_NAMESPACE).get(code)
+        except (catalogues.CatalogueNotFound, catalogues.CatalogueInvalid):
+            translated = None
 
     sdk4_boundary.values = values
     for name, value in environ.items():
@@ -1545,10 +1561,54 @@ async def test_sdk4_explicit_locale_and_english_child_fallback(
     monkeypatch.setattr(messages, "render", render_explicit)
     monkeypatch.setattr(messages, "_lookup", lookup)
     spec, _ = _sdk4_spec(case)
-    await _sdk4_assert_refusal(sdk4_boundary, case, _sdk4_english(case, spec))
+    if translated is None:
+        expected = _sdk4_english(case, spec)
+        expected_lookups = ["en"] if rendered == "en" else [rendered, "en"]
+    else:
+        # Formatted from the catalogue's own string, not through `messages.render`,
+        # so the oracle stays independent of the path under test.
+        expected = i18n_runtime.render_message(translated, _sdk4_params(case, spec), rendered)
+        expected_lookups = [rendered]
+    await _sdk4_assert_refusal(sdk4_boundary, case, expected)
     assert observed == [resolved]
-    assert lookups == (["en"] if rendered == "en" else [rendered, "en"])
+    assert lookups == expected_lookups
     assert sdk4_boundary.reads == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", _SDK4_CASES)
+async def test_sdk4_absent_child_namespace_falls_back_to_english(
+    sdk4_boundary, monkeypatch, tmp_path, case
+):
+    """The fallback itself, with the absence CONSTRUCTED rather than read off the tree.
+
+    The tree-derived test above stops exercising the English fallback for a locale
+    once that locale ships `sdk_startup`; this one keeps proving the mechanism
+    whatever the catalogues contain. The root holds only the English source plus an
+    unrelated sibling file for `ru`, so the lookup misses on the NAMESPACE.
+    """
+    from local_operator.i18n import catalogues, messages
+
+    synthetic = tmp_path / "sdk4-catalogues"
+    (synthetic / "en").mkdir(parents=True)
+    (synthetic / "ru").mkdir()
+    (synthetic / "ru" / "wire.unrelated.json").write_text("{}")
+    (synthetic / "en" / f"{_SDK4_NAMESPACE}.json").write_bytes(
+        (catalogues.catalogue_root() / "en" / f"{_SDK4_NAMESPACE}.json").read_bytes()
+    )
+    monkeypatch.setattr(catalogues, "catalogue_root", lambda: synthetic)
+    sdk4_boundary.values = {"language": "ru"}
+    lookups = []
+    original_lookup = messages._lookup
+
+    def lookup(locale, namespace, code):
+        lookups.append(locale)
+        return original_lookup(locale, namespace, code)
+
+    monkeypatch.setattr(messages, "_lookup", lookup)
+    spec, _ = _sdk4_spec(case)
+    await _sdk4_assert_refusal(sdk4_boundary, case, _sdk4_english(case, spec))
+    assert lookups == ["ru", "en"]
 
 
 @pytest.mark.asyncio

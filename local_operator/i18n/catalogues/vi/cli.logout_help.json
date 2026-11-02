@@ -1,0 +1,4 @@
+{
+  "cli.logout_help.logout": "Đăng xuất khỏi một nhà cung cấp (xóa thông tin xác thực đã lưu)",
+  "cli.logout_help.provider": "Nhà cung cấp cần đăng xuất"
+}

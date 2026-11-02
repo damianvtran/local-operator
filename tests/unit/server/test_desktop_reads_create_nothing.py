@@ -68,6 +68,30 @@ def _settle_filesystem(root: Path, *, quiet_s: float = 0.25, limit_s: float = 15
             stable_since = now
 
 
+def _stop_library_writers(root: Path) -> None:
+    """Join only this isolated root's startup workers BEFORE the read baseline.
+
+    A quiet filesystem is not a lifecycle barrier: a paused indexer can open
+    SQLite after any quiet interval and create WAL/SHM during an unrelated GET.
+    Boot tasks have already finished when this is called, so stop their real
+    indexer and thumbnail worker using the production lifecycle. Do not start
+    an indexer if this root has none, or stop another test/root's worker. A
+    route that starts a writer itself still does so AFTER the baseline and
+    fails the unchanged filesystem comparison below.
+    """
+    from local_operator.library import indexer
+
+    with indexer._INSTANCES_LOCK:
+        worker = indexer._INSTANCES.get(str(root.resolve()))
+    if worker is None:
+        return
+    worker.stop()
+    assert not worker.running, "isolated-root library indexer did not join"
+    assert (
+        worker._thumb_thread is None or not worker._thumb_thread.is_alive()
+    ), "isolated-root thumbnail worker did not join"
+
+
 NETWORK = "n_0123456789abcdef01234567"
 SELF_DEVICE = "d_" + "a" * 32
 PEER_DEVICE = "d_" + "b" * 32
@@ -203,6 +227,7 @@ def test_the_other_read_routes_do_not_create_the_run_plane_either(tmp_path, monk
             portal = client.portal
             assert portal is not None
             portal.call(_settle_boot_task, task)
+        _stop_library_writers(root)
         for route in routes:
             # Taken PER ROUTE (review round 4, MINOR-2). Once, a second indexer
             # pass could still land inside a later route's window and read as that
@@ -272,3 +297,50 @@ def test_the_probe_and_the_vocabulary_still_read_a_real_network(tmp_path, monkey
     # Both halves of the vocabulary: the name a person types, then the id as the
     # fallback for a device that was never named (``known_peer_names``).
     assert remote["argument_words"] == [PEER_NAME, PEER_DEVICE]
+
+
+def test_the_lifecycle_barrier_joins_a_paused_writer_only_for_its_root(
+    tmp_path, monkeypatch
+) -> None:
+    """A writer may make its FIRST SQLite write only after stop is requested.
+
+    A quiet-time guess cannot prove that this write happened before the baseline.
+    Joining both real threads can, and must not stop a different root's workers.
+    """
+    import threading
+
+    from local_operator.library import indexer
+
+    root = _isolate(tmp_path, monkeypatch)
+    other_root = tmp_path / "other-root"
+    ready = threading.Barrier(5)  # both workers on both roots, plus this test
+    finished: list[tuple[Path, str]] = []
+
+    def paused_write(worker) -> None:
+        ready.wait(timeout=10)
+        assert worker._stop.wait(10), "test never requested worker shutdown"
+        # Real SQLite work, deliberately landing AFTER the stop request. The
+        # caller must join it, not just signal stop and take the baseline.
+        worker.store.ensure_schema()
+        finished.append((worker.config_dir, threading.current_thread().name))
+
+    monkeypatch.setattr(indexer.LibraryIndexer, "_run", paused_write)
+    monkeypatch.setattr(indexer.LibraryIndexer, "_run_thumbnails", paused_write)
+    target = indexer.ensure_started(root)
+    other = indexer.ensure_started(other_root)
+    try:
+        ready.wait(timeout=10)
+        assert not (root / "library" / "library.sqlite3").exists()
+        _stop_library_writers(root)
+        assert (root / "library" / "library.sqlite3").is_file()
+        assert sorted(name for path, name in finished if path == root) == [
+            "library-indexer",
+            "library-thumbs",
+        ]
+        assert other.running
+        assert other._thumb_thread is not None and other._thumb_thread.is_alive()
+        assert not other._stop.is_set()
+        assert not target.running
+    finally:
+        target.stop()
+        other.stop()

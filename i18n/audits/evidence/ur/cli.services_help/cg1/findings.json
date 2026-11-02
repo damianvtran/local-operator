@@ -1,0 +1,27 @@
+{
+  "locale": "ur",
+  "namespace": "cli.services_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-021",
+      "severity": "MINOR",
+      "namespace": "cli.services_help",
+      "key": "cli.services_help.services",
+      "english": "Bring this machine's non-runtime services (serve daemons and the supervised daemons) onto the current build, without stopping any running conversation",
+      "current": "اس مشین کی غیر رن ٹائم سروسز (serve ڈیمنز اور سپروائزڈ ڈیمنز) کو موجودہ بلڈ پر لائیں، بغیر کسی چلتی گفتگو کو روکے",
+      "problem": "'supervised' rendered «سپروائزڈ» (also services_description, update_help.no_services); glossary §2 fixes supervised → «زیرِ نگرانی» for ur, and cli.services_status already uses it.",
+      "suggested": "اس مشین کی غیر رن ٹائم سروسز (serve ڈیمنز اور زیرِ نگرانی ڈیمنز) کو …",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    }
+  ]
+}

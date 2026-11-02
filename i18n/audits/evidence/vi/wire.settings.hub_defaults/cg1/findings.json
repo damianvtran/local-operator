@@ -1,0 +1,27 @@
+{
+  "locale": "vi",
+  "namespace": "wire.settings.hub_defaults",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 1,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-056",
+      "severity": "MAJOR",
+      "namespace": "wire.settings.hub_defaults",
+      "key": "wire.settings.hub_defaults.model_default.note",
+      "english": "Hub merges use your current default model. The old hub model override is ignored.",
+      "current": "Việc hợp nhất trên hub dùng mô hình mặc định hiện tại của bạn. Ghi đè mô hình hub cũ bị bỏ qua.",
+      "problem": "Glossary §2 wave-2 kept-English set: hub `merge` stays English; 'Việc hợp nhất trên hub' translates the operation.",
+      "suggested": "Các lần merge trên hub dùng mô hình mặc định hiện tại của bạn. Ghi đè mô hình hub cũ bị bỏ qua.",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    }
+  ]
+}

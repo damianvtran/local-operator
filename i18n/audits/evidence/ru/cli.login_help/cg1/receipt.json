@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "ru",
+  "namespace": "cli.login_help",
+  "source_sha256": "66ae3d9bfe16c2830bb0a78ef7b5c768ae194f9f4d972379bbe9d752b35502f7",
+  "target_sha256": "c4fa9648d07098aeb33ba43afa778d70b6d60b064b3800cb15c2f54ca59c66a0",
+  "hashes": {
+    "audit.log": "1768d20a5094f4d924e421c468dfbff0f2d896c079b057f9f79abc8b01f7f0b8",
+    "findings.json": "1549b72d40135b81b563ee6c6187dd125d9420a4054859fb5b38691e93a2f76c",
+    "record.json": "16341eeb9cf17c917085ae6ac82764811a8ab35f5612e48ef90ce321da4e8f02",
+    "report.md": "20ce2a744f7177fb0719c6ee3f612c04ad9bcb143e6e5d55403d672a20479872"
+  }
+}

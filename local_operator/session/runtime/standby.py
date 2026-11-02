@@ -393,6 +393,18 @@ def disabled() -> bool:
     """
     if os.name != "posix":
         return True
+    # THE SESSION HOST ROUTE SWITCHES WARMING OFF, and this is the one place that
+    # does it because ``disabled()`` is consulted by every entry point
+    # (``enable_warming``, ``notify_engage``, ``try_adopt``, ``adoption_possible``).
+    # A spare is a runtime image the CONSOLE forked, so under the host route it
+    # would be an app descendant -- the exact ancestry the host exists to remove
+    # (design §2: "no surface forks a runtime") -- and nothing on that route ever
+    # adopts it (``launch._spawn_runtime_hosted``), so it would also sit in RAM for
+    # nothing (#3222 R-3). Whether the HOST should own spares is a slice-3 call.
+    from local_operator.session.runtime import session_host
+
+    if session_host.spawn_authority() == session_host.AUTHORITY_HOST:
+        return True
     return os.environ.get(DISABLE_ENV, "") not in ("", "0", "false", "no", "off")
 
 
@@ -1721,28 +1733,40 @@ def _recv_request(sock: socket.socket) -> "tuple[dict[str, Any], list[int]]":
     Raises ``ValueError`` on EOF — the console having gone away, which the caller
     reads as this process's exit signal.
     """
-    header = b""
     fds: list[int] = []
-    while len(header) < 4:
-        chunk, received, _flags, _addr = socket.recv_fds(
-            sock, 4 - len(header), max(1, 4 - len(fds))
-        )
-        if not chunk:
-            for fd in fds:
-                os.close(fd)
-            raise ValueError("standby channel closed")
-        header += chunk
-        fds.extend(received)
-    size = int.from_bytes(header, "big")
-    if size > 1 << 20:
-        raise ValueError("standby frame too large")
-    body = b""
-    while len(body) < size:
-        chunk = sock.recv(size - len(body))
-        if not chunk:
-            raise ValueError("standby channel closed")
-        body += chunk
-    return json.loads(body.decode("utf-8")), fds
+    # EVERY DESCRIPTOR THAT ARRIVED IS CLOSED ON ANY FAILURE, not only on the
+    # first read's EOF. ``recv_fds`` hands the kernel's copies to THIS process the
+    # moment the message is read, so a torn body, an oversized or non-JSON frame, a
+    # read timeout or a hostile length prefix would otherwise strand them: the
+    # caller's ``finally`` only sees descriptors this function RETURNED. Measured
+    # by review of the session host (#3222 R-1): five torn requests each carrying
+    # one descriptor grew the host's table by five, and the descriptor is the
+    # child end of an operator-capability socketpair -- a leak is a capability
+    # outliving its request, and enough of them exhaust the process every runtime
+    # is spawned by. The standby shares this function and had the same leak.
+    try:
+        header = b""
+        while len(header) < 4:
+            chunk, received, _flags, _addr = socket.recv_fds(
+                sock, 4 - len(header), max(1, 4 - len(fds))
+            )
+            fds.extend(received)
+            if not chunk:
+                raise ValueError("standby channel closed")
+            header += chunk
+        size = int.from_bytes(header, "big")
+        if size > 1 << 20:
+            raise ValueError("standby frame too large")
+        body = b""
+        while len(body) < size:
+            chunk = sock.recv(size - len(body))
+            if not chunk:
+                raise ValueError("standby channel closed")
+            body += chunk
+        return json.loads(body.decode("utf-8")), fds
+    except BaseException:
+        _close_all(fds)
+        raise
 
 
 def _close_all(fds: "list[int]") -> None:

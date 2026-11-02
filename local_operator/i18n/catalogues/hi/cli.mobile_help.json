@@ -1,0 +1,17 @@
+{
+  "cli.mobile_help.mobile": "फ़ोन एक्सेस: इस मशीन के lop सत्र नियंत्रित करें",
+  "cli.mobile_help.install": "डेमन, पासवर्ड और LaunchAgent इंस्टॉल करें",
+  "cli.mobile_help.status": "डेमन की स्थिति, गेट और लाइव सत्र",
+  "cli.mobile_help.daemon_action": "{action, select, start{डेमन शुरू करें} stop{डेमन रोकें} restart{डेमन फिर शुरू करें} other{{action}: डेमन}}",
+  "cli.mobile_help.logs": "डेमन और रनटाइम के लॉग का अंतिम भाग दिखाएँ",
+  "cli.mobile_help.logs_lines": "प्रति फ़ाइल पंक्तियाँ (अधिकतम दो फ़ाइलें पढ़ी जाती हैं)",
+  "cli.mobile_help.logs_follow": "नाम से फ़ॉलो करें, ताकि देखते समय बना या रोटेट हुआ लॉग दिखे (डिस्क्रिप्टर-बद्ध फ़ॉलो दोनों चूक जाता है)",
+  "cli.mobile_help.password": "पोर्टल पासवर्ड दिखाएँ या बदलें",
+  "cli.mobile_help.devices": "इस कंप्यूटर के पुश डिवाइस सूचीबद्ध करें, या किसी को रद्द/बहाल करें",
+  "cli.mobile_help.devices_command": "list (डिफ़ॉल्ट), revoke <device_id>, या unrevoke <device_id>",
+  "cli.mobile_help.devices_device_id": "`lop mobile devices` द्वारा सूचीबद्ध device_id; revoke/unrevoke के लिए आवश्यक",
+  "cli.mobile_help.devices_port": "मोबाइल डेमन का पोर्ट (डिफ़ॉल्ट: डेमन का अपना डिफ़ॉल्ट)",
+  "cli.mobile_help.uninstall": "LaunchAgent हटाएँ",
+  "cli.mobile_help.uninstall_purge": "पासवर्ड भी हटाएँ",
+  "cli.mobile_help.serve": "डेमन चलाएँ (फ़ोरग्राउंड)"
+}

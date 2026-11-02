@@ -1,0 +1,100 @@
+# vi/cli.hub_shared_help audit.log: records the audit sessions kept, verbatim; nothing here is a replayed command.
+# The auditors wrote findings.jsonl / progress.log / summary.md (read-only brief), not a shell log.
+
+## round 1: audit dir core-audit/vi, auditor session 3ca692471511
+verdict.txt:
+CHANGES_REQUESTED
+BLOCKER 0 · MAJOR 31 · MINOR 17 · NIT 5 · 53 findings over 1311 values in 56 namespaces
+progress.log:
+cli.agents_help 21 8
+cli.aida_help 4 0
+cli.browser 64 3
+cli.browser_help 20 1
+cli.config_help 9 0
+cli.credential_help 5 1
+cli.exec_help 20 0
+cli.exec_runtime 11 0
+cli.exec_worker_help 11 1
+cli.global_help 17 2
+cli.hub_help 12 1
+cli.hub_shared_help 12 0
+cli.install_help 5 0
+cli.login_help 2 0
+cli.login_status_help 2 0
+cli.logout_help 2 0
+cli.mcp_help 19 0
+cli.memory_help 1 0
+cli.mobile_help 15 1
+cli.model_help 5 0
+cli.monitor_help 6 0
+cli.qwencloud_help 5 0
+cli.refresh_help 7 0
+cli.resume_click_help 1 0
+cli.send_help 7 0
+cli.serve_help 5 0
+cli.services_help 9 0
+cli.sessions_help 47 2
+cli.stop_help 9 0
+cli.teams_help 34 5
+cli.update_help 6 0
+cli.wake_help 17 1
+mobile.setup 76 2
+relay.login 4 0
+tui.analytics 98 2
+tui.app 46 1
+tui.hub_links 56 11
+tui.import 87 0
+tui.library 108 1
+tui.projects 97 0
+tui.small 137 4
+tui.usage 21 1
+wire.aida_cadence 2 0
+wire.console 8 0
+wire.errors.agents 44 1
+wire.errors.auth 12 0
+wire.errors.files 11 0
+wire.errors.media 20 0
+wire.errors.sdk_spec 21 0
+wire.errors.sdk_startup 4 0
+wire.exec 17 1
+wire.host_speed 2 1
+wire.settings.account_policy 14 1
+wire.settings.hub_defaults 9 1
+wire.slash.library 2 0
+wire.tunnel_setup 5 0
+
+## round 2: audit dir core-audit2/vi, auditor session a3954428c96c
+verdict.txt:
+CHANGES_REQUESTED
+BLOCKER 0 · MAJOR 2 · MINOR 5 · NIT 2 — 9 findings; 70 changed values + 2 declines re-judged; 56 namespaces swept
+progress.log:
+2026-10-31 round-2 vi audit (read-only)
+- read glossary + vi style guide (origin/main 5a6683f6)
+- extracted en + context for 56 namespaces via one git cat-file --batch -> core-audit2/vi/src/batch.out
+- (A) 70 changes.jsonl keys: AFTER == file value for all 70; each judged against EN/rules
+- (B) 2 declines (VI-003/004) judged: alignment fixed (cell 15 on all 4 rows), protocol-label point left as MINOR R2-VI-004
+- (C) sweeps: push/pull/merge/đẩy/kéo/hợp nhất; judge; heartbeat/nhịp tim; chấp thuận; nền tảng lưu trữ; foreground; highlight; ledger; cánh tay; chưa được hoàn tác; băng tần; prompt/token/cache/script/endpoint/extra/telemetry/runtime; sidecar protocol-label tokens; cổng; quotes
+- (D) ICU parse of every value (names, select arms, plural cats = other only): 0 issues; NFC/CR/control/bidi: 0; ESC counts identical; backticks/flags identical; 30 maxCells measured with wcwidth-style count and rich cell_len: 0 over
+- ru wire.settings.hub_defaults.agents.help now 60 cells (≤72); vi 69/72
+- wrote findings.jsonl (9), verdict.txt, summary.md
+
+## round 3: audit dir core-audit3/vi, auditor session 0cc22c4c8b4f
+verdict.txt:
+PASS
+BLOCKER 0 · MAJOR 0 · MINOR 2 · NIT 1
+progress.log:
+loaded 56 patch files / 1311 values; en catalogues + sidecars from origin/main 1774a28df5a9 (git archive to own scratch)
+glossary + vi style guide read first
+(A) 8 changes.jsonl entries: after == patch bytes 8/8; judged fresh -> 1 NIT (create_notify)
+(B) 1 decline (R2-VI-004): reasoned, conflicts with sidecar -> MINOR carried as R3-VI-001
+(C) sweep: kept-English reverse check (prompt/token/push/pull/merge/commit/endpoint/cache/script/deploy/telemetry/runtime/mesh/linger/heartbeat/judge/extra) + pattern greps (hợp đồng, cánh tay, tại chỗ, đánh thức, cổng, lời nhắc, mã truy cập, nhịp tim, giám khảo, chấp thuận, đẩy/kéo/hợp nhất, nhóm, « », ...) -> no new recurrences
+(D) ICU args/types/select arms/plural cats (other only), backticks, --flags, Rich tags, ESC counts, newline/edge whitespace, NFC, CR, bidi/format chars, maxCells (30 budgets, terminal cells) -> 0 defects; ru hub_defaults.agents.help now 60/72
+verdict PASS
+late sweep: Latin relay/wake in prose -> R3-VI-003 MINOR (cli.services_help.services_description); verdict PASS, MINOR 2 NIT 1
+
+## applier-computed (apply_locale.py, run against the worktree at 137984daf98e6491dfd97cb6812d51c1a98abe6c)
+keys merged for this namespace: 12
+sha256 en  local_operator/i18n/catalogues/en/cli.hub_shared_help.json = 5d40860430e36224bd77e95ff8298bd4b80f052f3d910a532947af6e78632b44
+sha256 tgt local_operator/i18n/catalogues/vi/cli.hub_shared_help.json = e6be663a24293e5accc311312c01f5a86870c19952515ffd23cb37c546d137ae
+sha256 audited patch file (scratchpad core-i18n/vi/cli.hub_shared_help.json) = 8bfdd39c709edeb0a9b2b0a0892d24439d2f216a30b49b1905019f09cd31f155
+assertions passed: patch keys subset of en, every en key present, English key order, patch values byte-equal to catalogue values, no pre-existing value changed

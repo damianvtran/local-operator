@@ -1,0 +1,86 @@
+{
+  "locale": "es",
+  "namespace": "wire.errors.session_host",
+  "audit_id": "es3222b",
+  "audit_date": "2026-10-31",
+  "key_count": 3,
+  "source_audit_revision": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "host-es-audit-b",
+    "session": "f784eae73c69",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "independent_from_translator_session": "056852035b33",
+    "actual_model_source": "Host model-switch notices: anthropic/claude-sonnet-5-5 -> anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider quota fallback. Semantic audit and validation performed on openai/gpt-6.1-sol.",
+    "result": "passed",
+    "findings": 0
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "056852035b33",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "actual_model_source": "host model-switch notice: temporary fallback for provider quota; anthropic/claude-sonnet-5-5 -> anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; translation reasoning and writing performed on openai/gpt-6.1-sol"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/wire.errors.session_host.json",
+      "sha256": "b27376785fe2c4bc4e3ca302e3f34097dad93bf483ccef5a921177ac6e8a00b8",
+      "audited_candidate_path": "/Users/damian/.local-operator/sessions/056852035b33/scratchpad/host-copy-es/wire.errors.session_host.json"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es3222b/report.md",
+      "sha256": "59ae25bacb02a1747d62e1d747b97ae21961efe9aac910f9688291ac6445fcf0"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es3222b/audit.log",
+      "sha256": "bd891f90b8196fe5f28ae0eb63c16288db69bd08cbb63ec6ad210727f62019f1"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es3222b/run_audit.py",
+      "sha256": "f25323264e9fcee22e29e62e23390db9ed4dd14d30d0ad499ef35ab1c27b298c"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es3222b/input-hashes.json",
+      "sha256": "0cb371176729adb3eda2ca98e8f90329458b8ea5b9d305cfcaf626a323a9b675"
+    },
+    {
+      "path": "i18n/audits/evidence/es/wire.errors.session_host/es3222b/ledger-row-proposal.json",
+      "sha256": "4d2816e6e8b0a285f8cc84063cf2374adbfa5b4ae92b95f8f2f8445d282ef426"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "findings_report": "i18n/audits/evidence/es/wire.errors.session_host/es3222b/report.md",
+  "audit_notes_not_execution_log": [
+    "report.md"
+  ],
+  "actual_execution_logs": [
+    "audit.log"
+  ],
+  "canonical_future_record_path": "i18n/audits/evidence/es/wire.errors.session_host/es3222b/record.json",
+  "artifact_state": "scratch handoff; not tracked/committed/merged; manager to retain canonical bundle",
+  "limitations": [
+    "No rendered fit proof",
+    "Scoped committed check_catalogues() only; no whole-repository CLI/full suite",
+    "Same actual model as translator, but separate independent session; audit-a never inspected"
+  ],
+  "second_independent_pass": true,
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

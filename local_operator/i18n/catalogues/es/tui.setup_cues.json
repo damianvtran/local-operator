@@ -1,0 +1,4 @@
+{
+  "tui.setup_cues.setup_placeholder": "Escribe {command} para empezar",
+  "tui.setup_cues.no_provider_cue": "Conecta primero una cuenta de IA: escribe {command}"
+}

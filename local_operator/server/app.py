@@ -43,6 +43,7 @@ from local_operator.server.routes import (
     chat,
     config,
     credentials,
+    desktop_account_profile,
     desktop_aida,
     desktop_approvals,
     desktop_catalogues,
@@ -935,6 +936,7 @@ app.include_router(desktop_lifecycle.router)
 # session-scoped `/v1/desktop/sessions/{id}/mcp` above.
 app.include_router(desktop_mcp.router)
 app.include_router(desktop_radient.router)
+app.include_router(desktop_account_profile.router)
 # `/v1/desktop/tunnel` is a literal path, so it collides with nothing above it
 # whatever the order: no sibling declares a single-segment `/v1/desktop/{...}`
 # template that could swallow it.

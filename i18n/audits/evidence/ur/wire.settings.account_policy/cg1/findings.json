@@ -1,0 +1,27 @@
+{
+  "locale": "ur",
+  "namespace": "wire.settings.account_policy",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-025",
+      "severity": "MINOR",
+      "namespace": "wire.settings.account_policy",
+      "key": "wire.settings.account_policy.help",
+      "english": "Chooses eligible sibling accounts within the same provider and credential tier. A compatible, unexpired lease from a successful request takes priority for every policy; it does not guarantee a cache hit. Reset soonest prefers the nearest weekly refill, then the five-hour refill within one-minute ties. An explicit policy overrides the legacy usage-aware account pick setting.",
+      "current": "ایک ہی فراہم کنندہ اور کریڈینشل درجے کے اندر اہل ہم سطح اکاؤنٹس منتخب کرتا ہے۔ کامیاب درخواست سے ملنے والی مطابقت پذیر، غیر میعاد شدہ لیز ہر پالیسی میں ترجیح پاتی ہے؛ یہ کیش ہٹ کی ضمانت نہیں دیتی۔ Reset soonest قریب ترین ہفتہ وار ری فل کو ترجیح دیتی ہے، پھر ایک منٹ کے برابری کے دائرے میں پانچ گھنٹے کی ری فل۔ واضح پالیسی پرانی usage-aware اکاؤنٹ پک ترتیب کو اوور رائڈ کرتی ہے۔",
+      "problem": "The help names the option «Reset soonest» in English while the option label right beside it is translated «جلد ری سیٹ» (reset_soonest.label; legacy.help already uses the translated labels). A user cannot match the help to the choice.",
+      "suggested": "… جلد ری سیٹ قریب ترین ہفتہ وار ری فل کو ترجیح دیتی ہے …",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    }
+  ]
+}

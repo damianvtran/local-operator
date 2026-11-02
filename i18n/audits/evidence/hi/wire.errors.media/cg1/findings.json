@@ -1,0 +1,27 @@
+{
+  "locale": "hi",
+  "namespace": "wire.errors.media",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 2,
+      "id": "HI2-004",
+      "severity": "NIT",
+      "namespace": "wire.errors.media",
+      "key": "wire.errors.media.provider_model_pair",
+      "english": "provider and model must be provided together, or neither.",
+      "current": "provider और model एक साथ दिए जाने चाहिए, या कोई नहीं।",
+      "problem": "The only prose 'provider' left in Latin after the प्रोवाइडर sweep. That is fine if these are parameter names, but there is no context sidecar to confirm it. If they are words in the message, the sentence should use प्रोवाइडर/मॉडल.",
+      "suggested": "if not parameter names: 'प्रोवाइडर और मॉडल दोनों एक साथ दें, या कोई भी नहीं।'; otherwise wrap as `provider`/`model`",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ]
+}

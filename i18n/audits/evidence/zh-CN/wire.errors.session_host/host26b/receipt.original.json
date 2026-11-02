@@ -1,0 +1,34 @@
+{
+  "record_reference": "i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/record.json",
+  "locale": "zh-CN",
+  "namespace": "wire.errors.session_host",
+  "audit_date": "2026-10-31",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev; host-zh-CN-audit-b)",
+    "session": "3d31f5998c79",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "independent_from_translator_session": "d90daece65d4",
+    "actual_model_source": "Explicit runtime user model-switch notice: openai/gpt-6.1-sol temporary quota fallback; prior notice anthropic/claude-opus-5-5; primary anthropic/claude-sonnet-5-5. Audit performed after gpt-6.1-sol switch."
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/report.md",
+      "sha256": "1bc46dd1b50e05c3af647e966e6f4bd8ee95c149696ab966d0e6db3e78632497"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/audit.log",
+      "sha256": "8b8950a6cbe87a639138561bb4bb22254bb45d8c28b7f9508a3ad276506973e1"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/audit-run.py.txt",
+      "sha256": "2e6643f4c391c8779ff97a2a0f6089249c59032533a255b437489cae3006782d"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/ledger-proposal.json",
+      "sha256": "77a964a09c934fcedf0baaaaaaf547f2990db85147934c64e5d3431fb1d77e95"
+    }
+  ],
+  "staging_only": true,
+  "tracked_commit": null
+}

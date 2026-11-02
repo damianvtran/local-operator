@@ -1,0 +1,13 @@
+{
+  "wire.errors.files.audio_type": "फ़ाइल अनुमत ऑडियो प्रकार की नहीं है: {mime_type}",
+  "wire.errors.files.heic_conversion": "HEIC/HEIF फ़ाइल बदलने में विफल: {error}",
+  "wire.errors.files.html_type": "फ़ाइल अनुमत HTML प्रकार की नहीं है: {mime_type}",
+  "wire.errors.files.html_utf8": "HTML फ़ाइल मान्य UTF-8 टेक्स्ट नहीं है।",
+  "wire.errors.files.image_type": "फ़ाइल अनुमत छवि प्रकार की नहीं है: {mime_type}",
+  "wire.errors.files.internal_error": "आंतरिक सर्वर त्रुटि: {error}",
+  "wire.errors.files.sign_auth": "लोकल एक्सेस टोकन या डेस्कटॉप बेयरर आवश्यक है।",
+  "wire.errors.files.sign_path": "path खाली नहीं होना चाहिए।",
+  "wire.errors.files.sign_route": "route इनमें से एक होना चाहिए: {routes}",
+  "wire.errors.files.sign_ttl": "ttl_s 1 और {maximum} के बीच होना चाहिए।",
+  "wire.errors.files.video_type": "फ़ाइल अनुमत वीडियो प्रकार की नहीं है: {mime_type}"
+}

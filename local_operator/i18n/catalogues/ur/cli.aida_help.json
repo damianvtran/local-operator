@@ -1,0 +1,6 @@
+{
+  "cli.aida_help.aida": "Aida کے پروفائل نوٹس: ریکارڈ کریں کہ اسے کیا یاد رکھنا چاہیے",
+  "cli.aida_help.note": "system_prompt.md میں 'About the operator' کے تحت نوٹ شامل کریں",
+  "cli.aida_help.note_text": "ریکارڈ کیا جانے والا نوٹ؛ STDIN سے پڑھنے کے لیے چھوڑ دیں",
+  "cli.aida_help.note_description": "<config root>/system_prompt.md کے نشان زد 'About the operator' سیکشن کے اندر نوٹ درج کریں، تاکہ ہر آئندہ سیشن اور ذیلی ایجنٹ اسے دیکھے۔ فائل کنفیگ روٹ سے حل ہوتی ہے اور کبھی آرگومنٹ نہیں ہوتی؛ نوٹ میں سیکشن مارکر نہیں ہونے چاہییں۔ STDIN سے نوٹ پڑھنے کے لیے TEXT چھوڑ دیں (کئی لائنوں کے نوٹس کو کوٹیشن کی ضرورت نہیں)۔"
+}

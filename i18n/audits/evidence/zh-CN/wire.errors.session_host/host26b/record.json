@@ -1,0 +1,98 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.errors.session_host",
+  "audit_id": "host26b",
+  "audit_date": "2026-10-31",
+  "key_count": 3,
+  "auditor": {
+    "agent": "i18n-auditor (lopdev; host-zh-CN-audit-b)",
+    "session": "3d31f5998c79",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "independent_from_translator_session": "d90daece65d4",
+    "actual_model_source": "Explicit runtime user model-switch notice: openai/gpt-6.1-sol temporary quota fallback; prior notice anthropic/claude-opus-5-5; primary anthropic/claude-sonnet-5-5. Audit performed after gpt-6.1-sol switch."
+  },
+  "source_audit_revision": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.errors.session_host.json",
+      "sha256": "4205cc6feda10279c524d78ff95c450bbc50981a48d13e37f82849d1705860d4"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/report.md",
+      "sha256": "1bc46dd1b50e05c3af647e966e6f4bd8ee95c149696ab966d0e6db3e78632497"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/audit.log",
+      "sha256": "8b8950a6cbe87a639138561bb4bb22254bb45d8c28b7f9508a3ad276506973e1"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/audit-run.py.txt",
+      "sha256": "2e6643f4c391c8779ff97a2a0f6089249c59032533a255b437489cae3006782d"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/ledger-proposal.json",
+      "sha256": "77a964a09c934fcedf0baaaaaaf547f2990db85147934c64e5d3431fb1d77e95"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/receipt.json",
+      "sha256": "2ef5e004f871e50429a2923eeec8b587ede05f18a6deaadda706b45d820ef03b"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "report_kind": "second_independent_blind_semantic_audit",
+  "audit_notes_not_execution_log": [
+    "report.md"
+  ],
+  "actual_execution_logs": [
+    "audit.log"
+  ],
+  "rendered_fit_proof": false,
+  "first_auditor_findings_consulted": false,
+  "machine_translation_used": false,
+  "shared_ledger_written": false,
+  "candidate_edited": false,
+  "evidence_state": "temporary scratch handoff only; canonical paths proposed, not tracked or on main",
+  "canonical_future_record_path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/record.json",
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "integration": {
+    "integrated_from_session": "3d31f5998c79",
+    "original_record_sha256": "1abbce8283a285f862db081f3af21d57ed3fa29dd0e759f484865527ddc98a59",
+    "original_receipt_sha256": "863ef85e5a05dadd9cbac6e988b6a045678f222f4087c0e389fb04c05ce5fa7f",
+    "canonical_record": "i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/record.json",
+    "canonical_translator_provenance": "i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/translator/provenance.json",
+    "retention": "Retained in this PR; not claimed merged or on main. Historical commands/cwd/scratch input paths are preserved as executed, not claimed tracked.",
+    "integration_judgment": "No new audit; semantic pass/finding facts copied from independent original records.",
+    "artifact_hash_updates": [
+      {
+        "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/receipt.json",
+        "original_sha256": "863ef85e5a05dadd9cbac6e988b6a045678f222f4087c0e389fb04c05ce5fa7f",
+        "integrated_sha256": "2ef5e004f871e50429a2923eeec8b587ede05f18a6deaadda706b45d820ef03b",
+        "reason": "Receipt gained integration metadata and canonical record_reference; original bytes retained as receipt.original.json."
+      }
+    ],
+    "retained_script_snapshots": [
+      {
+        "original_bundle_name": "run_audit.py",
+        "retained_snapshot": "run_audit.py.txt",
+        "sha256": "2e6643f4c391c8779ff97a2a0f6089249c59032533a255b437489cae3006782d"
+      }
+    ]
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "locale": "hi",
+  "namespace": "wire.errors.session_host",
+  "audit_date": "2026-10-31",
+  "audit_id": "h31a",
+  "key_count": 3,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "host-hi-audit-a",
+    "session": "b2f3bfde5529",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "independent_from_translator_session": "d2959affe186",
+    "independence_basis": "Different auditor agent session; did not author or edit candidate. Same actual model is disclosed.",
+    "actual_model_source": "Host [model switch] notice: openai/gpt-6.1-sol temporary provider failure/quota fallback; initial anthropic/claude-sonnet-5-5, intermediate anthropic/claude-opus-5-5. Audit reasoning and artifact generation on openai/gpt-6.1-sol."
+  },
+  "translator_provenance": {
+    "agent": "i18n-translator",
+    "session": "d2959affe186",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31"
+  },
+  "source_audit_revision": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/hi/wire.errors.session_host.json",
+      "sha256": "9f9e90cfe7ef2633163f20bff9ab579e49f88b77f322eeb3e7854f208c92632d",
+      "candidate_path": "/Users/damian/.local-operator/sessions/d2959affe186/scratchpad/host-copy-hi/wire.errors.session_host.json"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/hi/wire.errors.session_host/h31a/audit.log",
+      "staging_path": "/Users/damian/.local-operator/sessions/b2f3bfde5529/scratchpad/hi-host-audit-a/audit.log",
+      "sha256": "65ac66daa721f4b6386105b952c4f5fe297d9c8e60b074cc8e94c0af69b0ef3e",
+      "kind": "actual_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/hi/wire.errors.session_host/h31a/report.md",
+      "staging_path": "/Users/damian/.local-operator/sessions/b2f3bfde5529/scratchpad/hi-host-audit-a/report.md",
+      "sha256": "05ee3aca880fb8461327623416abee93404f1e65ed301be18e6faddbc7210f49",
+      "kind": "audit_notes_not_execution_log"
+    }
+  ],
+  "planned_canonical_record_path": "i18n/audits/evidence/hi/wire.errors.session_host/h31a/record.json",
+  "retention_status": "scratch staging only; awaiting manager tracked preservation",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "per_key_assessments": [
+    {
+      "key": "wire.errors.session_host.unsupported",
+      "current_text": "यह कंप्यूटर बैकग्राउंड सत्र होस्ट नहीं चला सकता, इसलिए सत्र शुरू नहीं हुआ। ऐसे कंप्यूटर का इस्तेमाल करें जिसमें समर्थित बैकग्राउंड सेवा प्रबंधक हो।",
+      "verdict": "passed",
+      "finding_ids": [],
+      "assessment": "Cannot run host and session not started are explicit. Supported-computer remedy is preserved, without a temporary-retry promise. बैकग्राउंड सत्र होस्ट and सेवा प्रबंधक are intelligible technical Hindi; सत्र and सेवा follow glossary. Polite इस्तेमाल करें is idiomatic."
+    },
+    {
+      "key": "wire.errors.session_host.unavailable",
+      "current_text": "बैकग्राउंड सत्र होस्ट से जवाब नहीं मिला, इसलिए सत्र शुरू नहीं हुआ। दोबारा कोशिश करने से पहले थोड़ा इंतज़ार करें।",
+      "verdict": "passed",
+      "finding_ids": [],
+      "assessment": "जवाब नहीं मिला truthfully states no host response; सत्र शुरू नहीं हुआ denies successful start. थोड़ा इंतज़ार करें retains the wait-before-manual-retry remedy and does not promise reconnecting or automatic recovery. Natural polite Hindi; nukta in इंतज़ार is retained."
+    },
+    {
+      "key": "wire.errors.session_host.refused",
+      "current_text": "बैकग्राउंड सत्र होस्ट ने यह सत्र शुरू करने से इनकार कर दिया। सत्र शुरू नहीं हुआ। दोबारा कोशिश करने से पहले अपने Local Operator के कॉन्फ़िगरेशन फ़ोल्डर में logs/session-host.log देखें।",
+      "verdict": "passed",
+      "finding_ids": [],
+      "assessment": "इनकार कर दिया accurately conveys refusal, separately confirms no session start, and requires inspecting the exact logs/session-host.log literal in the Local Operator config folder before trying again. कॉन्फ़िगरेशन फ़ोल्डर is an appropriate technical loan; no host internals added."
+    }
+  ],
+  "findings": [],
+  "second_independent_pass_required": true,
+  "second_independent_pass_completed_by_this_report": false,
+  "rendered_fit_verified": false,
+  "ledger_written": false,
+  "sibling_evidence": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/d2959affe186/scratchpad/host-copy-hi/provenance.json",
+      "sha256": "676007a2d981c59076c0fab9188b864925bfaeff6b6ac23496b7621839bf0aaf"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/d2959affe186/scratchpad/host-copy-hi/validator.log",
+      "sha256": "a9bba4cb0f66a924b430b9b34380bf12a842d7cb2a12639f6b3e4891729056b1"
+    }
+  ],
+  "integration": {
+    "integrated_from_session": "b2f3bfde5529",
+    "original_record_sha256": "8cab186e7517de8c23452a13f2491f2dc14a41cd7022dc36f1f71b276c226421",
+    "original_receipt_sha256": "9d1885b0c70f291679cf11bdf0b1f30674fa51ad07bbfa057c0d6e8323786566",
+    "canonical_record": "i18n/audits/evidence/hi/wire.errors.session_host/h31a/record.json",
+    "canonical_translator_provenance": "i18n/audits/evidence/hi/wire.errors.session_host/h31a/translator/provenance.json",
+    "retention": "Retained in this PR; not claimed merged or on main. Historical commands/cwd/scratch input paths are preserved as executed, not claimed tracked.",
+    "integration_judgment": "No new audit; semantic pass/finding facts copied from independent original records."
+  }
+}

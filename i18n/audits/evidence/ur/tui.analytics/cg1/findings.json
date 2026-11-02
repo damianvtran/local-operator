@@ -1,0 +1,29 @@
+{
+  "locale": "ur",
+  "namespace": "tui.analytics",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": "targeted-argorder",
+      "auditor_session": "b15ab322fa0f",
+      "id": "UR-ARG-2",
+      "severity": "NIT",
+      "namespace": "tui.analytics",
+      "key": "tui.analytics.rate.legend",
+      "english": "decode rate over {shown, number} of {total, number} calls",
+      "current": "decode ریٹ {shown, number} کالز پر، کل {total, number} میں سے",
+      "problem": "Correct direction (rate over shown, out of total); trailing 'کل {total} میں سے' is a tacked-on clause. Acceptable; a parenthetical reads a touch smoother.",
+      "suggested": "decode ریٹ {shown, number} کالز پر (کل {total, number} میں سے)",
+      "disposition": "accepted unchanged"
+    }
+  ],
+  "counts_scope": "counts, result and gate_status describe locale-wide rounds 1-2 as recorded in the ledger; findings with round \"targeted-argorder\" come from session b15ab322fa0f (read only the rephrased keys) and are not in those counts"
+}

@@ -47,6 +47,7 @@ from local_operator.tui.widgets.status_line import (
     ICON_LAST_RATE,
     ICON_MCP,
     ICON_MODEL,
+    ICON_SAVER,
     ICON_TEAM,
     ICON_TUNNEL,
     NAME_CELLS,
@@ -2568,3 +2569,186 @@ def test_the_composed_fork_and_liveness_row_fits_and_keeps_the_age_last(monkeypa
         # the head is intact.
         if "Not answering" in row and "4m" not in row:
             assert row.rstrip().endswith(("\u2026", "…", "reconnec…")), (width, row)
+
+
+# -- the operator's status command segment ----------------------------------
+
+
+def test_the_custom_segment_paints_unadorned_and_clears_on_empty() -> None:
+    """The script's own text, no band icon in front (scripts bring their own
+    glyphs), and "" removes it — the runner sends "" on failure."""
+    status, _clock = _full_band()
+    status.update(custom="quota 42%")
+    row = status.render_text(200).plain
+    # Leftmost of the figures, nothing between the seam and the script's text.
+    assert f"quota 42% {_SEP_RIGHT} {ICON_CONTEXT} 49.6%/1M" in row
+    status.update(custom="")
+    assert "quota" not in status.render_text(200).plain
+
+
+def test_the_custom_segment_is_inert_when_unset() -> None:
+    """No command configured: the band is byte-identical to before the rung."""
+    status, _clock = _full_band()
+    rows = {width: status.render_text(width).plain for width in range(200, 20, -7)}
+    status.update(custom="")
+    assert {width: status.render_text(width).plain for width in rows} == rows
+
+
+def test_the_custom_segment_outlives_title_and_cost_but_not_context(
+    monkeypatch,
+) -> None:
+    """Order: after the conversation name and cost, before the context reading.
+
+    The operator configured this reading on purpose, so it outranks a title,
+    the static settings and the re-derivable figures; the context reading
+    still outranks it because it predicts compaction in THIS session.
+    """
+    monkeypatch.setenv("HOME", "/Users/tester")
+    status, _clock = _full_band()
+    status.update(custom="acct 42%")
+    gone: dict[str, int] = {}
+    probes = {
+        "name": "Status band enric",
+        "custom": "acct 42%",
+        "cost": "$12.40",
+        "context": "49.6%/1M",
+    }
+    for width in range(200, 4, -1):
+        plain = status.render_text(width).plain
+        for key, needle in probes.items():
+            if key not in gone and needle not in plain:
+                gone[key] = width
+    assert gone["name"] > gone["cost"] > gone["custom"] > gone["context"], gone
+
+
+def test_a_long_custom_reading_shortens_before_it_drops(monkeypatch) -> None:
+    """All-or-nothing left a 41-cell hole at 80 columns (design round 1, T-1).
+
+    Wherever the reading is painted it is whole or cut with an ellipsis, never
+    below the floor; and wherever cwd survives but the reading is gone, the
+    blank run between the groups is too narrow to have held the floor plus its
+    seam, so no width drops it while there was room for it.
+    """
+    from local_operator.tui.widgets.status_line import CUSTOM_CELLS_FLOOR
+
+    monkeypatch.setenv("HOME", "/Users/tester")
+    from local_operator.tui.status_command import MAX_CELLS
+
+    reading = "acct 5h 42% · 7d 18% · resets in 13h 12m"
+    assert cell_len(reading) == MAX_CELLS
+    status, _clock = _full_band()
+    status.update(custom=reading)
+    assert reading in status.render_text(140).plain
+    seen_cut = False
+    for width in range(140, 40, -1):
+        plain = status.render_text(width).plain
+        assert cell_len(plain) <= width
+        if "local-operator" not in plain:
+            continue
+        if "acct" not in plain:
+            hole = max(len(run) for run in re.findall(r" {2,}", plain))
+            room = hole - _MIN_GROUP_GAP
+            assert room < CUSTOM_CELLS_FLOOR + 3, f"dropped with {room} spare at {width}: {plain!r}"
+            continue
+        if reading not in plain:
+            seen_cut = True
+            shown = plain[plain.index("acct") :].split(f" {_SEP_RIGHT}")[0]
+            assert shown.endswith("…") and cell_len(shown) >= CUSTOM_CELLS_FLOOR, shown
+    assert seen_cut, "no width exercised the shortened form"
+
+
+def test_a_stale_reading_takes_the_last_known_ink() -> None:
+    """A held line (the script just failed) must not read as a fresh one."""
+    status, _clock = _full_band()
+    status.update(custom="acct 42%")
+
+    def style_of(needle: str) -> Style:
+        text = status.render_text(200)
+        start = text.plain.index(needle)
+        style = next(span.style for span in text.spans if span.start <= start < span.end)
+        assert isinstance(style, Style)
+        return style
+
+    fresh = style_of("acct 42%")
+    status.update(custom_stale=True)
+    stale = style_of("acct 42%")
+    assert fresh != stale
+    assert stale == Style(color=theme_mod.semantic_color("muted"), italic=True)
+    assert fresh.color == stale.color and not fresh.italic
+
+
+def test_the_custom_rung_is_in_every_ladder_and_bounded() -> None:
+    for ladder in (
+        _DROP_LADDER,
+        _DROP_LADDER_QUIET,
+        _DROP_LADDER_ESTIMATE,
+        _DROP_LADDER_QUIET_ESTIMATE,
+    ):
+        assert "custom" in ladder
+        assert ladder.index("shorten-custom") == ladder.index("custom") - 1
+    assert "custom" not in _UNBOUNDED_RUNGS
+    assert _DROP_LADDER.index("cost") < _DROP_LADDER.index("custom") < _DROP_LADDER.index("cwd")
+
+
+def test_command_facts_are_what_the_band_shows() -> None:
+    status, _clock = _full_band()
+    facts = status.command_facts()
+    assert facts["model_label"] == "openrouter/moonshotai/kimi-k2-thinking"
+    assert facts["context_tokens"] == 496_000
+    assert facts["context_window"] == 1_000_000
+    assert facts["cost"] == "$12.40"
+
+
+# ---------------------------------------------------------------------------
+# Saver segment — presence IS the message (design round 2, D1/D2/D3)
+# ---------------------------------------------------------------------------
+
+
+def _saver_band(width: int, value: str) -> StatusLine:
+    status = StatusLine(_dock(width), clock=FakeClock())
+    status.update(model_label="openai/gpt-5.4", cwd="/Users/tester/work", saver=value)
+    return status
+
+
+def _band_text(status: StatusLine, width: int) -> str:
+    return status.render_text(width).plain
+
+
+def test_saver_off_paints_nothing_at_all() -> None:
+    """Off is ABSENT, not reserved (D1).
+
+    The shipped round-1 band painted ``ICON_SAVER`` with an empty value in every
+    session for every user — a dim smudge that told a reader nothing, and the
+    only segment in the band that painted without a reading. Every other
+    segment is gated on a non-empty value; this pins Saver to the same rule.
+    """
+    off = _saver_band(120, "")
+    text = _band_text(off, 120)
+    assert ICON_SAVER not in text
+    assert "saver" not in text
+
+
+def test_saver_on_paints_its_word_and_the_mark() -> None:
+    text = _band_text(_saver_band(120, "saver"), 120)
+    assert ICON_SAVER in text and "saver" in text
+
+
+def test_the_saver_mark_is_not_the_read_tool_icon() -> None:
+    """Design D3: ``≡`` is ``PLAIN_TOOL_ICONS["read"]`` on the same screen."""
+    from local_operator.tui.glyphs import PLAIN_TOOL_ICONS
+
+    assert ICON_SAVER not in PLAIN_TOOL_ICONS.values()
+
+
+def test_the_band_is_one_row_at_every_width_in_both_states() -> None:
+    for width in (80, 100, 120, 140):
+        for value in ("", "saver"):
+            row = _saver_band(width, value).render_text(width).plain
+            assert "\n" not in row, (width, value)
+
+
+def test_saver_sheds_beside_fast_not_under_duration() -> None:
+    """Design D2: the old rung lost the indicator at 80 columns while `fast` stayed."""
+    ladder = _DROP_LADDER
+    assert ladder.index("saver") > ladder.index("fast")
+    assert ladder.index("saver") - ladder.index("fast") == 1

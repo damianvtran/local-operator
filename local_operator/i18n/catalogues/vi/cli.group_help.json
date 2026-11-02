@@ -1,0 +1,12 @@
+{
+  "cli.group_help.skills": "Xuất bản, pull và đồng bộ kỹ năng trên Agent Hub (tài liệu và gói)",
+  "cli.group_help.skills_description": "Gói kỹ năng không được chứa tệp thực thi (từ chối mọi tệp có bit thực thi); cài đặt gói không bao giờ chạy mã.",
+  "cli.group_help.tunnel": "Truy cập các runtime cục bộ từ xa qua Radient",
+  "cli.group_help.secret": "Bí mật được mã hóa và lưu lâu dài, tác nhân có thể truy xuất mà không cần hỏi lại",
+  "cli.group_help.network": "Mạng mesh: ghép đôi thiết bị, điều khiển phiên trên các thiết bị",
+  "cli.group_help.disk": "Công cụ khi thiếu dung lượng đĩa: đo trước, chỉ thu hồi khi chứng minh được là an toàn",
+  "cli.group_help.operator": "Quyền của người vận hành: khóa cho phép nới lỏng yêu cầu phê duyệt đang áp dụng",
+  "cli.group_help.pair": "Ghép đôi điện thoại làm thiết bị của người vận hành: chỉ cần ký cấp quyền một lần",
+  "cli.group_help.search": "Cấu hình và kiểm tra tìm kiếm web có cân bằng tải",
+  "cli.group_help.fetch": "Cấu hình và kiểm tra tải nội dung web không hiển thị cửa sổ"
+}

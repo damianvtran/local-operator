@@ -173,6 +173,7 @@ def _consumer_defaults() -> dict[str, object]:
         QUERY_BUDGET_SECONDS_DEFAULT,
         QUERY_BUDGET_STOP_DEFAULT,
     )
+    from local_operator.tui import status_command
     from local_operator.tui.resume_click import DESKTOP_LAUNCH_COMMAND_DEFAULT
     from local_operator.tui.session_catalog import (
         DEFAULT_SIDEBAR_POSITION,
@@ -286,6 +287,7 @@ def _consumer_defaults() -> dict[str, object]:
         # carries a literal because settings_io stays off the write path's
         # import graph, so this pin is what makes a drift red.
         "session.scratchpad.max_bytes": SCRATCHPAD_TOTAL_BUDGET_BYTES,
+        "display.composer.command_interval": status_command.DEFAULT_INTERVAL_S,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
         # Read at every child build by ``subagent.read_slim_child_knowledge``;
         # the constant sits beside that reader, not here, so the registry
@@ -685,6 +687,7 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.composer.rate": "tui/settings.py derives its defaults from this registry",
     "display.composer.cost": "tui/settings.py derives its defaults from this registry",
     "display.composer.duration": "tui/settings.py derives its defaults from this registry",
+    "display.composer.command": "free text; empty means no command runs, so no constant",
     "subagents.models.lo": "free text; empty removes the tier; 'default' tracks it, no constant",
     "subagents.models.med": "free text; empty removes the tier; 'default' tracks it, no constant",
     "subagents.models.hi": "free text; empty removes the tier; 'default' tracks it, no constant",
@@ -3615,3 +3618,44 @@ def test_each_authored_query_reaches_the_row_it_is_about(query: str, row_key: st
         if f" {query} " in f" {_row_search_text(setting)} "
     }
     assert row_key in reachable, f"{query!r} no longer reaches {row_key}"
+
+
+def test_the_status_command_interval_bounds_match_the_runner() -> None:
+    """The page's range for the interval is the range the runner clamps to.
+
+    The registry carries literals because it stays off the TUI's import path;
+    this is what turns a drift between the two into a red test.
+    """
+    from local_operator.tui import status_command
+
+    row = settings_io.resolve_key("display.composer.command_interval")
+    assert row is not None
+    assert (row.minimum, row.maximum, row.unit) == (
+        status_command.MIN_INTERVAL_S,
+        status_command.MAX_INTERVAL_S,
+        "seconds",
+    )
+
+
+def test_the_status_command_is_operator_only_on_the_agent_write_path(tmp_path) -> None:
+    """The agent's ``setting`` tool cannot install a command the TUI then runs.
+
+    A write-tier approval card does not say "this runs on a timer, forever",
+    and a host with standing approval has no human in the loop at all, so the
+    row is refused before any write. The interval is NOT refused: changing how
+    often an operator-chosen command runs grants nothing new.
+    """
+    from local_operator import settings_control
+    from local_operator.config import ConfigManager
+
+    manager = ConfigManager(tmp_path)
+    command = settings_io.resolve_key("display.composer.command")
+    assert command is not None
+    with pytest.raises(ValueError, match="operator-only"):
+        settings_control.apply(manager, command, "echo hi")
+    assert settings_control.read(manager, command) == ""
+
+    interval = settings_io.resolve_key("display.composer.command_interval")
+    assert interval is not None
+    settings_control.apply(manager, interval, 60)
+    assert settings_control.read(manager, interval) == 60

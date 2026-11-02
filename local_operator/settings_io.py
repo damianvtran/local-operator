@@ -2956,6 +2956,40 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ws.display_composer_duration_choice_false_description()),
         ),
     ),
+    # The operator's own band segment (``tui/status_command.py``). A COMMAND,
+    # not a choice of built-ins: the facts it exists for (an account's quota
+    # from another agent tool's plugin, a deploy state) are ones the harness
+    # does not know, and those tools already ship scripts that print them.
+    # Empty = no segment and nothing runs. Operator-only on the agent write
+    # path (``settings_control.OPERATOR_ONLY``): it is a shell command run on a
+    # timer with no approval card.
+    Setting(
+        key="display.composer.command",
+        path=("display.composer.command",),
+        section="appearance",
+        label=_t(_ws.display_composer_command_label()),
+        kind=Kind.TEXT,
+        default="",
+        help=_t(_ws.display_composer_command_help()),
+        placeholder=_t(_ws.display_composer_command_placeholder()),
+        empty_unsets=True,
+        synonyms=("statusline", "plugin", "quota", "usage"),
+    ),
+    Setting(
+        key="display.composer.command_interval",
+        path=("display.composer.command_interval",),
+        section="appearance",
+        label=_t(_ws.display_composer_command_interval_label()),
+        kind=Kind.INT,
+        # Pinned to ``status_command.DEFAULT_INTERVAL_S`` (and the bounds to
+        # its MIN/MAX) by ``test_settings_io._consumer_defaults``; literal here
+        # because this module stays off the TUI's import path.
+        default=30,
+        help=_t(_ws.display_composer_command_interval_help()),
+        minimum=5,
+        maximum=3600,
+        unit="seconds",
+    ),
     Setting(
         key="tui.sidebar_visible",
         path=("tui", "sidebar_visible"),

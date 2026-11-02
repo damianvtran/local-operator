@@ -1,0 +1,11 @@
+{
+  "wire.settings.hub_defaults.agents.help": "Выкл. — пауза обновлений всех связей; вкл. — подписка новых.",
+  "wire.settings.hub_defaults.agents.label": "Автообновление связей агентов/навыков",
+  "wire.settings.hub_defaults.agents.off.description": "приостановить обновления всех связей агентов и навыков",
+  "wire.settings.hub_defaults.agents.on.description": "подписывать новые связи агентов и навыков",
+  "wire.settings.hub_defaults.model_default.note": "Для merge из хаба используется ваша текущая модель по умолчанию. Прежнее переопределение модели хаба игнорируется.",
+  "wire.settings.hub_defaults.teams.help": "Для новых связей команд; у существующих остаются свои политики.",
+  "wire.settings.hub_defaults.teams.label": "Подписывать новые связи команд",
+  "wire.settings.hub_defaults.teams.off.description": "приостановить входящие обновления для новых связей команд",
+  "wire.settings.hub_defaults.teams.on.description": "подписывать новые связи команд"
+}

@@ -1,0 +1,6 @@
+{
+  "cli.failures.error_line": "{prog}: error: {message}",
+  "cli.failures.required": "the following arguments are required: {names}",
+  "cli.failures.invalid_choice": "argument {argument}: invalid choice: {value} (choose from {choices})",
+  "cli.failures.invalid_command": "Invalid {group} command: {command}"
+}

@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: protocol.gen.ts (wire declarations).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (13 modules: access-flow.ts, access-queue.ts, ax-compact.ts, ax-locator.ts, deadline.ts, element-query.ts, errors.ts, file-transfer-policy.ts, file-transfer.tables.gen.ts, geometry-read.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: 1b089794060316c45d0c38b94adf7fd654caf8cfbc440dd4c5626b4ffcbae2cb
+// Inputs sha256: dc02c532ea19d85d9e35d44eeae640c02978b8741a71e10e4ee67ab723f40c15
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
@@ -32,6 +32,7 @@ export enum ErrorCode {
   NAV_FAILED = 'nav_failed',
   NAV_TIMEOUT = 'nav_timeout',
   ELEMENT_NOT_FOUND = 'element_not_found',
+  UNSUPPORTED_KEY = 'unsupported_key',
   ORIGIN_DENIED = 'origin_denied',
   ORIGIN_PROMPT_PENDING = 'origin_prompt_pending',
   ORIGIN_NOT_ALLOWED = 'origin_not_allowed',
@@ -71,7 +72,7 @@ export const CAPABILITY_SWITCHES: Record<string, { label: string; permission: st
   "upload": { label: 'Allow uploads', permission: '' },
 };
 
-export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'styles' | 'hit_test' | 'ancestors' | 'query' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_inspect' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload' | 'network_start' | 'network_stop' | 'network_read' | 'network_clear' | 'record_start' | 'record_stop';
+export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'press' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'styles' | 'hit_test' | 'ancestors' | 'query' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_inspect' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload' | 'network_start' | 'network_stop' | 'network_read' | 'network_clear' | 'record_start' | 'record_stop';
 // Wire methods ONLY the desktop app's browser host serves. They are in `Method`
 // because the vocabulary is shared, but this build must not serve or advertise
 // them: network capture needs a standing channel the extension's worker lifetime
@@ -79,7 +80,7 @@ export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'cli
 // tab-scoped session (D10 keeps that one desktop-only until its probe and consent
 // switch land). Generated from Python's `DESKTOP_ONLY_METHODS` so the
 // handler-parity test needs no hand-kept exemption.
-export type DesktopOnlyMethod = 'network_start' | 'network_stop' | 'network_read' | 'network_clear' | 'record_start' | 'record_stop';
+export type DesktopOnlyMethod = 'press' | 'network_start' | 'network_stop' | 'network_read' | 'network_clear' | 'record_start' | 'record_stop';
 // One buffered console/runtime log line, as `logs` returns it (newest last).
 // `level` is normalized to the error/warning/info/log vocabulary the tool
 // filters on; `source` distinguishes a page console call from an uncaught

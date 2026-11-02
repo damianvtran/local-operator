@@ -1,0 +1,7 @@
+{
+  "cli.qwencloud_help.qwencloud_ticket": "QwenCloud کنسول سیشن کوکی محفوظ کریں جسے /usage پڑھتا ہے",
+  "cli.qwencloud_help.set": "کوکی محفوظ کریں؛ ویلیو STDIN سے پڑھی جاتی ہے، argv سے کبھی نہیں",
+  "cli.qwencloud_help.status": "آیا کوکی محفوظ ہے اور کتنی پرانی ہے؛ ویلیو کبھی نہیں",
+  "cli.qwencloud_help.rm": "محفوظ شدہ کوکی ہٹائیں",
+  "cli.qwencloud_help.migrate": "سادہ متن ٹکٹ کو خفیہ شدہ سیکرٹ اسٹور میں منتقل کریں"
+}

@@ -1,0 +1,39 @@
+{
+  "locale": "vi",
+  "namespace": "wire.settings.account_policy",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-055",
+      "severity": "MINOR",
+      "namespace": "wire.settings.account_policy",
+      "key": "wire.settings.account_policy.help",
+      "english": "Chooses eligible sibling accounts within the same provider and credential tier. A compatible, unexpired lease from a successful request takes priority for every policy; it does not guarantee a cache hit. Reset soonest prefers the nearest weekly refill, then the five-hour refill within one-minute ties. An explicit policy overrides the legacy usage-aware account pick setting.",
+      "current": "Chọn các tài khoản anh em đủ điều kiện trong cùng nhà cung cấp và bậc thông tin xác thực. Một lease tương thích, chưa hết hạn từ một yêu cầu thành công được ưu tiên với mọi chính sách; nó không đảm bảo trúng cache. Reset soonest ưu tiên lần nạp lại hằng tuần gần nhất, rồi lần nạp lại năm giờ khi hòa trong vòng một phút. Chính sách tường minh ghi đè cài đặt chọn tài khoản theo mức sử dụng kiểu cũ.",
+      "problem": "The help names the option 'Reset soonest' in English while its label (reset_soonest.label) and legacy.help render it 'Đặt lại sớm nhất', so the user cannot match the help to the choice. 'tài khoản anh em' (brother accounts) is an over-familial calque of 'sibling accounts'.",
+      "suggested": "Chọn các tài khoản cùng nhóm đủ điều kiện … «Đặt lại sớm nhất» ưu tiên lần nạp lại hằng tuần gần nhất, …",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 2,
+      "id": "R2-VI-005",
+      "severity": "MINOR",
+      "namespace": "wire.settings.account_policy",
+      "key": "wire.settings.account_policy.help",
+      "english": "Chooses eligible sibling accounts within the same provider and credential tier. A compatible, unexpired lease from a successful request takes priority for every policy; it does not guarantee a cache hit. Reset soonest prefers the nearest weekly refill, then the five-hour refill within one-minute ties. An explicit policy overrides the legacy usage-aware account pick setting.",
+      "current": "Chọn các tài khoản cùng nhóm đủ điều kiện trong cùng nhà cung cấp và bậc thông tin xác thực. Một lease tương thích, chưa hết hạn từ một yêu cầu thành công được ưu tiên với mọi chính sách; nó không đảm bảo trúng cache. «Đặt lại sớm nhất» ưu tiên lần nạp lại hằng tuần gần nhất, rồi lần nạp lại năm giờ khi hòa trong vòng một phút. Chính sách tường minh ghi đè cài đặt chọn tài khoản theo mức sử dụng kiểu cũ.",
+      "problem": "Changed value introduces «» guillemets around «Đặt lại sớm nhất»; vi style guide: quotes are “ ” (main vi uses “ ” 16×, « 0×). Also «tài khoản cùng nhóm» for «sibling accounts» collides with the glossary term nhóm = team, so it reads as «accounts in the same team».",
+      "suggested": "Chọn các tài khoản khác đủ điều kiện trong cùng nhà cung cấp và bậc thông tin xác thực. … “Đặt lại sớm nhất” ưu tiên …",
+      "disposition": "fixed (remediation core-fix2, session 053117b4ad36)"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "wire.errors.session_host.unsupported": "Este equipo no puede ejecutar el servidor de sesiones en segundo plano, así que la sesión no se ha iniciado. Usa un equipo con un gestor de servicios en segundo plano compatible.",
+  "wire.errors.session_host.unavailable": "El servidor de sesiones en segundo plano no ha respondido, así que la sesión no se ha iniciado. Espera un momento antes de volver a intentarlo.",
+  "wire.errors.session_host.refused": "El servidor de sesiones en segundo plano ha rechazado iniciar esta sesión. La sesión no se ha iniciado. Revisa logs/session-host.log en tu carpeta de configuración de Local Operator antes de volver a intentarlo."
+}

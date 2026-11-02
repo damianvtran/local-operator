@@ -1,0 +1,39 @@
+{
+  "locale": "ru",
+  "namespace": "tui.projects",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "RU-011",
+      "severity": "MINOR",
+      "namespace": "tui.projects",
+      "key": "tui.projects.notice_read_only",
+      "english": "Read-only: this conversation's runtime is on another device, so project changes are not available here.",
+      "current": "Только чтение: среда выполнения этого разговора находится на другом устройстве, поэтому изменения проектов здесь недоступны.",
+      "problem": "ru style guide wave-2 call: runtime → «рантайм»; the sibling read-only notices (tui.authoring/tui.schedule.notice_read_only) say «рантайм этой беседы на другом устройстве». «среда выполнения» breaks the recorded term and the parallel wording.",
+      "suggested": "Только чтение: рантайм этого разговора на другом устройстве, поэтому изменения проектов здесь недоступны.",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    },
+    {
+      "round": 1,
+      "id": "RU-012",
+      "severity": "NIT",
+      "namespace": "tui.projects",
+      "key": "tui.projects.send.wake_unconfirmed",
+      "english": "wake unconfirmed — don't resend; it may have landed",
+      "current": "пробуждение не подтверждено — не повторяйте, оно могло дойти",
+      "problem": "«не повторяйте» is vaguer than 'don't resend'; the action being warned off is re-sending.",
+      "suggested": "пробуждение не подтверждено — не отправляйте снова, оно могло дойти",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    }
+  ]
+}

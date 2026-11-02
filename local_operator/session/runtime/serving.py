@@ -36,7 +36,7 @@ import uuid
 import weakref
 from asyncio import InvalidStateError
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -407,8 +407,33 @@ _ASK_REFRESH_MIN_S = 1.0
 #: idle threads. Lazy because most runtimes never switch, and the test suite
 #: builds hundreds of handles that never do.
 _SWITCH_EXECUTOR_WORKERS = 2
+
+#: One queue-plus-resolution budget, shorter than the attach ACK deadline.
+#: HTTP read timeouts bound idle reads, not a trickling complete listing, and
+#: dedicated workers can themselves be occupied. Only metadata is built in a
+#: worker: expiry cancels this await before the loop-owned mutation below, so
+#: a late result can populate caches but cannot change the session later.
+_MODEL_SWITCH_RESOLVE_S = 8.0
 _switch_executor_pool: concurrent.futures.ThreadPoolExecutor | None = None
 _switch_executor_lock = threading.Lock()
+
+
+@contextlib.asynccontextmanager
+async def _model_resolution_window(deadline: float) -> AsyncIterator[None]:
+    from local_operator.model.deadline import scope
+
+    # Task-local as well as worker-local: MetaMuse's asynchronous resolver and
+    # its to_thread metadata leg must inherit the SAME foreground deadline.
+    with scope(deadline):
+        try:
+            async with asyncio.timeout(_MODEL_SWITCH_RESOLVE_S):
+                yield
+        except TimeoutError as error:
+            # Reuse the existing noun-neutral localized label; an empty built-in
+            # TimeoutError otherwise becomes the unhelpful "cannot switch model: ".
+            from local_operator.i18n.keys.relay_asks import card_timed_out_badge
+
+            raise TimeoutError(card_timed_out_badge().envelope()["text"]) from error
 
 
 def _switch_executor() -> concurrent.futures.ThreadPoolExecutor:
@@ -878,6 +903,22 @@ class ServingSessionHandle(SessionHandle):
     #: capability the handle cannot answer, which is the defect class that guard
     #: exists to catch. See ``create_session`` for what waits on it.
     mcp_publication_gate: PublicationGate | None = None
+
+    #: The idle latch's recorded refusal cause, or ``""`` until ``begin_retire``
+    #: records one. ``server._idle_refusal_reason`` is its only reader: it turns the
+    #: string into the stop refusal's token (``busy`` / ``wake`` / ``leaving``), so
+    #: a handle that cannot answer the probe would report every refusal as work in
+    #: flight — the answer R3/Q-1 exists to stop producing.
+    #:
+    #: Declared at CLASS level for the reason the latch above gives: the server
+    #: reaches for it with a ``getattr`` capability probe, and the
+    #: capability-surface guard reads ``hasattr(ServingSessionHandle, name)``, so an
+    #: attribute that lived only on the instance reads as a capability the handle
+    #: cannot answer (measured: the guard's first report after this PR added the
+    #: probe). ``begin_retire`` is the only writer, and every path that refuses sets
+    #: it before returning ``False``, so the reader never sees this default in
+    #: practice — the class still has to state it for the probe to resolve.
+    _retire_refusal: str = ""
 
     def __init__(
         self,
@@ -2334,13 +2375,36 @@ class ServingSessionHandle(SessionHandle):
         read as an invitation.
         """
         if getattr(self, "_disposing", False):
+            self._retire_refusal = "already disposing"
+            return False
+        # A stop cannot take over the successor promised by an update window.
+        # begin_update sets the handle flag before publishing it; end_update
+        # clears it only when that window closes. Checking the authoritative
+        # flag HERE keeps exclusion and retirement in the same owner-loop step,
+        # including the await while the update announces its handover (R7-1 /
+        # Q4-1). Do not put this in may_refresh or reject every retirement: the
+        # update itself must still latch runtime-retired inside its own window.
+        if cause == "user-stop" and getattr(self, "_updating", ""):
+            self._retire_refusal = "updating"
             return False
         try:
             reason = str(self.may_refresh() or "")
         except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
             reason = "busy probe failed"
         if reason:
+            # THE REFUSAL'S CAUSE, KEPT FOR THE CALLER THAT ASKED. The reasons
+            # ``may_refresh`` gives have different next steps — work in flight
+            # clears on its own, a wake due in the warm window clears when it
+            # fires, and an unevaluable probe may not clear at all — and the
+            # stop ladder's receipt names one step, not three. Recorded here
+            # rather than re-probed by the caller, because a second sample would
+            # describe state this decision did not see (agent review round 1 D2,
+            # UX round 1 U2). Read back by
+            # ``server._idle_refusal_reason``; this attribute is that field's
+            # only reader.
+            self._retire_refusal = reason
             return False
+        self._retire_refusal = ""
         self._retiring_cause = cause or "retiring"
         self._retiring_detail = detail
         self._exit_committed = True
@@ -5842,27 +5906,38 @@ class ServingSessionHandle(SessionHandle):
         # that resolves through another is how a "warm" switch used to run the
         # cold body on the loop anyway (review round 2, R2-1).
         from local_operator.model.configure import warm_model_info
+        from local_operator.model.deadline import run_before
 
-        warm_info = warm_model_info(provider, model_id)
-        if warm_info is not None:
-            spec = build_model_spec(provider, model_id, info=warm_info)
-        else:
-            spec = await self._loop.run_in_executor(
-                _switch_executor(), build_model_spec, provider, model_id
-            )
-        if provider == "meta-muse":
-            from local_operator.harness.types import ModelSpec
+        # Captured before submission: queueing cannot earn another network
+        # budget when a worker finally becomes available. run_in_executor does
+        # not propagate contextvars, so install the shared budget explicitly.
+        resolution_deadline = time.monotonic() + _MODEL_SWITCH_RESOLVE_S
+        async with _model_resolution_window(resolution_deadline):
+            warm_info = warm_model_info(provider, model_id)
+            if warm_info is not None:
+                spec = build_model_spec(provider, model_id, info=warm_info)
+            else:
+                spec = await self._loop.run_in_executor(
+                    _switch_executor(),
+                    run_before,
+                    resolution_deadline,
+                    build_model_spec,
+                    provider,
+                    model_id,
+                )
+            if provider == "meta-muse":
+                from local_operator.harness.types import ModelSpec
 
-            # Resolve the same selected account BEFORE publishing primary/spec.
-            # This is the existing metadata seam, not an inference or Codex call.
-            resolver = getattr(
-                getattr(self._session, "_stream_fn", None), "resolve_context_model", None
-            )
-            if callable(resolver):
-                result = resolver(spec)
-                resolved = await result if inspect.isawaitable(result) else result
-                if isinstance(resolved, ModelSpec):
-                    spec = resolved
+                # Resolve the same selected account BEFORE publishing primary/spec.
+                # This is the existing metadata seam, not an inference or Codex call.
+                resolver = getattr(
+                    getattr(self._session, "_stream_fn", None), "resolve_context_model", None
+                )
+                if callable(resolver):
+                    result = resolver(spec)
+                    resolved = await result if inspect.isawaitable(result) else result
+                    if isinstance(resolved, ModelSpec):
+                        spec = resolved
         if effort:
             spec = spec.model_copy(
                 update={
@@ -8568,6 +8643,39 @@ class ServingSessionHandle(SessionHandle):
             return await self._effort_slash(session, args, SlashResult)
         if command == "fast":
             return self._fast_slash(session, args, SlashResult)
+        # ONE BRANCH PER WORD, spelled `command ==`, not a set membership: the
+        # dispatch-surface guard reads this body for `command == "<name>"` and a
+        # tuple membership is invisible to it, which is how `/saver` came to be
+        # advertised as authoritative_session while the reader believed nothing
+        # dispatched it (measured: `test_the_runtime_dispatches_every_slash_command
+        # _it_advertises`).
+        if command == "saver":
+            from local_operator.saver.command import saver_slash
+
+            result = await saver_slash(session, args, SlashResult)
+            self._notify()
+            return result
+        if command == "radient":
+            from local_operator.i18n.keys import wire_radient_saver
+            from local_operator.i18n.text import tr
+            from local_operator.saver.command import saver_slash
+
+            word, _, rest = args.partition(" ")
+            if word != "saver":
+                return SlashResult(
+                    kind="notice",
+                    text=str(tr("wire.radient_saver")(wire_radient_saver.command_usage())),
+                    style="warning",
+                )
+            # Same rule as the app host: a bare `/radient saver` REPORTS rather
+            # than toggles, so a namespace command completed by return keys cannot
+            # change state (QA round 3, Q1). STRIPPED, because this host forwards
+            # `body.args` verbatim (desktop_sessions.py) and `rest or "status"` is a
+            # TRUTHINESS test: a whitespace-only argument is truthy, so `/radient
+            # saver␣␣` reported in the app and WROTE Saver on here (round 4).
+            result = await saver_slash(session, (rest or "").strip() or "status", SlashResult)
+            self._notify()
+            return result
         if command == "approvals":
             # ``may_loosen`` (issue #1310; design round 2 D10, UX round 2 U9):
             # whether THIS connection could carry `/approvals auto`, as the seam
