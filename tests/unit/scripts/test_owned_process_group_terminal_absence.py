@@ -9,7 +9,13 @@ absent by our own authorised act. The send path never gains that licence: it cal
 
 from __future__ import annotations
 
+from local_operator import owned_process_group as owned
 from tests.unit.scripts.test_run_bounded_run_record import World
+
+
+def _foreign_unreadable(world):
+    """Replace the leader with a foreign pid in another group, birth unreadable."""
+    world.rows[10] = (world.rows[10][0], 999, 999, None)  # type: ignore[assignment]
 
 
 def _live_owned_group():
@@ -67,7 +73,7 @@ def test_foreign_reuse_with_an_unreadable_birth_without_a_kill_refuses():
     world, cap = _live_owned_group()
     # The leader is replaced by a FOREIGN process on the same pid, in a different
     # group, whose birth cannot be read -- and this run never signals anything.
-    world.rows[10] = (world.rows[10][0], 999, 999, None)
+    _foreign_unreadable(world)
     terminal = cap.refresh(deadline=world.clock() + 1.0, terminal=True)
     assert terminal.status == "REFUSED", terminal.reason
     assert "authorised kill" not in terminal.reason, terminal.reason
@@ -78,7 +84,7 @@ def test_foreign_reuse_with_an_unreadable_birth_after_a_kill_does_not_leak_autho
     """The terminal licence is for REPORTING; it never reaches the send path."""
     world, cap = _live_owned_group()
     assert cap.signal(9, deadline=world.clock() + 1.0).status == "SIGNALED"
-    world.rows[10] = (world.rows[10][0] if 10 in world.rows else 1, 999, 999, None)
+    _foreign_unreadable(world)
     terminal = cap.refresh(deadline=world.clock() + 1.0, terminal=True)
     assert terminal.status == "OBSERVED_EMPTY", terminal.reason
     # A SECOND SEND ON THE SAME CAPABILITY MUST STILL REFUSE.
@@ -106,3 +112,4 @@ def test_the_r2_reproduction_a_leader_removed_without_a_signal_refuses():
     terminal = cap.refresh(deadline=world.clock() + 1.0, terminal=True)
     assert terminal.status == "REFUSED", terminal.reason
     assert "requires a recorded kill" in terminal.reason, terminal.reason
+
