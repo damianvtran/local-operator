@@ -6,6 +6,7 @@ Session commitment is exercised separately because a loop end is provisional.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from pathlib import Path
@@ -35,6 +36,20 @@ from tests.unit.harness.test_loop import (
 
 async def run_wrapped(tmp_path: Path, code: str, *, early: bool = False):
     effects: list[str] = []
+    # The parent import winner does not establish which protocol module -m
+    # starts under a detached worker. Assert the real worker's own __main__
+    # path AND bytes before the discriminating cell, without changing lifecycle.
+    worker_source = Path(__file__).resolve().parents[3] / "local_operator/tools/eval_worker.py"
+    worker_digest = hashlib.sha256(worker_source.read_bytes()).hexdigest()
+    identity_receipt = "__quiet_worker_identity_verified__:" + worker_digest
+    identity_prefix = (
+        "import hashlib as _quiet_hashlib, pathlib as _quiet_pathlib, sys as _quiet_sys\n"
+        "_quiet_worker_source = _quiet_pathlib.Path(_quiet_sys.modules['__main__'].__file__).resolve()\n"
+        f"assert str(_quiet_worker_source) == {str(worker_source)!r}, 'wrong eval worker source path'\n"
+        f"assert _quiet_hashlib.sha256(_quiet_worker_source.read_bytes()).hexdigest() == {worker_digest!r}, 'wrong eval worker source bytes'\n"
+        f"print({identity_receipt!r})\n"
+    )
+    code = identity_prefix + code
     session_id = "quiet-regression-" + uuid.uuid4().hex
     context = ToolContext(
         cwd=str(tmp_path), session_id=session_id, session_dir=str(tmp_path),
@@ -56,6 +71,15 @@ async def run_wrapped(tmp_path: Path, code: str, *, early: bool = False):
         events = [event async for event in AgentLoop().run(
             [Message.user("synthetic input")], loop_context, make_config(stream), None)]
         assert isinstance(events[-1], AgentEndEvent)
+        root_results = [event.result for event in events
+                        if isinstance(event, ToolExecutionEndEvent)
+                        and event.tool_call_id == "wrapper"]
+        assert len(root_results) == 1
+        assert any(identity_receipt in getattr(block, "text", "")
+                   for block in root_results[0].content), (
+            "real eval worker did not verify the expected protocol source; "
+            "even a negative-case test must fail before interpreting its outcome"
+        )
         return stream, events, effects
     finally:
         await eval_tool.close_session_kernel(session_id)
