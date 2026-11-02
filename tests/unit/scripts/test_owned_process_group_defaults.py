@@ -48,7 +48,11 @@ def test_default_capture_subsecond_native_or_explicit_fallback_refusal(
             getpid=lambda: 1,
             getpgid=lambda _: 10,
             getsid=lambda _: 10,
-            getpgrp=lambda: 10,
+            # `getpgrp` describes THIS process, so it must not coincide with
+            # the fixture's target group: returning 10 made the capability
+            # correctly conclude it was signalling its own group, turning a
+            # passing exclusion invariant into a refused row.
+            getpgrp=lambda: 999_999,
         ),
     )
     monkeypatch.setattr(o.resources, "direct_ppid_pgid", lambda _: (1, 10))
