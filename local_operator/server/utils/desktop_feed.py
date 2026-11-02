@@ -50,8 +50,9 @@ was 1 s.
 
 COST, CONTINUED — the FIVE 1 s invalidation probes are NOT in that eight-stat figure:
 the approvals one (two directory stats; record reads only on movement/expiry,
-with failures backing off on the same clock), the catalogue's, the authoring one (O(profiles)), the code-request one (one ``readdir``
-of the derived code-request index plus one ``os.stat`` per session WITH rows — usually
+with failures backing off on the same clock), the catalogue's, the authoring one
+(O(profiles)), the code-request one (one ``readdir`` of the derived code-request
+index plus one ``os.stat`` per session WITH rows — usually
 zero, since most sessions never touch a pull request, and one small file read per
 CHANGED index), and the inbox's asks-index one (one ``readdir`` of ``asks/`` plus one
 ``os.stat`` per session with asks, the same shape). The catalogue probe is a readdir and
@@ -1256,6 +1257,20 @@ class DesktopFeed:
         # An unreadable store leaves this ``None`` (unknown), which is what
         # stops a failed read being announced as "0 unread" on connect.
         self._notifications_seen = self._notifications_state_or_none()
+        # The ticker owns this first-connection baseline, just like the inbox.
+        # Priming it suppresses a fabricated None -> False edge on a quiet
+        # start; subscriber open snapshots must never commit this shared state.
+        self._approvals_probed_at = time.monotonic()
+        try:
+            (
+                self._approvals_token,
+                self._approvals_pending,
+                self._approvals_expiry,
+            ) = self._approval_snapshot()
+        except Exception:  # noqa: BLE001 — an optional store remains unknown
+            self._approvals_token = None
+            self._approvals_pending = None
+            self._approvals_expiry = 0.0
         candidates = [*records, *self._wake_index, *self._monitor_index, *names]
         states = self.store.state_many([f"session/{session_id}" for session_id in candidates])
         for identity, state in states.items():
@@ -3109,7 +3124,9 @@ class DesktopFeed:
         # because the open was stamped after an older snapshot finished.
         frame = self._frame("open", {})
         snapshot = await asyncio.to_thread(self._badge_open_snapshot)
-        attention, catalogue_revision, authoring_revision, attention_status, notifications = snapshot
+        attention, catalogue_revision, authoring_revision, attention_status, notifications = (
+            snapshot
+        )
         try:
             approvals_pending = (await asyncio.to_thread(self._approval_snapshot))[1]
             # A subscriber snapshot is local; only the ticker commits the
@@ -3132,7 +3149,9 @@ class DesktopFeed:
 
     def _badge_open_snapshot(
         self,
-    ) -> tuple[dict[str, dict[str, Any]], int, int, dict[str, dict[str, Any]], dict[str, Any] | None]:
+    ) -> tuple[
+        dict[str, dict[str, Any]], int, int, dict[str, dict[str, Any]], dict[str, Any] | None
+    ]:
         """Expose the existing baseline's levels without another catalogue scan.
 
         A native badge has no mounted sidebar to supply the terminal-status
