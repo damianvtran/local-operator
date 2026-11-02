@@ -26,10 +26,15 @@ export function Sheet({
 	children,
 	returnFocusRef,
 	initialFocusRef,
+	headerAction,
 }: {
 	open: boolean;
 	onClose: () => void;
 	title?: string;
+	/** One control rendered immediately before ✕ (the usage sheet's refresh).
+	    Lives in the header, outside the scroller, so it stays reachable while
+	    the content scrolls. Absent on every other sheet, which render as before. */
+	headerAction?: ReactNode;
 	children: ReactNode;
 	returnFocusRef?: RefObject<HTMLElement | null>;
 	/** Where focus lands when the sheet opens. Defaults to the ✕; the slash
@@ -161,6 +166,7 @@ export function Sheet({
 						<span id={titleId} className="text-heading font-semibold text-ink">
 							{title}
 						</span>
+						{headerAction ? <div className="ms-auto flex items-center">{headerAction}</div> : null}
 						<button
 							ref={closeRef}
 							type="button"

@@ -40,6 +40,10 @@ def session_waiting() -> Msg:
     return Msg("relay.shell.session.waiting", {})
 
 
+def usage_account(*, index: int | float) -> Msg:
+    return Msg("relay.shell.usage.account", {"index": index})
+
+
 def usage_amount_unknown() -> Msg:
     return Msg("relay.shell.usage.amount_unknown", {})
 
@@ -52,16 +56,24 @@ def usage_blocked() -> Msg:
     return Msg("relay.shell.usage.blocked", {})
 
 
-def usage_cached() -> Msg:
-    return Msg("relay.shell.usage.cached", {})
-
-
 def usage_command() -> Msg:
     return Msg("relay.shell.usage.command", {})
 
 
 def usage_continue() -> Msg:
     return Msg("relay.shell.usage.continue", {})
+
+
+def usage_countdown_days(*, days: int | float, hours: int | float) -> Msg:
+    return Msg("relay.shell.usage.countdown_days", {"days": days, "hours": hours})
+
+
+def usage_countdown_hours(*, hours: int | float, minutes: int | float) -> Msg:
+    return Msg("relay.shell.usage.countdown_hours", {"hours": hours, "minutes": minutes})
+
+
+def usage_countdown_minutes(*, minutes: int | float) -> Msg:
+    return Msg("relay.shell.usage.countdown_minutes", {"minutes": minutes})
 
 
 def usage_eligibility_unknown() -> Msg:
@@ -78,6 +90,26 @@ def usage_family() -> Msg:
 
 def usage_family_caps() -> Msg:
     return Msg("relay.shell.usage.family_caps", {})
+
+
+def usage_family_fable() -> Msg:
+    return Msg("relay.shell.usage.family_fable", {})
+
+
+def usage_family_opus() -> Msg:
+    return Msg("relay.shell.usage.family_opus", {})
+
+
+def usage_family_sonnet() -> Msg:
+    return Msg("relay.shell.usage.family_sonnet", {})
+
+
+def usage_family_unknown() -> Msg:
+    return Msg("relay.shell.usage.family_unknown", {})
+
+
+def usage_family_zread() -> Msg:
+    return Msg("relay.shell.usage.family_zread", {})
 
 
 def usage_fraction(*, value: int | float) -> Msg:
@@ -100,6 +132,30 @@ def usage_paid() -> Msg:
     return Msg("relay.shell.usage.paid", {})
 
 
+def usage_reauth() -> Msg:
+    return Msg("relay.shell.usage.reauth", {})
+
+
+def usage_reauth_short() -> Msg:
+    return Msg("relay.shell.usage.reauth_short", {})
+
+
+def usage_refresh() -> Msg:
+    return Msg("relay.shell.usage.refresh", {})
+
+
+def usage_refresh_failed() -> Msg:
+    return Msg("relay.shell.usage.refresh_failed", {})
+
+
+def usage_refresh_timeout() -> Msg:
+    return Msg("relay.shell.usage.refresh_timeout", {})
+
+
+def usage_refreshing() -> Msg:
+    return Msg("relay.shell.usage.refreshing", {})
+
+
 def usage_remaining(*, value: int | float, unit: str) -> Msg:
     return Msg("relay.shell.usage.remaining", {"value": value, "unit": unit})
 
@@ -116,8 +172,31 @@ def usage_reset(*, value: datetime) -> Msg:
     return Msg("relay.shell.usage.reset", {"value": value})
 
 
+def usage_reset_now() -> Msg:
+    return Msg("relay.shell.usage.reset_now", {})
+
+
+def usage_resets_in(*, countdown: str) -> Msg:
+    return Msg("relay.shell.usage.resets_in", {"countdown": countdown})
+
+
+def usage_retry() -> Msg:
+    return Msg("relay.shell.usage.retry", {})
+
+
 def usage_row(*, label: str, window: str, value: str) -> Msg:
     return Msg("relay.shell.usage.row", {"label": label, "window": window, "value": value})
+
+
+def usage_row_a11y(*, label: str, value: str, tone: str) -> Msg:
+    return Msg("relay.shell.usage.row_a11y", {"label": label, "value": value, "tone": tone})
+
+
+def usage_row_a11y_reset(*, label: str, value: str, tone: str, reset: str) -> Msg:
+    return Msg(
+        "relay.shell.usage.row_a11y_reset",
+        {"label": label, "value": value, "tone": tone, "reset": reset},
+    )
 
 
 def usage_row_family(*, label: str, family: str, window: str, value: str) -> Msg:
@@ -127,12 +206,36 @@ def usage_row_family(*, label: str, family: str, window: str, value: str) -> Msg
     )
 
 
+def usage_row_label_family(*, family: str, window: str) -> Msg:
+    return Msg("relay.shell.usage.row_label_family", {"family": family, "window": window})
+
+
 def usage_stale() -> Msg:
     return Msg("relay.shell.usage.stale", {})
 
 
+def usage_throttled(*, seconds: int | float) -> Msg:
+    return Msg("relay.shell.usage.throttled", {"seconds": seconds})
+
+
 def usage_title() -> Msg:
     return Msg("relay.shell.usage.title", {})
+
+
+def usage_tone_exhausted() -> Msg:
+    return Msg("relay.shell.usage.tone_exhausted", {})
+
+
+def usage_tone_ok() -> Msg:
+    return Msg("relay.shell.usage.tone_ok", {})
+
+
+def usage_tone_unknown() -> Msg:
+    return Msg("relay.shell.usage.tone_unknown", {})
+
+
+def usage_tone_warning() -> Msg:
+    return Msg("relay.shell.usage.tone_warning", {})
 
 
 def usage_unavailable() -> Msg:
@@ -157,6 +260,10 @@ def usage_unit_usd() -> Msg:
 
 def usage_unlimited() -> Msg:
     return Msg("relay.shell.usage.unlimited", {})
+
+
+def usage_updated(*, value: datetime) -> Msg:
+    return Msg("relay.shell.usage.updated", {"value": value})
 
 
 def usage_used(*, value: int | float, unit: str) -> Msg:
