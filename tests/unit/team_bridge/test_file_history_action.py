@@ -143,6 +143,262 @@ async def test_exact_human_history_commissions_only_response_files(monkeypatch):
     assert store.refreshes == 0
 
 
+async def test_private_manifest_is_allowlisted_frozen_and_same_response(monkeypatch):
+    store, registry = Store(), InertFileActionRegistry()
+    s = scope(registry)
+    source = page([file(display_name="report.pdf", **{"class": "pdf", "size": 99})])
+    source["result"]["messages"][0]["files"][0]["untrusted_extra"] = "discard-me"
+    context = await history.commission_human_history(
+        client(monkeypatch, store, lambda _: streamed_json(source)), registry, s, lambda: s
+    )
+    assert isinstance(context, str)  # Existing return shape remains an opaque handle.
+    manifest = registry.inspect_manifest(context)
+    assert (
+        manifest.tenant_id,
+        manifest.conversation_id,
+        manifest.message_id,
+        manifest.message_seq,
+    ) == ("tnt_alpha", "bcv_aaaaaaaa", "bcmsg_aaaaaaaa", 1001)
+    assert manifest.thread_root_id is None and len(manifest.files) == 1
+    item = manifest.files[0]
+    assert (
+        item.file_id,
+        item.file_class,
+        item.mime,
+        item.size,
+        item.expires_at,
+        item.display_name,
+    ) == (
+        "batt_aaaaaaaa",
+        "pdf",
+        "application/octet-stream",
+        99,
+        "2099-01-01T00:00:00Z",
+        "report.pdf",
+    )
+    assert item.state == "bound" and item.download_only is True
+    assert isinstance(manifest.files, tuple)
+    with pytest.raises((AttributeError, TypeError)):
+        setattr(manifest, "files", ())
+    source["result"]["messages"][0]["files"][0]["display_name"] = "mutated.txt"
+    source["result"]["messages"][0]["files"].clear()
+    assert item.display_name == "report.pdf" and len(registry.inspect_manifest(context).files) == 1
+    assert not hasattr(item, "untrusted_extra") and not hasattr(manifest, "credential_id")
+    assert not hasattr(manifest, "account_id") and not hasattr(manifest, "login_incarnation")
+    assert "report.pdf" not in repr(manifest) and "report.pdf" not in repr(item)
+    with pytest.raises((AttributeError, TypeError)):
+        setattr(item, "size", 100)
+    registry.invalidate_view(s.window_id, s.view_generation)
+    with pytest.raises(ActionUnavailable):
+        registry.inspect_manifest(context)
+
+
+async def test_private_manifest_refuses_expired_descriptor_as_whole(monkeypatch):
+    from datetime import datetime, timezone
+
+    from local_operator.team_bridge import file_action_registry as registry_module
+
+    store, registry = Store(), InertFileActionRegistry()
+    s = scope(registry)
+    context = await history.commission_human_history(
+        client(monkeypatch, store, lambda _: streamed_json(page())), registry, s, lambda: s
+    )
+    assert registry.inspect_manifest(context).files
+
+    class Future(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2100, 1, 1, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(registry_module, "datetime", Future)
+    with pytest.raises(ActionUnavailable):
+        registry.inspect_manifest(context)
+
+
+async def test_mixed_manifest_rejects_whole_snapshot_when_one_file_expires(monkeypatch):
+    from datetime import datetime, timezone
+
+    from local_operator.team_bridge import file_action_registry as registry_module
+
+    store, registry = Store(), InertFileActionRegistry()
+    s = scope(registry)
+    source = page([
+        file(expires_at="2099-01-01T00:00:00Z"),
+        file("batt_bbbbbbbb", expires_at="2101-01-01T00:00:00Z"),
+    ])
+    context = await history.commission_human_history(
+        client(monkeypatch, store, lambda _: streamed_json(source)), registry, s, lambda: s
+    )
+    assert len(registry.inspect_manifest(context).files) == 2
+
+    class Future(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2100, 1, 1, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(registry_module, "datetime", Future)
+    with pytest.raises(ActionUnavailable):
+        registry.inspect_manifest(context)
+
+
+async def test_direct_revoke_invalidates_private_manifest(monkeypatch):
+    store, registry = Store(), InertFileActionRegistry()
+    s = scope(registry)
+    context = await history.commission_human_history(
+        client(monkeypatch, store, lambda _: streamed_json(page())), registry, s, lambda: s
+    )
+    assert registry.inspect_manifest(context).files
+    registry.revoke(context)
+    with pytest.raises(ActionUnavailable):
+        registry.inspect_manifest(context)
+
+
+async def test_boolean_response_sequence_never_commissions_manifest(monkeypatch):
+    store, registry = Store(), InertFileActionRegistry()
+    s = scope(registry)
+    source = page()
+    source["result"]["messages"][0]["seq"] = True
+    with pytest.raises(BridgeRefusal):
+        await history.commission_human_history(
+            client(monkeypatch, store, lambda _: streamed_json(source)), registry, s, lambda: s
+        )
+    assert not registry._contexts
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "tenant",
+        "conversation",
+        "message",
+        "root",
+        "file_set",
+        "duplicate",
+        "seq_bool",
+        "seq_zero",
+        "seq_string",
+        "seq_overflow",
+    ],
+)
+async def test_mismatched_private_manifest_cannot_be_commissioned(monkeypatch, field):
+    store, registry = Store(), InertFileActionRegistry()
+    s = scope(registry)
+    context = await history.commission_human_history(
+        client(monkeypatch, store, lambda _: streamed_json(page())), registry, s, lambda: s
+    )
+    binding = registry.inspect_context(context)
+    assert binding.manifest is not None
+    manifest = binding.manifest
+    changes: dict[str, dict[str, Any]] = {
+        "tenant": {"tenant_id": "tnt_other"},
+        "conversation": {"conversation_id": "bcv_bbbbbbbb"},
+        "message": {"message_id": "bcmsg_bbbbbbbb"},
+        "root": {"thread_root_id": "bcmsg_rootaaaa"},
+        "file_set": {"files": (replace(manifest.files[0], file_id="batt_bbbbbbbb"),)},
+        "duplicate": {"files": (manifest.files[0], manifest.files[0])},
+        "seq_bool": {"message_seq": True},
+        "seq_zero": {"message_seq": 0},
+        "seq_string": {"message_seq": "1001"},
+        "seq_overflow": {"message_seq": (1 << 53) - 1},
+    }
+    forged = replace(binding, manifest=replace(manifest, **changes[field]))
+    with pytest.raises(ActionUnavailable):
+        registry.commission(forged, ttl_seconds=30, expected_epoch=s.registry_epoch)
+    assert len(registry._contexts) == 1
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"display_name": "../secret"},
+        {"display_name": "bad\x00name"},
+        {"display_name": "\u202espoof"},
+        {"display_name": "\ud800"},
+        {"display_name": "dir\\file"},
+        {"display_name": 17},
+        {"display_name": "x" * 121},
+        {"size": True},
+        {"size": -1},
+        {"size": 25 * 1024 * 1024 + 1},
+        {"size": "1"},
+        {"expires_at": "not-a-date"},
+        {"expires_at": "2099-01-01T00:00:00"},
+        {"mime": "text/plain"},
+        {"download_only": 1},
+        {"download_only": False},
+        {"class": "executable"},
+    ],
+)
+async def test_invalid_bound_metadata_never_publishes_partial_manifest(monkeypatch, changes):
+    store, registry = Store(), InertFileActionRegistry()
+    s = scope(registry)
+    source = page([file(), file("batt_bbbbbbbb", **changes)])
+    with pytest.raises(BridgeRefusal):
+        await history.commission_human_history(
+            client(monkeypatch, store, lambda _: streamed_json(source)), registry, s, lambda: s
+        )
+    assert registry._contexts == {} and store.refreshes == 0
+
+
+@pytest.mark.parametrize("states", [("expired", "bound"), ("bound", "expired"), ("bound", "bound")])
+async def test_duplicate_ids_are_rejected_before_expiry_filtering(monkeypatch, states):
+    store, registry = Store(), InertFileActionRegistry()
+    s = scope(registry)
+    source = page([file(state=states[0]), file(state=states[1])])
+    with pytest.raises(BridgeRefusal):
+        await history.commission_human_history(
+            client(monkeypatch, store, lambda _: streamed_json(source)), registry, s, lambda: s
+        )
+    assert registry._contexts == {}
+
+
+async def test_valid_file_survives_distinct_expired_tombstone(monkeypatch):
+    store, registry = Store(), InertFileActionRegistry()
+    s = scope(registry)
+    source = page([file("batt_bbbbbbbb", state="expired"), file(display_name="shown.txt")])
+    context = await history.commission_human_history(
+        client(monkeypatch, store, lambda _: streamed_json(source)), registry, s, lambda: s
+    )
+    assert tuple(item.file_id for item in registry.inspect_manifest(context).files) == (
+        "batt_aaaaaaaa",
+    )
+    assert registry.inspect_context(context).file_ids == frozenset({"batt_aaaaaaaa"})
+
+
+async def test_manifest_context_ttl_and_legacy_binding(monkeypatch):
+    clock = [100.0]
+    store, registry = Store(), InertFileActionRegistry(clock=lambda: clock[0])
+    s = scope(registry)
+    context = await history.commission_human_history(
+        client(monkeypatch, store, lambda _: streamed_json(page())), registry, s, lambda: s
+    )
+    binding = registry.inspect_context(context)
+    legacy = replace(binding, manifest=None)
+    legacy_context = registry.commission(legacy, ttl_seconds=30, expected_epoch=s.registry_epoch)
+    assert registry.inspect_context(legacy_context) == legacy
+    with pytest.raises(ActionUnavailable):
+        registry.inspect_manifest(legacy_context)
+    assert registry.start(legacy_context, "batt_aaaaaaaa")
+    clock[0] += 30.0
+    with pytest.raises(ActionUnavailable):
+        registry.inspect_manifest(context)
+
+
+async def test_manifest_context_refuses_after_epoch_rotation(monkeypatch):
+    from local_operator.team_bridge import file_action_registry as registry_module
+
+    monkeypatch.setattr(registry_module, "_MAX_WINDOW_TOMBSTONES", 1)
+    store, registry = Store(), InertFileActionRegistry()
+    s = scope(registry)
+    context = await history.commission_human_history(
+        client(monkeypatch, store, lambda _: streamed_json(page())), registry, s, lambda: s
+    )
+    registry.invalidate_view("window_seed", 1)
+    registry.invalidate_view("window_rotate", 1)
+    with pytest.raises(ActionUnavailable):
+        registry.inspect_manifest(context)
+
+
 async def test_far_older_message_uses_one_authenticated_targeted_read(monkeypatch):
     store, registry, queries = Store(), InertFileActionRegistry(), []
     s = scope(registry)
@@ -275,6 +531,9 @@ async def test_distant_thread_reply_is_selected_with_inclusive_cursor(monkeypatc
         registry.start(handle, "batt_bbbbbbbb")
     binding = registry.inspect_context(handle)
     assert binding.thread_root_id == "bcmsg_rootaaaa"
+    manifest = registry.inspect_manifest(handle)
+    assert manifest.thread_root_id == "bcmsg_rootaaaa" and manifest.message_seq == 1001
+    assert tuple(item.file_id for item in manifest.files) == ("batt_aaaaaaaa",)
     view = TrustedMainView(
         "window_1", 4, "tnt_alpha", "bcv_aaaaaaaa", "bcmsg_aaaaaaaa", 1001, "bcmsg_rootaaaa"
     )

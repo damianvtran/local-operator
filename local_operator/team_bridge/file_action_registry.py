@@ -19,8 +19,12 @@ import re
 import secrets
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable
+
+from local_operator.team_bridge.types import ATTACHMENT_ID_PATTERN
 
 _MAX_CONTEXTS = 256
 _MAX_OPERATIONS = 256
@@ -37,6 +41,32 @@ class ActionUnavailable(ValueError):
 
 
 @dataclass(frozen=True, repr=False)
+class InertFileDescriptor:
+    """Allowlisted hub projection, not a hash, scan result, or byte-integrity claim."""
+
+    file_id: str
+    file_class: str
+    mime: str
+    size: int
+    expires_at: str
+    display_name: str | None
+    state: str = "bound"
+    download_only: bool = True
+
+
+@dataclass(frozen=True, repr=False)
+class InertFileManifest:
+    """Private snapshot bound to the selected response; never authentication."""
+
+    tenant_id: str
+    conversation_id: str
+    message_id: str
+    message_seq: int
+    thread_root_id: str | None
+    files: tuple[InertFileDescriptor, ...]
+
+
+@dataclass(frozen=True, repr=False)
 class InertActionBinding:
     """Untrusted until commissioned by a future authenticated core-only seam."""
 
@@ -50,6 +80,9 @@ class InertActionBinding:
     message_id: str
     file_ids: frozenset[str]
     thread_root_id: str | None = None
+    # Absent for pre-existing callers; only the authenticated history producer
+    # supplies a manifest, and the registry itself cannot prove its provenance.
+    manifest: InertFileManifest | None = None
 
 
 @dataclass(frozen=True, repr=False)
@@ -74,6 +107,60 @@ class _Operation:
 
 def _bounded_text(value: object) -> bool:
     return isinstance(value, str) and 0 < len(value) <= 256 and not any(ord(c) < 32 for c in value)
+
+
+def _valid_manifest(manifest: InertFileManifest, binding: InertActionBinding) -> bool:
+    if (
+        not isinstance(manifest, InertFileManifest)
+        or manifest.tenant_id != binding.tenant_id
+        or manifest.conversation_id != binding.conversation_id
+        or manifest.message_id != binding.message_id
+        or manifest.thread_root_id != binding.thread_root_id
+        or type(manifest.message_seq) is not int
+        or not 1 <= manifest.message_seq <= (1 << 53) - 2
+        or not isinstance(manifest.files, tuple)
+        or not 0 < len(manifest.files) <= _MAX_FILES
+    ):
+        return False
+    ids: set[str] = set()
+    for item in manifest.files:
+        if (
+            not isinstance(item, InertFileDescriptor)
+            or not isinstance(item.file_id, str)
+            or re.fullmatch(ATTACHMENT_ID_PATTERN, item.file_id) is None
+            or item.file_id in ids
+            or not isinstance(item.file_class, str)
+            or item.file_class not in {"pdf", "text", "container", "other"}
+            or item.mime != "application/octet-stream"
+            or item.state != "bound"
+            or item.download_only is not True
+            or type(item.size) is not int
+            or not 0 <= item.size <= 25 * 1024 * 1024
+            or not isinstance(item.expires_at, str)
+            or not 0 < len(item.expires_at) <= 64
+            or (
+                item.display_name is not None
+                and (
+                    not isinstance(item.display_name, str)
+                    or not 0 < len(item.display_name) <= 120
+                    or "/" in item.display_name
+                    or "\\" in item.display_name
+                    or any(
+                        unicodedata.category(char) in {"Cc", "Cf", "Cs"}
+                        for char in item.display_name
+                    )
+                )
+            )
+        ):
+            return False
+        try:
+            expires = datetime.fromisoformat(item.expires_at.replace("Z", "+00:00"))
+            if expires.tzinfo is None:
+                return False
+        except (ValueError, OverflowError):
+            return False
+        ids.add(item.file_id)
+    return ids == binding.file_ids
 
 
 def _valid_binding(binding: object) -> bool:
@@ -101,6 +188,7 @@ def _valid_binding(binding: object) -> bool:
         and isinstance(binding.file_ids, frozenset)
         and 0 < len(binding.file_ids) <= _MAX_FILES
         and all(_bounded_text(file_id) for file_id in binding.file_ids)
+        and (binding.manifest is None or _valid_manifest(binding.manifest, binding))
     )
 
 
@@ -232,6 +320,30 @@ class InertFileActionRegistry:
             if row is None or row.boot != self._boot:
                 raise ActionUnavailable()
             return row.binding
+
+    def inspect_manifest(self, context: str) -> InertFileManifest:
+        """Read only the live response snapshot, without credential identifiers.
+
+        The same lock, epoch and expiry checks as operation creation apply. This
+        is a private candidate, not evidence of current membership or byte identity.
+        """
+        if not isinstance(context, str):
+            raise ActionUnavailable()
+        with self._lock:
+            self._require_open()
+            self._prune(self._now())
+            row = self._contexts.get(context)
+            if row is None or row.boot != self._boot or row.binding.manifest is None:
+                raise ActionUnavailable()
+            # Do not return a partial manifest or a snapshot whose file expired
+            # while the context remained live. The caller must recheck the view.
+            now = datetime.now(timezone.utc)
+            if any(
+                datetime.fromisoformat(item.expires_at.replace("Z", "+00:00")) <= now
+                for item in row.binding.manifest.files
+            ):
+                raise ActionUnavailable()
+            return row.binding.manifest
 
     def start(self, context: str, file_id: str) -> str:
         """Create one claimable operation only for a file in the candidate set."""

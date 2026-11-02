@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -47,6 +48,8 @@ from local_operator.team_bridge.client import (
 from local_operator.team_bridge.file_action_registry import (
     InertActionBinding,
     InertFileActionRegistry,
+    InertFileDescriptor,
+    InertFileManifest,
 )
 from local_operator.team_bridge.read_context import TENANT_ID_PATTERN
 from local_operator.team_bridge.types import (
@@ -90,8 +93,8 @@ def _pairs_unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _file_ids(body: bytes, scope: HistoryScope) -> frozenset[str]:
-    """Parse only bounded server output, refusing ambiguous or inconsistent pages."""
+def _file_manifest(body: bytes, scope: HistoryScope) -> InertFileManifest:
+    """Copy only allowlisted metadata from the one authenticated selected response."""
     try:
         envelope = json.loads(
             body.decode("utf-8"),
@@ -132,7 +135,7 @@ def _file_ids(body: bytes, scope: HistoryScope) -> frozenset[str]:
         files = found.get("files", [])
         if not isinstance(files, list) or len(files) > 16:
             raise ValueError("files")
-        ids: set[str] = set()
+        files_out: list[InertFileDescriptor] = []
         observed: set[str] = set()
         for item in files:
             if not isinstance(item, dict):
@@ -167,11 +170,36 @@ def _file_ids(body: bytes, scope: HistoryScope) -> frozenset[str]:
             expires = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
             if expires.tzinfo is None:
                 raise ValueError("file expiry zone")
+            name = item.get("display_name")
+            if name is not None and (
+                not isinstance(name, str)
+                or not 0 < len(name) <= 120
+                or "/" in name
+                or "\\" in name
+                or any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in name)
+            ):
+                raise ValueError("file display name")
             if expires > datetime.now(timezone.utc):
-                ids.add(file_id)
-        if not ids:
+                files_out.append(
+                    InertFileDescriptor(
+                        file_id=file_id,
+                        file_class=item["class"],
+                        mime=item["mime"],
+                        size=item["size"],
+                        expires_at=expiry,
+                        display_name=name,
+                    )
+                )
+        if not files_out:
             raise ValueError("no files")
-        return frozenset(ids)
+        return InertFileManifest(
+            tenant_id=scope.tenant_id,
+            conversation_id=scope.conversation_id,
+            message_id=scope.message_id,
+            message_seq=scope.message_seq,
+            thread_root_id=scope.thread_root_id,
+            files=tuple(files_out),
+        )
     except (ValueError, KeyError, TypeError, OverflowError, UnicodeError, RecursionError):
         raise _invalid() from None
 
@@ -355,7 +383,8 @@ async def commission_human_history(
                 guard()
     except httpx.HTTPError:
         raise BridgeUnreachable() from None
-    files = _file_ids(bytes(data), scope)
+    manifest = _file_manifest(bytes(data), scope)
+    files = frozenset(item.file_id for item in manifest.files)
     # This check is not atomic with an independent auth write. View retirement
     # is separately serialized with insertion by the registry's watermark.
     guard()
@@ -371,6 +400,7 @@ async def commission_human_history(
             message_id=scope.message_id,
             file_ids=files,
             thread_root_id=scope.thread_root_id,
+            manifest=manifest,
         ),
         ttl_seconds=30,
         expected_epoch=scope.registry_epoch,
