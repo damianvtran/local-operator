@@ -364,6 +364,24 @@ def test_disabling_after_the_designation_moved_clears_the_old_sessions_alert(
     assert item["session_id"] == "sess_old" and item["priority"] == "low"
 
 
+def test_disabling_with_no_designated_session_still_clears_a_stranded_alert(
+    tmp_path: Path,
+) -> None:
+    """Threshold 0 clears BEFORE the no-session guard: a removed designation must not strand it."""
+
+    store = _enrolled(tmp_path, session="sess_old")
+    now = 10 * HOUR
+    clock = Clock()
+    _raise_then_forget(tmp_path, store, clock, now)
+    store.update_designated_session(_owner(), None)
+    _threshold(tmp_path, 0)
+
+    assert asyncio.run(_tick(tmp_path, clock, now)) == "disabled"
+
+    [item] = _items(tmp_path)
+    assert item["session_id"] == "sess_old" and item["priority"] == "low"
+
+
 def test_a_restart_after_a_move_leaves_a_dismissed_old_alert_dismissed(tmp_path: Path) -> None:
     store = _enrolled(tmp_path, session="sess_old")
     now = 10 * HOUR
