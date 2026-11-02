@@ -28,8 +28,10 @@ import logging
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, suppress
@@ -855,6 +857,317 @@ def assert_runtime_root_isolated(scratch: Path) -> Path:
     return resolved
 
 
+class _BrokerFree:
+    """A test-only no-spawn contract, NOT containment of native/fork callers.
+
+    State outlives ordinary fixture patches. In particular, a caught refusal or
+    a fixture finalizer cannot erase the evidence before the terminal audit.
+    Discovery is deliberately separate from the legacy forgiving broker sweep:
+    uncertainty here must fail, never turn into permission to signal a PID.
+    """
+
+    LIMIT = 4096
+
+    def __init__(self, anchors: tuple[Path, ...]) -> None:
+        self.anchors = tuple(path.absolute() for path in anchors)
+        self.violations: list[str] = []
+        self.candidates: set[Path] = set()
+        self.artifacts: set[Path] = set()
+        self.pytest_aliases: dict[Path, Path] = {}
+        self.patch = pytest.MonkeyPatch()
+        self.deriving = False
+        self.session: pytest.Session | None = None
+        from local_operator.secrets import protocol
+
+        self.socket_path = protocol.socket_path
+        self.lock_path = protocol.lock_path
+
+    def fail(self, message: str) -> None:
+        # Bounded diagnostics, but never drop the fact that the contract failed.
+        if message not in self.violations and len(self.violations) < 64:
+            self.violations.append(message)
+
+    def owned(self, path: Path) -> bool:
+        """Validate lexically BEFORE lstat; never resolve a foreign symlink."""
+        if ".." in path.parts:
+            self.fail("broker-free path contains parent traversal")
+            return False
+        path = path.absolute()
+        anchor = next((root for root in self.anchors if path.is_relative_to(root)), None)
+        if anchor is None:
+            self.fail(f"broker-free foreign candidate: {path}")
+            return False
+        current = Path(path.anchor)
+        try:
+            for part in path.parts[1:]:
+                current /= part
+                try:
+                    info = current.lstat()
+                except FileNotFoundError:
+                    break
+                if stat.S_ISLNK(info.st_mode):
+                    self.fail(f"broker-free symlink candidate: {current}")
+                    return False
+                if current != path and not stat.S_ISDIR(info.st_mode):
+                    self.fail(f"broker-free non-directory ancestor: {current}")
+                    return False
+                if current.is_relative_to(anchor) and hasattr(os, "getuid"):
+                    if info.st_uid != os.getuid():
+                        self.fail(f"broker-free foreign-owned candidate: {current}")
+                        return False
+        except Exception as exc:  # noqa: BLE001 — uncertainty poisons the run
+            self.fail(f"broker-free inspection failed: {type(exc).__name__}")
+            return False
+        return True
+
+    def remember(self, base: Path | None) -> None:
+        from local_operator.paths import config_dir
+
+        candidate = Path(base if base is not None else config_dir()).absolute()
+        if not self.owned(candidate):
+            return
+        if candidate not in self.candidates and len(self.candidates) >= self.LIMIT:
+            self.fail("broker-free candidate limit reached")
+            return
+        self.candidates.add(candidate)
+        # Existing pure protocol functions retain the exact fallback name even
+        # when a finalizer deletes its config root. Never enumerate shared /tmp.
+        try:
+            self.deriving = True
+            paths = (self.socket_path(candidate), self.lock_path(candidate))
+        except Exception as exc:  # noqa: BLE001 — not an empty candidate set
+            self.fail(f"broker-free derivation failed: {type(exc).__name__}")
+            return
+        finally:
+            self.deriving = False
+        self.artifacts.update(paths)
+
+    def record_numbered(self, parent: Path, prefix: str, target: Path) -> None:
+        """Record pytest's expected alias, never adopt the observed link value.
+
+        mktemp's numbered-directory return is the provenance. Repeated prefixes
+        update only the alias expectation; every numbered config/fallback name
+        remains in candidates/artifacts, including after pytest deletes a dir.
+        """
+        parent = parent.absolute()
+        target = target.absolute()
+        prefix = os.path.normpath(prefix)
+        if not self.owned(parent) or not self.owned(target):
+            return
+        if (
+            prefix in (".", "..")
+            or Path(prefix).name != prefix
+            or target.parent != parent
+            or not target.name.startswith(prefix)
+            or not target.name[len(prefix) :].isdigit()
+        ):
+            self.fail("broker-free invalid pytest numbered-directory provenance")
+            return
+        self.remember(target)
+        alias = parent / (prefix + "current")
+        if alias not in self.pytest_aliases and len(self.pytest_aliases) >= self.LIMIT:
+            self.fail("broker-free pytest alias limit reached")
+            return
+        self.pytest_aliases[alias] = target
+
+    def audit_pytest_alias(self, alias: Path) -> None:
+        """Validate an exact recorded leaf without resolving/traversing its target."""
+        expected = self.pytest_aliases[alias]
+        if not self.owned(alias.parent) or not self.owned(expected):
+            return
+        try:
+            info = alias.lstat()
+            if not stat.S_ISLNK(info.st_mode):
+                self.fail("broker-free recorded pytest alias is not a symlink")
+                return
+            if hasattr(os, "getuid") and info.st_uid != os.getuid():
+                self.fail("broker-free recorded pytest alias has foreign owner")
+                return
+            if os.readlink(alias) != str(expected):
+                self.fail("broker-free recorded pytest alias target changed")
+        except FileNotFoundError:
+            # pytest creates convenience aliases best-effort. Missing aliases
+            # do not remove the separately retained numbered target/fallbacks.
+            return
+        except Exception as exc:  # noqa: BLE001 — provenance uncertainty fails
+            self.fail(f"broker-free pytest alias inspection failed: {type(exc).__name__}")
+
+    def discover(self, roots: tuple[Path, ...]) -> None:
+        """Bound each deterministic walk; callers never rescan basetemp per cell."""
+        pending = list(sorted(set(roots), reverse=True))
+        entries = 0
+        while pending:
+            root = pending.pop()
+            if root in self.pytest_aliases:
+                self.audit_pytest_alias(root)
+                continue
+            if not self.owned(root):
+                continue
+            self.remember(root)
+            try:
+                with os.scandir(root) as stream:
+                    children = []
+                    for child in stream:
+                        entries += 1
+                        if entries > self.LIMIT:
+                            self.fail("broker-free discovery entry limit reached")
+                            return
+                        children.append(child)
+                for child in sorted(children, key=lambda entry: entry.name, reverse=True):
+                    path = Path(child.path)
+                    if path in self.pytest_aliases:
+                        self.audit_pytest_alias(path)
+                        continue  # target is independent; never traverse an alias
+                    if not self.owned(path):
+                        continue
+                    if child.is_dir(follow_symlinks=False):
+                        pending.append(path)
+            except FileNotFoundError:
+                # The retained candidate and derived paths are still audited.
+                continue
+            except Exception as exc:  # noqa: BLE001 — inspection is fail-closed
+                self.fail(f"broker-free discovery failed: {type(exc).__name__}")
+
+    def audit(self) -> None:
+        for alias in sorted(self.pytest_aliases):
+            self.audit_pytest_alias(alias)
+        for artifact in sorted(self.artifacts):
+            if not self.owned(artifact):
+                continue
+            try:
+                # Exact derived fallback paths can be outside owned roots. Do not
+                # follow a socket/lock symlink or connect to a claimed broker.
+                artifact.lstat()
+            except FileNotFoundError:
+                continue
+            except Exception as exc:  # noqa: BLE001 — no status or signal fallback
+                self.fail(f"broker-free artifact inspection failed: {type(exc).__name__}")
+            else:
+                self.fail(f"broker-free unexpected broker artifact: {artifact}")
+
+    def deny_spawn(self, base: Path | None) -> None:
+        self.remember(base)
+        self.fail("broker-free denied _spawn_broker")
+        raise RuntimeError("broker-free denied _spawn_broker")
+
+    def install(self) -> None:
+        """Combined setup for synthetic controls; real hooks split the phases."""
+        self.install_broker_guards()
+        self.install_subprocess_guard()
+
+    def install_broker_guards(self) -> None:
+        from local_operator.secrets import client, protocol
+
+        state = self
+        temporary = Path(os.environ["TMPDIR"])
+        if not self.owned(temporary):
+            raise pytest.UsageError("--broker-free TMPDIR must be inside an owned root")
+        # Protocol fallbacks stay private even if a plugin cached system /tmp.
+        self.patch.setattr(tempfile, "tempdir", str(temporary))
+
+        def socket_path(base=None):
+            if not state.deriving:
+                state.remember(base)
+            return state.socket_path(base)
+
+        def lock_path(base=None):
+            if not state.deriving:
+                state.remember(base)
+            return state.lock_path(base)
+
+        self.patch.setattr(client, "_spawn_broker", self.deny_spawn)
+        self.patch.setattr(protocol, "socket_path", socket_path)
+        self.patch.setattr(protocol, "lock_path", lock_path)
+        # client imported these by name before installation; patch both aliases
+        # so late finalizers cannot derive an unrecorded fallback rendezvous.
+        self.patch.setattr(client, "socket_path", socket_path)
+        self.patch.setattr(client, "lock_path", lock_path)
+
+        from _pytest.tmpdir import TempPathFactory
+
+        original_mktemp = TempPathFactory.mktemp
+
+        def mktemp(factory, basename, numbered=True):
+            # getbasetemp() can recursively delete _given_basetemp on first
+            # access. Inspect only initialized metadata before delegating.
+            parent = getattr(factory, "_basetemp", None)
+            if not isinstance(parent, Path) or not state.owned(parent):
+                state.fail("broker-free uninitialized or unsupported pytest factory")
+                raise RuntimeError("broker-free uninitialized or unsupported pytest factory")
+            try:
+                if not stat.S_ISDIR(parent.lstat().st_mode):
+                    raise RuntimeError("temporary root is not a directory")
+            except Exception as exc:  # noqa: BLE001 — stale roots must not initialize
+                state.fail(f"broker-free stale pytest factory root: {type(exc).__name__}")
+                raise RuntimeError("broker-free stale pytest factory root") from exc
+            prefix = os.path.normpath(basename)
+            if prefix in (".", "..") or Path(prefix).name != prefix:
+                state.fail("broker-free invalid pytest temporary prefix")
+                raise RuntimeError("broker-free invalid pytest temporary prefix")
+            if not state.owned(parent) or not state.owned(parent / prefix):
+                raise RuntimeError("broker-free foreign pytest temporary root")
+            target = original_mktemp(factory, basename, numbered=numbered)
+            if numbered:
+                state.record_numbered(parent, basename, target)
+            else:
+                state.remember(target)
+            return target
+
+        self.patch.setattr(TempPathFactory, "mktemp", mktemp)
+
+    def install_subprocess_guard(self) -> None:
+        state = self
+
+        class NoSubprocess(subprocess.Popen[bytes]):
+            def __init__(self, *args, **kwargs):
+                state.fail("broker-free denied subprocess.Popen")
+                raise RuntimeError("broker-free denied subprocess.Popen")
+
+        self.patch.setattr(subprocess, "Popen", NoSubprocess)
+
+
+_BROKER_FREE: _BrokerFree | None = None
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--broker-free",
+        action="store_true",
+        default=False,
+        help="Fail-closed in-process tests: no broker/subprocess; requires explicit -n0",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if config.getoption("broker_free"):
+        for item in items:
+            if item.get_closest_marker("allow_secret_broker"):
+                raise pytest.UsageError("--broker-free conflicts with allow_secret_broker")
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    global _BROKER_FREE
+    if _BROKER_FREE is not None:
+        state = _BROKER_FREE
+        try:
+            # Other hooks/finalizers may run after sessionfinish and catch a
+            # refusal. The final verdict must share the guard-removal boundary,
+            # not discard a late ledger entry with an already-OK session.
+            state.discover(state.anchors)
+            state.audit()
+            _broker_free_verdict(state)
+        finally:
+            state.patch.undo()
+            _BROKER_FREE = None
+
+
+def _broker_free_verdict(state: _BrokerFree) -> None:
+    if state.violations:
+        print("\n".join(state.violations), file=sys.stderr)
+        if state.session is not None and state.session.exitstatus == pytest.ExitCode.OK:
+            state.session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Re-assert the desktop gates once pytest owns the process.
 
@@ -864,6 +1177,54 @@ def pytest_configure(config: pytest.Config) -> None:
     """
     arm_process_desktop_gates()
     scrub_import_time_environment()
+
+
+@pytest.hookimpl(specname="pytest_configure", tryfirst=True)
+def pytest_broker_free_prepare(config: pytest.Config) -> None:
+    """Deny broker starts before trusted configure-time identity preflight.
+
+    General subprocess denial starts in the late hook: the unchanged root
+    identity check must still run its bounded -P interpreter probe. This leaves
+    trusted CONFIGURE hooks unsealed, not an argv whitelist or OS containment.
+    Arbitrary plugins/equal-priority later registration are outside this lease.
+    """
+    if config.getoption("broker_free"):
+        arm_process_desktop_gates()
+        scrub_import_time_environment()
+        global _BROKER_FREE
+        if config.getoption("numprocesses", default=None) != 0:
+            raise pytest.UsageError("--broker-free requires explicit -n0 (no workers)")
+        base = config.getoption("basetemp")
+        home = os.environ.get("HOME")
+        directory = os.environ.get("LOCAL_OPERATOR_CONFIG_DIR")
+        temporary = os.environ.get("TMPDIR")
+        if not all((base, home, directory, temporary)):
+            raise pytest.UsageError("--broker-free requires isolated HOME/config/TMPDIR/basetemp")
+        if os.name != "nt":
+            import pwd
+
+            if Path(home).absolute() == Path(pwd.getpwuid(os.getuid()).pw_dir):
+                raise pytest.UsageError("--broker-free refuses the account's real HOME")
+        state = _BrokerFree((Path(base), Path(home)))
+        for root in (Path(base), Path(home), Path(directory), Path(temporary)):
+            if not state.owned(root):
+                raise pytest.UsageError("; ".join(state.violations))
+        _BROKER_FREE = state
+        state.install_broker_guards()
+        state.remember(Path(directory))
+
+
+@pytest.hookimpl(specname="pytest_configure", trylast=True)
+def pytest_broker_free_seal(config: pytest.Config) -> None:
+    """Seal before collection, only after normal configure hooks succeeded.
+
+    Historic configure hooks cannot be wrappers. Explicit phase priorities keep
+    broker prevention active during preflight without weakening tree identity.
+    """
+    if config.getoption("broker_free"):
+        if _BROKER_FREE is None:
+            raise pytest.UsageError("broker-free early configuration did not complete")
+        _BROKER_FREE.install_subprocess_guard()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -1481,10 +1842,33 @@ def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
     try:
         yield
     finally:
-        roots = _temp_roots(item)
-        item.stash[_SWEEP_ROOT_KEY] = roots
-        _record_for_session_sweep(roots)
-        _reap_brokers_of_this_test(item)
+        if _BROKER_FREE is not None:
+            roots = tuple(value for value in item.funcargs.values() if isinstance(value, Path))
+            _BROKER_FREE.discover(roots)
+            _BROKER_FREE.audit()
+        else:
+            roots = _temp_roots(item)
+            item.stash[_SWEEP_ROOT_KEY] = roots
+            _record_for_session_sweep(roots)
+            _reap_brokers_of_this_test(item)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
+    report = yield
+    if _BROKER_FREE is not None and _BROKER_FREE.violations:
+        report.sections.append(("broker-free violations", "\n".join(_BROKER_FREE.violations)))
+        if report.when == "teardown":
+            report.outcome = "failed"
+    return report
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_fixture_setup(fixturedef: pytest.FixtureDef, request: pytest.FixtureRequest):
+    result = yield
+    if _BROKER_FREE is not None and isinstance(result, Path):
+        _BROKER_FREE.discover((result,))
+    return result
 
 
 #: Config dirs this worker's tests could have started a broker under, kept for
@@ -1512,6 +1896,44 @@ def _capture_session_basetemp(tmp_path_factory: pytest.TempPathFactory) -> None:
     already computed for ``tmp_path``, so this creates no directory of its own.
     """
     global _SESSION_BASETEMP
+    if _BROKER_FREE is not None:
+        # This session-scoped dependency initializes before function-scoped
+        # isolate_environment calls mktemp. Never call pytest's destructive
+        # uninitialized getbasetemp path, even for a root we intended to own.
+        parent = getattr(tmp_path_factory, "_basetemp", None)
+        if parent is None:
+            intended = getattr(tmp_path_factory, "_given_basetemp", None)
+            if (
+                not isinstance(intended, Path)
+                or intended.absolute() != _BROKER_FREE.anchors[0]
+                or not _BROKER_FREE.owned(intended)
+            ):
+                _BROKER_FREE.fail("broker-free unsupported initial pytest temporary root")
+                raise RuntimeError("broker-free unsupported initial pytest temporary root")
+            try:
+                # exist_ok=False: refuse a stale/preexisting root rather than
+                # letting getbasetemp remove it. No cleanup/restore is attempted.
+                intended.mkdir(mode=0o700)
+            except Exception as exc:  # noqa: BLE001 — initialization must fail visibly
+                _BROKER_FREE.fail(f"broker-free initial root creation failed: {type(exc).__name__}")
+                raise RuntimeError("broker-free initial root creation failed") from exc
+            tmp_path_factory._basetemp = intended
+            parent = intended
+        if (
+            not isinstance(parent, Path)
+            or parent.absolute() != _BROKER_FREE.anchors[0]
+            or not _BROKER_FREE.owned(parent)
+        ):
+            _BROKER_FREE.fail("broker-free invalid initialized session temporary root")
+            raise RuntimeError("broker-free invalid initialized session temporary root")
+        try:
+            if not stat.S_ISDIR(parent.lstat().st_mode):
+                raise RuntimeError("temporary root is not a directory")
+        except Exception as exc:  # noqa: BLE001 — do not adopt missing/stale metadata
+            _BROKER_FREE.fail(f"broker-free stale session temporary root: {type(exc).__name__}")
+            raise RuntimeError("broker-free stale session temporary root") from exc
+        _SESSION_BASETEMP = parent
+        return
     with suppress(Exception):
         _SESSION_BASETEMP = tmp_path_factory.getbasetemp().resolve()
 
@@ -1593,6 +2015,11 @@ def _sweep_session_leftovers(basetemp: Path | None) -> int:
     case and say nothing, and a candidate the sweep declined to stop was never
     reclaimed.
     """
+    if _BROKER_FREE is not None:
+        if basetemp is not None:
+            _BROKER_FREE.discover((basetemp,))
+        _BROKER_FREE.audit()
+        return 0
     if not _broker_daemon_is_available():
         return 0
     candidates = _session_sweep_candidates(basetemp)
@@ -1722,6 +2149,14 @@ def pytest_sessionfinish(session: pytest.Session) -> None:
     outcome must not add a line to every run.
     """
     _fail_session_on_runtime_root_escapes(session)
+    if _BROKER_FREE is not None:
+        _BROKER_FREE.session = session
+        _BROKER_FREE.discover(_BROKER_FREE.anchors)
+        _BROKER_FREE.audit()
+        # Preserve this Session through unconfigure, where guards are removed;
+        # later hook/wrapper refusals must still affect the returned exit code.
+        _broker_free_verdict(_BROKER_FREE)
+        return
     with suppress(Exception):
         reclaimed = _sweep_session_leftovers(_SESSION_BASETEMP)
         if reclaimed:
@@ -1752,6 +2187,11 @@ def _reap_brokers_of_this_test(item: pytest.Item) -> None:
     set is built by the same `_sweep_candidates` the teardown sweep uses, so the
     two can never drift into disagreeing about what this test owns.
     """
+    if _BROKER_FREE is not None:
+        roots = tuple(value for value in item.funcargs.values() if isinstance(value, Path))
+        _BROKER_FREE.discover(roots)
+        _BROKER_FREE.audit()
+        return
     home = getattr(item, "funcargs", {}).get("isolate_environment")
     _stop_brokers_in(_sweep_candidates(item, home if isinstance(home, Path) else None))
 
@@ -1844,6 +2284,10 @@ def stop_secret_brokers_started_by_this_test(request, isolate_environment) -> It
     """
     yield
 
+    if _BROKER_FREE is not None:
+        _BROKER_FREE.discover((isolate_environment,))
+        _BROKER_FREE.audit()
+        return
     candidates = _secret_config_dirs(request, isolate_environment)
     if not candidates:
         return
@@ -1878,6 +2322,13 @@ def _stop_brokers_in(candidates: list[Path]) -> set[Path]:
     fixture, which is the argument for one guard at the bottom of the stack
     rather than one per entry point.
     """
+    if _BROKER_FREE is not None:
+        if len(candidates) > _BROKER_FREE.LIMIT:
+            _BROKER_FREE.fail("broker-free cleanup candidate limit reached")
+        for candidate in candidates[: _BROKER_FREE.LIMIT]:
+            _BROKER_FREE.remember(candidate)
+        _BROKER_FREE.audit()
+        return set()  # audit only, never a claim that an artifact was reclaimed
     if not _broker_daemon_is_available():
         return set()  # no daemon to stop, so nothing was confirmed gone
 
