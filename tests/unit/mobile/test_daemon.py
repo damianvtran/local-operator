@@ -2947,6 +2947,48 @@ def test_the_two_viewport_meta_copies_agree_and_match_the_runtime_constant() -> 
     assert "width=device-width" in shell and "initial-scale=1" in shell
 
 
+def test_manifest_is_served_unauthenticated_with_relative_urls() -> None:
+    """The installed-app manifest: the OS fetches it WITHOUT the session cookie, so
+    it must answer a cold client (like ``/mark.png``), and its URLs stay relative
+    because a tunnel may mount the app under a path."""
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+
+    response = client.get("/manifest.webmanifest")  # no cookie, no login
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/manifest+json")
+    assert response.headers["cache-control"] == "no-store"
+    manifest = response.json()
+    assert manifest["name"] == "local operator"
+    assert manifest["short_name"] == "lop"
+    assert manifest["display"] == "standalone"
+    assert manifest["start_url"] == "./" and manifest["scope"] == "./"
+    assert manifest["background_color"] == manifest["theme_color"] == "#14110c"
+    assert manifest["icons"] == [{"src": "./mark.png", "sizes": "256x256", "type": "image/png"}]
+    # The icon it names is itself reachable without a cookie.
+    assert client.get("/mark.png").status_code == 200
+
+
+def test_login_page_and_shell_declare_the_installed_app_identity() -> None:
+    """Both entry documents (server-rendered login, SPA shell) carry the manifest
+    link and the capable/title metas, so the app installs from whichever page the
+    reader was on; the login page also matches the shell's status-bar style."""
+    from pathlib import Path
+
+    from local_operator.mobile import daemon as daemon_module
+
+    shell = (Path(daemon_module.__file__).parent / "web" / "index.html").read_text()
+    login = daemon_module._LOGIN_HTML
+    for markup in (shell, login):
+        flat = " ".join(markup.split())
+        assert 'rel="manifest" href="manifest.webmanifest"' in flat
+        assert 'name="mobile-web-app-capable" content="yes"' in flat
+        assert 'name="apple-mobile-web-app-capable" content="yes"' in flat
+        assert 'name="apple-mobile-web-app-title" content="local operator"' in flat
+        assert 'name="apple-mobile-web-app-status-bar-style" content="black-translucent"' in flat
+        assert 'rel="apple-touch-icon" href="mark.png"' in flat
+
+
 def test_durable_projection_carries_supplement_rows_per_anchor(tmp_path, monkeypatch) -> None:
     """The cold-open half of the sibling map (memo §3.1 row 18): custom rows are
     invisible to ``fold_history`` (messages only), so the durable fold collects

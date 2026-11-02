@@ -94,6 +94,21 @@ describe("SessionMenu", () => {
 		await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
 	});
 
+	it("omits the wide view row in an installed app, where it is never applied", () => {
+		vi.stubGlobal("matchMedia", (query: string) => ({
+			matches: query === "(display-mode: standalone)",
+			media: query,
+		}));
+		try {
+			setup();
+			expect(screen.queryByRole("button", { name: "wide view" })).toBeNull();
+			// The neighbouring rows are untouched.
+			expect(screen.getByRole("button", { name: "Pin session" })).toBeTruthy();
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
 	it("toggles wide view and states it visibly and to assistive tech", () => {
 		setup();
 		const wide = screen.getByRole("button", { name: "wide view" });

@@ -132,28 +132,66 @@ function viewportMeta(): HTMLMetaElement | null {
 	return document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
 }
 
-/** Apply (and persist) the mode: the meta, plus the `data-view` attribute the
- *  column cap keys off (`--lo-column-max` in `styles/index.css`). */
-export function applyWideView(wide: boolean): void {
+/** Whether the page runs as an installed app (home-screen / PWA) rather than a
+ *  browser tab. iOS reports it through the non-standard `navigator.standalone`;
+ *  everyone else through the `display-mode` media query.
+ *
+ * WHY THIS EXISTS: the wide view rewrites the viewport meta to `width=512`, and
+ * WebKit then fits 512 CSS px into the phone's ~393pt, so the whole app renders at
+ * ~0.76 scale: small and soft, with no browser chrome to explain why. The wide
+ * preference is persisted per origin, and an installed app has no address bar to
+ * toggle it from by feel, so a tab-time opt-in (or an accidental tap on the
+ * footer button) silently shrank the installed app. The installed app therefore
+ * never uses it. Guarded for engines (and test environments) without `matchMedia`. */
+export function isStandalone(): boolean {
+	if ((navigator as { standalone?: boolean }).standalone === true) return true;
+	return typeof window.matchMedia === "function"
+		? window.matchMedia("(display-mode: standalone)").matches
+		: false;
+}
+
+/** Put the document back on the default layout: meta, `data-view`, fit-scale var
+ *  and listeners. Never touches the stored preference. */
+function clearWideDom(): void {
 	const meta = viewportMeta();
-	if (meta) meta.setAttribute("content", wide ? WIDE_VIEWPORT_CONTENT : DEFAULT_VIEWPORT_CONTENT);
+	if (meta) meta.setAttribute("content", DEFAULT_VIEWPORT_CONTENT);
+	delete document.documentElement.dataset.view;
+	document.documentElement.style.removeProperty(FIT_SCALE_PROP);
+	window.removeEventListener("orientationchange", recomputeFitScale);
+	window.removeEventListener("resize", recomputeFitScale);
+}
+
+/** Apply (and persist) the mode: the meta, plus the `data-view` attribute the
+ *  column cap keys off (`--lo-column-max` in `styles/index.css`).
+ *
+ *  Turning it ON is a no-op in an installed app (see {@link isStandalone}). */
+export function applyWideView(wide: boolean): void {
+	if (wide && isStandalone()) return;
 	if (wide) {
+		const meta = viewportMeta();
+		if (meta) meta.setAttribute("content", WIDE_VIEWPORT_CONTENT);
 		document.documentElement.dataset.view = "wide";
 		recomputeFitScale();
 		window.addEventListener("orientationchange", recomputeFitScale);
 		window.addEventListener("resize", recomputeFitScale);
 		localStorage.setItem(KEY, "1");
 	} else {
-		delete document.documentElement.dataset.view;
-		document.documentElement.style.removeProperty(FIT_SCALE_PROP);
-		window.removeEventListener("orientationchange", recomputeFitScale);
-		window.removeEventListener("resize", recomputeFitScale);
+		clearWideDom();
 		localStorage.removeItem(KEY);
 	}
 }
 
 /** Boot: restore the persisted mode before first paint, like `initTheme`. A
- *  default-off reader never touches the meta at all. */
+ *  default-off reader never touches the meta at all.
+ *
+ *  In an installed app the stored preference is IGNORED, not deleted: Android
+ *  Chrome shares storage between the tab and the installed app, and the same
+ *  origin's browser tab must keep its opt-in. */
 export function initWideView(): void {
-	if (getWideView()) applyWideView(true);
+	if (!getWideView()) return;
+	if (isStandalone()) {
+		clearWideDom();
+		return;
+	}
+	applyWideView(true);
 }

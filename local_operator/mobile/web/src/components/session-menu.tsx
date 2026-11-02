@@ -23,7 +23,7 @@
  * first and the gate sheet then owns focus.
  */
 import { useEffect, useState, type RefObject } from "react";
-import { applyWideView, getWideView } from "../lib/viewport";
+import { applyWideView, getWideView, isStandalone } from "../lib/viewport";
 import { Sheet } from "./ui/sheet";
 import { messageRuntime } from "../store";
 
@@ -147,22 +147,26 @@ export function SessionMenu({
 						{pinned ? "pinned" : "not pinned"}
 					</span>
 				</button>
-				<button
-					type="button"
-					onClick={() => {
-						const next = !wide;
-						applyWideView(next);
-						setWide(next);
-					}}
-					aria-pressed={wide}
-					aria-label="wide view"
-					className={MENU_ROW}
-				>
-					<span className="min-w-0 flex-1 truncate">Wide view</span>
-					<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
-						{wide ? "on" : "off"}
-					</span>
-				</button>
+				{/* Absent in an installed app, where wide view is never applied
+				    (`isStandalone`): a row there would be a dead toggle. */}
+				{!isStandalone() && (
+					<button
+						type="button"
+						onClick={() => {
+							const next = !wide;
+							applyWideView(next);
+							setWide(next);
+						}}
+						aria-pressed={wide}
+						aria-label="wide view"
+						className={MENU_ROW}
+					>
+						<span className="min-w-0 flex-1 truncate">Wide view</span>
+						<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
+							{wide ? "on" : "off"}
+						</span>
+					</button>
+				)}
 				{/* Beside Approvals (design D11): the two ▸ rows that open a sheet. */}
 				{spendRow && onOpenSpend ? (
 					<button type="button" onClick={() => { onClose(); onOpenSpend(); }} className={MENU_ROW}>

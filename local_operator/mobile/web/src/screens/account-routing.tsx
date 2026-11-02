@@ -69,7 +69,7 @@ export function AccountRoutingScreen() {
 			<Button variant="ghost" onClick={() => navigateUp("/")}>{copy("back")}</Button>
 			<h1 className="text-body font-medium">{copy("title")}</h1>
 		</header>
-		<div className="min-h-0 flex-1 overflow-y-auto p-4 space-y-4">
+		<div className="min-h-0 flex-1 overflow-y-auto p-4 pb-[max(env(safe-area-inset-bottom),1rem)] space-y-4">
 			<p className="text-ink-muted">{copy("scope")}</p>
 			{loading && <p role="status">{copy("loading")}</p>}
 			{error && <p role="alert" className="text-danger">{error}</p>}
