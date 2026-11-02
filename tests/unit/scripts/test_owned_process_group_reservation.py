@@ -248,12 +248,20 @@ def test_c4_pid_one_and_our_own_group_are_never_signalled(monkeypatch):
     with pytest.raises(ValueError):
         Kernel(leader=1, parent=1).cap()
 
-    kernel = Kernel(leader=4242, parent=1)
+    # THE FIXTURE MUST ADMIT, or the assertion below witnesses the wrong refusal.
+    # `parent=1` refuses at C1 with `not_exclusive_reaper` -- the class under test
+    # (`excluded`) was never reached, and the row passed for that reason.
+    kernel = Kernel(leader=4242, parent=os.getpid())
     cap = kernel.cap()
+    assert cap.last.status == "VERIFIED", cap.last.reason
     monkeypatch.setattr(owned.os, "getpgrp", lambda: 4242)
     monkeypatch.setattr(owned.os, "getpid", lambda: 77)
     verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
     assert verdict.status == "REFUSED", verdict.reason
+    # THE CLASS, not only the status: a re-classification of this same refusal
+    # would otherwise pass silently. The pid-1 arm above refuses by CONSTRUCTION
+    # (a `ValueError` from `cap()`), so it has no verdict class to assert.
+    assert verdict.refusal_class == "excluded", verdict.reason
     assert kernel.sent == []
 
 
