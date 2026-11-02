@@ -33,6 +33,13 @@ class World:
         }
         #: Set when the faked child has exited; a corpse until it is reaped.
         self.exited = False
+        #: WHEN the faked child exits, on the fake clock. The child here is
+        #: `synthetic`, which returns immediately: with `timeout=None` the wrapper
+        #: waits for the CHILD by contract, so a fake that never terminates makes a
+        #: healthy run wait for ever (measured: the file ran to a 240 s bound). The
+        #: exit is an EVENT IN TIME, not a side effect of whichever call the
+        #: implementation happens to make.
+        self.exits_at = 0.01
         self.now = 0.0
         self.calls = []
         self.sample_calls = 0
@@ -50,7 +57,7 @@ class World:
         # turned a live leader into a corpse during capture and the receipt was
         # never recorded. `self.exited` says the child has exited; nothing else.
         self.sample_calls += 1
-        corpse = bool(getattr(self, "exited", False))
+        corpse = bool(getattr(self, "exited", False)) or self.now >= self.exits_at
         return {
             pid: owned.procstate.ProcessSample(corpse and pid == 10, self.rows[pid][3])
             for pid in pids
@@ -76,7 +83,12 @@ class World:
             census=self.census,
             samples=self.samples,
             identity=identity or self.identity,
-            scheme=lambda: "fixture",
+            # A REGISTERED SCHEME, not an invented name. `is_birth` is three-valued
+            # and answers None for a scheme this build does not produce, so `"fixture"`
+            # made the birth UNREADABLE -- capture refused, no receipt was written,
+            # and every later refresh reported "no leader receipt" (rc 126). `None`
+            # there means "could not ask", never "no".
+            scheme=owned.procstate.birth_scheme,
             clock=self.clock,
             signal_group=send or self.send,
         )
@@ -159,7 +171,7 @@ def test_a_successful_run_writes_spawn_and_exit_records(wrapper, monkeypatch, tm
     assert spawn["wall_clock_start_utc"].endswith("Z")
     assert [actor["pid"] for actor in spawn["actors"]] == [10]
     assert spawn["actors"][0]["birth"] == "leader"
-    assert spawn["actors"][0]["scheme"] == "fixture"
+    assert spawn["actors"][0]["scheme"] == owned.procstate.birth_scheme()
 
     exit_record = json.loads(_records(tmp_path, "exit")[0].read_text())
     assert exit_record["run_id"] == "qa-1234"
