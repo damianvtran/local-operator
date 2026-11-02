@@ -42,6 +42,43 @@ its actual balance and says `Spend unavailable`. Eligible paid headroom can
 continue after included quota is exhausted; model-family restrictions remain
 unless the provider explicitly says paid allowance supersedes them.
 
+## Refresh
+
+`GET /api/usage` stays write-free. A separate, authenticated and
+origin-checked `POST /api/usage/refresh` (body `{"force": bool}`) is the only
+phone path that reaches vendors. The sheet paints the GET, then posts
+`force:false` on open (served by the 5-minute cache, the cross-process lease
+and per-account backoff, so reopening costs nothing) and `force:true` from the
+refresh button.
+
+- **Who is probed.** `ProviderController.for_persisted_usage_refresh()` targets
+  persisted logins only. Environment, runtime and config keys are neither
+  targets nor the API key a stored login uses
+  (`AuthStore.get_persisted_api_key`).
+- **What it writes.** The usage cache row under the exact persisted key the GET
+  reads (`_persisted_account_fingerprint`), its lease rows, and OAuth tokens
+  rotated by the vendor in `auth.db` — the writes the TUI's background warmer
+  already makes.
+- **Floor and single flight.** One refresh runs per daemon; a concurrent POST
+  joins it. A forced refresh inside `desktop_quota.REFRESH_FLOOR_MS` (15 s)
+  runs unforced and answers `refresh.status: "throttled"` with
+  `retry_after_ms`.
+- **Bound.** The route waits up to 8 s, then answers with the cached projection
+  and `status: "timeout"`. The task is shielded, never cancelled: cancelling
+  mid OAuth rotation could lose a refresh token the vendor already replaced.
+  A failure answers the cached projection with `status: "failed"`.
+- **Response.** The GET envelope plus `refreshed_at` (the OLDEST report's
+  `fetched_at`), `refresh: {status, forced, retry_after_ms}`, and `source:
+  "live"` only when a report was fetched after the refresh started. The POST
+  answers from its own results because the GET's `immutable=1` read cannot see
+  WAL frames a refresh just wrote.
+
+Both routes add, without changing earlier keys: per report `provider_name`,
+`account_index`/`account_count` (login order, assigned before identity is
+stripped — no email or hashed id crosses the tunnel), `state`
+(`providers.usage.usage_report_state`, shared with the desktop catalogue) and
+`credential_invalid`; per limit `remaining_fraction` (clamped 0..1) and `tone`.
+
 Dependency order: paid-health contract PR, strict read-only authority PR, then
 these panels. Source tests mocking that public method are not proof that the
 method exists or that store writes are absent; real authorized HTTP and

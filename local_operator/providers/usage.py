@@ -408,6 +408,22 @@ class UsageReport:
     credential_invalid: bool = False
 
 
+def usage_report_state(report: UsageReport) -> str:
+    """The one display state of a cached/live report, for every remote surface.
+
+    ``reauth_required`` (the grant is dead -- only a new login fixes it) wins
+    over ``unavailable`` (no limits, or probes keep failing), which wins over
+    ``partial`` (last-good numbers kept after a recent failed probe). ONE rule,
+    because the desktop quota catalogue and the paired phone both label
+    accounts with it, and two copies of an ordering like this drift.
+    """
+    if report.credential_invalid:
+        return "reauth_required"
+    if report.usage_unavailable or not report.limits:
+        return "unavailable"
+    return "partial" if report.consecutive_failures else "available"
+
+
 @dataclass(frozen=True)
 class QuotaHealth:
     """Whether a provider account can accept another message."""

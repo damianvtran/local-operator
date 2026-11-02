@@ -1,7 +1,10 @@
 """Phone usage is an authenticated cached display, never a provider probe."""
 
+import asyncio
 from unittest.mock import Mock, patch
 
+import httpx
+import pytest
 from starlette.testclient import TestClient
 
 from local_operator.mobile import daemon as mobile
@@ -246,3 +249,194 @@ def test_snapshot_freshness_survives_phone_projection():
         value = mobile._cached_phone_usage()
     assert value["may_be_stale"] is True
     assert value["cached_at"] == 1700000000000
+
+
+# -- POST /api/usage/refresh ---------------------------------------------------
+
+def _refresh_body(**extra):
+    body = {
+        "reports": [],
+        "source": "live",
+        "may_be_stale": False,
+        "cached_at": None,
+        "refreshed_at": None,
+    }
+    body.update(extra)
+    return body
+
+
+def _cached_body():
+    return {"reports": [], "source": "cached", "may_be_stale": False, "cached_at": 7}
+
+
+def _authed_client(app):
+    client = TestClient(app, follow_redirects=False)
+    client.post("/login", data={"password": "fixture-password"})
+    return client
+
+
+def _app():
+    return mobile.build_app(mobile.MobileDaemon(password="fixture-password", dial_registrants=False))
+
+
+def test_refresh_requires_pairing_and_same_origin(monkeypatch):
+    calls = []
+
+    async def refresh(force):
+        calls.append(force)
+        return _refresh_body()
+
+    monkeypatch.setattr(mobile, "_refresh_phone_usage", refresh)
+    with TestClient(_app(), follow_redirects=False) as client:
+        assert client.post("/api/usage/refresh", json={"force": True}).status_code == 401
+        client.post("/login", data={"password": "fixture-password"})
+        crossed = client.post(
+            "/api/usage/refresh",
+            json={"force": True},
+            headers={"origin": "https://someone-else.example.test"},
+        )
+        assert crossed.status_code == 403
+        assert calls == []
+        ok = client.post("/api/usage/refresh", json={"force": False})
+    assert ok.status_code == 200
+    assert ok.json()["refresh"] == {"status": "ok", "forced": False, "retry_after_ms": None}
+    assert calls == [False]
+
+
+def test_forced_refresh_is_floored_and_reports_retry_after(monkeypatch):
+    calls = []
+
+    async def refresh(force):
+        calls.append(force)
+        return _refresh_body()
+
+    monkeypatch.setattr(mobile, "_refresh_phone_usage", refresh)
+    with _authed_client(_app()) as client:
+        first = client.post("/api/usage/refresh", json={"force": True}).json()["refresh"]
+        second = client.post("/api/usage/refresh", json={"force": True}).json()["refresh"]
+    assert first == {"status": "ok", "forced": True, "retry_after_ms": None}
+    assert second["status"] == "throttled" and second["forced"] is False
+    assert 0 < second["retry_after_ms"] <= 15_000
+    # The throttled request still refreshes, just without skipping the cache.
+    assert calls == [True, False]
+
+
+def test_concurrent_refreshes_share_one_fetch(monkeypatch):
+    """Two phones (or a double tap) joining one in-flight refresh fetch once."""
+    calls = []
+    release = asyncio.Event()
+
+    async def refresh(force):
+        calls.append(force)
+        await release.wait()
+        return _refresh_body()
+
+    monkeypatch.setattr(mobile, "_refresh_phone_usage", refresh)
+    app = _app()
+    async def scenario():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://phone") as client:
+            await client.post("/login", data={"password": "fixture-password"})
+            first = asyncio.create_task(client.post("/api/usage/refresh", json={"force": True}))
+            second = asyncio.create_task(client.post("/api/usage/refresh", json={"force": True}))
+            await asyncio.sleep(0.05)
+            release.set()
+            return await first, await second
+
+    first, second = asyncio.run(scenario())
+    assert calls == [True]
+    assert first.status_code == second.status_code == 200
+
+
+def test_slow_refresh_times_out_to_cached_data_without_cancelling(monkeypatch):
+    """The bound stops WAITING; the shielded task still finishes and writes."""
+    finished = []
+
+    async def refresh(force):
+        await asyncio.sleep(0.3)
+        finished.append(True)
+        return _refresh_body()
+
+    monkeypatch.setattr(mobile, "_refresh_phone_usage", refresh)
+    monkeypatch.setattr(mobile, "_cached_phone_usage", _cached_body)
+    monkeypatch.setattr(mobile, "PHONE_REFRESH_BOUND_S", 0.05)
+    app = _app()
+    async def scenario():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://phone") as client:
+            await client.post("/login", data={"password": "fixture-password"})
+            response = await client.post("/api/usage/refresh", json={"force": False})
+            assert not finished, "the bound must answer before the refresh lands"
+            await asyncio.sleep(0.5)
+            return response
+
+    response = asyncio.run(scenario())
+    body = response.json()
+    assert body["refresh"]["status"] == "timeout"
+    assert body["source"] == "cached" and body["cached_at"] == 7
+    assert finished == [True], "the timed-out refresh was cancelled"
+
+
+def test_failed_refresh_answers_cached_projection(monkeypatch):
+    async def refresh(force):
+        raise RuntimeError("vendor private-account detail")
+
+    monkeypatch.setattr(mobile, "_refresh_phone_usage", refresh)
+    monkeypatch.setattr(mobile, "_cached_phone_usage", _cached_body)
+    with _authed_client(_app()) as client:
+        response = client.post("/api/usage/refresh", json={"force": False})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["refresh"]["status"] == "failed"
+    assert "private-account" not in response.text
+    assert body["cached_at"] == 7
+
+
+def test_projection_derives_tone_fraction_state_and_account_positions():
+    reports = [
+        UsageReport(
+            provider="anthropic",
+            limits=[
+                UsageLimit("5h", "5 hour", UsageAmount(used_fraction=0.9, unit="percent"), "5h"),
+                UsageLimit("7d", "7 day", UsageAmount(used_fraction=1.04, unit="percent"), "7d"),
+                UsageLimit("x", "odd", UsageAmount(unit="unknown")),
+                UsageLimit(
+                    "v", "vendor", UsageAmount(used_fraction=0.1), status="exhausted"
+                ),
+            ],
+            consecutive_failures=1,
+        ),
+        UsageReport(provider="anthropic", credential_invalid=True),
+        UsageReport(provider="deepseek", usage_unavailable=True),
+    ]
+    rows = mobile._phone_usage_projection(reports, [(1, 2), (0, 2), (0, 1)])
+    first = rows[0]
+    assert first["provider_name"] == "Anthropic (Claude Pro/Max)"
+    assert (first["account_index"], first["account_count"]) == (1, 2)
+    assert first["state"] == "partial" and first["credential_invalid"] is False
+    tones = [(lim["tone"], lim["remaining_fraction"]) for lim in first["limits"]]
+    assert tones[0][0] == "warning" and tones[0][1] == pytest.approx(0.1)
+    assert tones[1] == ("exhausted", 0.0)  # over-quota clamps, never negative
+    assert tones[2] == ("unknown", None)
+    assert tones[3][0] == "exhausted"  # vendor status outranks the threshold
+    assert rows[1]["state"] == "reauth_required" and rows[1]["credential_invalid"] is True
+    assert rows[2]["state"] == "unavailable"
+    # Without positions, numbering falls back to order within each provider.
+    fallback = mobile._phone_usage_projection(reports)
+    assert [(r["account_index"], r["account_count"]) for r in fallback] == [(0, 2), (1, 2), (0, 1)]
+
+
+def test_get_keeps_original_keys_and_adds_only(monkeypatch):
+    """Older phone builds read only the first-release keys; none may change."""
+    report = UsageReport(
+        provider="openai",
+        limits=[UsageLimit("c", "Credits", UsageAmount(remaining=1, limit=2, unit="credits"))],
+    )
+    rows = mobile._phone_usage_projection([report])
+    original = {"provider", "limits", "unavailable", "fetched_at"}
+    assert original <= set(rows[0])
+    original_limit = {
+        "amount", "paid_fallback", "available", "unlimited", "supersedes_tiers",
+        "family_cap", "shared", "window", "family", "resets_at_ms", "payable", "exhausted",
+    }
+    assert original_limit <= set(rows[0]["limits"][0])

@@ -20,7 +20,7 @@ import logging
 import random
 import sqlite3
 import time
-from typing import TYPE_CHECKING, Any, Callable, Collection, Mapping, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Collection, Mapping, Protocol, cast
 
 import httpx
 
@@ -81,7 +81,7 @@ from local_operator.providers.usage_cache import (
 if TYPE_CHECKING:  # auth_store stays off this module's runtime import graph
     from pathlib import Path
 
-    from local_operator.providers.auth_store import OAuthAccess, StoredCredential
+    from local_operator.providers.auth_store import AuthStore, OAuthAccess, StoredCredential
     from local_operator.providers.oauth.callback_server import LoginCallbacks
 
 LoginCallbackFactory = Callable[[ProviderDefinition], "LoginCallbacks"]
@@ -509,6 +509,12 @@ class ReadOnlyUsageSnapshot:
     unavailable: bool = False
     may_be_stale: bool = False
     cached_at: int | None = None
+    #: ``(account_index, account_count)`` per entry of ``reports`` (parallel),
+    #: in login order. Computed before identity is stripped -- the only point
+    #: at which accounts can be told apart. Empty when the seam returned an
+    #: early (Muse-only) answer; consumers then treat each report as account 0
+    #: of 1 within its provider group.
+    account_positions: list[tuple[int, int]] = dataclasses.field(default_factory=list)
 
 
 class ProviderController:
@@ -543,6 +549,11 @@ class ProviderController:
         #: first-frame path uses these plus nonsecret store metadata, never
         #: bearer decryption, token rotation or inference quota evidence.
         self._catalogue_scopes: dict[str, str] = {}
+        #: Set ONLY by :meth:`for_persisted_usage_refresh`. A usage refresh in
+        #: this mode probes stored logins alone and writes under the persisted
+        #: cache key the paired phone reads. A constructor-time mode rather than
+        #: a per-call flag, so no call site can forget it (see that factory).
+        self._persisted_usage_only = False
 
     def set_login_callbacks(self, factory: "LoginCallbackFactory | None") -> None:
         """Install host-specific login callbacks after construction.
@@ -966,6 +977,125 @@ class ProviderController:
             ),
         )
 
+    @classmethod
+    def for_persisted_usage_refresh(
+        cls,
+        auth_db_path: "Path | None" = None,
+        usage_cache: "UsageCacheStore | None" = None,
+    ) -> "ProviderController":
+        """A controller that REFRESHES usage for stored logins only.
+
+        Built for the paired phone's ``POST /api/usage/refresh``. The ordinary
+        :meth:`fetch_usage` targets every report-able provider, including one
+        configured only through the environment, and keys its cache row by a
+        fingerprint that folds the env/runtime/config key in. On a daemon with
+        ``ANTHROPIC_API_KEY`` set that would (a) probe an ambient account the
+        operator never logged in with and (b) land the result under a key the
+        phone's read (:meth:`cached_persisted_usage_reports_read_only`, keyed by
+        :meth:`_persisted_account_fingerprint`) never looks at.
+
+        So this mode branches at exactly three sites -- the target list, the
+        cache key and the API-key fallback in :meth:`_fetch_one` -- and reuses
+        everything else (``_fetch_provider_cached``/``_refresh_provider_usage``:
+        lease, last-good retention, empty-never-overwrites). A plain
+        :class:`AuthStore` has no runtime/config overrides, and OAuth
+        enumeration already reads stored rows only.
+
+        Unlike the read-only factory this one WRITES: the usage cache row and
+        lease, and rotated OAuth tokens in ``auth.db`` -- the same writes the
+        TUI's background warmer makes. Build and use it on one thread (the
+        SQLite handles are thread-affine).
+        """
+        from local_operator.providers.auth_store import AuthStore
+
+        controller = cls(AuthStore(auth_db_path), None, usage_cache=usage_cache)
+        controller._persisted_usage_only = True
+        return controller
+
+    async def refresh_persisted_usage(self, force: bool = False) -> list[UsageReport]:
+        """Refresh every stored login's usage; reports KEEP their identity.
+
+        Identity is kept because the caller must order accounts by login order
+        (:meth:`order_persisted_usage_reports`) before stripping it for the
+        wire. Only meaningful on a :meth:`for_persisted_usage_refresh`
+        controller; on any other it would probe ambient accounts, so refuse.
+        """
+        if not self._persisted_usage_only:
+            raise RuntimeError("refresh_persisted_usage needs for_persisted_usage_refresh()")
+        return await self.fetch_usage(None, force_refresh=force)
+
+    def order_persisted_usage_reports(
+        self,
+        reports: list[UsageReport],
+        store: "ReadOnlyUsageMetadataStore | None" = None,
+    ) -> list[tuple[UsageReport, int, int]]:
+        """``(report, account_index, account_count)`` in stable login order.
+
+        The phone labels a provider's accounts "Account 1..N" without ever
+        seeing an email, so the numbering has to be stable across reads: the
+        cache payload's order is merge order, which shuffles when one account
+        fails and another succeeds. Login order (credential row id) is stable --
+        adding a login never renumbers the existing ones.
+
+        A report is matched to its row by the SAME label
+        :meth:`_expected_oauth_identities` derives (email, then account_id,
+        then identity_key, then ``cred:<id>``), plus the row's
+        :func:`credential_identity` for non-OAuth rows. Unmatched reports go
+        last, sorted by identity, so the order is still deterministic. Must run
+        BEFORE identity is stripped -- afterwards nothing can be matched.
+        Provider order is preserved (first appearance); the phone sorts
+        providers itself.
+        """
+        from local_operator.providers.auth_store import credential_identity
+
+        metadata = store if store is not None else self.auth_store
+        rank_cache: dict[str, dict[str, int]] = {}
+
+        def ranks(provider: str) -> dict[str, int]:
+            storage = self._storage_id(provider)
+            if storage not in rank_cache:
+                found: dict[str, int] = {}
+                try:
+                    rows = metadata.list_credentials(storage)
+                except Exception:  # noqa: BLE001 — labels only; unmatched sorts last
+                    rows = []
+                for row in sorted(rows, key=lambda r: getattr(r, "id", 0)):
+                    row_id = int(getattr(row, "id", 0) or 0)
+                    data = getattr(row, "data", None)
+                    data = data if isinstance(data, dict) else {}
+                    labels = [
+                        data.get("email"),
+                        data.get("account_id"),
+                        getattr(row, "identity_key", None),
+                        f"cred:{row_id}",
+                    ]
+                    try:
+                        labels.append(credential_identity(row))
+                    except Exception:  # noqa: BLE001 — a fake row shape is unlabelled
+                        pass
+                    for label in labels:
+                        if label:
+                            found.setdefault(str(label), row_id)
+                rank_cache[storage] = found
+            return rank_cache[storage]
+
+        grouped: dict[str, list[UsageReport]] = {}
+        for report in reports:
+            grouped.setdefault(report.provider, []).append(report)
+        out: list[tuple[UsageReport, int, int]] = []
+        unmatched = float("inf")
+        for provider, group in grouped.items():
+            table = ranks(provider)
+            ordered = sorted(
+                group,
+                key=lambda r: (
+                    table.get(r.identity or "", unmatched),
+                    r.identity or "",
+                ),
+            )
+            out.extend((report, index, len(ordered)) for index, report in enumerate(ordered))
+        return out
+
     @staticmethod
     def _persisted_account_fingerprint(store: "ReadOnlyUsageMetadataStore", provider: str) -> str:
         """The fingerprint of the PERSISTED account set for ``provider``.
@@ -1092,10 +1222,14 @@ class ProviderController:
         # as of T (may be out of date)" and can exclude a removed account. The
         # one state that stays UNAVAILABLE is an unreadable/foreign schema, where
         # nothing trustworthy exists to return at all.
+        # Order by login BEFORE identity is stripped: afterwards the phone's
+        # "Account N" labels could not be tied to a stable login.
+        ordered = self.order_persisted_usage_reports(out, store)
         return ReadOnlyUsageSnapshot(
-            reports=[self._without_identity(report) for report in out],
+            reports=[self._without_identity(report) for report, _, _ in ordered],
             may_be_stale=may_be_stale,
             cached_at=cached_at,
+            account_positions=[(index, count) for _, index, count in ordered],
         )
 
     def _usage_read_only_path(self) -> "Path":
@@ -1464,7 +1598,13 @@ class ProviderController:
             # counts (it is the tier the stream cascade resolves), but only where an
             # API-key route to the quota endpoint exists — see
             # :meth:`can_report_usage` for why each half is needed.
-            targets = self.usage_reportable_providers()
+            targets = (
+                # Stored logins only: an env-only provider is an ambient
+                # account the phone's operator never logged in with.
+                [p for p in self._persisted_providers(self.auth_store) if p in USAGE_PROVIDERS]
+                if self._persisted_usage_only
+                else self.usage_reportable_providers()
+            )
         # De-duplicate aliases that share a storage id (openai vs
         # openai-device; xai vs xai-oauth) so one request/one report per row.
         targets = self._dedupe_targets(targets)
@@ -1606,7 +1746,14 @@ class ProviderController:
 
     def _usage_cache_key(self, provider: str) -> str:
         """The shared-cache key for ``provider``'s current account set."""
-        return provider_cache_key(self._storage_id(provider), self._account_fingerprint(provider))
+        storage = self._storage_id(provider)
+        if self._persisted_usage_only:
+            # The EXACT key the phone's read-only GET reads, so a phone refresh
+            # lands where the phone looks (env keys deliberately excluded).
+            return provider_cache_key(
+                storage, self._persisted_account_fingerprint(self.auth_store, storage)
+            )
+        return provider_cache_key(storage, self._account_fingerprint(provider))
 
     def _account_fingerprint(self, provider: str) -> str:
         """A synchronous fingerprint of WHICH accounts ``provider`` would fetch.
@@ -3247,7 +3394,17 @@ class ProviderController:
             # to the cascade's key would silently report a DIFFERENT account's
             # numbers under this account's identity.
             try:
-                api_key = await self.auth_store.get_api_key(provider)
+                # Persisted-only mode: stored API-key rows only, because
+                # get_api_key walks the full cascade including the process
+                # environment. The factory always builds a concrete AuthStore;
+                # the facade's structural store protocol lacks this accessor.
+                api_key = (
+                    await cast("AuthStore", self.auth_store).get_persisted_api_key(
+                        provider, kinds={"api_key"}
+                    )
+                    if self._persisted_usage_only
+                    else await self.auth_store.get_api_key(provider)
+                )
             except Exception:  # noqa: BLE001 — a refresh failure is not fatal here
                 api_key = None
         if not access_token and not api_key and not extra_creds:

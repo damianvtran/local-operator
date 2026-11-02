@@ -435,3 +435,133 @@ async def test_clean_database_is_not_flagged_stale(tmp_path) -> None:
     snap = controller.cached_persisted_usage_reports_read_only(None)
     assert snap.may_be_stale is False
     assert snap.unavailable is False
+
+
+# -- persisted-only REFRESH (the phone's POST /api/usage/refresh) -------------
+
+
+def _refresh_controller(tmp_path):
+    auth_db = tmp_path / "auth.db"
+    cache = UsageCacheStore(tmp_path / "usage.db")
+    return ProviderController.for_persisted_usage_refresh(auth_db, cache), auth_db, cache
+
+
+async def test_persisted_refresh_never_probes_env_keys(tmp_path, monkeypatch) -> None:
+    """An ambient env key is neither a target nor the API key a stored login uses.
+
+    DEEPSEEK has a stored key AND an env key: the fetcher must see the stored
+    one. OPENROUTER exists only in the environment: it must never be probed.
+    """
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ambient-deepseek")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-ambient-openrouter")
+    seeder = AuthStore(tmp_path / "auth.db")
+    seeder.upsert_credential("deepseek", {"key": "sk-stored-deepseek", "type": "api_key"})
+    seeder.close()
+    calls: list[tuple[str, str | None]] = []
+
+    async def fake_fetch(client, provider, **kwargs):
+        calls.append((provider, kwargs.get("api_key")))
+        return UsageReport(
+            provider=provider,
+            limits=[UsageLimit("bal", "Balance", UsageAmount(remaining=5, unit="usd"))],
+        )
+
+    monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+    controller, _, cache = _refresh_controller(tmp_path)
+    try:
+        reports = await controller.refresh_persisted_usage(force=True)
+    finally:
+        controller.close()
+        controller.auth_store.close()  # type: ignore[attr-defined]
+    assert calls == [("deepseek", "sk-stored-deepseek")]
+    assert [r.provider for r in reports] == ["deepseek"]
+
+
+async def test_persisted_refresh_writes_the_key_the_phone_reads(tmp_path, monkeypatch) -> None:
+    """The refresh lands under _persisted_account_fingerprint even with an env key set."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ambient-deepseek")
+    seeder = AuthStore(tmp_path / "auth.db")
+    seeder.upsert_credential("deepseek", {"key": "sk-stored-deepseek", "type": "api_key"})
+    seeder.close()
+
+    async def fake_fetch(client, provider, **kwargs):
+        return UsageReport(
+            provider=provider,
+            limits=[UsageLimit("bal", "Balance", UsageAmount(remaining=42, unit="usd"))],
+        )
+
+    monkeypatch.setattr("local_operator.providers.controller.fetch_usage", fake_fetch)
+    controller, auth_db, cache = _refresh_controller(tmp_path)
+    try:
+        await controller.refresh_persisted_usage(force=True)
+        persisted_key = provider_cache_key(
+            "deepseek",
+            ProviderController._persisted_account_fingerprint(controller.auth_store, "deepseek"),
+        )
+        # The ordinary (env-folding) key differs, which is the whole defect.
+        assert persisted_key != ProviderController(controller.auth_store)._usage_cache_key(
+            "deepseek"
+        )
+    finally:
+        controller.close()
+        controller.auth_store.close()  # type: ignore[attr-defined]
+    # Closing the writer checkpoints the WAL, so the phone's immutable read sees it.
+    reader = ProviderController.read_only_for_persisted_usage(auth_db, tmp_path / "usage.db")
+    snap = reader.cached_persisted_usage_reports_read_only(None)
+    assert not snap.unavailable
+    assert [r.limits[0].amount.remaining for r in snap.reports] == [42]
+
+
+async def test_refresh_persisted_usage_refuses_an_ordinary_controller(tmp_path) -> None:
+    """The ambient-probing controller cannot be talked into the phone's refresh."""
+    store = AuthStore(tmp_path / "auth.db")
+    try:
+        with pytest.raises(RuntimeError):
+            await ProviderController(store).refresh_persisted_usage()
+    finally:
+        store.close()
+
+
+async def test_read_only_seam_orders_accounts_by_login_regardless_of_cache_order(
+    tmp_path,
+) -> None:
+    """Account N is always the Nth login, however the cache payload is ordered."""
+    auth_db = tmp_path / "auth.db"
+    cache_db = tmp_path / "usage.db"
+    seeder = AuthStore(auth_db)
+    emails = ["first@example.test", "second@example.test", "third@example.test"]
+    for email in emails:
+        seeder.upsert_credential(
+            "anthropic",
+            {"access": "a", "refresh": "r", "expires": 10**15, "email": email},
+        )
+    fingerprint = ProviderController._persisted_account_fingerprint(seeder, "anthropic")
+    seeder.close()
+    shuffled = [emails[2], "stranger@example.test", emails[0], emails[1]]
+    cache = UsageCacheStore(cache_db)
+    cache.set(
+        provider_cache_key("anthropic", fingerprint),
+        "anthropic",
+        [
+            UsageReport(
+                provider="anthropic",
+                identity=email,
+                limits=[
+                    UsageLimit(
+                        "5h", "5 hour", UsageAmount(used_fraction=i / 10, unit="percent")
+                    )
+                ],
+            )
+            for i, email in enumerate(shuffled)
+        ],
+        expires_at_ms=int(time.time() * 1000) + 60_000,
+    )
+    cache.close()
+
+    controller = ProviderController.read_only_for_persisted_usage(auth_db, cache_db)
+    snap = controller.cached_persisted_usage_reports_read_only(None)
+    # Fractions tag which cached report landed where: login order 0,1,2 then the
+    # unmatched stranger last.
+    assert [r.limits[0].amount.used_fraction for r in snap.reports] == [0.2, 0.3, 0.0, 0.1]
+    assert snap.account_positions == [(0, 4), (1, 4), (2, 4), (3, 4)]
+    assert all(r.identity is None for r in snap.reports)
