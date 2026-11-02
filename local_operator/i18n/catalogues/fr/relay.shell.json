@@ -69,6 +69,6 @@
   "relay.shell.usage.tone_unknown": "Non communiqué",
   "relay.shell.usage.reauth": "Reconnectez-vous sur l’ordinateur pour mettre à jour ce compte.",
   "relay.shell.usage.reauth_short": "Reconnexion requise",
-  "relay.shell.usage.row_a11y": "{label} : {value}, {tone}",
-  "relay.shell.usage.row_a11y_reset": "{label} : {value}, {tone}, {reset}"
+  "relay.shell.usage.row_a11y": "{label} : {value}, {tone}",
+  "relay.shell.usage.row_a11y_reset": "{label} : {value}, {tone}, {reset}"
 }

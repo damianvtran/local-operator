@@ -2516,6 +2516,25 @@
       },
       "status": "passed",
       "note": "Dual blind passes: i18n/audits/evidence/ur/wire.errors.session_host/hura1/record.json; i18n/audits/evidence/ur/wire.errors.session_host/u31h8b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.shell",
+      "source_sha256": "388f23d29d082106ccb706ed041f48238eca32a6cfaf6cfa05517ee8dc773a01",
+      "translator": {
+        "agent": "coder subagent e8f92ac9fa94 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 92826ef0767b (lopdev team, independent i18n auditor)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "relay.shell 64 keys read in full at this en hash. Fixes: countdown_days, countdown_hours and countdown_hour rendered the hour noun as a bare number with the plural گھنٹے, so 1 hour read '1 گھنٹے' — upgraded to the lossless number→plural form {hours, plural, one {# گھنٹہ} other {# گھنٹے}} (scripts/i18n/check.py arguments_match WHY note; matches relay.asks.duration.hours). دن/منٹ/سیکنڈ are invariant. Disposition (not changed): this namespace says ریفریش while tui.usage says تازہ for the same feature — ریفریش is an established loanword and consistent within relay.shell; reset is بحالی matching the namespace's existing relay.shell.usage.reset. آپ-imperative and ۔/، punctuation verified; Opus/Sonnet/Fable/Zread kept Latin. Rendered RTL/bidi, Nastaliq shaping and narrow-width layout not exercised; no rendered sign-off claimed. 0 blocker / 0 major unresolved."
     }
   ]
 }
