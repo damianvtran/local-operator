@@ -350,7 +350,7 @@ export function UsageSheet({ open, onClose }: { open: boolean; onClose: () => vo
 
 	const action = unsupported ? null : <Button variant="icon" aria-label={t("relay.shell.usage.refresh")}
 		aria-disabled={inert || undefined} aria-busy={refreshing || undefined}
-		className="aria-disabled:text-ink-disabled"
+		className={inert ? "text-ink-disabled" : "text-ink-muted"}
 		onClick={() => { if (inert) return; if (error && data === null) load(); else refresh(true); }}>
 		{refreshing ? <Spinner className="size-4" /> : <ChromeIcon name="refresh" />}
 	</Button>;
