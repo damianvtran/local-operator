@@ -1245,6 +1245,37 @@ and in-process, must spell the same money** —
 `test_one_journal_spells_the_same_cold_and_in_process` drives the three states a
 record can be in (remainder, adopted, unpriceable) through both paths.
 
+### Off-record receipt publication
+
+The runtime's complete/aside callback also publishes through
+`FrontendStateStore.accrue_usage`. It must use `SessionSpend.published_usd()`,
+just like restoration: raw accumulator `usd == 0.0` does not distinguish an
+entirely unpriceable receipt from a known zero. Receipt presence follows the
+shared `has_reported_tokens` contract, including cache/reasoning-only counters
+and a final unknown-tier stamp even when all counters are zero. Never-used
+state remains distinct; mixed priced/unpriced calls retain their known numeric
+lower bound and partial knowledge. The nullable value must survive wire
+serialization and refresh without being replaced by zero.
+
+This fixes the off-record writer, not a claim that every ordinary streaming
+turn had the same publication bug. Focused store/accumulator regressions do not
+replace independent real-Session producer QA or rendered band verification.
+
+When a typed channel root exists, the band derives activity from its actual
+row units (inference units are calls), not from whether the resumed session
+retained a last `Usage`. An unknown root with activity renders unavailable;
+unknown with no activity and known exact zero remain omitted. Without that
+root, the legacy reading uses the shared receipt-presence predicate, including
+cache/reasoning-only and stamped-zero receipts. Partial numeric totals remain
+lower bounds, never replaced with an unknown cell by a later unpriced call.
+
+A synthetic capture must also implement the production off-record adoption and
+restoration lifecycle. A double whose restore method always returns `None` can
+erase the reading during turn-end refresh and manufacture a second-writer
+failure. Such a frame remains evidence of that carrier, not proof that a real
+Session loses its adopted reading; record-only root consumption is a separate
+production regression and needs its own discriminator.
+
 ## 13. What I could not settle from the code, and what would settle it
 
 1. **SETTLED — measured 2026-09-13, and T7 is DROPPED as a result.** The

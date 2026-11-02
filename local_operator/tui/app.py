@@ -13585,11 +13585,12 @@ class OperatorApp(App[None]):
             if window_us > 0 and window_tokens > 0
             else ""
         )
-        billed_unknown = bool(
-            usage is not None
-            and (getattr(usage, "input_tokens", 0) or getattr(usage, "output_tokens", 0))
-            and cost is None
-        )
+        from local_operator.session.spend import has_reported_tokens
+
+        # Legacy snapshots may have no root ledger. Preserve the shared receipt
+        # semantics here too: cache/reasoning-only and stamped-zero receipts are
+        # activity, unlike a never-used session with no reading.
+        billed_unknown = bool(usage is not None and has_reported_tokens(usage) and cost is None)
         mcp_servers = list(getattr(state, "mcp_servers", []) or [])
         task_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "task"]
         bash_jobs = [j for j in getattr(state, "jobs", []) if getattr(j, "type", "") == "bash"]
@@ -59505,6 +59506,8 @@ class OperatorApp(App[None]):
         # without this - the session's first search-heavy turn would leave the
         # segment holding the previous turn's figure while the ledger moved.
         search_spend = self._session_search_spend()
+        from local_operator.session.spend import has_reported_tokens
+
         if cost is not None or (
             self._session is not None and (self._subagent_costs or search_spend.searches)
         ):
@@ -59521,7 +59524,7 @@ class OperatorApp(App[None]):
             # dict alone would repaint the dead conversation's total into a band
             # that was just emptied on purpose.
             cost_text = self._spend_text(total)
-        elif message.usage is not None and getattr(message.usage, "input_tokens", 0):
+        elif message.usage is not None and has_reported_tokens(message.usage):
             # D20: the turn billed tokens but pricing is unknown — render an
             # explicit "unavailable" so the segment's absence reads as that,
             # not as "free".
@@ -60696,7 +60699,12 @@ class OperatorApp(App[None]):
         published = self._spend_channels_state
         if published is not None:
             if str(getattr(published, "knowledge", "unknown")) == "unknown":
-                return UNKNOWN_COST_CELL if billed_unknown else None
+                # A resumed record can have no last Usage at all. Its typed
+                # root rows already report activity in units (inference: calls),
+                # so the root must not be vetoed by a legacy last-usage flag.
+                # Do not infer activity merely from an unknown zero total.
+                active = any((getattr(row, "units", None) or 0) > 0 for row in published.rows)
+                return UNKNOWN_COST_CELL if active else None
             return self._spend_text() or None
         if cost is not None:
             return self._spend_text((cost or 0.0) + search_usd)

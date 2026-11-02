@@ -416,7 +416,7 @@ def job_subtree_summary(
     disagree on ``at_ms`` is priced at the wall clock (see the merge). The footer
     total has always been priced that way, and the row now agrees with it.
     """
-    grouped: dict[tuple[str | None, str | None, str, str | None, bool], Usage] = {}
+    grouped: dict[tuple[str | None, str | None, str, str | None, bool, str | None], Usage] = {}
     for component in job_subtree_components(job, detach=False, live=live, problems=problems):
         if type(component) is not Usage:
             # A follower's rows carry frozen ``Usage`` subclasses; the merge
@@ -427,7 +427,8 @@ def job_subtree_summary(
 
 
 def _merge_accounting_component(
-    grouped: dict[tuple[str | None, str | None, str, str | None, bool], Usage], component: Usage
+    grouped: dict[tuple[str | None, str | None, str, str | None, bool, str | None], Usage],
+    component: Usage,
 ) -> None:
     """Bound a subtree summary without erasing receipt-vs-estimate provenance."""
     from local_operator.model.configure import _usage_cost
@@ -451,6 +452,7 @@ def _merge_accounting_component(
         mode,
         component.billing_basis,
         component.openai_long_context,
+        component.openai_service_tier,
     )
     total = grouped.get(key)
     if total is None:
@@ -963,7 +965,7 @@ class AsyncJobManager:
         # retention can remove them. The owning parent runner later copies this
         # snapshot onto its AsyncJob; polling never participates in durability.
         self._settled_accounting: dict[
-            tuple[str | None, str | None, str, str | None, bool], Usage
+            tuple[str | None, str | None, str, str | None, bool, str | None], Usage
         ] = {}
         # The status band reads this ledger every second. Cache the bounded
         # aggregate and propagate invalidations through live manager edges so
@@ -1141,7 +1143,7 @@ class AsyncJobManager:
         """
         if self._tasks:
             raise RuntimeError("accounting restore requires a fresh job manager")
-        grouped: dict[tuple[str | None, str | None, str, str | None, bool], Usage] = {}
+        grouped: dict[tuple[str | None, str | None, str, str | None, bool, str | None], Usage] = {}
         for component in components:
             _merge_accounting_component(grouped, component)
         self._settled_accounting = grouped
@@ -1324,7 +1326,9 @@ class AsyncJobManager:
                     f"logical task {logical_id!r} is already running as job {prior.id}"
                 )
             inherited = [*prior.attempt_aliases, prior.id, *inherited]
-            grouped: dict[tuple[str | None, str | None, str, str | None, bool], Usage] = {}
+            grouped: dict[
+                tuple[str | None, str | None, str, str | None, bool, str | None], Usage
+            ] = {}
             for component in [
                 *current.prior_attempt_usage,
                 *prior.prior_attempt_usage,

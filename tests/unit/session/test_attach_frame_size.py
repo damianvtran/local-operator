@@ -1212,6 +1212,9 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
             return previous(index).model_copy(
                 update={
                     "openai_long_context": True,
+                    # Unknown is the longer wire value; the unpriced case
+                    # must prove the worst populated tier fits as well.
+                    "openai_service_tier": "unknown" if long_context == "unpriced" else "fast",
                     "usd_cost": None if long_context == "unpriced" else 0.0123,
                 }
             )
@@ -1588,6 +1591,9 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(
         assert 0 < len(snapshot["usage_components"]) <= 200
         assert state.usage_components[-1].openai_long_context is True
         assert snapshot["usage_components"][-1]["openai_long_context"] is True
+        expected_tier = "unknown" if long_context == "unpriced" else "fast"
+        assert state.usage_components[-1].openai_service_tier == expected_tier
+        assert snapshot["usage_components"][-1]["openai_service_tier"] == expected_tier
     assert snapshot["goal_history"] == [], (
         "the wire bound did not run on a frame this size, so this guard is "
         "measuring the unbounded shape (see _bound_goal_record_in_place)"
