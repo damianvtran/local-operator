@@ -1,5 +1,6 @@
 {
   "schema": 1,
+  "locale": "es",
   "entries": [
     {
       "locale": "es",
@@ -2600,6 +2601,46 @@
       },
       "status": "passed",
       "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity. Dates are delegator-supplied dispatch/completion windows, not per-row timestamps. Target hash was verified during ledger assembly; this row does not assert the auditor published that hash. The delegator reports five slice-2 auditors did not publish target hashes; no locale-specific published-hash claim is made."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session e537e741e8d1)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 56bf28217956; instance 56bf28217956-slash2-es)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 9 of 52 values rewritten by i18n-translator (session e537e741e8d1) (actual model radient/auto; provider-quota fallback); round-1 audit e7a6d684b88a-slash-es rejected the shortened bytes (0B/1M/5m/5n) and round-2 independent audit 56bf28217956-slash2-es on the new bytes passed 0B/0M/2m/4n. target sha256 b577fc64e6ab7369a58f02d4b4653367f9169cf1a015b16168e02dae6bfc5c3b; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/es/wire.slash/es29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "056852035b33",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "f784eae73c69",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/es/wire.errors.session_host/es31a/record.json; i18n/audits/evidence/es/wire.errors.session_host/es3222b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
     }
   ]
 }
