@@ -663,7 +663,11 @@ def run(
 
     # The command is spawned: from here every failure names residuals, never
     # "did not run". A forwarded signal still carries its own status.
-    rc = 128 + stop["signum"] if stop["signum"] else EXIT_CLEANUP_UNPROVEN
+    # NO DEFAULT TERMINAL CODE. This used to start at EXIT_CLEANUP_UNPROVEN, so any
+    # exit that did not reach its own assignment published 126 -- a refusal code
+    # overwriting the caller's actual outcome (timeout 124, memory 137, a monitor
+    # error's raise). The code is now decided by the path that produced it.
+    rc = 128 + stop["signum"] if stop["signum"] else None
     exited = False
     unanswered = 0
     try:
@@ -854,6 +858,10 @@ def run(
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
 
+    if rc is None:
+        # Nothing determined a terminal code: either the child ended on its own (0)
+        # or the path could not say (cleanup unproven).
+        rc = 0 if exited else EXIT_CLEANUP_UNPROVEN
     if refused and rc == 0:
         # The gate ran and passed; what is missing is proof of cleanup. Say that,
         # rather than reusing 125, which callers read as "the gate did not run".
