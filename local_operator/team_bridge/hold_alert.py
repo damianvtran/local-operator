@@ -15,10 +15,9 @@ no message id, sender, conversation, body, hold code or age. The age is left
 out on purpose so the notification's content hash moves only when the count
 does; a growing age would write a new revision (and re-notify) on every tick.
 
-CLEARING. One keyed update at priority ``low``, sent to the session that RAISED
-the alert (recorded per process, so a changed designated session cannot strand
-it) and only while that keyed item still exists: a pruned row is not re-created
-as a stray "cleared" item. The clear looks the keyed item up in EVERY session's inbox
+CLEARING. One keyed update at priority ``low`` per standing alert, and only
+while that keyed item still exists: a pruned row is not re-created as a stray
+"cleared" item. The clear looks the keyed item up in EVERY session's inbox
 (``NotificationStore.find_by_key``) and clears each standing ``normal`` one in
 the session that shows it, whatever this process remembers and wherever the
 designation points now; that is how a restart, a moved designation or a
