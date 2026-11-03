@@ -242,9 +242,7 @@ def test_no_extension_connected_says_how_to_fix_it(daemon: _Daemon) -> None:
     assert result.returncode == 1
     assert _six_digit_codes(result.stdout) == []
     assert "open the extension popup" not in result.stdout.lower()
-    assert "Chrome" in result.stdout and "chromewebstore.google.com" in result.stdout, (
-        result.stdout
-    )
+    assert "Chrome" in result.stdout and "chromewebstore.google.com" in result.stdout, result.stdout
 
 
 def test_a_code_minted_by_the_cli_pairs_the_install(daemon: _Daemon) -> None:
@@ -398,9 +396,7 @@ def test_cli_unreachable_names_restart_and_the_detail(monkeypatch, capsys) -> No
     assert rc == 1 and "lop browser restart" in out and "timed out" in out
 
 
-def test_cli_older_daemon_reads_the_file_and_states_the_real_lifetime(
-    monkeypatch, capsys
-) -> None:
+def test_cli_older_daemon_reads_the_file_and_states_the_real_lifetime(monkeypatch, capsys) -> None:
     """An older daemon's code lives ITS lifetime: never claim 15 minutes (R3a)."""
     soon = time.time() + 100  # 1m40s left
     pairing = {
@@ -431,14 +427,22 @@ def test_cli_several_codes_on_an_older_daemon_never_promise_tabs(monkeypatch, ca
     assert "works for" not in out  # under a minute left: say nothing rather than "0 minutes"
 
 
-def test_cli_several_codes_with_one_old_extension_use_the_icon_wording(
-    monkeypatch, capsys
-) -> None:
+def test_cli_several_codes_with_one_old_extension_use_the_icon_wording(monkeypatch, capsys) -> None:
     codes = [
-        {"code": "111111", "extension_id": STORE_ID, "label": "Chrome extension 0.1.26",
-         "extension_version": "0.1.26", "update_available": False},
-        {"code": "222222", "extension_id": UNPACKED_ID, "label": "Chrome extension 0.1.20",
-         "extension_version": "0.1.20", "update_available": True},
+        {
+            "code": "111111",
+            "extension_id": STORE_ID,
+            "label": "Chrome extension 0.1.26",
+            "extension_version": "0.1.26",
+            "update_available": False,
+        },
+        {
+            "code": "222222",
+            "extension_id": UNPACKED_ID,
+            "label": "Chrome extension 0.1.20",
+            "extension_version": "0.1.20",
+            "update_available": True,
+        },
     ]
     answer = {"ok": True, "codes": codes, "expected_extension_version": "0.1.26"}
     rc, out = _run_pair(monkeypatch, capsys, answer, {})
@@ -450,8 +454,15 @@ def test_cli_several_codes_with_one_old_extension_use_the_icon_wording(
 
 
 def test_cli_one_current_extension_gets_the_tab_wording(monkeypatch, capsys) -> None:
-    codes = [{"code": "654321", "extension_id": STORE_ID, "label": "Chrome extension 0.1.26",
-              "extension_version": "0.1.26", "update_available": False}]
+    codes = [
+        {
+            "code": "654321",
+            "extension_id": STORE_ID,
+            "label": "Chrome extension 0.1.26",
+            "extension_version": "0.1.26",
+            "update_available": False,
+        }
+    ]
     rc, out = _run_pair(monkeypatch, capsys, {"ok": True, "codes": codes}, {})
     assert rc == 0 and "654321" in out
     assert "a Local Operator tab is open there" in out and "15 minutes" in out

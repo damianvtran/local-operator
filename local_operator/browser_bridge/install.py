@@ -700,9 +700,9 @@ def request_pairing_codes(port: int | None = None, root: Path | None = None) -> 
     codes = payload.get("codes")
     return {
         "ok": True,
-        "codes": [entry for entry in codes if isinstance(entry, dict)]
-        if isinstance(codes, list)
-        else [],
+        "codes": (
+            [entry for entry in codes if isinstance(entry, dict)] if isinstance(codes, list) else []
+        ),
         "connected_count": int(payload.get("connected_count", 0) or 0),
         "paired_connected_count": int(payload.get("paired_connected_count", 0) or 0),
         "expected_extension_version": str(payload.get("expected_extension_version", "")),

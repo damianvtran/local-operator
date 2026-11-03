@@ -38,6 +38,10 @@ from local_operator.browser_bridge.protocol import (
     EXPECTED_EXTENSION_VERSION,
     MIN_SUPPORTED_PROTO,
     ORIGIN_PROMPT_WINDOW_S,
+    PAIR_EXPIRED_MESSAGE,
+    PAIR_LOCKED_MESSAGE,
+    PAIR_MISMATCH_MESSAGE,
+    PAIR_NO_CODE_MESSAGE,
     PROTO_VERSION,
     Capabilities,
     CapabilitySwitches,
@@ -45,10 +49,6 @@ from local_operator.browser_bridge.protocol import (
     ErrorDetail,
     Hello,
     HelloAck,
-    PAIR_EXPIRED_MESSAGE,
-    PAIR_LOCKED_MESSAGE,
-    PAIR_MISMATCH_MESSAGE,
-    PAIR_NO_CODE_MESSAGE,
     PairRequest,
     PairResult,
     Request,
@@ -2492,11 +2492,7 @@ class BridgeService:
             and int(entry.get("attempts", 0)) < PAIR_MAX_ATTEMPTS
         ):
             return
-        if (
-            keep_expired
-            and entry is not None
-            and int(entry.get("attempts", 0)) < PAIR_MAX_ATTEMPTS
-        ):
+        if keep_expired and entry is not None and int(entry.get("attempts", 0)) < PAIR_MAX_ATTEMPTS:
             # The HANDSHAKE keeps an expired record rather than rotating it. The
             # extension submits a code over a FRESH socket (popup and pairing
             # tab both do), so the handshake runs immediately before the guess:
@@ -3342,9 +3338,7 @@ class BridgeService:
                 # races closed costs only the convenience, never the code.
                 with suppress(Exception):
                     await link.send(ShowPairing().model_dump(mode="json"))
-        live = {
-            str(entry["extension_id"]): entry for entry in pairing_status(self.root)["pending"]
-        }
+        live = {str(entry["extension_id"]): entry for entry in pairing_status(self.root)["pending"]}
         codes = []
         for link in sorted(waiting, key=lambda entry: entry.attached_at):
             entry = live.get(link.extension_id)

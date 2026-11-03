@@ -326,7 +326,7 @@ CASES = [
         (
             "Your browser is already paired with Local Operator, so no code is needed. To pair "
             "another browser, install the Local Operator extension there, then ask Local "
-            "Operator to \"pair my browser\" again."
+            'Operator to "pair my browser" again.'
         ),
     ),  # already_paired
     (
@@ -336,7 +336,7 @@ CASES = [
             "Chrome and check that the Local Operator extension is installed and turned on: "
             "https://chromewebstore.google.com/detail/local-operator/"
             "omibaecbjdhgbbcedbnnnmjpmopfheof "
-            "It connects within a minute. Then ask Local Operator to \"pair my browser\" again."
+            'It connects within a minute. Then ask Local Operator to "pair my browser" again.'
         ),
     ),  # no_extension_waiting
     (
