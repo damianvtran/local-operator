@@ -78,6 +78,17 @@ the chosen preview before applying it; a stale receipt requires a fresh preview.
 Never silently discard guidance or move the real folder. Adoption does not relax
 the Hub service's strict document schema.
 
+## Adoption platform boundary
+
+Reviewed adoption of an existing folder requires secure projection storage for
+local-only assets and legacy paths. macOS and Linux use descriptor-relative,
+no-follow operations. On Windows, adoption and existing projected-link operations
+fail closed before changing content, link or policy; ordinary strict Hub installs
+remain available when a retained-handle probe proves no projection exists. Do not
+bypass that capability refusal by moving folders or deleting projection metadata.
+A native Windows secure projection lifecycle is a separate owned follow-up; a
+simulated Windows API test is not native execution evidence.
+
 ## Author and improve skills
 
 The `skill://skill-authoring` skill is the playbook: description as routing signal, progressive disclosure, token budgets, and testing before shipping. Format mechanics and the extension surfaces are in `guide://extensions`.

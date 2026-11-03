@@ -14,5 +14,6 @@
   "wire.skill_adoption.no_apply": "Solo vista previa. No se instaló ni vinculó nada.",
   "wire.skill_adoption.inherited_assets": "Los recursos locales se conservan sin enviarlos al modelo de merge.",
   "wire.skill_adoption.yes_help": "Confirmar la vista previa de instalación o adopción revisada",
-  "wire.skill_adoption.alias_occupied": "Una habilidad local ya usa este nombre. Haz pull de la habilidad del Hub con --dry-run para revisar un merge de adopción, o elige otro nombre."
+  "wire.skill_adoption.alias_occupied": "Una habilidad local ya usa este nombre. Haz pull de la habilidad del Hub con --dry-run para revisar un merge de adopción, o elige otro nombre.",
+  "wire.skill_adoption.projection_unsupported": "La adopción revisada de una habilidad local existente aún no es compatible con esta plataforma. La habilidad local y su vínculo no se modificaron. Usa una plataforma compatible para la adopción; la instalación normal de habilidades del Hub sigue disponible."
 }

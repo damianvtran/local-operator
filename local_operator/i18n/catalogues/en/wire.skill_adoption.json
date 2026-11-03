@@ -14,5 +14,6 @@
   "wire.skill_adoption.no_apply": "Preview only. Nothing was installed or linked.",
   "wire.skill_adoption.inherited_assets": "Local assets are preserved without being sent to the merge model.",
   "wire.skill_adoption.yes_help": "Confirm the reviewed installation or adoption preview",
-  "wire.skill_adoption.alias_occupied": "A local skill already uses this name. Pull the Hub skill with --dry-run to review an adoption merge, or choose another name."
+  "wire.skill_adoption.alias_occupied": "A local skill already uses this name. Pull the Hub skill with --dry-run to review an adoption merge, or choose another name.",
+  "wire.skill_adoption.projection_unsupported": "Reviewed adoption of an existing local skill is not supported on this platform yet. The local skill and its link were not changed. Use a supported platform for adoption; ordinary Hub skill installs remain available."
 }

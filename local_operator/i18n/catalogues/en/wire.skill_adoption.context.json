@@ -94,5 +94,11 @@
     "tone": "plain, calm, explicit about review and data preservation",
     "width": "terminal prose; wraps without truncating commands or parameters",
     "note": "Remedy for name collision on Hub pull; --dry-run is literal. Alternate name remains valid for creation/non-Hub paths."
+  },
+  "wire.skill_adoption.projection_unsupported": {
+    "role": "Fail-closed capability refusal before adopting an existing local skill",
+    "tone": "plain, calm, explicit about preserved local state and the supported alternative",
+    "width": "terminal prose; wraps without truncation",
+    "note": "Platform-generic refusal for unsupported secure adoption projection writes. The existing local skill and its link remain unchanged. Ordinary installs means fresh Hub skill installs under valid unoccupied names; not permission to overwrite an existing folder or bypass adoption review. Does not claim native Windows validation or unsupported status for ordinary pull/update/unpull. No placeholders."
   }
 }

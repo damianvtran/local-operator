@@ -32,6 +32,35 @@
       },
       "status": "translated_independent_delta_reaudit_required",
       "note": "Historical initial-translation namespace hashes above are retained as provenance, not current eligibility claims. No self-audit, ledger changes or generation. Agent-facing skill_tool recovery hint updated to retain same ID, scope and options."
+    },
+    {
+      "date": "2026-11-03",
+      "reason": "Fail-closed platform capability refusal for existing-local-skill adoption",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "identity_evidence": "Parent verified actual serving model; existing model_identity_correction applies"
+      },
+      "namespace": "wire.skill_adoption",
+      "keys": [
+        "wire.skill_adoption.projection_unsupported"
+      ],
+      "source_before_sha256": "e809a3221b21b41951ef45200378d59f9a66dcda81c45c4b81119c1cbba360be",
+      "source_after_sha256": "5313b5455bb3b295e3fe78a5ea465a9e9d85c641927562bad93f58e0e5971f7b",
+      "context_after_sha256": "9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c",
+      "locale_after_sha256": {
+        "en": "5313b5455bb3b295e3fe78a5ea465a9e9d85c641927562bad93f58e0e5971f7b",
+        "fr": "21c69011c26caa9a4b797b84f39768909a736357d5f2dc04c09163b61e5f8745",
+        "es": "23414f9d449c4c71755683c181511f092e534b4ea5983ec1adcb099237e6dd74",
+        "zh-CN": "936eec9d7ec1cf185590e1a87fe2544997bad62b0e9867417012054668101e77",
+        "ru": "f390b84b69ac993d093a73a83801988b691ebd93f4ec8a4a8a13f46e4c442234",
+        "vi": "246cb7cc5e497811b8f201ef40246627336ec460e72ac47c5721cd570f986049",
+        "ur": "5fe45b9bb2f02e4639318d00d84a1f66603851fbf68b2e6c081ede475e7d444b",
+        "hi": "fe67b95fb7f80fd3ee3926a1990ad39d45325d8dffb5b8848773cc5062ee13a3"
+      },
+      "status": "translated_independent_delta_reaudit_required",
+      "note": "New refusal key only; no other catalogue values changed. Platform-generic wording does not claim native Windows proof. No self-audit or ledger writes. Generate only the Python key module, leaving eligibility generation to the parent after independent audit."
     }
   ],
   "translator": {

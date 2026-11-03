@@ -3546,8 +3546,9 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._swap",
         "os.replace",
-        "Old-dir backup, edit restore and staged swap of <config_dir>/skills/<validated alias>",
-        3,
+        "Old-dir backup, edit restore, staged swap and raw_after-CAS backup restore of "
+        "<config_dir>/skills/<validated alias>; every destination comes from _locations()",
+        4,
     ),
     # LOCAL REMOVE. Same path construction as above: the source is
     # ``path(alias)`` (validated alias under <config_dir>/skills, symlinks
@@ -3556,6 +3557,39 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # is a single same-filesystem rename that KEEPS the bytes -- never an rmtree
     # -- and a linked alias is refused before it is reached. The same three
     # tests above drive ``remove_local`` at sessions/ and show it refused.
+    # Projection operations use a retained no-follow config/hub/projection
+    # directory FD, never a path reopened through a mutable hub ancestor. The
+    # adversarial projection tests replace each ancestor and leaf at check/use
+    # boundaries and assert the sessions-like victim tree stays byte-identical.
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._write_projection",
+        "os.replace",
+        "Own .projection-<uuid>.tmp to validated alias JSON, both relative to one retained FD",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._write_projection",
+        "os.unlink",
+        "Removes only this operation's temporary entry relative to its retained projection FD",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._retire_projection",
+        "os.unlink",
+        "Validated alias JSON entry relative to retained projection FD; "
+        "leaf symlinks never followed",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.adopt",
+        "os.replace",
+        "Original backup, concurrent-edit restore and staged install "
+        "through validated _locations()",
+        3,
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._recover_adoption",
+        "os.replace",
+        "Restores raw-hash-matching backup to the validated alias destination "
+        "supplied by _locations()",
+    ),
     (
         "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.remove_local",
         "os.replace",

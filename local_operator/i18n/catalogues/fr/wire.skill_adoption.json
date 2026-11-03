@@ -14,5 +14,6 @@
   "wire.skill_adoption.no_apply": "Aperçu uniquement. Rien n’a été installé ni lié.",
   "wire.skill_adoption.inherited_assets": "Les ressources locales sont conservées sans être envoyées au modèle de merge.",
   "wire.skill_adoption.yes_help": "Confirmer l’aperçu d’installation ou d’adoption examiné",
-  "wire.skill_adoption.alias_occupied": "Une compétence locale utilise déjà ce nom. Effectuez un pull de la compétence du Hub avec --dry-run pour examiner un merge d’adoption, ou choisissez un autre nom."
+  "wire.skill_adoption.alias_occupied": "Une compétence locale utilise déjà ce nom. Effectuez un pull de la compétence du Hub avec --dry-run pour examiner un merge d’adoption, ou choisissez un autre nom.",
+  "wire.skill_adoption.projection_unsupported": "L’adoption après examen d’une compétence locale existante n’est pas encore prise en charge sur cette plateforme. La compétence locale et son lien n’ont pas été modifiés. Utilisez une plateforme compatible pour l’adoption ; l’installation classique de compétences du Hub reste disponible."
 }

@@ -14,5 +14,6 @@
   "wire.skill_adoption.no_apply": "仅预览。未安装或关联任何内容。",
   "wire.skill_adoption.inherited_assets": "本地资源会保留，不会发送给merge 模型。",
   "wire.skill_adoption.yes_help": "确认已检查的安装或接管预览",
-  "wire.skill_adoption.alias_occupied": "已有本地技能使用此名称。请用 --dry-run 对 Hub 技能执行 pull，检查接管时的 merge 方案，或选择其他名称。"
+  "wire.skill_adoption.alias_occupied": "已有本地技能使用此名称。请用 --dry-run 对 Hub 技能执行 pull，检查接管时的 merge 方案，或选择其他名称。",
+  "wire.skill_adoption.projection_unsupported": "此平台尚不支持经审核后接管现有本地技能。本地技能及其关联均未更改。请在支持的平台上执行接管；常规的 Hub 技能安装仍然可用。"
 }

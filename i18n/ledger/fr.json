@@ -2826,6 +2826,28 @@
       },
       "status": "passed",
       "note": "Metadata-only correction: prior runtime-label error; actual auditor and translator openai/gpt-6.1-sol. Same approved source/target and verdict; no re-audit or new independent round. Target SHA-256 19458365fcacf645d5e9621f460be5cc35962b98d7b2e6146a5d05fd9d5dc64e. Evidence: i18n/audits/skill-adoption-model-correction-5ad13f38d6e6.json. Prior row retains historical labels."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "5313b5455bb3b295e3fe78a5ea465a9e9d85c641927562bad93f58e0e5971f7b",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "identity_evidence": "Parent verified actual serving model; existing model_identity_correction applies",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 21c69011c26caa9a4b797b84f39768909a736357d5f2dc04c09163b61e5f8745; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
     }
   ]
 }

@@ -14,5 +14,6 @@
   "wire.skill_adoption.no_apply": "Chỉ xem trước. Chưa cài đặt hay liên kết nội dung nào.",
   "wire.skill_adoption.inherited_assets": "Tài nguyên cục bộ được giữ lại và không gửi đến mô hình merge.",
   "wire.skill_adoption.yes_help": "Xác nhận bản xem trước cài đặt hoặc đưa vào quản lý trên Hub đã kiểm tra",
-  "wire.skill_adoption.alias_occupied": "Đã có kỹ năng cục bộ dùng tên này. Thực hiện pull kỹ năng Hub bằng --dry-run để kiểm tra merge khi đưa vào quản lý trên Hub, hoặc chọn tên khác."
+  "wire.skill_adoption.alias_occupied": "Đã có kỹ năng cục bộ dùng tên này. Thực hiện pull kỹ năng Hub bằng --dry-run để kiểm tra merge khi đưa vào quản lý trên Hub, hoặc chọn tên khác.",
+  "wire.skill_adoption.projection_unsupported": "Nền tảng này chưa hỗ trợ đưa kỹ năng cục bộ hiện có vào quản lý trên Hub sau khi kiểm tra. Kỹ năng cục bộ và liên kết của kỹ năng không thay đổi. Hãy dùng nền tảng được hỗ trợ để đưa kỹ năng vào quản lý trên Hub; vẫn có thể cài đặt kỹ năng Hub theo cách thông thường."
 }

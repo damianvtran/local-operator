@@ -58,6 +58,10 @@ def preview_title() -> Msg:
     return Msg("wire.skill_adoption.preview_title", {})
 
 
+def projection_unsupported() -> Msg:
+    return Msg("wire.skill_adoption.projection_unsupported", {})
+
+
 def receipt_help() -> Msg:
     return Msg("wire.skill_adoption.receipt_help", {})
 

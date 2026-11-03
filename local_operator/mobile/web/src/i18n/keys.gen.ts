@@ -1650,6 +1650,7 @@ export type MessageParams = {
   "wire.skill_adoption.preview_changed": undefined;
   "wire.skill_adoption.preview_required": undefined;
   "wire.skill_adoption.preview_title": undefined;
+  "wire.skill_adoption.projection_unsupported": undefined;
   "wire.skill_adoption.receipt_help": undefined;
   "wire.skill_adoption.receipt_label": { "receipt": string };
   "wire.skill_adoption.strategy_help": undefined;
