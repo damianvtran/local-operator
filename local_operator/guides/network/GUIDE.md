@@ -904,6 +904,19 @@ devices. If the borrowing device points at a local or staging hub, set
 `RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1` on that device: the check runs where
 the request is sent, so setting it on the owner does nothing.
 
+An already-granted borrower can explicitly ask its credential owner to refresh:
+`lop network credential refresh <provider> --json`, run ON THE BORROWER. This uses
+the existing broker grant request with `force_refresh=true`; only an admin device
+may force a refresh, and the owner still checks the existing share. It cannot
+create or restore a grant, change the account/scope/destination, or perform an
+interactive sign-in for the owner. Owner refusal codes (including
+`not_authorised` and `interactive_required`) remain refusal codes; a successful
+receipt contains no access or refresh material. Ordinary requests still resolve
+the owner automatically, so this is an explicit repair action, not something to
+run after every authentication failure. Readiness offers the command for an
+expired selected-model grant only to an admin observer; run it on the peer named
+by that remedy.
+
 A granted share is learned by PULLING, never pushed. The owner's document changes
 when `lop network credential share` runs there; this device reads it on its next
 `lop network credentials`, and a key it has not read yet is a key it has never
