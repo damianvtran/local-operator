@@ -1,0 +1,3 @@
+# Analysis only: no harness, office, MCP, statistics, or API-client dependencies.
+matplotlib==3.10.7
+numpy==2.3.4

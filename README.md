@@ -40,6 +40,45 @@ pooled, load-balanced, and used with the prompt cache in mind.
   <a href="#-contributing">Contribute</a>
 </div>
 
+## 📊 Reproducible cost and effectiveness benchmarks
+
+**Inspect the evidence, not just the headline.** The
+[public harness-cost kit](benchmarks/harness_cost/README.md) includes metered
+request records, task and run manifests, pricing calculations, independent
+methodology review, and a single command that regenerates the tables and plots.
+It also builds a checksummed ZIP for independent review.
+
+> **Exploratory results—not a current-performance ranking.** The initial study
+> used unequal private loadouts and uncontrolled cross-run cache warmth; Codex
+> also used incorrect model metadata. Those confounds are documented in the
+> [corrections](benchmarks/harness_cost/CORRECTIONS.md). These results do not
+> establish equal task effectiveness or a general cost advantage. Expanded,
+> public-loadout experiments must clear their methodology and reproducibility
+> gates before any new claim is published.
+
+<p align="center">
+  <img src="./benchmarks/harness_cost/generated/fig1-cost-per-task.png"
+       alt="Exploratory cost-per-task results showing observed model costs and explicitly counterfactual cold-cache estimates; Codex's confounded four-task sample is shown separately"
+       width="1000">
+</p>
+
+<details>
+<summary>What contributes to cost, and how to reproduce the figures</summary>
+
+<p align="center">
+  <img src="./benchmarks/harness_cost/generated/fig2-why-costs-differ.png"
+       alt="Exploratory long-task model cost decomposition, including cache writes, cache reads, uncached input and output; not a causal ranking"
+       width="1000">
+</p>
+
+From `benchmarks/harness_cost/`, install the pinned analysis dependencies and run
+`python regenerate.py`. Regeneration uses the included snapshot only: no model
+calls, login, or API spend. See the [reproduction evidence](benchmarks/harness_cost/REPRODUCTION.md)
+for fresh-extraction checks and the [kit README](benchmarks/harness_cost/README.md)
+for the exact commands, populations, limitations, and packaging instructions.
+
+</details>
+
 ## 📚 Table of Contents
 
 - [✨ Why Local Operator](#-why-local-operator)

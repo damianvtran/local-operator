@@ -1,0 +1,122 @@
+[
+  {
+    "id": "37608790-6147-45d0-9f20-1137bb35703d",
+    "_domain": "libreoffice_calc",
+    "_tier": "short"
+  },
+  {
+    "id": "abed40dc-063f-4598-8ba5-9fe749c0615d",
+    "_domain": "libreoffice_calc",
+    "_tier": "short"
+  },
+  {
+    "id": "01b269ae-2111-4a07-81fd-3fcd711993b0",
+    "_domain": "libreoffice_calc",
+    "_tier": "short"
+  },
+  {
+    "id": "1e8df695-bd1b-45b3-b557-e7d599cf7597",
+    "_domain": "libreoffice_calc",
+    "_tier": "short"
+  },
+  {
+    "id": "eb03d19a-b88d-4de4-8a64-ca0ac66f426b",
+    "_domain": "libreoffice_calc",
+    "_tier": "short"
+  },
+  {
+    "id": "7a4e4bc8-922c-4c84-865c-25ba34136be1",
+    "_domain": "libreoffice_calc",
+    "_tier": "short"
+  },
+  {
+    "id": "51b11269-2ca8-4b2a-9163-f21758420e78",
+    "_domain": "libreoffice_calc",
+    "_tier": "short"
+  },
+  {
+    "id": "0cecd4f3-74de-457b-ba94-29ad6b5dafb6",
+    "_domain": "libreoffice_calc",
+    "_tier": "short"
+  },
+  {
+    "id": "0e763496-b6bb-4508-a427-fad0b6c3e195",
+    "_domain": "libreoffice_writer",
+    "_tier": "short"
+  },
+  {
+    "id": "e528b65e-1107-4b8c-8988-490e4fece599",
+    "_domain": "libreoffice_writer",
+    "_tier": "short"
+  },
+  {
+    "id": "d53ff5ee-3b1a-431e-b2be-30ed2673079b",
+    "_domain": "libreoffice_writer",
+    "_tier": "short"
+  },
+  {
+    "id": "73c99fb9-f828-43ce-b87a-01dc07faa224",
+    "_domain": "libreoffice_impress",
+    "_tier": "short"
+  },
+  {
+    "id": "edb61b14-a854-4bf5-a075-c8075c11293a",
+    "_domain": "libreoffice_impress",
+    "_tier": "short"
+  },
+  {
+    "id": "9cf05d24-6bd9-4dae-8967-f67d88f5d38a",
+    "_domain": "libreoffice_impress",
+    "_tier": "short"
+  },
+  {
+    "id": "276cc624-87ea-4f08-ab93-f770e3790175",
+    "_domain": "vs_code",
+    "_tier": "short"
+  },
+  {
+    "id": "930fdb3b-11a8-46fe-9bac-577332e2640e",
+    "_domain": "vs_code",
+    "_tier": "short"
+  },
+  {
+    "id": "eb303e01-261e-4972-8c07-c9b4e7a4922a",
+    "_domain": "multi_apps",
+    "_tier": "long"
+  },
+  {
+    "id": "aceb0368-56b8-4073-b70e-3dc9aee184e0",
+    "_domain": "multi_apps",
+    "_tier": "long"
+  },
+  {
+    "id": "81c425f5-78f3-4771-afd6-3d2973825947",
+    "_domain": "multi_apps",
+    "_tier": "long"
+  },
+  {
+    "id": "bc2b57f3-686d-4ec9-87ce-edf850b7e442",
+    "_domain": "multi_apps",
+    "_tier": "long"
+  },
+  {
+    "id": "51f5801c-18b3-4f25-b0c3-02f85507a078",
+    "_domain": "multi_apps",
+    "_tier": "long"
+  },
+  {
+    "id": "5bc63fb9-276a-4439-a7c1-9dc76401737f",
+    "_domain": "multi_apps",
+    "_tier": "long"
+  },
+  {
+    "id": "20236825-b5df-46e7-89bf-62e1d640a897",
+    "_domain": "multi_apps",
+    "_tier": "long"
+  },
+  {
+    "id": "8df7e444-8e06-4f93-8a1a-c5c974269d82",
+    "_domain": "multi_apps",
+    "_tier": "long"
+  }
+]

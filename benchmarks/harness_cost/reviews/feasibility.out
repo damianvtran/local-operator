@@ -1,0 +1,24 @@
+37608790 short compare_table {"gold": 1.0, "gold_roundtrip": 1.0, "input": 0.0, "missing": 0.0}
+abed40dc short compare_table {"gold": 1.0, "gold_roundtrip": 1.0, "input": 0.0, "missing": 0.0}
+01b269ae short compare_table {"gold": 1.0, "gold_roundtrip": 1.0, "input": 0.0, "missing": 0.0}
+1e8df695 short compare_table {"gold": 1.0, "gold_roundtrip": 0.0, "input": 0.0, "missing": 0.0}
+eb03d19a short compare_table {"gold": 1.0, "gold_roundtrip": 1.0, "input": 0.0, "missing": 0.0}
+7a4e4bc8 short compare_table {"gold": 1.0, "gold_roundtrip": 1.0, "input": 0.0, "missing": 0.0}
+51b11269 short compare_table {"gold": 1.0, "gold_roundtrip": 1.0, "input": 0.0, "missing": 0.0}
+0cecd4f3 short compare_table {"gold": 1.0, "gold_roundtrip": 1.0, "input": 0.0, "missing": 0.0}
+0e763496 short compare_font_names rule-based checker; not probed
+e528b65e short compare_docx_files {"gold": 1.0, "gold_roundtrip": 1.0, "input": 0.0, "missing": 0.0}
+d53ff5ee short compare_docx_files {"gold": 1.0, "gold_roundtrip": 1.0, "input": 0.0, "missing": 0.0}
+73c99fb9 short compare_pptx_files {"gold": 1.0, "gold_roundtrip": 1.0, "input": 0.0, "missing": 0.0}
+edb61b14 short compare_pptx_files {"gold": 1.0, "gold_roundtrip": 1.0, "input": 0.0, "missing": 0.0}
+9cf05d24 short compare_pptx_files {"gold": 1.0, "gold_roundtrip": 1.0, "input": 0.0, "missing": 0.0}
+276cc624 short check_json_settings rule-based checker; not probed
+930fdb3b short check_json_keybindings rule-based checker; not probed
+eb303e01 long compare_pptx_files {"gold": 1.0, "gold_roundtrip": 1.0, "input": 0.0, "missing": 0.0}
+aceb0368 long compare_table {"gold": 1.0, "gold_roundtrip": 1.0, "missing": 0.0}
+81c425f5 long compare_docx_tables {"gold": 1.0, "gold_roundtrip": 1.0, "missing": 0.0}
+bc2b57f3 long compare_table {"gold": 1.0, "gold_roundtrip": 0.0, "input": 0.0, "missing": 0.0}
+51f5801c long compare_docx_files {"gold": 1.0, "gold_roundtrip": 1.0, "missing": 0.0}
+5bc63fb9 long compare_docx_files_and_ignore_new_lines {"gold": 1.0, "gold_roundtrip": 1.0, "missing": 0.0}
+20236825 long compare_text_file {"gold": 1.0, "gold_roundtrip": 1.0, "missing": 0.0}
+8df7e444 long compare_zip_files {"gold": 1.0, "gold_roundtrip": 1.0, "missing": 0.0}
