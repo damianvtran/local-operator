@@ -47,6 +47,14 @@ def _isolated_module_state(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(watchdog, "_CONTROLLER", None)
     monkeypatch.setattr(watchdog, "_WORKER", None)
     controllers = []
+    reporters = []
+    reporter_init = watchdog._PythonReporter.__init__
+
+    def init_owned(reporter):
+        reporter_init(reporter)
+        reporters.append(reporter)
+
+    monkeypatch.setattr(watchdog._PythonReporter, "__init__", init_owned)
     start = watchdog._Controller.start
 
     def start_owned(controller):
@@ -61,6 +69,12 @@ def _isolated_module_state(monkeypatch, tmp_path: Path):
     finally:
         # Stop every owned reporter before joining, including on assertion
         # failures. Never touch a controller belonging to the enclosing run.
+        for reporter in reporters:
+            stopped = reporter.stop()
+            assert stopped, "test-owned soft reporter did not stop"
+            handle = reporter._borrowed_handle
+            if handle is not None:
+                handle.close()
         for controller in controllers:
             controller.stop()
         threads = [
@@ -471,10 +485,287 @@ def test_the_workflow_enables_the_watchdog() -> None:
     assert float(env[watchdog.ENV_SECONDS]) > 0
 
 
+def test_python_reporter_generation_deadline_and_stale_capture(monkeypatch):
+    import io
+
+    class NoThread:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def join(self, timeout):
+            pass
+
+        def is_alive(self):
+            return False
+
+    monkeypatch.setattr(watchdog.threading, "Thread", NoThread)
+    monkeypatch.setattr(watchdog.time, "monotonic", lambda: 10.0)
+    reporter = watchdog._PythonReporter()
+    handle = io.StringIO()
+    reporter.arm("first", 4, handle)
+    first = reporter._job
+    assert reporter._due(13.9) is None
+    assert reporter._due(14.0) is first
+    reporter.arm("second", 4, handle)
+    monkeypatch.setattr(watchdog, "_python_snapshot", lambda: ("captured", ["safe-frame"]))
+    before = handle.getvalue()
+    reporter._capture(first)
+    assert handle.getvalue() == before
+    reporter._capture(reporter._job)
+    assert '"node": "second"' in handle.getvalue()
+    assert "terminal] captured" in handle.getvalue()
+    reporter.disarm()
+    assert reporter._due(100) is None
+    assert reporter.stop()
+
+
+def test_python_snapshot_privacy_bounds_and_free_threaded_unavailable(monkeypatch):
+    import sys
+
+    secret_local = "DO-NOT-EXPORT-LOCALS"
+    monkeypatch.setattr(watchdog.sys, "_current_frames", lambda: {1: sys._getframe()})
+    status, lines = watchdog._python_snapshot(max_threads=1, max_frames=1)
+    assert status in {"captured", "truncated"}
+    assert secret_local not in "\n".join(lines)
+    status, lines = watchdog._python_snapshot(max_bytes=1)
+    assert status == "truncated" and lines == []
+    monkeypatch.setattr(watchdog.sys, "_is_gil_enabled", lambda: False, raising=False)
+    assert watchdog._python_snapshot() == ("unavailable", [])
+
+
+def test_python_reporter_capture_failure_has_terminal_status(monkeypatch):
+    import io
+
+    reporter = watchdog._PythonReporter()
+    handle = io.StringIO()
+    try:
+        reporter.arm("failure-node", 1000, handle)
+        job = reporter._job
+
+        def fail():
+            raise RuntimeError("PRIVATE-EXCEPTION-MUST-NOT-PRINT")
+
+        monkeypatch.setattr(watchdog, "_python_snapshot", fail)
+        reporter._capture(job)
+        text = handle.getvalue()
+        assert "terminal] incomplete-failed" in text
+        assert "PRIVATE-EXCEPTION" not in text
+    finally:
+        assert reporter.stop()
+
+
+def test_python_reporter_rearm_discards_capture_in_progress(monkeypatch):
+    import io
+    import threading
+
+    reporter = watchdog._PythonReporter()
+    handle = io.StringIO()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def capture():
+        entered.set()
+        assert release.wait(3)
+        return "captured", ["old-frame"]
+
+    monkeypatch.setattr(watchdog, "_python_snapshot", capture)
+    reporter.arm("old-node", 1000, handle)
+    old = reporter._job
+    thread = threading.Thread(target=reporter._capture, args=(old,))
+    try:
+        thread.start()
+        assert entered.wait(3)
+        reporter.arm("new-node", 1000, handle)
+        before = handle.getvalue()
+        release.set()
+        thread.join(3)
+        assert not thread.is_alive()
+        assert handle.getvalue() == before
+        assert "old-frame" not in handle.getvalue()
+    finally:
+        release.set()
+        thread.join(3)
+        assert reporter.stop()
+
+
+def test_python_reporter_blocked_io_stop_does_not_close_or_replace(monkeypatch):
+    import io
+    import threading
+
+    reporter = watchdog._PythonReporter()
+    entered = threading.Event()
+    release = threading.Event()
+
+    class HeldWriter(io.StringIO):
+        def write(self, text):
+            if text.startswith(watchdog.PYTHON_MARKER):
+                entered.set()
+                assert release.wait(3)
+            return super().write(text)
+
+    handle = HeldWriter()
+    monkeypatch.setattr(watchdog, "_python_snapshot", lambda: ("captured", ["frame"]))
+    try:
+        reporter.arm("held-node", 0.001, handle)
+        assert entered.wait(3)
+        assert reporter.arm("next-node", 1000, handle) is False
+        assert reporter.stop() is False
+        assert not handle.closed
+        assert not reporter.arm("replacement", 1000, handle)
+    finally:
+        release.set()
+        assert reporter.stop()
+        assert not handle.closed
+
+
+def test_python_reporter_constructor_failure_never_native_falls_back(monkeypatch):
+    def unavailable():
+        raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr(watchdog, "_PythonReporter", unavailable)
+    native = _FakeFaulthandler()
+    monkeypatch.setattr(watchdog, "faulthandler", native)
+    worker = watchdog._WorkerTimer(4)
+    worker.arm("node")
+    assert worker._disabled and not worker._armed
+    assert native.armed == [] and native.cancels == 0
+
+
+@pytest.mark.parametrize(
+    "status", ["captured", "truncated", "unavailable", "incomplete-failed", None]
+)
+def test_python_snapshot_parser_preserves_terminal_truth(status):
+    text = watchdog.PYTHON_MARKER + "{}\nframe\n"
+    if status is not None:
+        text += "[worker Python snapshot terminal] " + status + "\n"
+    lines = watchdog._fired_lines(text)
+    assert lines is not None, "a Python snapshot marker must produce an observed excerpt"
+    excerpt = "\n".join(lines)
+    assert (status if status is not None else "incomplete-failed") in excerpt
+    assert watchdog._fired_lines("[shard stall] armed only") is None
+
+
+def test_python_snapshot_clears_references_and_never_reads_locals(monkeypatch):
+    class Code:
+        co_filename = "private-path"
+        co_name = "safe-function"
+
+    class Frame:
+        f_code = Code()
+        f_lineno = 7
+        f_back = None
+
+        @property
+        def f_locals(self):
+            raise AssertionError("locals access forbidden")
+
+    mapping = {1: Frame(), 2: Frame()}
+    monkeypatch.setattr(watchdog.sys, "_current_frames", lambda: mapping)
+    status, lines = watchdog._python_snapshot(max_threads=1)
+    assert status == "truncated" and len(lines) == 1
+    assert mapping == {}, "all held frame references must be released"
+    assert len("\n".join(lines).encode()) < 65536
+
+
+def test_python_reporter_write_failure_and_missing_terminal_are_incomplete(monkeypatch):
+    import io
+
+    class Broken(io.StringIO):
+        def write(self, text):
+            if text.startswith("frame"):
+                raise OSError("do not reopen pathname")
+            return super().write(text)
+
+    reporter = watchdog._PythonReporter()
+    handle = Broken()
+    try:
+        reporter.arm("node", 1000, handle)
+        monkeypatch.setattr(watchdog, "_python_snapshot", lambda: ("captured", ["frame"]))
+        reporter._capture(reporter._job)
+        assert reporter._job is None
+        assert "terminal] incomplete-failed" in handle.getvalue()
+    finally:
+        assert reporter.stop()
+
+
+class _SoftReporterSpy:
+    """No thread, clock or frame capture: routing contracts run before runtime QA."""
+
+    def __init__(self):
+        self.calls = []
+
+    def arm(self, nodeid, seconds, handle):
+        self.calls.append(("arm", nodeid, seconds, handle))
+
+    def disarm(self):
+        self.calls.append(("disarm",))
+
+    def stop(self):
+        self.calls.append(("stop",))
+        return True
+
+
+def test_report_only_worker_never_touches_native_timer(monkeypatch):
+    """The mitigation must remove BOTH soft arm and cancel from the C path."""
+    reporter = _SoftReporterSpy()
+    monkeypatch.setattr(watchdog, "_PythonReporter", lambda: reporter, raising=False)
+
+    class ForbiddenNative:
+        def dump_traceback_later(self, *args, **kwargs):
+            raise AssertionError("report-only native arm forbidden")
+
+        def cancel_dump_traceback_later(self):
+            raise AssertionError("report-only native cancel forbidden")
+
+    monkeypatch.setattr(watchdog, "faulthandler", ForbiddenNative())
+    worker = watchdog._WorkerTimer(4.0)
+    monkeypatch.setattr(watchdog, "_WORKER", worker)
+    worker.arm("original-node")
+    worker.arm("next-node")
+    worker.disarm()
+    watchdog.shutdown()
+    arms = [call for call in reporter.calls if call[0] == "arm"]
+    assert [(call[1], call[2]) for call in arms] == [
+        ("original-node", 4.0),
+        ("next-node", 4.0),
+    ]
+    assert all(call[3] is worker._handle for call in arms)
+    assert reporter.calls[-1] == ("stop",)
+
+
+@pytest.mark.parametrize("seconds", [None, 4.0])
+def test_hard_worker_keeps_native_exit_without_python_reporter(monkeypatch, seconds):
+    """Reporter-silenced hard-only mode must remain independently effective."""
+
+    def forbidden_reporter():
+        raise AssertionError("hard mode must not construct soft reporter")
+
+    monkeypatch.setattr(watchdog, "_PythonReporter", forbidden_reporter, raising=False)
+    native = _FakeFaulthandler()
+    monkeypatch.setattr(watchdog, "faulthandler", native)
+    worker = watchdog._WorkerTimer(seconds, (300.0, True))
+    worker.arm("hard-node")
+    assert native.armed == [(300.0, {"file": worker._handle, "repeat": False, "exit": True})]
+    worker.disarm()
+    assert native.cancels == 1
+
+
+def test_controller_does_not_equate_missing_soft_snapshot_with_health():
+    controller = watchdog._Controller(4.0)
+    text = "\n".join(controller._stack_excerpts())
+    assert "Worker Python snapshot unavailable/not observed" in text
+    assert "requires the GIL" in text
+    assert "Absence does not establish" in text
+    assert "timer was never due" in text
+
+
 class _FakeFaulthandler:
     """Stands in for :mod:`faulthandler` without touching the real module.
 
-    The C timer is the whole point of the worker half, and no unit test can make
+    The native hard timer is spied on; no unit test here can make
     a real one fire, so it is spied on instead: the assertions are that the timer
     was armed for the running test, at the bound captured at install, and
     cancelled only by that test's teardown.
@@ -496,14 +787,33 @@ def _install_worker(monkeypatch, bound: str = "4") -> _FakeFaulthandler:
     monkeypatch.setenv(watchdog.ENV_SECONDS, bound)
     fake = _FakeFaulthandler()
     monkeypatch.setattr(watchdog, "faulthandler", fake)
+    # Preserve the existing bound/header/lifecycle assertions using a PURE
+    # Python reporter double. Native hard-mode calls still hit the independent
+    # faulthandler spy below; no legacy soft cell starts an actual timer.
+
+    class SoftSpy:
+        def arm(self, nodeid, seconds, handle):
+            if fake.armed:
+                fake.cancels += 1
+            fake.armed.append((seconds, {"file": handle, "repeat": True, "exit": False}))
+            handle.write(f"{watchdog.ARM_MARKER}{nodeid} exceeded {seconds:g}s\n")
+            handle.flush()
+
+        def disarm(self):
+            fake.cancels += 1
+
+        def stop(self):
+            return True
+
+    monkeypatch.setattr(watchdog, "_PythonReporter", SoftSpy)
     watchdog.install(_FakeConfig(worker=True))
     return fake
 
 
-def test_the_worker_arms_the_c_timer_and_writes_the_header(monkeypatch) -> None:
+def test_the_worker_arms_the_python_reporter_and_writes_the_header(monkeypatch) -> None:
     """The worker half produces the stacks; a no-op ``arm`` must fail a test.
 
-    ``arm`` is the only thing that starts the C timer, and the round-1 review
+    ``arm`` must reach the Python reporter, and the round-1 review
     measured that turning it into an early ``return`` left all ten guards green
     while no dump could ever be produced -- the reporter would name the test and
     hand the reader no stacks at all.
@@ -665,9 +975,9 @@ def test_the_report_mode_prints_fired_stacks_and_labels_unfired_headers(tmp_path
     # A fired file names its test too: the stacks say what was parked, but the
     # node id is what a reader of a cancelled run needs first.
     assert "in flight when the timer fired: tests/unit/a.py::test_fast" in report
-    assert "never fired" in report
+    assert "snapshot not observed" in report
     assert "3000 tests started" in report
-    assert "in flight at cancel, not fired: tests/unit/a.py::test_2999" in report
+    assert "last armed item: tests/unit/a.py::test_2999" in report
     # The defect: no arm-time header may be presented as a fired timeout.
     assert "exceeded 240s" not in report
     assert report.count(watchdog.FIRED_MARKER) == 1
@@ -692,8 +1002,8 @@ def test_the_report_mode_does_not_read_a_marker_out_of_a_node_id(tmp_path) -> No
     report = watchdog.report_dumps(dumps)
 
     assert "(fired," not in report, "an arm-time header was read as a snapshot"
-    assert "never fired" in report
-    assert f"in flight at cancel, not fired: {nodeid}" in report
+    assert "snapshot not observed" in report
+    assert f"last armed item: {nodeid}" in report
 
 
 def test_a_bound_no_timer_can_hold_disables_the_instrument(monkeypatch) -> None:
@@ -727,6 +1037,7 @@ def test_the_worker_survives_a_bound_the_timer_rejects(monkeypatch) -> None:
         def dump_traceback_later(self, seconds, **kwargs):
             raise OverflowError("timestamp out of range for platform time_t")
 
+    monkeypatch.setenv(watchdog.TEST_TIMEOUT_ENV, "300")
     _install_worker(monkeypatch)
     monkeypatch.setattr(watchdog, "faulthandler", _OverflowingFaulthandler())
 
