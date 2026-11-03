@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -253,6 +254,49 @@ def test_controller_rejects_path_protocol_without_failing_pytest(tmp_path, monke
     assert not (tmp_path / "outside").exists()
 
 
+def _assert_registered_pytest_invocation(command):
+    # Module/plugin options are part of main's guarded collection contract.
+    # Inspect the command boundary, not the obsolete literal ``pytest $(``:
+    # adding an ordering plugin must not hide a missing or late registry export.
+    lines = [
+        line.strip().removesuffix("\\")
+        for line in command.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    invocations = [
+        (index, shlex.split(line))
+        for index, line in enumerate(lines)
+        if shlex.split(line)[:3] == ["python", "-m", "pytest"]
+    ]
+    assert len(invocations) == 1, "expected one real module pytest command"
+    index, tokens = invocations[0]
+    assert tokens[3:5] == ["-p", "tests.ci_order_owned_first"], "ordering plugin missing"
+    exports = [
+        i
+        for i, line in enumerate(lines)
+        if shlex.split(line) == ["export", artifact.ENV_REGISTRY + "=$registry"]
+    ]
+    assert len(exports) == 1 and exports[0] < index, "registry must precede pytest"
+
+
+@pytest.mark.parametrize("violation", ["late-registry", "lost-plugin"])
+def test_workflow_contract_rejects_broken_handoff(violation):
+    workflow = yaml.safe_load((Path(__file__).parents[2] / ".github/workflows/ci.yml").read_text())
+    command = next(
+        step["run"]
+        for step in workflow["jobs"]["test"]["steps"]
+        if step.get("id") == "shard_pytest"
+    )
+    export = 'export ' + artifact.ENV_REGISTRY + '="$registry"'
+    assert export in command
+    if violation == "late-registry":
+        command = command.replace(export, "") + "\n" + export + "\n"
+    else:
+        command = command.replace("-p tests.ci_order_owned_first", "")
+    with pytest.raises(AssertionError):
+        _assert_registered_pytest_invocation(command)
+
+
 def test_controller_identity_and_real_cli_workflow_contract(tmp_path, monkeypatch):
     monkeypatch.setenv(artifact.ENV_INVOCATION, RUN)
     monkeypatch.setattr(watchdog, "DUMP_ROOT", tmp_path / "lo-shard-stall")
@@ -277,9 +321,7 @@ def test_controller_identity_and_real_cli_workflow_contract(tmp_path, monkeypatc
     pytest_step = next(s for s in steps if s.get("id") == "shard_pytest")
     assert stage["env"][artifact.ENV_INVOCATION] == pytest_step["env"][artifact.ENV_INVOCATION]
     assert stage["env"][artifact.ENV_REGISTRY] == "${{ steps.shard_pytest.outputs.stall_registry }}"
-    assert pytest_step["run"].index("export " + artifact.ENV_REGISTRY) < pytest_step["run"].index(
-        "pytest $("
-    )
+    _assert_registered_pytest_invocation(pytest_step["run"])
     upload = next(s for s in steps if s.get("name") == "Upload current-invocation timeout files")
     assert upload["with"]["retention-days"] == 1
     assert upload["with"]["path"] == "${{ steps.stage_stall.outputs.artifact }}"
