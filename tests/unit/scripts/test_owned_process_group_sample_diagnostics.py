@@ -168,7 +168,7 @@ def test_revocation_does_not_relabel_old_sampling_evidence(monkeypatch):
 
 
 def test_broken_optional_sink_does_not_change_missing_sample(monkeypatch):
-    class BrokenSink(list):
+    class BrokenSink(list[dict[str, object]]):
         def append(self, value):
             raise RuntimeError("synthetic diagnostic sink unavailable")
 
