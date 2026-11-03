@@ -1,0 +1,27 @@
+INPUT en 1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25
+INPUT fr f998c7a608a0023275a39f4c75ff7db65d107924c78db3907c7d0a28b2d30744
+INPUT translator_context ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254
+INPUT audited_context 2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02
+CONTEXT PASS: exactly fourteen note-only changes; all other fields identical
+CORE VALIDATOR PASS: check_catalogues(), isolated one-namespace en/fr fixture
+NEGATIVE CONTROL REJECTED added argument fr/wire.settings.account_policy: wire.settings.account_policy.label: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1
+NEGATIVE CONTROL REJECTED missing key fr/wire.settings.account_policy: missing key 'wire.settings.account_policy.error.invalid_json'
+NEGATIVE CONTROL REJECTED invalid ICU fr/wire.settings.account_policy: wire.settings.account_policy.label: expected ',' or '}' after argument name 'bad' (at offset 4 of '{bad')
+KEY PASS wire.settings.account_policy.label args=0 plurals=0 Cf=0 render-exact=true
+KEY PASS wire.settings.account_policy.help args=0 plurals=0 Cf=0 render-exact=true
+KEY PASS wire.settings.account_policy.reset_soonest.label args=0 plurals=0 Cf=0 render-exact=true
+KEY PASS wire.settings.account_policy.reset_soonest.description args=0 plurals=0 Cf=0 render-exact=true
+KEY PASS wire.settings.account_policy.headroom.label args=0 plurals=0 Cf=0 render-exact=true
+KEY PASS wire.settings.account_policy.headroom.description args=0 plurals=0 Cf=0 render-exact=true
+KEY PASS wire.settings.account_policy.fair.label args=0 plurals=0 Cf=0 render-exact=true
+KEY PASS wire.settings.account_policy.fair.description args=0 plurals=0 Cf=0 render-exact=true
+KEY PASS wire.settings.account_policy.legacy.label args=0 plurals=0 Cf=0 render-exact=true
+KEY PASS wire.settings.account_policy.legacy.help args=0 plurals=0 Cf=0 render-exact=true
+KEY PASS wire.settings.account_policy.error.unavailable args=0 plurals=0 Cf=0 render-exact=true
+KEY PASS wire.settings.account_policy.error.invalid_shape args=0 plurals=0 Cf=0 render-exact=true
+KEY PASS wire.settings.account_policy.error.invalid_json args=0 plurals=0 Cf=0 render-exact=true
+KEY PASS wire.settings.account_policy.error.write_failed args=0 plurals=0 Cf=0 render-exact=true
+WIDTHS [{"key": "wire.settings.account_policy.label", "cells": 28, "maxCells": 29}, {"key": "wire.settings.account_policy.reset_soonest.label", "cells": 26, "maxCells": 29}, {"key": "wire.settings.account_policy.headroom.label", "cells": 24, "maxCells": 29}, {"key": "wire.settings.account_policy.fair.label", "cells": 21, "maxCells": 29}, {"key": "wire.settings.account_policy.legacy.label", "cells": 26, "maxCells": 29}]
+ACTUAL COMPLETED USAGE {"message_id": "54c636bf88db4c93870fb288aa8b4e68", "ts": 1793712896.875197, "provider": "openai", "model_id": "gpt-6.1-sol", "input_tokens": 75673, "output_tokens": 1713}
+NOT RUN: pseudo, RTL rendering, native/app fit, real-path integration, design, builds, installs, scanner, full suite, ledger writes
+PASS: fourteen-key isolated mechanical audit

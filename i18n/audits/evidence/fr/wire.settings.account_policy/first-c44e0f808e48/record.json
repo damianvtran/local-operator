@@ -1,0 +1,121 @@
+{
+  "locale": "fr",
+  "namespace": "wire.settings.account_policy",
+  "audit_id": "frap-first-c44e0f808e48",
+  "audit_date": "2026-11-03",
+  "key_count": 14,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "c44e0f808e48",
+    "instance": "c44e0f808e48",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "7b2ba4ed501d",
+    "independent_from_coder": true,
+    "actual_model_source": {
+      "kind": "own_completed_assistant_usage",
+      "artifact": "served-model-evidence.json",
+      "message_id": "54c636bf88db4c93870fb288aa8b4e68",
+      "provider": "openai",
+      "model_id": "gpt-6.1-sol",
+      "requested_header_not_used": true,
+      "fallback_disclosure": "Earlier run disclosed temporary quota fallback; current served model verified from completed usage, no no-fallback assertion."
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:local_operator/i18n/catalogues/en/wire.settings.account_policy.json",
+      "snapshot": "en.json",
+      "sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25"
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-account-policy-0e7cde33/wire.settings.account_policy.json",
+      "snapshot": "fr.json",
+      "sha256": "f998c7a608a0023275a39f4c75ff7db65d107924c78db3907c7d0a28b2d30744"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/account-policy-context-backfill/local_operator/i18n/catalogues/en/wire.settings.account_policy.context.json",
+      "snapshot": "audited_context.json",
+      "sha256": "2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02"
+    },
+    "translator_input_context": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-account-policy-0e7cde33/inputs/en.context.json",
+      "snapshot": "translator_context.json",
+      "sha256": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "report.md",
+      "sha256": "91c73abb5e13838c4af09c4d147deae9ffb1ea563f0c029c1b2079b6512b083b"
+    },
+    {
+      "path": "receipt.json",
+      "sha256": "1d7067797bb95849c78364844fbb52394130c9d6131d36fa171d9b4622213067"
+    },
+    {
+      "path": "audit.py",
+      "sha256": "b66d3f84f464a51ebd0faab694f3f89a7949a9ede41894c19524cc232c67892a"
+    },
+    {
+      "path": "audit.log",
+      "sha256": "16d3ac71f0be78ed7b6576b78a7f224756d6516312f82e62b12249e496951461"
+    },
+    {
+      "path": "widths.json",
+      "sha256": "860bba1dd0c5b418bb59d9bc605fd87388022310595d16b6e7da88434593ae88"
+    },
+    {
+      "path": "served-model-evidence.json",
+      "sha256": "956273c010f3ebfb65d92670f784ff3d4ea7e42dc9ef51b474dc1df7dbeb7dc6"
+    },
+    {
+      "path": "en.json",
+      "sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25"
+    },
+    {
+      "path": "fr.json",
+      "sha256": "f998c7a608a0023275a39f4c75ff7db65d107924c78db3907c7d0a28b2d30744"
+    },
+    {
+      "path": "translator_context.json",
+      "sha256": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254"
+    },
+    {
+      "path": "audited_context.json",
+      "sha256": "2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "context_provenance": "Translated under original context; independently audited under corrected proposed context. No claim translator used new context. Independently verified fourteen note-only changes with all other fields unchanged.",
+  "evidence_types": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual_execution_log",
+    "widths.json": "actual_rich_cell_len_results",
+    "served-model-evidence.json": "structured_completed_usage_extract"
+  },
+  "not_run": [
+    "pseudo",
+    "native_RTL",
+    "native_rendered_fit",
+    "app_runtime_requests",
+    "design_UX",
+    "second_reader",
+    "build_install_scanner_fullsuite",
+    "ledger_write_activation_release"
+  ],
+  "original_packet_preserved": true,
+  "retention": "Own scratch immutable handoff only; coordinator must retain in tracked core evidence. Not claimed on main.",
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

@@ -5300,6 +5300,25 @@
       "note": "Round 2 re-audit at this en hash: changed updated/reset ({when}, now pre-formatted by the phone) and throttled (cooldown, no 'limite'); new refresh_ready, unlimited_generic, accounts_order, row_a11y_bare, row_a11y_bare_reset. U+202F before ':' kept in updated, reset and both new row_a11y_bare keys; round-1 fix intact. throttled keeps one/many/other with #. No fixes needed. 0 blocker / 0 major. No rendered or native-speaker pass claimed."
     },
     {
+      "locale": "fr",
+      "namespace": "wire.settings.account_policy",
+      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Initial 14/14 namespace contribution. Translator session 7b2ba4ed501d; two independent readers c44e0f808e48, 35aac0a677bc, both actual openai/gpt-6.1-sol, each passed with zero findings. Full immutable records, usage provenance and source/context/target bindings: i18n/audits/evidence/fr/wire.settings.account_policy/integration-binding.json. Auditors bound corrected context 2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02 and reconciled original translator context; English semantics and constraints unchanged. Second reader coder-identity author addendum maps job196c3a94b346 to actual coder session eae0961e4e78; original record preserved. No native/design/pseudo/RTL execution claimed; independent QA/rendered review pending."
+    },
+    {
       "locale": "hi",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -18586,6 +18605,25 @@
       },
       "status": "passed",
       "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). Fix: reset was '{when}重置', which reads as a past event; now '将于{when}重置' (future, matching 'Resets at'). Round-1 fixes intact: no spaces around CJK/number runs (#秒, 更新于{when}), 账户 throughout incl. accounts_order; throttled drops 上限. other-only plural. 0 blocker / 0 major unresolved. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings.account_policy",
+      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Initial 14/14 namespace contribution. Translator session 7fce46e29bee; two independent readers e55f54b6a26e, 6433b7a5b3e9, both actual openai/gpt-6.1-sol, each passed with zero findings. Full immutable records, usage provenance and source/context/target bindings: i18n/audits/evidence/zh-CN/wire.settings.account_policy/integration-binding.json. Auditors bound corrected context 2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02 and reconciled original translator context; English semantics and constraints unchanged. No native/design/pseudo/RTL execution claimed; independent QA/rendered review pending."
     }
   ]
 }

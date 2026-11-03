@@ -1,0 +1,46 @@
+{
+  "kind": "implementer-execution-evidence-not-independent-audit",
+  "contract": "manager-authorized command-status, 512MiB, 90s each, cleanup UNKNOWN",
+  "files": [
+    {
+      "path": "gates.log",
+      "sha256": "36f18a52e17988c1d6487dca22f44abc013678ecee37460b5872397478846fcb"
+    },
+    {
+      "path": "outer-group-observations.json",
+      "sha256": "134a5fb386ff90773533697a266634bd3cb2efdb93c1881c60c41e69402ee095"
+    },
+    {
+      "path": "registry-proof.py.txt",
+      "sha256": "dc5bdacb22ee2eea4c147f1357e52322f57757f9cfaf65a5023723ca79884293"
+    },
+    {
+      "path": "supervisor.py.txt",
+      "sha256": "3bbadb12f776890d2be75765b01840293f63249c64493bd43aed9fe034cd83fb"
+    },
+    {
+      "path": "original-refusal.log",
+      "sha256": "e5f7252b598a74e99d65e43247fc52260d8eec4396ff3caa4ea8945f908ddb0b"
+    },
+    {
+      "path": "original-refusal.completion.json",
+      "sha256": "e84314b9cec21c33aeb4fee6266979fc0511ba61c01911037da0688f862939eb"
+    },
+    {
+      "path": "generator.completion.json",
+      "sha256": "90e8c9dc2661d93d39f603fed386a86ba65cab29effddd1e3b4b1b7fe7f16df0"
+    },
+    {
+      "path": "catalogues.completion.json",
+      "sha256": "90d9daec9ab0d0c57c639e409f1605d14dd47403dadaf2f9028db40f522a1c54"
+    },
+    {
+      "path": "affected-pytest.completion.json",
+      "sha256": "b04a4141d5c82d1069e942a5c7625722c532249dd5455fd70405a7e45f39565f"
+    },
+    {
+      "path": "registry-proof.completion.json",
+      "sha256": "3662f0ac00c8f4e32d51c3512afd2d1fd15314ebe78ebd0a80281f9748358d10"
+    }
+  ]
+}

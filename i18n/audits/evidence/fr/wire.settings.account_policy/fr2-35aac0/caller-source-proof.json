@@ -1,0 +1,190 @@
+{
+  "provenance_reference": "record.json:auditor",
+  "kind": "source inspection not runtime execution",
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "files": {
+    "local_operator/settings_io.py": {
+      "sha256": "c6462e6b01cfd9f12610aadf24cb890ca97f3405a38c69b1290ddbadbe9ea724",
+      "excerpts": [
+        {
+          "start": 2355,
+          "lines": [
+            "            _t(_ws.retry_usageawarefallback_choice_false_description()),",
+            "        ),",
+            "    ),",
+            "    Setting(",
+            "        key=\"retry.accountSelectionPolicy\",",
+            "        path=(\"retry\", \"accountSelectionPolicy\"),",
+            "        section=\"failover\",",
+            "        label=_t(_ap.label()),",
+            "        kind=Kind.ENUM,",
+            "        default=DEFAULT_ACCOUNT_SELECTION_POLICY,",
+            "        help=_t(_ap.help()),",
+            "        choices=(",
+            "            Choice(",
+            "                \"reset-soonest\", _t(_ap.reset_soonest_label()), _t(_ap.reset_soonest_description())",
+            "            ),",
+            "            Choice(\"headroom\", _t(_ap.headroom_label()), _t(_ap.headroom_description())),",
+            "            Choice(\"fair\", _t(_ap.fair_label()), _t(_ap.fair_description())),",
+            "        ),",
+            "    ),",
+            "    Setting(",
+            "        key=\"retry.usageAwareAccountPick\",",
+            "        path=(\"retry\", \"usageAwareAccountPick\"),",
+            "        section=\"failover\",",
+            "        label=_t(_ap.legacy_label()),",
+            "        kind=Kind.BOOL,",
+            "        default=True,",
+            "        help=_t(_ap.legacy_help()),"
+          ]
+        },
+        {
+          "start": 2371,
+          "lines": [
+            "            Choice(\"fair\", _t(_ap.fair_label()), _t(_ap.fair_description())),",
+            "        ),",
+            "    ),",
+            "    Setting(",
+            "        key=\"retry.usageAwareAccountPick\",",
+            "        path=(\"retry\", \"usageAwareAccountPick\"),",
+            "        section=\"failover\",",
+            "        label=_t(_ap.legacy_label()),",
+            "        kind=Kind.BOOL,",
+            "        default=True,",
+            "        help=_t(_ap.legacy_help()),",
+            "        choices=_bool_choices(",
+            "            _t(_ws.retry_usageawareaccountpick_choice_true_description()),",
+            "            _t(_ws.retry_usageawareaccountpick_choice_false_description()),",
+            "        ),",
+            "    ),",
+            "    Setting(",
+            "        key=\"retry.usageReservePercent\",",
+            "        path=(\"retry\", \"usageReservePercent\"),",
+            "        section=\"failover\",",
+            "        label=_t(_ws.retry_usagereservepercent_label()),",
+            "        kind=Kind.FLOAT,",
+            "        default=10.0,",
+            "        help=_t(_ws.retry_usagereservepercent_help()),",
+            "        minimum=0.0,",
+            "        maximum=100.0,",
+            "    ),"
+          ]
+        }
+      ]
+    },
+    "local_operator/mobile/daemon.py": {
+      "sha256": "a6f814a657021a6a51f8cac625a9ed49e77255624bd33bd7b9e4382381dd4301",
+      "excerpts": [
+        {
+          "start": 6411,
+          "lines": [
+            "",
+            "                return JSONResponse(",
+            "                    {",
+            "                        \"code\": \"invalid_setting\",",
+            "                        \"error\": _ap.error_invalid_json().envelope()[\"text\"],",
+            "                    },",
+            "                    status_code=422,",
+            "                )",
+            "        try:",
+            "            payload = await asyncio.to_thread(",
+            "                policy_payload, config_dir(), patch, write=request.method == \"PATCH\"",
+            "            )",
+            "        except AccountRoutingError as exc:",
+            "            return JSONResponse(",
+            "                {\"code\": exc.code, \"error\": str(exc)},",
+            "                status_code=exc.status,",
+            "                headers={\"Cache-Control\": \"no-store\"},",
+            "            )",
+            "        return JSONResponse(payload, headers={\"Cache-Control\": \"no-store\"})",
+            "",
+            "    async def api_config_events(request: Request) -> Response:",
+            "        \"\"\"SSE for the RESOLVED language: a settings change reaches the phone live.",
+            "",
+            "        Wave-5 slice D. The relay web (and, through it, the mobile app)",
+            "        subscribe to the same ``config`` frame semantics the desktop feed",
+            "        publishes — one shape, shared builder",
+            "        (``i18n/frames.config_frame_payload``) — so a language write from any"
+          ]
+        }
+      ]
+    },
+    "local_operator/providers/account_policy.py": {
+      "sha256": "59a15397628aa2680b9066b759f0c590df1f2fa0681af556127d0653f01faa9f",
+      "excerpts": [
+        {
+          "start": 270,
+          "lines": [
+            "    \"\"\"",
+            "    ordered: list[ResetCandidate] = []",
+            "    for states in ((\"healthy\", \"unknown\"), (\"reserve\",)):",
+            "        eligible = [row for row in rows if row.state in states]",
+            "        for weekly in _buckets(eligible, \"weekly_ms\"):",
+            "            # Weekly-unknown rows form a neutral tie pool rather than inheriting",
+            "            # the known rows' weekly forecast. Spread them at the best 5h level.",
+            "            for short in _buckets(weekly, \"five_hour_ms\"):",
+            "                ordered.extend(_spread(short, session_id, tie_order))",
+            "    return [row.account_id for row in ordered]"
+          ]
+        }
+      ]
+    },
+    "local_operator/mobile/account_routing.py": {
+      "sha256": "4d448f7851e6cc10a3f76d44a39627741043673fcf158eb3240fdd95364e7b7f",
+      "excerpts": [
+        {
+          "start": 25,
+          "lines": [
+            "        self.status = status",
+            "",
+            "",
+            "def policy_payload(root: Path, patch: Any = None, *, write: bool = False) -> dict[str, Any]:",
+            "    \"\"\"Read or patch the one non-security setting through the existing facade.\"\"\"",
+            "    setting = settings_io.resolve_key(POLICY_KEY)",
+            "    if setting is None:",
+            "        raise AccountRoutingError(",
+            "            \"account_routing_unavailable\", _ap.error_unavailable().envelope()[\"text\"], 404",
+            "        )",
+            "    try:",
+            "        settings_io.require_readable_config_path(root / CONFIG_FILE_NAME)",
+            "        manager = ConfigManager(root)",
+            "        settings_io._require_readable_config(manager)",
+            "        if write:",
+            "            if not isinstance(patch, dict) or set(patch) != {\"value\"}:",
+            "                raise AccountRoutingError(",
+            "                    \"invalid_setting\", _ap.error_invalid_shape().envelope()[\"text\"], 422",
+            "                )",
+            "            # Interactive authenticated user action: retain the same attribution",
+            "            # as TUI/desktop HTTP, not the agent-only settings_control seam.",
+            "            settings_io.write_setting(manager, setting, patch[\"value\"])",
+            "        value = settings_io.read_setting(manager, setting)",
+            "    except settings_io.ConfigUnreadableError as exc:",
+            "        raise AccountRoutingError(\"config_unreadable\", str(exc), 409) from exc",
+            "    except ValueError as exc:",
+            "        raise AccountRoutingError(\"invalid_setting\", str(exc), 422) from exc",
+            "    except OSError as exc:",
+            "        raise AccountRoutingError(",
+            "            \"setting_write_failed\", _ap.error_write_failed().envelope()[\"text\"], 503",
+            "        ) from exc",
+            "    return {",
+            "        \"capability\": CAPABILITY,",
+            "        \"setting\": {",
+            "            \"key\": setting.key,",
+            "            \"label\": setting.label,",
+            "            \"help\": setting.help,",
+            "            \"kind\": setting.kind.value,",
+            "            \"value\": value,",
+            "            \"default\": setting.default,",
+            "            \"is_default\": settings_io.is_default(manager, setting),",
+            "            \"choices\": [",
+            "                {\"value\": choice.value, \"label\": choice.label, \"description\": choice.description}",
+            "                for choice in setting.resolved_choices",
+            "            ],",
+            "        },",
+            "    }"
+          ]
+        }
+      ]
+    }
+  }
+}

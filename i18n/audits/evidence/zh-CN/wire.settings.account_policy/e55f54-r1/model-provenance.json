@@ -1,0 +1,17 @@
+{
+  "session": "e55f54b6a26e",
+  "source": "own transcript.jsonl completed assistant payload.usage",
+  "usage": {
+    "billing_basis": "subscription_api_equivalent",
+    "input_tokens": 75234,
+    "output_tokens": 157,
+    "cache_read_tokens": 73216,
+    "context_tokens": 75234,
+    "reasoning_tokens": 34,
+    "at_ms": 1793712841594,
+    "provider": "openai",
+    "model_id": "gpt-6.1-sol"
+  },
+  "actual_model": "openai/gpt-6.1-sol",
+  "fallback_disclosure": "Completed usage differs from initial Anthropic header; fallback used. No role/config/model changes performed by auditor."
+}
