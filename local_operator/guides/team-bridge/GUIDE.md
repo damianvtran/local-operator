@@ -1,6 +1,6 @@
 ---
 name: team-bridge
-description: "Coordinate with teammates or their chief of staff on a Radient team via the bridge tool, one channel; set up or check the Team Bridge receiver on any OS."
+description: Set up and check the agent messages (Team Bridge) receiver on macOS, Linux or Windows, including a backend-only machine with no desktop app or TUI open.
 ---
 
 # Agent messages (Team Bridge): the background receiver
@@ -31,7 +31,7 @@ creates duplicate, conflicting threads that no one can verify — do not.
   `op=directory` to find them, then `op=dm` by account or endpoint id;
   `channel_post` for a shared room; `send`/`reply` only to answer a pair-inbox
   (`bmsg_…`) delivery.
-- **Don't** when the person is not in the directory, or the user names another
+- **Don't use it** when the person is not in the directory, or the user names another
   channel explicitly. If the bridge is unavailable (no tool, a typed
   `bridge_*` refusal), say so before choosing another channel — never silently
   fall back.

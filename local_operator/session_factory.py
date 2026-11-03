@@ -3361,39 +3361,84 @@ def _memory_recommendation(query: str) -> _ClassificationCandidate | None:
 #: Coordination with a PERSON or their agent. Deliberately COMPOUND: a
 #: messaging verb alone fires on "send a message to the queue", "ask the API" or
 #: "notify via webhook"; a person noun alone on "tell me about the chief of
-#: staff role". The verb must sit within ~80 characters of a person-shaped
-#: target: someone's agent / chief of staff, a teammate/colleague/manager, or
-#: a capitalised name directly after the verb ("ask Ben", "ping Aida's agent").
+#: staff role". Two arms, see :func:`_team_bridge_intent`.
 _TEAM_BRIDGE_VERB = (
-    r"(?:message|dm|ping|tell|ask|notify|reach\s+out(?:\s+to)?|follow\s+up(?:\s+with)?|"
-    r"coordinate(?:\s+with)?|loop\s+in|check\s+with|get\s+(?:sign-?off|approval)\s+from)"
+    r"(?:message|dm|ping|tell|ask|notify|e-?mail|slack|reach\s+out(?:\s+to)?|"
+    r"follow\s+up(?:\s+with)?|coordinate(?:\s+with)?|loop\s+in|check\s+with|"
+    r"get\s+(?:sign-?off|approval)\s+from)"
 )
+#: Person-shaped targets that need no name: someone's agent / chief of staff,
+#: a teammate, colleague or manager.
 _TEAM_BRIDGE_PERSON = (
     r"(?:\w+'s\s+(?:agent|chief\s+of\s+staff|cos)\b|(?:their|his|her)\s+"
     r"(?:agent|chief\s+of\s+staff)\b|chiefs?\s+of\s+staff\b|teammates?\b|"
     r"colleagues?\b|co-?workers?\b|(?:my|our)\s+(?:manager|boss|lead|team)\b|"
     r"the\s+(?:qa|design|reviewer)\s+(?:person|lead|owner)\b)"
 )
-_TEAM_BRIDGE_INTENT = re.compile(
+#: A capitalised word directly after the verb counts as a NAME only with person
+#: evidence after it — a possessive, a reporting/purpose word ("ask Ben to",
+#: "tell Aida that", "ping Sarah about"), an article starting the object ("DM
+#: Sarah the notes") or a clause break. Case-SENSITIVE on the name itself, so
+#: "ask the API" never reaches it; the stop-list below drops capitalised
+#: non-people that still pass the evidence test ("ask Docker to restart").
+_TEAM_BRIDGE_NAME = (
+    r"(?-i:(?P<name>[A-Z][a-z]+))(?:'s\b|(?=\s+(?:about|that|to|whether|if|for|re|the|a|an|"
+    r"and|know)\b|\s*[,;:]|\s*$))"
+)
+#: "send" and "let" are too general to scan 80 characters for a person ("send
+#: the teammates list to the API", "let teammates decide"), so they count only
+#: with the person as their DIRECT object: "send Sarah the slides", "send my
+#: manager the deck", "let Ben know", "let my manager know".
+_TEAM_BRIDGE_PERSON_ARM = re.compile(
     # "tell me about…"/"ask you…" address the assistant, not a teammate.
-    rf"\b{_TEAM_BRIDGE_VERB}\b(?!\s+(?:me|us|you)\b).{{0,80}}?{_TEAM_BRIDGE_PERSON}",
+    rf"(?:\b{_TEAM_BRIDGE_VERB}\b(?!\s+(?:me|us|you)\b)(?P<gap>.{{0,80}}?){_TEAM_BRIDGE_PERSON}"
+    rf"|\bsend\s+{_TEAM_BRIDGE_PERSON}|\blet\s+{_TEAM_BRIDGE_PERSON}\s+know\b)",
     re.I | re.S,
 )
-#: "ask Ben to …", "ping Aida", "coordinate with Damian": the verb followed by a
-#: capitalised word. Case-SENSITIVE on the name on purpose ("ask the API",
-#: "tell me about" stay quiet); the stop-list drops capitalised non-people.
-_TEAM_BRIDGE_NAMED = re.compile(rf"(?i:\b{_TEAM_BRIDGE_VERB})\s+(?P<name>[A-Z][a-z]+)\b(?!\.\w)")
-_TEAM_BRIDGE_NOT_A_NAME = frozenset(
-    {"Slack", "Claude", "Gemini", "Google", "GitHub", "GitLab", "The", "It", "This",
-     "That", "Them", "Me", "Us", "Him", "Her", "Codex", "OpenAI", "Linear", "Notion"}
-)  # fmt: skip
-#: Technical messaging that mentions an agent/team in passing. Checked on the
-#: WHOLE bounded text: one of these makes the turn about code, not a person.
-_TEAM_BRIDGE_TECHNICAL = re.compile(
-    r"(?i)\b(?:message\s+(?:queue|broker|bus)|webhooks?|api\s+(?:endpoint|call)|"
-    r"http\s+request|kafka|rabbitmq|sqs|pub/?sub|unit\s+tests?|implement(?:ation)?|"
-    r"refactor|function|endpoint)\b"
+_TEAM_BRIDGE_NAMED_ARM = re.compile(
+    rf"(?:\b(?:{_TEAM_BRIDGE_VERB}|send)\s+|\blet\s+(?=\S+\s+know\b)){_TEAM_BRIDGE_NAME}",
+    re.I,
 )
+_TEAM_BRIDGE_NOT_A_NAME = frozenset(
+    # Pronouns/determiners, question and politeness words a sentence can start with.
+    {"The", "It", "This", "That", "Them", "Me", "Us", "Him", "Her", "What", "How", "Why",
+     "When", "Where", "Which", "Who", "Whether", "If", "Please", "Kindly", "Just", "Also",
+     "Again", "Everyone", "Anyone", "All",
+     # Days and months ("notify Monday about…" is a date, not a person).
+     "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+     "January", "February", "March", "April", "May", "June", "July", "August",
+     "September", "October", "November", "December",
+     # Products, services and orgs a turn addresses as a system, not a person.
+     "Slack", "Claude", "Gemini", "Google", "GitHub", "GitLab", "Codex", "OpenAI",
+     "Linear", "Notion", "Docker", "Kubernetes", "Jenkins", "Sentry", "Datadog",
+     "Jira", "Postgres", "Redis", "Pergamon", "Minerva", "Radient", "Copilot",
+     "Siri", "Alexa", "Grafana", "Vercel", "Stripe"}
+)  # fmt: skip
+#: Technical vocabulary that makes the VERB's object a system, not a person.
+#: Scoped to the verb's own window (a short lead-in plus the span up to the
+#: target) rather than the whole message: "message Sarah about the
+#: implementation plan" is still a person ask (review round 1, R4).
+_TEAM_BRIDGE_TECHNICAL = re.compile(
+    r"(?i)\b(?:message\s+(?:queue|broker|bus)|webhooks?|api\b|http|kafka|rabbitmq|sqs|"
+    r"pub/?sub|unit\s+tests?|implement\w*|refactor\w*|function|endpoint|code|script|"
+    r"cron|bot)\b"
+)
+_TEAM_BRIDGE_LEAD_IN = 40
+
+
+def _team_bridge_intent(text: str) -> bool:
+    """Whether some verb in ``text`` targets a person with no technical object."""
+    for arm in (_TEAM_BRIDGE_PERSON_ARM, _TEAM_BRIDGE_NAMED_ARM):
+        for match in arm.finditer(text):
+            name = match.groupdict().get("name")
+            if name is not None and name in _TEAM_BRIDGE_NOT_A_NAME:
+                continue
+            lead = text[max(0, match.start() - _TEAM_BRIDGE_LEAD_IN) : match.start()]
+            if _TEAM_BRIDGE_TECHNICAL.search(lead + " " + (match.groupdict().get("gap") or "")):
+                continue
+            return True
+    return False
+
 
 #: The rendered rule (candidate description). One line, kept tiny because it is
 #: harness-owned prompt text paid on every matching turn; pinned by a budget test.
@@ -3425,13 +3470,7 @@ def _team_bridge_recommendation(
     ``_memory_recommendation`` precedent) so the probe only runs on turns that
     already look like person-to-person coordination.
     """
-    text = query[:2048]
-    if _TEAM_BRIDGE_TECHNICAL.search(text):
-        return None
-    if not _TEAM_BRIDGE_INTENT.search(text) and not any(
-        match.group("name") not in _TEAM_BRIDGE_NOT_A_NAME
-        for match in _TEAM_BRIDGE_NAMED.finditer(text)
-    ):
+    if not _team_bridge_intent(query[:2048]):
         return None
     probe = hooks.team_bridge_available
     if probe is None:

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -142,6 +142,16 @@ def test_unknown_membership_is_silent_and_offline() -> None:
         "follow up with my manager about the budget approval",
         "message the teammate who owns QA coordination",
         "DM Sarah the meeting notes",
+        # Review round 1, R4: a technical word in the TOPIC, not the target.
+        "message Sarah about the implementation plan",
+        "Ask Ben's agent about the endpoint rollout",
+        # R4: the added verbs, with the person as the object.
+        "email Priya that the deck is ready",
+        "slack Marco about the demo",
+        "send Sarah the slides",
+        "send my manager the deck",
+        "let Ben know the build is out",
+        "let my manager know I'm late",
     ],
 )
 def test_coordination_intent_fires(query: str) -> None:
@@ -159,6 +169,21 @@ def test_coordination_intent_fires(query: str) -> None:
         "implement a function that pings teammates on failure",
         "fix the message broker retry for agent tasks",
         "what does the bridge module do?",
+        # Review round 1, R3: capitalised non-names after the verb.
+        "Tell What the config does",
+        "ask How to configure it",
+        "Ask Please summarise the logs",
+        "ask Docker to restart the container",
+        "Ping Kubernetes about the pod",
+        "Notify Monday about the release",
+        "tell Pergamon about the outage",
+        # R4: the veto still holds inside the verb's own window, and the general
+        # verbs need the person as their direct object.
+        "write code to notify my manager via webhook",
+        "send the logs to the endpoint",
+        "send the teammates list to the API",
+        "let it know",
+        "Let teammates decide",
     ],
 )
 def test_technical_and_self_addressed_turns_stay_quiet(query: str) -> None:
@@ -198,16 +223,10 @@ def test_the_bridge_tool_joins_the_classifier_roster_only_when_held(tmp_path: Pa
     assert "bridge" not in {row.name for row in _tool_roster_rows([])}
 
 
-@pytest.mark.asyncio
-async def test_a_real_factory_session_attaches_the_probe(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The REAL boot path: enrolled config dir -> create_session -> hooks -> block.
-
-    Guards the attach point (``Session._refresh_tool_roster``): a probe that
-    only the fake above exercises would be a feature nothing in a live session
-    ever turns on.
-    """
+async def _boot_and_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, enrolled: bool
+) -> tuple[Any, str]:
+    """Real ``create_session`` on an isolated config dir, then the incident turn's block."""
     import argparse
 
     from local_operator import settings_io
@@ -223,26 +242,71 @@ async def test_a_real_factory_session_attaches_the_probe(
     config_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.chdir(tmp_path)
     config = ConfigManager(config_dir)
-    settings_io.write_setting(config, settings_io.BY_KEY["team_bridge.enabled"], True)
-    Store(config_dir).commit_enrollment(
-        OWNER, OwnerReceipt("bridge_consent_v1", "ref-1"), cos_session_id="s1"
-    )
+    if enrolled:
+        settings_io.write_setting(config, settings_io.BY_KEY["team_bridge.enabled"], True)
+        Store(config_dir).commit_enrollment(
+            OWNER, OwnerReceipt("bridge_consent_v1", "ref-1"), cos_session_id="s1"
+        )
     args = argparse.Namespace(
         hosting="test", model="test", agent_name=None, agent_id=None, yolo=True, train=False
     )
-    session = await create_session(args, config, AgentRegistry(config_dir))
+    session = cast(Session, await create_session(args, config, AgentRegistry(config_dir)))
+    hooks = session._knowledge_hooks
+    assert hooks is not None
+    return session, await _select_knowledge_block(hooks, INCIDENT, task_id="real")
+
+
+@pytest.mark.asyncio
+async def test_a_real_factory_session_attaches_the_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The REAL boot path: enrolled config dir -> create_session -> hooks -> block.
+
+    Guards the attach point (``Session._refresh_tool_roster``): a probe only the
+    fake above exercises would be a feature no live session ever turns on. The
+    GATED rule line itself is asserted, not merely a guide listing: the lexical
+    guide index is ungated, and when it listed the guide the advisory copy was
+    deduped away (review round 1, R1/Q2) — so the guide's frontmatter stays
+    receiver-shaped and the incident turn must reach THIS line.
+    """
+    session, block = await _boot_and_render(tmp_path, monkeypatch, enrolled=True)
     try:
         assert session.bridge_runtime is not None
-        hooks = session._knowledge_hooks
-        assert hooks is not None and hooks.team_bridge_available is not None
-        assert hooks.team_bridge_available() is True
-        assert "bridge" in {row.name for row in hooks.tool_roster}
-        block = await _select_knowledge_block(hooks, INCIDENT, task_id="real")
-        # The real lexical index ALSO selects the guide for this prompt (its
-        # description routes for teammate coordination), so the advisory copy
-        # is deduped away by design and the guide is listed exactly once, in
-        # the skills block. Either way the model sees it once, never twice.
-        listed = block.count("- team-bridge:") + block.count("- guide://team-bridge")
-        assert listed == 1, block
+        assert "bridge" in {row.name for row in session._knowledge_hooks.tool_roster}
+        assert block.count(f"- guide://team-bridge — {_TEAM_BRIDGE_RULE}") == 1, block
+        assert "- team-bridge:" not in block, "the ungated listing must not carry it"
     finally:
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_real_unenrolled_session_gets_no_team_bridge_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control for the boot above: not on a team -> nothing at all."""
+    session, block = await _boot_and_render(tmp_path, monkeypatch, enrolled=False)
+    try:
+        assert session.bridge_runtime is None
+        assert "team-bridge" not in block, block
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_ungated_guide_index_does_not_route_the_incident_turn(tmp_path: Path) -> None:
+    """The lexical guide index has no sign-in/team gate, so it must stay quiet here.
+
+    Review round 1 (R1/Q1/Q2): a coordination-shaped frontmatter description
+    made the index list ``team-bridge`` for users who are NOT on a team, and on
+    an enrolled session that listing deduped the gated rule line away. The
+    gated deterministic line is the one delivery path for this rule; the
+    guide's description stays receiver-shaped.
+    """
+    from local_operator.guides import discover_guides
+    from local_operator.skills.embeddings import LocalEmbedder
+    from local_operator.skills.index import SkillIndex
+
+    index = SkillIndex(cast(Any, discover_guides()), LocalEmbedder(), cache_dir=tmp_path / "cache")
+    await index.build()
+    for query in (INCIDENT, "Coordinate with Damian's chief of staff on the QA plan"):
+        assert "team-bridge" not in {guide.name for guide in await index.select(query)}, query
