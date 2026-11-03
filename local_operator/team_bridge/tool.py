@@ -1109,49 +1109,52 @@ async def _direct_message(
     # on the DM's own conversation id; reserved AFTER every local refusal (a
     # malformed or unreachable target never spends budget) and BEFORE the write
     # (a concurrent post of this endpoint sees the slot).
+    # The staged images are released on EVERY exit that does not land the send —
+    # a refused/unavailable guard, a failed send, and a cancelled turn
+    # (CancelledError is not an ``Exception``) — by one ``finally`` rather than a
+    # discard at each return, so a path added later cannot forget it.
+    landed = False
     try:
-        slot = reply_guard.reserve_post(
-            runtime.config_dir, endpoint_id=endpoint_id, conversation_id=conversation_id
-        )
-    except reply_guard.ReplyGuardUnavailable:
-        await agent_attachments.discard_attachments(
-            runtime, conversation_id, endpoint_id, staged_images
-        )
-        return _error(
-            "the reply guard could not read its state; not posting",
-            code=reply_guard.CODE_UNAVAILABLE,
-        )
-    if isinstance(slot, reply_guard.Refusal):
-        await agent_attachments.discard_attachments(
-            runtime, conversation_id, endpoint_id, staged_images
-        )
-        return slot.as_result()
-    try:
-        result = await runtime.client.conversation_send(
-            conversation_id,
-            client_ref=str(uuid.uuid4()),
-            text=text,
-            tenant_id=runtime.tenant_id,
-            actor_endpoint_id=endpoint_id,
-            origin_session_id=runtime.session_id,
-            thread_root_id=thread_root_id or None,
-            expected_account_id=runtime.owner.account_id,
-            **agent_attachments.send_kwargs(staged_images),
-        )
-    except Exception as failure:
-        # The hub did not take it: the budget slot goes back (the run counter
-        # does not — see ``reply_guard.release``), and so do the staged images.
-        await agent_attachments.discard_attachments(
-            runtime, conversation_id, endpoint_id, staged_images
-        )
-        reply_guard.release(
-            runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=conversation_id
-        )
-        return _error(
-            f"the DM {conversation_id} opened but the post did not confirm: "
-            f"{_failure_text(failure)}",
-            code="post_failed",
-        )
+        try:
+            slot = reply_guard.reserve_post(
+                runtime.config_dir, endpoint_id=endpoint_id, conversation_id=conversation_id
+            )
+        except reply_guard.ReplyGuardUnavailable:
+            return _error(
+                "the reply guard could not read its state; not posting",
+                code=reply_guard.CODE_UNAVAILABLE,
+            )
+        if isinstance(slot, reply_guard.Refusal):
+            return slot.as_result()
+        try:
+            result = await runtime.client.conversation_send(
+                conversation_id,
+                client_ref=str(uuid.uuid4()),
+                text=text,
+                tenant_id=runtime.tenant_id,
+                actor_endpoint_id=endpoint_id,
+                origin_session_id=runtime.session_id,
+                thread_root_id=thread_root_id or None,
+                expected_account_id=runtime.owner.account_id,
+                **agent_attachments.send_kwargs(staged_images),
+            )
+        except Exception as failure:
+            # The hub did not take it: the budget slot goes back (the run counter
+            # does not — see ``reply_guard.release``).
+            reply_guard.release(
+                runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=conversation_id
+            )
+            return _error(
+                f"the DM {conversation_id} opened but the post did not confirm: "
+                f"{_failure_text(failure)}",
+                code="post_failed",
+            )
+        landed = True
+    finally:
+        if not landed:
+            await agent_attachments.discard_attachments(
+                runtime, conversation_id, endpoint_id, staged_images
+            )
     receipt = _post_receipt(
         conversation_id, result, thread_root_id=thread_root_id, lead=f"direct message to {label} in"
     )
@@ -1991,39 +1994,51 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # retry re-sends this exact body, so that retry is idempotent on the
         # server; a second tool call mints a second ref and is a second message.
         client_ref = str(uuid.uuid4())
+        # Staged ids are released on every exit that does not land the send,
+        # cancellation included (CancelledError is not an ``Exception``).
+        landed = False
         try:
-            result = await runtime.client.conversation_send(
-                channel_id,
-                client_ref=client_ref,
-                text=params.body,
-                tenant_id=runtime.tenant_id,
-                actor_endpoint_id=endpoint_id,
-                origin_session_id=runtime.session_id,
-                thread_root_id=thread_root_id or None,
-                mentions=mentions or None,
-                pre_http_guard=pre_http_guard,
-                **agent_attachments.send_kwargs(staged_images),
-            )
-        except DispatchRefused as failure:
-            await agent_attachments.discard_attachments(
-                runtime, channel_id, endpoint_id, staged_images
-            )
-            if slot is not None:
-                reply_guard.release(
-                    runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=channel_id
+            try:
+                result = await runtime.client.conversation_send(
+                    channel_id,
+                    client_ref=client_ref,
+                    text=params.body,
+                    tenant_id=runtime.tenant_id,
+                    actor_endpoint_id=endpoint_id,
+                    origin_session_id=runtime.session_id,
+                    thread_root_id=thread_root_id or None,
+                    mentions=mentions or None,
+                    pre_http_guard=pre_http_guard,
+                    **agent_attachments.send_kwargs(staged_images),
                 )
-            return failure.result
-        except Exception as failure:
-            # The hub did not take it: the budget slot goes back. (The run
-            # counter does not — see ``reply_guard.release``.)
-            await agent_attachments.discard_attachments(
-                runtime, channel_id, endpoint_id, staged_images
-            )
-            if slot is not None:
-                reply_guard.release(
-                    runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=channel_id
+            except DispatchRefused as failure:
+                if slot is not None:
+                    reply_guard.release(
+                        runtime.config_dir,
+                        slot,
+                        endpoint_id=endpoint_id,
+                        conversation_id=channel_id,
+                    )
+                return failure.result
+            except Exception as failure:
+                # The hub did not take it: the budget slot goes back. (The run
+                # counter does not — see ``reply_guard.release``.)
+                if slot is not None:
+                    reply_guard.release(
+                        runtime.config_dir,
+                        slot,
+                        endpoint_id=endpoint_id,
+                        conversation_id=channel_id,
+                    )
+                return _error(
+                    f"the post did not confirm: {_failure_text(failure)}", code="post_failed"
                 )
-            return _error(f"the post did not confirm: {_failure_text(failure)}", code="post_failed")
+            landed = True
+        finally:
+            if not landed:
+                await agent_attachments.discard_attachments(
+                    runtime, channel_id, endpoint_id, staged_images
+                )
         # ONE receipt shape for every conversation write (main's `_post_receipt`,
         # shared with `dm`), EXTENDED with the resolved recipient rather than
         # rebuilt here: a second construction site is how the two lanes drift.

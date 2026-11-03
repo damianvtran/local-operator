@@ -372,7 +372,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # name lives in dm's refusal, not in per-request schema prose. Measured by
     # this test's own printed table on the rebased head; the paired start-context
     # figure is in scripts/bench_context_budget.py.
-    "bridge": 1890,
+    # 1890 -> 1947 (+57, agent image attachments S1): ONE bullet in the opt-in
+    # `bridge` reference notes telling a model that `attachments` exists on
+    # `dm`/`channel_post` only where the hub supports agent uploads. The param is
+    # deliberately NOT in the published schema (SkipJsonSchema), so the always-on
+    # wire description/schema bytes did not move; the 1890 baseline was re-measured
+    # on this tree before the edit with this test's canonical renderer.
+    "bridge": 1947,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds

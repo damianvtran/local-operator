@@ -20,6 +20,7 @@ hub accepts the upload.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
@@ -73,6 +74,16 @@ CAP_HUMAN_ONLY = {
 def _isolated_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # The reply guard writes its budget under the runtime's config dir (".").
     monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _config_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A known config dir, so "inside the config dir" cases are real, not assumed."""
+
+    root = tmp_path / "cfg"
+    root.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    return root
 
 
 @pytest.fixture(autouse=True)
@@ -560,3 +571,345 @@ async def test_short_or_non_image_data_uris_are_ordinary_text() -> None:
 def test_guard_threshold_is_about_one_kib() -> None:
     assert aa.refuse_inline_image_data(_data_uri(aa.INLINE_IMAGE_DATA_MIN_CHARS - 1)) is None
     assert aa.refuse_inline_image_data(_data_uri(aa.INLINE_IMAGE_DATA_MIN_CHARS)) is not None
+
+
+# -- M1: the path gate (browser_files.check_upload) ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_image_under_the_config_dir_is_refused(tmp_path: Path, _config_root: Path) -> None:
+    """Another session's screenshot (config/sessions/<id>/...) is not attachable."""
+
+    hub = FakeHub()
+    other = _config_root / "sessions" / "abc123def456" / "shot.png"
+    other.parent.mkdir(parents=True)
+    data = _png_bytes()
+    other.write_bytes(data)
+    for target in (other, _config_root / "uploads" / "x.png"):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        out = await execute_bridge(_runtime(hub), _post(attachments=[str(target)]))
+        assert out["ok"] is False and out["code"] == "attachment_refused", out
+        assert "config directory" in out["error"]
+        _assert_no_bytes(out, data)
+    assert hub.named("upload_attachment") == [] and hub.named("conversation_send") == []
+
+
+@pytest.mark.asyncio
+async def test_symlink_into_the_config_dir_is_judged_by_its_target(
+    tmp_path: Path, _config_root: Path
+) -> None:
+    hub = FakeHub()
+    secret = _config_root / "sessions" / "abc123def456" / "shot.png"
+    secret.parent.mkdir(parents=True)
+    secret.write_bytes(_png_bytes())
+    outside = tmp_path / "innocent.png"
+    outside.symlink_to(secret)
+    out = await execute_bridge(_runtime(hub), _post(attachments=[str(outside)]))
+    assert out["code"] == "attachment_refused" and hub.named("upload_attachment") == []
+
+
+@pytest.mark.asyncio
+async def test_symlink_to_an_image_outside_the_config_dir_is_attached_by_its_target(
+    tmp_path: Path,
+) -> None:
+    """A link is not refused as such: it is judged (and read) as its RESOLVED target."""
+
+    hub = FakeHub()
+    real = tmp_path / "pictures" / "real.png"
+    real.parent.mkdir()
+    real.write_bytes(_png_bytes())
+    link = tmp_path / "link.png"
+    link.symlink_to(real)
+    out = await execute_bridge(_runtime(hub), _post(attachments=[str(link)]))
+    assert out["ok"] is True, out
+    assert len(hub.uploads) == 1
+
+
+@pytest.mark.asyncio
+async def test_credential_named_files_and_directories_are_refused(tmp_path: Path) -> None:
+    hub = FakeHub()
+    data = _png_bytes()
+    keyfile = tmp_path / "server.pem"
+    keyfile.write_bytes(data)  # a valid PNG under a credential NAME
+    ssh = tmp_path / ".ssh"
+    ssh.mkdir()
+    (ssh / "photo.png").write_bytes(data)
+    for target in (keyfile, ssh / "photo.png"):
+        out = await execute_bridge(_runtime(hub), _post(attachments=[str(target)]))
+        assert out["ok"] is False and out["code"] == "attachment_refused", out
+        assert "credential" in out["error"]
+    assert hub.named("upload_attachment") == []
+
+
+@pytest.mark.asyncio
+async def test_own_scratchpad_is_the_only_config_subtree_that_attaches(
+    _config_root: Path,
+) -> None:
+    hub = FakeHub()
+    pad = _config_root / "sessions" / "sess_1" / "scratchpad"
+    pad.mkdir(parents=True)
+    (pad / "chart.png").write_bytes(_png_bytes())
+    out = await execute_bridge(_runtime(hub), _post(attachments=[str(pad / "chart.png")]))
+    assert out["ok"] is True, out  # runtime.session_id == "sess_1"
+    sibling = _config_root / "sessions" / "sess_2" / "scratchpad" / "chart.png"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_bytes(_png_bytes((1, 1, 1)))
+    out = await execute_bridge(_runtime(FakeHub()), _post(attachments=[str(sibling)]))
+    assert out["code"] == "attachment_refused"
+
+
+@pytest.mark.asyncio
+async def test_fifo_and_directory_are_refused_without_hanging(tmp_path: Path) -> None:
+    import os
+
+    hub = FakeHub()
+    fifo = tmp_path / "pipe.png"
+    os.mkfifo(fifo)
+    out = await asyncio.wait_for(
+        execute_bridge(_runtime(hub), _post(attachments=[str(fifo)])), timeout=10
+    )
+    assert out["ok"] is False and out["code"] == "attachment_invalid"
+    assert "regular file" in out["error"]
+    folder = tmp_path / "dir.png"
+    folder.mkdir()
+    out = await execute_bridge(_runtime(hub), _post(attachments=[str(folder)]))
+    assert out["code"] == "attachment_invalid"
+    assert hub.named("upload_attachment") == []
+
+
+@pytest.mark.asyncio
+async def test_gate_refusals_never_echo_the_directory(tmp_path: Path, _config_root: Path) -> None:
+    hub = FakeHub()
+    out = await execute_bridge(_runtime(hub), _post(attachments=[str(tmp_path / "nope" / "a.png")]))
+    assert out["code"] == "attachment_unreadable"
+    assert str(tmp_path) not in out["error"] and "nearest existing" not in out["error"]
+
+
+# -- m2: malformed paths are structured refusals on BOTH ops -------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["/tmp/\udcff.png", "~nosuchuser_zz/x.png", "/a/\x00b.png"])
+async def test_unencodable_or_unresolvable_paths_are_structured_on_dm_and_post(bad: str) -> None:
+    hub = FakeHub()
+    for args in (_post(attachments=[bad]), _dm(attachments=[bad])):
+        out = await execute_bridge(_runtime(hub), args)
+        assert out["ok"] is False and out["code"].startswith("attachment_"), (bad, out)
+    assert hub.named("upload_attachment") == [] and hub.named("create_conversation") == []
+
+
+# -- m1: the inline-data guard is not a prefix match ---------------------------
+
+_BYPASSES = {
+    "uppercase": "DATA:IMAGE/PNG;BASE64," + "A" * 1500,
+    "charset param": "data:image/png;charset=utf-8;base64," + "A" * 1500,
+    "space after comma": "data:image/png;base64, " + "A" * 1500,
+    "space after colon": "data: image/png;base64," + "A" * 1500,
+    "space wrapped": "data:image/png;base64," + " ".join(["A" * 60] * 30),
+    "newline wrapped": "data:image/jpeg;base64," + "\n".join(["A" * 76] * 20),
+    "crlf wrapped": "data:image/jpeg;base64," + "\r\n".join(["A" * 76] * 20),
+    "percent encoded specials": "data:image/png;base64," + "AB%2BC%2F%3D" * 200,
+    "inside prose": "see this: (data:image/webp;base64," + "Q" * 1500 + ") thanks",
+    "svg+xml": "data:image/svg+xml;base64," + "A" * 1500,
+}
+
+
+@pytest.mark.parametrize("name", sorted(_BYPASSES))
+def test_inline_image_guard_bypasses_are_closed(name: str) -> None:
+    refused = aa.refuse_inline_image_data(_BYPASSES[name])
+    assert refused is not None and refused["code"] == "inline_image_data", name
+    assert "AAAA" not in refused["error"]
+
+
+def test_inline_image_guard_does_not_flag_legitimate_text() -> None:
+    legit = [
+        "an ordinary message about data and images",
+        "data:image/png;base64," + "A" * 200,  # a tiny inline icon
+        "data:text/plain;base64," + "A" * 5000,  # not an image
+        "data:image/png," + "A" * 5000,  # no base64 marker (a URL-encoded body)
+        "see data:image/png;base64 for the format, then " + "word " * 600,
+        "image/png;base64," + "A" * 5000,  # no data: scheme
+    ]
+    for text in legit:
+        assert aa.refuse_inline_image_data(text) is None, text[:50]
+
+
+def test_inline_refusal_text_does_not_promise_attachments_unconditionally() -> None:
+    refused = aa.refuse_inline_image_data(_BYPASSES["uppercase"])
+    assert refused is not None
+    error = refused["error"]
+    assert "`attachments`" in error and "Where this hub supports agent uploads" in error
+    assert "where it does not" in error  # the off-hub fallback is stated
+
+
+# -- NIT: metadata is stripped, pixels and orientation are kept -----------------
+
+
+def _jpeg_with_exif(size: tuple[int, int] = (40, 30)) -> bytes:
+    buffer = io.BytesIO()
+    exif = Image.Exif()
+    exif[0x010F] = "SecretCameraMaker"  # Make
+    exif[0x0112] = 1  # Orientation: upright, so the verbatim rung is taken
+    Image.new("RGB", size, (10, 120, 200)).save(buffer, format="JPEG", exif=exif.tobytes())
+    return buffer.getvalue()
+
+
+def _png_with_text() -> bytes:
+    from PIL.PngImagePlugin import PngInfo
+
+    info = PngInfo()
+    info.add_text("Comment", "GPS 51.5N 0.1W secret-note")
+    buffer = io.BytesIO()
+    Image.new("RGB", (40, 30), (9, 9, 9)).save(buffer, format="PNG", pnginfo=info)
+    return buffer.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_exif_and_png_text_chunks_do_not_leave_the_machine(tmp_path: Path) -> None:
+    jpeg, png = _jpeg_with_exif(), _png_with_text()
+    assert b"SecretCameraMaker" in jpeg and b"secret-note" in png  # the controls
+    hub = FakeHub()
+    out = await execute_bridge(
+        _runtime(hub),
+        _post(attachments=[_write(tmp_path, "a.jpg", jpeg), _write(tmp_path, "b.png", png)]),
+    )
+    assert out["ok"] is True, out
+    for uploaded in hub.uploads:
+        assert b"SecretCameraMaker" not in uploaded and b"secret-note" not in uploaded
+        assert b"Exif" not in uploaded
+        Image.open(io.BytesIO(uploaded)).load()  # still a decodable image
+    assert Image.open(io.BytesIO(hub.uploads[0])).size == (40, 30)
+
+
+def test_jpeg_strip_keeps_pixels_and_drops_trailing_data() -> None:
+    jpeg = _jpeg_with_exif()
+    stripped = aa.strip_image_metadata(jpeg + b"HIDDEN-TRAILER", "image/jpeg")
+    assert b"HIDDEN-TRAILER" not in stripped
+    assert (
+        Image.open(io.BytesIO(stripped)).convert("RGB").tobytes()
+        == Image.open(io.BytesIO(jpeg)).convert("RGB").tobytes()
+    )
+    with pytest.raises(ValueError):
+        aa.strip_image_metadata(b"\xff\xd8\xff\xe1\x00", "image/jpeg")
+
+
+# -- m4/m5: cleanup on cancellation and on every dm exit; no-bytes everywhere ---
+
+
+@pytest.mark.asyncio
+async def test_cancelled_dm_send_still_deletes_the_staged_ids(tmp_path: Path) -> None:
+    hub = FakeHub()
+    started = asyncio.Event()
+
+    async def hang(conversation_id: str, **kwargs: Any) -> Any:
+        started.set()
+        await asyncio.sleep(60)
+
+    hub.conversation_send = hang  # type: ignore[method-assign]
+    task = asyncio.ensure_future(
+        execute_bridge(_runtime(hub), _dm(attachments=[_write(tmp_path, "1.png", _png_bytes())]))
+    )
+    await asyncio.wait_for(started.wait(), timeout=10)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert [d["attachment_id"] for d in hub.named("delete_attachment")] == [AID1]
+
+
+@pytest.mark.asyncio
+async def test_dm_guard_refusal_and_guard_unavailable_discard_what_was_staged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.team_bridge import reply_guard
+
+    path = _write(tmp_path, "1.png", _png_bytes())
+    refusal = reply_guard.Refusal(code="reply_budget", retry_after_s=30, message="slow down")
+    monkeypatch.setattr(reply_guard, "reserve_post", lambda *a, **k: refusal)
+    hub = FakeHub()
+    out = await execute_bridge(_runtime(hub), _dm(attachments=[path]))
+    assert out["code"] == "reply_budget"
+    assert [d["attachment_id"] for d in hub.named("delete_attachment")] == [AID1]
+    assert hub.named("conversation_send") == []
+
+    def unavailable(*a: Any, **k: Any) -> Any:
+        raise reply_guard.ReplyGuardUnavailable("down")
+
+    monkeypatch.setattr(reply_guard, "reserve_post", unavailable)
+    hub = FakeHub()
+    out = await execute_bridge(_runtime(hub), _dm(attachments=[path]))
+    assert out["code"] == reply_guard.CODE_UNAVAILABLE
+    assert [d["attachment_id"] for d in hub.named("delete_attachment")] == [AID1]
+
+
+@pytest.mark.asyncio
+async def test_channel_post_guard_refusal_discards_what_was_staged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.team_bridge import reply_guard
+
+    refusal = reply_guard.Refusal(code="reply_budget", retry_after_s=30, message="slow down")
+    monkeypatch.setattr(reply_guard, "reserve_post", lambda *a, **k: refusal)
+    hub = FakeHub()
+    out = await execute_bridge(
+        _runtime(hub), _post(attachments=[_write(tmp_path, "1.png", _png_bytes())])
+    )
+    assert out["code"] == "reply_budget"
+    assert [d["attachment_id"] for d in hub.named("delete_attachment")] == [AID1]
+
+
+@pytest.mark.asyncio
+async def test_no_bytes_in_any_failure_refusal_or_cleanup_outcome(tmp_path: Path) -> None:
+    original = _png_bytes((77, 88, 99), (50, 50))
+    path = _write(tmp_path, "a.png", original)
+    scenarios = [
+        (FakeHub(send_failure=RuntimeError("boom")), _post(attachments=[path])),
+        (FakeHub(send_failure=RuntimeError("boom")), _dm(attachments=[path])),
+        (FakeHub(fail_upload_at=0), _post(attachments=[path])),
+        (FakeHub(status=CAP_HUMAN_ONLY), _post(attachments=[path])),
+    ]
+    for hub, args in scenarios:
+        out = await execute_bridge(_runtime(hub), args)
+        assert out["ok"] is False
+        _assert_no_bytes(out, original, *hub.uploads)
+        # the cleanup calls carry ids only
+        for call in hub.named("delete_attachment"):
+            _assert_no_bytes(call, original)
+
+
+@pytest.mark.asyncio
+async def test_inline_guard_refusal_names_the_rule_but_echoes_none_of_the_run(
+    tmp_path: Path,
+) -> None:
+    # The refusal text legitimately SAYS "data:image"/"base64" (it names the rule),
+    # so it cannot go through the blanket no-bytes assertion; it must carry no run.
+    path = _write(tmp_path, "a.png", _png_bytes())
+    hub = FakeHub()
+    out = await execute_bridge(
+        _runtime(hub), _post(body=f"x data:image/png;base64,{'A' * 2000}", attachments=[path])
+    )
+    assert out["code"] == "inline_image_data" and "AAAA" not in json.dumps(out)
+    assert hub.calls == []  # refused before the status read, the upload and the send
+
+
+# -- 25 MiB source boundary ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_source_cap_boundary_is_inclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    png = _png_bytes()
+    monkeypatch.setattr(aa, "_SOURCE_MAX_BYTES", len(png))
+    ok = await execute_bridge(
+        _runtime(FakeHub()), _post(attachments=[_write(tmp_path, "at.png", png)])
+    )
+    assert ok["ok"] is True, ok
+    over = await execute_bridge(
+        _runtime(FakeHub()), _post(attachments=[_write(tmp_path, "over.png", png + b"\0")])
+    )
+    assert over["code"] == "attachment_too_large"
+
+
+def test_source_cap_is_25_mib() -> None:
+    assert aa._SOURCE_MAX_BYTES == 25 * 1024 * 1024
