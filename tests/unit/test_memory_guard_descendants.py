@@ -518,6 +518,7 @@ def test_not_permitted_pids_share_one_batched_ps_per_tick(monkeypatch):
         ps=lambda pid: (0, "2048"),
     )
     served = guard.runner
+    assert served is not None  # _guard installed the batched ps stand-in
     guard.runner = lambda argv: (calls.append(argv), served(argv))[1]
     sample = guard.sample_sync()
     assert calls == [["ps", "-o", "pid=,rss=", "-p", "900,901,902"]]
@@ -546,8 +547,10 @@ def test_a_not_permitted_pid_ps_never_sizes_fails_closed_after_the_read_limit(mo
         sample = guard.sample_sync()
         assert sample.unaccounted is None and guard.should_kill(sample) is False
     killed = False
-    for _ in range(mg.UNACCOUNTED_TICK_LIMIT):
-        sample = guard.sample_sync()
+    sample = guard.sample_sync()
+    for tick in range(mg.UNACCOUNTED_TICK_LIMIT):
+        if tick:
+            sample = guard.sample_sync()
         assert "900" in (sample.unaccounted or "")
         killed = guard.should_kill(sample)
     assert killed
@@ -580,7 +583,8 @@ def test_the_fail_closed_headline_omits_measured_when_nothing_was(monkeypatch):
         census=lambda roots: {901: 100},
         monkeypatch=monkeypatch,
     )
-    for _ in range(mg.UNACCOUNTED_TICK_LIMIT):
+    sample = guard.sample_sync()
+    for _ in range(mg.UNACCOUNTED_TICK_LIMIT - 1):
         sample = guard.sample_sync()
     assert guard.should_kill(sample) and sample.bytes_used is None
     text = guard.over_budget_message(sample, unit="MiB")
