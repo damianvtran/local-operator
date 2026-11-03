@@ -417,7 +417,7 @@ def strict_census(pgid, deadline):
         raise Unknown("strict membership probe failed") from exc
 
 
-def bounded_samples(pids, deadline, clock=time.monotonic):
+def bounded_samples(pids, deadline, clock=time.monotonic, *, diagnostics=None):
     """Use canonical native tokens first; budget only the fixed ps fallback.
 
     Native readers are fork-free. An unavailable native reader is NOT permission
@@ -434,7 +434,7 @@ def bounded_samples(pids, deadline, clock=time.monotonic):
                 raise Unknown("native birth sample exceeded deadline")
             return result
     elif sys.platform.startswith("linux"):
-        result = procstate._proc_samples(wanted)
+        result = procstate._proc_samples(wanted, diagnostics=diagnostics)
         if clock() >= deadline:
             raise Unknown("native birth sample exceeded deadline")
         return result
@@ -586,6 +586,7 @@ class OwnedGroup:
         self.initial_error = "unproven initial identity"
         self.last = Verdict("REFUSED", self.initial_error)
         self._revoked = False
+        self._sample_failures = []
         self._terminal_result = None
 
     def revoke(self):
@@ -755,10 +756,17 @@ class OwnedGroup:
         return sorted(members)
 
     def _samples(self, pids, deadline):
+        # Never attach an earlier witness/census attempt's error to a later
+        # unresolved PID. Publish only this attempt's bounded diagnostic facts.
+        self._sample_failures = []
         if self.clock() >= deadline:
             raise Unknown("ownership sample deadline exhausted")
         if self.samples is None:
-            return bounded_samples(pids, deadline, self.clock)
+            current = []
+            try:
+                return bounded_samples(pids, deadline, self.clock, diagnostics=current)
+            finally:
+                self._sample_failures = current
         result = self.samples(sorted(set(pids)))
         if self.clock() >= deadline:
             raise Unknown("injected sample exceeded deadline")
@@ -905,6 +913,10 @@ class OwnedGroup:
         # what a caller binds QA to, and the final refresh of a run normally returns
         # OBSERVED_EMPTY -- popping them there published `anchor: null` and
         # `proof: []` on every successful run.
+        # A new refusal (including irreversible revocation) must not relabel
+        # an earlier attempt's sample diagnostics as evidence gathered now.
+        for stale in ("sample_failure", "unresolved"):
+            self.probe.pop(stale, None)
         if self._revoked:
             self.last = Verdict(
                 "REFUSED", "signal authority irreversibly revoked", refusal_class="pin_lost"
@@ -999,6 +1011,21 @@ class OwnedGroup:
             absent = [pid for pid in members if pid not in samples]
             if absent:
                 self.probe["unresolved"] = absent
+                # These are observations from the existing reads, not a new
+                # authority predicate. In particular ENOENT is not amnesty for
+                # a PID seen by either complete census. Preserve the refusal.
+                failures = {row["pid"]: row for row in self._sample_failures}
+                self.probe["sample_failure"] = {
+                    "phase": "terminal-member-sample" if terminal else "member-sample",
+                    "witness": state,
+                    "censuses": [first[:16], second[:16]],
+                    "census_counts": [len(first), len(second)],
+                    "unresolved_count": len(absent),
+                    "unresolved": [
+                        failures.get(pid, {"pid": pid, "reason": "unavailable", "errno": None})
+                        for pid in absent[:16]
+                    ],
+                }
                 raise Unknown("census member sample unreadable")
             live = [pid for pid in members if not samples[pid].zombie]
             if not live:
