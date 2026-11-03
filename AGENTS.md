@@ -373,12 +373,15 @@ jobs of `.github/workflows/ci.yml`, spelled as they are for a full-tree run:
 .venv/bin/python -m flake8 .
 uvx --from black==26.1.0 black --check .
 uvx isort==5.13.2 --check .
-.venv/bin/python scripts/run_bounded.py --timeout 1800 -- .venv/bin/python -m pyright --pythonpath .venv/bin/python .
+.venv/bin/python scripts/run_bounded.py --contract=command-status --timeout 1800 -- .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 ```
 
 The `pyright` line goes through a bounded, process-group-reaping wrapper: it is
-whole-tree, exactly as before, but it cannot leave an analyzer running. See
-"The local `pyright` gate is bounded and process-group-reaped" below.
+whole-tree, exactly as before, but it cannot leave an analyzer running. It asks
+for `--contract=command-status` because the gate needs pyright's status, not a
+cleanup certificate; the default `cleanup-required` contract refuses before
+spawn on Darwin. See "The local `pyright` gate is bounded and
+process-group-reaped" below.
 
 **CI no longer runs all four over the whole tree on every PR.** Each job is
 gated on a scope flag computed by `scripts/ci_scope.py`, which classifies the
@@ -838,9 +841,15 @@ that too, and each unresolved class has its own row in
 ### The local `pyright` gate is bounded and process-group-reaped
 
 The local `type-check` command is spelled
-`.venv/bin/python scripts/run_bounded.py --timeout 1800 -- .venv/bin/python -m pyright …`.
+`.venv/bin/python scripts/run_bounded.py --contract=command-status --timeout 1800 -- .venv/bin/python -m pyright …`.
 The gate itself is **whole-tree**, exactly as `ci.yml` spells it: the wrapper
-bounds and reaps, it never narrows. The recipe also gives the node child
+bounds and reaps, it never narrows. `--contract=command-status` is deliberate:
+the default `cleanup-required` contract certifies owned-group cleanup and so
+refuses before spawn (125, `unsupported-backend`) where no authoritative census
+backend exists — Darwin today. command-status keeps the bound, the forwarded
+signals, the leader-exit sweep and the memory grant, signals the group only
+while its leader is unreaped, and always reports `cleanup=unknown`; it never
+certifies cleanup (`docs/design/run-bounded-contract.md`). The recipe also gives the node child
 ci.yml's heap headroom — `NODE_OPTIONS=--max-old-space-size=6144`, raised only
 when the caller's `NODE_OPTIONS` has no `--max-old-space-size` or a smaller
 one, a larger value passing through — because a bare run otherwise inherits
@@ -887,11 +896,19 @@ measured; 300 s in an earlier run for a 300 s one), where the wrapper SIGKILLs t
 group after `--grace` and clears the same tree in 5 s **with `--grace 2`** (the
 shipped `--grace` default of 10 takes ~13 s for it). It keeps
 `timeout(1)`'s statuses (124 on a fired bound, 125 when the command could not
-start), reports **128 + signum** when a signal ends the run — forwarded by this
+start, 126 when the command ran and produced its own status but the wrapper could
+not prove its owned group was cleaned up — deliberately distinct from 125, since
+"did not run" and "ran, residuals unknown" call for different follow-up), reports
+**128 + signum** when a signal ends the run — forwarded by this
 wrapper, or delivered to the child by someone else, where `sys.exit` used to
 render the raw `-9` as 247 — forwards **SIGHUP and SIGQUIT** as well as
 SIGINT/SIGTERM (SIGHUP used to kill the wrapper and leave the group alive), writes
-diagnostics to stderr only, and reports what it reaped.
+diagnostics to stderr only, and reports what it reaped. Every invocation writes
+`run-bounded-runs/<invocation_id>.completion.json` (the authoritative outcome,
+named on the last stderr line); spawned cleanup-required runs also write
+`<run_id>.spawn.json` and `.exit.json` naming the group it owned (`--run-id` or
+`$LOCAL_OPERATOR_RUN_ID` binds the id); see `scripts/run_bounded.py`'s RUN
+RECORD section for the schema.
 
 Its own limit, stated: a `SIGKILL` to the wrapper itself cannot be caught, so
 nothing runs a sweep in that case — what protects the group there is that the
@@ -3365,10 +3382,14 @@ The commit to retrieve each from:
 ### Detached runner memory budgets
 
 `memory_mb` on the bash tool covers its own PG, not a child that runs
-`start_new_session=True`. `scripts/run_bounded.py` now guards its OWN child PG
-with the canonical memory guard and inherits the resolved nonsecret
-`LOCAL_OPERATOR_RESOLVED_MEMORY_MB` from updated Toolbash. Before that update,
-outer-tool limits were not proof a detached test/build child was capped.
+`start_new_session=True`. `scripts/run_bounded.py` guards its OWN child PG with
+the canonical memory guard under **both** contracts and inherits the resolved
+nonsecret `LOCAL_OPERATOR_RESOLVED_MEMORY_MB` from updated Toolbash.
+`--contract=command-status` enforces the same grant on its group, sampling only
+while the leader is unreaped (so the group number cannot be a stranger's); a
+breach is 137 with cause `memory-policy`. Choosing command-status never drops
+or widens a grant. Before Toolbash exported the value, outer-tool limits were
+not proof a detached test/build child was capped.
 
 **Isolation drops inheritance.** For `env -i ... run_bounded.py`, expand the
 resolved ceiling before clearing env and pass `--memory-mb "$MEMORY_MB"`
@@ -3380,7 +3401,9 @@ refuses before spawn. Explicit zero disables protection only without an inherite
 positive ceiling. Inherited zero keeps protection off unless a positive explicit
 flag adds a ceiling. Units are MiB. Memory breach status 137 is named by the
 `MEMORY LIMIT EXCEEDED` diagnostic; timeout status is 124. Check the first
-`[run_bounded] memory budget …` stderr line for the effective ceiling and source.
+`[run_bounded] memory budget …` stderr line (printed by both contracts) for the
+effective ceiling and source; the completion receipt repeats them as
+`memory_ceiling_mb`/`memory_budget_source`.
 
 The bound is sampled/live-wrapper/owned-PG only: no aggregate ancestor or
 arbitrary descendant-setsid protection. Outer SIGKILL can still orphan a child;
