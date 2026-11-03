@@ -1,0 +1,157 @@
+name: Chrome Web Store review status
+
+# READ-ONLY. Polls the store's fetchStatus for the extension and records the
+# answer; it never uploads, submits, publishes, promotes or cancels anything.
+#
+# Why this exists. The stage workflow submits with STAGED_PUBLISH, so an
+# approved revision becomes privately STAGED while the public listing keeps the
+# previous version until chrome-web-store-promote.yml publishes it. Watching the
+# public listing therefore waits forever; only the authenticated fetchStatus
+# reports PENDING_REVIEW -> STAGED / REJECTED for the submitted revision. Before
+# this workflow the only ways to read that were the dashboard, a stage dispatch
+# (refused with NOT_UPDATEABLE while in review) or a hand-rolled call needing a
+# temporary IAM grant (docs/store/release-record.md).
+#
+# Why a SEPARATE workflow rather than a status mode of the stage/promote ones:
+# a file that contains no upload or publish step cannot be steered into one by
+# an input, a default or a future `if:` edit. The read-only property is held in
+# three independent places, so no single edit removes it:
+#   1. this file has no build, upload or publish step and no inputs at all (so
+#      no dispatcher-chosen URL, ref or argument reaches the token-bearing step);
+#   2. the token is minted with the chromewebstore.readonly scope, which
+#      fetchStatus accepts and every write method (upload, publish,
+#      cancelSubmission) refuses at the store;
+#   3. CWS_READ_ONLY=1 makes chrome-web-store.sh refuse every mode but `status`
+#      and every HTTP method but GET before a request leaves the runner.
+#
+# Credential route: unchanged. Same environment (`chrome-web-store`), same
+# environment-scoped variables, same service account and the same WIF provider
+# as the stage workflow. The provider's attribute condition is
+#   assertion.repository_id == "922327641" && assertion.ref == "refs/heads/main"
+# (docs/store/submission-checklist.md). It pins repository and ref, not the
+# workflow file, so a new workflow running on main is admitted without any
+# change to cloud permissions -- and anything not on main is refused by it,
+# by the environment's main-only branch policy, and by the checks below.
+
+on:
+  # Scheduled runs always execute the default branch (main) at its tip.
+  schedule:
+    - cron: '17 * * * *'
+  # Deliberately no inputs: the poll reads one fixed item and takes nothing
+  # from the dispatcher.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  # For verify-release-environment.sh's two environment endpoints, exactly as
+  # in chrome-web-store.yml (see the comment there on why no scope can reach
+  # the environment-variables endpoint).
+  actions: read
+
+# Its own group: a poll must never queue behind, or hold up, a stage or
+# promote run in `chrome-web-store-release`. Overlapping hourly polls add
+# nothing, so a newer one waits for the running one rather than racing it.
+concurrency:
+  group: chrome-web-store-status
+  cancel-in-progress: false
+
+jobs:
+  # Same topology and reason as the store workflows: outside the environment
+  # the release variables must resolve EMPTY, proving they are not defined at
+  # repository or organization scope. extension/tests/release.test.mjs pins it.
+  preflight:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require release variables to be environment-scoped only
+        env:
+          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          CWS_SERVICE_ACCOUNT: ${{ vars.CWS_SERVICE_ACCOUNT }}
+        run: |
+          extension/scripts/verify-release-environment.sh --assert-unscoped-empty \
+            CWS_PUBLISHER_ID "$CWS_PUBLISHER_ID" \
+            CWS_EXTENSION_ID "$CWS_EXTENSION_ID" \
+            GCP_WIF_PROVIDER "$GCP_WIF_PROVIDER" \
+            CWS_SERVICE_ACCOUNT "$CWS_SERVICE_ACCOUNT"
+
+  status:
+    needs: preflight
+    runs-on: ubuntu-latest
+    # The stage environment, because it already scopes the four variables this
+    # read needs and carries the main-only branch policy. A deployment record
+    # per hourly poll is the accepted cost of reusing that proven guard rather
+    # than a second environment or an untested opt-out.
+    environment: chrome-web-store
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Require the workflow to run from main
+        run: |
+          set -euo pipefail
+          # A dispatch from another branch would run that branch's copy of this
+          # file and of the token-bearing script; WIF and the branch policy
+          # refuse it too, but failing here is earlier and says why.
+          [[ "$GITHUB_REF" == refs/heads/main ]] || {
+            echo "::error::status polling must run from refs/heads/main, not $GITHUB_REF"
+            exit 1
+          }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "::error::status polling must run from a commit on main"
+            exit 1
+          }
+      - name: Verify protected environment configuration
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          CWS_SERVICE_ACCOUNT: ${{ vars.CWS_SERVICE_ACCOUNT }}
+        run: |
+          extension/scripts/verify-release-environment.sh chrome-web-store \
+            CWS_PUBLISHER_ID "$CWS_PUBLISHER_ID" \
+            CWS_EXTENSION_ID "$CWS_EXTENSION_ID" \
+            GCP_WIF_PROVIDER "$GCP_WIF_PROVIDER" \
+            CWS_SERVICE_ACCOUNT "$CWS_SERVICE_ACCOUNT"
+      - name: Authenticate without a service-account key (read-only scope)
+        id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.CWS_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore.readonly
+          create_credentials_file: false
+      - name: Read the review status (GET fetchStatus only)
+        working-directory: extension
+        env:
+          CWS_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+          CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+          CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+          CWS_READ_ONLY: '1'
+          CWS_STATUS_OUTPUT: ${{ runner.temp }}/chrome-web-store-status.json
+        run: |
+          set -euo pipefail
+          # The version under review is the one main's manifest carries: a PR
+          # that changes extension source bumps it (AGENTS.md), and stage
+          # submits main. The record compares the store's answer against it.
+          CWS_STATUS_EXPECTED_VERSION=$(jq -r .version package.json)
+          export CWS_STATUS_EXPECTED_VERSION
+          bash scripts/chrome-web-store.sh status
+      - name: Keep the status record
+        # Also on failure: the script writes a record for a refused or broken
+        # read, and a monitor reading the artifact must see that, not nothing.
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: chrome-web-store-status
+          path: ${{ runner.temp }}/chrome-web-store-status.json
+          if-no-files-found: warn
+          retention-days: 14

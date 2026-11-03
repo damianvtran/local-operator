@@ -22,7 +22,7 @@ const itemPath = `/v2/publishers/test-publisher/items/${extensionId}`;
 const rejectWith = (status, body) => ({ __rejectStatus: status, body });
 
 async function runRelease(args, handlers, options = {}) {
-  const { token = "test-token", expectFailure = false } = options;
+  const { token = "test-token", expectFailure = false, env = {} } = options;
   let requestIndex = 0;
   const server = createServer(async (request, response) => {
     const chunks = [];
@@ -51,6 +51,7 @@ async function runRelease(args, handlers, options = {}) {
       CWS_PUBLISHER_ID: "test-publisher",
       CWS_EXTENSION_ID: extensionId,
       CWS_POLL_INTERVAL_SECONDS: "0",
+      ...env,
     },
   };
   try {
@@ -1112,6 +1113,7 @@ test("unscoped mode rejects malformed argument pairs", async () => {
 // store package's toolchain than the assertions are worth.
 const STORE_WORKFLOWS = [
   { file: "chrome-web-store.yml", deployJob: "stage", environment: "chrome-web-store" },
+  { file: "chrome-web-store-status.yml", deployJob: "status", environment: "chrome-web-store" },
   { file: "chrome-web-store-promote.yml", deployJob: "promote", environment: "chrome-web-store-production" },
 ];
 
@@ -1240,3 +1242,164 @@ for (const { file, deployJob, environment } of STORE_WORKFLOWS) {
     assert.ok(preflightNames.length >= 4, "expected at least the four release variables");
   });
 }
+
+// ---------------------------------------------------------------------------
+// The read-only status poller (.github/workflows/chrome-web-store-status.yml).
+//
+// That workflow holds a real store token on an unattended hourly schedule, so
+// what these tests pin is that it CANNOT write: under CWS_READ_ONLY=1 exactly
+// one request leaves the script, it is a GET of fetchStatus, every other mode
+// is refused before any request, and the JSON record it leaves for a monitor
+// carries the store's answer without the token. runRelease asserts the request
+// count, so an extra upload/publish call fails the case rather than passing.
+// ---------------------------------------------------------------------------
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const POLL_TOKEN = "ya29.poll-token-must-never-appear-0123456789";
+
+async function runPoll(handlers, { expectFailure = false, env = {} } = {}) {
+  const dir = await mkdtemp(join(tmpdir(), "cws-status-"));
+  const output = join(dir, "status.json");
+  try {
+    const result = await runRelease(["status"], handlers, {
+      token: POLL_TOKEN,
+      expectFailure,
+      env: {
+        CWS_READ_ONLY: "1",
+        CWS_STATUS_OUTPUT: output,
+        CWS_STATUS_EXPECTED_VERSION: VERSION,
+        ...env,
+      },
+    });
+    const raw = await readFile(output, "utf8");
+    for (const text of [result.stdout, result.stderr, raw]) {
+      assert.ok(!text.includes(POLL_TOKEN), `token leaked:\n${text}`);
+    }
+    return { result, record: JSON.parse(raw), raw };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// Each handler asserts the only request is GET fetchStatus, and echoes the
+// token back in the body so redaction is exercised on every path.
+const fetchStatusOnly = (body) => (request) => {
+  assert.equal(request.method, "GET");
+  assert.equal(request.url, `${itemPath}:fetchStatus`);
+  return typeof body === "function" ? body() : body;
+};
+
+const revision = (state, crxVersion, deployPercentage = 100) => ({
+  state,
+  distributionChannels: [{ crxVersion, deployPercentage }],
+});
+
+for (const { name, submitted, published, extra = {}, staged } of [
+  { name: "PENDING_REVIEW", submitted: revision("PENDING_REVIEW", VERSION), published: revision("PUBLISHED", "0.1.20"), staged: false },
+  { name: "STAGED at the exact version", submitted: revision("STAGED", VERSION), published: revision("PUBLISHED", "0.1.20"), staged: true },
+  { name: "STAGED at another version", submitted: revision("STAGED", "0.1.25"), published: revision("PUBLISHED", "0.1.20"), staged: false },
+  { name: "STAGED below 100%", submitted: revision("STAGED", VERSION, 50), published: revision("PUBLISHED", "0.1.20"), staged: false },
+  { name: "PUBLISHED (no submitted revision)", submitted: undefined, published: revision("PUBLISHED", VERSION), staged: false },
+  { name: "REJECTED with a policy warning", submitted: revision("REJECTED", VERSION), published: revision("PUBLISHED", "0.1.20"), extra: { warned: true, takenDown: false }, staged: false },
+]) {
+  test(`status poll records ${name} with one GET and no write`, async () => {
+    const body = {
+      itemId: extensionId,
+      name: `echo ${POLL_TOKEN}`,
+      ...(submitted ? { submittedItemRevisionStatus: submitted } : {}),
+      publishedItemRevisionStatus: published,
+      ...extra,
+    };
+    const { result, record } = await runPoll([fetchStatusOnly(body)]);
+    assert.ok(result.stdout.includes("Chrome Web Store status for extension"), result.stdout);
+    assert.equal(record.schema, "local-operator/chrome-web-store-status/v1");
+    assert.equal(record.ok, true);
+    assert.equal(record.http_status, 200);
+    assert.equal(record.extension_id, extensionId);
+    assert.equal(record.expected_version, VERSION);
+    assert.equal(record.expected_version_staged_at_full, staged);
+    assert.equal(record.submitted?.state ?? null, submitted?.state ?? null);
+    if (submitted) assert.equal(record.submitted.channels[0].crxVersion, submitted.distributionChannels[0].crxVersion);
+    assert.equal(record.published.state, "PUBLISHED");
+    assert.equal(record.warned, extra.warned ?? null);
+    assert.equal(record.taken_down, extra.takenDown ?? null);
+    assert.equal(record.error, null);
+    assert.match(record.checked_at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+  });
+}
+
+test("status poll records a non-200 as a failed read, redacted, and exits non-zero", async () => {
+  const { result, record } = await runPoll([
+    fetchStatusOnly(() => rejectWith(403, { error: { code: 403, status: "PERMISSION_DENIED", message: `scope ${POLL_TOKEN}` } })),
+  ], { expectFailure: true });
+  assert.notEqual(result.code, 0);
+  assert.equal(record.ok, false);
+  assert.equal(record.http_status, 403);
+  assert.equal(record.submitted, null);
+  assert.equal(record.expected_version_staged_at_full, false);
+  assert.match(record.error, /fetchStatus call returned HTTP 403/);
+  assert.match(record.error, /PERMISSION_DENIED/);
+  assert.match(record.error, /<redacted CWS_ACCESS_TOKEN>/);
+  // An unattended poll must not advertise withdrawing a pending review.
+  assert.ok(!result.stderr.includes("cancelSubmission"), result.stderr);
+});
+
+test("status poll records an identity mismatch instead of trusting the response", async () => {
+  const { record } = await runPoll([fetchStatusOnly({ itemId: "someone-else", submittedItemRevisionStatus: revision("STAGED", VERSION) })], { expectFailure: true });
+  assert.equal(record.ok, false);
+  assert.match(record.error, /different extension/);
+});
+
+test("status poll bounds the record whatever the store returns", async () => {
+  const { record, raw } = await runPoll([fetchStatusOnly({
+    itemId: extensionId,
+    submittedItemRevisionStatus: {
+      state: "S".repeat(100_000),
+      distributionChannels: Array.from({ length: 50 }, () => ({ crxVersion: "v".repeat(10_000), deployPercentage: 100 })),
+    },
+  })]);
+  assert.ok(raw.length < 16_000, `record is ${raw.length} bytes`);
+  assert.equal(record.submitted.channels.length, 4);
+  assert.equal(record.submitted.channel_count, 50);
+});
+
+test("CWS_READ_ONLY=1 refuses every writing mode before any request", async () => {
+  for (const args of [["stage", "local-operator-extension.zip", VERSION], ["promote", VERSION]]) {
+    const error = await runRelease(args, [], { expectFailure: true, env: { CWS_READ_ONLY: "1" } });
+    assert.match(error.stderr, /CWS_READ_ONLY=1 permits only the status mode/);
+  }
+});
+
+test("CWS_READ_ONLY accepts only unset or 1, so a typo cannot disarm it", async () => {
+  for (const value of ["0", "true", "yes"]) {
+    const error = await runRelease(["status"], [], { expectFailure: true, env: { CWS_READ_ONLY: value } });
+    assert.match(error.stderr, /CWS_READ_ONLY must be unset or 1/);
+  }
+  const error = await runRelease(["promote", VERSION], [], { expectFailure: true, env: { CWS_STATUS_OUTPUT: "/dev/null" } });
+  assert.match(error.stderr, /CWS_STATUS_OUTPUT applies only to the status mode/);
+});
+
+test("the status workflow is structurally read-only", async () => {
+  const text = await readFile(new URL("../../.github/workflows/chrome-web-store-status.yml", import.meta.url), "utf8");
+  const code = text.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+  // No dispatcher-controlled input can reach the token-bearing step.
+  assert.ok(!/^\s+inputs:/m.test(code), "status workflow must take no inputs");
+  assert.ok(!/\$\{\{\s*(inputs|github\.event)\./.test(code), "status workflow must not read dispatch/event payloads");
+  assert.match(code, /^\s+schedule:\n\s+- cron: '\d+ \* \* \* \*'/m, "hourly schedule");
+  assert.match(code, /^\s+workflow_dispatch:\s*$/m);
+  // The token is minted read-only, and only for the readonly scope.
+  const scopes = [...code.matchAll(/access_token_scopes:\s*(\S+)/g)].map((m) => m[1]);
+  assert.deepEqual(scopes, ["https://www.googleapis.com/auth/chromewebstore.readonly"]);
+  // The script is invoked once, in status mode, with the guard armed.
+  const calls = [...code.matchAll(/chrome-web-store\.sh\s+(\S+)/g)].map((m) => m[1]);
+  assert.deepEqual(calls, ["status"]);
+  assert.match(code, /CWS_READ_ONLY: '1'/);
+  // Nothing that builds, uploads or publishes.
+  for (const forbidden of [/build:zip/, /:publish/, /:upload/, /cancelSubmission/, /pnpm install/, /STAGED_PUBLISH/]) {
+    assert.ok(!forbidden.test(code), `status workflow must not contain ${forbidden}`);
+  }
+  // Its own concurrency group, so a poll never queues a release.
+  assert.match(code, /group: chrome-web-store-status/);
+});
