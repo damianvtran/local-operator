@@ -2554,6 +2554,25 @@
       },
       "status": "passed",
       "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). Fix: accounts_order spelled 'سائن اِن' (zer); relay.shell reauth/reauth_short and relay.login use 'سائن ان', so aligned. Round-1 fix intact: countdown_hour/hours/days keep the one/other hour plural (گھنٹہ/گھنٹے). Urdu comma ، in row_a11y_bare_reset; throttled avoids 'حد'. 0 blocker / 0 major unresolved. No rendered RTL, Nastaliq or native-speaker pass claimed."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.browser",
+      "source_sha256": "5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24",
+      "translator": {
+        "agent": "translator (job 5d6bbe1050a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 54930f3283db, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "CLI-first browser pairing delta (14 keys rewritten/added, open_popup removed) at source_sha256 5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24; target catalogue_sha256 4e9abf18a0cd1f603a8de9d4f804b93b6cee43cd1900f8a8ddfb2beca15b8fdb. Independent audit PASS, 0B/0M/3m/1n; dispositions: T1-T4 applied verbatim (T1/T2: polite دیں per style guide). Zero unresolved blocker/major. Translator and auditor are separate sessions sharing the Claude model family (disclosed). Not verified: native-speaker review. Evidence: i18n/audits/evidence/ur/cli.browser/pair1/record.json"
     }
   ]
 }

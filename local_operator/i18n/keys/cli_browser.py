@@ -102,6 +102,10 @@ def enter_code() -> Msg:
     return Msg("cli.browser.enter_code", {})
 
 
+def enter_code_icon() -> Msg:
+    return Msg("cli.browser.enter_code_icon", {})
+
+
 def enter_each_code() -> Msg:
     return Msg("cli.browser.enter_each_code", {})
 
@@ -198,12 +202,36 @@ def now_driving(*, id: str) -> Msg:
     return Msg("cli.browser.now_driving", {"id": id})
 
 
-def open_popup() -> Msg:
-    return Msg("cli.browser.open_popup", {})
+def pair_after_reset() -> Msg:
+    return Msg("cli.browser.pair_after_reset", {})
+
+
+def pair_code_lifetime(*, minutes: int | float) -> Msg:
+    return Msg("cli.browser.pair_code_lifetime", {"minutes": minutes})
+
+
+def pair_no_daemon() -> Msg:
+    return Msg("cli.browser.pair_no_daemon", {})
 
 
 def pair_no_extension() -> Msg:
     return Msg("cli.browser.pair_no_extension", {})
+
+
+def pair_no_page_hint() -> Msg:
+    return Msg("cli.browser.pair_no_page_hint", {})
+
+
+def pair_outdated(*, label: str, want: str) -> Msg:
+    return Msg("cli.browser.pair_outdated", {"label": label, "want": want})
+
+
+def pair_several_header() -> Msg:
+    return Msg("cli.browser.pair_several_header", {})
+
+
+def pair_unreachable(*, detail: str) -> Msg:
+    return Msg("cli.browser.pair_unreachable", {"detail": detail})
 
 
 def paired_line(*, value: str) -> Msg:

@@ -324,8 +324,8 @@ test("the pairing card holds one height across placeholder, form and error (J1/J
   assert.ok(pendingMin, "the placeholder must pin a height, or the card resizes when render() settles");
   assert.equal(
     Number(pendingMin[1]),
-    219,
-    "the fallback pin must be the pairing form's height (measured 219px -> card 340px at 300x600)",
+    284,
+    "the fallback pin must be the pairing form's height (measured 284px -> card 405px at 300x600)",
   );
 
   // The error's reserved slot. 36px is two lines at 12px/1.5 — the height the
@@ -400,15 +400,27 @@ test("every pairing failure message fits the reserved slot (J7)", async () => {
     return out;
   };
 
+  // The daemon's pairing-result sentences are single-sourced in protocol.py
+  // (PAIR_*_MESSAGE) and exported to protocol.gen.ts; read them from the
+  // generated file, which is what the popup actually renders. The daemon
+  // source is still scanned for any LITERAL result message, so a sentence
+  // written inline in daemon.py again cannot slip past the measurement.
+  const generated = await readFile(join(HERE, "..", "src", "protocol.gen.ts"), "utf8");
+  const fromGenerated = [
+    ...generated.matchAll(/export const PAIR_(?:MISMATCH|EXPIRED|LOCKED|NO_CODE)_MESSAGE = (["'])(.+?)\1;/g),
+  ].map((m) => m[2]);
+  assert.equal(fromGenerated.length, 4, "the four generated pairing-result sentences must all be measured");
   const messages = [
+    ...fromGenerated,
     ...joinAdjacent(daemon).filter((m) =>
-      /^(That code|No live pairing code|Too many attempts)/.test(m),
+      /^(That code|No live pairing code|There's no code|Too many)/.test(m),
     ),
-    /PAIR_MISMATCH_MESSAGE = "([^"]+)"/.exec(flow)?.[1],
-    /error\.textContent = "(Could not reach[^"]*)"/.exec(popup)?.[1],
+    /"(Can't reach Local Operator[^"]*)"/.exec(popup)?.[1],
+    /"(Local Operator closed the connection[^"]*)"/.exec(popup)?.[1],
   ].filter(Boolean);
+  void flow;
 
-  assert.ok(messages.length >= 5, `expected the real failure strings, found ${messages.length}`);
+  assert.ok(messages.length >= 6, `expected the real failure strings, found ${messages.length}`);
   // The daemon's mismatch copy is the string the 36px slot is calibrated to.
   assert.ok(
     messages.some((m) => m.startsWith("That code didn't match")),
@@ -628,7 +640,7 @@ test("the first paint is pinned to the state this browser will actually reach (D
     await tick(30);
     assert.equal(
       fresh.get("pending").style.minHeight,
-      "219px",
+      "284px",
       "an unpaired browser's first paint must be pinned to the pairing form's height",
     );
   } finally {
@@ -769,7 +781,7 @@ test("the pin follows the card that was rendered, in both directions (D1/D3-1)",
     await tick(30);
     assert.equal(
       globalThis.localStorage.getItem("lop:pin-hint"),
-      "219px",
+      "284px",
       "an unpair must record the form's pin, or the next first paint is the wrong height",
     );
 
@@ -792,7 +804,7 @@ test("the pin follows the card that was rendered, in both directions (D1/D3-1)",
     // wedged open grows into the tall card once and the recovery open is exact.
     assert.equal(
       globalThis.localStorage.getItem("lop:pin-hint"),
-      "219px",
+      "284px",
       "the transient wedge card must leave the durable pin alone (design D1)",
     );
   } finally {
@@ -1138,7 +1150,7 @@ test("a failed socket upgrade leaves the field usable for the retry (U8)", async
     );
     assert.match(
       nodes.get("pair-error").textContent,
-      /Could not reach/,
+      /Can.t reach Local Operator/,
       "precondition: this is the catch branch, not the mismatch branch",
     );
 

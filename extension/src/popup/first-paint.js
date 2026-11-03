@@ -41,7 +41,7 @@
   // connected card. Mirrors the same fallback in popup.ts.
   var LEGACY_KEY = "lop:paired-hint";
   var PIN_CONNECTED = "148px";
-  var PIN_PAIRING = "219px";
+  var PIN_PAIRING = "284px";
   // Only the DURABLE states are pinned — see popup.ts's PIN_BY_STATE for why
   // the transient wedged card is deliberately absent, and why the standby card
   // (a durable role between two installed builds) is present.

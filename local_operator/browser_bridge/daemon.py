@@ -45,10 +45,15 @@ from local_operator.browser_bridge.protocol import (
     ErrorDetail,
     Hello,
     HelloAck,
+    PAIR_EXPIRED_MESSAGE,
+    PAIR_LOCKED_MESSAGE,
+    PAIR_MISMATCH_MESSAGE,
+    PAIR_NO_CODE_MESSAGE,
     PairRequest,
     PairResult,
     Request,
     Response,
+    ShowPairing,
     extension_older,
     proto_supported,
 )
@@ -161,7 +166,22 @@ PING_TICK_LAG_WARN_S = 1.0
 #: How often the daemon re-reads the pairing file to notice an out-of-process
 #: revoke. Short enough that "Unpair" feels immediate, cheap enough to poll.
 REVOKE_WATCH_S = 3.0
-PAIR_TTL_S = 120.0
+#: How long one pairing code stays valid: 15 minutes (operator requirement,
+#: 2026-11-02). It was 120 s, and in real use that was shorter than the path the
+#: code travels: `lop browser pair` runs inside an agent's tool call, the agent
+#: writes the code into its reply, and only THEN does the person find the
+#: extension and type it — the operator watched three codes expire that way.
+#:
+#: Why a longer life does not weaken the lockout. The code is one of 1,000,000;
+#: each code accepts at most PAIR_MAX_ATTEMPTS (5) wrong guesses and is then
+#: ROTATED (`_rotate_pending`), so a guesser gets 5 tries per code no matter how
+#: long the code lives — the success odds per code are 5 / 1,000,000, and a new
+#: code costs the guesser nothing it did not already have (it learns nothing
+#: from the dead one). The TTL bounds how long a code that was SHOWN stays
+#: useful, not how many guesses are allowed; guessing is bounded by the cap. The
+#: bind stays 127.0.0.1-only, codes stay per identity, and a guess has to come
+#: over an extension-origin socket, exactly as before.
+PAIR_TTL_S = 900.0
 PAIR_MAX_ATTEMPTS = 5
 
 #: WebSocket close codes that mean "the SERVER is going down", as opposed to
@@ -2455,7 +2475,9 @@ class BridgeService:
         }
         _write_pending(self.root, entries)
 
-    def _ensure_pending(self, extension_id: str, label: str = "") -> None:
+    def _ensure_pending(
+        self, extension_id: str, label: str = "", *, keep_expired: bool = False
+    ) -> None:
         """Guarantee a live pending code exists for this identity, reusing one.
 
         A code is reused only while it is unexpired AND still under the attempt
@@ -2469,6 +2491,21 @@ class BridgeService:
             and float(entry.get("expires_at", 0)) > time.time()
             and int(entry.get("attempts", 0)) < PAIR_MAX_ATTEMPTS
         ):
+            return
+        if (
+            keep_expired
+            and entry is not None
+            and int(entry.get("attempts", 0)) < PAIR_MAX_ATTEMPTS
+        ):
+            # The HANDSHAKE keeps an expired record rather than rotating it. The
+            # extension submits a code over a FRESH socket (popup and pairing
+            # tab both do), so the handshake runs immediately before the guess:
+            # rotating here replaced the code the person was typing and they
+            # were told "That code didn't match" for a code that had merely
+            # expired (measured in the real-Chrome E2E, 2026-11-02). Kept, the
+            # record lets `_try_pair` say "That code expired" and rotate it
+            # itself. Nothing is weakened: an expired code still never matches,
+            # and an exhausted one (attempts at the cap) still rotates here.
             return
         self._rotate_pending(extension_id, label)
 
@@ -2502,7 +2539,7 @@ class BridgeService:
         entry = _pending_entries(self.root).get(extension_id)
         if entry is None:
             self._ensure_pending(extension_id, _browser_label(link.browser, link.extension_version))
-            return PairResult(ok=False, message="No live pairing code. Run lop browser pair again.")
+            return PairResult(ok=False, message=PAIR_NO_CODE_MESSAGE)
         attempts = int(entry.get("attempts", 0)) + 1
         expired = float(entry.get("expires_at", 0)) <= time.time()
         matches = secrets.compare_digest(str(entry.get("code", "")), request.code)
@@ -2520,12 +2557,7 @@ class BridgeService:
                 # leave a waiting install anonymous exactly after a lockout,
                 # when the user most needs to know which popup to re-open.
                 self._rotate_pending(extension_id, str(entry.get("label", "")))
-                message = (
-                    "Too many attempts. That code is now dead — run 'lop browser "
-                    "pair' for a fresh one."
-                    if not expired
-                    else "That code expired. Run 'lop browser pair' for a fresh one."
-                )
+                message = PAIR_LOCKED_MESSAGE if not expired else PAIR_EXPIRED_MESSAGE
             else:
                 self._set_pending_attempts(extension_id, attempts)
                 # Two lines at the popup's 300px width, not three. The popup
@@ -2536,7 +2568,7 @@ class BridgeService:
                 # is showing no error at all. Kept byte-identical to the
                 # extension's own PAIR_MISMATCH_MESSAGE fallback, which is the
                 # string a user sees when the daemon sends none.
-                message = "That code didn't match. Codes expire after two minutes — check the app."
+                message = PAIR_MISMATCH_MESSAGE
             return PairResult(ok=False, message=message)
         token = secrets.token_urlsafe(32)
         # Rotation, not insertion: re-pairing the same identity must invalidate
@@ -2785,7 +2817,11 @@ class BridgeService:
                     continue
                 surplus.append((victim, wire))
         if not link.paired:
-            self._ensure_pending(extension_id, _browser_label(link.browser, link.extension_version))
+            self._ensure_pending(
+                extension_id,
+                _browser_label(link.browser, link.extension_version),
+                keep_expired=True,
+            )
         self.publish_safely()
         # Only now, with this handshake fully installed, is the socket it
         # replaced closed: a bounded courtesy to a peer that is already
@@ -3240,6 +3276,100 @@ class BridgeService:
         """
         matches = self._matching_extensions(target)
         return matches[0] if len(matches) == 1 else None
+
+    async def pairing_codes(self, http_request: HttpRequest) -> JSONResponse:
+        """Make sure every connected, unpaired install has a live code: ``lop browser pair``.
+
+        WHY THIS EXISTS. A code used to be minted only at the extension's own
+        handshake (and on a wrong guess), so an install that connected and then
+        sat unpaired past the code's lifetime had NO code, and `lop browser pair`
+        answered "no extension is waiting" about an extension `lop browser status`
+        could see connected (operator report, 2026-11-02). The only way out was
+        typing a wrong code into the popup to make the daemon rotate one. With
+        this endpoint the CLI asks for the code itself, from any state: popup
+        open or closed, never opened, code expired.
+
+        WHAT IT MAY DO, and why that is safe:
+
+        * It REUSES a live code (`_ensure_pending`): unexpired and under the
+          attempt cap. Running `lop browser pair` twice shows the same code, so a
+          person already typing it is never undercut by a second run. It mints
+          only where there is no usable code.
+        * It touches ATTACHED, UNPAIRED links only. A paired install needs no
+          code, and a code for an identity with no live socket could never be
+          entered anyway (a code is submitted over that install's own socket).
+        * The code goes back to the CALLER ONLY, and the caller must present the
+          session key (`X-Bridge-Key`), the same check `/rpc` and `/driver` make.
+          That key lives in the 0600 discovery file under the operator's config
+          dir, so a process that can read it can already read the pending-code
+          file beside it; this endpoint grants no knowledge it did not have. A
+          web page or another local user cannot present it, and the extension
+          never gets a code from here — the code still travels terminal → person
+          → browser, which is the whole pairing property.
+        * Nothing about guessing changes: the 5-attempt cap, rotation on
+          exhaustion and per-identity codes are `_try_pair`'s and are untouched.
+
+        The response is the display-safe pending list, plus who is connected
+        and paired, so the CLI can word "already paired" and "nothing connected"
+        from one live answer instead of a second file read.
+        """
+        supplied = http_request.headers.get("x-bridge-key", "")
+        if not secrets.compare_digest(supplied, self.state.session_key):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        try:
+            body = json.loads(await http_request.body() or b"{}")
+        except ValueError:
+            body = {}
+        # Default ON: `lop browser pair` asks each waiting install to put its
+        # pairing page in front, so the person who reads the code in the chat
+        # switches to Chrome and finds the code field already open — no toolbar
+        # icon to hunt for (Chrome hides new extension icons in the puzzle-piece
+        # menu), and no popup that closes when they look away. `false` is for a
+        # caller that only wants the codes (tests, scripts).
+        show_page = not (isinstance(body, dict) and body.get("show_page") is False)
+        attached = [link for link in self.links.values() if link.websocket is not None]
+        waiting = [link for link in attached if not link.paired]
+        for link in waiting:
+            self._ensure_pending(
+                link.extension_id, _browser_label(link.browser, link.extension_version)
+            )
+        if show_page:
+            for link in waiting:
+                # Additive daemon→extension event, like `role`: it carries NO
+                # code (the code still travels terminal → person → browser), and
+                # a build that predates it ignores an unknown event (worker.ts
+                # dispatches on known names only). Best effort: a socket that
+                # races closed costs only the convenience, never the code.
+                with suppress(Exception):
+                    await link.send(ShowPairing().model_dump(mode="json"))
+        live = {
+            str(entry["extension_id"]): entry for entry in pairing_status(self.root)["pending"]
+        }
+        codes = []
+        for link in sorted(waiting, key=lambda entry: entry.attached_at):
+            entry = live.get(link.extension_id)
+            if entry is None:  # pragma: no cover - _ensure_pending just wrote it
+                continue
+            codes.append(
+                {
+                    **entry,
+                    # The version the install REPORTED, so the CLI can say which
+                    # one is out of date and how to update it (req. 4) without a
+                    # second request. "" when the peer sent none.
+                    "extension_version": link.extension_version,
+                    "update_available": extension_older(
+                        link.extension_version, EXPECTED_EXTENSION_VERSION
+                    ),
+                }
+            )
+        return JSONResponse(
+            {
+                "codes": codes,
+                "connected_count": len(attached),
+                "paired_connected_count": len(attached) - len(waiting),
+                "expected_extension_version": EXPECTED_EXTENSION_VERSION,
+            }
+        )
 
     async def rpc(self, http_request: HttpRequest) -> JSONResponse:
         supplied = http_request.headers.get("x-bridge-key", "")
@@ -4256,6 +4386,9 @@ def create_app(port: int = DEFAULT_PORT, root: Path | None = None) -> Starlette:
             Route("/health", service.health, methods=["GET"]),
             Route("/repair", service.repair, methods=["POST"]),
             Route("/driver", service.driver, methods=["POST"]),
+            # Session-key authenticated, like /driver and /rpc: mints or reuses
+            # a code for each connected, unpaired install (`lop browser pair`).
+            Route("/pairing/codes", service.pairing_codes, methods=["POST"]),
             Route("/rpc", service.rpc, methods=["POST"]),
             WebSocketRoute("/extension", service.extension),
         ],

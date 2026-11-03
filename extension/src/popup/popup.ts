@@ -7,8 +7,9 @@ import {
 import type { BroadGrant } from "../origin-policy";
 import { DEFAULT_PORT, getLocal } from "../state";
 import { getPopupLocal, getPopupSession } from "./read-state";
-import { EXTENSION_UPDATE_NOTE, PROTO_VERSION } from "../protocol.gen";
-import { pairVerdict, viewForHealth } from "./pair-flow";
+import { EXTENSION_UPDATE_NOTE, PAIR_ASK_PHRASE } from "../protocol.gen";
+import { viewForHealth } from "./pair-flow";
+import { digitsOnly, submitPairingCode } from "../pair/submit";
 import {
   ackForDecision,
   ackInFlight,
@@ -383,7 +384,10 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 //
 // (connected card      207.16px  ->  86px  before the update advisory;
 //  connected card      269.16px  -> 148px with its reserved slot — see below)
-//   pairing form        339.52px  -> 219px
+//   pairing form        405.00px  -> 284px  (was 339.52 -> 219 before the
+//                                            no-code helper and "Open in a tab"
+//                                            lines; re-measured 2026-11-02, real
+//                                            Chrome 156, 300x600 dpr=2)
 //   standby card        314.27px  -> 193px
 //
 // The chrome constant is 121.0px (measured 121.16 / 120.52 against the two
@@ -452,7 +456,7 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 //
 // `disconnected` is NOT pinned, for that same reason and by the same test, and
 // it is written down here because this branch's new catch makes arriving at it
-// from a pinned card (148px `connected`, 219px `pairing`) reachable from one
+// from a pinned card (148px `connected`, 284px `pairing`) reachable from one
 // more failure mode. Its whole copy is "try again", so the next open is the one
 // most likely to be a different card — the daemon answered, or the read that
 // failed recovered — and a pin would charge that open the mis-size. This is a
@@ -514,7 +518,7 @@ const LEGACY_PAIRED_HINT_KEY = "lop:paired-hint";
 // carries the re-measured 207.2px for the same card, so the ~4px is a
 // measurement correction on this branch, not a second card.)
 const PIN_CONNECTED = "148px";
-const PIN_PAIRING = "219px";
+const PIN_PAIRING = "284px";
 const PIN_STANDBY = "193px";
 const PINS: readonly string[] = [PIN_CONNECTED, PIN_PAIRING, PIN_STANDBY];
 const PIN_BY_STATE: Partial<Record<State, string>> = {
@@ -1163,6 +1167,12 @@ function hostnameOf(origin: string | undefined): string {
   }
 }
 
+// The words the pairing card tells a person to say to the agent: generated,
+// so the card, the pairing tab and the agent guide cannot drift.
+for (const node of Array.from(document.querySelectorAll<HTMLElement>(".ask-phrase"))) {
+  node.textContent = PAIR_ASK_PHRASE;
+}
+
 // Keep the pairing field to digits so a desktop keyboard cannot enter letters
 // (finding U6); the field is also autofocused when the pairing state renders.
 const codeInput = document.getElementById("pair-code") as HTMLInputElement | null;
@@ -1183,14 +1193,8 @@ codeInput?.addEventListener("input", () => {
   // number of characters stripped ahead of the caret is where the user's edit
   // point actually is. maxlength="6" already bounds the length for both typing
   // and paste, so no slice is needed here.
-  const raw = codeInput.value;
-  const clean = raw.replace(/\D/g, "");
-  if (clean === raw) return;
-  const caret = codeInput.selectionStart ?? raw.length;
-  const strippedBeforeCaret = raw.slice(0, caret).length - raw.slice(0, caret).replace(/\D/g, "").length;
-  codeInput.value = clean;
-  const next = Math.max(0, caret - strippedBeforeCaret);
-  codeInput.setSelectionRange(next, next);
+  // The sanitiser itself is shared with the pairing tab (pair/submit.ts).
+  digitsOnly(codeInput);
 });
 
 // Lock the form for the duration of one submission: a second click while the
@@ -1215,61 +1219,13 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
   error.classList.add("hidden");
   setPairBusy(true);
   const { token, port = DEFAULT_PORT } = await getLocal();
-  // Whether the daemon ANSWERED this dial. Declared outside the try because the
-  // failure branch is what needs it: a close after an answer is not
-  // unreachability, and saying so was the last lie of the revoked-install dead
-  // end (design D1 / UX U3) — a popup that was fetching /health from the daemon
-  // the whole time told the user it could not reach it.
-  let answered = false;
+  // The socket exchange is shared with the pairing tab (pair/submit.ts), so the
+  // two surfaces cannot drift. What stays here is what is popup-specific: the
+  // success card, the error slot and the focus handling.
   try {
-    const wire = new WebSocket(`ws://127.0.0.1:${port}/extension`);
-    // ONE shared rejection wired to error AND close for every await below: a
-    // socket that drops after open but before pair_result must land in
-    // `catch` — a bare onmessage promise would suspend forever, and with the
-    // busy lock held that means a form disabled until the popup is reopened
-    // (review finding M1). The no-op catch keeps a post-handshake close (our
-    // own close() included, if handlers weren't detached) from surfacing as an
-    // unhandled rejection.
-    let failed: (reason: Error) => void = () => {};
-    const failure = new Promise<never>((_, reject) => {
-      failed = reject;
-    });
-    void failure.catch(() => {});
-    wire.onerror = () => failed(new Error("socket error"));
-    wire.onclose = () => failed(new Error("socket closed"));
-    await Promise.race([
-      new Promise((resolve) => {
-        wire.onopen = resolve;
-      }),
-      failure,
-    ]);
-    const nextMessage = (): Promise<MessageEvent> =>
-      Promise.race([
-        new Promise<MessageEvent>((resolve) => {
-          wire.onmessage = resolve;
-        }),
-        failure,
-      ]);
-    wire.send(
-      JSON.stringify({
-        event: "hello",
-        proto: PROTO_VERSION,
-        token: token ?? "",
-        extension_version: chrome.runtime.getManifest().version,
-        browser: navigator.userAgent,
-      }),
-    );
-    await nextMessage();
-    answered = true;
-    wire.send(JSON.stringify({ event: "pair", code: input.value.trim() }));
-    const verdict = await nextMessage();
-    const outcome = pairVerdict(JSON.parse(String(verdict.data)));
+    const outcome = await submitPairingCode({ code: input.value, port, token });
     if (outcome.ok) {
       await chrome.storage.local.set({ token: outcome.token });
-      // Detach before closing: this close is deliberate, not a failure.
-      wire.onerror = null;
-      wire.onclose = null;
-      wire.close();
       // Confirm SUCCESS from the pair_result frame alone, before any health
       // round-trip: the worker has not reconnected with the new token yet, so
       // /health still says unpaired and a render() here would re-show the form
@@ -1285,7 +1241,7 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
       show("paired");
       await new Promise((resolve) => setTimeout(resolve, 250));
       await render();
-    } else {
+    } else if (outcome.kind === "rejected") {
       error.textContent = outcome.message;
       error.classList.remove("hidden");
       // A live pairing error turns the status rule danger — the one place the
@@ -1304,8 +1260,7 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
       // rejected code, which is how every other "wrong code, try again" field
       // behaves.
       input.select();
-    }
-  } catch {
+    } else {
     // Two different failures, two different sentences. The old single string
     // blamed reachability even when the daemon had answered and then closed the
     // socket — the exact shape of the revoked-install dead end (design D1), and
@@ -1314,9 +1269,10 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
     // the longest string that can land in it, so a longer one would resize the
     // card at the moment of failure, which is what the reservation exists to
     // prevent.
-    error.textContent = answered
-      ? "Local Operator closed the connection. Reopen the popup to try again."
-      : "Could not reach Local Operator on this machine.";
+    error.textContent =
+      outcome.kind === "closed"
+        ? "Local Operator closed the connection. Press Pair to try again."
+        : "Can't reach Local Operator. Make sure it's running, then press Pair.";
     error.classList.remove("hidden");
     document.getElementById("card")?.style.setProperty("--tone", "var(--danger)");
     // Unlock BEFORE selecting, for the same reason as the rejected-code branch
@@ -1330,6 +1286,7 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
     // without this the retry after a transport failure silently swallows every
     // keystroke and a paste too.
     input.select();
+    }
   } finally {
     // Always unlock, success included: if health later drops (daemon restart)
     // the user lands back on this form, and it must not arrive pre-disabled.

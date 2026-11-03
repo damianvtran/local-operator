@@ -543,6 +543,23 @@ input:disabled {
   margin-bottom: 10px;
 }
 
+/* "Open in a tab": the pairing card's way out of focus loss. Small and
+ * secondary; the form above is the primary path. */
+.tab-link {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-dim);
+}
+.tab-link a {
+  color: var(--ink-muted);
+  font-weight: 500;
+}
+.sub q {
+  quotes: "\201C" "\201D";
+  color: var(--ink);
+}
+
 .error {
   margin: 12px 0 0;
   font-size: 12px;
@@ -563,7 +580,8 @@ input:disabled {
  * holding the pin show() recorded for the card it last rendered:
  *
  *  148px  -> the connected card (269.2px)
- *   219px -> the pairing form (340.2px)
+ *   284px -> the pairing form (405.0px; was 219px/340.2px before the
+ *            no-code helper and the "Open in a tab" line)
  *   193px -> the standby card (314.27px)
  * A value per state rather than a paired/unpaired boolean (design D3-1), and
  * ONLY for states that are durable properties of the browser. A pin is a bet
@@ -587,7 +605,7 @@ input:disabled {
  * changes; a stale pin is a resize, which is the defect this whole block exists
  * to prevent. */
 #pending {
-  min-height: 219px;
+  min-height: 284px;
 }
 
 /* The pairing error RESERVES its space instead of reflowing the card.

@@ -95,7 +95,15 @@ def proto_supported(
 #: 0.1.25 is the first tree whose `element_not_found` carries
 #: `data.candidates` (role/name/locator) on a CSS miss as well as a locator
 #: miss, so the tool can name the closest real elements instead of a bare miss.
-EXPECTED_EXTENSION_VERSION = "0.1.25"
+#: 0.1.26 is the first tree with the pairing TAB (`pair/pair.html`): a normal
+#: extension page that survives focus loss, opened by the `show_pairing` event
+#: `lop browser pair` sends, and on first install.
+EXPECTED_EXTENSION_VERSION = "0.1.26"
+
+#: The first extension version that opens its pairing tab on `show_pairing`.
+#: An older install ignores the event, so `lop browser pair` tells its user to
+#: click the toolbar icon instead of pointing at a tab that never opened.
+SHOW_PAIRING_MIN_EXTENSION_VERSION = "0.1.26"
 
 #: The first extension version that serves each capability-gated method.
 #:
@@ -258,6 +266,50 @@ EXTENSION_UPDATE_NOTE = (
     "Browser extension {have} < {want} — update it in Chrome when a newer version is "
     "offered; nothing is blocked."
 )
+
+
+#: How to update an older extension, in one sentence a person can follow.
+#:
+#: Chrome updates store extensions on its own schedule (hours, sometimes a day),
+#: and the only control it gives a person to force it is the Update button on
+#: chrome://extensions, which appears only with Developer mode on. That path is
+#: the one that works for the store build AND for a locally loaded one, so it is
+#: the one we name. Kept beside EXTENSION_UPDATE_NOTE so the CLI and the agent
+#: guide say the same thing; the CLI's own copy is keyed (cli.browser.*).
+EXTENSION_UPDATE_HOW = (
+    "open chrome://extensions, turn on Developer mode (top right), then click Update"
+)
+
+#: The pairing-result sentences the DAEMON sends to the extension's pairing form.
+#:
+#: Single-sourced here and exported to `protocol.gen.ts`, so the popup, the
+#: pairing tab and the daemon carry ONE spelling each. They are rendered by the
+#: extension, which is English-only today (no `_locales`), so they are wire
+#: constants rather than `cli.browser` keys.
+#:
+#: The register is the operator requirement of 2026-11-02: every sentence says
+#: what to DO next in the words a person would use, and the next step is always
+#: "ask Local Operator", never a command — most people pair from a chat with the
+#: agent, not from a terminal. Each fits two lines in the popup's 300px card:
+#: `#pair-error` reserves two line boxes, and a third line would resize the
+#: popup at the moment of failure (popup.css).
+PAIR_MISMATCH_MESSAGE = "That code didn't match. Check it and type it again."
+PAIR_EXPIRED_MESSAGE = 'That code expired. Ask Local Operator to "pair my browser" again.'
+PAIR_LOCKED_MESSAGE = (
+    'Too many wrong tries. Ask Local Operator to "pair my browser" for a new code.'
+)
+PAIR_NO_CODE_MESSAGE = (
+    "There's no code for this browser yet. Ask Local Operator to \"pair my browser\"."
+)
+
+#: The phrase the extension tells a person to say to the agent, and the agent
+#: guide tells the agent to answer. One spelling, because it is a hand-off
+#: between two surfaces: the pairing form says it, the person repeats it.
+PAIR_ASK_PHRASE = "pair my browser"
+
+#: How long one code stays valid, in minutes, for COPY only. The daemon's
+#: `PAIR_TTL_S` is the authority; `test_pair_cold_state` pins the two together.
+PAIR_TTL_MINUTES = 15
 
 
 def parse_extension_version(value: str) -> tuple[int, ...] | None:
@@ -767,6 +819,21 @@ class Role(WireModel):
 
     event: Literal["role"] = "role"
     role: Literal["driver", "standby"] = "driver"
+
+
+class ShowPairing(WireModel):
+    """Daemon -> extension: put the pairing page in front, please.
+
+    Sent by ``lop browser pair`` (``POST /pairing/codes``) to every connected,
+    unpaired install, so the person who reads the code in the chat switches to
+    Chrome and finds the code field already open. It carries NO code — the code
+    travels terminal → person → browser, and putting it on this wire would hand
+    it to whatever holds the socket. A new EVENT like ``Role``, so a build that
+    predates it drops the frame instead of failing (worker.ts dispatches on
+    known event names only).
+    """
+
+    event: Literal["show_pairing"] = "show_pairing"
 
 
 class PairRequest(WireModel):

@@ -186,38 +186,33 @@
   },
   "cli.browser.pairing_code": {
     "role": "lop browser CLI output",
-    "tone": "terse, factual, operator-facing",
-    "note": "same key as L3787"
+    "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
+    "note": "First line of the pairing block. {code} is six digits. Usually quoted verbatim by an agent to a person who never sees the terminal, so it must read as a complete sentence."
   },
   "cli.browser.enter_code": {
     "role": "lop browser CLI output",
-    "tone": "terse, factual, operator-facing",
-    "note": "same key as L3788"
-  },
-  "cli.browser.open_popup": {
-    "role": "lop browser CLI output",
-    "tone": "terse, factual, operator-facing",
-    "note": "instruction"
+    "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
+    "note": "Tells the person where to type the code. The CLI just asked the extension to open its pairing tab. 'Pair' is the button label in the extension (English-only UI) — keep it as Pair."
   },
   "cli.browser.pairing_code_labeled": {
     "role": "lop browser CLI output",
-    "tone": "terse, factual, operator-facing",
-    "note": "code plus the waiting install's label"
+    "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
+    "note": "One waiting browser: six-digit code, then its label (browser, extension version and short id, English, from the daemon). Keep the leading spaces and the gap."
   },
   "cli.browser.enter_each_code": {
     "role": "lop browser CLI output",
-    "tone": "terse, factual, operator-facing",
-    "note": "instruction"
+    "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
+    "note": "Several browsers waiting. 'Pair' is the extension's English button label; keep it."
   },
   "cli.browser.already_paired": {
     "role": "lop browser CLI output",
-    "tone": "terse, factual, operator-facing",
-    "note": "explains the already-paired state; tokens in situ"
+    "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
+    "note": "Already-paired answer, usually quoted to a person by an agent. \"pair my browser\" is the phrase the person says to the agent; keep it as a quoted phrase in the target language's natural wording for that request."
   },
   "cli.browser.no_extension_waiting": {
     "role": "lop browser CLI output",
-    "tone": "terse, factual, operator-facing",
-    "note": "instruction"
+    "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
+    "note": "Nothing connected. The URL is the Chrome Web Store listing; keep it verbatim and keep a space after it. \"pair my browser\" is the phrase the person says to the agent."
   },
   "cli.browser.authorised_installs": {
     "role": "lop browser CLI output",
@@ -318,5 +313,45 @@
     "role": "lop browser CLI output",
     "tone": "terse, factual, operator-facing",
     "note": "cleanup outcome; detail is why nothing was closed"
+  },
+  "cli.browser.enter_code_icon": {
+    "role": "lop browser CLI output",
+    "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
+    "note": "Where to type the code when the installed extension is too old to open its own pairing tab. 'Pair' is the extension's English button label; keep it."
+  },
+  "cli.browser.pair_no_page_hint": {
+    "role": "lop browser CLI output",
+    "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
+    "note": "Fallback when the pairing tab did not appear. 'it' is the code."
+  },
+  "cli.browser.pair_code_lifetime": {
+    "role": "lop browser CLI output",
+    "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
+    "note": "Lifetime of the code plus the next step after pairing. {minutes} is 15 today. 'Allow' is the extension's English button label; keep it."
+  },
+  "cli.browser.pair_several_header": {
+    "role": "lop browser CLI output",
+    "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
+    "note": "Header above one line per waiting browser."
+  },
+  "cli.browser.pair_outdated": {
+    "role": "lop browser CLI output",
+    "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
+    "note": "Out-of-date extension. {label} is an English parenthesised label like '(Chrome extension 0.1.20 · jbadjeao…)'; {want} a version. chrome://extensions is typed in the address bar; keep it. 'Developer mode' and 'Update' are Chrome's control labels: use Chrome's localized label if known, else English."
+  },
+  "cli.browser.pair_no_daemon": {
+    "role": "lop browser CLI output",
+    "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
+    "note": "The bridge service is not running. Commands stay verbatim."
+  },
+  "cli.browser.pair_unreachable": {
+    "role": "lop browser CLI output",
+    "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
+    "note": "{detail} is a short technical reason in English, kept in brackets at the end. Commands stay verbatim."
+  },
+  "cli.browser.pair_after_reset": {
+    "role": "lop browser CLI output",
+    "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
+    "note": "After --reset revoked every paired browser. Command stays verbatim."
   }
 }

@@ -658,6 +658,57 @@ def pin_driver(target: str, port: int | None = None, root: Path | None = None) -
     }
 
 
+def request_pairing_codes(port: int | None = None, root: Path | None = None) -> dict[str, Any]:
+    """Ask the running daemon for a live code for every connected, unpaired install.
+
+    What `lop browser pair` calls first, so pairing works from ANY state — the
+    extension connected long ago and its code expired, the popup closed or never
+    opened. The daemon reuses a live code and mints only where there is none, so
+    calling this twice returns the same code (`BridgeService.pairing_codes`).
+
+    Carries the discovery file's session key, exactly like `pin_driver`: the
+    endpoint hands back pairing codes, which only the operator's own terminal may
+    learn. Returns ``{"ok": False, "reason": ...}`` rather than raising, with one
+    of three machine reasons the CLI words for a person:
+
+    * ``no_daemon`` — nothing is running (or the discovery file is gone);
+    * ``old_daemon`` — a daemon from before this endpoint (Starlette's plain 404),
+      which the caller answers from the file as the old CLI did;
+    * ``unreachable`` — the process exists but did not answer.
+    """
+    current = state_store.read(root)
+    if current is None or not state_store.pid_alive(current.pid):
+        return {"ok": False, "reason": "no_daemon"}
+    resolved_port = port or current.port
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{resolved_port}/pairing/codes",
+        data=b"{}",
+        method="POST",
+        headers={"X-Bridge-Key": current.session_key, "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            payload: Any = json.loads(response.read().decode())
+    except urllib.error.HTTPError as error:
+        if error.code in (404, 405):
+            return {"ok": False, "reason": "old_daemon"}
+        return {"ok": False, "reason": "unreachable", "detail": f"HTTP {error.code}"}
+    except Exception as error:  # noqa: BLE001 - report, do not raise, at a CLI edge
+        return {"ok": False, "reason": "unreachable", "detail": str(error)}
+    if not isinstance(payload, dict):
+        return {"ok": False, "reason": "unreachable", "detail": "unexpected response"}
+    codes = payload.get("codes")
+    return {
+        "ok": True,
+        "codes": [entry for entry in codes if isinstance(entry, dict)]
+        if isinstance(codes, list)
+        else [],
+        "connected_count": int(payload.get("connected_count", 0) or 0),
+        "paired_connected_count": int(payload.get("paired_connected_count", 0) or 0),
+        "expected_extension_version": str(payload.get("expected_extension_version", "")),
+    }
+
+
 def _message_from_payload(body_text: str) -> str:
     """The human sentence a failed /driver response carries, or "" if it has none.
 

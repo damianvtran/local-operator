@@ -263,40 +263,65 @@ then:
 
 ### 4. Pair the extension to this machine — YOU run it and show the code
 
-Pairing is **one-time**: once it succeeds, the extension stores the token and
-the daemon stores its hash, and every later reconnect (daemon restart, browser
-restart, reboot, a brand-new lop session) happens silently with no code and no
-prompt. The user does this exactly once, ever.
+**Write the code in your reply IMMEDIATELY after `lop browser pair` returns —
+before any other tool call, in bold, with where to type it and how long it
+lasts. Never leave it only in the tool output, and do not start a polling loop
+first.** Tool output is collapsed in most interfaces, and most people do not
+know it can be expanded: a code that is only in a tool block is a code the
+person cannot see. (Observed 2026-11-02: three codes in a row expired that way
+while the agent ran more commands; pairing took fourteen minutes.)
 
-Run the command yourself and read the code out of its output:
+The flow is **you first, then the person**. You run the command and hand over
+the code; only then does the person go to the browser. Do NOT ask them to open
+the extension popup first, and never tell them to "open the popup, then retry":
+`lop browser pair` makes the code itself from any state (popup closed or never
+opened, an old code expired), and opens a pairing tab in their Chrome.
 
 ```sh
 lop browser pair
 ```
 
-It prints a 6-digit code (2-minute TTL, five tries then a fresh code). **You
-MUST show that code to the user in your reply and ask them to type it into the
-extension popup** (click the toolbar icon → enter the code). Do not just tell
-them to "run `lop browser pair`": most users start from the TUI and never see
-terminal output, so if you don't surface the code in the conversation they have
-no way to get it. Showing it is correct and safe here — unlike a durable
-password, this is a single-use code with a 2-minute TTL whose entire purpose is
-to be shown to the user; it authorizes nothing on its own and expires in
-minutes. (This is the one browser secret you DO print. Contrast the mobile
-portal password, which must never enter the transcript.)
+Then, in your reply, say something like:
 
-Concretely, say something like: *"Your one-time pairing code is **NNNNNN**.
-Click the Local Operator extension icon in your browser toolbar and type it in.
-This is the only time you'll need to do this."* If the code expires before they
-enter it, just run `lop browser pair` again and show the fresh one.
+> Your pairing code is **123456**. Switch to Chrome: a Local Operator tab is
+> open there. Type the code and press Pair. (No tab? Click the Local Operator
+> icon in Chrome's toolbar; it may be under the puzzle-piece icon.) The code
+> works for 15 minutes. Once we're paired, I'll ask you in Chrome to Allow each
+> new website the first time I visit it.
 
-The code flows terminal → browser (you → the user → the popup) on purpose: that
-direction is the security property that stops a rogue local process from
-pairing itself. Do not try to script the code into the popup on the user's
-normal browser — you have no debug access to it, and that is intentional.
+Facts behind that wording:
+
+- **One code per browser, valid for 15 minutes**, five wrong tries and it is
+  replaced. Running `lop browser pair` again within the 15 minutes prints the
+  SAME code — safe to re-run if you lost it. If it may have expired, re-run
+  and give the new one; never re-send an old code from earlier in the chat.
+- **Several browsers waiting** prints one code per browser, each named
+  (browser + extension version + short id). Give every code and which browser
+  it belongs to.
+- **An outdated extension** gets one line saying how to update it
+  (`chrome://extensions` → Developer mode → Update). Pass it on; pairing still
+  works without updating.
+- **"No browser extension is connected yet"** means Chrome is closed or the
+  extension is not installed or is turned off. Follow step 0 (wake Chrome with
+  `open -g -a "Google Chrome"`) and step 3, then run `lop browser pair` again.
+- **"already paired"**: nothing to do — check `lop browser status`.
+- If the person opens the extension without a code, it tells them to ask you
+  to **"pair my browser"**. That phrase means: run `lop browser pair` and give
+  them the code as above.
+
+Showing the code is correct and safe here — unlike a durable password, it is a
+single-use code whose entire purpose is to be shown to the person; it
+authorizes nothing on its own and expires. (This is the one browser secret you
+DO print. Contrast the mobile portal password, which must never enter the
+transcript.)
+
+The code flows terminal → person → browser on purpose: that direction is the
+security property that stops a rogue local process from pairing itself. Do not
+try to script the code into the extension in the person's normal browser — you
+have no debug access to it, and that is intentional.
 
 Re-pairing (new browser profile, wiped token, uninstalled extension): same
-flow. `lop browser pair --reset` revokes the current pairing first.
+flow. `lop browser pair --reset` revokes every pairing first.
 
 ### 5. Confirm and use
 
@@ -770,8 +795,8 @@ Every failure is one actionable string; act on it rather than retrying blindly:
      `extension_unresponsive` below, where the toolbar icon does nothing.
   3. **Still nothing?** The extension may be disabled or removed — ask the
      user to check `chrome://extensions`.
-- **"browser bridge not paired"** — run `lop browser pair` and have the user
-  enter the code.
+- **"browser bridge not paired"** — run `lop browser pair` and write the code
+  into your reply right away (step 4); do not ask the user to open the popup.
 - **"browser bridge unreachable: the daemon … is not answering"** — run
   `lop browser status`; `lop browser install` (re)starts it. Logs:
   `lop browser logs`.

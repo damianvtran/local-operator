@@ -96,7 +96,15 @@
           <p class="sub hidden" id="pair-unpaired">
             This browser was unpaired from Local Operator.
           </p>
-          <p class="sub">Enter the code shown in Local Operator.</p>
+          <!-- The no-code helper (operator requirement, 2026-11-02). A person
+               who opens the popup WITHOUT a code must be told exactly what to
+               say to get one; "Enter the code shown in Local Operator" assumed
+               they already had it and had no answer for "where?". The phrase
+               is filled from PAIR_ASK_PHRASE by popup.ts so this card, the
+               pairing tab and the agent guide say the same words. -->
+          <p class="sub" id="pair-ask">
+            No code? Ask Local Operator to <q class="ask-phrase">pair my browser</q>.
+          </p>
           <form id="pair-form">
             <label class="field-label" for="pair-code">Pairing code</label>
             <input
@@ -121,6 +129,11 @@
               <button type="submit" class="btn primary block">Pair</button>
             </div>
           </form>
+          <!-- The escape from focus loss: this popup closes the moment the
+               person switches windows to read the code. The tab keeps the
+               field. A link (not a button) so it is also a plain, keyboard-
+               reachable target with no script needed to read it. -->
+          <p class="tab-link"><a href="../pair/pair.html" target="_blank" id="pair-open-tab">Open in a tab</a> (it stays open when you switch windows).</p>
         </section>
 
         <!-- Ships HIDDEN like every other section. A diagnostic error state must

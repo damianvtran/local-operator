@@ -2772,6 +2772,25 @@
       },
       "status": "passed",
       "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). throttled drops 'лимит', keeps one/few/many/other accusative after через; аккаунт consistent with account/reauth; 'Обновлено: {when}' / 'Сброс: {when}' fit both time-only and date+time. No fixes needed. 0 blocker / 0 major. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.browser",
+      "source_sha256": "5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24",
+      "translator": {
+        "agent": "translator (job 4945a527ff76, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 53be3a51c939, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "CLI-first browser pairing delta (14 keys rewritten/added, open_popup removed) at source_sha256 5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24; target catalogue_sha256 f34a9abb0b6c3895e15576f192c244f5b32b467a04eacb5d80d2fffc1ccf66fb. Independent audit PASS, 0B/0M/1m/2n; dispositions: T1-T3 applied verbatim. Zero unresolved blocker/major. Translator and auditor are separate sessions sharing the Claude model family (disclosed). Not verified: native-speaker review. Evidence: i18n/audits/evidence/ru/cli.browser/pair1/record.json"
     }
   ]
 }
