@@ -11,6 +11,7 @@
  * A row NEVER marks itself read. Rendering, scrolling past or focusing it is
  * not engagement (decision D11); only the reader's explicit act is.
  */
+import { contentDir } from "../lib/content-direction";
 import { useEffect, useRef } from "react";
 import { cn } from "../lib/cn";
 import { ageText, sourceName } from "../lib/notifications";
@@ -141,7 +142,7 @@ export function NotificationRow({
 						<span className="flex max-w-full flex-1 flex-wrap gap-x-1.5">
 							{/* The separator travels with the source, so a wrapped age starts
 							    its line clean rather than with a dangling "·". */}
-							<span className="flex min-w-[8ch] max-w-full gap-1.5"><span className="min-w-0 truncate">{source}</span><span aria-hidden>·</span></span>
+							<span className="flex min-w-[8ch] max-w-full gap-1.5"><span dir={contentDir(source)} className="min-w-0 truncate">{source}</span><span aria-hidden>·</span></span>
 							<span className="shrink-0">{age}</span>
 						</span>
 					</span>
