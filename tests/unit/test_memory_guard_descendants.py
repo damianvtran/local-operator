@@ -260,8 +260,10 @@ def test_a_not_permitted_descendant_is_charged_by_ps_and_never_fails_closed(monk
         denied={900},
         ps=lambda pid: (0, "14336\n"),
     )
-    for _ in range(mg.UNACCOUNTED_TICK_LIMIT * 3):
-        sample = guard.sample_sync()
+    sample = guard.sample_sync()
+    for tick in range(mg.UNACCOUNTED_TICK_LIMIT * 3):
+        if tick:
+            sample = guard.sample_sync()
         assert sample.unaccounted is None and guard.should_kill(sample) is False
     assert sample.not_permitted == {900: 14 * _MIB}
     assert sample.bytes_used == 19 * _MIB
@@ -280,8 +282,10 @@ def test_a_not_permitted_descendant_ps_cannot_size_is_disclosed_uncharged(monkey
         denied={900},
         ps=lambda pid: (1, ""),
     )
-    for _ in range(mg.UNACCOUNTED_TICK_LIMIT * 2):
-        sample = guard.sample_sync()
+    sample = guard.sample_sync()
+    for tick in range(mg.UNACCOUNTED_TICK_LIMIT * 2):
+        if tick:
+            sample = guard.sample_sync()
         assert guard.should_kill(sample) is False
     assert sample.not_permitted == {900: None}
     assert "900 (uncharged)" in mg.not_permitted_line(sample, [900])
