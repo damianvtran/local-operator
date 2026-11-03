@@ -28,8 +28,10 @@ experimental manifest. The original development output/logs are not shipped.
 - Paid LoP runs **only through its per-run edge** (`lop_edge.py`, S6), behind
   two fail-closed preflights checked before any auth access or preparation:
   `BENCH_LOP_EDGE_EVIDENCE` must name an S4/S5 evidence record whose `files`
-  equal the current `runner_v2.py`/`meter_proxy.py`/`lop_edge.py` SHA-256s
-  (any change to one of them refuses until S4/S5 are re-run), and the live
+  equal the metering closure's SHA-256s (`runner_v2.py`, `meter_proxy.py`,
+  `lop_edge.py`, `lop_launch.py`, `radient_meter/*.py`) and whose
+  `evidence_path` artifact still hashes to `evidence_sha256` (any change
+  refuses until `regenerate.sh` re-runs S4/S5; see LOP-EDGE-VERIFICATION.md), and the live
   `https://api.radienthq.com/v1/prices` listing must still state the reviewed
   `decisions-rate@2026-09-19` contract. The Radient bearer is resolved host-side
   (env or the user's own `lop login radient` store, read-only) and handed to the
@@ -44,6 +46,8 @@ experimental manifest. The original development output/logs are not shipped.
   loopback meter/MCP/bridge ports, no Unix sockets) applies to the harnesses in
   `SANDBOXED_HARNESSES` — those whose zero-paid first-wire launch completed under
   it (see `LOP-EDGE-VERIFICATION.md`, S6). OpenCode and Hermes are unfenced.
+  One port rule (`fence_ports`) for all fenced harnesses, LoP included: the
+  model endpoint (LoP: its edge) plus the bench MCP port on public-full.
 - CoW is preferred: APFS uses `cp -Rc`; Linux first tries
   `cp --reflink=always -a`. Cross-filesystem copies remain refused.
   `BENCH_CP_BIN` can select the copy executable. If Linux CoW is unavailable,

@@ -15,8 +15,10 @@ resolved. No Docker, no browsers, no auth-store reads.
   synthetic billing. Live pricing (`/api/v1/models` rate card) and real
   Radient/OpenRouter billing are first exercised by the paid pilot.
 * **S6 (runner integration) is wired but has never run a paid trial**: paid
-  LoP needs an S4/S5 evidence record for the exact runner/meter/edge hashes
-  (none is issued in this commit, so it still refuses) and a live prices match.
+  LoP needs an S4/S5 evidence record for the exact metering closure hashes and
+  a live prices match. The record is generated outside the repo (it is bound
+  to one checkout's bytes and is regenerated, not versioned) — see
+  "S4/S5 evidence record" below.
   The full `execute()` path with a real task, evaluator and shared meter was
   not driven end to end; its pieces were (section S6 below).
 * The unpriced `GET` metadata allowlist stays **empty**: the only reads seen
@@ -217,6 +219,35 @@ response mid-body. The meter then correctly latched it as an incomplete stream
 (`incomplete: true`, ledger blocked), so S4 `native` failed intermittently
 (3/5 at the S6 head, 2/5 at the reviewed `7d6de8ec`, so not introduced here). The
 tap now defers to the real `receive` after the body; 10/10 then pass.
+
+## S4/S5 evidence record (R4)
+
+`runner_v2.lop_edge_preflight()` reads `BENCH_LOP_EDGE_EVIDENCE`, a JSON record
+with `s4_s5_passed`, `lop_head`, `files` (= `metering_file_hashes()`: runner,
+meter, edge, `lop_launch.py` and every `radient_meter/*.py`), and
+`evidence_path` (relative, same directory) whose bytes must hash to
+`evidence_sha256`. A self-attested record, a missing artifact or a path
+escaping the directory is refused.
+
+Where it lives: `~/workspace/harness-cost-bench/radient-dev/lop-edge-evidence/`
+(`lop-edge-evidence.json` + `LOP-EDGE-EVIDENCE.md`, plus the rig copies under
+`rig/` and the judge `build_record.py`). Regenerate after any change to a
+metering file (zero-paid, fake credentials, loopback fixtures, ≥17 GiB free):
+
+```sh
+~/workspace/harness-cost-bench/radient-dev/lop-edge-evidence/regenerate.sh [<repo>]
+export BENCH_LOP_EDGE_EVIDENCE=~/workspace/harness-cost-bench/radient-dev/lop-edge-evidence/lop-edge-evidence.json
+```
+
+`build_record.py` derives every verdict from run artifacts and sets
+`s4_s5_passed` only if all rows pass. Issued 2026-11-03 for this commit's
+closure: `LOP-EDGE-EVIDENCE.md` sha256 `bb939510…035e`, overall PASS — native,
+**public-full** (LoP fence = edge + MCP port; `tools/list` reached all 9
+public MCP servers under the sandbox; oracle 7 = edge 7), fork, tool-bypass
+(EPERM) clean; failover/529, opus fallback, off-card title tier, typesafe
+host, diagnostics-400, decisions without cost, decisions 401 all voided; no
+proxy / wrong nonce / direct egress 0 fixture hits; direct TLS with the
+run-only CA refused by httpx and requests.
 
 ## Provenance of vendored code
 

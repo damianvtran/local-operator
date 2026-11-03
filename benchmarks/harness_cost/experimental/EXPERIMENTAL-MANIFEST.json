@@ -9,8 +9,8 @@
       "sha256": "e6eaa4ae8e2122e938d48b3355881be6e14939125f429dff5775e7315eadf8cc"
     },
     "LOP-EDGE-VERIFICATION.md": {
-      "bytes": 19631,
-      "sha256": "40963569fef9b0b8291ae25a686b43fe566e05a5cedd60d3c66f7f6b74f6129d"
+      "bytes": 21327,
+      "sha256": "7cd528f32bf3060e2221fc033a353762763850288895b1526d873348f7c7c1a5"
     },
     "PREREGISTRATION.md": {
       "bytes": 43078,
@@ -21,8 +21,8 @@
       "sha256": "92430cd11b80ea2577f87c1cb1bf81a698d9d9a2feeb5610c793a1bf91e2ba6d"
     },
     "RUNNER_V2.md": {
-      "bytes": 10712,
-      "sha256": "98ee6ce500aacd516e58d5492b496c15f6986c6d3b9a7659f3225397a600bc57"
+      "bytes": 11016,
+      "sha256": "06c9f7efcbc02afab4d3b8e9132eb3183793cfb0a1b02c0d6f745152cd6c11c8"
     },
     "SOURCE-AUDIT.json": {
       "bytes": 28949,
@@ -205,8 +205,8 @@
       "sha256": "6be4440a9d4d7f955d973f9ea13d6f2fe168b6702ef86bf538264145dd0ef8ac"
     },
     "runner_v2.py": {
-      "bytes": 93956,
-      "sha256": "57cb422b9222409c15acfc732239ca0f6eb9a891e1ee596a067878099f20b850"
+      "bytes": 95695,
+      "sha256": "133a18aa08f8bcbf5af8ea070bf16124498b497353ba439199f11ffd68b6e2ae"
     },
     "sse_stream.py": {
       "bytes": 2190,
@@ -241,8 +241,8 @@
       "sha256": "ae867a1a5f8ee0776332727bcf0ba9b4c1c6a818ea48b81a9ddb1cf304332e84"
     },
     "test_runner_v2.py": {
-      "bytes": 29160,
-      "sha256": "4dbe9189fdb939c00a5c00bf774b0d6537fd48a324e38265ed69aa40cd06e83a"
+      "bytes": 31751,
+      "sha256": "2d3e727c1947c37defc50c9c35639ef86aa58419e2ddb73db55a18b605347bb5"
     },
     "translator_config.example.json": {
       "bytes": 394,

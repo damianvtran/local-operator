@@ -59,6 +59,8 @@ class V2Tests(unittest.TestCase):
             else:
                 source = self.public if name.startswith("public_") else self.real
                 shutil.copy(source / name, self.root / name)
+        shutil.copytree(self.real / "radient_meter", self.root / "radient_meter",
+                        ignore=shutil.ignore_patterns("__pycache__"))
         (self.root / "task-manifest.json").write_text("{}\n")
         (self.root / "model_metadata.json").write_text(
             json.dumps(
@@ -101,15 +103,19 @@ class V2Tests(unittest.TestCase):
         self.assertEqual(args.kwargs["env"]["BENCH_TASK_CACHE"], str(r.TASK_CACHE))
 
     def _evidence(self, **overrides: object) -> Path:
-        """A synthetic S4/S5 evidence record bound to the current file hashes."""
+        """A synthetic S4/S5 record bound to the current hashes and a real artifact."""
+        evidence = self.root / "evidence" / "LOP-EDGE-EVIDENCE.md"
+        evidence.parent.mkdir(exist_ok=True)
+        evidence.write_text("synthetic S4/S5 evidence body\n")
         record = {
             "s4_s5_passed": True,
             "lop_head": r.LOP_HEAD,
             "files": r.metering_file_hashes(),
-            "evidence_sha256": "e" * 64,
+            "evidence_path": evidence.name,
+            "evidence_sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
             **overrides,
         }
-        path = self.root / "lop-edge-evidence.json"
+        path = evidence.parent / "lop-edge-evidence.json"
         path.write_text(json.dumps(record))
         return path
 
@@ -135,11 +141,50 @@ class V2Tests(unittest.TestCase):
                                   self.runtime, {})
 
     def test_evidence_preflight_accepts_exact_hashes(self):
-        with patch.dict(os.environ, {"BENCH_LOP_EDGE_EVIDENCE": str(self._evidence())}):
-            self.assertEqual(r.lop_edge_preflight()["lop_edge_evidence_sha256"], "e" * 64)
-        self.assertEqual(
-            set(r.metering_file_hashes()), {"runner_v2.py", "meter_proxy.py", "lop_edge.py"}
-        )
+        record = self._evidence()
+        expected = json.loads(record.read_text())["evidence_sha256"]
+        with patch.dict(os.environ, {"BENCH_LOP_EDGE_EVIDENCE": str(record)}):
+            self.assertEqual(r.lop_edge_preflight()["lop_edge_evidence_sha256"], expected)
+
+    def test_evidence_hash_scope_covers_launcher_and_classifier(self):
+        # R4 F10: the guard and the classifier settlement are what S4/S5 proved.
+        names = set(r.metering_file_hashes())
+        self.assertTrue({"runner_v2.py", "meter_proxy.py", "lop_edge.py", "lop_launch.py"} <= names)
+        expected = {f"radient_meter/{p.name}" for p in (self.root / "radient_meter").glob("*.py")}
+        self.assertTrue(expected and expected <= names)
+        before = r.metering_file_hashes()
+        (self.root / "radient_meter" / "classifier.py").write_text("# changed\n")
+        self.assertNotEqual(r.metering_file_hashes(), before)
+
+    def test_evidence_record_must_bind_a_real_evidence_file(self):
+        # R4 F11: a self-attested record (zeros digest, no artifact) is refused.
+        cases = {
+            "zeros": self._evidence(evidence_sha256="0" * 64),
+            "missing file": self._evidence(evidence_path="absent.md"),
+            "escapes dir": self._evidence(evidence_path="../outside.md"),
+            "no path": self._evidence(evidence_path=None),
+        }
+        (self.root / "outside.md").write_text("synthetic S4/S5 evidence body\n")
+        for name, record in cases.items():
+            with self.subTest(name), patch.dict(
+                os.environ, {"BENCH_LOP_EDGE_EVIDENCE": str(record)}
+            ):
+                with self.assertRaisesRegex(ValueError, "S4/S5 evidence"):
+                    r.lop_edge_preflight()
+
+    def test_lop_public_full_fence_admits_mcp_like_every_fenced_harness(self):
+        # R4 F12: the ports execute() builds, compared across harnesses.
+        with patch.object(r, "PROXY", "http://127.0.0.1:8787"), patch.object(
+            r, "MCP", "http://127.0.0.1:8790"
+        ):
+            lop = r.fence_ports("local-operator", "public-full", edge_port=4242, bridge_port=0)
+            omp = r.fence_ports("omp", "public-full", edge_port=None, bridge_port=0)
+            self.assertEqual(lop, [4242, 8790])
+            self.assertEqual(omp, [8787, 8790])
+            self.assertEqual(r.fence_ports("local-operator", "clean", edge_port=4242,
+                                           bridge_port=0), [4242])
+            self.assertEqual(r.fence_ports("opencode", "public-full", edge_port=None,
+                                           bridge_port=0), [])
 
     def test_live_prices_must_match_the_reviewed_decisions_contract(self):
         good = json.dumps({"result": {"rates": {"decision_models": {
@@ -202,8 +247,6 @@ class V2Tests(unittest.TestCase):
     def test_start_edge_hands_the_token_over_stdin_only_and_reaps(self):
         import test_adapters  # shares the offline meter configuration helper
 
-        for name in ("radient_meter",):
-            shutil.copytree(self.real / name, self.root / name, dirs_exist_ok=True)
         fake = "s6-fake-radient-bearer-not-a-credential"
         run = self.root / "run"
         run.mkdir()

@@ -21,7 +21,6 @@ import collections
 import hashlib
 import json
 import os
-import re
 import shutil
 import signal
 import socket
@@ -1731,8 +1730,16 @@ def run_ledger_summary(
 
 
 def metering_file_hashes() -> dict[str, str]:
-    """The exact bytes S4/S5 evidence must have been produced against."""
-    return {name: sha(HERE / name) for name in ("runner_v2.py", "meter_proxy.py", "lop_edge.py")}
+    """The exact bytes S4/S5 evidence must have been produced against.
+
+    The whole metering closure, not just the three entry modules: the
+    launcher's edge-environment guard (``lop_launch.py``) and the classifier
+    settlement/price qualification (``radient_meter/*.py``) are exactly what
+    S4/S5 exercised, so a change to any of them must invalidate the record.
+    """
+    names = ["runner_v2.py", "meter_proxy.py", "lop_edge.py", "lop_launch.py"]
+    names += sorted(f"radient_meter/{p.name}" for p in (HERE / "radient_meter").glob("*.py"))
+    return {name: sha(HERE / name) for name in names}
 
 
 def lop_edge_preflight() -> dict[str, object]:
@@ -1746,15 +1753,50 @@ def lop_edge_preflight() -> dict[str, object]:
     raw = os.environ.get("BENCH_LOP_EDGE_EVIDENCE")
     if not raw:
         raise ValueError("No S4/S5 evidence record (BENCH_LOP_EDGE_EVIDENCE): paid LoP refused")
-    record = json.loads(Path(raw).read_text())
+    record_path = Path(raw)
+    record = json.loads(record_path.read_text())
     if (
         record.get("s4_s5_passed") is not True
         or record.get("lop_head") != LOP_HEAD
         or record.get("files") != metering_file_hashes()
-        or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("evidence_sha256", "")))
     ):
         raise ValueError("S4/S5 evidence does not match these runner/meter/edge files")
+    # The record is not self-attesting (R4 F11): it names an evidence artifact
+    # in its own directory, whose bytes must still hash to the recorded digest.
+    rel = record.get("evidence_path")
+    evidence_dir = record_path.resolve().parent
+    artifact = (evidence_dir / rel).resolve() if isinstance(rel, str) and rel else None
+    if (
+        artifact is None
+        or not artifact.is_relative_to(evidence_dir)
+        or not artifact.is_file()
+        or sha(artifact) != record.get("evidence_sha256")
+    ):
+        raise ValueError("S4/S5 evidence file is missing or does not match its recorded sha256")
     return {"lop_edge_evidence_sha256": record["evidence_sha256"]}
+
+
+def fence_ports(harness: str, arm: str, edge_port: int | None, bridge_port: int) -> list[int]:
+    """Loopback ports a fenced harness may reach; ``[]`` for an unfenced one.
+
+    Every fenced harness gets its single model endpoint plus, on public-full,
+    the bench MCP server -- LoP included (its edge is its model endpoint, and
+    its MCP config points straight at the loopback MCP server, which the
+    edge's NO_PROXY exempts). One rule for all, so no harness loses its tools.
+    """
+    if harness not in SANDBOXED_HARNESSES:
+        return []
+    if harness == "local-operator":
+        if edge_port is None:
+            raise ValueError("LoP is fenced only through its own edge port")
+        model_port = edge_port
+    elif harness == "codex":
+        # Codex's only model endpoint is its loopback tool_search bridge
+        # (the bridge itself runs outside the fence and reaches LiteLLM).
+        model_port = bridge_port
+    else:
+        model_port = _loopback_port(PROXY)
+    return [model_port] + ([_loopback_port(MCP)] if arm == "public-full" else [])
 
 
 PRICES_URL = "https://api.radienthq.com/v1/prices"
@@ -1942,7 +1984,7 @@ def execute(
         argv, env = configure(
             harness, run_id, build_prompt(task), home, arm == "public-full", runtime, port
         )
-        sandbox_ports: list[int] = []
+        edge_port: int | None = None
         if harness == "local-operator":
             # The real bearer belongs to the edge process only (S3): resolved
             # here, handed over on the edge's stdin, never put in argv, the
@@ -1955,12 +1997,8 @@ def execute(
             if not isinstance(child, dict) or not isinstance(port_value, int):
                 raise ValueError("lop_edge announced a malformed child environment")
             env.update({str(k): str(v) for k, v in child.items()})
-            sandbox_ports = [port_value]
-        elif harness in SANDBOXED_HARNESSES:
-            # Codex's only model endpoint is its loopback tool_search bridge
-            # (the bridge itself runs outside the fence and reaches LiteLLM).
-            model_port = port if harness == "codex" else _loopback_port(PROXY)
-            sandbox_ports = [model_port] + ([_loopback_port(MCP)] if arm == "public-full" else [])
+            edge_port = port_value
+        sandbox_ports = fence_ports(harness, arm, edge_port, port)
         if harness == "codex":
             key = os.environ.get("BENCH_LITELLM_KEY")
             if not key:
