@@ -98,5 +98,10 @@
     "No inserted bidi controls; runtime paint boundary owns isolation",
     "ICU placeholders preserved exactly; no plural forms added"
   ],
-  "audit_required": "Independent non-translator audit for each of seven non-English locales over entire wire.skill_adoption and wire.errors.desktop namespaces at these exact English hashes; append only real auditor ledger rows. High-visibility confirmation/refusal copy also needs second independent audit per guide://i18n."
+  "audit_required": "Independent non-translator audit for each of seven non-English locales over entire wire.skill_adoption and wire.errors.desktop namespaces at these exact English hashes; append only real auditor ledger rows. High-visibility confirmation/refusal copy also needs second independent audit per guide://i18n.",
+  "model_identity_correction": {
+    "actual_translator_model": "openai/gpt-6.1-sol",
+    "evidence": "i18n/audits/skill-adoption-model-correction-5ad13f38d6e6.json",
+    "applies_to": "All initial and resumed translation/delta work by this translator session. Historical requested/startup/fallback labels are retained; no Anthropic serving record was observed."
+  }
 }

@@ -15,7 +15,7 @@ import posixpath
 import re
 import stat
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, Sequence
 
@@ -347,6 +347,87 @@ def _kept(result: MergeResult) -> dict[str, list[str]]:
     return out
 
 
+def _prose_path(path: str, mode: int = 0) -> bool:
+    """A relocation must never promote an original data/executable payload to prose."""
+    return (
+        path.lower().endswith((".md", ".markdown"))
+        and not path.startswith(("scripts/", "assets/"))
+        and not mode & 0o111
+    )
+
+
+def _equivalent(source: str, local: str, target: str, remote: str, mode: int = 0) -> bool:
+    if not (_prose_path(source, mode) and _prose_path(target)):
+        return local == remote
+    return _norm(local) == _norm(remote)
+
+
+def _code_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """Conservatively isolate raw Markdown code before any prose normalization.
+
+    Outer blocks own their entire raw slice, including delimiters/newlines. An
+    unclosed delimiter protects the remainder rather than guessing it is prose.
+    """
+    spans: list[tuple[int, int]] = []
+
+    def add(start: int, end: int) -> None:
+        overlapping = [(begin, stop) for begin, stop in spans if start < stop and end > begin]
+        for begin, stop in overlapping:
+            spans.remove((begin, stop))
+            start, end = min(start, begin), max(end, stop)
+        spans.append((start, end))
+
+    for opening in re.finditer(r"(?m)^ {0,3}(`{3,}|~{3,})[^\n]*(?:\n|$)", text):
+        if any(start <= opening.start() < end for start, end in spans):
+            continue
+        fence = opening[1]
+        closing = re.search(
+            r"(?m)^ {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*(?:\r?\n|$)",
+            text[opening.end() :],
+        )
+        add(opening.start(), opening.end() + closing.end() if closing else len(text))
+    for opening in re.finditer(r"<(pre|code|script|style|textarea)\b[^>]*>", text, re.I):
+        closing = re.search(r"</" + opening[1] + r"\s*>", text[opening.end() :], re.I)
+        add(opening.start(), opening.end() + closing.end() if closing else len(text))
+    for block in re.finditer(
+        r"(?m)^(?: {4}|\t)[^\n]*(?:\n(?:(?: {4}|\t)[^\n]*|[ \t]*(?=\n)))*(?:\n|$)",
+        text,
+    ):
+        add(block.start(), block.end())
+    cursor = 0
+    for opening in re.finditer(r"`+", text):
+        if opening.start() < cursor or any(a <= opening.start() < b for a, b in spans):
+            continue
+        closing = re.search(r"(?<!`)" + re.escape(opening[0]) + r"(?!`)", text[opening.end() :])
+        cursor = opening.end() + closing.end() if closing else len(text)
+        add(opening.start(), cursor)
+    return tuple(sorted(spans))
+
+
+def _shield_code(text: str) -> tuple[str, dict[str, str]]:
+    payloads: dict[str, str] = {}
+    parts: list[str] = []
+    cursor = 0
+    for start, end in _code_spans(text):
+        raw = text[start:end]
+        token = "LOP_PROTECTED_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        if token in text:
+            raise AdoptionError("adoption-needs-choice", "protected code token is ambiguous")
+        payloads[token] = raw
+        # Keep block boundaries visible to the segmenter, without exposing code.
+        parts.extend((text[cursor:start], token + ("\n" if raw.endswith("\n") else "")))
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts), payloads
+
+
+def _restore_code(text: str, payloads: Mapping[str, str]) -> str:
+    for token, raw in payloads.items():
+        text = text.replace(token + ("\n" if raw.endswith("\n") else ""), raw)
+        text = text.replace(token, raw)  # segmenters may strip the final prose newline
+    return text
+
+
 def _norm(text: str) -> str:
     """Comparison form: the engine's normalization plus soft line-wrap folding.
 
@@ -356,6 +437,7 @@ def _norm(text: str) -> str:
     while list items, tables, fences and headings keep their line structure.
     """
 
+    text, _ = _shield_code(text)
     out: list[str] = []
     paragraph: list[str] = []
     in_fence = False
@@ -428,7 +510,8 @@ def _rewrite_relocated_refs(
             relative = "./" + relative
         return relative
 
-    return pattern.sub(rewrite, text)
+    masked, payloads = _shield_code(text)
+    return _restore_code(pattern.sub(rewrite, masked), payloads)
 
 
 def _hub_text_files(remote: SkillDocument) -> dict[str, str]:
@@ -436,7 +519,12 @@ def _hub_text_files(remote: SkillDocument) -> dict[str, str]:
 
 
 def _relocation_target(
-    local_path: str, entry_text: str, remote_files: Mapping[str, str], taken: set[str]
+    local_path: str,
+    entry_text: str,
+    remote_files: Mapping[str, str],
+    taken: set[str],
+    *,
+    mode: int = 0,
 ) -> str | None:
     """Where a root-level local file lands in a hub-shaped tree, or ``None``.
 
@@ -455,13 +543,13 @@ def _relocation_target(
         candidate = prefix + name
         if candidate in remote_files and candidate not in taken:
             return candidate
-    wanted = _norm(entry_text)
     for path, content in remote_files.items():
         if (
             path not in taken
             and path != "SKILL.md"
-            and path.endswith((".md", ".markdown"))
-            and _norm(content) == wanted
+            and _prose_path(local_path, mode)
+            and _prose_path(path)
+            and _equivalent(local_path, entry_text, path, content)
         ):
             return path
     candidate = "references/" + name
@@ -499,14 +587,31 @@ def _merge_text(
 ) -> MergeResult:
     """Two-way merge of one file with NO common ancestor (there is no baseline)."""
 
-    return merge_field(
-        FieldInput(field=path, kind="markdown", base=None, local=local, remote=remote),
+    local_codes = tuple(local[a:b] for a, b in _code_spans(local))
+    remote_codes = tuple(remote[a:b] for a, b in _code_spans(remote))
+    if local_codes != remote_codes:
+        return MergeResult(path, "refused", local, refusal="protected code differs")
+    masked_local, payloads = _shield_code(local)
+    masked_remote, _ = _shield_code(remote)
+    result = merge_field(
+        FieldInput(
+            field=path, kind="markdown", base=None, local=masked_local, remote=masked_remote
+        ),
         MergeOptions(
             allow_llm=allow_llm,
             acknowledge_unknown_baseline=True,
             resolver=resolver if allow_llm else None,
         ),
     )
+    if result.outcome not in ("merged", "unchanged"):
+        return replace(result, merged=local)
+    proposed = str(result.merged)
+    if any(proposed.count(token) != masked_local.count(token) for token in payloads):
+        return replace(result, outcome="refused", merged=local, refusal="protected code missing")
+    restored = _restore_code(proposed, payloads)
+    if tuple(restored[a:b] for a, b in _code_spans(restored)) != local_codes:
+        return replace(result, outcome="refused", merged=local, refusal="protected code changed")
+    return replace(result, merged=restored)
 
 
 def build_proposal(
@@ -595,6 +700,7 @@ def build_proposal(
                 raw,
                 remote_files,
                 set(carried) | set(moves.values()) | set(local_by_path),
+                mode=entry.mode,
             )
             if target is not None and target not in local_by_path:
                 moves[entry.path] = target
@@ -639,7 +745,7 @@ def build_proposal(
                         destination_path=target,
                         known_paths=set(local_by_path),
                     )
-                    if target.endswith((".md", ".markdown"))
+                    if _prose_path(src, local_by_path[src].mode) and _prose_path(target)
                     else text
                 ),
             )
@@ -674,9 +780,27 @@ def build_proposal(
         relocated_from = source if source is not None and source != path else None
         if path == "SKILL.md":
             assert local_text is not None and remote_text is not None
-            plan = _plan_skill_md(
-                local_text, remote_text, resolver=resolver, allow_llm=allow_llm, strategy=strategy
-            )
+            if (
+                strategy == "merge"
+                and source
+                and local_by_path[source].mode & 0o111
+                and local_text != remote_text
+            ):
+                plan = FilePlan(
+                    path,
+                    "needs-choice",
+                    local=local_text,
+                    remote=remote_text,
+                    reason="executable source differs",
+                )
+            else:
+                plan = _plan_skill_md(
+                    local_text,
+                    remote_text,
+                    resolver=resolver,
+                    allow_llm=allow_llm,
+                    strategy=strategy,
+                )
         elif local_text is None:
             plan = FilePlan(path, "hub-only", remote=remote_text, proposed=remote_text)
         elif remote_text is None:
@@ -703,10 +827,12 @@ def build_proposal(
                     local=local_text,
                     reason="not in the hub version; kept in the snapshot",
                 )
-        elif (
-            local_text == remote_text
-            if not path.endswith((".md", ".markdown")) or path.startswith(("scripts/", "assets/"))
-            else _norm(local_text) == _norm(remote_text)
+        elif _equivalent(
+            source or path,
+            local_text,
+            path,
+            remote_text,
+            local_by_path[source].mode if source else 0,
         ):
             plan = FilePlan(
                 path,
@@ -734,7 +860,9 @@ def build_proposal(
                 remote=remote_text,
                 proposed=remote_text,
             )
-        elif path.startswith(("assets/", "scripts/")) or not path.endswith((".md", ".markdown")):
+        elif not _prose_path(
+            source or path, local_by_path[source].mode if source else 0
+        ) or not _prose_path(path):
             # Assets are payloads, even when UTF-8. The resolver must never see
             # or invent their bytes; differing versions require an explicit choice.
             plan = FilePlan(
@@ -769,7 +897,7 @@ def build_proposal(
                     local_path=relocated_from,
                     local=local_text,
                     remote=remote_text,
-                    proposed=str(result.merged).rstrip("\n") + "\n",
+                    proposed=str(result.merged),
                     result=result,
                 )
             else:
@@ -948,7 +1076,7 @@ def _plan_skill_md(
     if result.outcome in ("merged", "unchanged"):
         body = str(result.merged)
         lead = "\n" if remote_body.startswith("\n") else ""
-        proposed = remote_head + lead + body + ("\n" if not body.endswith("\n") else "")
+        proposed = remote_head + lead + body
         return FilePlan(
             "SKILL.md",
             "merged",
@@ -1042,6 +1170,7 @@ def local_projection(tree: LocalTree, *, carried_paths: Sequence[str] = ()) -> S
             raise AdoptionError("adoption-needs-choice", "local relocation collides")
         files[target] = text
     inverse = {target: source for source, target in moves.items()}
+    modes = {entry.path: entry.mode for entry in tree.entries}
     files = {
         path: (
             _rewrite_relocated_refs(
@@ -1051,7 +1180,10 @@ def local_projection(tree: LocalTree, *, carried_paths: Sequence[str] = ()) -> S
                 destination_path=path,
                 known_paths=original,
             )
-            if path.endswith((".md", ".markdown"))
+            if (
+                _prose_path(inverse.get(path, path), modes[inverse.get(path, path)])
+                and _prose_path(path)
+            )
             else text
         )
         for path, text in files.items()

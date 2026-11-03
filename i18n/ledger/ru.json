@@ -2876,6 +2876,50 @@
       },
       "status": "passed",
       "note": "D3 independent delta audit: only wire.skill_adoption.preview_required changed; prior full audit retained with exact HEAD hash compatibility. Same ID/scope/options, preview/review/receipt confirmation verified. Target SHA-256 bef9ef969dcd67bf056d6071b4c66c8837167822ff2e3f74b8c8cd3de84b5608; context SHA-256 d24fe484fa7ce9758efc7135b95f2c8c0527a90cde9824b0c82f153779dfacef. Evidence: i18n/audits/skill-adoption-d3-5ad13f38d6e6.json. Unchanged translations retain initial openai/gpt-6.1-sol authorship; changed key translator anthropic/claude-opus-5-5. No aggregate generation or rendered/real-path QA claimed."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "e809a3221b21b41951ef45200378d59f9a66dcda81c45c4b81119c1cbba360be",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "Actual served model verified from transcript metadata; historical startup/fallback claims retained in superseded row.",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Metadata-only correction: prior runtime-label error; actual auditor and translator openai/gpt-6.1-sol. Same approved source/target and verdict; no re-audit or new independent round. Target SHA-256 bef9ef969dcd67bf056d6071b4c66c8837167822ff2e3f74b8c8cd3de84b5608. Evidence: i18n/audits/skill-adoption-model-correction-5ad13f38d6e6.json. Prior row retains historical labels."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "Actual served model verified from transcript metadata; historical startup/fallback claims retained in superseded row.",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Metadata-only correction: prior runtime-label error; actual auditor and translator openai/gpt-6.1-sol. Same approved source/target and verdict; no re-audit or new independent round. Target SHA-256 88407453361d251adfce2056dca3b3952e0172ede5bd4a81b57d63834df971c4. Evidence: i18n/audits/skill-adoption-model-correction-5ad13f38d6e6.json. Prior row retains historical labels."
     }
   ]
 }

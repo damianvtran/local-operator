@@ -81,5 +81,11 @@
   "ledger_rows_appended": 14,
   "aggregate_regenerated": false,
   "second_independent_audit": "Still required for high-visibility confirmation/refusal copy; this resumed session is the first auditor, not a second auditor.",
-  "provenance_target_hash_note": "Current target hashes independently measured after remediation. Initial translator provenance target hashes may describe pre-remediation bytes; this report does not claim those old pins match current targets."
+  "provenance_target_hash_note": "Current target hashes independently measured after remediation. Initial translator provenance target hashes may describe pre-remediation bytes; this report does not claim those old pins match current targets.",
+  "model_identity_correction": {
+    "evidence": "i18n/audits/skill-adoption-model-correction-5ad13f38d6e6.json",
+    "actual_auditor_model": "openai/gpt-6.1-sol",
+    "actual_translator_model": "openai/gpt-6.1-sol",
+    "historical_label_policy": "Original model/fallback/startup labels above are retained as historical claims, not actual serving identities. This field supersedes conflicting identity claims only; hashes, findings and verdict unchanged."
+  }
 }

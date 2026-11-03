@@ -285,5 +285,11 @@
   "verdict": "changes_requested",
   "terminal": false,
   "ledger_updates": "None: overall audit not clean. No false passed rows or aggregate regeneration.",
-  "remaining_gate": "Batch remediation parent owns catalogue edits. Second independent audit of high-visibility safety/confirmation copy remains required."
+  "remaining_gate": "Batch remediation parent owns catalogue edits. Second independent audit of high-visibility safety/confirmation copy remains required.",
+  "model_identity_correction": {
+    "evidence": "i18n/audits/skill-adoption-model-correction-5ad13f38d6e6.json",
+    "actual_auditor_model": "openai/gpt-6.1-sol",
+    "actual_translator_model": "openai/gpt-6.1-sol",
+    "historical_label_policy": "Original model/fallback/startup labels above are retained as historical claims, not actual serving identities. This field supersedes conflicting identity claims only; hashes, findings and verdict unchanged."
+  }
 }
