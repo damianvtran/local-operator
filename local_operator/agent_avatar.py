@@ -356,13 +356,16 @@ def parse_size(raw: Optional[str]) -> Optional[int]:
     """The ``size`` query as one of :data:`DERIVATIVE_SIZES`, ``None`` when absent.
 
     ONE strict parser for the core route and the phone relay, so both answer the
-    same input the same way: plain decimal digits only (``64.0``/``+64``/``0x40``
-    are refused, where pydantic's lax int would accept some), else ``ValueError``.
+    same input the same way: canonical decimal digits only (``064``/``64.0``/
+    ``+64``/``0x40`` are refused, where pydantic's lax int would accept some),
+    else ``ValueError``. Canonical because two spellings of one size would be two
+    URL cache keys for one body.
     """
     if raw is None:
         return None
-    if raw.isascii() and raw.isdigit() and int(raw) in DERIVATIVE_SIZES:
-        return int(raw)
+    if raw.isascii() and raw.isdigit() and str(int(raw)) == raw:
+        if int(raw) in DERIVATIVE_SIZES:
+            return int(raw)
     raise ValueError(f"unsupported avatar size {raw!r}")
 
 
@@ -372,9 +375,17 @@ def derivative_name(sha256: str, size: int, mime: str) -> str:
 
 
 def _is_derivative_name(name: str) -> bool:
+    """A cached variant, or its staging temp (``<variant>.<pid>.<hex>.tmp``).
+
+    The temp counts so a SIGKILL between write and rename leaves no orphan the
+    sweep can never reach. The PICTURE's own staging temp
+    (``.avatar.png.<pid>.<hex>.tmp``) never matches: its third part is the
+    extension, not a size, and it is not this cache's to delete.
+    """
     parts = name.split(".")
-    # ["", "avatar", <sha12>, <size>, <ext>] -- anything else (the staging temps
-    # included) is not ours to sweep here.
+    if len(parts) == 8 and parts[7] == "tmp":
+        parts = parts[:5]
+    # ["", "avatar", <sha12>, <size>, <ext>]
     return (
         len(parts) == 5
         and parts[0] == ""
@@ -413,11 +424,23 @@ def sized_tag(sha256: str, size: Optional[int]) -> str:
     return sha256 if size is None else f"{sha256}-{size}"
 
 
-def _read_cached_derivative(path: Path, size: int) -> Optional[bytes]:
-    """The cached variant's bytes if it is a regular file of the right edge."""
+def _read_cached_derivative(path: Path, size: int, mime: str) -> Optional[bytes]:
+    """The cached variant's bytes if it is a regular file of the right edge and type.
+
+    ``lstat`` BEFORE the open, and ``O_NONBLOCK`` on it: the agent can write its
+    own directory, and a FIFO planted at this name would otherwise block the
+    open forever (no writer), pinning one executor thread per request until the
+    pool is gone. A non-regular file is a cache miss; the rebuild's atomic
+    rename then replaces it.
+    """
     from local_operator.media import sniff_image
 
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+    except (OSError, ValueError):
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(path, flags)
         with os.fdopen(fd, "rb") as handle:
@@ -428,8 +451,9 @@ def _read_cached_derivative(path: Path, size: int) -> Optional[bytes]:
         return None
     info = sniff_image(data) if len(data) <= STORED_MAX_BYTES else None
     # The agent can write its own directory, so a cache file is checked for the
-    # shape we wrote; a mismatch is rebuilt rather than served.
-    if info is None or (info.width, info.height) != (size, size):
+    # shape we wrote -- edge AND type, since it is served under ``mime`` -- and a
+    # mismatch is rebuilt rather than served.
+    if info is None or info.mime_type != mime or (info.width, info.height) != (size, size):
         return None
     return data
 
@@ -475,7 +499,7 @@ def _sized(
         raise ValueError(f"unsupported avatar size {size!r}")
     tag = sized_tag(sha, size)
     path = agent_dir / derivative_name(sha, size, mime)
-    cached = _read_cached_derivative(path, size)
+    cached = _read_cached_derivative(path, size, mime)
     if cached is not None:
         return cached, mime, tag
     encoded = _encode_derivative(data, mime, size)
