@@ -197,6 +197,27 @@ sections, prompts and paid holds are AST-identical. Actual Linux fallback
 execution remains a separate hosted-CI result, not inferred from the local
 simulated failure test.
 
+## Bounded-copy review remediation
+
+The focused copy review found two real cases the 98-test suite had missed:
+`os.fwalk` ignored permission errors and omitted a source subtree, and replacing
+the destination with a symlink could redirect pathname-based writes/mode changes.
+Both were independently reproduced before the unified fix.
+
+Both source traversals now raise on errors. Every destination content, directory,
+metadata and cleanup operation uses owned descriptors/no-follow semantics;
+success also validates the destination binding. Native CoW uses an isolated
+stdlib `fchdir`/`exec` carrier rather than a threaded-host `preexec_fn` or a
+replaceable destination pathname. Cleanup identifies the owned inode, not a
+replacement symlink. Real disposable-I/O controls verify permission-error aborts
+in both passes, no outside file creation or mode change during replacement, and
+owned-partial cleanup. A native-CoW carrier replacement control also passes.
+
+The local offline suite is now **101 tests** (16 core, 63 experimental, 22 coding).
+All other runner sections are AST-identical. These are source-safety/portability
+checks, not model calls or native-harness qualification. Actual hosted Linux
+execution remains a separate CI result.
+
 ## Remaining gates — not ready
 
 - Frozen/amended preregistration and feasible source selection; original 60-task

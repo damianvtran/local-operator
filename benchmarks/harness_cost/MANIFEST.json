@@ -50,7 +50,7 @@
     {
       "path": "experimental/EXPERIMENTAL-MANIFEST.json",
       "bytes": 8771,
-      "sha256": "b192f8b56ec17f138abd32f10ecde5640226be4ec90625c24a2871c8dc7dbd3e"
+      "sha256": "4479f307b21d50d28200c15557bd0e7cec32be3ea51a9813eedc798e2d504d70"
     },
     {
       "path": "experimental/PREREGISTRATION.md",
@@ -69,8 +69,8 @@
     },
     {
       "path": "experimental/SOURCE-AUDIT.json",
-      "bytes": 28710,
-      "sha256": "c60dc6fff1c9e25632aa3da4cfc13fa875bbf47c16e98217f7066828c00c4799"
+      "bytes": 28949,
+      "sha256": "7d730b29ee6b47dc8aa349202a1509f60a8afcebcc1c12e2324412999a9aa5d0"
     },
     {
       "path": "experimental/TASKS.md",
@@ -89,8 +89,8 @@
     },
     {
       "path": "experimental/VERIFICATION.md",
-      "bytes": 13583,
-      "sha256": "aabc3efd738ea89f70edc15a9fa6f914206cbd71991666e1d91fd7ff832a2597"
+      "bytes": 14825,
+      "sha256": "530d6a9a54a90c166943851991332fd2add95dcbb7869dc80aadb654288b3ce4"
     },
     {
       "path": "experimental/cache_forwarder.py",
@@ -279,8 +279,8 @@
     },
     {
       "path": "experimental/runner_v2.py",
-      "bytes": 78657,
-      "sha256": "7434dd9b8e3c9b3d0522d0af826a95fe8661df6f0aaad4653e538e669ab01a9e"
+      "bytes": 82762,
+      "sha256": "2d65f11553bb92e061644b57ecab505ddf7fda75f4ec71ecf376e063a9292949"
     },
     {
       "path": "experimental/sse_stream.py",
@@ -314,8 +314,8 @@
     },
     {
       "path": "experimental/test_clone_path.py",
-      "bytes": 10991,
-      "sha256": "af17c73026d09587bc59d042ea3c919c29590c2e594b598397c065ee51f976f4"
+      "bytes": 15351,
+      "sha256": "43edde0d35b83e19d6f830e4859b0199cec7e08be0f06fc07c67edc6fcfe52de"
     },
     {
       "path": "experimental/test_runner_v2.py",

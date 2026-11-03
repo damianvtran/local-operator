@@ -31,7 +31,7 @@ class ClonePathTests(unittest.TestCase):
     def unavailable(self, args, **kwargs):
         # GNU cp can create directories/empty files before returning ENOTSUP.
         self.assertIn("--reflink=always", args)
-        destination = Path(args[-1])
+        destination = self.destination
         self.assertTrue(destination.is_dir())
         (destination / "partial-cow-output").write_bytes(b"partial")
         raise subprocess.CalledProcessError(1, args, stderr=b"Operation not supported")
@@ -56,7 +56,7 @@ class ClonePathTests(unittest.TestCase):
 
     def test_successful_cow_is_preferred_without_ordinary_copy(self):
         def clone(args, **kwargs):
-            (Path(args[-1]) / "cow-marker").write_bytes(b"clone")
+            (self.destination / "cow-marker").write_bytes(b"clone")
             return subprocess.CompletedProcess(args, 0)
 
         with (
@@ -176,7 +176,7 @@ class ClonePathTests(unittest.TestCase):
         sentinel.write_bytes(b"untouched")
 
         def readonly_partial(args, **kwargs):
-            destination = Path(args[-1])
+            destination = self.destination
             child = destination / "readonly"
             child.mkdir()
             (child / "link").symlink_to(user_directory, target_is_directory=True)
@@ -213,6 +213,94 @@ class ClonePathTests(unittest.TestCase):
                 r.clone_path(self.source, self.destination)
         self.assertTrue(self.destination.is_symlink())
         self.assertEqual(sentinel.read_bytes(), b"untouched")
+
+    def test_unreadable_source_directory_fails_closed_in_both_walks(self):
+        unreadable = self.source / "unreadable"
+        unreadable.mkdir()
+        secret = unreadable / "must-not-be-omitted.txt"
+        secret.write_bytes(b"Real public fixture bytes, not an empty subtree")
+        original_walk = r.os.fwalk
+
+        for pass_number in (1, 2):
+            with self.subTest(pass_number=pass_number):
+                calls = 0
+
+                def unreadable_walk(*args, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    if calls == pass_number:
+                        unreadable.chmod(0)
+                    yield from original_walk(*args, **kwargs)
+
+                try:
+                    with patch.object(r.os, "fwalk", side_effect=unreadable_walk):
+                        with self.assertRaises(PermissionError):
+                            self.linux_copy()
+                    self.assertFalse(self.destination.exists())
+                finally:
+                    # Restore the real chmod000 fixture even when a regression
+                    # unexpectedly reports success, so fixture cleanup is safe.
+                    unreadable.chmod(0o700)
+                self.assertEqual(
+                    secret.read_bytes(), b"Real public fixture bytes, not an empty subtree"
+                )
+
+    def test_root_swap_after_source_open_never_writes_or_chmods_outside(self):
+        # Same timing as R6-F2: real source open succeeds, then the owned root
+        # is moved aside and its public pathname becomes an outside symlink.
+        # Traversal, source read, destination writes/mode application are real.
+        flat = self.source / "profile.txt"
+        flat.write_bytes(b"public bytes")
+        outside = self.root / "outside"
+        outside.mkdir(mode=0o700)
+        # Mirror existing source subdirectories so the old pathname-based copy
+        # can demonstrably reach its write/chmod rather than fail on a missing
+        # directory before exercising the reported race.
+        (outside / ".agents/skills/public").mkdir(parents=True)
+        moved = self.root / "moved-during-copy"
+        original_open = r.os.open
+        swapped = False
+
+        def swap_after_source_open(path, flags, *args, **kwargs):
+            nonlocal swapped
+            fd = original_open(path, flags, *args, **kwargs)
+            if path == "profile.txt" and flags & os.O_NONBLOCK and not swapped:
+                swapped = True
+                self.destination.rename(moved)
+                self.destination.symlink_to(outside, target_is_directory=True)
+            return fd
+
+        with patch.object(r.os, "open", side_effect=swap_after_source_open):
+            with self.assertRaisesRegex(ValueError, "destination changed"):
+                self.linux_copy()
+        self.assertTrue(swapped)
+        self.assertTrue(self.destination.is_symlink())
+        self.assertFalse((outside / "profile.txt").exists())
+        self.assertFalse((outside / self.skill.relative_to(self.source)).exists())
+        self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o700)
+        self.assertFalse(moved.exists())  # only the inode we created was cleaned
+        self.assertEqual(flat.read_bytes(), b"public bytes")
+
+    def test_native_clone_carrier_uses_owned_cwd_and_checks_success_binding(self):
+        # Exercise the real carrier/native cp too: replacing its destination
+        # pathname must not redirect CoW writes before the final identity check.
+        outside = self.root / "outside"
+        outside.mkdir(mode=0o700)
+        moved = self.root / "moved-before-native-clone"
+        original_run = r.subprocess.run
+
+        def replace_before_native_clone(args, **kwargs):
+            self.destination.rename(moved)
+            self.destination.symlink_to(outside, target_is_directory=True)
+            return original_run(args, **kwargs)
+
+        with patch.object(r.subprocess, "run", side_effect=replace_before_native_clone):
+            with self.assertRaisesRegex(ValueError, "destination changed"):
+                r.clone_path(self.source, self.destination)
+        self.assertTrue(self.destination.is_symlink())
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o700)
+        self.assertFalse(moved.exists())
 
     def test_cross_filesystem_policy_still_refuses_before_copy(self):
         original = r.Path.stat
