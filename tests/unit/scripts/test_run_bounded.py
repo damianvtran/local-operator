@@ -702,7 +702,7 @@ if child == 0:
     null = os.open(os.devnull, os.O_RDWR)
     for fd in (0, 1, 2):
         os.dup2(null, fd)
-    buf = bytearray(400 * 1024 * 1024)
+    buf = bytearray(240 * 1024 * 1024)
     for i in range(0, len(buf), 4096):
         buf[i] = 1
     open(pidfile, "w").write(str(os.getpid()))
@@ -715,7 +715,7 @@ time.sleep(60)
 @pytest.mark.skipif(not hasattr(os, "setsid"), reason="POSIX only")
 def test_negative_control_an_over_budget_setsid_descendant_is_stopped(tmp_path):
     """The measured miss, as a real process tree: a grandchild that left the
-    group by setsid() holds 400 MB under a 200 MiB grant. Before the descendant
+    group by setsid() holds 240 MB under a 120 MiB grant. Before the descendant
     census this ran to its own exit with status 0 (repro: 600 MB under 300 MiB,
     rc=0 after 12 s); it must now end 137 with the grandchild dead."""
     pidfile = tmp_path / "escaped.pid"
@@ -729,7 +729,7 @@ def test_negative_control_an_over_budget_setsid_descendant_is_stopped(tmp_path):
                 str(WRAPPER),
                 *CONTRACT_ARGS,
                 "--memory-mb",
-                "200",
+                "120",
                 "--timeout",
                 "20",
                 "--",
