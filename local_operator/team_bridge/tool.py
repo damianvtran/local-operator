@@ -1071,7 +1071,10 @@ async def _direct_message(
     # (a concurrent post of this endpoint sees the slot).
     try:
         slot = reply_guard.reserve_post(
-            runtime.config_dir, endpoint_id=endpoint_id, conversation_id=conversation_id
+            runtime.config_dir,
+            endpoint_id=endpoint_id,
+            conversation_id=conversation_id,
+            body=text,
         )
     except reply_guard.ReplyGuardUnavailable:
         return _error(
@@ -1092,8 +1095,7 @@ async def _direct_message(
             expected_account_id=runtime.owner.account_id,
         )
     except Exception as failure:
-        # The hub did not take it: the budget slot goes back (the run counter
-        # does not — see ``reply_guard.release``).
+        # The hub did not take it: the slot goes back (``reply_guard.release``).
         reply_guard.release(
             runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=conversation_id
         )
@@ -1889,12 +1891,15 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             if refusal is not None:
                 raise DispatchRefused(refusal)
             # Reserve only when the first physical attempt is authorized.
-            # Releasing an early slot would still consume the run counter;
-            # retries instead revalidate and reuse the same slot/client_ref.
+            # Retries revalidate and reuse the same slot/client_ref, so a
+            # transport retry never counts as a second post (or a duplicate).
             if slot is None:
                 try:
                     reserved = reply_guard.reserve_post(
-                        runtime.config_dir, endpoint_id=endpoint_id, conversation_id=channel_id
+                        runtime.config_dir,
+                        endpoint_id=endpoint_id,
+                        conversation_id=channel_id,
+                        body=params.body,
                     )
                 except reply_guard.ReplyGuardUnavailable:
                     raise DispatchRefused(
@@ -1930,8 +1935,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 )
             return failure.result
         except Exception as failure:
-            # The hub did not take it: the budget slot goes back. (The run
-            # counter does not — see ``reply_guard.release``.)
+            # The hub did not take it: the slot goes back (``reply_guard.release``).
             if slot is not None:
                 reply_guard.release(
                     runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=channel_id

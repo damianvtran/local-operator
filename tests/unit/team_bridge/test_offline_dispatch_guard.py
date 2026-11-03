@@ -73,25 +73,20 @@ async def test_peer_passthrough_does_not_double_invoke_or_serialize_guard():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cooldown", [False, True])
-async def test_offline_tool_preserves_budget_and_cooldown(bound_runtime, cooldown):  # noqa: F811
+@pytest.mark.parametrize("runaway", ["no_new_inbound", "duplicate"])
+async def test_offline_tool_preserves_the_runaway_guard(bound_runtime, runaway):  # noqa: F811
     runtime, _, _ = bound_runtime
     sink = []
     runtime.client = RecordingClient(sink)
-    count = reply_guard.COOLDOWN_AFTER if cooldown else reply_guard.BUDGET_POSTS
-    if cooldown:
-        reply_guard.record_trigger(
-            runtime.config_dir,
-            endpoint_id=runtime.owner.endpoint_id,
-            conversation_id=A,
-            sender_kind="agent",
-            mention=False,
-        )
-    for _ in range(count):
-        out = await execute_bridge(runtime, {"op": "channel_post", "channel_id": A, "body": "ok"})
+    if runaway == "duplicate":
+        bodies, expected = ["same text"], reply_guard.CODE_DUPLICATE
+        denied = "same text"
+    else:
+        bodies = [f"part {i}" for i in range(reply_guard.PER_INBOUND_POSTS)]
+        expected, denied = reply_guard.CODE_NO_NEW_INBOUND, "denied"
+    for body in bodies:
+        out = await execute_bridge(runtime, {"op": "channel_post", "channel_id": A, "body": body})
         assert out["ok"], out
-    refused = await execute_bridge(
-        runtime, {"op": "channel_post", "channel_id": A, "body": "denied"}
-    )
-    assert refused["code"] == (reply_guard.CODE_COOLDOWN if cooldown else reply_guard.CODE_BUDGET)
-    assert len(sink) == count
+    refused = await execute_bridge(runtime, {"op": "channel_post", "channel_id": A, "body": denied})
+    assert refused["code"] == expected
+    assert len(sink) == len(bodies)

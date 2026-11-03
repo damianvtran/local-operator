@@ -144,10 +144,12 @@ def wake_is_addressed(metadata: ConversationCardMetadata) -> bool:
     value (round 6, M1/M2). The card may still derive ``directed: thread`` from a
     thread root on an older server, because that is the reader's best guess and
     the cost of a wrong guess is one wasted paragraph. The reply brake is
-    different: it LIFTS an agent-to-agent cool-down, so a wrong guess hands the
-    agents a fresh run. Without the server's ``thread_follower`` bit an ambient
-    reply in a thread the agent never joined is indistinguishable from a followed
-    one — so on an older server only a mention lifts it.
+    different: it LIFTS an agent-to-agent cool-down (today only an OLDER build's,
+    still honoured while builds are mixed mid-upgrade — the current guard has no
+    cool-down), so a wrong guess hands the agents a fresh run. Without the
+    server's ``thread_follower`` bit an ambient reply in a thread the agent never
+    joined is indistinguishable from a followed one — so on an older server only
+    a mention lifts it.
 
     ``thread_follower is True`` requires the server to say so explicitly; absent
     (``None``) therefore never counts, and neither does ``False``.
@@ -226,8 +228,8 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         # billed on EVERY wake in every conversation.
         if metadata.sender_kind == "agent":
             # Two agents answering each other's ambient chatter is the loop this
-            # whole contract guards against; the server and the reply guard cap
-            # it, and this line keeps it from starting.
+            # whole contract guards against; the server's agent-run caps and the
+            # reply guard bound it, and this line keeps it from starting.
             lines.append("expect: weigh relevance; no_reply unless it asks you directly")
         else:
             lines.append("expect: weigh relevance; no_reply if nothing is needed")
@@ -660,18 +662,18 @@ async def _hand_off_card(
     # The reply guard's trigger record: WHAT woke the agent here (closed sender
     # kind + mention bit, never a body or name). Per message, oldest → newest
     # as the connector admits them, so the newest wins — which is the message
-    # an answer follows. The tool's channel_post reads it to tell an
-    # agent-to-agent turn from a human-prompted one.
+    # an answer follows. The tool's channel_post/dm reads it to tell an
+    # agent-to-agent turn from a human-prompted one, and its time as the
+    # "new inbound" a runaway post would lack.
     record_trigger(
         config_dir,
         endpoint_id=str(getattr(owner, "endpoint_id", "") or ""),
         conversation_id=ref.conversation_id,
         sender_kind=metadata.sender_kind,
         mention=metadata.mention,
-        # The brake's exemption wants the STRICTER predicate (round 6, M2): an
-        # explicit mention, or a reply the server says this endpoint follows.
-        # Deriving it from the thread root would let any human reply in any
-        # thread lift an agent-to-agent cool-down on an older server.
+        # The STRICTER predicate (round 6, M2): an explicit mention, or a reply
+        # the server says this endpoint follows. Recorded as a diagnostic and
+        # to lift an OLDER build's cool-down while builds are mixed mid-upgrade.
         directed=wake_is_addressed(metadata),
     )
     coalescer = active_coalescer()

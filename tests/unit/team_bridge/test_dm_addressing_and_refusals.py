@@ -255,7 +255,11 @@ async def test_dm_to_endpoint_id_opens_the_same_dm_as_the_top_level_field() -> N
     by_field = DmClient([_member()])
     by_to = DmClient([_member()])
     field_outcome = await execute_bridge(_runtime(by_field), _dm(endpoint_id=PEER_ENDPOINT))
-    to_outcome = await execute_bridge(_runtime(by_to), _dm(to={"endpoint_id": PEER_ENDPOINT}))
+    # A distinct body: both runtimes share one guard file and one DM id, and the
+    # reply guard refuses an identical second post as a duplicate.
+    to_outcome = await execute_bridge(
+        _runtime(by_to), _dm(to={"endpoint_id": PEER_ENDPOINT}, body="ping via to")
+    )
 
     assert field_outcome["ok"] is True, field_outcome
     assert to_outcome["ok"] is True, to_outcome
@@ -283,7 +287,9 @@ async def test_dm_to_account_id_and_a_bare_id_reach_the_account_target(to: Any) 
     by_field = DmClient([_member()])
     by_to = DmClient([_member()])
     field_outcome = await execute_bridge(_runtime(by_field), _dm(account_id=PEER))
-    to_outcome = await execute_bridge(_runtime(by_to), _dm(to=to))
+    # A distinct body: both runtimes share one guard file and one DM id, and the
+    # reply guard refuses an identical second post as a duplicate.
+    to_outcome = await execute_bridge(_runtime(by_to), _dm(to=to, body="ping via to"))
 
     assert field_outcome["ok"] is True, field_outcome
     assert to_outcome["ok"] is True, to_outcome
@@ -631,7 +637,7 @@ async def test_a_sibling_op_surfaces_the_same_detail() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_dm_post_spends_the_reply_guard_budget(
+async def test_a_dm_post_is_covered_by_the_reply_guard(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A DM wakes the other agent like any conversation post, so it is budgeted.
@@ -646,17 +652,20 @@ async def test_a_dm_post_spends_the_reply_guard_budget(
     client = DmClient([_member()])
     runtime = _runtime(client, config_dir=tmp_path)
 
-    for _ in range(reply_guard.BUDGET_POSTS):
-        assert (await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT)))["ok"] is True
-    refused = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT))
+    # No inbound message is recorded for this DM, so these are unprompted posts:
+    # a multi-part burst is admitted, a fourth with nothing to answer is not.
+    for index in range(reply_guard.PER_INBOUND_POSTS):
+        sent = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, body=f"part {index}"))
+        assert sent["ok"] is True
+    refused = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, body="part 4"))
 
     assert refused["ok"] is False
-    assert refused["code"] == reply_guard.CODE_BUDGET
-    # The structured answer an agent can act on instead of retrying.
-    assert "no_reply" in refused["next"] and refused["retry_after_s"] > 0
+    assert refused["code"] == reply_guard.CODE_NO_NEW_INBOUND
+    # The structured answer tells the agent to KEEP the draft and when to retry.
+    assert "Keep your draft" in refused["next"] and refused["retry_after_s"] > 0
     # The refused post never reached the hub.
     sends = [call for call in client.calls if call["method"] == "conversation_send"]
-    assert len(sends) == reply_guard.BUDGET_POSTS
+    assert len(sends) == reply_guard.PER_INBOUND_POSTS
 
 
 @pytest.mark.asyncio
@@ -678,16 +687,22 @@ async def test_a_dm_the_hub_refuses_gives_the_budget_back(
 
     client = RefusingSend([_member()])
     runtime = _runtime(client, config_dir=tmp_path)
-    for _ in range(reply_guard.BUDGET_POSTS - 1):
-        assert (await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT)))["ok"] is True
+    for index in range(reply_guard.PER_INBOUND_POSTS - 1):
+        sent = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, body=f"part {index}"))
+        assert sent["ok"] is True
 
     client.fail_next = True
-    failed = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT))
+    failed = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, body="last part"))
     assert failed["ok"] is False and refused_code(failed) == "post_failed"
 
-    # Five posts landed, so the sixth slot is still free.
-    assert (await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT)))["ok"] is True
-    assert (await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT)))["ok"] is False
+    # Two posts landed, so the third slot is still free — and the retry of the
+    # SAME text is not a duplicate, because the failed attempt left no hash.
+    assert (await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, body="last part")))[
+        "ok"
+    ] is True
+    assert (await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, body="extra")))[
+        "ok"
+    ] is False
 
 
 def refused_code(outcome: dict[str, Any]) -> str:
