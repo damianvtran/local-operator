@@ -3970,6 +3970,7 @@ class TeamBridgeClient:
         data: bytes,
         *,
         tenant_id: str | None = None,
+        actor_endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
         mode: Literal["image", "file"] = "image",
@@ -3987,6 +3988,13 @@ class TeamBridgeClient:
         # image upload below stays byte-identical, and ``name`` is a file-only
         # field: an image never carries one.
         if mode == "file":
+            # Agents may not stage files (the hub refuses ``agent_actor``, and
+            # no screening path exists), and ``_upload_file`` has no actor
+            # query: an agent-addressed file call must fail loudly rather than
+            # stage the bytes as the HUMAN (review F1). Spelled like #3335's
+            # agent-image parameter so the two signatures merge as one.
+            if actor_endpoint_id is not None:
+                raise ValueError("an agent endpoint cannot upload files")
             return await self._upload_file(
                 conversation_id,
                 data,

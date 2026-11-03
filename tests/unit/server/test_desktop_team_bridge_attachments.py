@@ -9,6 +9,7 @@ proxy, not the hub's Mongo store or the renderer.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
@@ -778,14 +779,12 @@ def test_file_mode_streams_to_25_mib_and_refuses_one_byte_more_before_the_hub(pr
     assert over.status_code == 413, over.text
     assert over.json()["detail"]["code"] == "attachment_too_large"
 
-    # A CHUNKED sender (no Content-Length) is stopped by the running count,
-    # not by buffering the whole body first. 26 MiB offered in 1 MiB chunks;
-    # the generator records how much the route actually pulled.
-    pulled = {"bytes": 0}
-
+    # A CHUNKED sender (no Content-Length) is refused too. How much the ROUTE
+    # read is asserted in the stub-request test below: over a real socket the
+    # httpx client keeps writing its generator after the 413, so a counter here
+    # measures the sender, not the route (review F3).
     def body():
         for _ in range(26):
-            pulled["bytes"] += 1024 * 1024
             yield b"\0" * (1024 * 1024)
 
     chunked = client.post(_owner(f"{BASE}/attachments?mode=file"), content=body())
@@ -801,6 +800,42 @@ def test_file_mode_streams_to_25_mib_and_refuses_one_byte_more_before_the_hub(pr
     at = client.post(_owner(f"{BASE}/attachments?mode=file"), content=b"\1" * limit)
     assert at.status_code == 201, at.text
     assert len(calls) == 1 and len(calls[-1][2]) == limit
+
+
+@pytest.mark.asyncio
+async def test_bounded_upload_stops_reading_at_the_first_chunk_past_the_cap():
+    """Review F3: the running count stops the read; the body is never drained.
+
+    A stub request with no Content-Length offers 26 x 1 MiB and counts the
+    chunks the route actually pulls: the 26th crosses 25 MiB and is the last
+    one read. The control: exactly 25 MiB is read whole and returned intact.
+    """
+
+    from fastapi import HTTPException
+
+    mib = 1024 * 1024
+
+    class StubRequest:
+        def __init__(self, n: int) -> None:
+            self.headers: dict[str, str] = {}
+            self.n = n
+            self.pulled = 0
+
+        async def stream(self):
+            for _ in range(self.n):
+                self.pulled += 1
+                yield b"\0" * mib
+
+    over = StubRequest(40)
+    with pytest.raises(HTTPException) as refused:
+        await routes._bounded_upload(over, routes._FILE_MAX_BYTES, "file")  # type: ignore[arg-type]
+    assert refused.value.status_code == 413
+    assert over.pulled == 26, over.pulled
+    exact = StubRequest(25)
+    data = await routes._bounded_upload(
+        exact, routes._FILE_MAX_BYTES, "file"  # type: ignore[arg-type]
+    )
+    assert exact.pulled == 25 and len(data) == routes._FILE_MAX_BYTES
 
 
 def test_file_upload_wrong_account_is_refused_before_any_bytes_move(proxy):
@@ -880,25 +915,45 @@ def test_scheduled_create_refuses_files_because_reserve_is_image_only(proxy):
     assert calls == []
 
 
+#: Every logger the no-name claim covers: the wire clients (which log request
+#: lines at DEBUG/INFO) and the app's own tree. Named EXPLICITLY because
+#: ``caplog.at_level(DEBUG)`` with no logger lowers only the ROOT level, and
+#: ``local_operator.logger.quiet_wire_clients`` pins the wire clients to WARNING
+#: in-process; a test that ran earlier on the same xdist worker leaves that pin,
+#: and the capture then sees nothing (CI run 41679932548, shard 3).
+_NAME_LOG_SCOPES = ("httpx", "httpcore", "urllib3", "local_operator", "uvicorn", "")
+
+
 def test_file_display_name_never_reaches_a_log(proxy, caplog):
     """The name is user content: it rides a header, and nothing logs it.
 
-    Captures every logger at DEBUG (httpx/httpcore included, which log request
-    lines) across an upload, and asserts neither the decoded nor the encoded
-    form appears. The control: the hub really received the name.
+    Each covered logger is set to DEBUG for the upload (and restored by
+    ``caplog``), so the capture is independent of what earlier tests did to
+    logger levels. Two controls keep it non-vacuous: the hub really received
+    the name, and a name logged through the same loggers IS seen.
     """
 
     client, _, state = proxy
-    with caplog.at_level(logging.DEBUG):
+    with contextlib.ExitStack() as stack:
+        for name in _NAME_LOG_SCOPES:
+            stack.enter_context(caplog.at_level(logging.DEBUG, logger=name or None))
         response = client.post(
             _owner(f"{BASE}/attachments?mode=file"),
             content=b"%PDF-1.7",
             headers={"x-bridge-file-name": FILE_NAME_WIRE},
         )
-    assert response.status_code == 201
-    assert {k.lower(): v for k, v in state["headers"][-1].items()}[
-        "x-bridge-file-name"
-    ] == FILE_NAME_WIRE
-    assert caplog.records, "control: the capture saw the request at all"
-    assert FILE_NAME not in caplog.text and FILE_NAME_WIRE not in caplog.text
-    assert "rëport" not in caplog.text
+        assert response.status_code == 201
+        assert {k.lower(): v for k, v in state["headers"][-1].items()}[
+            "x-bridge-file-name"
+        ] == FILE_NAME_WIRE
+        # Control 1: the wire client's request line was captured at all.
+        assert any(r.name.startswith("httpx") for r in caplog.records), [
+            r.name for r in caplog.records
+        ]
+        assert FILE_NAME not in caplog.text and FILE_NAME_WIRE not in caplog.text
+        assert "rëport" not in caplog.text
+        # Control 2 (negative): a leak through any covered logger would be seen.
+        for name in _NAME_LOG_SCOPES[:-1]:
+            caplog.clear()
+            logging.getLogger(f"{name}.leak-probe").debug("leak %s", FILE_NAME_WIRE)
+            assert FILE_NAME_WIRE in caplog.text, name

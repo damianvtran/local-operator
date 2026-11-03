@@ -322,3 +322,16 @@ def test_status_files_block_is_normalized_or_dropped() -> None:
     assert (
         _status_with_attachments(plain, tb_client.attachments_capability, files_capability) is plain
     )
+
+
+@asyncio
+async def test_file_mode_refuses_an_agent_actor_before_io() -> None:
+    """Review F1: an agent-addressed file upload must not stage as the human."""
+
+    seen, handler = _recorder()
+    client = _make_client(handler)
+    with pytest.raises(ValueError):
+        await client.upload_attachment(
+            CID, b"%PDF", mode="file", actor_endpoint_id="bep_" + "a" * 32
+        )
+    assert seen == []

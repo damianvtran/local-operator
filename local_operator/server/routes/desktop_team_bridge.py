@@ -81,6 +81,7 @@ every ``lop serve`` boot, and the desktop_radient rule (a module-scope httpx was
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import re
 import unicodedata
@@ -2895,16 +2896,21 @@ async def _bounded_upload(
                 raise HTTPException(413, too_large)
         except ValueError:
             _raise_read("invalid_request")
-    chunks: list[bytes] = []
+    # ``BytesIO`` rather than a chunk list + ``b"".join``: the join held the
+    # list AND a second full copy at once (~2x a 25 MiB file, review F2), and a
+    # ``bytearray`` copied out to ``bytes`` peaks the same. ``getvalue()`` on an
+    # unshared BytesIO hands back its buffer without copying (tracemalloc
+    # peak, 25 MiB of 64 KiB chunks: join 50.0 MiB, bytearray 50.2, BytesIO 25.3).
+    buffer = io.BytesIO()
     size = 0
     async for chunk in request.stream():
         size += len(chunk)
         if size > limit:
             raise HTTPException(413, too_large)
-        chunks.append(chunk)
+        buffer.write(chunk)
     if not size:
         raise HTTPException(422, {"code": "attachment_invalid", "message": f"The {noun} is empty."})
-    return b"".join(chunks)
+    return buffer.getvalue()
 
 
 @router.post(
@@ -2934,6 +2940,11 @@ async def upload_conversation_attachment(
 
     _require_conversation_id(conversation_id)
     tenant_id, expected_account_id, mode = _upload_query(request)
+    # ORDER (review F4, informational): query -> name -> bounded body read ->
+    # client. The captured-owner receipt is compared in the client, after the
+    # body is read, so a wrong-account upload is buffered locally (at most the
+    # cap) before its 409. Nothing reaches the hub — that is the guarantee —
+    # and the image route has always had the same order.
     name: str | None = None
     if mode == "file":
         name = _upload_file_name(request)
