@@ -989,6 +989,19 @@ def _require_attachment_id(attachment_id: str) -> None:
         raise ValueError("attachment id is not a minted batt_ id")
 
 
+def _attachment_write_params(
+    tenant_id: str | None, actor_endpoint_id: str | None
+) -> dict[str, str] | None:
+    """Query for an attachment upload/delete; ``None`` when there is nothing to say."""
+
+    params: dict[str, str] = {}
+    if tenant_id:
+        params["tenant_id"] = tenant_id
+    if actor_endpoint_id:
+        params["actor_endpoint_id"] = actor_endpoint_id
+    return params or None
+
+
 def _sniff_image(data: bytes) -> str | None:
     """The image type ``data`` actually is, by magic bytes, or ``None``.
 
@@ -1041,6 +1054,15 @@ def attachments_capability(payload: Any) -> dict[str, Any] | None:
     the unknown field. A present block must say ``enabled: true`` and list at
     least one type this client can handle; anything malformed reads as off
     rather than as a guess at the hub's limits.
+
+    ``agent_upload`` (agent-server PR #283) says the hub also lets an AGENT
+    endpoint stage images (``POST …/attachments?actor_endpoint_id=``). The hub
+    emits it ``omitempty`` and only once endpoint-scoped staging is enabled
+    fleet-wide, so the key is carried through ONLY when it is the literal
+    ``True``: absent, ``false``, ``"true"`` or ``1`` all read as off and add no
+    key, which keeps every existing consumer's normalized block (the desktop
+    status route re-serves this dict to the renderer) byte-identical on a hub
+    that does not advertise it.
     """
 
     if not isinstance(payload, Mapping):
@@ -1059,6 +1081,8 @@ def attachments_capability(payload: Any) -> dict[str, Any] | None:
         value = block.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             out[key] = value
+    if block.get("agent_upload") is True:
+        out["agent_upload"] = True
     return out
 
 
@@ -3837,10 +3861,16 @@ class TeamBridgeClient:
         data: bytes,
         *,
         tenant_id: str | None = None,
+        actor_endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Stage one image for a later send: ``{attachment: {id, mime, ...}}``.
+
+        ``actor_endpoint_id`` stages the image AS that agent endpoint (the hub
+        refuses it unless it advertises ``attachments.agent_upload``, and binds
+        the staged row to that exact endpoint). The query key is omitted when
+        unset so a human upload stays byte-identical to the pre-agent wire.
 
         The size bound refuses before any I/O. Type is deliberately NOT checked
         here: the hub sniffs the bytes and answers ``415``/``422`` itself, and a
@@ -3859,7 +3889,7 @@ class TeamBridgeClient:
                 "The attachment is larger than allowed.",  # i18n: ignore, no code
                 http_status=413,
             )
-        params = {"tenant_id": tenant_id} if tenant_id else None
+        params = _attachment_write_params(tenant_id, actor_endpoint_id)
         return await self._send(
             "POST",
             f"/messaging/conversations/{conversation_id}/attachments",
@@ -3875,13 +3905,19 @@ class TeamBridgeClient:
         attachment_id: str,
         *,
         tenant_id: str | None = None,
+        actor_endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
-        """Discard one STAGED upload (idempotent on the hub; bound ones stay)."""
+        """Discard one STAGED upload (idempotent on the hub; bound ones stay).
+
+        An agent-staged row is owned by its endpoint, so deleting it needs the
+        same ``actor_endpoint_id`` it was uploaded with; the human form cannot
+        see it.
+        """
 
         _require_attachment_id(attachment_id)
-        params = {"tenant_id": tenant_id} if tenant_id else None
+        params = _attachment_write_params(tenant_id, actor_endpoint_id)
         response = await self._authorized(
             "DELETE",
             f"/messaging/conversations/{conversation_id}/attachments/{attachment_id}",
