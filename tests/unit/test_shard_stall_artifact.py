@@ -287,7 +287,7 @@ def test_workflow_contract_rejects_broken_handoff(violation):
         for step in workflow["jobs"]["test"]["steps"]
         if step.get("id") == "shard_pytest"
     )
-    export = 'export ' + artifact.ENV_REGISTRY + '="$registry"'
+    export = "export " + artifact.ENV_REGISTRY + '="$registry"'
     assert export in command
     if violation == "late-registry":
         command = command.replace(export, "") + "\n" + export + "\n"
