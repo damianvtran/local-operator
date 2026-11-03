@@ -40,6 +40,7 @@
   "cli.browser.enter_code": "Chrome پر جائیں: وہاں Local Operator کا ایک ٹیب کھلا ہے جس میں کوڈ کے لیے خانہ موجود ہے۔ کوڈ لکھیں اور Pair دبائیں۔",
   "cli.browser.pairing_code_labeled": "  {code}   {label}",
   "cli.browser.enter_each_code": "اب ہر براؤزر میں Local Operator کا ایک ٹیب کھلا ہے۔ وہاں پہلا کوڈ لکھیں اور Pair دبائیں۔ اگر بتایا جائے کہ کوڈ میل نہیں کھاتا تو اس کی جگہ دوسرا کوڈ لکھیں۔",
+  "cli.browser.enter_each_code_icon": "ہر براؤزر میں ٹول بار پر Local Operator کے آئیکن پر کلک کریں (یہ پزل کے ٹکڑے والے آئیکن کے نیچے ہو سکتا ہے)۔ پہلے کوڈ اپنے سامنے رکھ لیں: کہیں اور کلک کرتے ہی خانہ بند ہو جاتا ہے۔ پہلا کوڈ لکھیں اور Pair دبائیں۔ اگر بتایا جائے کہ کوڈ میل نہیں کھاتا تو اس کی جگہ دوسرا کوڈ لکھیں۔",
   "cli.browser.already_paired": "آپ کا براؤزر پہلے ہی Local Operator سے جڑا ہوا ہے، اس لیے کسی کوڈ کی ضرورت نہیں۔ کوئی اور براؤزر جوڑنے کے لیے اس میں Local Operator ایکسٹینشن انسٹال کریں، پھر Local Operator سے دوبارہ کہیں: “میرا براؤزر جوڑ دیں”۔",
   "cli.browser.no_extension_waiting": "ابھی تک کوئی Local Operator ایکسٹینشن منسلک نہیں، اس لیے دکھانے کو کوئی کوڈ نہیں۔ Chrome کھولیں اور دیکھیں کہ Local Operator ایکسٹینشن انسٹال اور آن ہے: https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof یہ ایک منٹ کے اندر منسلک ہو جاتی ہے۔ پھر Local Operator سے دوبارہ کہیں: “میرا براؤزر جوڑ دیں”۔",
   "cli.browser.authorised_installs": "مجاز انسٹالیشنز:",

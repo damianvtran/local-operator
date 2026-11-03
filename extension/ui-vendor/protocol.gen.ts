@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: protocol.gen.ts (wire declarations).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (13 modules: access-flow.ts, access-queue.ts, ax-compact.ts, ax-locator.ts, deadline.ts, element-query.ts, errors.ts, file-transfer-policy.ts, file-transfer.tables.gen.ts, geometry-read.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: e02eb3edd2ba8ad631749dd3b8f5633f34e4e7bf6e25ca6c869da1e704dc6c5b
+// Inputs sha256: 4a36ac6eb801c5e291ee3cf2617bc5a3921ff93ce02b84aa1159cd504869fb31
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
@@ -25,10 +25,10 @@ export const EXTENSION_UPDATE_HOW = 'open chrome://extensions, turn on Developer
 // The pairing-result sentences. The DAEMON sends them in `pair_result.message`;
 // the extension uses the same constants as its fallback when a message is
 // absent, so one spelling reaches the person whichever side wrote it.
-export const PAIR_MISMATCH_MESSAGE = "That code didn't match. Check it and type it again.";
-export const PAIR_EXPIRED_MESSAGE = 'That code expired. Ask Local Operator to "pair my browser" again.';
-export const PAIR_LOCKED_MESSAGE = 'Too many wrong tries. Ask Local Operator to "pair my browser" for a new code.';
-export const PAIR_NO_CODE_MESSAGE = 'There\'s no code for this browser yet. Ask Local Operator to "pair my browser".';
+export const PAIR_MISMATCH_MESSAGE = 'That code didn’t match. Check it and type it again.';
+export const PAIR_EXPIRED_MESSAGE = 'That code expired. Ask Local Operator to “pair my browser” again.';
+export const PAIR_LOCKED_MESSAGE = 'Too many wrong tries. Ask Local Operator to “pair my browser” for a new code.';
+export const PAIR_NO_CODE_MESSAGE = 'There’s no code for this browser yet. Ask Local Operator to “pair my browser”.';
 // What the pairing form tells a person to say to the agent, and how long a
 // code lasts (the daemon's PAIR_TTL_S, in minutes, for copy only).
 export const PAIR_ASK_PHRASE = 'pair my browser';

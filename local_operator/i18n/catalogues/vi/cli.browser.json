@@ -40,6 +40,7 @@
   "cli.browser.enter_code": "Chuyển sang Chrome: ở đó đang mở một tab Local Operator có ô để nhập mã. Nhập mã rồi bấm Pair.",
   "cli.browser.pairing_code_labeled": "  {code}   {label}",
   "cli.browser.enter_each_code": "Giờ mỗi trình duyệt đều đang mở một tab Local Operator. Nhập mã thứ nhất vào đó rồi bấm Pair. Nếu thấy báo mã không khớp, hãy nhập mã còn lại.",
+  "cli.browser.enter_each_code_icon": "Trong mỗi trình duyệt, bấm biểu tượng Local Operator trên thanh công cụ (có thể nằm trong biểu tượng mảnh ghép). Hãy chuẩn bị sẵn các mã trước: ô nhập sẽ đóng nếu bạn bấm ra ngoài. Nhập mã thứ nhất rồi bấm Pair. Nếu thấy báo mã không khớp, hãy nhập mã còn lại.",
   "cli.browser.already_paired": "Trình duyệt của bạn đã được ghép nối với Local Operator nên không cần mã. Để ghép nối một trình duyệt khác, hãy cài tiện ích Local Operator trên trình duyệt đó, rồi nhờ Local Operator “ghép nối trình duyệt của tôi” lần nữa.",
   "cli.browser.no_extension_waiting": "Chưa có tiện ích Local Operator nào kết nối nên chưa có mã để hiển thị. Hãy mở Chrome và kiểm tra xem tiện ích Local Operator đã được cài và bật chưa: https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof Tiện ích sẽ kết nối trong vòng một phút. Sau đó, hãy nhờ Local Operator “ghép nối trình duyệt của tôi” lần nữa.",
   "cli.browser.authorised_installs": "các bản cài được ủy quyền:",

@@ -110,6 +110,10 @@ def enter_each_code() -> Msg:
     return Msg("cli.browser.enter_each_code", {})
 
 
+def enter_each_code_icon() -> Msg:
+    return Msg("cli.browser.enter_each_code_icon", {})
+
+
 def exact_cleanup() -> Msg:
     return Msg("cli.browser.exact_cleanup", {})
 

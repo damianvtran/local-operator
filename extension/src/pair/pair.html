@@ -61,9 +61,17 @@
               maxlength="6"
               autocomplete="one-time-code"
               spellcheck="false"
-              aria-describedby="pair-help pair-error"
+              aria-describedby="pair-hint pair-error pair-help"
             />
-            <p class="error hidden" id="pair-error" role="alert"></p>
+            <!-- ONE slot, two voices (design D1): a muted hint by default,
+                 replaced in place by the error, so the field and Pair keep one
+                 rhythm and nothing moves when a failure appears. The hint and
+                 the error are separate elements stacked in one reserved box, so
+                 the error keeps its own role="alert" announcement. -->
+            <div class="slot">
+              <p class="hint" id="pair-hint">Type the 6&#8209;digit code Local Operator gave you.</p>
+              <p class="error hidden" id="pair-error" role="alert"></p>
+            </div>
             <div class="actions">
               <button type="submit" class="btn primary" id="pair-submit">Pair</button>
             </div>
@@ -78,7 +86,7 @@
             <p class="helper-title">Don't have a code?</p>
             <p class="helper-text">
               Ask Local Operator: <q id="pair-ask-phrase">pair my browser</q>. It shows you a
-              6-digit code to type here. Codes work for
+              6&#8209;digit code to type here. Codes work for
               <span id="pair-ttl">15</span> minutes. You can switch windows; this page keeps
               what you typed.
             </p>

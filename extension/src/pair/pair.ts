@@ -41,6 +41,13 @@ const HEALTH_TIMEOUT_MS = 3000;
 
 const input = document.getElementById("pair-code") as HTMLInputElement;
 const error = document.getElementById("pair-error") as HTMLParagraphElement;
+const hint = document.getElementById("pair-hint") as HTMLParagraphElement;
+/** Show the error in the slot, or put the hint back (design D1). */
+function showError(message: string | null): void {
+  error.textContent = message ?? "";
+  error.classList.toggle("hidden", message === null);
+  hint.classList.toggle("hidden", message !== null);
+}
 const submit = document.getElementById("pair-submit") as HTMLButtonElement;
 const card = document.getElementById("card") as HTMLElement;
 
@@ -124,8 +131,7 @@ function setBusy(on: boolean): void {
 }
 
 function fail(message: string): void {
-  error.textContent = message;
-  error.classList.remove("hidden");
+  showError(message);
   card.style.setProperty("--tone", "var(--danger)");
   // Unlock BEFORE selecting: a disabled input refuses focus. SELECT rather
   // than focus, so the next keystroke or paste replaces the rejected digits
@@ -139,7 +145,7 @@ input.addEventListener("input", () => {
   // A fresh edit clears the last failure, so a red line never sits under a
   // code the person has already corrected.
   if (!error.classList.contains("hidden")) {
-    error.classList.add("hidden");
+    showError(null);
     card.style.setProperty("--tone", "");
   }
 });
@@ -152,7 +158,7 @@ document.getElementById("pair-form")?.addEventListener("submit", async (event) =
     fail("Type all 6 digits of the code.");
     return;
   }
-  error.classList.add("hidden");
+  showError(null);
   setBusy(true);
   try {
     const { token, port = DEFAULT_PORT } = await getLocal();

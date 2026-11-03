@@ -2792,6 +2792,25 @@
       },
       "status": "passed",
       "note": "CLI-first browser pairing delta (14 keys rewritten/added, open_popup removed) at source_sha256 5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24; target catalogue_sha256 58613b7c49d704bbb64d2ed51c5eda9d7d63cffed35989f2638c9cdff4734609. Independent audit PASS, 0B/0M/0m/0n; dispositions: none needed. Zero unresolved blocker/major. Translator and auditor are separate sessions sharing the Claude model family (disclosed). Not verified: native-speaker review. Evidence: i18n/audits/evidence/vi/cli.browser/pair1/record.json"
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.browser",
+      "source_sha256": "af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019",
+      "translator": {
+        "agent": "translator (job f364d94792a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 68b1b726839c, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 b0bdef4063fed876cf38099e9c17df6efde0fbe6bfd46195054da0389664a933. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/vi/cli.browser/pair2/record.json"
     }
   ]
 }

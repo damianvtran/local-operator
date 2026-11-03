@@ -72,12 +72,25 @@ def _superseded(locale: str, namespace: str) -> bool:
         return False
     row = last[0]
     evidence = str(row.get("note", "")).rsplit("Evidence: ", 1)[-1].split()[0:1]
-    return (
+    if not (
         row.get("status") == "passed"
         and row.get("source_sha256") == current
-        and bool(evidence)
+        and evidence
         and (ROOT / evidence[0]).is_file()
+    ):
+        return False
+    # The byte pin MOVES to the audit that now owns the values; it is never
+    # dropped (review R1). Superseded is a verdict on which audit to compare
+    # against, so the shipped catalogue must equal the bytes the later audit
+    # judged — the evidence record's `target_sha256` — or this test fails.
+    record = json.loads((ROOT / evidence[0]).read_text(encoding="utf-8"))
+    shipped = catalogues.catalogue_sha256(locale, namespace)
+    assert record.get("source_sha256") == current, f"{evidence[0]}: source hash is stale"
+    assert record.get("target_sha256") == shipped, (
+        f"{locale}/{namespace}: shipped values differ from the superseding audit "
+        f"({evidence[0]} target_sha256)"
     )
+    return True
 
 
 @pytest.mark.parametrize("path", MANIFESTS, ids=lambda p: p.parent.parent.name)

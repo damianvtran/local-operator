@@ -16,10 +16,10 @@ export const EXTENSION_UPDATE_HOW = 'open chrome://extensions, turn on Developer
 // The pairing-result sentences. The DAEMON sends them in `pair_result.message`;
 // the extension uses the same constants as its fallback when a message is
 // absent, so one spelling reaches the person whichever side wrote it.
-export const PAIR_MISMATCH_MESSAGE = "That code didn't match. Check it and type it again.";
-export const PAIR_EXPIRED_MESSAGE = 'That code expired. Ask Local Operator to "pair my browser" again.';
-export const PAIR_LOCKED_MESSAGE = 'Too many wrong tries. Ask Local Operator to "pair my browser" for a new code.';
-export const PAIR_NO_CODE_MESSAGE = 'There\'s no code for this browser yet. Ask Local Operator to "pair my browser".';
+export const PAIR_MISMATCH_MESSAGE = 'That code didn’t match. Check it and type it again.';
+export const PAIR_EXPIRED_MESSAGE = 'That code expired. Ask Local Operator to “pair my browser” again.';
+export const PAIR_LOCKED_MESSAGE = 'Too many wrong tries. Ask Local Operator to “pair my browser” for a new code.';
+export const PAIR_NO_CODE_MESSAGE = 'There’s no code for this browser yet. Ask Local Operator to “pair my browser”.';
 // What the pairing form tells a person to say to the agent, and how long a
 // code lasts (the daemon's PAIR_TTL_S, in minutes, for copy only).
 export const PAIR_ASK_PHRASE = 'pair my browser';

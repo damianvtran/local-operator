@@ -40,6 +40,7 @@
   "cli.browser.enter_code": "Перейдите в Chrome: там открыта вкладка Local Operator с полем для кода. Введите код и нажмите Pair.",
   "cli.browser.pairing_code_labeled": "  {code}   {label}",
   "cli.browser.enter_each_code": "В каждом браузере теперь открыта вкладка Local Operator. Введите там первый код и нажмите Pair. Если появится сообщение, что код не подошёл, введите другой код.",
+  "cli.browser.enter_each_code_icon": "В каждом браузере нажмите значок Local Operator на панели инструментов (он может быть спрятан под значком пазла). Сначала подготовьте коды: окно закроется, если щёлкнуть за его пределами. Введите первый код и нажмите Pair. Если появится сообщение, что код не подошёл, введите другой код.",
   "cli.browser.already_paired": "Ваш браузер уже сопряжён с Local Operator, код не нужен. Чтобы сопрячь ещё один браузер, установите в нём расширение Local Operator, а затем снова попросите Local Operator: «подключи мой браузер».",
   "cli.browser.no_extension_waiting": "Расширение Local Operator пока не подключилось, поэтому кода нет. Откройте Chrome и проверьте, что расширение Local Operator установлено и включено: https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof Оно подключится в течение минуты. Затем снова попросите Local Operator: «подключи мой браузер».",
   "cli.browser.authorised_installs": "авторизованные установки:",

@@ -282,6 +282,13 @@ input[type="number"] {
   font-size: 15px;
   letter-spacing: 0.14em;
 }
+/* The pairing code field's edge at 3:1+ against its ground (design D3, PR
+ * #3339): --hairline-strong measured 1.5:1 / 1.42:1, under WCAG 1.4.11's 3:1
+ * for a control boundary; --ink-dim is 5.43:1 / 5.11:1. Colour only — the
+ * width is unchanged, so the measured pairing pin (284px) still holds. */
+#pair-code {
+  border-color: var(--ink-dim);
+}
 /* The Allow scope picker: the text input's well (same border, radius and
  * surface) in the 13px system face rather than the pairing field's spaced
  * monospace, because its options are prose, not a code. The label above it

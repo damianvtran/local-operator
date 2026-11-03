@@ -141,7 +141,10 @@ q {
 #pair-code {
   width: 100%;
   padding: 12px 14px;
-  border: 1px solid var(--hairline-strong);
+  /* --ink-dim, not --hairline-strong (design D3): a control's edge needs 3:1
+   * against its ground (WCAG 1.4.11); the hairline measured 1.5:1 / 1.42:1,
+   * this is 5.43:1 / 5.11:1. Only the field — the token stays as it is. */
+  border: 1px solid var(--ink-dim);
   border-radius: 4px;
   background: var(--surface);
   color: var(--ink);
@@ -159,21 +162,38 @@ q {
   opacity: 0.6;
 }
 
-/* The error slot RESERVES two lines, like the popup's #pair-error: a failure
- * appearing must not push the button down under the person's cursor. */
-.error {
+/* The hint/error SLOT reserves THREE lines (design D2): the longest result
+ * message is two lines at the card's full width, but it wraps to three in a
+ * narrow window (measured at 320px), and a third line pushed Pair down — the
+ * movement the slot exists to prevent. The hint and the error share the box
+ * (grid stacking), so swapping one for the other changes no geometry. */
+.slot {
+  display: grid;
   margin: 10px 0 0;
-  min-height: 42px;
+  min-height: calc(3 * 1.45em);
   font-size: 13px;
-  line-height: 1.6;
+  line-height: 1.45;
+}
+.slot > * {
+  grid-area: 1 / 1;
+  margin: 0;
+}
+.hint {
+  color: var(--ink-muted);
+}
+.error {
   color: var(--danger);
 }
-.error.hidden {
+.error.hidden,
+.hint.hidden {
   visibility: hidden;
 }
 
 .actions {
-  margin-top: 4px;
+  margin-top: 12px;
+}
+#unreachable-state .actions {
+  margin-top: 16px;
 }
 .btn {
   display: inline-flex;
@@ -243,7 +263,8 @@ q {
 .hidden {
   display: none !important;
 }
-/* The error slot stays in the layout while hidden (see .error above). */
-.error.hidden {
+/* The slot's two voices stay in the layout while hidden (see .slot above). */
+.error.hidden,
+.hint.hidden {
   display: block !important;
 }

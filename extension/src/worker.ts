@@ -808,6 +808,16 @@ chrome.runtime.onInstalled.addListener((details) => {
   if (details?.reason === "install") guarded(() => openPairingTab("install"), "open pairing tab");
 });
 
+// The popup's "Open in a tab" link: reuse the one pairing tab (review R5).
+// Only this extension's own pages can reach `runtime.onMessage` (no
+// externally_connectable), so no web page can drive it.
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (message?.event === "open_pairing_tab" && sender.id === chrome.runtime.id) {
+    guarded(() => openPairingTab("cli"), "open pairing tab");
+  }
+  return undefined;
+});
+
 /** Open (or bring forward) the pairing tab, `pair/pair.html`.
  *
  * WHY A TAB AND NOT THE POPUP. A Chrome action popup closes the moment focus

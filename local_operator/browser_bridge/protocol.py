@@ -292,14 +292,15 @@ EXTENSION_UPDATE_HOW = (
 #: "ask Local Operator", never a command — most people pair from a chat with the
 #: agent, not from a terminal. Each fits two lines in the popup's 300px card:
 #: `#pair-error` reserves two line boxes, and a third line would resize the
-#: popup at the moment of failure (popup.css).
-PAIR_MISMATCH_MESSAGE = "That code didn't match. Check it and type it again."
-PAIR_EXPIRED_MESSAGE = 'That code expired. Ask Local Operator to "pair my browser" again.'
+#: popup at the moment of failure (popup.css). Typographic quotes and
+#: apostrophes (design D5), matching how the pages render the ask phrase.
+PAIR_MISMATCH_MESSAGE = "That code didn\u2019t match. Check it and type it again."
+PAIR_EXPIRED_MESSAGE = "That code expired. Ask Local Operator to \u201cpair my browser\u201d again."
 PAIR_LOCKED_MESSAGE = (
-    'Too many wrong tries. Ask Local Operator to "pair my browser" for a new code.'
+    "Too many wrong tries. Ask Local Operator to \u201cpair my browser\u201d for a new code."
 )
 PAIR_NO_CODE_MESSAGE = (
-    "There's no code for this browser yet. Ask Local Operator to \"pair my browser\"."
+    "There\u2019s no code for this browser yet. Ask Local Operator to \u201cpair my browser\u201d."
 )
 
 #: The phrase the extension tells a person to say to the agent, and the agent

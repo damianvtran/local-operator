@@ -3441,7 +3441,7 @@ def _browser_pair(pairing_status: Callable[[], dict[str, Any]]) -> int:
         extension_older,
     )
 
-    minutes = int(PAIR_TTL_S // 60)
+    minutes: int | None = int(PAIR_TTL_S // 60)
     answer = browser_install.request_pairing_codes()
     if not answer.get("ok"):
         reason = answer.get("reason")
@@ -3460,6 +3460,14 @@ def _browser_pair(pairing_status: Callable[[], dict[str, Any]]) -> int:
         ]
         paired_connected = 1 if pair.get("paired") else 0
         page_opened = False
+        # That daemon minted the code with ITS lifetime, not ours (review R3a):
+        # say how long is actually left on the code, rounded down, or nothing.
+        left = [
+            float(item.get("expires_at", 0) or 0) - time.time()
+            for item in codes
+            if item.get("expires_at")
+        ]
+        minutes = int(min(left) // 60) if left and min(left) >= 60 else None
     else:
         codes = list(answer.get("codes") or [])
         paired_connected = int(answer.get("paired_connected_count", 0))
@@ -3506,9 +3514,16 @@ def _browser_pair(pairing_status: Callable[[], dict[str, Any]]) -> int:
                     )
                 )
             )
-        print(_bt(_b.enter_each_code()))
-        print(_bt(_b.pair_no_page_hint()))
-    print(_bt(_b.pair_code_lifetime(minutes=minutes)))
+        # The tab wording only when EVERY install will open its tab (review
+        # R3b): an older daemon cannot ask, and an extension older than
+        # SHOW_PAIRING_MIN_EXTENSION_VERSION ignores the request.
+        if all(_opens_page(item) for item in codes):
+            print(_bt(_b.enter_each_code()))
+            print(_bt(_b.pair_no_page_hint()))
+        else:
+            print(_bt(_b.enter_each_code_icon()))
+    if minutes is not None:
+        print(_bt(_b.pair_code_lifetime(minutes=minutes)))
     for item in codes:
         if item.get("update_available"):
             print(

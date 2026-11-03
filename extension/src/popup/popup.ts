@@ -1167,6 +1167,17 @@ function hostnameOf(origin: string | undefined): string {
   }
 }
 
+// "Open in a tab" asks the WORKER to open or focus the one pairing tab (review
+// R5), the same path `lop browser pair` takes, instead of stacking a new tab per
+// click. The href stays as the no-script fallback.
+document.getElementById("pair-open-tab")?.addEventListener("click", (event) => {
+  event.preventDefault();
+  chrome.runtime.sendMessage({ event: "open_pairing_tab" }).catch(() => {
+    void chrome.tabs.create({ url: chrome.runtime.getURL("pair/pair.html") });
+  });
+  window.close();
+});
+
 // The words the pairing card tells a person to say to the agent: generated,
 // so the card, the pairing tab and the agent guide cannot drift.
 for (const node of Array.from(document.querySelectorAll<HTMLElement>(".ask-phrase"))) {

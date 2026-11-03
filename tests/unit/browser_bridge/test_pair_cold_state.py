@@ -350,3 +350,105 @@ def test_an_expired_code_typed_over_a_fresh_socket_still_says_expired(daemon: _D
         again = daemon.pair()
         printed = _six_digit_codes(again.stdout)
         assert printed and printed[0] != code, again.stdout
+
+
+def test_a_reconnect_rotates_an_exhausted_code_even_when_it_expired(daemon: _Daemon) -> None:
+    """The `keep_expired` handshake keeps an EXPIRED code so `_try_pair` can say
+    so — but never an EXHAUSTED one (review R2). Five wrong guesses must stay
+    dead across a reconnect, whatever the clock says."""
+    from local_operator.browser_bridge.daemon import PAIR_MAX_ATTEMPTS
+
+    with daemon.extension(STORE_ID):
+        dead = _six_digit_codes(daemon.pair().stdout)[0]
+    record = json.loads(daemon.pending_file().read_text())
+    record["pending"][STORE_ID]["attempts"] = PAIR_MAX_ATTEMPTS
+    record["pending"][STORE_ID]["expires_at"] = time.time() - 1
+    daemon.pending_file().write_text(json.dumps(record))
+    with daemon.extension(STORE_ID):
+        entry = json.loads(daemon.pending_file().read_text())["pending"][STORE_ID]
+    assert entry["code"] != dead
+    assert entry["attempts"] == 0 and float(entry["expires_at"]) > time.time()
+
+
+# --- CLI branches that need no daemon (review R4) ------------------------------
+#
+# Driven in-process with `request_pairing_codes` and the pairing file stubbed, so
+# each branch's printed block and exit code are pinned, not just its catalogue row.
+
+
+def _run_pair(monkeypatch, capsys, answer: dict[str, Any], pairing: dict[str, Any]):
+    from local_operator import cli
+    from local_operator.browser_bridge import install
+
+    monkeypatch.setattr(install, "request_pairing_codes", lambda *a, **k: answer)
+    monkeypatch.setenv("LOP_LANG", "en")
+    rc = cli._browser_pair(lambda: pairing)
+    return rc, capsys.readouterr().out
+
+
+def test_cli_no_daemon_names_the_fix(monkeypatch, capsys) -> None:
+    rc, out = _run_pair(monkeypatch, capsys, {"ok": False, "reason": "no_daemon"}, {})
+    assert rc == 1 and "lop browser install" in out and not _six_digit_codes(out)
+
+
+def test_cli_unreachable_names_restart_and_the_detail(monkeypatch, capsys) -> None:
+    rc, out = _run_pair(
+        monkeypatch, capsys, {"ok": False, "reason": "unreachable", "detail": "timed out"}, {}
+    )
+    assert rc == 1 and "lop browser restart" in out and "timed out" in out
+
+
+def test_cli_older_daemon_reads_the_file_and_states_the_real_lifetime(
+    monkeypatch, capsys
+) -> None:
+    """An older daemon's code lives ITS lifetime: never claim 15 minutes (R3a)."""
+    soon = time.time() + 100  # 1m40s left
+    pairing = {
+        "paired": False,
+        "pending": [{"code": "123456", "extension_id": STORE_ID, "label": "Chrome", "expires_at": soon}],
+    }
+    rc, out = _run_pair(monkeypatch, capsys, {"ok": False, "reason": "old_daemon"}, pairing)
+    assert rc == 0 and "123456" in out
+    assert "15 minutes" not in out and "1 minute" in out
+    assert "toolbar" in out and "tab is open" not in out
+
+
+def test_cli_several_codes_on_an_older_daemon_never_promise_tabs(monkeypatch, capsys) -> None:
+    """R3b: the tab wording only when every install will really open its tab."""
+    pending = [
+        {"code": "111111", "extension_id": STORE_ID, "label": "Chrome", "expires_at": time.time() + 30},
+        {"code": "222222", "extension_id": UNPACKED_ID, "label": "Chrome", "expires_at": time.time() + 30},
+    ]
+    rc, out = _run_pair(
+        monkeypatch, capsys, {"ok": False, "reason": "old_daemon"}, {"pending": pending}
+    )
+    assert rc == 0 and "111111" in out and "222222" in out
+    assert "now has a Local Operator tab open" not in out
+    assert "toolbar" in out
+    assert "works for" not in out  # under a minute left: say nothing rather than "0 minutes"
+
+
+def test_cli_several_codes_with_one_old_extension_use_the_icon_wording(
+    monkeypatch, capsys
+) -> None:
+    codes = [
+        {"code": "111111", "extension_id": STORE_ID, "label": "Chrome extension 0.1.26",
+         "extension_version": "0.1.26", "update_available": False},
+        {"code": "222222", "extension_id": UNPACKED_ID, "label": "Chrome extension 0.1.20",
+         "extension_version": "0.1.20", "update_available": True},
+    ]
+    answer = {"ok": True, "codes": codes, "expected_extension_version": "0.1.26"}
+    rc, out = _run_pair(monkeypatch, capsys, answer, {})
+    assert rc == 0
+    assert "now has a Local Operator tab open" not in out and "toolbar" in out
+    assert "15 minutes" in out
+    # The outdated install is named, with the way to update it.
+    assert "0.1.20" in out and "chrome://extensions" in out and "Developer mode" in out
+
+
+def test_cli_one_current_extension_gets_the_tab_wording(monkeypatch, capsys) -> None:
+    codes = [{"code": "654321", "extension_id": STORE_ID, "label": "Chrome extension 0.1.26",
+              "extension_version": "0.1.26", "update_available": False}]
+    rc, out = _run_pair(monkeypatch, capsys, {"ok": True, "codes": codes}, {})
+    assert rc == 0 and "654321" in out
+    assert "a Local Operator tab is open there" in out and "15 minutes" in out

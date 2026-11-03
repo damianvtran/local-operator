@@ -40,6 +40,7 @@
   "cli.browser.enter_code": "切换到Chrome：那里已打开一个Local Operator标签页，里面有一个输入配对码的输入框。输入配对码，然后点击Pair。",
   "cli.browser.pairing_code_labeled": "  {code}   {label}",
   "cli.browser.enter_each_code": "每个浏览器现在都打开了一个Local Operator标签页。在其中输入第一个配对码，然后点击Pair。如果提示配对码不匹配，就改为输入另一个配对码。",
+  "cli.browser.enter_each_code_icon": "在每个浏览器中，点击工具栏上的Local Operator图标（可能收在拼图图标下）。先把配对码准备好：点击其他地方，输入框就会关闭。输入第一个配对码，然后点击Pair。如果提示配对码不匹配，就改为输入另一个配对码。",
   "cli.browser.already_paired": "你的浏览器已与Local Operator配对，无需配对码。要配对另一个浏览器，先在那个浏览器中安装Local Operator扩展，再对Local Operator说“配对我的浏览器”。",
   "cli.browser.no_extension_waiting": "尚无Local Operator扩展连接，因此没有可显示的配对码。打开Chrome，确认Local Operator扩展已安装并已启用：https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof 扩展会在一分钟内连接。之后再对Local Operator说“配对我的浏览器”。",
   "cli.browser.authorised_installs": "已授权安装：",

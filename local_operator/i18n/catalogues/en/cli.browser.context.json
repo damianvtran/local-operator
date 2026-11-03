@@ -353,5 +353,10 @@
     "role": "lop browser CLI output",
     "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
     "note": "After --reset revoked every paired browser. Command stays verbatim."
+  },
+  "cli.browser.enter_each_code_icon": {
+    "role": "lop browser CLI output",
+    "tone": "plain, friendly, person-facing; often quoted verbatim by an agent",
+    "note": "Several browsers waiting, but at least one cannot open the pairing tab (older extension or older Local Operator), so the person uses the toolbar icon. Same wording family as enter_code_icon and enter_each_code; keep 'Pair' as the English button label."
   }
 }

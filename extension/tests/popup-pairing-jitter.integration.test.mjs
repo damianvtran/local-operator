@@ -413,7 +413,7 @@ test("every pairing failure message fits the reserved slot (J7)", async () => {
   const messages = [
     ...fromGenerated,
     ...joinAdjacent(daemon).filter((m) =>
-      /^(That code|No live pairing code|There's no code|Too many)/.test(m),
+      /^(That code|No live pairing code|There[\u2019']s no code|Too many)/.test(m),
     ),
     /"(Can't reach Local Operator[^"]*)"/.exec(popup)?.[1],
     /"(Local Operator closed the connection[^"]*)"/.exec(popup)?.[1],
@@ -423,7 +423,7 @@ test("every pairing failure message fits the reserved slot (J7)", async () => {
   assert.ok(messages.length >= 6, `expected the real failure strings, found ${messages.length}`);
   // The daemon's mismatch copy is the string the 36px slot is calibrated to.
   assert.ok(
-    messages.some((m) => m.startsWith("That code didn't match")),
+    messages.some((m) => /^That code didn[\u2019']t match/.test(m)),
     "the daemon's mismatch message must be among the strings measured",
   );
 

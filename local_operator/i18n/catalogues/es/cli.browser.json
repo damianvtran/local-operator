@@ -40,6 +40,7 @@
   "cli.browser.enter_code": "Ve a Chrome: allí hay abierta una pestaña de Local Operator con un recuadro para el código. Escribe el código y pulsa Pair.",
   "cli.browser.pairing_code_labeled": "  {code}   {label}",
   "cli.browser.enter_each_code": "Cada navegador tiene ahora abierta una pestaña de Local Operator. Escribe allí el primer código y pulsa Pair. Si dice que el código no coincide, escribe el otro.",
+  "cli.browser.enter_each_code_icon": "En cada navegador, haz clic en el icono de Local Operator de la barra de herramientas (puede estar bajo el icono de la pieza de rompecabezas). Ten los códigos a mano antes: el recuadro se cierra si haces clic fuera. Escribe el primer código y pulsa Pair. Si dice que el código no coincide, escribe el otro.",
   "cli.browser.already_paired": "Tu navegador ya está emparejado con Local Operator, así que no hace falta ningún código. Para emparejar otro navegador, instala allí la extensión de Local Operator y luego vuelve a pedirle a Local Operator: “empareja mi navegador”.",
   "cli.browser.no_extension_waiting": "Todavía no hay ninguna extensión de Local Operator conectada, así que no hay código que mostrar. Abre Chrome y comprueba que la extensión de Local Operator está instalada y activada: https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof Se conecta en menos de un minuto. Luego vuelve a pedirle a Local Operator: “empareja mi navegador”.",
   "cli.browser.authorised_installs": "instalaciones autorizadas:",

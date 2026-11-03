@@ -82,7 +82,7 @@ def test_the_catalogue_is_the_golden_fixture() -> None:
         (REPO / "tests/unit/i18n/fixtures/cli_browser_en_golden.json").read_text(encoding="utf-8")
     )
     assert live == golden, "the shipped catalogue and the fixture golden drifted"
-    assert len(golden) == 71, len(golden)
+    assert len(golden) == 72, len(golden)
     sidecar = catalogues.context("en", "cli.browser")
     for key, entry in sidecar.items():
         assert all(entry.get(field) for field in ("role", "tone", "note")), key
@@ -312,6 +312,15 @@ CASES = [
             "Pair. If it says the code didn't match, type the other code instead."
         ),
     ),  # enter_each_code
+    (
+        _bw(_b.enter_each_code_icon()),
+        (
+            "In each browser, click the Local Operator icon in the toolbar (it may be under "
+            "the puzzle-piece icon). Have the codes in front of you first: the box closes if "
+            "you click away. Type the first code and press Pair. If it says the code didn't "
+            "match, type the other code instead."
+        ),
+    ),  # enter_each_code_icon
     (
         _bw(_b.already_paired()),
         (
