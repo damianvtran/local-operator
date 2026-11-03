@@ -66,7 +66,7 @@ def test_delivery_authority_keeps_cost_and_safety_controls_together():
     ):
         assert required in policy
     # Raised from 6800 for the review-economy section: measured review churn
-    # (median 6-7 rounds/PR, ~45% after an already-clean round) costs far more
+    # (median 6-7 rounds/PR, ~55% no-BLOCKER/MAJOR re-runs after a clean round) costs far more
     # tokens than ~1.7k always-loaded chars. Still a hard cap: detail belongs
     # in AGENTS.md, not here.
     assert len(policy) < 8500

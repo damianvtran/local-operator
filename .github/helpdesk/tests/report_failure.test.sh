@@ -67,8 +67,8 @@ check "first failure posts a new notice" "POST repos/example/repo/issues/7/comme
 check "first notice records one failure" "1" "$(grep -c '^Failures recorded: 1$' "$tmp/writes.log")"
 check "first notice carries the run link" "1" "$(grep -c 'runs/1$' "$tmp/writes.log")"
 
-existing="$(jq -n --arg h "$H" '[{id: 11, body: "### Sir Knight Lop the Second — review run failed\n\nother"},
-  {id: 42, body: ($h + "\n\nThe run failed.\n\nLast failure: x — run log: y\nFailures recorded: 4\n")}]')"
+existing="$(jq -n --arg h "$H" '[{id: 11, user: {login: "github-actions[bot]"}, body: "### Sir Knight Lop the Second — review run failed\n\nother"},
+  {id: 42, user: {login: "github-actions[bot]"}, body: ($h + "\n\nThe run failed.\n\nLast failure: x — run log: y\nFailures recorded: 4\n")}]')"
 reset "$existing"
 run 2
 check "repeat failure PATCHes the matching notice, never posts" "PATCH repos/example/repo/issues/comments/42" "$(head -n1 "$tmp/writes.log")"
@@ -76,7 +76,7 @@ check "only one write per failure" "1" "$(grep -c '^---$' "$tmp/writes.log")"
 check "count increments from the existing notice" "1" "$(grep -c '^Failures recorded: 5$' "$tmp/writes.log")"
 check "run link is refreshed" "1" "$(grep -c 'runs/2$' "$tmp/writes.log")"
 
-reset "$(jq -n '[{id: 11, body: "### Sir Knight Lop the Second — review run failed\n\nother"}]')"
+reset "$(jq -n '[{id: 11, user: {login: "github-actions[bot]"}, body: "### Sir Knight Lop the Second — review run failed\n\nother"}]')"
 run 3
 check "a different mode's notice is not reused" "POST repos/example/repo/issues/7/comments" "$(head -n1 "$tmp/writes.log")"
 
@@ -84,6 +84,19 @@ reset "$existing"
 touch "$tmp/patch_fails"
 run 4
 check "failed PATCH falls back to posting (never a silent drop)" "POST repos/example/repo/issues/7/comments" "$(head -n1 "$tmp/writes.log")"
+
+# A human comment whose first line IS the heading must not be edited: the token
+# can PATCH anyone's comment, so only the author filter protects it.
+reset "$(jq -n --arg h "$H" '[{id: 5, user: {login: "human"}, body: ($h + "\nFailures recorded: 999")}]')"
+run 7
+check "human comment with the exact heading is not matched (POST)" "POST repos/example/repo/issues/7/comments" "$(head -n1 "$tmp/writes.log")"
+check "human comment's count is not adopted" "1" "$(grep -c '^Failures recorded: 1$' "$tmp/writes.log")"
+
+# gh returns 200 with garbage: jq fails, the script must still POST and exit 0.
+reset 'not json {'
+rc=0; bash "$script" 7 "$H" "The run failed." "https://example/runs/8" > /dev/null 2>&1 || rc=$?
+check "non-JSON comment list exits 0" "0" "$rc"
+check "non-JSON comment list falls back to POST" "POST repos/example/repo/issues/7/comments" "$(head -n1 "$tmp/writes.log")"
 
 reset '[]'
 run 5 install

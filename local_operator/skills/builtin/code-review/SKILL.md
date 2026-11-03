@@ -53,7 +53,7 @@ The same practice for any agent: reviewing a diff, a patch, or another agent's w
 
 ## Verdict
 
-- Post rounds only for pushed heads, one comment per stream per round; amend your own comment instead of adding `re-pin`/`addendum`/`delta` sub-rounds.
+- Post rounds only for pushed heads, one comment per stream per round; no `re-pin`/`addendum` comments. A later commit gets a properly numbered delta round with `Scope: <prev-head>..<head>`. Amend your own round only for provenance or typo fixes, before any remediation reply, and never change its `Scope:`.
 - End with a terminal verdict: with no BLOCKER and no MAJOR left, the verdict is `clean` and you state the round is terminal; remaining minors and nits are follow-ups, not a reason for another round.
 - Language is precise: "blocked on X", "clean with follow-ups". Never "LGTM" with no checks behind it.
 

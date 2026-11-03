@@ -11,8 +11,13 @@
 # the latest run link, timestamp and a running failure count instead of posting.
 #
 # CONTRACT
-#   * Matching is on the exact first line (<heading>), so the PR's review and
-#     verdict notices stay separate, and reconcile.sh's "a `— review run
+#   * Matching is on the exact first line (<heading>) AND the author
+#     github-actions[bot] (the workflow's `github.token` identity, which posted
+#     every earlier notice). The author filter matters: the token has
+#     `issues: write`, which can edit anyone's comment, so a human comment that
+#     happens to start with the heading must never be overwritten or have its
+#     text read as a failure count. The heading match keeps the PR's review and
+#     verdict notices separate, and reconcile.sh's "a `— review run
 #     failed` notice does NOT count" rule is unaffected (headings unchanged).
 #   * PATCH can only edit a comment the current token authored; when it fails
 #     (e.g. the earlier notice was posted by the app, this one by
@@ -42,10 +47,16 @@ trap 'rm -f "$comments" "$body"' EXIT
 existing_id=""
 previous_count=0
 if gh api --paginate "repos/${repo}/issues/${number}/comments" > "$comments" 2>/dev/null; then
+  # `|| match=""`: a 200 with non-JSON or truncated output makes jq fail, and
+  # under `set -e` that would exit without writing anything — degrade to POST.
   match="$(jq -rs --arg h "$heading" '
-    (add // []) | map(select((.body // "") | split("\n")[0] == $h)) | last // empty
+    (add // []) | map(select(.user.login == "github-actions[bot]"
+                             and ((.body // "") | split("\n")[0] == $h))) | last // empty
     | [(.id | tostring), (((.body // "") | capture("Failures recorded: (?<n>[0-9]+)").n) // "1")]
-    | @tsv' "$comments")"
+    | @tsv' "$comments" 2>/dev/null)" || {
+    echo "::warning::could not parse comments on #${number}; posting a new notice"
+    match=""
+  }
   if [ -n "$match" ]; then
     existing_id="${match%%$'\t'*}"
     previous_count="${match#*$'\t'}"

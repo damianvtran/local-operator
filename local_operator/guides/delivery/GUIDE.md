@@ -115,18 +115,20 @@ correctness, security or regression risk. MINOR/NIT do not force another round.
 - **Minors.** Fold accepted MINOR/NIT into the same commit as the majors, or
   defer them in the remediation comment. Never a commit just for minors after
   all streams are terminal: that re-stales the head.
-- **Freshness.** A commit that only answers MINOR/NIT, only touches tests/docs,
-  or is a MECHANICAL rebase/merge of main keeps clean rounds fresh with the
-  posted proof or a one-line `<prev-head>..<head>` delta note by an independent
-  reviewer: no full round, no QA rerun unless a QA'd surface moved.
+- **Freshness.** A delta round is `### Agent review — round <N>`, `Scope:
+  <prev-head>..<head>`, by an independent reviewer. MECHANICAL rebase/merge of
+  main (`scripts/rebase_proof.py`) keeps rounds fresh on its proof; docs,
+  comments or tests need only a delta round. Executable code, minor fixes
+  included, needs a delta round plus QA if a QA'd surface moved.
 - **Hygiene.** Rounds only on pushed heads; one comment per stream per round; no
-  `re-pin`, `addendum` or `delta` sub-rounds. Amend your own comment (`gh api
-  -X PATCH`) or carry it into the next real round.
+  `re-pin`/`addendum` comments. Amend your own round (`gh api -X PATCH`) only
+  for provenance/typos, before any remediation reply; never change `Scope:`.
 - **Tone.** Collaborative: state the problem, evidence and a suggested fix; note
   what works in a line. No retraction/correction theatre; disagree once, with
   evidence, then settle.
 - **Stop.** Past 3 waves, or review-driven growth past ~2x the original diff,
-  the manager splits the follow-on into a separate PR.
+  the manager splits follow-on scope into a separate PR; an open BLOCKER/MAJOR
+  is never split out of the PR being merged.
 
 ## Model provenance
 
