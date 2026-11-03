@@ -969,13 +969,14 @@ superseded it with 0.1.7 before any submission, so no 0.1.6 entry is owed.
 above. "Pending review" is a snapshot from the submission date; Chrome review
 usually resolves within days, so if that date is well in the past, assume the
 row is stale and re-check before relying on it. Append the approval timestamp
-and promote this heading when it lands. Note there is no status-only workflow to
-dispatch — both store workflows write (`stage` uploads and submits, `promote`
-publishes), so a read-only status check has to be the hand-rolled API call, and
-that needs a temporary IAM grant which must be revoked afterwards. Read the
-warning under "Release-automation verification" before making it. The dashboard
-shows the same state with no grant at all, which is the cheaper check when you
-only need to eyeball it.
+and promote this heading when it lands. A read-only status check no longer needs
+a hand-rolled call or a temporary IAM grant: `chrome-web-store-status.yml` reads
+`fetchStatus` hourly (and on `gh workflow run chrome-web-store-status.yml --ref
+main`) with a `chromewebstore.readonly` token and keeps the answer as the
+`chrome-web-store-status` JSON artifact. It never uploads or publishes; an
+approved STAGED revision is still promoted with `chrome-web-store-promote.yml`.
+The dashboard shows the same state, including a rejection's reason, which
+`fetchStatus` does not carry.
 
 **Follow-up: make `build:zip` deterministic.** `build.mjs` invokes `zip` without
 normalising timestamps, which is why the archive hash above cannot be

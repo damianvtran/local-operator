@@ -5420,6 +5420,14 @@ class MobileDaemon:
         # runtime spawn outside ``launch._spawn_runtime``, so it does not get
         # that function's scrub (review round 1, M1).
         env.pop(ENGAGED_ENV, None)
+        # A daemon started from a wake-owned runtime is not that supervisor.
+        # Match the viewer spawn's ownership boundary: only the actual minting
+        # supervisor may pass its owner token, never an inherited PID/marker.
+        # Boot also strips these, but the exec-time environment is what a stop
+        # sweep inspects, so clearing only after boot is too late (#3028 r5).
+        from local_operator.wakes.owned_runtimes import stamp_child_env
+
+        stamp_child_env(env)
         # The desktop bearer, for the same reason as the claim above: the viewer's spawn in
         # ``launch._spawn_runtime`` scrubs it and this one did not (#3002 review r2, R2-1).
         # A mobile daemon started from inside a desktop-owned tree would otherwise put the

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import copy
 import ctypes
+import errno
 import math
 import os
 import signal
@@ -787,7 +788,20 @@ class AuthoritativeCensus(CensusResult):
 
 
 class OwnedGroup:
-    def __init__(self, seal, leader, *, census, samples, identity, scheme, clock, signal_group):
+    def __init__(
+        self,
+        seal,
+        leader,
+        *,
+        census,
+        samples,
+        identity,
+        scheme,
+        clock,
+        signal_group,
+        departure=None,
+        proc_self=None,
+    ):
         if seal is not _SEAL or type(leader) is not int or leader <= 1:
             raise ValueError("numeric PGID alone cannot construct signal authority")
         self.leader = self.pgid = leader
@@ -820,6 +834,14 @@ class OwnedGroup:
         self._revoked = False
         self._sample_failures = []
         self._terminal_result = None
+        #: THE DEPARTURE PROBES (see `_departed`). Kept on the `identity`
+        #: pattern so synthetic histories can inject them, but `None` is
+        #: meaningful: it means "the product default", which is only consulted
+        #: on the native sampling path. An injected `samples` reader produces no
+        #: per-PID ENOENT diagnostics we can trust, so a fixture that wants a
+        #: departure must inject the probe explicitly (positive control).
+        self._departure = departure
+        self._proc_self = proc_self
 
     def revoke(self):
         # Reaping releases the reservation even if wait times out or raises.
@@ -847,6 +869,8 @@ class OwnedGroup:
         scheme=procstate.birth_scheme,
         clock=time.monotonic,
         signal_group=None,
+        departure=None,
+        proc_self=None,
     ):
         if signal_group is None:
             # Resolved HERE, never as a keyword default: a default is evaluated when
@@ -865,6 +889,8 @@ class OwnedGroup:
             scheme=scheme,
             clock=clock,
             signal_group=signal_group,
+            departure=departure,
+            proc_self=proc_self,
         )
         parent = os.getpid() if parent_pid is None else parent_pid
         cap.probe["parent"] = parent
@@ -1262,7 +1288,7 @@ class OwnedGroup:
         # `proof: []` on every successful run.
         # A new refusal (including irreversible revocation) must not relabel
         # an earlier attempt's sample diagnostics as evidence gathered now.
-        for stale in ("sample_failure", "unresolved", "census_failure"):
+        for stale in ("sample_failure", "unresolved", "census_failure", "vanished"):
             self.probe.pop(stale, None)
         if self._revoked:
             self.last = Verdict(
@@ -1270,7 +1296,7 @@ class OwnedGroup:
             )
             return self.last
         self._terminal_result = None
-        for stale in ("residuals", "error", "vanished"):
+        for stale in ("residuals", "error"):
             self.probe.pop(stale, None)
         members = []
         samples = {}
@@ -1350,18 +1376,39 @@ class OwnedGroup:
                     return self.last
                 raise Unknown("live leader absent from a complete census: contradictory")
             samples = self._samples(set(members) | {self.leader}, deadline)
+            # SNAPSHOT NOW (security review C11): `_samples` resets
+            # `_sample_failures` on every call and `_leader_witness` calls it, so
+            # any later witness read would erase this attempt's member evidence
+            # -- or, after a refactor, substitute the leader's.
+            failures = {row["pid"]: row for row in self._sample_failures}
             self.probe["observed"] = _observed(samples, None)
             # UNRESOLVED MEMBER SAMPLES ARE REFUSED BEFORE ANY EMPTINESS VERDICT.
             # A missing map entry cannot prove departure, so certifying "no live
             # members" while one member is unresolved would be false cleanup through
             # a second door.
             absent = [pid for pid in members if pid not in samples]
+            departed, unresolved = self._departed(absent, first, second, failures)
+            if departed and not unresolved:
+                kept = [pid for pid in members if pid not in departed]
+                if not kept:
+                    # Never let a pruned set reach an emptiness verdict: the
+                    # empty-census branch above is bracketed by its own witness
+                    # reads and was not designed for "everything left". The
+                    # refusal keeps the unpruned members as its residuals.
+                    raise Unknown("every census member departed: no member to prove")
+                # Pruned BEFORE `live`, so identities, Verdict members and
+                # residuals all describe the members that remain.
+                members = kept
+                self.probe["vanished"] = [departed[pid] for pid in sorted(departed)]
+                absent = []
             if absent:
                 self.probe["unresolved"] = absent
                 # These are observations from the existing reads, not a new
-                # authority predicate. In particular ENOENT is not amnesty for
-                # a PID seen by either complete census. Preserve the refusal.
-                failures = {row["pid"]: row for row in self._sample_failures}
+                # authority predicate. ENOENT ALONE is not amnesty for a PID seen
+                # by either complete census -- `/proc` visibility is not the
+                # kernel's process table (hidepid, setuid). The one exception is
+                # `_departed`'s conjunction, and it applies only when EVERY
+                # absent member qualifies; otherwise this refusal is unchanged.
                 self.probe["sample_failure"] = {
                     "phase": "terminal-member-sample" if terminal else "member-sample",
                     "witness": state,
@@ -1430,12 +1477,94 @@ class OwnedGroup:
                 refusal_class="pin_lost" if isinstance(exc, PinLost) else "unproven",
             )
             self.probe["error"] = type(exc).__name__ + ":" + str(exc)
+            # Departures are evidence FOR a proof; a run that refused must not
+            # publish them beside its refusal as if they had authorised anything.
+            self.probe.pop("vanished", None)
             # The DECLINED set carries the same fields as the proven set — pid,
             # birth, scheme, group, session — because "who did we refuse to touch"
             # needs the same evidence as "who did we signal". The samples this check
             # already paid for supply the birth for a member that was never enrolled.
             self.probe["residuals"] = _identities(self.receipts, samples, members)
         return self.last
+
+    def _departed(self, absent, first, second, failures):
+        """Split unsampled members into ``(departed, unresolved)``.
+
+        WHY THIS EXISTS. A healthy churn gate's child can exit between the two
+        censuses: CI 41665666039 (job 126020333214) recorded censuses
+        ``[[2716,2739,2740,2741],[2716,2741]]`` with 2739/2740 failing their
+        sample at ENOENT. The union-of-censuses rule then refused every such run
+        with exit 126 ("census member sample unreadable") although nothing of
+        ours was alive. Architect ruling 641ae72fe5d1 and security review
+        e8f8f83bc578 approved dropping such a PID only under ALL of:
+
+        - both censuses were authoritative and complete (guaranteed by
+          `_members`, which raises otherwise, so we never get here);
+        - P was in census 1 and NOT in census 2. LOAD-BEARING, not redundant
+          with ESRCH: a complete strict scan requires start list minus
+          proven-gone == end list, so a P absent from census 2 was already gone
+          during that scan, and any child it forked into our group before dying
+          is in census 2 or broke completeness. "In census 2, then ESRCH" would
+          let a P fork a live child after census 2 and then be dropped;
+        - P is neither the leader nor the pgid (the witness is never amnestied);
+        - this attempt's sample diagnostic for P says ``read-error``/ENOENT.
+          Any other reason, no entry, or past the 16-row cap refuses;
+        - AFTER the sample, ``getpgid(P)`` raises ProcessLookupError. That is the
+          kernel's answer, independent of `/proc` visibility: a zombie still
+          answers getpgid, hidepid cannot fake ESRCH, and a reused PID returns a
+          number. ONLY ProcessLookupError counts -- a value, EPERM/EACCES (LSM
+          denial) or any other error refuses;
+        - `/proc` is our PID namespace (C10): `/proc/self` must name our pid,
+          because getpgid resolves in OUR namespace and a foreign `/proc` would
+          make "ENOENT there + ESRCH here" describe two different processes.
+
+        The witness state is already "held" (the only branch that reaches the
+        member sample) and every later witness check is unchanged. Returns
+        ``departed`` as ``{pid: evidence}`` for the run record.
+        """
+        if not absent:
+            return {}, []
+        probe = self._departure
+        if probe is None:
+            if self.samples is not None:
+                # An injected sampler carries no trustworthy per-PID errno.
+                return {}, list(absent)
+            probe = os.getpgid
+        try:
+            own = (self._proc_self or (lambda: os.readlink("/proc/self")))()
+        except Exception:  # noqa: BLE001 - an unreadable namespace grants nothing
+            return {}, list(absent)
+        if own != str(os.getpid()):
+            return {}, list(absent)
+        seen_first, seen_second = set(first), set(second)
+        departed, unresolved = {}, []
+        for pid in absent:
+            row = failures.get(pid)
+            if (
+                pid in (self.leader, self.pgid)
+                or pid not in seen_first
+                or pid in seen_second
+                or row is None
+                or row.get("reason") != "read-error"
+                or row.get("errno") != errno.ENOENT
+            ):
+                unresolved.append(pid)
+                continue
+            try:
+                probe(pid)
+            except ProcessLookupError:
+                departed[pid] = {
+                    "pid": pid,
+                    "reason": "read-error",
+                    "errno": errno.ENOENT,
+                    "getpgid": "ProcessLookupError",
+                    "census": "first-only",
+                }
+                continue
+            except Exception:  # noqa: BLE001 - anything but ESRCH is not departure
+                pass
+            unresolved.append(pid)
+        return departed, unresolved
 
     def signal(self, signum, *, deadline):
         result = self.refresh(deadline=deadline)
