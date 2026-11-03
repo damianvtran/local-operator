@@ -1,0 +1,56 @@
+{
+  "locale": "fr",
+  "namespace": "wire.aida_cadence",
+  "audit_id": "frca-delta-05c51",
+  "audit_date": "2026-11-03",
+  "key_count": 2,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "05c51f9b1aba",
+    "model": "anthropic/claude-sonnet-5-5",
+    "independent_from_translator_session": "a58a48732351",
+    "actual_model_source": "Current resumed-run runtime header; no fallback observed in this delta audit",
+    "fallback_used": false
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.aida_cadence.json",
+      "sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.aida_cadence.context.json",
+      "sha256": "6efad501b08345b72e5d4d19cfee3dd27a02a48c2eb721780cf9d7f8c7694d0e"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/wire.aida_cadence.json",
+      "sha256": "42333772890dd59733f0bcff715c9d608ff1f7c069c8dbb025ee3b2f0548ed63"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-05c51/report.md",
+      "sha256": "71b6c37664c26a27ded085ed2aeea15ee956968d25bc141c9ee41622225fbc7c"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-05c51/audit.log",
+      "sha256": "bfa770cb7efdbb9b5f4101c187f176c0f22f9e7cf4c90586f779161da8538e10"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  },
+  "audit_notes_not_execution_log": "report.md qualitative reasoning; audit.log actual validator/probe output plus labelled recovery note",
+  "rendered_proof": false,
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "intended_tracked_root": "i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-05c51"
+}

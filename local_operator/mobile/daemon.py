@@ -6414,9 +6414,9 @@ def build_app(daemon: MobileDaemon):
                         "code": "invalid_setting",
                         # Match this relay's config-resolved metadata language,
                         # not envelope()'s English default or ambient TUI state.
-                        "error": _ap.error_invalid_json().envelope(
-                            locale=resolve_language()
-                        )["text"],
+                        "error": _ap.error_invalid_json().envelope(locale=resolve_language())[
+                            "text"
+                        ],
                     },
                     status_code=422,
                 )

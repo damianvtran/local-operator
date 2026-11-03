@@ -4,10 +4,9 @@ import pytest
 from starlette.testclient import TestClient
 
 from local_operator import settings_io
+from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.i18n import messages
 from local_operator.i18n.resolve import resolve_language
-
-from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.mobile.daemon import MobileDaemon, build_app
 from local_operator.paths import config_dir
 from local_operator.providers.account_policy import effective_account_selection_policy

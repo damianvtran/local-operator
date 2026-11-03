@@ -945,6 +945,11 @@ def add_parser(
         help="Apply signed finite-share recovery; never future inheritance",
     )
     cred_share.add_argument("--json", action="store_true")
+    # Explicit refresh reuses the grant operation. No destination, scope or
+    # owner override is accepted: placement and the owner remain the authority.
+    cred_refresh = credential_actions.add_parser("refresh")
+    cred_refresh.add_argument("key")
+    cred_refresh.add_argument("--json", action="store_true")
     cred_revoke = credential_actions.add_parser(
         "revoke",
         help="Stop letting a device borrow a credential, or end its copy of a stored secret",
@@ -2922,6 +2927,33 @@ def _cmd_credential_inherit(args: argparse.Namespace) -> int:
             f"{args.provider} --to {device} --status",
         ],
     )
+
+
+def _cmd_credential_refresh(args: argparse.Namespace) -> int:
+    """Ask the existing owner broker once; never expose the returned bearer.
+
+    The local relay resolves the owner from placement and the owner still checks
+    holder permission and ADMIN. A CLI refresh cannot grant, retarget, or repair
+    a withdrawn share, and refusal codes cross this hop unchanged.
+    """
+    from local_operator.network.credentials import BROKER_OP_DEADLINE_S
+    from local_operator.network.types import MeshRefusal
+
+    key = str(args.key)
+    detail = _relay_answer(
+        "credential_grant",
+        timeout=BROKER_OP_DEADLINE_S,
+        credential_key=key,
+        force_refresh=True,
+    )
+    if detail.get("kind") != "grant":
+        raise MeshRefusal(
+            str(detail.get("code") or "grant_invalid"),
+            str(detail.get("message") or "grant_invalid"),
+        )
+    # A grant contains access material. Emit a new allowlisted receipt, never
+    # the broker detail or a redacted copy whose future fields could leak.
+    return _emit(args, {"ok": True, "credential_name": key}, [key])
 
 
 def _cmd_credential(args: argparse.Namespace) -> int:
@@ -9417,6 +9449,8 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
     names them, which is the same rule ``member`` states.
     """
     verb = getattr(args, "credential_command", None)
+    if verb == "refresh":
+        return _cmd_credential_refresh(args)
     if verb == "inherit":
         return _cmd_credential_inherit(args)
     if verb in ("share", "revoke", "mark"):
@@ -9428,6 +9462,7 @@ def _guard_credential_subcommand(args: argparse.Namespace) -> int:
         "--request-approval|--approval <id>|--status\n"
         "       lop network credential revoke <provider|mcp:<url>> --from <device>\n"
         "       lop network credential mark   <secret> sync|local-only|default\n"
+        "       lop network credential refresh <provider> [--json]\n"
         "       lop network credentials [--json]   # what is shared, and with whom",
         file=sys.stderr,
     )

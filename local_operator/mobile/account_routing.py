@@ -36,7 +36,7 @@ def policy_payload(root: Path, patch: Any = None, *, write: bool = False) -> dic
         raise AccountRoutingError(
             "account_routing_unavailable",
             _ap.error_unavailable().envelope(locale=resolve_language())["text"],
-            404
+            404,
         )
     try:
         settings_io.require_readable_config_path(root / CONFIG_FILE_NAME)
@@ -47,7 +47,7 @@ def policy_payload(root: Path, patch: Any = None, *, write: bool = False) -> dic
                 raise AccountRoutingError(
                     "invalid_setting",
                     _ap.error_invalid_shape().envelope(locale=resolve_language())["text"],
-                    422
+                    422,
                 )
             # Interactive authenticated user action: retain the same attribution
             # as TUI/desktop HTTP, not the agent-only settings_control seam.
@@ -61,7 +61,7 @@ def policy_payload(root: Path, patch: Any = None, *, write: bool = False) -> dic
         raise AccountRoutingError(
             "setting_write_failed",
             _ap.error_write_failed().envelope(locale=resolve_language())["text"],
-            503
+            503,
         ) from exc
     return {
         "capability": CAPABILITY,
