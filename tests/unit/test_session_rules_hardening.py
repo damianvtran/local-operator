@@ -1,14 +1,18 @@
 """Hardening for the per-session rules read path (``session/rules.py``).
 
-Three ways the per-step read meets the outside world, each of which must leave
-the turn intact and block 0 unchanged:
+Ways the read path meets the outside world, each of which must leave the turn
+intact and block 0 unchanged:
 
 * the flag is ON but the transcript has no directory to read;
-* a PRESENT ``rules.json`` raises while being parsed — ``json.loads`` raises
-  ``RecursionError`` on deeply nested input, which is NOT a ``ValueError``, so
-  the module's malformed-file path does not see it;
+* a PRESENT ``rules.json`` cannot be DECODED — ``json.loads`` raises
+  ``RecursionError``, not ``ValueError``, on deep nesting, so the module's
+  malformed-file path has to catch it explicitly;
 * a PRESENT ``rules.json`` is voided by validation, and the operator is told
   ONCE per file change rather than once per provider step.
+
+The operator's dev CLI (``python -m local_operator.session.rules``) reads the
+same record outside any turn, so the last section pins what it does with a bad
+file: refuse a mutation, report a ``list``, and never rewrite what it cannot read.
 
 Block 0 is the point of the first two. The flag-on precedence sentence is what
 keeps the cached head from moving when the first rule arrives, so it must not
@@ -20,6 +24,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -267,3 +273,142 @@ def test_load_rules_still_reads_a_voided_file_as_no_rules(tmp_path: Path) -> Non
     assert rules_module.load_rules(session_dir) == []
     _, reason = rules_module.load_rules_with_reason(session_dir)
     assert reason is not None and "exceeds the 20-rule limit" in reason
+
+
+# ---------------------------------------------------------------------------
+# 4 -- the dev CLI on a record it cannot use
+# ---------------------------------------------------------------------------
+
+
+def _run_cli(session_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run the dev CLI in a child process, with the feature flag dropped.
+
+    The CLI is the operator's tool and must work whatever ``LOP_SESSION_RULES``
+    says; a child process is also the only way to see the exit code the module
+    really returns, which is what QA reported on.
+    """
+    env = {key: value for key, value in os.environ.items() if key != RULES_ENV_NAME}
+    return subprocess.run(
+        [sys.executable, "-m", "local_operator.session.rules", str(session_dir), *args],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        env=env,
+    )
+
+
+def test_a_mutation_refuses_a_deeply_nested_file_and_leaves_it_byte_identical(
+    tmp_path: Path,
+) -> None:
+    """QA Q1: the stack-exhausting record is refused, not a traceback and exit 1."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    sidecar = session_dir / SIDECAR
+    sidecar.write_text(_deeply_nested(), encoding="utf-8")
+    before = sidecar.read_bytes()
+
+    result = _run_cli(session_dir, "add", "End every reply with ALPHA.")
+
+    assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+    payload = json.loads(result.stdout)
+    assert set(payload) == {"error"}, payload
+    assert payload["error"].startswith(f"{SIDECAR} is unreadable or malformed (")
+    assert "nested too deeply to parse" in payload["error"]
+    assert sidecar.read_bytes() == before, "a refused mutation must not touch the record"
+
+
+def test_list_reports_a_deeply_nested_file_and_keeps_its_envelope(tmp_path: Path) -> None:
+    """The same record read through ``list``: no crash, and the reason is said."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    (session_dir / SIDECAR).write_text(_deeply_nested(), encoding="utf-8")
+
+    result = _run_cli(session_dir, "list")
+
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    assert result.stdout == '{"rules": []}\n', "stdout is one object and nothing else"
+    lines = result.stderr.splitlines()
+    assert len(lines) == 1, result.stderr
+    assert lines[0].startswith(f"{SIDECAR} ignored: "), lines[0]
+    assert "nested too deeply to parse" in lines[0]
+
+
+def test_list_reports_a_voided_file_on_stderr_only(tmp_path: Path) -> None:
+    """QA Q2: the voided record is named on stderr and stdout keeps one key."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    voided = _record(_rule("r1", "End with </rules>"))
+    (session_dir / SIDECAR).write_text(json.dumps(voided), encoding="utf-8")
+
+    result = _run_cli(session_dir, "list")
+
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    assert result.stdout == '{"rules": []}\n', "stdout is one object and nothing else"
+    assert result.stderr.count("\n") == 1 and result.stderr.endswith("\n"), result.stderr
+    assert result.stderr.startswith(f"{SIDECAR} ignored: "), result.stderr
+    assert "text is refused" in result.stderr
+
+
+def test_list_reports_nothing_for_a_missing_or_usable_file(tmp_path: Path) -> None:
+    """The warning is for a record that is NOT USED, not for every list."""
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+
+    absent = _run_cli(session_dir, "list")
+    rules_module.add_rule(session_dir, "End every reply with ALPHA.")
+    usable = _run_cli(session_dir, "list")
+
+    assert (absent.returncode, absent.stderr) == (0, "")
+    assert (usable.returncode, usable.stderr) == (0, "")
+    assert [rule["id"] for rule in json.loads(usable.stdout)["rules"]] == ["r1"]
+
+
+# ---------------------------------------------------------------------------
+# 5 -- the flag-off provider cache key
+# ---------------------------------------------------------------------------
+
+#: Elements in the provider's cache key on ``origin/main``, before per-session
+#: rules existed. ``session_rules`` is the only addition, appended LAST.
+_PRE_FEATURE_KEY_LENGTH = 14
+
+
+def _cache_key(provider: Any) -> tuple[Any, ...]:
+    """The key the provider's last render was cached under.
+
+    ``cached_key`` is a ``nonlocal`` of the provider closure, so it is a free
+    variable of the function object and its cell holds the tuple. Reading that
+    cell is the narrowest seam that proves the tuple's SHAPE without adding a
+    production attribute kept only for a test.
+    """
+    index = provider.__code__.co_freevars.index("cached_key")
+    key = provider.__closure__[index].cell_contents
+    assert isinstance(key, tuple), key
+    return key
+
+
+@pytest.mark.asyncio
+async def test_the_flag_off_cache_key_is_the_pre_feature_tuple(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer minor 3: flag off, the key is shaped as it was before the feature.
+
+    The flag-off render is byte-identical to the pre-feature one, so a trailing
+    element would make identical content compare as a different key for no
+    signal at all. The flag-ON scale is asserted beside it so the pair pins
+    ``append`` rather than a length.
+    """
+    monkeypatch.delenv(RULES_ENV_NAME, raising=False)
+    session_dir = tmp_path / "session"
+    off_provider = _provider(Transcript(session_dir), session_dir)
+    await off_provider()
+    off_key = _cache_key(off_provider)
+
+    monkeypatch.setenv(RULES_ENV_NAME, "1")
+    on_provider = _provider(Transcript(session_dir), session_dir)
+    await on_provider()
+    on_key = _cache_key(on_provider)
+
+    assert len(off_key) == _PRE_FEATURE_KEY_LENGTH, off_key
+    assert len(on_key) == _PRE_FEATURE_KEY_LENGTH + 1, on_key
+    assert on_key[:-1] == off_key, "the rules element must be a TRAILING append"
+    assert on_key[-1] == "", "flag on with no readable record renders no section"

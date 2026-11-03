@@ -3961,9 +3961,9 @@ def _make_system_blocks_provider(
             try:
                 session_rules = current_rules(rules_dir)
             except Exception:  # noqa: BLE001 — a rules read must never break a turn
-                # RecursionError on a deeply nested file is the case that reaches
-                # here; anything else would be a defect. Neither is worth
-                # refusing the operator's message over.
+                # ``rules.py`` turns an unreadable file into a reason, so what
+                # reaches here is a defect; it is still not worth failing the
+                # operator's turn over.
                 logger.warning(
                     "session rules: reading %s failed; no rules are rendered this step",
                     rules_dir / RULES_SIDECAR_NAME,
@@ -3977,7 +3977,7 @@ def _make_system_blocks_provider(
             session_rules = ""
         else:
             session_rules = None
-        key = (
+        key: tuple[Any, ...] = (
             knowledge_block,
             date_str,
             goal,
@@ -3992,8 +3992,13 @@ def _make_system_blocks_provider(
             open_asks or "",
             tuple((tool.name, tool.description) for tool in tools),
             has_notify,
-            session_rules,
         )
+        # ``session_rules`` is appended ONLY with the feature on: flag off the
+        # tuple must have exactly the shape it had before per-session rules
+        # existed, because the flag-off render is unchanged and a trailing
+        # ``None`` would be a different tuple for identical content.
+        if rules_on:
+            key = (*key, session_rules)
         # ``deferred_tools`` is deliberately NOT passed here and NOT part of
         # ``key``: this render is the CACHED head only, and the session
         # re-renders block 1 against its own deferral state every turn

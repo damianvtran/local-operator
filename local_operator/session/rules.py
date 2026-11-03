@@ -22,7 +22,10 @@ on each provider step, so an edit needs no session API and reaches the model as
 an ordinary ``[session-state]`` delta.
 
 Module scope imports only the standard library and the deliberately light
-``resume`` module, so the dev CLI starts without loading the engine.
+``resume`` module, so the CLI starts without loading the engine.
+``prompts_api`` is the one exception: ``_tail_markers`` imports it on first
+use, when a rule's text is checked — ``add`` and ``edit`` check the text they
+are given, and any command checks the entries of a record it reads.
 """
 
 from __future__ import annotations
@@ -123,15 +126,20 @@ def _parse(raw: str) -> tuple[tuple[int, list[Rule]] | None, str | None]:
     tell the operator which file it is ignoring and why: a rule set that quietly
     stops applying is the failure this record exists to prevent.
 
-    ``RecursionError`` is deliberately NOT caught here. ``json.loads`` raises it
-    on deeply nested input, and the caller that runs per provider step wraps the
-    whole read for exactly that case (``session_factory``); catching it here
-    would put the recovery inside the module whose job is to report.
+    A file ``json.loads`` cannot DECODE is refused here too, and that includes
+    the pathological one: ``json.loads`` recurses on nested input and raises
+    ``RecursionError`` — not a ``ValueError`` — once the nesting exhausts the
+    stack. It is caught beside the syntax errors because the record is
+    unreadable either way, and the dev CLI has no other layer to catch it:
+    uncaught, the operator's ``add`` died on a traceback with exit 1 instead of
+    reporting a refusal.
     """
     try:
         payload = json.loads(raw)
     except ValueError as exc:
         return None, f"not valid JSON ({exc})"
+    except RecursionError as exc:
+        return None, f"nested too deeply to parse ({exc})"
     if not isinstance(payload, dict):
         return None, "not a JSON object"
     if payload.get("v") != _SCHEMA_VERSION:
@@ -185,11 +193,7 @@ def _read(session_dir: Path) -> tuple[tuple[int, list[Rule]] | None, str | None]
 
 
 def load_rules(session_dir: Path) -> list[Rule]:
-    """The session's rules in order; ``[]`` for a missing or unusable file.
-
-    ``RecursionError`` from a pathologically nested file is the one exception
-    that escapes: it is the case the per-step reader wraps for.
-    """
+    """The session's rules in order; ``[]`` for a missing or unusable file."""
     record, _ = _read(session_dir)
     return [] if record is None else record[1]
 
@@ -308,7 +312,14 @@ def _cli(argv: Sequence[str]) -> tuple[dict[str, Any], int]:
     session_dir, command, rest = Path(argv[0]), argv[1], list(argv[2:])
     try:
         if command == "list" and not rest:
-            return {"rules": [asdict(rule) for rule in load_rules(session_dir)]}, 0
+            # A record the validator refuses is REPORTED, not passed off as an
+            # empty rule set: the operator's constraints have stopped binding,
+            # and silence is the one answer they must not get. stderr keeps
+            # stdout the single JSON object the envelope promises.
+            rules, reason = load_rules_with_reason(session_dir)
+            if reason is not None:
+                sys.stderr.write(f"{RULES_SIDECAR_NAME} ignored: {reason}\n")
+            return {"rules": [asdict(rule) for rule in rules]}, 0
         if command == "add" and len(rest) == 1:
             return {"rule": asdict(add_rule(session_dir, rest[0]))}, 0
         if command == "edit" and len(rest) == 2:
@@ -321,7 +332,11 @@ def _cli(argv: Sequence[str]) -> tuple[dict[str, Any], int]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Dev entry point: one JSON object on stdout, exit 2 on refusal."""
+    """Dev entry point: one JSON object on stdout, exit 2 on refusal.
+
+    ``list`` also writes one ``rules.json ignored: <reason>`` line to stderr when
+    a present record cannot be used; that is a report, not a refusal.
+    """
     payload, code = _cli(sys.argv[1:] if argv is None else argv)
     sys.stdout.write(json.dumps(payload) + "\n")
     return code
