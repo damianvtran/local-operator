@@ -91,7 +91,8 @@ def test_real_command_status_preserves_child_outcome_and_environment(tmp_path, s
     assert row["cleanup_status"] == row["descendant_cleanup"] == "unknown"
     # 3.12 on macOS has no os.waitid: it must RUN on the sysctl observer, not skip.
     assert row["terminal_observer"] == bounded_contract.ReservedLeader.select_observer()
-    assert "memory guard disabled (explicit)" in done.stderr
+    assert "memory guard disabled by --memory-mb 0" in done.stderr
+    assert "memory_mb=0" not in done.stderr  # D2.3: the wrapper's own spelling
 
 
 def _alive(token):
@@ -198,7 +199,7 @@ def test_real_opt_in_cannot_bypass_positive_inherited_grant(tmp_path, memory_arg
     assert row["termination_cause"] == "memory-policy-refused"
     assert row["command_exit_code"] is None
     assert row["cleanup_status"] == "unknown"
-    assert "refused before spawn: memory budget refused" in done.stderr
+    assert "refused before spawn: --memory-mb cannot disable or widen" in done.stderr
     assert "spawned=no" in done.stderr and f"invocation_id={row['invocation_id']}" in done.stderr
 
 

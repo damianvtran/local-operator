@@ -158,7 +158,7 @@ def test_each_wrapper_path_reauthorizes_without_unbounded_wait(
         tick_s=0.1,
         sample_sync=sample,
         should_kill=lambda _: mode == "memory-unknown",
-        over_budget_message=lambda _: "MEMORY LIMIT EXCEEDED",
+        over_budget_message=lambda _, **kwargs: "MEMORY LIMIT EXCEEDED",
         soft_notice=lambda _: None,
     )
     monkeypatch.setattr(wrapper.memory_guard, "Guard", lambda *_: guard)

@@ -948,7 +948,9 @@ class Guard:
         hard_gb = sample.bytes_hard / (1024**3)
         return f"memory {used_gb:.1f}/{hard_gb:.1f} GB — approaching the command budget"
 
-    def over_budget_message(self, sample: Sample) -> str:
+    def over_budget_message(
+        self, sample: Sample, *, unit: str = "GB", escape: str | None = None
+    ) -> str:
         """The tool-result text from §5. Plain text, no markdown, no backticks.
 
         The numbers are the MEASURED group peak and the ceiling; naming them is
@@ -968,21 +970,32 @@ class Guard:
         the reminder a big host most needs is the one it lost first. The short
         form measures 405 cells on a 128 GB host, so the whole sentence, escape
         hatch included, fits inside the reason block at every width.
+
+        ``unit``/``escape`` exist for scripts/run_bounded.py (design review
+        D2.1): its ceilings are small MiB values (64 MiB rendered as "0.1 GB"
+        made peak and budget look equal) and its knob is ``--memory-mb``, not
+        the bash call's ``memory_mb``. The defaults keep the bash tool's text
+        byte-identical; one copy, parameterised, rather than a fork.
         """
         peak = sample.bytes_used if sample.bytes_used is not None else self.peak_bytes
-        peak_gb = (peak or sample.bytes_hard) / (1024**3)
-        hard_gb = sample.bytes_hard / (1024**3)
+        if unit == "MiB":
+            reached = f"{(peak or sample.bytes_hard) / (1024**2):.0f} MiB"
+            ceiling = f"{sample.bytes_hard / (1024**2):.0f} MiB"
+        else:
+            reached = f"{(peak or sample.bytes_hard) / (1024**3):.1f} GB"
+            ceiling = f"{sample.bytes_hard / (1024**3):.1f} GB"
         device = ""
         if self.budget.total_mb is not None and self.budget.available_mb is not None:
             device = f" (on a {self.budget.total_mb / 1024:.0f} GB host)"
+        if escape is None:
+            escape = "pass memory_mb on the bash call or raise bash.memory.limit_mb in settings"
         return (
             f"MEMORY LIMIT EXCEEDED: this command's process group reached "
-            f"{peak_gb:.1f} GB, over the {hard_gb:.1f} GB budget for one command"
+            f"{reached}, over the {ceiling} budget for one command"
             f"{device}. The command was killed; the session is fine. Reduce peak "
             f"memory and retry: stream instead of loading all rows, lower the batch "
             f"size, or process the input in chunks. To allow a deliberately large "
-            f"command, pass memory_mb on the bash call or raise bash.memory.limit_mb "
-            f"in settings."
+            f"command, {escape}."
         )
 
 

@@ -531,6 +531,24 @@ def _memory_budget(override_mb: int | None) -> tuple[memory_guard.Budget, str]:
     return memory_guard.compute_budget(override_mb=ceiling), source
 
 
+def _memory_escape() -> str:
+    """The over-budget message's escape hatch, in this wrapper's own terms.
+
+    Design review D2.1: the bash tool's wording (`memory_mb on the bash call`)
+    names a knob that cannot move a ceiling set by --memory-mb, so this caller
+    names --memory-mb first and the inherited cap that bounds it. Read after
+    _memory_budget has already validated the variable.
+    """
+    raw = os.environ.get(memory_guard.RESOLVED_MEMORY_MB_ENV, "")
+    inherited = int(raw) if raw.isdigit() else 0
+    if inherited > 0:
+        return (
+            f"raise --memory-mb (up to the inherited {inherited} MiB), or memory_mb "
+            "on the outer bash call"
+        )
+    return "raise --memory-mb, or pass --memory-mb 0 to disable the guard"
+
+
 def _child_environment(budget):
     # Source integration required two independent edits: define this builder,
     # then replace the old inline policy with a call. There is no atomic "move".
@@ -606,7 +624,7 @@ def _run_cleanup_required(
             "sampled owned child group only\n"
         )
     else:
-        stream.write(f"[run_bounded] memory guard disabled ({budget_source}): {budget.reason}\n")
+        stream.write(bounded_contract.disabled_budget_line(budget_source, budget) + "\n")
     stream.flush()
     started = time.monotonic()
     # A signal to this wrapper has to reach the group: the child leads its own
@@ -820,7 +838,8 @@ def _run_cleanup_required(
                 sample = guard.sample_sync()
                 next_sample = now + guard.tick_s
                 if guard.should_kill(sample):
-                    _report(stream, f"[run_bounded] {guard.over_budget_message(sample)}")
+                    message = guard.over_budget_message(sample, unit="MiB", escape=_memory_escape())
+                    _report(stream, f"[run_bounded] {message}")
                     rc = EXIT_MEMORY
                     if _outcome is not None:
                         _outcome.termination_cause = "memory-policy"
@@ -1019,12 +1038,24 @@ def run(
         # The refusal line names the reason and the next step (design D1); the
         # status line then carries invocation_id/completion like every other
         # path, so the caller can locate the receipt proving the refusal (R8).
-        _report(stream, f"[run_bounded] refused before spawn: memory budget refused: {exc}")
         outcome = bounded_contract.Outcome(
             wrapper_exit_code=125,
             termination_cause="memory-policy-refused",
             cleanup_reason=str(exc),
         )
+        backend = bounded_contract.selected_backend() if _backend is None else _backend
+        if contract == "cleanup-required" and not backend.authoritative:
+            # Design D2.2: both refusals are known before spawn. Fixing the
+            # budget alone would only reveal the backend refusal next, and the
+            # real answer here is usually --contract=command-status, so the
+            # backend refusal leads and owns the recorded cause.
+            outcome.termination_cause = "unsupported-backend"
+            outcome.cleanup_reason = backend.reason
+            advice = bounded_contract.refusal_advice(outcome, contract, argv=argv, backend=backend)
+            _report(stream, f"[run_bounded] refused before spawn: {advice}")
+            _report(stream, f"[run_bounded] refused before spawn, also: {exc}")
+        else:
+            _report(stream, f"[run_bounded] refused before spawn: {exc}")
         try:
             receipt.publish(contract, outcome)
         except (OSError, ValueError, TypeError) as publication_error:
@@ -1060,6 +1091,7 @@ def run(
         strict=strict,
         backend=_backend,
         budget_source=budget_source,
+        memory_escape=_memory_escape(),
     )
 
 
@@ -1078,7 +1110,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         epilog=(
             "Exit status: child status normally; 124 on timeout; 125 on start or "
             "budget refusal (also backend/policy refusals before spawn: the "
-            "command never ran); 126 when the command ran but its owned group's "
+            "command never ran; pre-spawn refusals print spawned=no on the final "
+            "line); 126 when the command ran but its owned group's "
             "cleanup could not be proved under cleanup-required, or command-status"
             " supervision failed (command-status child success remains 0 with "
             "cleanup UNKNOWN); 137 with MEMORY LIMIT "

@@ -235,7 +235,7 @@ def test_positive_grant_cannot_be_disabled_or_widened(runner, monkeypatch, tmp_p
         text = stream.getvalue()
         # R8: the refusal names its receipt like every other path, and D1/D4:
         # a human reason line precedes a status line that says nothing ran.
-        assert "refused before spawn: memory budget refused" in text
+        assert "refused before spawn: --memory-mb cannot disable or widen" in text
         assert "spawned=no" in text and "invocation_id=" in text and "completion=" in text
     # A positive valid grant is ENFORCED by command-status, not refused: the
     # supervisor receives the budget and builds the guard on its own group.
@@ -1078,12 +1078,31 @@ class FakeKernel:
     """The OS calls ReservedLeader makes, recorded in one ordered event log.
 
     The leader turns into a zombie at ``dies_at`` ticks of ``waitid`` or when it
-    is SIGKILLed; ``stragglers`` stay in the group listing until signalled. The
-    log is the oracle for the architect's ordering invariant: every killpg
-    names pgid == proc.pid and precedes the single consuming waitpid.
+    is SIGKILLed (unless ``unkillable``: a leader stuck in uninterruptible
+    sleep); ``stragglers`` stay in the group listing until signalled. The log is
+    the oracle for the architect's ordering invariant: every killpg names
+    pgid == proc.pid and precedes the single consuming waitpid.
+
+    The kernel also owns the fake clock. Its ``sleep`` is CAPPED (R2.2): a
+    supervisor regression that never leaves its loop used to grow ``log``
+    until a memory guard killed the run (1.6 GB bounded, 15.3 GB unbounded);
+    now it trips ``runaway`` and the caller fails by assertion instead.
     """
 
-    def __init__(self, monkeypatch, *, dies_at=2, stragglers=(), observe_error=None):
+    #: Far above any legitimate run here (the longest, a 10 s grace at 50 ms
+    #: ticks, needs ~200), far below where the log costs real memory.
+    MAX_SLEEPS = 10_000
+
+    def __init__(
+        self,
+        monkeypatch,
+        *,
+        dies_at=2,
+        stragglers=(),
+        observe_error=None,
+        unkillable=False,
+        eperm_listing=False,
+    ):
         self.log = []
         self.ticks = 0
         self.dies_at = dies_at
@@ -1091,17 +1110,44 @@ class FakeKernel:
         self.reaped = False
         self.members = list(stragglers)
         self.observe_error = observe_error
+        self.unkillable = unkillable
+        self.now = 0.0
+        self.sleeps = 0
+        self.runaway = False
+        self.leader: contracts.ReservedLeader | None = None
+        self.signalled_at = []
+        # ``eperm_listing`` (anything but False) makes every killpg answer
+        # EPERM, as Darwin does for a group holding only our zombie leader,
+        # and is what the kernel's own group listing then reports.
+        self.eperm_listing = eperm_listing
         monkeypatch.setattr(contracts.os, "killpg", self.killpg)
         monkeypatch.setattr(contracts.os, "waitpid", self.waitpid)
         monkeypatch.setattr(contracts.os, "waitid", self.waitid, raising=False)
         for name, value in (("P_PID", 1), ("WEXITED", 4), ("WNOHANG", 1), ("WNOWAIT", 32)):
             monkeypatch.setattr(contracts.os, name, value, raising=False)
+        if eperm_listing is not False:
+            from local_operator.mobile import resources
+
+            monkeypatch.setattr(resources, "direct_group_pids", lambda pgid: eperm_listing)
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, dt):
+        self.sleeps += 1
+        if self.sleeps > self.MAX_SLEEPS:
+            self.runaway = True
+            raise AssertionError(f"supervisor loop exceeded {self.MAX_SLEEPS} ticks")
+        self.now += dt
 
     def killpg(self, pgid, signum):
         assert not self.reaped, "signal after the consuming reap"
         self.log.append(("killpg", pgid, signum))
+        self.signalled_at.append((signum, self.now))
+        if self.eperm_listing is not False:
+            raise PermissionError(1, "Operation not permitted")
         self.members = []
-        if signum == signal.SIGKILL:
+        if signum == signal.SIGKILL and not self.unkillable:
             self.zombie = True
 
     def waitid(self, idtype, pid, options):
@@ -1115,7 +1161,12 @@ class FakeKernel:
         return SimpleNamespace(si_pid=pid) if self.zombie else None
 
     def waitpid(self, pid, options):
-        assert options == 0
+        assert options in (0, 1), options
+        if not self.zombie:
+            # A blocking wait on a live leader never returns: that is the bug.
+            assert options == 1, "blocking waitpid on a leader not known dead"
+            self.log.append(("waitpid-nohang-empty", pid))
+            return 0, 0
         self.log.append(("waitpid", pid))
         self.reaped = True
         return pid, 0
@@ -1123,9 +1174,12 @@ class FakeKernel:
     def group(self, pgid):
         return [pgid, *self.members]
 
+    def boundary(self, proc):
+        self.leader = contracts.ReservedLeader(proc, observer="waitid-wnowait")
+        return self.leader
 
-def run_supervised(kernel, *, timeout=None, grace=0.2, clock=None):
-    now = [0.0]
+
+def run_supervised(kernel, *, timeout=None, grace=0.2, clock=None, **extra):
     outcome = contracts.Outcome()
     contracts.supervise_direct(
         ["synthetic"],
@@ -1136,11 +1190,15 @@ def run_supervised(kernel, *, timeout=None, grace=0.2, clock=None):
         stop={"signum": 0},
         stream=io.StringIO(),
         spawn=lambda *a, **k: Child(),
-        clock=clock or (lambda: now[0]),
-        sleep=lambda dt: now.__setitem__(0, now[0] + dt),
-        boundary=lambda proc: contracts.ReservedLeader(proc, observer="waitid-wnowait"),
+        clock=clock or kernel.clock,
+        sleep=kernel.sleep,
+        boundary=kernel.boundary,
         group_pids=kernel.group,
+        **extra,
     )
+    # supervise_direct swallows Exception into a 126 outcome, so the cap's
+    # AssertionError is re-asserted here, where it fails the test.
+    assert not kernel.runaway, "supervisor never left its loop (R2.2 cap tripped)"
     return outcome
 
 
@@ -1210,6 +1268,23 @@ def test_darwin_sysctl_observer_reads_zombie_without_consuming(monkeypatch):
         leader.send_group(signal.SIGTERM)
 
 
+def test_darwin_sysctl_absent_pid_revokes_instead_of_reading_unknown(monkeypatch):
+    """R2.3: a readable sysctl result WITHOUT our pid means someone else reaped
+    the leader. That is revocation, not "unreadable": the unreadable branch
+    would SIGKILL a group number that may already belong to a stranger."""
+    from local_operator import procstate
+
+    samples = iter([{43210: SimpleNamespace(zombie=False, birth="b1")}, {}])
+    monkeypatch.setattr(procstate, "_sysctl_samples", lambda pids: next(samples))
+    monkeypatch.setattr(contracts.os, "killpg", forbidden)
+    leader = contracts.ReservedLeader(Child(), observer="darwin-sysctl-zombie")
+    assert leader.observe() is False
+    with pytest.raises(ChildProcessError):
+        leader.observe()
+    with pytest.raises(RuntimeError, match="revoked"):
+        leader.send_group(signal.SIGTERM)
+
+
 def test_non_default_sigchld_still_refuses_before_spawn(monkeypatch, tmp_path):
     monkeypatch.setattr(contracts.signal, "getsignal", lambda sig: (lambda *a: None))
     assert "SIGCHLD is not default" in (contracts.ReservedLeader.unavailable_reason() or "")
@@ -1232,46 +1307,120 @@ def test_non_default_sigchld_still_refuses_before_spawn(monkeypatch, tmp_path):
     assert "refused before spawn:" in text and "spawned=no" in text
 
 
-def test_memory_breach_kills_group_before_reap_with_policy_cause(monkeypatch):
-    kernel = FakeKernel(monkeypatch, dies_at=10**9)
+def synthetic_guard(*, kill_on_sample=1):
+    """A guard factory whose ``kill_on_sample``-th sample breaches the grant."""
 
     class Guard:
         tick_s = 0.05
 
         def __init__(self, pgid, budget):
             assert pgid == 43210 and budget.ceiling_mb == 64
+            self.samples = 0
 
         def sample_sync(self):
-            return "over"
+            self.samples += 1
+            return self.samples
 
         def should_kill(self, sample):
-            return True
+            return sample >= kill_on_sample
 
-        def over_budget_message(self, sample):
+        def over_budget_message(self, sample, **kwargs):
             return "MEMORY LIMIT EXCEEDED: synthetic"
 
-    now = [0.0]
-    outcome = contracts.Outcome()
-    contracts.supervise_direct(
-        ["synthetic"],
-        timeout=None,
+    return Guard
+
+
+def test_memory_breach_kills_group_before_reap_with_policy_cause(monkeypatch):
+    kernel = FakeKernel(monkeypatch, dies_at=10**9)
+    outcome = run_supervised(
+        kernel,
         grace=10,
-        env={},
-        outcome=outcome,
-        stop={"signum": 0},
         budget=SimpleNamespace(ceiling_mb=64),
-        stream=io.StringIO(),
-        spawn=lambda *a, **k: Child(),
-        clock=lambda: now[0],
-        sleep=lambda dt: now.__setitem__(0, now[0] + dt),
-        boundary=lambda proc: contracts.ReservedLeader(proc, observer="waitid-wnowait"),
-        guard_factory=Guard,
-        group_pids=kernel.group,
+        guard_factory=synthetic_guard(),
     )
     assert kernel.log[0] == ("killpg", 43210, signal.SIGKILL)
     assert kernel.log[-1] == ("waitpid", 43210)
     assert outcome.wrapper_exit_code == 137 and outcome.termination_cause == "memory-policy"
     assert outcome.cleanup_status == "unknown"
+
+
+def test_grant_stays_enforced_through_a_deadline_grace(monkeypatch):
+    """R2.4: a TERM-ignoring group may not balloon while we wait out --grace.
+
+    timeout=0 latches the deadline on the first tick (kill_at = grace = 10 s);
+    the guard breaches on its SECOND sample, one 50 ms tick later. SIGKILL must
+    come from the guard then, not from the grace expiry at 10 s.
+    """
+    kernel = FakeKernel(monkeypatch, dies_at=10**9)  # ignores SIGTERM
+    outcome = run_supervised(
+        kernel,
+        timeout=0,
+        grace=10,
+        budget=SimpleNamespace(ceiling_mb=64),
+        guard_factory=synthetic_guard(kill_on_sample=2),
+    )
+    assert [sig for sig, _ in kernel.signalled_at] == [signal.SIGTERM, signal.SIGKILL]
+    kill_time = kernel.signalled_at[1][1]
+    assert kill_time < 10, kernel.signalled_at  # before kill_at = 0 + grace
+    assert kernel.log[-1] == ("waitpid", 43210)
+    # The deadline latched first, so it keeps the cause and status.
+    assert outcome.wrapper_exit_code == 124 and outcome.termination_cause == "deadline"
+
+
+@pytest.mark.parametrize(
+    ("listing", "accepted"),
+    [([43210], True), ([43210, 43299], False), (None, False)],
+    ids=["leader-only", "leader-and-other", "unreadable"],
+)
+def test_darwin_eperm_is_accepted_only_when_the_listing_proves_leader_only(
+    monkeypatch, listing, accepted
+):
+    """R2.1: Darwin answers killpg with EPERM when the only member is our
+    zombie leader. That reading is accepted ONLY when the kernel listing says
+    exactly that; an EPERM with another member (e.g. a setuid exec we may not
+    signal) or with an unreadable listing is authority loss: revoke, 126."""
+    kernel = FakeKernel(monkeypatch, dies_at=2, stragglers=[43299], eperm_listing=listing)
+    outcome = run_supervised(kernel)
+    assert kernel.log[0] == ("waitid", 43210)
+    first_signal = next(e for e in kernel.log if e[0] == "killpg")
+    assert first_signal == ("killpg", 43210, signal.SIGTERM)
+    if accepted:
+        # The sweep's EPERMs were "nobody signalable", so the corpse is reaped
+        # and the child's own status stands.
+        assert kernel.log[-1] == ("waitpid", 43210)
+        assert outcome.wrapper_exit_code == 0 and outcome.termination_cause == "child-exit"
+    else:
+        leader = kernel.leader
+        assert leader is not None and leader._revoked
+        with pytest.raises(RuntimeError, match="revoked"):
+            leader.send_group(signal.SIGTERM)
+        # Exactly one signal attempt, and no reap: the number may hold a
+        # member we cannot signal, so nothing more is sent or consumed.
+        assert [e for e in kernel.log if e[0] == "killpg"] == [first_signal]
+        assert not [e for e in kernel.log if e[0] == "waitpid"]
+        assert outcome.wrapper_exit_code == 126
+        assert outcome.termination_cause == "supervision-failure"
+        assert outcome.command_exit_code is None
+    assert outcome.cleanup_status == "unknown"
+
+
+def test_unreadable_observer_never_blocks_on_a_leader_that_will_not_die(monkeypatch):
+    """R2.5: after SIGKILL the unreadable branch polls with WNOHANG until
+    KILL_SETTLE_SECONDS; a leader stuck in uninterruptible sleep yields 126
+    with no status instead of an unbounded blocking waitpid."""
+    kernel = FakeKernel(
+        monkeypatch, dies_at=10**9, unkillable=True, observe_error=OSError("synthetic EINVAL")
+    )
+    outcome = run_supervised(kernel)
+    assert ("killpg", 43210, signal.SIGKILL) in kernel.log
+    polls = [e for e in kernel.log if e[0] == "waitpid-nohang-empty"]
+    assert polls and not [e for e in kernel.log if e[0] == "waitpid"]
+    killed_at = kernel.signalled_at[-1][1]
+    assert contracts.KILL_SETTLE_SECONDS <= kernel.now - killed_at < 3
+    assert outcome.wrapper_exit_code == 126
+    assert outcome.termination_cause == "supervision-failure"
+    assert outcome.command_exit_code is None
+    assert "termination not established" in (outcome.supervision_error or "")
 
 
 def test_windows_shaped_signal_module_still_imports(monkeypatch):
@@ -1299,3 +1448,48 @@ def test_accepted_terminal_certificate_outranks_an_earlier_transient_refusal(str
     rc, row, admitted = run()
     assert row["cleanup_status"] == "proven-empty"
     assert rc == 0 and admitted
+
+
+def test_strict_on_uncertifying_backend_leads_with_the_backend_refusal(
+    runner, monkeypatch, tmp_path
+):
+    """D2.2: both refusals are known before spawn. Leading with the memory one
+    sent users through two fixes when the answer was --contract=command-status."""
+    monkeypatch.setenv("LOCAL_OPERATOR_RESOLVED_MEMORY_MB", "128")
+    monkeypatch.setattr(runner, "_record_dir", lambda: tmp_path)
+    monkeypatch.setattr(runner.subprocess, "Popen", forbidden)
+    stream = io.StringIO()
+    rc = runner.run(
+        ["never-start"],
+        timeout=None,
+        grace=0.1,
+        memory_mb=0,
+        stream=stream,
+        _backend=contracts.ObservationOnlyBackend(),
+    )
+    lines = stream.getvalue().splitlines()
+    assert rc == 125
+    assert "--contract=command-status" in lines[0]
+    assert lines[1].startswith("[run_bounded] refused before spawn, also: --memory-mb")
+    assert "cause=unsupported-backend" in lines[-1] and "spawned=no" in lines[-1]
+    row = json.loads(next(tmp_path.glob("*.completion.json")).read_text())
+    assert row["termination_cause"] == "unsupported-backend"
+
+
+@pytest.mark.parametrize(
+    ("inherited", "expected"),
+    [
+        (
+            "128",
+            "raise --memory-mb (up to the inherited 128 MiB), or memory_mb on the outer bash call",
+        ),
+        (None, "raise --memory-mb, or pass --memory-mb 0 to disable the guard"),
+    ],
+)
+def test_wrapper_memory_escape_names_its_own_flag_first(runner, monkeypatch, inherited, expected):
+    # D2.1: the bash tool's `memory_mb` cannot move a --memory-mb ceiling.
+    if inherited is None:
+        monkeypatch.delenv("LOCAL_OPERATOR_RESOLVED_MEMORY_MB", raising=False)
+    else:
+        monkeypatch.setenv("LOCAL_OPERATOR_RESOLVED_MEMORY_MB", inherited)
+    assert runner._memory_escape() == expected

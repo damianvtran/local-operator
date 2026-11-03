@@ -322,6 +322,9 @@ class ReservedLeader:
     def send_group(self, signum: int) -> bool:
         """killpg the owned group; False when it has no signalable member.
 
+        The return value is diagnostic only: no supervisor branches on it,
+        because "nobody signalable" is advice, never cleanup evidence.
+
         ESRCH is not authority loss: the leader is still unreaped by us, so the
         number is still ours and simply holds nobody live. Any other failure
         revokes, so a later tick cannot retry into an unknown state.
@@ -353,6 +356,22 @@ class ReservedLeader:
         """Revoke, then consume the leader's status directly (never Popen.poll)."""
         self._revoked = True
         _, status = os.waitpid(self.proc.pid, 0)
+        code = os.waitstatus_to_exitcode(status)
+        self.proc.returncode = code
+        return code
+
+    def try_reap(self) -> int | None:
+        """Revoke, then consume the status only if the leader is ALREADY dead.
+
+        For a leader we have SIGKILLed but cannot observe: a blocking waitpid
+        there has no bound (uninterruptible sleep, and PEP 475 retries it
+        through our latched signals). Revoking first is safe because no signal
+        may follow this call whether or not it consumed anything.
+        """
+        self._revoked = True
+        pid, status = os.waitpid(self.proc.pid, os.WNOHANG)
+        if pid == 0:
+            return None
         code = os.waitstatus_to_exitcode(status)
         self.proc.returncode = code
         return code
@@ -413,6 +432,7 @@ def supervise_direct(
     boundary: Callable[[Any], Any] | None = None,
     guard_factory: Callable[..., Any] | None = None,
     group_pids: Callable[[int], list[int] | None] | None = None,
+    memory_escape: str | None = None,
 ):
     """Command status plus an ENFORCED owned-group memory grant; no cleanup proof.
 
@@ -507,7 +527,15 @@ def supervise_direct(
                 sample = guard.sample_sync()
                 next_sample = now + guard.tick_s
                 if guard.should_kill(sample):
-                    report(f"[run_bounded] {guard.over_budget_message(sample)}")
+                    # MiB plus the caller's own knob (design D2.1); None keeps
+                    # the guard's default wording for any other embedder.
+                    if memory_escape is None:
+                        message = guard.over_budget_message(sample)
+                    else:
+                        message = guard.over_budget_message(
+                            sample, unit="MiB", escape=memory_escape
+                        )
+                    report(f"[run_bounded] {message}")
                     if escalating is None:
                         outcome.wrapper_exit_code = 128 + signal.SIGKILL
                         outcome.termination_cause = "memory-policy"
@@ -526,10 +554,20 @@ def supervise_direct(
                     outcome.termination_cause = "supervision-failure"
                     if not killed:
                         kill_group(now)
-                    reaped: int = leader.reap()
-                    raw_status = reaped
-                    outcome.command_exit_code = shell_status(reaped)
-                    return
+                    # Poll, never block: the leader may not die (R2.5). An
+                    # unsettled leader still reports 126, with no status.
+                    while True:
+                        reaped = leader.try_reap()
+                        if reaped is not None:
+                            raw_status = reaped
+                            outcome.command_exit_code = shell_status(reaped)
+                            return
+                        if clock() >= settle_until:
+                            outcome.supervision_error = (
+                                "terminal observer unreadable; leader termination not established"
+                            )
+                            return
+                        sleep(0.05)
             else:
                 unreadable_since = None
             if terminal:
@@ -583,10 +621,23 @@ def _report_budget(stream, ceiling: int, source: str | None, budget) -> None:
                 "sampled owned child group only\n"
             )
         else:
-            reason = getattr(budget, "reason", "") or "no ceiling"
-            stream.write(f"[run_bounded] memory guard disabled ({source or 'unknown'}): {reason}\n")
+            stream.write(disabled_budget_line(source, budget) + "\n")
     except (OSError, ValueError):
         pass
+
+
+def disabled_budget_line(source: str | None, budget) -> str:
+    """The guard-off line in run_bounded's own vocabulary (design D2.3).
+
+    memory_guard's reason is written for the bash tool (`memory_mb=0`) and
+    repeated the word "disabled"; the wrapper's user typed `--memory-mb 0`.
+    """
+    if source == "explicit":
+        return "[run_bounded] memory guard disabled by --memory-mb 0"
+    if source == "inherited: guard off":
+        return "[run_bounded] memory guard disabled: the inherited budget is 0 (guard off)"
+    reason = getattr(budget, "reason", "") or "no ceiling"
+    return f"[run_bounded] memory guard disabled ({source or 'unknown'}): {reason}"
 
 
 def status_line(contract: str, outcome: Outcome, receipt) -> str:
@@ -642,6 +693,7 @@ def execute(
     direct: Callable[..., None] = supervise_direct,
     boundary: Any = ReservedLeader,
     budget_source: str | None = None,
+    memory_escape: str | None = None,
 ) -> int:
     """Called after canonical _memory_budget, before any handler or Popen.
 
@@ -706,6 +758,7 @@ def execute(
                 stop=stop,
                 budget=budget,
                 stream=stream,
+                memory_escape=memory_escape,
             )
     except Exception as exc:
         supervision_exception = exc
