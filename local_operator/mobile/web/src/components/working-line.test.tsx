@@ -26,9 +26,11 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { act } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkingLine } from "./working-line";
+import { resetTurnStopForTests } from "../lib/turn-stop";
 
 afterEach(() => {
 	cleanup();
+	resetTurnStopForTests();
 	vi.useRealTimers();
 });
 
@@ -80,5 +82,23 @@ describe("WorkingLine", () => {
 			expect(clock?.className).toContain("shrink-0");
 			cleanup();
 		}
+	});
+});
+
+describe("WorkingLine Stop", () => {
+	it("draws no control for a line with no session to stop (a subagent's own line)", () => {
+		render(<WorkingLine activity="responding" startedS={0} />);
+		expect(document.querySelector("[data-working-stop]")).toBeNull();
+	});
+
+	it("offers a 44 px Stop whenever the turn's line is drawn, with or without a label", () => {
+		const { rerender } = render(<WorkingLine activity="responding" startedS={0} stopPid="s1" />);
+		const stop = document.querySelector("[data-working-stop]") as HTMLButtonElement;
+		expect(stop.className).toContain("min-h-11");
+		expect(stop.className).toContain("min-w-11");
+		// the line's height is fixed at the control's, so the dock never jumps
+		expect(stop.parentElement?.className).toContain("min-h-11");
+		rerender(<WorkingLine activity="" startedS={null} stopPid="s1" />);
+		expect(document.querySelector("[data-working-stop]")).toBeTruthy();
 	});
 });

@@ -863,7 +863,7 @@ export function SessionScreen({
 					pending={pendingEchoes}
 					streaming={projection.streaming}
 					topInset={0}
-					tailContent={projection.streaming ? <WorkingLine activity={projection.activity} startedS={projection.activity_started_s} /> : undefined}
+					tailContent={projection.streaming ? <WorkingLine activity={projection.activity} startedS={projection.activity_started_s} stopPid={sessionId} /> : undefined}
 					supplements={projection.supplements}
 					projectionPid={projection.pid}
 				/>
