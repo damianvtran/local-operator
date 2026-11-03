@@ -17,11 +17,14 @@ LiteLLM is optional and was absent in the inspected environments, so translator
 integration was not exercised. The catalog targets Codex `rust-v0.147.0` only.
 
 `lop_launch.py` requires `LOP_BENCH_PYTHON` (absolute path to the selected source
-install's Python), `LOP_BENCH_SOURCE_ROOT`, and `BENCH_ANTHROPIC_URL` pointing at
-the local meter. It checks Git HEAD against reviewed source `07c324e9`, refuses
-tracked modifications, and checks the actual `local_operator` package origin.
-This deliberately distinguishes that source install from installed Local
-Operator `0.94.22`; it does not update, rebuild, or otherwise mutate either.
+install's Python), `LOP_BENCH_SOURCE_ROOT`, and the per-run edge environment
+(`HTTPS_PROXY` naming a loopback edge with a run identity, `SSL_CERT_FILE` =
+`REQUESTS_CA_BUNDLE` = the run CA, `NO_PROXY` = loopback only). It checks Git
+HEAD against released v0.94.22 `500883ef56ca504325ffd80c5b90bf2435d00e3f` (full
+SHA), refuses tracked modifications and untracked files, and checks the actual
+`local_operator` package origin. It patches nothing: `lop_edge.py` meters LoP's
+real first-party URLs at the network boundary (see `LOP-EDGE-VERIFICATION.md`).
+It does not update, rebuild, or otherwise mutate any install.
 The shim is in-process, not added to inherited `PYTHONPATH`.
 
 ## Explicit budget/auth setup (illustrative, not executed)
@@ -175,8 +178,9 @@ Source-to-destination audit:
 | `codex_toolsearch_bridge.py` | same | Explicit interpreter usage example; transformation retained |
 | `codex_catalog.py` | same | Unchanged |
 | `codex-model-catalog*.json` | same | Unchanged, including embedded prompt bytes |
-| `lop_shim/sitecustomize.py` | same | Unchanged; loaded only inside launcher |
-| `lop_launch.py` | same | Explicit interpreter/root/proxy, reviewed source identity and clean-tree checks |
+| `lop_launch.py` | same | Explicit interpreter/root/edge env, released v0.94.22 identity and clean-tree checks; shim removed |
+| `lop_edge.py` | new | Per-run CONNECT/TLS edge: exact routes, host-held credentials, shared ledger, sandbox profile |
+| `radient_meter/` | public-port | Byte-identical reviewed decisions-billing qualification (not modified) |
 | `meter_proxy.py` | same | Env-only key; durable dual budgets/rate bounds; default-off cache/body mutations; sanitized error logs |
 
 The catalogs retain the upstream Codex prompt verbatim, verified against tagged

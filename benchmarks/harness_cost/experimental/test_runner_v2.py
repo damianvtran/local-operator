@@ -49,7 +49,7 @@ class V2Tests(unittest.TestCase):
             "tasks.json",
             "codex_toolsearch_bridge.py",
             "lop_launch.py",
-            "lop_shim/sitecustomize.py",
+            "lop_edge.py",
         ):
             (self.root / name).parent.mkdir(parents=True, exist_ok=True)
             if name == "tasks.json":
@@ -128,6 +128,14 @@ class V2Tests(unittest.TestCase):
         self.assertEqual(env["LOP_BENCH_PYTHON"], sys.executable)
         self.assertEqual(env["LOP_BENCH_SOURCE_ROOT"], "/explicit/reviewed-source")
         self.assertNotIn("OPENROUTER_API_KEY", env)
+        # The released product talks to its real URLs; the edge meters them.
+        self.assertNotIn("BENCH_ANTHROPIC_URL", env)
+        self.assertEqual(env["RADIENT_API_KEY"], "bench-dummy")
+
+    def test_lop_is_pinned_to_released_v0_94_22(self):
+        self.assertEqual(r.LOP_HEAD, "500883ef56ca504325ffd80c5b90bf2435d00e3f")
+        self.assertIn("lop_edge.py", r.integration_inputs())
+        self.assertNotIn("lop_shim/sitecustomize.py", r.integration_inputs())
 
     def test_all_seven_commands_and_public_servers(self):
         for harness in r.HARNESSES:
@@ -143,7 +151,8 @@ class V2Tests(unittest.TestCase):
                 )
                 self.assertEqual(argv[0], sys.executable)
                 self.assertEqual(env["HOME"], str(self.home))
-                self.assertNotIn("RADIENT_API_KEY", env)
+                # LoP alone carries a Radient variable, and only the dummy.
+                self.assertIn(env.get("RADIENT_API_KEY"), (None, "bench-dummy"))
                 self.assertNotIn("BENCH_LITELLM_KEY", env)
                 self.assertNotIn("AUTH_TOKEN", env)
                 self.assertNotIn("--no-tools", argv)

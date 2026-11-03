@@ -6,10 +6,16 @@ unknown billing, disconnects, and malformed ledgers stop later traffic. Only a
 pinned, explicitly priced model and default service tier are accepted. This is
 not provider-side billing enforcement: configured rates must bound all charges.
 Prompt capture is opt-in; logs contain usage/count metadata, never auth headers.
+
+One ledger serves every paid channel. ``channel`` is ``model`` for Messages
+traffic priced here and ``classifier`` for Radient decisions priced by
+``lop_edge.py``; both reserve and settle through the same ``BudgetGuard`` file,
+so total and per-trial caps bound the sum of both, not each separately.
 """
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import json
 import math
@@ -30,6 +36,13 @@ from starlette.routing import Route
 # Only the provider JSON boundary is dynamic: nested schemas, tool arguments,
 # and provider usage extensions must survive without a lossy local schema.
 WireObject = dict[str, Any]
+
+# Local Operator sends ``max_tokens=128000`` on main turns (its native output
+# budget for the benchmark model). A lower cap refuses every LoP turn with a
+# local 402 the product cannot recover from, so a configuration below the
+# native value is rejected instead of silently measuring a broken harness.
+NATIVE_MAIN_OUTPUT_TOKENS = 128000
+CHANNELS = ("model", "classifier")
 
 UPSTREAM = os.environ.get("BENCH_UPSTREAM", "https://openrouter.ai/api").rstrip("/")
 MODEL = os.environ.get("BENCH_MODEL", "claude-sonnet-5-5")
@@ -78,6 +91,13 @@ class BudgetGuard:
         self.max_tokens = int(os.environ["BENCH_MAX_OUTPUT_TOKENS"])
         if self.max_bytes <= 0 or self.max_tokens <= 0:
             raise ValueError("positive byte/token bounds required")
+        if self.max_tokens < NATIVE_MAIN_OUTPUT_TOKENS:
+            raise ValueError("BENCH_MAX_OUTPUT_TOKENS must admit the native 128000 main cap")
+        # Bounded queueing, not refusal: harnesses natively overlap side calls
+        # (LoP's title errand and classifier run beside the turn; Claude Code
+        # issues concurrent helpers). Refusing them turns a priced call into a
+        # native fallback (e.g. a placeholder title) and changes behaviour.
+        self.admission_wait = positive("BENCH_ADMISSION_WAIT_S")
         if os.environ.get("BENCH_SERVICE_TIER") != "default":
             raise ValueError("explicit BENCH_SERVICE_TIER=default required")
         self.path = Path(os.environ["BENCH_SPEND_FILE"])
@@ -91,13 +111,24 @@ class BudgetGuard:
             if self.path.exists():
                 data = json.loads(self.path.read_text())
                 if (
-                    set(data) != {"usd", "trials", "pending", "blocked"}
+                    set(data) != {"usd", "trials", "pending", "blocked", "channels"}
                     or not isinstance(data["blocked"], bool)
                     or not isinstance(data["pending"], dict)
                     or not isinstance(data["trials"], dict)
+                    or not isinstance(data["channels"], dict)
+                    or set(data["channels"]) != set(CHANNELS)
                 ):
                     raise ValueError("invalid budget ledger")
-                for value in [data["usd"], *data["trials"].values()]:
+                pending_usd = [
+                    entry.get("usd") if isinstance(entry, dict) else None
+                    for entry in data["pending"].values()
+                ]
+                for value in [
+                    data["usd"],
+                    *data["trials"].values(),
+                    *data["channels"].values(),
+                    *pending_usd,
+                ]:
                     if (
                         isinstance(value, bool)
                         or not isinstance(value, (int, float))
@@ -106,7 +137,13 @@ class BudgetGuard:
                     ):
                         raise ValueError("invalid ledger spend")
             else:
-                data = {"usd": 0.0, "trials": {}, "pending": {}, "blocked": False}
+                data = {
+                    "usd": 0.0,
+                    "trials": {},
+                    "pending": {},
+                    "blocked": False,
+                    "channels": {name: 0.0 for name in CHANNELS},
+                }
             yield data
             tmp = self.path.with_suffix(self.path.suffix + ".new")
             with tmp.open("w") as fh:
@@ -147,6 +184,11 @@ class BudgetGuard:
             "cache_control",
             "service_tier",
             "provider",
+            # LoP's first-party cache diagnostics opt-in (configure.py turn
+            # requests; clients.py adds it when the base is api.anthropic.com).
+            # Price-neutral request metadata: forwarded unchanged so the
+            # product's native diagnostics/refusal-retry path stays intact.
+            "diagnostics",
         }
         if set(body) - allowed:
             raise ValueError("unpriced request extension")
@@ -182,20 +224,70 @@ class BudgetGuard:
         if bound > self.reserve:
             raise ValueError("request reservation is below worst-case token/rate bound")
 
-    def acquire(self, run_id: str) -> str:
+    def try_acquire(self, run_id: str, channel: str, usd: float) -> str | None:
+        """Reserve ``usd`` against settled spend PLUS every pending reservation.
+
+        Returns a token when the reservation fits now, ``None`` when it would fit
+        once in-flight reservations settle (the caller may wait), and raises when
+        it can never fit or the ledger is latched. Summing pending exposure is
+        what makes concurrent dispatch safe: two in-flight worst cases must both
+        fit under the caps, exactly as one did before.
+        """
+        if channel not in CHANNELS:
+            raise ValueError("unknown ledger channel")
         token = uuid.uuid4().hex
         with self.ledger() as data:
-            if data["blocked"] or data["pending"]:
-                raise ValueError("unreconciled or in-flight request; budget fails closed")
-            if (
-                data["usd"] + self.reserve > self.total
-                or data["trials"].get(run_id, 0.0) + self.reserve > self.trial
-            ):
+            if data["blocked"]:
+                raise ValueError("unreconciled request; budget fails closed")
+            trial = data["trials"].get(run_id, 0.0)
+            if data["usd"] + usd > self.total or trial + usd > self.trial:
                 raise ValueError("total or per-trial budget exhausted")
-            data["pending"][token] = {"run_id": run_id, "usd": self.reserve}
+            pending = list(data["pending"].values())
+            exposure = sum(p["usd"] for p in pending)
+            trial_exposure = sum(p["usd"] for p in pending if p["run_id"] == run_id)
+            if (
+                data["usd"] + exposure + usd > self.total
+                or trial + trial_exposure + usd > self.trial
+            ):
+                return None
+            data["pending"][token] = {"run_id": run_id, "usd": usd, "channel": channel}
         return token
 
-    def settle(self, token: str, cost) -> None:
+    async def acquire(self, run_id: str, channel: str = "model", usd: float | None = None) -> str:
+        """Wait (bounded by BENCH_ADMISSION_WAIT_S) for room, then reserve.
+
+        Exhaustion and a latched ledger still refuse immediately; only
+        contention with in-flight exposure waits. At the deadline the request
+        is refused, so a reservation that never settles cannot stall a run.
+        """
+        amount = self.reserve if usd is None else usd
+        deadline = time.monotonic() + self.admission_wait
+        while True:
+            token = self.try_acquire(run_id, channel, amount)
+            if token is not None:
+                return token
+            if time.monotonic() >= deadline:
+                raise ValueError("admission wait expired with exposure still pending")
+            await asyncio.sleep(0.02)
+
+    def latch(self) -> None:
+        """Void the run: block every later admission until operator reconciliation.
+
+        Used by the edge for traffic it refused without a bill (a denied POST,
+        an unclassifiable CONNECT): the request's intent is unknown, so the
+        run can no longer be shown to have measured all of its spend.
+        """
+        with self.ledger() as data:
+            data["blocked"] = True
+
+    def settle(self, token: str, cost, qualified: bool = True) -> None:
+        """Settle a reservation from a billed amount; anything unknown latches.
+
+        An invalid/missing cost keeps the reservation as exposure and blocks
+        all later admissions. ``qualified=False`` records a finite stated bill
+        (it was charged) but still latches: the bill's contract was not the
+        reviewed one, so later spend cannot be bounded.
+        """
         with self.ledger() as data:
             pending = data["pending"][token]
             if (
@@ -209,7 +301,9 @@ class BudgetGuard:
             data["usd"] += cost
             run_id = pending["run_id"]
             data["trials"][run_id] = data["trials"].get(run_id, 0.0) + cost
-            if cost > pending["usd"]:
+            channel = pending.get("channel", "model")
+            data["channels"][channel] = data["channels"][channel] + cost
+            if cost > pending["usd"] or not qualified:
                 data["blocked"] = True
             del data["pending"][token]
 
@@ -378,7 +472,7 @@ async def proxy(request: Request) -> Response:
     if request.url.query:
         url += "?" + request.url.query
     try:
-        reservation = guard.acquire(run_id)
+        reservation = await guard.acquire(run_id)
     except (ValueError, KeyError, OSError, TypeError):
         return JSONResponse(
             {"error": "budget ledger unavailable, exhausted, or unreconciled"}, status_code=402
@@ -394,7 +488,14 @@ async def proxy(request: Request) -> Response:
             {"error": "upstream transport failed; reconcile reservation"}, status_code=502
         )
     ctype = resp.headers.get("content-type", "")
-    row = {"ts": started, "run_id": run_id, "path": path, "status": resp.status_code, **meta}
+    row = {
+        "ts": started,
+        "run_id": run_id,
+        "channel": "model",
+        "path": path,
+        "status": resp.status_code,
+        **meta,
+    }
     passthrough_headers = {
         k: v
         for k, v in resp.headers.items()

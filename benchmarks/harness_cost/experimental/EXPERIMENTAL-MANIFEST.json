@@ -1,24 +1,28 @@
 {
   "files": {
     "ADAPTERS.md": {
-      "bytes": 9653,
-      "sha256": "c3efd349a229b2c614df16704002004d58d1a2bc1f89928e358c66482bcfb885"
+      "bytes": 10043,
+      "sha256": "a174b4298e3b33b6f343b5d4eebf0b0f1b7ca8176f22b226e4f27b835344d524"
     },
     "CACHE-QUALIFICATION.md": {
       "bytes": 5927,
       "sha256": "e6eaa4ae8e2122e938d48b3355881be6e14939125f429dff5775e7315eadf8cc"
     },
+    "LOP-EDGE-VERIFICATION.md": {
+      "bytes": 9277,
+      "sha256": "3b442d601982320e4653e4c4a7e70a538b24cd1b2d443e1f30ed8e6c32bed8a6"
+    },
     "PREREGISTRATION.md": {
-      "bytes": 42934,
-      "sha256": "32a224da12059d0d5cd846f91411d9815cd7697974b65780d6f64c52dbc4b2a4"
+      "bytes": 43078,
+      "sha256": "5cd88a77c370f993f16090f08d7d7e003b7f44cc6cc39edfae5e3e8ff5d9a5b4"
     },
     "README.md": {
-      "bytes": 10398,
-      "sha256": "6bfb4d7e6984ec430bc4396b2a1241c666134a200a356b814827a38ddb896281"
+      "bytes": 10478,
+      "sha256": "92430cd11b80ea2577f87c1cb1bf81a698d9d9a2feeb5610c793a1bf91e2ba6d"
     },
     "RUNNER_V2.md": {
       "bytes": 9662,
-      "sha256": "0486384bea386d663b50067bae8f0210e188742979b263053bce80303717b723"
+      "sha256": "4e128af5a9993d1f0d1cfab61dbad87fc100c0ca39d71ec6a729e0ef48082f9d"
     },
     "SOURCE-AUDIT.json": {
       "bytes": 28949,
@@ -176,29 +180,45 @@
       "bytes": 11343,
       "sha256": "a8d1d88a0f9cce3cdbff73b03a80dc5e5d69e3ba2443946c268815a550c9e0ec"
     },
-    "lop_launch.py": {
-      "bytes": 2273,
-      "sha256": "1cf9fb27a65948bd30cc5f2a39449e5d948d632090565456d072d353225137f8"
+    "lop_edge.py": {
+      "bytes": 29493,
+      "sha256": "d1c6e46ff1da64123f1cd36ecdac14ca232fdbec4f1fb931d678c5480bafe101"
     },
-    "lop_shim/sitecustomize.py": {
-      "bytes": 1189,
-      "sha256": "156c8779eb105272fa002083260ce059ecc2583b3bd9511b4a9d440b1a414cb8"
+    "lop_launch.py": {
+      "bytes": 3489,
+      "sha256": "f17b8afce6431ad11baa36b5f4744c747a1da14feab10e860dfcbe97ccc8f954"
     },
     "meter_proxy.py": {
-      "bytes": 20643,
-      "sha256": "098ce294c1a194053ccc390d66730b65b6509744238586ee4ef79b1c094e5834"
+      "bytes": 25621,
+      "sha256": "53de08633032b83961cdf91191ea76e515ac41e3008efa7caa21dd91ec8858f2"
+    },
+    "radient_meter/classifier.py": {
+      "bytes": 6611,
+      "sha256": "e8aebf5e6f86e9532f5e05ae5f0c00eb1971f5b979acde083fbeec1a757d0db7"
+    },
+    "radient_meter/json_types.py": {
+      "bytes": 3066,
+      "sha256": "5e833ea672d409e2fc039835809c9df5f3a8a7e462b43b9d8d27f30593addb19"
+    },
+    "radient_meter/model.py": {
+      "bytes": 14543,
+      "sha256": "d35963fd2ca49d25aaa0929dfa10b82bed57008819b45bc33ebf8642cbe1631c"
+    },
+    "radient_meter/sse_stream.py": {
+      "bytes": 2190,
+      "sha256": "6be4440a9d4d7f955d973f9ea13d6f2fe168b6702ef86bf538264145dd0ef8ac"
     },
     "runner_v2.py": {
-      "bytes": 82762,
-      "sha256": "2d65f11553bb92e061644b57ecab505ddf7fda75f4ec71ecf376e063a9292949"
+      "bytes": 83331,
+      "sha256": "c6b2eb21c10c646eba89dd7d626d4d32009bc67236256dfa193f6409cf89790a"
     },
     "sse_stream.py": {
       "bytes": 2190,
       "sha256": "6be4440a9d4d7f955d973f9ea13d6f2fe168b6702ef86bf538264145dd0ef8ac"
     },
     "test_adapters.py": {
-      "bytes": 12718,
-      "sha256": "858d5da576c4551a28e631b296bbebdc89174b3dcd63280a74cc5787048af734"
+      "bytes": 21807,
+      "sha256": "7987868181b7b2fe90e1f943ecf177d61011a255f60468beee119a252f1f9a6f"
     },
     "test_bridge_sse.py": {
       "bytes": 8812,
@@ -220,9 +240,13 @@
       "bytes": 15351,
       "sha256": "43edde0d35b83e19d6f830e4859b0199cec7e08be0f06fc07c67edc6fcfe52de"
     },
+    "test_lop_edge.py": {
+      "bytes": 26818,
+      "sha256": "3340b8b20ea8095e829ceba839c2202a100d193ad9033e43d63cab3d4c112ff4"
+    },
     "test_runner_v2.py": {
-      "bytes": 21116,
-      "sha256": "814de9b2e9f1878338baa5b1570017b71301f0900766dd62d6630d03d76c1995"
+      "bytes": 21672,
+      "sha256": "c4222f3628cd74a2685ba626b905419bb7cf65bd06620bb2df1f6954cbe0cacc"
     },
     "translator_config.example.json": {
       "bytes": 394,

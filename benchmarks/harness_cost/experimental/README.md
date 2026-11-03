@@ -20,9 +20,9 @@ Nothing here changes the core analysis, its immutable snapshot or its loadout.
   post-pull floor **17 GiB**, and emergency hard floor **15 GiB**. Containers and
   task images/toolchains are not supplied. Do not pull/build anything to test
   this port.
-- LOP's reviewed source head is
-  `07c324e9f613b378c437936ede1978c9fc0b49db`. An installed `0.94.22` binary is
-  distinct and does not prove this source fix. Use an isolated source install of
+- LOP is pinned to released v0.94.22,
+  `500883ef56ca504325ffd80c5b90bf2435d00e3f` (previously the unreleased
+  `07c324e9…` head; DEV qualification on that head does not carry over). Use an isolated source install of
   that head, record the full source and executable hashes and dependency lock;
   do not update the operator's global runtime.
 - Paid coding dispatch is unconditionally hard-blocked pending real executable
@@ -46,8 +46,9 @@ Nothing here changes the core analysis, its immutable snapshot or its loadout.
 - `codex_catalog.py`, catalogs, `codex_toolsearch_bridge.py`: Codex-specific
   experimental model metadata and tool-search translation. Read `ADAPTERS.md`
   and third-party attribution before use; catalogs are version-specific inputs.
-- `lop_launch.py`, `lop_shim/sitecustomize.py`: process-local LOP routing shim;
-  do not export this directory as global `PYTHONPATH` to task subprocesses.
+- `lop_launch.py`: source-identity launcher for the unmodified product;
+  `lop_edge.py`: per-run TLS edge that meters all LoP paid traffic
+  (`LOP-EDGE-VERIFICATION.md` lists what is and is not yet verified).
 - `meter_proxy.py`: explicitly configured, fail-closed model-cost admission and
   metering. See `ADAPTERS.md`; no billing tier/rate/reservation is inferred.
 - `runner_v2.py`, `RUNNER_V2.md`: adapted after the author's immutable handoff;

@@ -8,6 +8,8 @@
 > oracles in the private development report; six Linux runtime toolchains were
 > verified, Hermes remains incomplete, and there have been no paid coding pilots.
 > Those private artifacts are not shipped or independently revalidated here.
+> (2026-11-03 note: the runner now pins released v0.94.22 `500883ef`; the
+> text below records the earlier preregistration and is not updated.)
 > LOP requires the reviewed source head `07c324e9` and its own source install;
 > installed `0.94.22` is distinct and not evidence of that head. Never update a
 > global runtime for this experiment. Runner source is ported after immutable

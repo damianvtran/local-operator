@@ -7,9 +7,11 @@ These are source-only checks, not provider billing or native harness evidence.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +30,13 @@ def load(name):
     return module
 
 
+async def until(predicate, timeout: float = 3.0) -> None:
+    """Poll a test condition with a deadline so a regression fails, never hangs."""
+    async with asyncio.timeout(timeout):
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+
 meter = load("meter_proxy")
 bridge = load("codex_toolsearch_bridge")
 catalog = load("codex_catalog")
@@ -43,11 +52,14 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 "OPENROUTER_API_KEY": "offline-test-key-not-a-credential",
                 "BENCH_BUDGET_USD": "1",
                 "BENCH_TRIAL_BUDGET_USD": "0.3",
-                "BENCH_REQUEST_RESERVE_USD": "0.2",
+                # 128000 output tokens at 1 USD/M plus the 10000-byte input
+                # bound reserve 0.2335 USD; 0.24 keeps one request per trial.
+                "BENCH_REQUEST_RESERVE_USD": "0.24",
                 "BENCH_INPUT_USD_PER_MILLION": "1",
                 "BENCH_OUTPUT_USD_PER_MILLION": "1",
                 "BENCH_MAX_INPUT_BYTES": "10000",
-                "BENCH_MAX_OUTPUT_TOKENS": "1000",
+                "BENCH_MAX_OUTPUT_TOKENS": "128000",
+                "BENCH_ADMISSION_WAIT_S": "0.3",
                 "BENCH_SERVICE_TIER": "default",
                 "BENCH_SPEND_FILE": str(root / "spend.json"),
             },
@@ -112,7 +124,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_negative_controls_never_dispatch(self):
         for update in (
             {"model": "unpriced"},
-            {"max_tokens": 1001},
+            {"max_tokens": 128001},
             {"service_tier": "priority"},
             {"plugins": []},
             {"tools": [{"type": "web_search_20250305"}]},
@@ -148,9 +160,22 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.post()).status_code, 402)
         path.write_text(json.dumps({"usd": -1, "trials": {}, "pending": {}, "blocked": False}))
         self.assertEqual((await self.post()).status_code, 402)
-        path.write_text(json.dumps({"usd": 0, "trials": {}, "pending": {}, "blocked": False}))
+        path.write_text(
+            json.dumps(
+                {
+                    "usd": 0,
+                    "trials": {},
+                    "pending": {},
+                    "blocked": False,
+                    "channels": {"model": 0, "classifier": 0},
+                }
+            )
+        )
         guard = meter.BudgetGuard()
-        guard.acquire("pending")
+        # A reservation that never settles is exposure, not a refusal: the
+        # second request waits for it and is refused only at the deadline.
+        guard.trial = 1.0  # another trial's large in-flight worst case
+        self.assertIsNotNone(guard.try_acquire("pending", "model", 0.8))
         self.assertEqual((await self.post()).status_code, 402)
         self.assertEqual(self.calls, [])
 
@@ -188,6 +213,97 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         ledger = json.loads(Path(os.environ["BENCH_SPEND_FILE"]).read_text())
         self.assertEqual(ledger["usd"], 0.25)
         self.assertTrue(ledger["blocked"])
+
+    async def test_diagnostics_is_price_neutral_and_forwarded_unchanged(self):
+        diagnostics = {"previous_message_id": None}
+        self.assertEqual((await self.post(diagnostics=diagnostics)).status_code, 200)
+        self.assertEqual(json.loads(self.calls[0].content)["diagnostics"], diagnostics)
+
+    async def test_main_output_cap_below_native_128000_is_refused(self):
+        with patch.dict(os.environ, {"BENCH_MAX_OUTPUT_TOKENS": "127999"}):
+            self.assertEqual((await self.post()).status_code, 402)
+        self.assertEqual((await self.post(max_tokens=128000)).status_code, 200)
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_concurrent_admissions_queue_against_pending_exposure(self):
+        release = asyncio.Event()
+        started = []
+
+        async def held(request):
+            self.calls.append(request)
+            started.append(request)
+            await release.wait()
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                stream=httpx.ByteStream(json.dumps(self.response).encode()),
+            )
+
+        self.upstream._transport = httpx.MockTransport(held)
+        with patch.dict(os.environ, {"BENCH_TRIAL_BUDGET_USD": "1", "BENCH_BUDGET_USD": "0.5"}):
+            first = asyncio.create_task(self.post())
+            second = asyncio.create_task(self.post())
+            await until(lambda: len(started) >= 2)
+            # Both are dispatched together: 0.48 pending fits a 0.5 cap.
+            third = await self.post()
+            self.assertEqual(third.status_code, 402)
+            self.assertEqual(len(self.calls), 2)
+            release.set()
+            self.assertEqual([(await t).status_code for t in (first, second)], [200, 200])
+        ledger = json.loads(Path(os.environ["BENCH_SPEND_FILE"]).read_text())
+        self.assertEqual(ledger["pending"], {})
+        self.assertAlmostEqual(ledger["usd"], 0.24)
+        self.assertAlmostEqual(ledger["channels"]["model"], 0.24)
+        self.assertFalse(ledger["blocked"])
+
+    async def test_waiting_admission_dispatches_once_exposure_settles(self):
+        release = asyncio.Event()
+
+        async def held(request):
+            self.calls.append(request)
+            if len(self.calls) == 1:
+                await release.wait()
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                stream=httpx.ByteStream(json.dumps(self.response).encode()),
+            )
+
+        self.upstream._transport = httpx.MockTransport(held)
+        with patch.dict(
+            os.environ,
+            {
+                "BENCH_TRIAL_BUDGET_USD": "1",
+                "BENCH_BUDGET_USD": "0.4",
+                "BENCH_ADMISSION_WAIT_S": "5",
+            },
+        ):
+            first = asyncio.create_task(self.post())
+            await until(lambda: bool(self.calls))
+            second = asyncio.create_task(self.post())
+            await asyncio.sleep(0.1)
+            self.assertEqual(len(self.calls), 1)  # queued, not refused
+            release.set()
+            self.assertEqual([(await t).status_code for t in (first, second)], [200, 200])
+        self.assertEqual(len(self.calls), 2)
+
+    async def test_unknown_costs_latch_the_ledger(self):
+        for cost in (None, float("nan"), -0.01, "0.1", True):
+            with self.subTest(cost=cost):
+                Path(os.environ["BENCH_SPEND_FILE"]).unlink(missing_ok=True)
+                self.calls.clear()
+                usage = {} if cost is None else {"cost": cost}
+                self.response = {"usage": usage}
+                self.assertEqual((await self.post()).status_code, 200)
+                self.assertEqual((await self.post("other")).status_code, 402)
+                ledger = json.loads(Path(os.environ["BENCH_SPEND_FILE"]).read_text())
+                self.assertTrue(ledger["blocked"])
+                self.assertEqual(len(self.calls), 1)
+
+    async def test_model_rows_carry_the_model_channel(self):
+        self.assertEqual((await self.post()).status_code, 200)
+        row = json.loads(meter.LOG.read_text().splitlines()[-1])
+        self.assertEqual(row["channel"], "model")
 
     async def test_bridge_stream_rewrites_search_results(self):
         item = {
@@ -235,30 +351,106 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data[0]["item"]["type"], "tool_search_call")
         self.assertEqual(data[1]["response"]["output"][0]["arguments"], {"query": "read"})
 
-    def test_launcher_negative_controls_do_not_import_cli(self):
+    def launcher_env(self, **updates: str) -> dict[str, str]:
+        ca = Path(self.tmp.name) / "edge-ca.pem"
+        ca.write_text("-----BEGIN CERTIFICATE-----\n")
+        env = {
+            "HTTPS_PROXY": "http://trial:nonce@127.0.0.1:18080",
+            "SSL_CERT_FILE": str(ca),
+            "REQUESTS_CA_BUNDLE": str(ca),
+            "NO_PROXY": "127.0.0.1,localhost,::1",
+            "LOP_BENCH_PYTHON": sys.executable,
+            "LOP_BENCH_SOURCE_ROOT": self.tmp.name,
+        }
+        env.update(updates)
+        return env
+
+    def run_launcher(self, launcher, env: dict[str, str]):
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.object(launcher.runpy, "run_module") as run,
+            patch.object(launcher.runpy, "run_path") as shim,
+        ):
+            try:
+                launcher.main()
+            except SystemExit as exc:
+                return run, shim, str(exc)
+            return run, shim, None
+
+    def test_launcher_requires_the_edge_proxy_environment(self):
         launcher = load("lop_launch")
-        with (
-            patch.dict(os.environ, {"BENCH_ANTHROPIC_URL": ""}),
-            patch.object(launcher.runpy, "run_module") as run,
+        for updates in (
+            {"HTTPS_PROXY": ""},
+            {"HTTPS_PROXY": "http://trial:nonce@10.0.0.1:18080"},
+            {"HTTPS_PROXY": "http://127.0.0.1:18080"},  # no run identity
+            {"SSL_CERT_FILE": ""},
+            {"REQUESTS_CA_BUNDLE": "/elsewhere.pem"},
+            {"NO_PROXY": "localhost"},
         ):
-            with self.assertRaises(SystemExit):
-                launcher.main()
+            with self.subTest(updates=updates):
+                run, _, error = self.run_launcher(launcher, self.launcher_env(**updates))
+                self.assertIsNotNone(error)
+                run.assert_not_called()
+
+    def test_launcher_refuses_unreleased_head_by_full_sha(self):
+        launcher = load("lop_launch")
+        self.assertEqual(launcher.REVIEWED_REVISION, "500883ef56ca504325ffd80c5b90bf2435d00e3f")
+        for head in ("07c324e9f613b378c437936ede1978c9fc0b49db", "500883ef" + "0" * 32):
+            with self.subTest(head=head):
+                with patch.object(launcher.subprocess, "check_output", return_value=head + "\n"):
+                    run, _, error = self.run_launcher(launcher, self.launcher_env())
+                self.assertIn("not reviewed revision", str(error))
+                run.assert_not_called()
+
+    def test_launcher_refuses_dirty_or_untracked_tree_in_a_real_repository(self):
+        import subprocess
+
+        launcher = load("lop_launch")
+        repo = Path(self.tmp.name) / "src"
+        (repo / "local_operator").mkdir(parents=True)
+        (repo / "local_operator" / "__init__.py").write_text("")
+        git = ["git", "-C", str(repo)]
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run([*git, "add", "."], check=True)
+        # A fixture identity with no address: the kit's publication scanner
+        # rejects address-shaped literals, and git accepts an empty email.
+        subprocess.run(
+            [*git, "-c", "user.name=fixture", "-c", "user.email=", "commit", "-qm", "fixture"],
+            check=True,
+        )
+        head = subprocess.check_output([*git, "rev-parse", "HEAD"], text=True).strip()
+        env = self.launcher_env(LOP_BENCH_SOURCE_ROOT=str(repo))
+        with patch.object(launcher, "REVIEWED_REVISION", head):
+            # Clean, but the interpreter imports a different local_operator.
+            _, _, error = self.run_launcher(launcher, env)
+            self.assertIn("does not import", str(error))
+            (repo / "local_operator" / "__init__.py").write_text("x = 1\n")
+            run, _, error = self.run_launcher(launcher, env)
+            self.assertIn("no modifications", str(error))
             run.assert_not_called()
+            subprocess.run([*git, "checkout", "-q", "--", "."], check=True)
+            # An untracked module (e.g. a stray sitecustomize.py) is importable.
+            (repo / "sitecustomize.py").write_text("")
+            run, _, error = self.run_launcher(launcher, env)
+            self.assertIn("no modifications", str(error))
+            run.assert_not_called()
+
+    def test_launcher_runs_the_unmodified_cli_without_any_shim(self):
+        launcher = load("lop_launch")
+        self.assertFalse((ROOT / "lop_shim").exists())
+        root = (ROOT / "../../..").resolve()  # repo root: its venv imports local_operator
+        env = self.launcher_env(LOP_BENCH_SOURCE_ROOT=str(root))
         with (
-            patch.dict(
-                os.environ,
-                {
-                    "BENCH_ANTHROPIC_URL": "http://127.0.0.1:8787/r/trial",
-                    "LOP_BENCH_PYTHON": launcher.sys.executable,
-                    "LOP_BENCH_SOURCE_ROOT": self.tmp.name,
-                },
+            patch.object(
+                launcher.subprocess, "check_output", side_effect=[launcher.REVIEWED_REVISION, ""]
             ),
-            patch.object(launcher.subprocess, "check_output", return_value="unreviewed-head"),
-            patch.object(launcher.runpy, "run_module") as run,
+            patch.object(launcher.importlib.util, "find_spec") as spec,
         ):
-            with self.assertRaises(SystemExit):
-                launcher.main()
-            run.assert_not_called()
+            spec.return_value.origin = str(root / "local_operator" / "__init__.py")
+            run, shim, error = self.run_launcher(launcher, env)
+        self.assertIsNone(error)
+        run.assert_called_once_with("local_operator.cli", run_name="__main__")
+        shim.assert_not_called()
 
     def test_bridge_search_loading_deduplicates(self):
         tool = {"type": "function", "name": "lookup", "parameters": {"type": "object"}}

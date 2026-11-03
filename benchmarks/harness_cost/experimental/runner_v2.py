@@ -178,7 +178,9 @@ EVALUATOR = (
 )
 MODEL = "claude-sonnet-5-5"
 CONTEXT = 1000000
-LOP_HEAD = "07c324e9f613b378c437936ede1978c9fc0b49db"
+# Released Local Operator v0.94.22, measured unmodified (METERING-ARCHITECTURE
+# §2.6): the unreleased 07c324e9 thinking-replay head is no longer accepted.
+LOP_HEAD = "500883ef56ca504325ffd80c5b90bf2435d00e3f"
 HARNESSES = ("claude-code", "codex", "local-operator", "omp", "opencode", "hermes", "dsh")
 SCRATCH = (
     Path(
@@ -1127,7 +1129,11 @@ def configure(
             LOP_BENCH_PYTHON=binary,
             LOP_BENCH_SOURCE_ROOT=os.environ.get("LOP_BENCH_SOURCE_ROOT", ""),
             LOCAL_OPERATOR_CONFIG_DIR=str(d),
-            BENCH_ANTHROPIC_URL=url,
+            # No endpoint rebinding: the per-run edge (lop_edge.py) supplies
+            # HTTPS_PROXY/SSL_CERT_FILE at launch and meters the real URLs.
+            # The child's Radient key is a worthless dummy; the edge strips it
+            # and injects the host-held bearer on the decisions route only.
+            RADIENT_API_KEY="bench-dummy",
             ANTHROPIC_API_KEY="bench-dummy",
             LOCAL_OPERATOR_NO_NOTIFICATIONS="1",
             LOCAL_OPERATOR_ALLOW_NESTED_SESSION="1",
@@ -1289,7 +1295,7 @@ def integration_inputs() -> dict[str, str]:
     """One shared input digest binds captures and freeze to the same helpers/catalog."""
     out = {
         name: sha(HERE / name)
-        for name in ("codex_toolsearch_bridge.py", "lop_launch.py", "lop_shim/sitecustomize.py")
+        for name in ("codex_toolsearch_bridge.py", "lop_launch.py", "lop_edge.py")
     }
     out["tasks.json"] = sha(TASKS_FILE)
     out.update(
@@ -1734,8 +1740,9 @@ def execute(
             harness, run_id, build_prompt(task), home, arm == "public-full", runtime, port
         )
         if harness == "local-operator":
+            # The real bearer belongs to the edge process only (S3); it is
+            # never exported to the child. Unreachable until S6 wires the edge.
             token = radient_token(runtime["binary"])
-            env["RADIENT_API_KEY"] = token
         if harness == "codex":
             key = os.environ.get("BENCH_LITELLM_KEY")
             if not key:
