@@ -105,9 +105,28 @@ INLINE_IMAGE_DATA_MIN_CHARS = 1024
 #: ``data:`` + image type + any ``;param`` list + ``,``. Deliberately loose around
 #: the edges that a model (or a forwarder re-wrapping a paste) varies: case,
 #: whitespace after the colon/semicolons/comma, and ``;charset=…``-style parameters.
-#: Each repetition must consume a ``;`` so the group cannot backtrack quadratically.
+#:
+#: EVERY QUANTIFIER IS BOUNDED AND EVERY GAP HAS ONE OWNER, and that is the safety
+#: property, not tidiness: this runs synchronously on the event loop over
+#: model-supplied text, so it must be linear. The previous shape,
+#: ``(?:\s*;\s*[^,;\s]*)*``, let the whitespace between two ``;`` be claimed by
+#: either neighbour, so a comma-less ``"; " * n`` run cost 2**n (measured 2.2 s at
+#: n=24, hours at 40). Proof of linearity for this one:
+#: (1) unambiguous: a parameter is ``;`` + leading blanks + an OPTIONAL token that
+#: excludes whitespace, ``;`` and ``,`` + trailing blanks only when a token exists,
+#: so any run of blanks has exactly one owner and every other split fails on the
+#: next character — the engine has one way to match any prefix and backtracking only
+#: walks counts DOWN, O(1) per step; (2) every quantifier has a constant cap, so one
+#: match attempt reads at most 5+8+6+64+8+8*(1+8+64+8)+1 = ~740 characters,
+#: independent of the input; (3) an attempt needs the literal ``data:`` to start, and
+#: attempts beginning inside another's window only repeat that constant, so total
+#: work is <= ~740 * len(text). A body-length cap is NOT added: padding in front of
+#: the payload would bypass it, and the bound above makes it unnecessary (timed in
+#: ``test_inline_image_guard_is_linear_on_adversarial_bodies``). Whitespace INSIDE a
+#: parameter value ("name=a b") is deliberately not matched, as before: letting it
+#: through made prose like ``data:image/png;base64 for the format, …`` a header.
 _INLINE_IMAGE_HEADER = re.compile(
-    r"data:\s*image/[a-z0-9.+-]+((?:\s*;\s*[^,;\s]*)*)\s*,",
+    r"data:\s{0,8}image/[a-z0-9.+-]{1,64}\s{0,8}" r"((?:;\s{0,8}(?:[^,;\s]{1,64}\s{0,8})?){0,8}),",
     re.IGNORECASE,
 )
 _BASE64_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
@@ -230,6 +249,14 @@ def refuse_inline_image_data(text: str) -> dict[str, str] | None:
 # the final payload whichever rung produced it. EXIF ORIENTATION is not lost:
 # the verbatim rung is taken only for images that need no rotation, and every
 # rotated image is re-encoded upright by the ladder before this runs.
+
+#: KNOWN LIMIT (no Pillow): on a host with no image decoder ``bound_image_for_model``
+#: forwards the bytes verbatim WITHOUT applying EXIF orientation, and this strip then
+#: removes the orientation tag, so a sideways phone photo would arrive unrotated. With
+#: Pillow (the default install: pillow-heif is a base dependency) rotated images are
+#: re-encoded upright first and the case cannot arise. PNG stripping is a deny-list
+#: (tEXt/zTXt/iTXt/eXIf/tIME): an unknown ancillary chunk such as a C2PA ``caBX``
+#: manifest is kept — provenance, not location data, and not worth re-encoding for.
 
 #: JPEG APPn segments kept, by marker AND payload identifier: the JFIF header, the
 #: ICC profile (colour fidelity) and Adobe (colour transform flag — dropping it can

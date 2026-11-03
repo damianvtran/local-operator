@@ -25,6 +25,9 @@ import base64
 import hashlib
 import io
 import json
+import re
+import signal
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -720,6 +723,91 @@ def test_inline_image_guard_bypasses_are_closed(name: str) -> None:
     refused = aa.refuse_inline_image_data(_BYPASSES[name])
     assert refused is not None and refused["code"] == "inline_image_data", name
     assert "AAAA" not in refused["error"]
+
+
+#: The pre-round-2 header pattern (7a05a1eb). Kept ONLY as the negative control: the
+#: regression test below swaps it in and must fail, proving the timing bound discriminates.
+_OLD_EXPONENTIAL_HEADER = re.compile(
+    r"data:\s*image/[a-z0-9.+-]+((?:\s*;\s*[^,;\s]*)*)\s*,", re.IGNORECASE
+)
+
+
+class _TooSlow(Exception):
+    pass
+
+
+def _timed_refuse(text: str, *, bound_s: float) -> float:
+    """Seconds ``refuse_inline_image_data(text)`` took; fails if over ``bound_s``.
+
+    A SIGALRM backstop (where the platform has one) turns an exponential pattern into
+    a bounded failure instead of a hung test run: Python's ``re`` checks signals, so
+    the alarm interrupts a runaway match.
+    """
+
+    def _fire(*_: Any) -> None:
+        raise _TooSlow()
+
+    armed = hasattr(signal, "SIGALRM") and hasattr(signal, "setitimer")
+    previous = signal.signal(signal.SIGALRM, _fire) if armed else None
+    if armed:
+        signal.setitimer(signal.ITIMER_REAL, bound_s * 4)
+    started = time.perf_counter()
+    try:
+        aa.refuse_inline_image_data(text)
+    except _TooSlow:
+        pytest.fail(f"guard still running after {bound_s * 4:.1f}s on a {len(text)}-char body")
+    finally:
+        elapsed = time.perf_counter() - started
+        if armed:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)  # type: ignore[arg-type]
+    assert elapsed < bound_s, f"{elapsed:.2f}s on a {len(text)}-char body"
+    return elapsed
+
+
+#: Comma-less on purpose: with no ``,`` the engine exhausts every way to split the
+#: header, which is what made the old ``(\s*;\s*...)*`` group 2**n.
+_REDOS_SHAPES = {
+    "semicolon-space run": "data:image/png" + "; " * 40,
+    "semicolon-space run in prose": "hello data:image/png" + "; " * 40,
+    "long semicolon-space run": "data:image/png" + "; " * 20000,
+    "space-semicolon run": "data:image/png" + " ;" * 20000,
+    "repeated header prefix": "data:image/png;base64 " * 3000,
+    "repeated data:image/": "data:image/" * 5000,
+    "semicolon then spaces": "data:image/png;" + " " * 100000,
+}
+
+
+@pytest.mark.parametrize("name", sorted(_REDOS_SHAPES))
+def test_inline_image_guard_is_linear_on_adversarial_bodies(name: str) -> None:
+    # perf_counter, no sleeps; 0.5 s is ~100x the measured worst of the bounded pattern
+    # on these shapes (<=5 ms) and ~4 orders under what the old pattern needs at n=40.
+    _timed_refuse(_REDOS_SHAPES[name], bound_s=0.5)
+
+
+def test_inline_image_guard_timing_test_fails_on_the_old_pattern(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative control: the SAME bound must trip when the exponential pattern is back."""
+
+    monkeypatch.setattr(aa, "_INLINE_IMAGE_HEADER", _OLD_EXPONENTIAL_HEADER)
+    with pytest.raises(pytest.fail.Exception):
+        _timed_refuse("data:image/png" + "; " * 40, bound_s=0.5)
+
+
+def test_assert_no_bytes_fails_on_a_leak() -> None:
+    """Negative control: the no-bytes assertion is capable of failing."""
+
+    data = _png_bytes()
+    for leak in (
+        {"x": base64.b64encode(data).decode("ascii")},
+        {"x": hashlib.sha256(data).hexdigest()},
+        {"x": "data:image/png;base64,AAAA"},
+        {"x": "...base64..."},
+    ):
+        with pytest.raises(AssertionError):
+            _assert_no_bytes(leak, data)
+    _assert_no_bytes({"ok": True, "attachments": [{"id": AID1}]}, data)  # clean passes
 
 
 def test_inline_image_guard_does_not_flag_legitimate_text() -> None:
