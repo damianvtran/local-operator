@@ -121,6 +121,7 @@ from local_operator.harness.document_limits import (
     MAX_FALLBACK_TEXT_CHARS,
     MAX_NATIVE_PDF_PAGES,
     is_text_mime,
+    text_weight,
 )
 from local_operator.harness.pdf_pages import known_pdf_page_count, pdf_page_count
 from local_operator.harness.types import (
@@ -231,10 +232,7 @@ def _document_token_estimate(block: DocumentContent) -> int:
         # a file whose real render is ~50 tokens.
         return _reference_tokens(block)
     if is_text_mime(block.mime_type):
-        # Decoded bytes >= characters, so the byte count is a safe stand-in
-        # for the text length without decoding the payload.
-        decoded = block.bytes if block.bytes > 0 else len(block.data) * 3 // 4
-        return _text_tokens(min(decoded, MAX_FALLBACK_TEXT_CHARS))
+        return _text_tokens(_text_units(block))
     return _reference_tokens(block)
 
 
@@ -264,6 +262,43 @@ def document_render_excess(messages: Sequence[Message], context_window: int) -> 
     )
 
 
+#: The rendered text's weight per content-addressed digest: the answer cannot
+#: change for the same bytes, and the upper bound asks on every turn.
+_TEXT_UNITS_CACHE: dict[str, int] = {}
+_TEXT_UNITS_CACHE_MAX = 256
+
+#: Base64 characters covering the first ``MAX_FALLBACK_TEXT_CHARS`` characters
+#: of any text (a character is at least one byte, and the render never reads
+#: past that bound). A multiple of 4 so the prefix decodes on its own.
+_TEXT_HEAD_B64 = (MAX_FALLBACK_TEXT_CHARS * 4 // 3 + 4) // 4 * 4 + 4
+
+
+def _text_units(block: DocumentContent) -> int:
+    """``text_weight`` units of the text a text document renders, window-blind.
+
+    ASCII is one unit a character and anything else a token per UTF-8 byte
+    (``document_limits.text_weight``), over the first
+    ``MAX_FALLBACK_TEXT_CHARS`` characters, which is all the serializer reads.
+    This is what puts the charge and the window-aware render cap
+    (``documents.document_text_cap``) in one unit: a byte count alone cannot
+    tell a 1 MB ASCII log from 1 MB of Hangul, which cost three times as much.
+    """
+    if block.digest and block.digest in _TEXT_UNITS_CACHE:
+        return _TEXT_UNITS_CACHE[block.digest]
+    try:
+        head = base64.b64decode(block.data[:_TEXT_HEAD_B64], validate=False)
+        text = head.decode("utf-8", errors="replace")[:MAX_FALLBACK_TEXT_CHARS]
+        units = text_weight(text)
+    except (ValueError, TypeError):
+        # Undecodable payload renders the reference sentence; charge bytes.
+        units = min(block.bytes or len(block.data) * 3 // 4, MAX_FALLBACK_TEXT_CHARS)
+    if block.digest:
+        if len(_TEXT_UNITS_CACHE) >= _TEXT_UNITS_CACHE_MAX:
+            _TEXT_UNITS_CACHE.pop(next(iter(_TEXT_UNITS_CACHE)))
+        _TEXT_UNITS_CACHE[block.digest] = units
+    return units
+
+
 def _reference_tokens(block: DocumentContent) -> int:
     """Tokens of the ``[Document reference: ...]`` sentence for ``block``."""
     return _text_tokens(_REFERENCE_FIXED_CHARS + len(block.filename), framing=0)
@@ -289,7 +324,7 @@ def document_wire_bytes(block: DocumentContent) -> int:
 
 
 def _text_tokens(chars: int, *, framing: int = _DOCUMENT_FRAMING_CHARS) -> int:
-    """Tokens for ``chars`` characters of rendered document text."""
+    """Tokens for ``chars`` ``text_weight`` units of rendered document text."""
     return (chars + framing) // DOCUMENT_CHARS_PER_TOKEN
 
 

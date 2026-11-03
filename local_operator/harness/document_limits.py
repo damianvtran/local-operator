@@ -20,16 +20,55 @@ MAX_FALLBACK_TEXT_CHARS = 400_000
 #: shed OTHER history, could never make the next request fit.
 DOCUMENT_WINDOW_SHARE = 4
 
-#: Characters per token the fallback text is budgeted at. This ratio sizes the
-#: REFUSAL (``document_render_excess``) and the render cap
-#: (``documents.document_text_cap``) together, so it must not flatter dense
-#: text: measured on o200k_base, English prose is ~4.5, minified JSON ~2.3, hex
-#: ~1.8, base64 ~1.5 and CJK ~1.3. A ratio of 3 under-counted a CJK file at its
-#: cap by 2.3x, which a refusal reads as headroom and the provider answers with
-#: a 400. 2 covers JSON and hex and leaves CJK ~1.6x under at the cap (and still
-#: inside the window: the cap is a quarter of it), at the price of rendering
-#: prose at a smaller character count than a 4-5 ratio would allow.
+#: Characters per token an ASCII character is budgeted at. Measured on
+#: o200k_base: English prose ~4.5, minified JSON ~2.3, hex ~1.8, base64 ~1.5.
+#: 2 covers all of them, so ASCII text is cut at ``window * 2 / 4`` characters.
+#: It is NOT the budget for non-ASCII text, which no ratio can bound: CJK runs
+#: 1.3 chars/token for common ideographs but ~2 for random full-range ones,
+#: Hangul and emoji ~2.3, and CJK Extension B ~4. See :func:`text_weight`.
 DOCUMENT_CHARS_PER_TOKEN = 2
+
+
+def text_weight(text: str) -> int:
+    """Budget units ``text`` costs: ASCII is 1 unit a character, anything else
+    ``DOCUMENT_CHARS_PER_TOKEN`` units per UTF-8 byte.
+
+    A unit is ``1 / DOCUMENT_CHARS_PER_TOKEN`` of a token, so non-ASCII text is
+    charged one token per UTF-8 byte. That is a hard ceiling rather than a
+    measurement: a tokenizer can always fall back to one token per byte, so
+    ``tokens <= len(text.encode("utf-8"))`` holds for every text and tokenizer
+    (the rule ``compaction.tokens`` already applies to its upper bound). A
+    cap in CHARACTERS cannot give that guarantee, which is how a 400k-character
+    file of Hangul or CJK Extension B filled (or overran) a 200k window.
+    """
+    encoded = len(text.encode("utf-8"))
+    ascii_chars = len(text.encode("ascii", "ignore"))
+    return ascii_chars + DOCUMENT_CHARS_PER_TOKEN * (encoded - ascii_chars)
+
+
+def weighted_prefix_len(text: str, budget: int) -> int:
+    """Longest prefix of ``text`` (in characters) whose :func:`text_weight`
+    fits ``budget`` units.
+
+    Pure-ASCII text, the common case, is cut at exactly ``budget`` characters.
+    Otherwise bisect on the prefix weight (monotonic in the prefix length):
+    ~19 passes over at most the 400k-character fallback bound.
+    """
+    if budget <= 0:
+        return 0
+    if len(text) <= budget and text_weight(text) <= budget:
+        return len(text)
+    if text.isascii():
+        return min(len(text), budget)
+    low, high = 0, min(len(text), budget)
+    while low < high:
+        mid = (low + high + 1) // 2
+        if text_weight(text[:mid]) <= budget:
+            low = mid
+        else:
+            high = mid - 1
+    return low
+
 
 #: Most pages a PDF may carry NATIVELY, whatever the window. At the per-page
 #: charge it is also the ceiling of one PDF's token charge

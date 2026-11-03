@@ -77,6 +77,7 @@ from local_operator.harness.document_limits import (
     MAX_FALLBACK_TEXT_CHARS,
     MAX_NATIVE_PDF_PAGES,
     is_text_mime,
+    weighted_prefix_len,
 )
 from local_operator.harness.pdf_pages import known_pdf_page_count, pdf_page_count
 from local_operator.harness.types import DocumentContent
@@ -330,11 +331,15 @@ def _window_page_cap(context_window: int | None) -> int:
 
 
 def document_text_cap(context_window: int | None) -> int | None:
-    """Most characters of fallback text ONE document may render for this model.
+    """Budget, in ``text_weight`` units, ONE document's fallback text may render.
 
     ``1 / DOCUMENT_WINDOW_SHARE`` of the window at
-    :data:`DOCUMENT_CHARS_PER_TOKEN`. ``None`` (unknown window) leaves only the
-    global :data:`MAX_FALLBACK_CHARS` / :data:`MAX_FALLBACK_TEXT_CHARS` bounds.
+    :data:`DOCUMENT_CHARS_PER_TOKEN` units a token. For ASCII a unit is a
+    character, so prose and code are cut where they always were; non-ASCII text
+    is charged a token per UTF-8 byte (``harness.document_limits.text_weight``),
+    so no script can render more than the window share. ``None`` (unknown
+    window) leaves only the global :data:`MAX_FALLBACK_CHARS` /
+    :data:`MAX_FALLBACK_TEXT_CHARS` bounds.
     """
     if not context_window or context_window <= 0:
         return None
@@ -499,7 +504,7 @@ def _cached_text_path(digest: str) -> Path:
     return AttachmentStore().root / f"{digest}.txt"
 
 
-def extract_document_text(block: "DocumentContent", max_chars: int | None = None) -> str:
+def extract_document_text(block: "DocumentContent", budget: int | None = None) -> str:
     """The fallback text for ``block``, with page markers and a truncation note.
 
     PDFs are extracted with ``pypdf`` (lazily imported: it is a base
@@ -514,22 +519,21 @@ def extract_document_text(block: "DocumentContent", max_chars: int | None = None
     REFERENCE sentence — a model must never receive nothing for a file the
     user believes it can see.
 
-    ``max_chars`` is the caller's WINDOW-aware ceiling (:func:`document_text_cap`)
-    and only ever lowers the global bounds: the cache keeps the full extraction
-    so a later request on a bigger model is not served a clipped copy.
+    ``budget`` is the caller's WINDOW-aware ceiling in ``text_weight`` units
+    (:func:`document_text_cap`) and only ever lowers the global bounds: the
+    cache keeps the full extraction so a later request on a bigger model is not
+    served a clipped copy.
     """
     raw = _decoded(block)
     if raw is None:
         return _reference_text(block, reason="its stored bytes could not be decoded")
     if block.mime_type == "application/pdf":
-        return _extract_pdf(block, raw, max_chars)
+        return _extract_pdf(block, raw, budget)
     if is_text_mime(block.mime_type):
-        limit = (
-            MAX_FALLBACK_TEXT_CHARS
-            if max_chars is None
-            else min(MAX_FALLBACK_TEXT_CHARS, max_chars)
-        )
         text = raw.decode("utf-8", errors="replace")
+        limit = min(len(text), MAX_FALLBACK_TEXT_CHARS)
+        if budget is not None:
+            limit = weighted_prefix_len(text[:limit], budget)
         if len(text) > limit:
             dropped = len(text) - limit
             text = text[:limit] + f"\n[... {dropped} characters truncated from {block.filename}]"
@@ -537,7 +541,7 @@ def extract_document_text(block: "DocumentContent", max_chars: int | None = None
     return _reference_text(block)
 
 
-def _extract_pdf(block: "DocumentContent", raw: bytes, max_chars: int | None = None) -> str:
+def _extract_pdf(block: "DocumentContent", raw: bytes, budget: int | None = None) -> str:
     # The cache holds the EXTRACTION only, never the display header: the same
     # bytes can be re-attached under a new filename, and a cached header would
     # then name a file the user is no longer sending.
@@ -545,7 +549,7 @@ def _extract_pdf(block: "DocumentContent", raw: bytes, max_chars: int | None = N
     header = f"[Document: {block.filename} ({block.mime_type}, {block.bytes} bytes)]"
     cached = _read_cached_text(digest)
     if cached is not None:
-        return f"{header}\n{_finish_extraction(cached, max_chars, block.filename)}"
+        return f"{header}\n{_finish_extraction(cached, budget, block.filename)}"
     try:
         from pypdf import PdfReader
 
@@ -580,7 +584,7 @@ def _extract_pdf(block: "DocumentContent", raw: bytes, max_chars: int | None = N
     if total > pages_read:
         body += f"\n[... only the first {pages_read} of {total} pages were read]"
     _write_cached_text(digest, body)
-    return f"{header}\n{_finish_extraction(body, max_chars, block.filename)}"
+    return f"{header}\n{_finish_extraction(body, budget, block.filename)}"
 
 
 _PAGE_MARKER_RE = re.compile(r"^--- page (\d+) ---\n", re.MULTILINE)
@@ -609,17 +613,20 @@ def _empty_pages_notice(body: str, filename: str) -> str:
     )
 
 
-def _finish_extraction(body: str, max_chars: int | None, filename: str) -> str:
+def _finish_extraction(body: str, budget: int | None, filename: str) -> str:
     """The extraction as sent: empty-page note first, then the window clip."""
-    return _empty_pages_notice(body, filename) + _clip_extraction(body, max_chars, filename)
+    return _empty_pages_notice(body, filename) + _clip_extraction(body, budget, filename)
 
 
-def _clip_extraction(body: str, max_chars: int | None, filename: str) -> str:
-    """``body`` cut to ``max_chars`` with the cut announced, never silent."""
-    if max_chars is None or len(body) <= max_chars:
+def _clip_extraction(body: str, budget: int | None, filename: str) -> str:
+    """``body`` cut to ``budget`` ``text_weight`` units, the cut announced."""
+    if budget is None:
+        return body
+    keep = weighted_prefix_len(body, budget)
+    if keep >= len(body):
         return body
     return (
-        body[:max_chars] + f"\n[... {len(body) - max_chars} characters truncated from {filename} "
+        body[:keep] + f"\n[... {len(body) - keep} characters truncated from {filename} "
         "to fit the model's context window]"
     )
 
@@ -661,6 +668,6 @@ def _reference_text(block: "DocumentContent", *, reason: str | None = None) -> s
     )
 
 
-def fallback_document_text(block: "DocumentContent", max_chars: int | None = None) -> str:
+def fallback_document_text(block: "DocumentContent", budget: int | None = None) -> str:
     """One entry point for the serializers' fallback arm."""
-    return extract_document_text(block, max_chars)
+    return extract_document_text(block, budget)

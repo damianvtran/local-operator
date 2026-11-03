@@ -30,6 +30,7 @@ from local_operator.compaction.marker import (
 )
 from local_operator.harness.document_limits import (
     DOCUMENT_CHARS_PER_TOKEN,
+    DOCUMENT_WINDOW_SHARE,
     MAX_NATIVE_PDF_PAGES,
 )
 from local_operator.harness.types import (
@@ -1325,10 +1326,15 @@ def test_google_wire_clips_a_fallback_text_to_the_window() -> None:
 def test_the_responses_wire_takes_the_window_page_cap_too() -> None:
     """The Responses row used to return before the window cap, so a 600-page PDF
     went native while the refusal assumed it was cut to the window share."""
+    from local_operator.compaction.tokens import PDF_PAGE_TOKEN_ESTIMATE
+
     long = _pdf_block(_pdf_raw(pages=600))
     for window in (128_000, 200_000, 400_000):
         form = document_form("openai", "openai-responses", context_window=window)
-        assert form is not None and form.max_pages == window // 4 // 2_500
+        assert form is not None and form.max_pages is not None
+        share = window // DOCUMENT_WINDOW_SHARE
+        assert form.max_pages * PDF_PAGE_TOKEN_ESTIMATE <= share
+        assert (form.max_pages + 1) * PDF_PAGE_TOKEN_ESTIMATE > share
         assert not document_native_ok(long, form)
     # A text-only model still gets no file part at all.
     assert document_form("openai", "openai-responses", supports_images=False) is None
@@ -1398,29 +1404,94 @@ def test_a_pdf_with_text_gets_no_empty_page_note(store, monkeypatch) -> None:
     assert "1 of 3 extracted pages of ok.pdf" in documents_mod._empty_pages_notice(mixed, "ok.pdf")
 
 
-@pytest.mark.parametrize("window", [128_000, 200_000])
-def test_the_refusal_covers_a_dense_text_file_at_its_cap(window) -> None:
-    """Measured on o200k: CJK is ~1.3 chars/token and minified JSON ~2.3, so the
-    ruler's ratio must be low enough that the figure that decides a REFUSAL is
-    not far under what a capped, dense file renders."""
+_RESERVE = 8192  # the reply headroom a request must still leave
+
+
+def _random_text(kind: str, count: int) -> str:
+    """``count`` random characters of one script, seeded so a failure repeats."""
+    import random
+
+    ranges = {
+        "cjk": (0x4E00, 0x9FFF),
+        "hangul": (0xAC00, 0xD7A3),
+        "emoji": (0x1F300, 0x1F64F),
+        "cjk_ext_b": (0x20000, 0x2A6DF),
+    }
+    low, high = ranges[kind]
+    rng = random.Random(f"{kind}-{count}")
+    return "".join(chr(rng.randint(low, high)) for _ in range(count))
+
+
+def _text_block(text: str, name: str = "dense.txt") -> DocumentContent:
+    raw = text.encode("utf-8")
+    return DocumentContent(
+        data=base64.b64encode(raw).decode("ascii"),
+        mime_type="text/plain",
+        filename=name,
+        bytes=len(raw),
+    )
+
+
+@pytest.mark.parametrize("window", [32_000, 128_000, 200_000])
+@pytest.mark.parametrize("kind", ["cjk", "hangul", "emoji", "cjk_ext_b"])
+def test_no_script_can_render_past_the_window_and_the_refusal_sees_it(kind, window) -> None:
+    """A cap in CHARACTERS cannot bound a script that costs more than the ratio
+    per character: at 400k characters random CJK filled 96-100% of a 128k/200k
+    window, Hangul 112%, emoji 110% and CJK Extension B ~200%, while the refusal
+    figure said 8k-50k, so the provider answered 400 and the session was stuck.
+    The real o200k count of what is actually rendered, plus the reply reserve,
+    must fit; and the figure the refusal reads must not be far under it."""
+    tiktoken = pytest.importorskip("tiktoken")
     from local_operator.providers.clients import _estimated_prompt_tokens
 
-    text = "\u6f22\u5b57\u4eee\u540d" * 100_000  # 400k CJK characters
-    block = DocumentContent(
-        data=base64.b64encode(text.encode("utf-8")).decode("ascii"),
-        mime_type="text/plain",
-        filename="dense.txt",
-        bytes=len(text.encode("utf-8")),
-    )
-    cap = document_text_cap(window)
-    assert cap is not None
-    rendered = fallback_document_text(block, cap)
+    encoding = tiktoken.get_encoding("o200k_base")
+    block = _text_block(_random_text(kind, 400_000))
+    rendered = fallback_document_text(block, document_text_cap(window))
+    real = len(encoding.encode(rendered, disallowed_special=()))
+    assert real + _RESERVE <= window, f"{kind}@{window}: {real} tokens rendered"
+    assert "characters truncated from dense.txt" in rendered, "the cut must be announced"
+
     request = ChatRequest(
         model=ModelSpec(provider="test", model_id="m", context_window=window),
         messages=[Message(role="user", content=[block])],
     )
     _, measured = _estimated_prompt_tokens(request)
-    # No more than ~1.6x under the CJK reality (1.3 chars/token) is accepted at
-    # the cap; the old ratio of 3 was 2.3x under.
-    assert measured >= len(rendered) / 1.3 / 1.6
-    assert DOCUMENT_CHARS_PER_TOKEN <= 2
+    # One token per UTF-8 byte is a ceiling, so the refusal figure may not sit
+    # below the measured count (it does not, with the 200-char framing allowance).
+    assert measured >= real
+
+
+def test_ascii_text_is_cut_exactly_where_it_always_was() -> None:
+    """Prose and code are 1 unit a character: the weighted cap must leave their
+    output byte-identical to the character cap it replaced (head b08929512)."""
+    prose = ("The quick brown fox jumps over the lazy dog; return x if y else z.\n" * 9000)[
+        :400_000
+    ]
+    block = DocumentContent(
+        data=base64.b64encode(prose.encode()).decode("ascii"),
+        mime_type="text/plain",
+        filename="notes.txt",
+        bytes=len(prose),
+    )
+    for window in (32_000, 128_000, 200_000):
+        cap = document_text_cap(window)
+        assert cap is not None
+        assert cap == window * DOCUMENT_CHARS_PER_TOKEN // DOCUMENT_WINDOW_SHARE
+        expected_body = prose[:cap]
+        expected = (
+            "[Document: notes.txt (text/plain)]\n```\n"
+            f"{expected_body}\n[... {len(prose) - cap} characters truncated from notes.txt]\n```"
+        )
+        assert fallback_document_text(block, cap) == expected
+
+
+def test_a_mixed_text_file_is_cut_at_its_weight_not_its_length() -> None:
+    from local_operator.harness.document_limits import text_weight, weighted_prefix_len
+
+    text = "abc" + "\u6f22" * 10 + "tail"
+    assert text_weight("abc") == 3
+    assert text_weight("\u6f22") == 3 * DOCUMENT_CHARS_PER_TOKEN
+    keep = weighted_prefix_len(text, 3 + 4 * 3 * DOCUMENT_CHARS_PER_TOKEN)
+    assert text[:keep] == "abc" + "\u6f22" * 4
+    assert weighted_prefix_len("abc", 100) == 3
+    assert weighted_prefix_len("abc", 0) == 0
