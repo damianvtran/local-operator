@@ -168,10 +168,11 @@ def test_check_reports_drift_instead_of_writing(tmp_path, capsys):
     stale = tmp_path / "manifest.json"
     committed = MANIFEST_PATH.read_text(encoding="utf-8")
     # The count tracks the regenerated manifest's architect entry (958 -> 1100
-    # in the 2026-10-06 reporting-rule revision): a literal that no longer
+    # in the 2026-10-06 reporting-rule revision, 1100 -> 1281 with the
+    # delivery-guide/minor-round rule): a literal that no longer
     # appears would make this replace a silent no-op, so keep the pair in step
     # with the regenerated manifest when a seed's character count moves.
-    stale.write_text(committed.replace('"instructions_chars": 1100', '"instructions_chars": 1099'))
+    stale.write_text(committed.replace('"instructions_chars": 1281', '"instructions_chars": 1280'))
     assert stale.read_text(encoding="utf-8") != committed
     assert generator.main(["--check", "--out", str(stale)]) == 1
     assert stale.read_text(encoding="utf-8") != committed, "--check must not rewrite the file"
