@@ -372,7 +372,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # name lives in dm's refusal, not in per-request schema prose. Measured by
     # this test's own printed table on the rebased head; the paired start-context
     # figure is in scripts/bench_context_budget.py.
-    "bridge": 1890,
+    # 1890 -> 1901 (2026-11-03): the one-channel clause in the description
+    # ("The one channel for teammates; reply where it arrived") — the incident
+    # fix for cross-channel fan-out to a teammate.
+    "bridge": 1901,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
