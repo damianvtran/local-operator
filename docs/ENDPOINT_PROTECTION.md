@@ -550,7 +550,7 @@ Identifier=python3
 Format=Mach-O thin (arm64)
 CodeDirectory v=20500 size=467 flags=0x10000(runtime) hashes=4+7 location=embedded
 Signature size=8973
-Authority=Developer ID Application: Radient Inc. (SHA2U6KT7V)
+Authority=Developer ID Application: <individual> (SHA2U6KT7V)
 Authority=Developer ID Certification Authority
 Authority=Apple Root CA
 Timestamp=Sep 15, 2026 at 2:50:22 PM
@@ -616,12 +616,7 @@ which the ad-hoc Class 1 image does not — and an app bundle that has been
 replaced since the capture moves its `Timestamp` and `Sealed Resources … files=`
 count (this machine's bundle now reads `Sep 20, 2026 at 10:14:27 PM` and
 `files=1562`, where the block below records the earlier build). The app-bundle
-block follows the same rule. **One field is substituted, and only one:** the
-leaf `Authority=` line shows the Radient Inc. organization identity that signs
-releases from the move to it onward. These blocks were captured under the
-earlier individual Developer ID certificate of the SAME team (`SHA2U6KT7V`);
-the account was converted to an organization, so the team ID and every
-`TeamIdentifier=` line are unchanged and the other fields are as captured.
+block follows the same rule.
 
 ### The desktop app bundle
 
@@ -632,7 +627,7 @@ Identifier=com.local-operator
 Format=app bundle with Mach-O thin (arm64)
 CodeDirectory v=20500 size=446 flags=0x10000(runtime) hashes=3+7 location=embedded
 Signature size=8972
-Authority=Developer ID Application: Radient Inc. (SHA2U6KT7V)
+Authority=Developer ID Application: <individual> (SHA2U6KT7V)
 Authority=Developer ID Certification Authority
 Authority=Apple Root CA
 Timestamp=Sep 15, 2026 at 9:07:50 PM
@@ -650,16 +645,24 @@ source=Notarized Developer ID
 
 The app is the artefact an organisation *can* key on: a Developer ID
 signature, a Team ID, a hardened runtime and a stapled notarization ticket,
-which Gatekeeper accepts. The **team ID is literal** and is what an exclusion
-keys on.
+which Gatekeeper accepts. The name printed against every `Authority=` line is a
+placeholder (`<individual>`): this document is committed to a public repository,
+so the individual's name is not reproduced here, but the **team ID is literal**
+and is what an exclusion keys on.
 
 Three honest qualifications.
 
-**First, the certificate changed while the team did not.** Releases are signed
-with `Developer ID Application: Radient Inc. (SHA2U6KT7V)`, an organization
-identity; earlier releases carried an individual's Developer ID certificate in
-the same team, which became the organization's. What that means for an
-existing allow-list depends on what it keys on:
+**First, the certificate in those captures is personal, and is being replaced
+while the team is not.** The blocks above carry a Developer ID issued to an
+individual. That Apple account was converted to an organization, so the team
+(`SHA2U6KT7V`) is now Radient Inc.'s. The CLI's macOS key agent
+(`lop-keyagent`) is signed with the organization identity
+`Developer ID Application: Radient Inc. (SHA2U6KT7V)` from the CLI release that
+moved its signing job onward, and desktop app releases from the Radient Inc.
+migration onward carry that organization leaf instead of the individual one;
+releases before those, including the captures above, carry the individual
+leaf. What the change means for an existing allow-list depends on what it keys
+on:
 
 - **keyed on the Team ID** (`SHA2U6KT7V`, the usual macOS "signer identity" /
   Team ID rule): keeps matching both old and new builds — nothing to do;
@@ -983,14 +986,17 @@ the file to exist — and then reinstall.
 Two pieces of work, stated as work rather than intent:
 
 - **Sign the CLI artefact with the company's Developer ID.** The identity half
-  of this is done: signed artefacts now carry the Radient Inc. organization
-  identity rather than an individual's certificate (same team, §2), so the
-  identity an admin keys an exclusion against belongs to the company and
-  outlives any one maintainer. What remains is narrower than "the artefacts
-  are unsigned", and worth stating precisely after §2: the desktop app bundle
-  is signed and notarized, the app-provisioned interpreter images under
-  Application Support carry that same Developer ID and team, but the **CLI
-  install path carries no identity signature an admin can key on** (Class 1).
+  is under way: CLI releases from the signing-job move onward sign the macOS
+  key agent with the Radient Inc. organization identity, and desktop app
+  releases from the Radient Inc. migration onward move to it too (same team,
+  §2), so the identity an admin keys an exclusion against becomes one the
+  company owns and that outlives any one maintainer. Until a desktop release carrying it is installed, the app and
+  its interpreters still carry the individual's certificate. What remains is
+  narrower than "the artefacts are unsigned", and worth stating precisely after
+  §2: the desktop app bundle is signed and notarized, the app-provisioned
+  interpreter images under Application Support carry that same Developer ID and
+  team, but the **CLI install path carries no identity signature an admin can
+  key on** (Class 1).
   Signing it would give the CLI artefact an identity to key on. Note the
   cost before reaching for it as a shortcut, though — on macOS a
   certificate exclusion is a performance-focus exclusion (§2), so it disables

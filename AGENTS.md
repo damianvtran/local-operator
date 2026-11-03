@@ -1587,9 +1587,11 @@ pypi/support#12738 and pypi/support#12882.
    team `SHA2U6KT7V`; certificate expires 2027-12-02), not a skipped job. The job
    also asserts the signature's `Authority=` is that organization identity, so a
    refill with any other certificate fails loudly; the retired
-   `MACOS_SIGNING_P12_*` / `MACOS_SIGNING_PROFILE_BASE64` secrets are rollback only.
-   Renewal procedure: `docs/design/operator-key-agent.md` §8. `keyagent-macos` runs on the pinned `macos-15` runner deliberately, so do
-   not bump that pin during a release window.
+   `MACOS_SIGNING_P12_*` / `MACOS_SIGNING_PROFILE_BASE64` secrets are rollback only,
+   and the tests forbid them, so a rollback reverts that PR with its tests and docs
+   (it would also commit the individual's name). Renewal procedure:
+   `docs/design/operator-key-agent.md` §8. `keyagent-macos` runs on the pinned
+   `macos-15` runner deliberately, so do not bump that pin during a release window.
 5. **Post the refs** (tag, release URL, installed `.lop-source` revision and
    the verified `lop --version`) as a comment on every PR in the window, and
    `send` them to each contributor still running.

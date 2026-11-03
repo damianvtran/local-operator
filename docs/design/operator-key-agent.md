@@ -375,9 +375,11 @@ Developer ID profile *Local Operator key agent (Developer ID, Radient Inc)* for 
 `SHA2U6KT7V.com.local-operator.lopkeyagent`. In CI they are `MACOS_DEVID_APP_P12_BASE64`
 / `MACOS_DEVID_APP_P12_PASSWORD` and `MACOS_KEYAGENT_PROFILE_BASE64`. The earlier
 individual identity's `MACOS_SIGNING_P12_*` / `MACOS_SIGNING_PROFILE_BASE64` are left in
-the secret store as the rollback path and nothing reads them; rolling back means pointing
-the job at them AND changing its `EXPECTED_AUTHORITY`, because the post-sign assertion
-refuses any other leaf.
+the secret store as the rollback path and nothing reads them. The tests in
+`tests/unit/test_publish_workflow.py` forbid those names and pin `EXPECTED_AUTHORITY` to
+the organization, and the individual leaf's `Authority=` carries a person's name that
+this public repository otherwise keeps out, so rolling back means reverting the pull
+request that moved the job, its tests and docs together — not re-pointing the secrets.
 
 **Why the move from the individual identity is not a break.** The account was converted
 to an organization, so the TEAM ID IS UNCHANGED. Every check that gates the key agent
