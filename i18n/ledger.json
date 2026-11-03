@@ -18909,6 +18909,314 @@
       },
       "status": "passed",
       "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 064822d38ede40517e1c425b4c9af422b44874408b933715918e493c42fd9997. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/zh-CN/cli.browser/pair2/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 4e08564de9827196b64c3c66d96258be798c1ede448fc75d4ab3a876055be8d0; context SHA-256 df0189becbf118ae9fa766395b412fe4d32a324cffd7587e87e392c255ed7a94. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 5200aeb1a08682ce5d473c00504198adc99a2e1be2e1e9ff04833bbbb1bc337a; context SHA-256 105c41ad6e03647b789d2f9dba474b2aa84fee4b050bbe11a95e7c2927246036. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 774a3a293a6a95ba3576083e27e2b0c7e8406ab02ceb0611f99e83cded6c84fb; context SHA-256 df0189becbf118ae9fa766395b412fe4d32a324cffd7587e87e392c255ed7a94. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 19458365fcacf645d5e9621f460be5cc35962b98d7b2e6146a5d05fd9d5dc64e; context SHA-256 105c41ad6e03647b789d2f9dba474b2aa84fee4b050bbe11a95e7c2927246036. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 a731a558f8a008b644c296e1e0e06fb025b4dcc682bda1c973dc531c8cc98c5a; context SHA-256 df0189becbf118ae9fa766395b412fe4d32a324cffd7587e87e392c255ed7a94. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 6b54cd79f125e4daec658418d32e535313e6aa15cfc29f6036f3187de0e3b6eb; context SHA-256 105c41ad6e03647b789d2f9dba474b2aa84fee4b050bbe11a95e7c2927246036. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 6de6ea4db4d39ce2901c4eb05f58de8d6d7162f9de36a7aa67b5424db20370ce; context SHA-256 df0189becbf118ae9fa766395b412fe4d32a324cffd7587e87e392c255ed7a94. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 88407453361d251adfce2056dca3b3952e0172ede5bd4a81b57d63834df971c4; context SHA-256 105c41ad6e03647b789d2f9dba474b2aa84fee4b050bbe11a95e7c2927246036. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 d95074ef43b55db80caad9e5795c8fb7c5ce5903871d3ba5c350178ea1abaca7; context SHA-256 df0189becbf118ae9fa766395b412fe4d32a324cffd7587e87e392c255ed7a94. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 16c8665ea489fd9331e5828f69e4d954a2a6fd8704d8953839e274e584863245; context SHA-256 105c41ad6e03647b789d2f9dba474b2aa84fee4b050bbe11a95e7c2927246036. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 c0f2c1455f9384402d61bef16fb43fddc5815f58a0df5ac2efe51ce25f77bcc4; context SHA-256 df0189becbf118ae9fa766395b412fe4d32a324cffd7587e87e392c255ed7a94. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 c48bddc53d05ba1b46253678a94b37972756b549420ff7eb6cf934a4d3b707ac; context SHA-256 105c41ad6e03647b789d2f9dba474b2aa84fee4b050bbe11a95e7c2927246036. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 f806ed78581b45af6983cf9fb2e25a045979057af58e7524f1644f7a01f33345; context SHA-256 df0189becbf118ae9fa766395b412fe4d32a324cffd7587e87e392c255ed7a94. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 6e4fbda5136e29554699f4dce17c059eefacc40ed5a4baa3eae005fe16b58522; context SHA-256 105c41ad6e03647b789d2f9dba474b2aa84fee4b050bbe11a95e7c2927246036. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
     }
   ]
 }

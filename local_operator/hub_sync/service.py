@@ -3508,6 +3508,9 @@ def install_skill(
     dry_run: bool = False,
     form: str | None = None,
     reinstall: bool = False,
+    adoption_receipt: str | None = None,
+    adoption_strategy: Literal["merge", "keep-local", "take-hub"] = "merge",
+    allow_llm: bool = True,
 ) -> dict[str, Any]:
     """Install ONE remote skill as a new local link (UI ``hub.skillPull``).
 
@@ -3654,6 +3657,25 @@ def install_skill(
                 }
             )
             return {"reports": [payload], "link": row, "links": snapshot}
+
+        # Adoption is an explicit initial-link transition, not an exception in
+        # the ordinary storage ownership gate. BOTH preview and apply validate
+        # durable ownership before reading text or claiming that installation is
+        # possible; the old early dry-run returned a misleading would-install.
+        owner = prov.alias_owner(ctx.config_dir, "skill", alias)
+        if owner is not None and owner != local_id:
+            raise LinkError(
+                "origin-conflict", "managed alias belongs to another local skill origin"
+            )
+        destination = storage.path(alias)
+        if bundle is None and destination.exists():
+            from local_operator.hub_sync.skill_adoption_service import adopt_skill
+
+            return adopt_skill(
+                ctx, resolved, dry_run=dry_run, confirm=confirm,
+                receipt=adoption_receipt, strategy=adoption_strategy,
+                allow_llm=allow_llm, subscribe=subscribe, auto_push=auto_push,
+            )
 
         # 7b-bundle. The bundle preflight runs BEFORE any policy staging or
         #     download: a public first install must name the publisher and the

@@ -2716,6 +2716,50 @@
       },
       "status": "passed",
       "note": "Provenance-only correction superseding the prior delta row serving-model claims, not a new semantic audit or execution. Both translator a58a48732351 and independent auditor 05c51f9b1aba actually served openai/gpt-6.1-sol; earlier Sonnet/no-fallback claims inferred from runtime headers were wrong and are withdrawn. Source: manager/coordinator independently parsed all 21 usage-bearing records in auditor history (GPT only); translator verified own transcript usage/native_replay lines 63/66/68. These verification results are coordinator/translator-reported to this implementer, not independently re-executed here. Immutable auditor-authored correction i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-prov-05c51/{record.json,receipt.json,report.md}; its host-reported-only verification level describes the auditor child, while this wrapper records subsequent coordinator usage verification. No fallback sequence/cause inferred. French hash remains 42333772890dd59733f0bcff715c9d608ff1f7c069c8dbb025ee3b2f0548ed63; EN/context unchanged. Original semantic delta verdict 2/2 passed, zero findings retained; no new findings, audit, native execution or suite reset. Prior rows and both earlier immutable bundles preserved."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 774a3a293a6a95ba3576083e27e2b0c7e8406ab02ceb0611f99e83cded6c84fb; context SHA-256 df0189becbf118ae9fa766395b412fe4d32a324cffd7587e87e392c255ed7a94. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 19458365fcacf645d5e9621f460be5cc35962b98d7b2e6146a5d05fd9d5dc64e; context SHA-256 105c41ad6e03647b789d2f9dba474b2aa84fee4b050bbe11a95e7c2927246036. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
     }
   ]
 }

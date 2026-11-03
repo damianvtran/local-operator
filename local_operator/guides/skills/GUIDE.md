@@ -56,6 +56,28 @@ Two environment knobs change the scan:
 - **Do not edit the packaged copy** — the next update replaces it.
 - The conflict warning is not an error: it names the shadowed file, the winner, and the rule. It is exactly what shadowing a builtin looks like.
 
+## Adopt a same-name Hub skill
+
+When a local folder already uses the Hub skill's name, preview adoption instead
+of moving the real folder or deleting it to make installation succeed:
+
+```bash
+lop skills pull <id> --org <tenant> --dry-run
+lop skills pull <id> --org <tenant> --adopt-receipt <receipt> --yes
+```
+
+Use `--public` instead of `--org <tenant>` for a public Hub skill. Keep the
+same scope, alias, `--no-subscribe` policy and `--strategy` choice from preview
+through confirmation; changing them requires a new preview.
+
+Review both diffs before confirming the receipt. A complete folder snapshot is
+saved before any merge-model call; local assets are preserved but excluded from
+model input. Use `--no-llm` with an explicit `--strategy keep-local` or
+`--strategy take-hub` preview when skill text must not leave the machine. Review
+the chosen preview before applying it; a stale receipt requires a fresh preview.
+Never silently discard guidance or move the real folder. Adoption does not relax
+the Hub service's strict document schema.
+
 ## Author and improve skills
 
 The `skill://skill-authoring` skill is the playbook: description as routing signal, progressive disclosure, token budgets, and testing before shipping. Format mechanics and the extension surfaces are in `guide://extensions`.

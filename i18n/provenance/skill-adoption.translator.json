@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "record_kind": "translator_provenance",
+  "date": "2026-11-03",
+  "status": "translated_independent_audit_required",
+  "translator": {
+    "agent": "coder / skill-adoption-copy",
+    "session": "5984801ad25d",
+    "model": "openai/gpt-6.1-sol",
+    "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol"
+  },
+  "scope": "16 new wire.skill_adoption keys plus skill_alias_occupied in wire.errors.desktop in all supported locales; unchanged desktop keys retained, entire changed namespace requires independent audit",
+  "locales": [
+    "en",
+    "fr",
+    "es",
+    "zh-CN",
+    "ru",
+    "vi",
+    "ur",
+    "hi"
+  ],
+  "hash_algorithm": "SHA-256 over exact UTF-8 catalogue file bytes",
+  "namespaces": [
+    {
+      "namespace": "wire.skill_adoption",
+      "en_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+      "context_sha256": "df0189becbf118ae9fa766395b412fe4d32a324cffd7587e87e392c255ed7a94",
+      "locale_sha256": {
+        "en": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+        "fr": "9805188cfe75b5bbb9ae059e3ecd0906f578c4efec49923ecbd30234c054de6c",
+        "es": "a4c39b00eb6cb1c106c92e46540fb21a62ea6c11fd8f3d47a9617b451e9c8944",
+        "zh-CN": "a22384877601aab4b0ddcb7d87d3a9df54e49f13017864d6b3f04629e4227bff",
+        "ru": "51fae40ec9b9ae1483b895872943325f4080119819e3cc8bbbeb386f4a0636dd",
+        "vi": "0f810b84c1bc1a1dd82e84a59584f4b7845ea27c3b26709ca7c1db737863c3ef",
+        "ur": "0b6f87b4bf3a61bad66742d562757957060a9bb4020d2b3fb10bfb2883a9afa4",
+        "hi": "3d8d0f2e89659402c286603db31683ca85ea200461bf5c81d19b3a6edb633fcc"
+      }
+    },
+    {
+      "namespace": "wire.errors.desktop",
+      "en_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "context_sha256": "105c41ad6e03647b789d2f9dba474b2aa84fee4b050bbe11a95e7c2927246036",
+      "locale_sha256": {
+        "en": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+        "fr": "d02446106e2b4f08a8acafdddbe2e3aa0a059053ba887670055ba87012920264",
+        "es": "570919f9fd5ada44d139bf13c9a440a4633f0ff1297de907f01d6e7fc8f1e1de",
+        "zh-CN": "5134d89c81aec603756bbfdaa2d06331af8b57dca69767f669195f806989ad13",
+        "ru": "e4d2b647dacced4b60f09f8aa88fe13a45284242669a4e70726b9282e601bf8b",
+        "vi": "cf75015692247e5abfeabb93a2cb3ce6a39d0cd16c5c3275fd4916fb4ecc70bf",
+        "ur": "fb827074c8dd00ba0e277aabb03df39a09146a88a3a2e91c5748c21ee320c3e2",
+        "hi": "0270ffe1ef85ada9c03e51fff36038beb59f6bf4f5cba5a79282549164257a81"
+      }
+    }
+  ],
+  "style_choices": {
+    "fr": "vous; compétence; developer merge/diff retained",
+    "es": "tú; habilidad; neutral Spanish",
+    "zh-CN": "技能; terse simplified Chinese; Hub retained",
+    "ru": "вы-compatible impersonal prose; навык",
+    "vi": "kỹ năng; đưa vào quản lý trên Hub for adoption; merge retained",
+    "ur": "آپ-compatible polite imperatives; مہارت; no stored bidi controls",
+    "hi": "polite imperative; कौशल; फ़ nukta preserved"
+  },
+  "invariants": [
+    "Commands, flags, strategy tokens and [y/N] untranslated",
+    "No inserted bidi controls; runtime paint boundary owns isolation",
+    "ICU placeholders preserved exactly; no plural forms added"
+  ],
+  "audit_required": "Independent non-translator audit for each of seven non-English locales over entire wire.skill_adoption and wire.errors.desktop namespaces at these exact English hashes; append only real auditor ledger rows. High-visibility confirmation/refusal copy also needs second independent audit per guide://i18n."
+}

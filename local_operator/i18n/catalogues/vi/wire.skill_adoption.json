@@ -1,0 +1,18 @@
+{
+  "wire.skill_adoption.preview_required": "Kỹ năng cục bộ này cần bản xem trước merge trước khi có thể liên kết. Chạy `lop skills pull <id> --dry-run`, kiểm tra cả hai bản diff, rồi xác nhận bản xem trước đó bằng `--adopt-receipt <receipt> --yes`.",
+  "wire.skill_adoption.preview_changed": "Kỹ năng cục bộ, phiên bản Hub hoặc chính sách liên kết đã thay đổi sau bản xem trước này. Tạo bản xem trước mới và kiểm tra trước khi áp dụng.",
+  "wire.skill_adoption.needs_choice": "Không thể tạo phiên bản hợp nhất một cách an toàn. Xem trước một lựa chọn rõ ràng: giữ bản cục bộ và liên kết, hoặc dùng bản Hub kèm bản sao lưu.",
+  "wire.skill_adoption.preview_title": "Kiểm tra hướng dẫn cục bộ và trên Hub trước khi liên kết",
+  "wire.skill_adoption.confirm": "Áp dụng phương án đưa kỹ năng vào quản lý trên Hub đã kiểm tra? [y/N] ",
+  "wire.skill_adoption.cancelled": "Đã hủy. Kỹ năng cục bộ không thay đổi.",
+  "wire.skill_adoption.dry_run_help": "Xem trước việc cài đặt hoặc đưa vào quản lý trên Hub mà không thay đổi kỹ năng cục bộ",
+  "wire.skill_adoption.receipt_help": "Áp dụng bản xem trước đưa vào quản lý trên Hub đã kiểm tra",
+  "wire.skill_adoption.strategy_help": "Chọn merge, keep-local hoặc take-hub cho bản xem trước",
+  "wire.skill_adoption.no_llm_help": "Không gửi văn bản kỹ năng đến mô hình merge",
+  "wire.skill_adoption.backup_label": "Ảnh chụp nhanh thư mục gốc: {path} (SHA-256 {hash})",
+  "wire.skill_adoption.receipt_label": "Biên nhận bản xem trước đưa vào quản lý trên Hub: {receipt}",
+  "wire.skill_adoption.no_apply": "Chỉ xem trước. Chưa cài đặt hay liên kết nội dung nào.",
+  "wire.skill_adoption.inherited_assets": "Tài nguyên cục bộ được giữ lại và không gửi đến mô hình merge.",
+  "wire.skill_adoption.yes_help": "Xác nhận bản xem trước cài đặt hoặc đưa vào quản lý trên Hub đã kiểm tra",
+  "wire.skill_adoption.alias_occupied": "Đã có kỹ năng cục bộ dùng tên này. Thực hiện pull kỹ năng Hub bằng --dry-run để kiểm tra merge khi đưa vào quản lý trên Hub, hoặc chọn tên khác."
+}

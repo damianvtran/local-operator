@@ -1,0 +1,18 @@
+{
+  "wire.skill_adoption.preview_required": "Cette compétence locale nécessite un aperçu de merge avant de pouvoir être liée. Exécutez `lop skills pull <id> --dry-run`, examinez les deux diffs, puis confirmez cet aperçu avec `--adopt-receipt <receipt> --yes`.",
+  "wire.skill_adoption.preview_changed": "La compétence locale, la révision du Hub ou la politique de liaison a changé depuis cet aperçu. Créez un nouvel aperçu et examinez-le avant de l’appliquer.",
+  "wire.skill_adoption.needs_choice": "Impossible de produire une version consolidée en toute sécurité. Prévisualisez un choix explicite : conserver la version locale et la lier, ou utiliser la version du Hub avec une sauvegarde.",
+  "wire.skill_adoption.preview_title": "Examiner les instructions locales et celles du Hub avant la liaison",
+  "wire.skill_adoption.confirm": "Appliquer cette adoption de compétence après examen ? [y/N] ",
+  "wire.skill_adoption.cancelled": "Annulé. La compétence locale n’a pas été modifiée.",
+  "wire.skill_adoption.dry_run_help": "Prévisualiser l’installation ou l’adoption sans modifier la compétence locale",
+  "wire.skill_adoption.receipt_help": "Appliquer cet aperçu d’adoption déjà examiné",
+  "wire.skill_adoption.strategy_help": "Choisir merge, keep-local ou take-hub pour l’aperçu d’adoption",
+  "wire.skill_adoption.no_llm_help": "Ne pas envoyer le texte de la compétence à un modèle de merge",
+  "wire.skill_adoption.backup_label": "Instantané du dossier d’origine : {path} (SHA-256 {hash})",
+  "wire.skill_adoption.receipt_label": "Reçu de l’aperçu d’adoption : {receipt}",
+  "wire.skill_adoption.no_apply": "Aperçu uniquement. Rien n’a été installé ni lié.",
+  "wire.skill_adoption.inherited_assets": "Les ressources locales sont conservées sans être envoyées au modèle de merge.",
+  "wire.skill_adoption.yes_help": "Confirmer l’aperçu d’installation ou d’adoption examiné",
+  "wire.skill_adoption.alias_occupied": "Une compétence locale utilise déjà ce nom. Effectuez un pull de la compétence du Hub avec --dry-run pour examiner un merge d’adoption, ou choisissez un autre nom."
+}

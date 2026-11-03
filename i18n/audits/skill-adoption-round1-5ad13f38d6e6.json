@@ -1,0 +1,289 @@
+{
+  "schema": 1,
+  "record_kind": "independent_translation_audit",
+  "round": 1,
+  "date": "2026-11-03",
+  "auditor": {
+    "agent": "reviewer / independent translation auditor",
+    "session": "5ad13f38d6e6",
+    "model": "openai/gpt-6.1-sol",
+    "fallback": "anthropic/claude-opus-5-5 failed quota before substantive audit; semantic audit conducted entirely by openai/gpt-6.1-sol"
+  },
+  "translator": {
+    "agent": "coder / skill-adoption-copy",
+    "session": "5984801ad25d",
+    "model": "openai/gpt-6.1-sol",
+    "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol"
+  },
+  "translator_job": {
+    "id": "eb1f5610cf0e",
+    "source": "delegator task brief; translator session/model verified against provenance file"
+  },
+  "provenance_file": "i18n/provenance/skill-adoption.translator.json",
+  "head": "31764c612ead25be4c1a5de123feb3bdea91d9df",
+  "source_state": "Uncommitted worktree catalogue bytes; source and all target hashes verified at audit start and end.",
+  "locales": [
+    "fr",
+    "es",
+    "zh-CN",
+    "ru",
+    "vi",
+    "ur",
+    "hi"
+  ],
+  "scope": "Every value of both namespaces: 16 + 88 keys per locale, 728 non-English values total; English context, glossary and seven style guides read.",
+  "namespaces": [
+    {
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+      "context_sha256": "df0189becbf118ae9fa766395b412fe4d32a324cffd7587e87e392c255ed7a94",
+      "keys_per_locale": 16,
+      "targets": {
+        "fr": {
+          "sha256": "9805188cfe75b5bbb9ae059e3ecd0906f578c4efec49923ecbd30234c054de6c",
+          "semantic_audit": "complete",
+          "unresolved_blocker_major": 0
+        },
+        "es": {
+          "sha256": "a4c39b00eb6cb1c106c92e46540fb21a62ea6c11fd8f3d47a9617b451e9c8944",
+          "semantic_audit": "complete",
+          "unresolved_blocker_major": 0
+        },
+        "zh-CN": {
+          "sha256": "a22384877601aab4b0ddcb7d87d3a9df54e49f13017864d6b3f04629e4227bff",
+          "semantic_audit": "complete",
+          "unresolved_blocker_major": 0
+        },
+        "ru": {
+          "sha256": "51fae40ec9b9ae1483b895872943325f4080119819e3cc8bbbeb386f4a0636dd",
+          "semantic_audit": "complete",
+          "unresolved_blocker_major": 0
+        },
+        "vi": {
+          "sha256": "0f810b84c1bc1a1dd82e84a59584f4b7845ea27c3b26709ca7c1db737863c3ef",
+          "semantic_audit": "complete",
+          "unresolved_blocker_major": 0
+        },
+        "ur": {
+          "sha256": "0b6f87b4bf3a61bad66742d562757957060a9bb4020d2b3fb10bfb2883a9afa4",
+          "semantic_audit": "complete",
+          "unresolved_blocker_major": 0
+        },
+        "hi": {
+          "sha256": "3d8d0f2e89659402c286603db31683ca85ea200461bf5c81d19b3a6edb633fcc",
+          "semantic_audit": "complete",
+          "unresolved_blocker_major": 0
+        }
+      }
+    },
+    {
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "context_sha256": "105c41ad6e03647b789d2f9dba474b2aa84fee4b050bbe11a95e7c2927246036",
+      "keys_per_locale": 88,
+      "targets": {
+        "fr": {
+          "sha256": "d02446106e2b4f08a8acafdddbe2e3aa0a059053ba887670055ba87012920264",
+          "semantic_audit": "complete",
+          "unresolved_blocker_major": 1
+        },
+        "es": {
+          "sha256": "570919f9fd5ada44d139bf13c9a440a4633f0ff1297de907f01d6e7fc8f1e1de",
+          "semantic_audit": "complete",
+          "unresolved_blocker_major": 1
+        },
+        "zh-CN": {
+          "sha256": "5134d89c81aec603756bbfdaa2d06331af8b57dca69767f669195f806989ad13",
+          "semantic_audit": "complete",
+          "unresolved_blocker_major": 0
+        },
+        "ru": {
+          "sha256": "e4d2b647dacced4b60f09f8aa88fe13a45284242669a4e70726b9282e601bf8b",
+          "semantic_audit": "complete",
+          "unresolved_blocker_major": 0
+        },
+        "vi": {
+          "sha256": "cf75015692247e5abfeabb93a2cb3ce6a39d0cd16c5c3275fd4916fb4ecc70bf",
+          "semantic_audit": "complete",
+          "unresolved_blocker_major": 0
+        },
+        "ur": {
+          "sha256": "fb827074c8dd00ba0e277aabb03df39a09146a88a3a2e91c5748c21ee320c3e2",
+          "semantic_audit": "complete",
+          "unresolved_blocker_major": 0
+        },
+        "hi": {
+          "sha256": "0270ffe1ef85ada9c03e51fff36038beb59f6bf4f5cba5a79282549164257a81",
+          "semantic_audit": "complete",
+          "unresolved_blocker_major": 0
+        }
+      }
+    }
+  ],
+  "checks": {
+    "hashes": "passed, exact UTF-8 file bytes",
+    "key_parity": "passed",
+    "placeholder_syntax_and_order": "passed",
+    "backtick_literals": "passed",
+    "bidi_control_absence": "passed",
+    "confirmation_suffix": "[y/N] plus trailing space preserved in all seven locales",
+    "strategy_tokens": "merge, keep-local, take-hub preserved in all seven locales",
+    "semantic_review": "completed; findings below",
+    "rendered_qa": "not performed; no browser tool in reviewer session; no native RTL or visual sign-off claimed"
+  },
+  "findings": [
+    {
+      "id": "SA-I18N-001",
+      "severity": "MAJOR",
+      "locales": [
+        "fr",
+        "es"
+      ],
+      "namespace": "wire.errors.desktop",
+      "keys": [
+        "wire.errors.desktop.aside_adopt_unconfirmed",
+        "wire.errors.desktop.aside_unavailable"
+      ],
+      "locations": [
+        "local_operator/i18n/catalogues/fr/wire.errors.desktop.json:10",
+        "local_operator/i18n/catalogues/fr/wire.errors.desktop.json:16",
+        "local_operator/i18n/catalogues/es/wire.errors.desktop.json:10",
+        "local_operator/i18n/catalogues/es/wire.errors.desktop.json:16"
+      ],
+      "summary": "Stale aside copy changes consent consequences and falsely declares feature-wide unavailability.",
+      "evidence": "English asks to confirm adding this aside to the conversation; French says la remarque deviendra la conversation principale and Spanish says el apunte se convertirá en la conversación principal (the aside will become the main conversation). English unavailable is this aside is no longer available; both locales instead say asides are unavailable in this version.",
+      "fix": "Retranslate both keys against the frozen English: adding this aside, not replacing the main conversation; this individual aside unavailable, not the whole feature/version.",
+      "origin": "Pre-existing target strings, not introduced by current alias-only translation; explicitly in requested full-namespace first-audit scope."
+    },
+    {
+      "id": "SA-I18N-002",
+      "severity": "MINOR",
+      "locales": [
+        "fr",
+        "es"
+      ],
+      "namespace": "wire.errors.desktop",
+      "keys": [
+        "wire.errors.desktop.answer_epoch_mismatch",
+        "wire.errors.desktop.aside_max_turns",
+        "wire.errors.desktop.aside_still_running"
+      ],
+      "locations": [
+        "local_operator/i18n/catalogues/fr/wire.errors.desktop.json:9",
+        "local_operator/i18n/catalogues/fr/wire.errors.desktop.json:12",
+        "local_operator/i18n/catalogues/fr/wire.errors.desktop.json:15",
+        "local_operator/i18n/catalogues/es/wire.errors.desktop.json:9",
+        "local_operator/i18n/catalogues/es/wire.errors.desktop.json:12",
+        "local_operator/i18n/catalogues/es/wire.errors.desktop.json:15"
+      ],
+      "summary": "Other stale desktop messages lose the specific condition or remedy.",
+      "evidence": "answer_epoch_mismatch substitutes generic conversation changed/reload for earlier session owner. aside_max_turns omits both 16 exchanges and start a new aside. aside_still_running reports running but omits wait before closing.",
+      "fix": "Align these three keys to the current owner-mismatch condition, 16-exchange/new-aside remedy, and wait-before-close instruction.",
+      "origin": "Pre-existing target strings included by explicit full-namespace audit."
+    },
+    {
+      "id": "SA-I18N-003",
+      "severity": "MINOR",
+      "locales": [
+        "hi"
+      ],
+      "namespace": "wire.errors.desktop",
+      "keys": [
+        "wire.errors.desktop.runtime_unreachable"
+      ],
+      "locations": [
+        "local_operator/i18n/catalogues/hi/wire.errors.desktop.json:66"
+      ],
+      "summary": "Technical reconciliation is translated as making peace.",
+      "evidence": "सुलह करें means reconcile a dispute/make peace, not reconcile session/runtime state before retrying. The unavailable-owner and reconnect clauses remain correct.",
+      "fix": "Use a state-check/reconciliation phrase such as स्थिति का मिलान करें rather than सुलह करें.",
+      "origin": "Pre-existing target string included by explicit full-namespace audit."
+    },
+    {
+      "id": "SA-I18N-004",
+      "severity": "MINOR",
+      "locales": [
+        "ru",
+        "vi"
+      ],
+      "namespace": "wire.errors.desktop",
+      "keys": [
+        "wire.errors.desktop.refresh_requires_live"
+      ],
+      "locations": [
+        "local_operator/i18n/catalogues/ru/wire.errors.desktop.json:63",
+        "local_operator/i18n/catalogues/vi/wire.errors.desktop.json:63"
+      ],
+      "summary": "Live usage data is rendered as active usage.",
+      "evidence": "RU активного использования and VI mức dùng đang hoạt động suggest active consumption rather than live/current usage data required for refresh.",
+      "fix": "Specify live/current usage data rather than active use.",
+      "origin": "Pre-existing target strings included by explicit full-namespace audit."
+    },
+    {
+      "id": "SA-I18N-005",
+      "severity": "MINOR",
+      "locales": [
+        "fr",
+        "es",
+        "zh-CN",
+        "ru",
+        "vi",
+        "ur",
+        "hi"
+      ],
+      "namespace": [
+        "wire.skill_adoption",
+        "wire.errors.desktop"
+      ],
+      "keys": [
+        "wire.skill_adoption.alias_occupied",
+        "wire.errors.desktop.skill_alias_occupied",
+        "wire.skill_adoption.preview_required",
+        "wire.skill_adoption.no_llm_help",
+        "wire.skill_adoption.inherited_assets"
+      ],
+      "locations": [
+        "local_operator/i18n/catalogues/{fr,es,zh-CN,ru,vi,ur,hi}/wire.skill_adoption.json:17",
+        "local_operator/i18n/catalogues/{fr,es,zh-CN,ru,vi,ur,hi}/wire.errors.desktop.json:81",
+        "local_operator/i18n/catalogues/{zh-CN,ru,ur,hi}/wire.skill_adoption.json:2",
+        "local_operator/i18n/catalogues/{zh-CN,ru,ur,hi}/wire.skill_adoption.json:11",
+        "local_operator/i18n/catalogues/{zh-CN,ru,ur,hi}/wire.skill_adoption.json:15"
+      ],
+      "summary": "Kept-English Hub operation terminology is inconsistently translated.",
+      "evidence": "Glossary section 2 wave-2 and locale guides keep pull and merge as Latin Hub/git operations. Both alias messages replace Pull with native retrieve/download equivalents in every locale. Chinese/Russian/Urdu/Hindi additionally translate or transliterate merge in preview_required, no_llm_help, inherited_assets, and the alias messages. Literal strategy values and actual commands are preserved, so this is a glossary-follow-up rather than a broken invocation.",
+      "fix": "Retain literal pull and merge in Hub-operation prose, inflecting surrounding native text; keep descriptive consolidated-version wording where it does not name the operation."
+    },
+    {
+      "id": "SA-I18N-006",
+      "severity": "NIT",
+      "locales": [
+        "fr"
+      ],
+      "namespace": "wire.skill_adoption",
+      "keys": [
+        "wire.skill_adoption.needs_choice",
+        "wire.skill_adoption.confirm",
+        "wire.skill_adoption.backup_label",
+        "wire.skill_adoption.receipt_label"
+      ],
+      "locations": [
+        "local_operator/i18n/catalogues/fr/wire.skill_adoption.json:4",
+        "local_operator/i18n/catalogues/fr/wire.skill_adoption.json:6",
+        "local_operator/i18n/catalogues/fr/wire.skill_adoption.json:12",
+        "local_operator/i18n/catalogues/fr/wire.skill_adoption.json:13"
+      ],
+      "summary": "French prose uses ASCII spaces before colon/question mark rather than required U+202F.",
+      "fix": "Use narrow no-break spaces before prose : and ?, preserving [y/N], trailing space and command bytes."
+    }
+  ],
+  "counts": {
+    "BLOCKER": 0,
+    "MAJOR": 1,
+    "MINOR": 4,
+    "NIT": 1
+  },
+  "verdict": "changes_requested",
+  "terminal": false,
+  "ledger_updates": "None: overall audit not clean. No false passed rows or aggregate regeneration.",
+  "remaining_gate": "Batch remediation parent owns catalogue edits. Second independent audit of high-visibility safety/confirmation copy remains required."
+}

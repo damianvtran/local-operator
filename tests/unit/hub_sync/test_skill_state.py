@@ -804,15 +804,13 @@ def test_a_pull_refusal_names_the_personal_copy_and_its_remedy(tmp_path: Path) -
 
     assert refused.value.code == "alias-occupied"
     message = str(refused.value)
-    assert f"{ALIAS!r}" in message
-    assert "already exists on this machine outside the hub" in message
-    assert "move it elsewhere or give it a different name, then try again" in message
-    # "Rename" alone would mislead: a skill's folder must match its frontmatter
-    # name, so the remedy says "give it a different name" (D3).
-    assert "rename" not in message
-    # Pull's chokepoint is shared with UPDATE, so it must not name "pull" here.
-    assert "pull" not in message
-    # The behaviour is unchanged: the personal copy is byte-identical.
+    # A collision now has an in-place recovery path. An unreviewed pull still
+    # refuses, but directs the caller to a receipt-bound preview rather than
+    # moving their only authored copy out of the way.
+    assert "lop skills pull <id> --dry-run" in message
+    assert "--adopt-receipt <receipt> --yes" in message
+    assert "move it elsewhere" not in message
+    # No reviewed receipt was supplied: the personal copy stays byte-identical.
     assert (personal / "SKILL.md").read_text(encoding="utf-8") == (
         "---\nname: example-skill\ndescription: My own copy\n---\n# Mine\n"
     )

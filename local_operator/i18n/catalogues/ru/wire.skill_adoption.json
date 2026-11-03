@@ -1,0 +1,18 @@
+{
+  "wire.skill_adoption.preview_required": "Перед привязкой этого локального навыка нужно просмотреть результат merge. Выполните `lop skills pull <id> --dry-run`, проверьте оба diff, затем подтвердите этот просмотр с помощью `--adopt-receipt <receipt> --yes`.",
+  "wire.skill_adoption.preview_changed": "После этого просмотра изменился локальный навык, ревизия Hub или политика привязки. Создайте новый предварительный просмотр и проверьте его перед применением.",
+  "wire.skill_adoption.needs_choice": "Не удалось безопасно создать объединённую версию. Явно выберите вариант для предварительного просмотра: сохранить локальную версию и привязать её или использовать версию Hub с резервной копией.",
+  "wire.skill_adoption.preview_title": "Проверьте локальные инструкции и инструкции Hub перед привязкой",
+  "wire.skill_adoption.confirm": "Применить проверенный вариант принятия навыка под управление Hub? [y/N] ",
+  "wire.skill_adoption.cancelled": "Отменено. Локальный навык не изменён.",
+  "wire.skill_adoption.dry_run_help": "Просмотреть установку или принятие под управление Hub без изменения локального навыка",
+  "wire.skill_adoption.receipt_help": "Применить ранее проверенный вариант принятия под управление Hub",
+  "wire.skill_adoption.strategy_help": "Выбрать merge, keep-local или take-hub для предварительного просмотра",
+  "wire.skill_adoption.no_llm_help": "Не отправлять текст навыка модели merge",
+  "wire.skill_adoption.backup_label": "Снимок исходной папки: {path} (SHA-256 {hash})",
+  "wire.skill_adoption.receipt_label": "Квитанция предварительного просмотра принятия под управление Hub: {receipt}",
+  "wire.skill_adoption.no_apply": "Только предварительный просмотр. Ничего не установлено и не привязано.",
+  "wire.skill_adoption.inherited_assets": "Локальные ресурсы сохраняются и не отправляются модели merge.",
+  "wire.skill_adoption.yes_help": "Подтвердить проверенный вариант установки или принятия под управление Hub",
+  "wire.skill_adoption.alias_occupied": "Это имя уже используется локальным навыком. Выполните pull навыка Hub с --dry-run, чтобы проверить merge при принятии под управление Hub, или выберите другое имя."
+}

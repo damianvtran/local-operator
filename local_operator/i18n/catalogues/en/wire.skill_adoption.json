@@ -1,0 +1,18 @@
+{
+  "wire.skill_adoption.preview_required": "This local skill needs a merge preview before it can be linked. Run `lop skills pull <id> --dry-run`, review both diffs, then confirm that preview with `--adopt-receipt <receipt> --yes`.",
+  "wire.skill_adoption.preview_changed": "The local skill, Hub revision, or link policy changed after this preview. Create a new preview and review it before applying.",
+  "wire.skill_adoption.needs_choice": "A consolidated version could not be produced safely. Preview an explicit choice: keep local and link, or take the Hub version with a backup.",
+  "wire.skill_adoption.preview_title": "Review local and Hub guidance before linking",
+  "wire.skill_adoption.confirm": "Apply this reviewed skill adoption? [y/N] ",
+  "wire.skill_adoption.cancelled": "Cancelled. The local skill was not changed.",
+  "wire.skill_adoption.dry_run_help": "Preview installation or adoption without changing the local skill",
+  "wire.skill_adoption.receipt_help": "Apply this previously reviewed adoption preview",
+  "wire.skill_adoption.strategy_help": "Choose merge, keep-local, or take-hub for the adoption preview",
+  "wire.skill_adoption.no_llm_help": "Do not send skill text to a merge model",
+  "wire.skill_adoption.backup_label": "Original folder snapshot: {path} (SHA-256 {hash})",
+  "wire.skill_adoption.receipt_label": "Adoption preview receipt: {receipt}",
+  "wire.skill_adoption.no_apply": "Preview only. Nothing was installed or linked.",
+  "wire.skill_adoption.inherited_assets": "Local assets are preserved without being sent to the merge model.",
+  "wire.skill_adoption.yes_help": "Confirm the reviewed installation or adoption preview",
+  "wire.skill_adoption.alias_occupied": "A local skill already uses this name. Pull the Hub skill with --dry-run to review an adoption merge, or choose another name."
+}
