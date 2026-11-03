@@ -749,3 +749,50 @@ def test_a_16_bit_greyscale_png_keeps_its_gradient():
     # The old clamp made every one of these 255.
     assert dark < mid < light < 255, (dark, mid, light)
     assert abs(dark - 50) <= 3 and abs(mid - 128) <= 3 and abs(light - 205) <= 3
+
+
+# -- size variants -------------------------------------------------------------
+
+
+def test_parse_size_is_strict():
+    assert agent_avatar.parse_size(None) is None
+    for size in agent_avatar.DERIVATIVE_SIZES:
+        assert agent_avatar.parse_size(str(size)) == size
+    for bad in ("", "65", "512", "64.0", "+64", " 64", "0x40", "\u0666\u0664"):
+        with pytest.raises(ValueError):
+            agent_avatar.parse_size(bad)
+
+
+def test_a_jpeg_original_yields_jpeg_variants(tmp_path):
+    from types import SimpleNamespace
+
+    out = io.BytesIO()
+    Image.new("RGB", (512, 512), (30, 140, 220)).save(out, "JPEG", quality=90)
+    data = out.getvalue()
+    (tmp_path / agent_avatar.JPEG_NAME).write_bytes(data)
+    meta = SimpleNamespace(
+        sha256=hashlib.sha256(data).hexdigest(), mime="image/jpeg", filename="avatar.jpg"
+    )
+    body, mime, tag = agent_avatar.read_sized(tmp_path, meta, 128)
+    assert mime == "image/jpeg" and tag == f"{meta.sha256}-128"
+    assert Image.open(io.BytesIO(body)).format == "JPEG"
+    assert Image.open(io.BytesIO(body)).size == (128, 128)
+    assert (tmp_path / agent_avatar.derivative_name(meta.sha256, 128, mime)).name.endswith(
+        ".128.jpg"
+    )
+    # Unsized is the stored bytes and the bare sha, untouched.
+    assert agent_avatar.read_sized(tmp_path, meta, None) == (data, mime, meta.sha256)
+
+
+def test_a_variant_is_never_built_from_a_file_that_fails_read(tmp_path):
+    """The integrity rules of ``read`` gate a variant: a digest mismatch is not_found."""
+    from types import SimpleNamespace
+
+    out = io.BytesIO()
+    Image.new("RGB", (512, 512)).save(out, "PNG")
+    (tmp_path / agent_avatar.PNG_NAME).write_bytes(out.getvalue())
+    meta = SimpleNamespace(sha256="0" * 64, mime="image/png", filename="avatar.png")
+    with pytest.raises(agent_avatar.AvatarError) as caught:
+        agent_avatar.read_sized(tmp_path, meta, 64)
+    assert caught.value.reason == agent_avatar.NOT_FOUND
+    assert list(tmp_path.glob(".avatar.*")) == []

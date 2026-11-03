@@ -6198,20 +6198,37 @@ def build_app(daemon: MobileDaemon):
         from local_operator.paths import config_dir
 
         agent_id = str(request.path_params["agent_id"])
+        # ``?size=64|128|256`` (feature ``agent_avatar_sizes``): the core route's
+        # downscaled variant, so a 24px phone row is not sent the 512px original.
+        # Absent keeps the original bytes and the bare-sha ETag.
+        try:
+            size = agent_avatar.parse_size(request.query_params.get("size"))
+        except ValueError:
+            return JSONResponse(
+                {"error": "invalid size", "code": "invalid_size"},  # i18n: ignore protocol diagnostic
+                status_code=422,
+            )
         root = config_dir()
         known = await asyncio.to_thread(agent_avatar.stored_sha, root, agent_id)
-        if known and etag_matches(request.headers.get("if-none-match", ""), known):
+        known_tag = agent_avatar.sized_tag(known, size) if known else None
+        if known_tag and etag_matches(request.headers.get("if-none-match", ""), known_tag):
             return Response(
                 status_code=304,
-                headers={"ETag": agent_avatar.etag(known), "Cache-Control": "private, no-cache"},
+                headers={
+                    "ETag": agent_avatar.etag(known_tag),
+                    "Cache-Control": "private, no-cache",
+                },
             )
         try:
-            data, mime, sha = await asyncio.to_thread(agent_avatar.read_stored, root, agent_id)
+            data, mime, sha = await asyncio.to_thread(
+                agent_avatar.read_stored_sized, root, agent_id, size
+            )
         except agent_avatar.AvatarError as exc:
             return JSONResponse(
                 {"error": exc.reason, "code": exc.reason},
                 status_code=agent_avatar.HTTP_STATUS.get(exc.reason, 404),
             )
+        # ``sha`` is the variant's tag here (``sized_tag``), the bare sha when unsized.
         headers = {"ETag": agent_avatar.etag(sha), "Cache-Control": "private, no-cache"}
         if etag_matches(request.headers.get("if-none-match", ""), sha):
             return Response(status_code=304, headers=headers)

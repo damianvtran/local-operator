@@ -151,3 +151,24 @@ def test_relay_route_refuses_a_symlinked_picture_and_tampered_bytes(store, tmp_p
     path.symlink_to(outside)
     got = client.get(url, headers={"if-none-match": '"stale"'})
     assert got.status_code == 404 and b"TOPSECRET" not in got.content
+
+
+def test_relay_serves_size_variants_with_sized_etag(store) -> None:
+    from PIL import Image as _Image
+
+    _cfg, agent, meta = store
+    client = _login(_cfg)
+    url = f"/v1/agents/{agent.id}/avatar"
+    for size in (64, 128, 256):
+        got = client.get(url, params={"size": size})
+        assert got.status_code == 200
+        assert got.headers["content-type"] == "image/png"
+        assert got.headers["etag"] == f'"{meta.sha256}-{size}"'
+        assert got.headers["cache-control"] == "private, no-cache"
+        assert _Image.open(io.BytesIO(got.content)).size == (size, size)
+        cached = client.get(url, params={"size": size}, headers={"if-none-match": got.headers["etag"]})
+        assert cached.status_code == 304
+    original = client.get(url)
+    assert hashlib.sha256(original.content).hexdigest() == meta.sha256
+    for bad in ("65", "512", "abc", "-64", "64.0", "+64"):
+        assert client.get(url, params={"size": bad}).status_code == 422
