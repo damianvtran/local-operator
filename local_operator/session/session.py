@@ -6016,7 +6016,10 @@ class Session:
         from local_operator.providers.failover import is_request_too_large
 
         if not is_request_too_large(error):
-            return False
+            # Not a byte-size refusal: a TOKEN overflow ("maximum context
+            # length", or this harness's own local refusal, which uses the same
+            # wording) has its own, narrower remedy. See the method.
+            return await self._degrade_largest_document_for_context(error)
 
         budget = self._wire_bytes_budget()
         if budget <= 0:
@@ -6055,6 +6058,89 @@ class Session:
             frames_left,
         )
         await self._emit(_notice(_nt.request_too_large_dropped(), kind="warning"))
+        return True
+
+    async def _degrade_largest_document_for_context(self, error: BaseException | str) -> bool:
+        """Replace the largest attached document with its reference line.
+
+        The last rung for a CONTEXT-LENGTH refusal that compaction cannot
+        answer. Compaction only sheds history; a document in the live tail, or
+        in a user turn (those are preserved verbatim), survives every pass, and
+        the local estimator can under-count dense text (base64, hex, control
+        bytes: ``document_limits.DOCUMENT_CHARS_PER_TOKEN``), so the same
+        oversized request is refused on every later turn. Measured: 25 refusals
+        in a row for a 2 MB UTF-16-as-UTF-8 CSV at 128k beside 30-60k tokens of
+        user-turn history.
+
+        One document per error, largest first: the next refusal takes the next
+        one, so the cost to the user is bounded by what was actually too big.
+        The failing turn is NOT retried (the user resends once), for the reason
+        ``_recover_if_request_too_large`` documents.
+
+        The LIVE context only. The transcript row keeps the document, exactly
+        as frame shedding does: ``/export``, forks and a later session on a
+        larger window still see it. The price is that a resumed session replays
+        the document and can take one more refusal before this fires again.
+        Persisting is safe from the turn-end pass: ``_persist_new_messages``
+        skips a message id the transcript already holds, so the mutated message
+        is never rewritten.
+
+        Returns ``False`` when the error is not a context-length refusal or no
+        document is left, so the error surfaces exactly as it did before.
+        """
+        from local_operator.compaction.tokens import (
+            _document_token_estimate,
+            invalidate_message_cache,
+        )
+        from local_operator.incidents import CONTEXT_LENGTH_MARKERS
+        from local_operator.providers.documents import _reference_text
+        from local_operator.providers.failover import _KIND_LABELS, ProviderError
+
+        if isinstance(error, ProviderError):
+            if error.kind != "request":
+                return False
+            haystack = error.message.lower()
+        else:
+            haystack = (error if isinstance(error, str) else str(error)).lower()
+            if not haystack.startswith(_KIND_LABELS["request"]):
+                return False
+        if not any(marker in haystack for marker in CONTEXT_LENGTH_MARKERS):
+            return False
+
+        largest: tuple[int, Message, int] | None = None
+        for message in self._context.messages:
+            if not isinstance(message, Message):
+                continue
+            for index, block in enumerate(message.content):
+                if not isinstance(block, DocumentContent):
+                    continue
+                cost = _document_token_estimate(block)
+                if largest is None or cost > largest[0]:
+                    largest = (cost, message, index)
+        if largest is None:
+            return False
+
+        _, message, index = largest
+        block = message.content[index]
+        assert isinstance(block, DocumentContent)
+        message.content[index] = TextContent(
+            text=_reference_text(block, reason="dropped to fit the model's context window")
+        )
+        # The estimate cache is keyed on ``Message.id``: without this the
+        # message keeps its document's charge and the next request is refused
+        # again for content that is no longer there.
+        invalidate_message_cache(message)
+        logger.warning(
+            "provider refused the request as over the context window; replaced %s (%d bytes) "
+            "with its reference line in this session's context",
+            block.filename,
+            block.bytes,
+        )
+        # Reuses the "too large, run /compact" notice: a dedicated, localized
+        # sentence needs the translator + independent auditor per locale (see
+        # docs/I18N.md). It does not name the file; the model does, from the
+        # reference line it now holds, on the next turn.
+        await self._emit(_notice(_nt.too_large_run_compact(), kind="warning"))
         return True
 
     async def _degrade_images_for_size(self, budget: int, frames_left: int) -> bool:

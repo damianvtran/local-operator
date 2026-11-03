@@ -1397,7 +1397,13 @@ class RefusesByRealTokenCount:
         if real + reply > self.window:
             self.statuses.append(400)
             return httpx.Response(
-                400, json={"error": {"code": "context_length_exceeded", "message": "too long"}}
+                400,
+                json={
+                    "error": {
+                        "code": "context_length_exceeded",
+                        "message": f"maximum context length is {self.window} tokens",
+                    }
+                },
             )
         self.statuses.append(200)
         chunks = [
@@ -1450,3 +1456,275 @@ async def test_a_dense_ascii_attachment_is_recovered_from_not_a_dead_end(tmp_pat
     assert 200 in after[:2], f"no accepted request within two: {after}"
     assert after[-1] == 200 and after.count(400) <= 1, after
     await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The last rung: an oversized document the estimator under-counted
+# ---------------------------------------------------------------------------
+
+
+class RefusesOverWindow:
+    """A provider that refuses on the REAL o200k token count of the rendered
+    request plus ``max_tokens``, with the real chat client building the body.
+
+    Not the local estimator: the guard exists for the case where the estimator
+    is wrong in itself, so the oracle must be independent of it. Refuses with a
+    400 whose wording is a vendor's own ("maximum context length is N"), which
+    the client renders as ``invalid request (HTTP 400): ...``.
+    """
+
+    def __init__(self, window: int) -> None:
+        self.inner = RefusesByRealTokenCount(window)
+
+    @property
+    def statuses(self) -> list[int]:
+        return self.inner.statuses
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        return self.inner(request, signal)
+
+
+async def _prompt_user_history(session, rng, count: int, tokens: int) -> None:
+    """``count`` real USER turns of roughly ``tokens`` each. Real prompts, not
+    ``seed_history``: compaction preserves a prompted user turn verbatim (that
+    is what it cannot shrink), while seeded history it simply sheds, which hides
+    the failure."""
+    words = ["alpha", "beta", "gamma", "omega"]
+    for index in range(count):
+        body = " ".join(rng.choice(words) + str(rng.randrange(999)) for _ in range(tokens // 3))
+        await session.prompt(f"history {index} {body}")
+
+
+def _window_session(tmp_path, window: int, stream):
+    model = ModelSpec(
+        provider="openai", model_id="stub", context_window=window, max_output_tokens=8192
+    )
+    return make_session(tmp_path, stream, model=model)
+
+
+def _document_kinds(session) -> list[str]:
+    return [
+        type(block).__name__
+        for message in session._context.messages
+        if isinstance(message, Message)
+        for block in message.content
+        if type(block).__name__ in {"DocumentContent"}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "history_tokens"),
+    # The history is sized just past the point where each file overflows 128k
+    # on the REAL token count (base64 costs more per character than the CSV
+    # but is charged the same, so it needs more history to cross the line).
+    [("utf16_csv", 14_000), ("base64", 21_000)],
+)
+async def test_an_oversized_document_costs_at_most_one_refusal_then_the_session_works(
+    tmp_path, kind, history_tokens
+):
+    """QA round 4: a 2 MB UTF-16-as-UTF-8 CSV at 128k beside user-turn history
+    was refused on EVERY turn (25 in a row) because compaction cannot shrink a
+    document in the live tail and the estimator under-counts dense ASCII.
+    Six follow-ups: at most one refusal, then accepted."""
+    pytest.importorskip("tiktoken")
+    import random
+
+    stream = RefusesOverWindow(128_000)
+    session = _window_session(tmp_path, 128_000, stream)
+    await _prompt_user_history(session, random.Random(5), 6, history_tokens)
+    before = len(stream.statuses)
+
+    await session.prompt("what is in this file?", documents=[_dense_document(kind)])
+    for turn in range(6):
+        await session.prompt(f"follow-up {turn}")
+
+    statuses = stream.statuses[before:]
+    assert statuses.count(400) <= 1, statuses
+    assert statuses[-1] == 200, statuses
+    # The guard, not luck, is why: the document is gone from the live context.
+    assert _document_kinds(session) == [], "the oversized document was never degraded"
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_degrade_is_live_only_and_announced_once(tmp_path):
+    """The transcript row keeps the document (``/export``, forks); the live
+    context holds its reference line; the user is told exactly once. The
+    turn-end persist pass skips a message id the transcript already holds, so
+    it cannot write the mutated message back over the stored one."""
+    pytest.importorskip("tiktoken")
+    import random
+
+    from local_operator.harness.types import NoticeEvent
+
+    stream = RefusesOverWindow(128_000)
+    session = _window_session(tmp_path, 128_000, stream)
+    notices: list[str] = []
+    session.subscribe(
+        lambda event: notices.append(str(event.text)) if isinstance(event, NoticeEvent) else None
+    )
+    await _prompt_user_history(session, random.Random(5), 6, 14_000)
+
+    await session.prompt("what is in this file?", documents=[_dense_document("utf16_csv")])
+    for turn in range(4):
+        await session.prompt(f"follow-up {turn}")
+
+    assert _document_kinds(session) == [], "the live context still holds the document"
+    live = [
+        block.text
+        for message in session._context.messages
+        if isinstance(message, Message)
+        for block in message.content
+        if isinstance(block, TextContent) and "Document reference: data.txt" in block.text
+    ]
+    assert live and "dropped to fit the model's context window" in live[0]
+
+    stored = [
+        block
+        for entry in session._transcript.entries()
+        for block in entry.payload.get("content", []) or []
+        if isinstance(block, dict)
+        and (block.get("type") == "document" or "attachment" in block)
+        and "reference" not in str(block.get("text", ""))
+    ]
+    assert stored, "the transcript lost the document row"
+    # The reused "too large" notice does not name the file (the model does,
+    # from the reference line); exactly one is emitted for the one degrade.
+    from local_operator.i18n.keys import tui_notices as _nt
+    from local_operator.i18n.text import tr
+
+    expected = tr("tui.notices")(_nt.too_large_run_compact())
+    assert notices.count(expected) == 1, notices
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_two_documents_degrade_largest_first_one_per_refusal(tmp_path):
+    from local_operator.harness.types import DocumentContent
+
+    stream = ScriptedOk()
+    session = make_session(tmp_path, stream)
+    small = DocumentContent(
+        data=base64.b64encode(b"s" * 4000).decode(),
+        mime_type="text/plain",
+        filename="small.txt",
+        bytes=4000,
+    )
+    big = DocumentContent(
+        data=base64.b64encode(b"b" * 400_000).decode(),
+        mime_type="text/plain",
+        filename="big.txt",
+        bytes=400_000,
+    )
+    await session.seed_history(
+        [Message(role="user", content=[small, big]), Message.assistant("ok")]
+    )
+    error = "invalid request (HTTP 400): maximum context length is 128000; requested 999999"
+
+    assert await session._recover_if_request_too_large(error) is True
+    left = [
+        b.filename
+        for m in session._context.messages
+        if isinstance(m, Message)
+        for b in m.content
+        if isinstance(b, DocumentContent)
+    ]
+    assert left == ["small.txt"], "the larger document must go first"
+    assert await session._recover_if_request_too_large(error) is True
+    assert not _document_kinds(session)
+    # Nothing left to give: the error surfaces as before.
+    assert await session._recover_if_request_too_large(error) is False
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_context_error_with_no_documents_is_not_handled(tmp_path):
+    session = make_session(tmp_path, ScriptedOk())
+    await session.seed_history([Message.user("hello"), Message.assistant("hi")])
+    assert (
+        await session._recover_if_request_too_large(
+            "invalid request (HTTP 400): maximum context length is 128000; requested 999999"
+        )
+        is False
+    )
+    # And an error that is not a context-length refusal never touches documents.
+    from local_operator.harness.types import DocumentContent
+
+    await session.seed_history([])
+    session._context.messages.append(
+        Message(
+            role="user",
+            content=[
+                DocumentContent(
+                    data=base64.b64encode(b"x" * 1000).decode(),
+                    mime_type="text/plain",
+                    filename="keep.txt",
+                    bytes=1000,
+                )
+            ],
+        )
+    )
+    for error in (
+        "invalid request (HTTP 400): unsupported parameter temperature",
+        "authentication failed (HTTP 401): maximum context length",
+        "provider error (HTTP 500): context window",
+    ):
+        assert await session._recover_if_request_too_large(error) is False, error
+    assert _document_kinds(session) == ["DocumentContent"]
+    await session.dispose()
+
+
+def test_a_degraded_message_is_estimated_as_its_reference_line():
+    from local_operator.compaction.tokens import estimate_messages_tokens
+    from local_operator.harness.types import DocumentContent
+    from local_operator.providers.documents import _reference_text
+
+    block = DocumentContent(
+        data=base64.b64encode(b"x" * 400_000).decode(),
+        mime_type="text/plain",
+        filename="big.txt",
+        bytes=400_000,
+    )
+    message = Message(role="user", content=[block])
+    before = estimate_messages_tokens([message])
+    message.content[0] = TextContent(text=_reference_text(block, reason="dropped"))
+    from local_operator.compaction.tokens import invalidate_message_cache
+
+    # Without the invalidation the cache would still answer ``before``.
+    assert estimate_messages_tokens([message]) == before
+    invalidate_message_cache(message)
+    assert estimate_messages_tokens([message]) < 1000 < before
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_session_replays_the_document_and_degrades_it_again(tmp_path):
+    """The degrade is live-only (D5), so the transcript still holds the file and
+    a resume pays at most one more refusal before the guard fires again."""
+    pytest.importorskip("tiktoken")
+    import random
+
+    from local_operator.session.transcript import Transcript
+
+    first = RefusesOverWindow(128_000)
+    session = _window_session(tmp_path, 128_000, first)
+    await _prompt_user_history(session, random.Random(5), 6, 14_000)
+    await session.prompt("what is in this file?", documents=[_dense_document("utf16_csv")])
+    await session.prompt("follow-up")
+    assert _document_kinds(session) == []
+    model = session._model
+    await session.dispose()
+
+    second = RefusesOverWindow(128_000)
+    resumed = Session(
+        model=model,
+        stream_fn=second,
+        tools=[],
+        transcript=Transcript(tmp_path / "sess"),
+        system_blocks_provider=lambda: ["stable"],
+    )
+    for turn in range(3):
+        await resumed.prompt(f"resumed {turn}")
+    assert second.statuses.count(400) <= 1, second.statuses
+    assert second.statuses[-1] == 200, second.statuses
+    await resumed.dispose()
