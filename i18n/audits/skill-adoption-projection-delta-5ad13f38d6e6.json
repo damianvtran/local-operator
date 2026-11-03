@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "record_kind": "independent_translation_delta_audit",
+  "date": "2026-11-03",
+  "namespace": "wire.skill_adoption",
+  "keys": [
+    "wire.skill_adoption.projection_unsupported"
+  ],
+  "locales": [
+    "fr",
+    "es",
+    "zh-CN",
+    "ru",
+    "vi",
+    "ur",
+    "hi"
+  ],
+  "source_sha256": "5313b5455bb3b295e3fe78a5ea465a9e9d85c641927562bad93f58e0e5971f7b",
+  "context_sha256": "9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c",
+  "target_sha256": {
+    "fr": "21c69011c26caa9a4b797b84f39768909a736357d5f2dc04c09163b61e5f8745",
+    "es": "23414f9d449c4c71755683c181511f092e534b4ea5983ec1adcb099237e6dd74",
+    "zh-CN": "936eec9d7ec1cf185590e1a87fe2544997bad62b0e9867417012054668101e77",
+    "ru": "f390b84b69ac993d093a73a83801988b691ebd93f4ec8a4a8a13f46e4c442234",
+    "vi": "246cb7cc5e497811b8f201ef40246627336ec460e72ac47c5721cd570f986049",
+    "ur": "5fe45b9bb2f02e4639318d00d84a1f66603851fbf68b2e6c081ede475e7d444b",
+    "hi": "fe67b95fb7f80fd3ee3926a1990ad39d45325d8dffb5b8848773cc5062ee13a3"
+  },
+  "auditor": {
+    "agent": "reviewer / independent translation auditor",
+    "session": "5ad13f38d6e6",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-03",
+    "result": "passed",
+    "findings": 0
+  },
+  "translator": {
+    "agent": "coder / skill-adoption-copy",
+    "session": "5984801ad25d",
+    "model": "openai/gpt-6.1-sol",
+    "identity_evidence": "Parent verified actual serving model; existing model_identity_correction applies",
+    "date": "2026-11-03"
+  },
+  "model_identity_evidence": {
+    "method": "Parsed structural provider/model_id metadata only; text/content/tool arguments excluded",
+    "observed_records": 182,
+    "unique_provider_model": [
+      {
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      }
+    ],
+    "transcript_observed_prefix_sha256": "12b03c736571126c816c46c79bd2e41819491b36353f2279f36161b58dab0b3d"
+  },
+  "prior_evidence": [
+    "i18n/audits/skill-adoption-d3-5ad13f38d6e6.json",
+    "i18n/audits/skill-adoption-model-correction-5ad13f38d6e6.json"
+  ],
+  "scope": "New projection capability refusal only. Whole-namespace initial audit plus approved D3 delta carry forward; all previous keys/values unchanged and prior target hashes compatible.",
+  "support_boundary": "English and translations distinguish unsupported existing-local adoption from ordinary Hub installs. Context narrows ordinary installs to valid unoccupied names. Storage adoption_subject rejects unsupported projection capability before recovery/model/snapshot/adoption mutation; ordinary operations retain separate absence gate. No claim that all ordinary operations always succeed or of native Windows validation.",
+  "checks": {
+    "frozen_source_context_target_hashes": "passed",
+    "exactly_one_new_key_no_existing_value_changes": "passed",
+    "17_key_parity": "passed",
+    "new_key_has_no_placeholders": "passed",
+    "stored_bidi_controls": "none in new translations"
+  },
+  "findings": [],
+  "verdict": "clean",
+  "terminal": true,
+  "ledger_rows_appended": 7,
+  "aggregate_regenerated": false,
+  "qa_limit": "Source-supported copy review only; no runtime tests, native Windows or rendered/RTL validation performed in this delta."
+}
