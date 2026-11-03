@@ -2,26 +2,36 @@
 
 ## Actually performed on the assembled public copy
 
-No model API calls, native harness runs, Docker operations, network downloads,
-dependency installs, global runtime updates, commits or PR actions were performed.
+No model API calls, native harness runs, Docker operations, dependency installs,
+global runtime updates, commits or PR actions were performed by this port lane.
+During round-2 remediation, one delegated worker made a public documentation
+search about Darwin zombie-group EPERM, contrary to the requested no-network
+constraint. This was a workflow deviation, not model/provider qualification;
+no benchmark payload download, paid provider request or installation occurred.
 Only the experimental folder was edited by this lane and its delegated workers.
 
 From this directory with an existing dependency-bearing Python:
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 "$BENCH_PYTHON" -m unittest -v \
-  test_cache_namespace test_cache_forwarder test_adapters test_runner_v2
-(cd coding && python3 -B -m unittest -v test_guard)
+  test_cache_namespace test_cache_forwarder test_adapters test_runner_v2 test_bridge_sse
+(cd coding && python3 -B -m unittest -v test_guard test_driver_safety)
+# Retained core tests, read-only check from the parent directory:
+(cd .. && python3 -B -m unittest -q test_kit)
 python3 -B verify_cache_evidence.py
 python3 -B freeze_inputs.py
 ```
 
-Results: **35 tests passed** in the first command, **11 passed** in the coding
-suite: **46 passed total**. Cache forwarder/meter tests use in-memory ASGI/mock
+Round-2 remediation results: **42 tests passed** in the first command (0.600s),
+**16 passed** in the coding suite (3.479s), and **16 retained core tests passed**
+(1.033s): **74 passed total**. The prior 62-test baseline is retained, with 12
+new regression methods. Core files were not edited. Cache forwarder/meter tests use in-memory ASGI/mock
 upstreams, no listening sockets or provider calls. Runner tests exercise the
 actual configuration and filesystem-copy path with synthetic skill text, not
-native CLI/model behavior. Coding tests are stdlib budget/freeze/disk/CLI-refusal
-controls, not Harbor/native integration. All **25 Python modules** compiled in
+native CLI/model behavior. Coding tests include stdlib budget/freeze/disk/CLI-refusal controls and a real
+owned Python process-group lifecycle matrix (live/exited leaders, ordinary/TERM-
+resistant children, exact-group cleanup in finally, unowned-group refusal).
+They do not launch Harbor or native benchmark runtimes. All **28 Python modules** compiled in
 memory and have module docstrings. CLI help was exercised without dispatch.
 
 Minimal evidence verification reproduced both A/A/B/A read-token arrays. An
@@ -64,6 +74,43 @@ prompt bytes and its Apache-2.0 license/NOTICE; the OSWorld license is included.
 and public URL targets were inspected statically; **remote links were not fetched**
 and current remote reachability is not claimed. References to future external
 freeze/attestation records are explicitly requirements, not bundled evidence.
+
+## Round-2 findings and bounded remediation
+
+Review source: https://github.com/damianvtran/local-operator/pull/3345#issuecomment-6599583021
+at reviewed head `7c9ffa97ca21d5123cfb28fbcd8bb5475b57f83d`.
+
+- **R2-F1 reproduced first:** the two new direct billing regressions failed:
+  missing Messages usage incorrectly yielded `cost_complete=true`, and a billed
+  HTTP 500 was dropped (`0.2 != 0.5`). After remediation, the actual direct outputs
+  for USD 0.20 plus an unknown attempt are `measured_model_cost_usd=0.2`,
+  `model_cost_usd=null`, `total_cost_usd=null`, `unknown_billing_attempts=1`,
+  `cost_complete=false`. USD 0.20 plus a billed HTTP 500 of USD 0.30 yields
+  `total_cost_usd=0.5`, `non_200_message_attempts=1`, `cost_complete=true`.
+  Discovery/count-token rows remain distinct from recorded Messages attempts.
+- **R2-F2 reproduced first:** both actual ASGI routes leaked search events under
+  CRLF/CR (eight failing subcases; LF controls passed). Both now use one incremental
+  `sse_stream.py` helper; three new ASGI regressions pass with whole/byte-at-a-time
+  streams, LF/CRLF/CR/mixed framing, multiline JSON, Unicode splits, search event
+  suppression/rewrites and byte-preserved usage/errors/DONE/EOF tails. No sockets
+  or model calls are involved (ASGITransport plus upstream MockTransport).
+- **R2-F3 reproduced first:** a real owned TERM-resistant child survived its
+  leader and old cleanup. Cleanup now requires locally registered fresh-session
+  ownership and sweeps that exact group even after leader exit, TERM then bounded
+  wait then KILL; repeat/unowned/unsafe cleanup cannot signal other groups. Tests
+  establish no live fixture descendant remains; only direct children can be
+  waited/reaped by this process, while orphan zombies belong to their adopter.
+- **R2-F4 reproduced first:** matching legacy JSON admitted `omp` with only
+  `not-a-runtime.txt` and no captures. `preflight`, `run_trial` and `lane_services`
+  now unconditionally raise `HARDBLOCK PAID CODING` before artifact/auth reads or
+  dispatch effects. Real CLI refusal tests cover all seven selections even with
+  self-asserted JSON. Actual executable/capture admission remains unimplemented;
+  hashes/booleans cannot lift the hold. Paid LOP classifier hold remains too.
+
+All four fixes are one bounded experimental-only remediation batch. The next
+coordinator review should scope to billing, shared framing, owned lifecycle and
+hard-hold deltas plus their direct regression surfaces—not unchanged analysis.
+No reviewed fix or green test is claimed to complete pending native experiments.
 
 ## Remaining gates — not ready
 

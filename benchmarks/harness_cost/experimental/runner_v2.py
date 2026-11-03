@@ -838,24 +838,45 @@ def radient_token(lop_python: str) -> str:
 
 
 def money(rows: list[dict], stderr: str, classification: bool) -> dict:
-    """Sum provider-billed USD and every per-run classifier charge independently.
+    """Account for every recorded Messages attempt, independent of HTTP success.
 
-    Missing classification charge evidence is UNKNOWN, not zero. Output and
-    classification tokens are already distinct services; never fold token
-    counts together or infer spend from shared spend.json deltas.
+    An error can be billed; a missing/invalid bill is unknown, never zero. Keep
+    the measured partial sum separate from nullable complete totals. Discovery
+    and count-token routes are not Messages attempts, but their presence alone
+    cannot establish a measured model run. Retries remain separate ledger rows;
+    do not deduplicate by status, timestamp or request contents. This function
+    cannot detect attempts missing entirely from its caller's metering ledger.
     """
-    messages = [r for r in rows if r.get("path", "").rstrip("/").endswith("v1/messages")]
-    valid = [r for r in messages if r.get("status") == 200 and r.get("usage")]
-    if not valid:
-        raise ValueError("No successful metered model usage")
-    if any(r["usage"].get("cost") is None for r in valid):
-        raise ValueError("Missing provider-billed cost")
-    model = sum((Decimal(str(r["usage"]["cost"])) for r in valid), Decimal(0))
+    from decimal import InvalidOperation
+
+    messages = [row for row in rows if str(row.get("path", "")).rstrip("/").endswith("v1/messages")]
+    measured = Decimal(0)
+    unknown = 0
+    for row in messages:
+        usage = row.get("usage")
+        value = usage.get("cost") if isinstance(usage, dict) else None
+        try:
+            if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
+                raise ValueError("Invalid billed cost")
+            amount = Decimal(str(value))
+            if not amount.is_finite() or amount < 0:
+                raise ValueError("Invalid billed cost")
+        except (InvalidOperation, ValueError, TypeError):
+            unknown += 1
+            continue
+        measured += amount
+    model_complete = bool(messages) and unknown == 0
     charges = re.findall(r"classification:.*?cost=\$([0-9]+(?:\.[0-9]+)?)", stderr)
     radient = sum((Decimal(v) for v in charges), Decimal(0)) if charges or not classification else None
-    return {"model_cost_usd": float(model), "radient_cost_usd": float(radient) if radient is not None else None,
-            "total_cost_usd": float(model + radient) if radient is not None else None,
-            "classification_calls_charged": len(charges), "cost_complete": radient is not None}
+    complete = model_complete and radient is not None
+    return {"model_cost_usd": float(measured) if model_complete else None,
+            "measured_model_cost_usd": float(measured),
+            "radient_cost_usd": float(radient) if radient is not None else None,
+            "total_cost_usd": float(measured + radient) if complete else None,
+            "message_attempts": len(messages), "unknown_billing_attempts": unknown,
+            "non_200_message_attempts": sum(row.get("status") != 200 for row in messages),
+            "non_model_rows": len(rows) - len(messages),
+            "classification_calls_charged": len(charges), "cost_complete": complete}
 
 
 def stop_group(proc: subprocess.Popen | None) -> None:

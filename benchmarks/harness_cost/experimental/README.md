@@ -25,8 +25,11 @@ Nothing here changes the core analysis, its immutable snapshot or its loadout.
   distinct and does not prove this source fix. Use an isolated source install of
   that head, record the full source and executable hashes and dependency lock;
   do not update the operator's global runtime.
-- Every paid driver requires a frozen preregistration, immutable runtime hashes
-  and tool-wire attestations. A file existing or unit test passing is not wire
+- Paid coding dispatch is unconditionally hard-blocked pending real executable
+  and retained wire-capture admission verification; matching hashes/self-asserted
+  JSON are not sufficient. All paid LOP paths remain separately blocked pending
+  classifier reservations. Other paid driver paths require a frozen
+  preregistration, immutable runtime hashes and tool-wire attestations. A file existing or unit test passing is not wire
   attestation. Cache candidate qualification is not blanket cold-cache approval.
 - Public-loadout exposure, all seven runtime routes, streamed usage, classifier
   costs/reservations, oracle validity, independent review and a revised feasible

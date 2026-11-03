@@ -71,16 +71,23 @@ same guard (for example a Docker host gateway), not a direct model endpoint.
 Do not expose a bearerless guard beyond an isolated task network. The driver
 only owns/reaps the two processes it starts; it does not restart shared services.
 
-## Fail-closed frozen gate
+## Paid coding dispatch hard-blocked — evidence admission incomplete
 
 `driver.py --help` lists all required arguments. There are **no implicit** model,
 billing-tier, budget or price defaults and no automatically generated approval.
-Without `--execute`, only local preflight runs; with no arguments it exits 2
-before dispatch. Current `subset.json` is incomplete and intentionally cannot
-pass full preflight. A future owner must complete the original seeded oracle
+**Paid coding dispatch is unconditionally disabled**, including for non-LOP
+harnesses and even with matching hashes/self-asserted manifests. The current
+runtime/toolwire checks do not verify actual executables and retained captures;
+they cannot license a paid run. Both preflight admission and `run_trial()` refuse
+before services, authentication or Harbor/model dispatch. `--help` remains safe;
+with no arguments the CLI exits 2. Current `subset.json` is also incomplete. A future owner must complete the original seeded oracle
 order before freezing a 30-task subset, not relabel 21 tasks as 30.
 
-Supply four external JSON artifacts and each artifact's explicit SHA-256:
+The following describes the **legacy draft metadata contract**, not a working
+admission gate. Supplying these four JSON files and hashes cannot unblock paid
+coding. A future, separately reviewed implementation must bind actual executable
+components and independently interpret retained wire captures before lifting the
+hard hold; boolean assertions and arbitrary hashed text are insufficient:
 
 * **Oracle attestation** (`--oracle-attestation`, `--oracle-sha256`):
   `frozen: true`, `verified: true`, `subset_sha256`, and a `tasks` mapping of
@@ -98,9 +105,9 @@ Supply four external JSON artifacts and each artifact's explicit SHA-256:
   `runtime_sha256`, exact `model`, `output_limit_enforced: true`,
   `billing_tier_enforced: true`, `guard_route_verified: true`, the exact
   `billing_tier`, `models: [<explicit model>]`, and `schema_sha256` matching
-  the shared public schema snapshot. These booleans are attestations of actual
-  external evidence, not values this port has measured. Retain that evidence
-  outside this source tree; do not assert them just to bypass the gate.
+  the shared public schema snapshot. These booleans are **unverified assertions**
+  in the legacy contract: the port does not derive them from retained captures.
+  Consequently, even matching assertions cannot unblock paid coding dispatch.
 * **Preregistration** (`--preregistration`, `--preregistration-sha256`):
   `frozen: true`; exact `billing_tier`, `model`, ordered `harnesses` and `tasks`
   lists, `rep`, `total_budget_usd`, `trial_budget_usd`, `input_usd_per_m`,

@@ -2,8 +2,9 @@
 
 WHY: the source lane stopped before a paid coding pilot. An example must not
 silently turn an unfinished subset or an installed release into frozen evidence.
-Dispatch therefore requires independently frozen preregistration, runtime and
-wire attestations, exact file hashes and an explicit billing tier and USD caps.
+Paid dispatch is unconditionally blocked until executable/runtime identity and
+retained tool-wire capture admission are implemented; self-asserted hashes and
+verification booleans are not evidence. The remaining preflight is source-only.
 CONSTRAINTS: external task/toolchain/output paths, one image at a time, no host
 profiles/auth DB, no payloads here. An external meter owns OPENROUTER_API_KEY.
 Conservative durable reservations bound trial + total spend, including failures.
@@ -63,8 +64,16 @@ def check_space(volume, compressed):
         raise ValueError("disk gate: need >=21 GiB free and estimated >=17 GiB after pull; hard floor 15 GiB")
 
 
+def block_paid_coding():
+    # Hash-matching JSON proves byte identity, not executable or wire behavior.
+    # Keep this hold before even auth-presence checks, including direct callers.
+    raise ValueError("HARDBLOCK PAID CODING: executable/runtime and retained capture admission implementation pending; "
+                     "paid Local Operator blocked: classifier reservation/accounting validation pending")
+
+
 def preflight(args):
-    """Validate all evidence before Docker/network/service startup; no auto-freeze."""
+    """Fail closed before credentials, artifact reads or dispatch side effects."""
+    block_paid_coding()
     for value in (args.total_budget_usd, args.trial_budget_usd,
                   args.input_usd_per_m, args.output_usd_per_m):
         if not math.isfinite(value) or value <= 0:
@@ -171,19 +180,68 @@ def preflight(args):
     return [tasks[n] for n in names], harnesses
 
 
+STOP_GRACE_SECONDS = 15
+_OWNED_GROUPS = {}
+
+
+def owned_process(*args, **kwargs):
+    # Only our fresh session grants group-wide cleanup authority. Never infer
+    # ownership from an arbitrary Popen PID (especially an already-exited one).
+    if kwargs.get("start_new_session") is not True:
+        raise ValueError("owned processes require a fresh session")
+    proc = subprocess.Popen(*args, **kwargs)
+    _OWNED_GROUPS[proc] = (os.getpid(), proc.pid)
+    return proc
+
+
+def _signal_owned_group(group, sig):
+    try:
+        os.killpg(group, sig)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Darwin reports EPERM, not ESRCH, for an orphan group containing only
+        # zombies. Do not swallow real permission failures: prove no live member
+        # remains, using a read-only process table (no ambient process signals).
+        rows = subprocess.run(["ps", "-axo", "pgid=,stat="], capture_output=True,
+                              text=True, check=True, timeout=5).stdout.splitlines()
+        members = [row.split()[1] for row in rows
+                   if len(row.split()) == 2 and row.split()[0] == str(group)]
+        if any(not status.startswith("Z") for status in members):
+            raise
+        return False
+
+
 def stop(proc):
-    if proc.poll() is None:
-        os.killpg(proc.pid, signal.SIGTERM)
-        try:
-            proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+    ownership = _OWNED_GROUPS.get(proc)
+    if ownership is None:
+        return  # Includes completed cleanup: never signal a potentially reused ID.
+    owner, group = ownership
+    if owner != os.getpid() or group <= 1 or group == os.getpgrp() or group != proc.pid:
+        raise ValueError("refusing cleanup outside this process's owned group")
+    try:
+        if not _signal_owned_group(group, signal.SIGTERM):
+            return
+        # Waiting only for the leader misses orphans. Allow the whole group a
+        # bounded grace period, then sweep even when the leader exited first.
+        deadline = time.monotonic() + STOP_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            proc.poll()  # Reap our direct child, not someone else's descendants.
+            if not _signal_owned_group(group, 0):
+                return
+            time.sleep(min(.05, max(0, deadline - time.monotonic())))
+        _signal_owned_group(group, signal.SIGKILL)
+        proc.wait(timeout=STOP_GRACE_SECONDS)
+    finally:
+        _OWNED_GROUPS.pop(proc, None)
+        proc.poll()
 
 
 @contextmanager
 def lane_services(args):
     """Own only lane guard/bridge; external meter and translator are never killed."""
+    block_paid_coding()
     import socket
     for port in (8788, 8789):
         with socket.socket() as sock:
@@ -204,7 +262,7 @@ def lane_services(args):
         for name, extra in (("codex_bridge", ["8789"]), ("budget_guard", [])):
             stream = (args.output / (name + ".log")).open("a")
             streams.append(stream)
-            processes.append(subprocess.Popen([sys.executable, str(HERE / (name + ".py")), *extra],
+            processes.append(owned_process([sys.executable, str(HERE / (name + ".py")), *extra],
                 cwd=HERE, env=env, stdout=stream, stderr=stream, start_new_session=True))
         for _ in range(40):
             if any(p.poll() is not None for p in processes):
@@ -238,6 +296,7 @@ def wire_rows(log, run_id):
 
 
 def run_trial(args, harness, task):
+    block_paid_coding()
     run_id = f"coding__{harness}__{task['task8']}__r{args.rep}"
     job = args.output / "jobs" / run_id
     if job.exists() or (args.request_log.exists() and wire_rows(args.request_log, run_id)):
@@ -269,7 +328,7 @@ def run_trial(args, harness, task):
     env.update(PYTHONPATH=str(HERE), CODING_MODEL=args.model)
     started, disk_stop = time.time(), False
     with (args.output / (run_id + ".log")).open("x") as stream:
-        proc = subprocess.Popen(argv, cwd=HERE, env=env, stdout=stream, stderr=stream, start_new_session=True)
+        proc = owned_process(argv, cwd=HERE, env=env, stdout=stream, stderr=stream, start_new_session=True)
         try:
             while proc.poll() is None:
                 if free_mb(args.disk_volume) < 17 * 1024:
