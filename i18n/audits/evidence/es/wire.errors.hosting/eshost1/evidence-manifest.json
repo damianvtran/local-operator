@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "record_kind": "portable_evidence_manifest",
+  "audit_id": "hosting-es-r1",
+  "receipt": "receipt.json",
+  "report": "report.md",
+  "file_count": 5,
+  "files": [
+    {
+      "path": "audit.log",
+      "bytes": 2558,
+      "sha256": "cdc15829ed5b0fb729b83a3091f91bb188d82758cd6fe0f071867b3b0a84cbfc",
+      "origin": "/Users/damian/.local-operator/sessions/f50d87966867/scratchpad/hosting-es-audit-reader1/audit.log"
+    },
+    {
+      "path": "findings.json",
+      "bytes": 3,
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "origin": "/Users/damian/.local-operator/sessions/f50d87966867/scratchpad/hosting-es-audit-reader1/findings.json"
+    },
+    {
+      "path": "receipt.json",
+      "bytes": 1665,
+      "sha256": "a847a0584a711239a5a97a66675fd9a4004dc7d3134544a511fd2f216d11ff38",
+      "origin": "/Users/damian/.local-operator/sessions/f50d87966867/scratchpad/hosting-es-audit-reader1/receipt.json"
+    },
+    {
+      "path": "record.json",
+      "bytes": 6665,
+      "sha256": "99127823548557a6f45d50b4d0a90794d206b4380ae533197d30d8cef823b83c",
+      "origin": "/Users/damian/.local-operator/sessions/f50d87966867/scratchpad/hosting-es-audit-reader1/record.json"
+    },
+    {
+      "path": "report.md",
+      "bytes": 5437,
+      "sha256": "735a2e6469684949eb57f34f67cf79c6eb7f909f9cff0bd1bd45843c83bdd145",
+      "origin": "/Users/damian/.local-operator/sessions/f50d87966867/scratchpad/hosting-es-audit-reader1/report.md"
+    }
+  ]
+}

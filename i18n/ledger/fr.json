@@ -2716,6 +2716,26 @@
       },
       "status": "passed",
       "note": "Provenance-only correction superseding the prior delta row serving-model claims, not a new semantic audit or execution. Both translator a58a48732351 and independent auditor 05c51f9b1aba actually served openai/gpt-6.1-sol; earlier Sonnet/no-fallback claims inferred from runtime headers were wrong and are withdrawn. Source: manager/coordinator independently parsed all 21 usage-bearing records in auditor history (GPT only); translator verified own transcript usage/native_replay lines 63/66/68. These verification results are coordinator/translator-reported to this implementer, not independently re-executed here. Immutable auditor-authored correction i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-prov-05c51/{record.json,receipt.json,report.md}; its host-reported-only verification level describes the auditor child, while this wrapper records subsequent coordinator usage verification. No fallback sequence/cause inferred. French hash remains 42333772890dd59733f0bcff715c9d608ff1f7c069c8dbb025ee3b2f0548ed63; EN/context unchanged. Original semantic delta verdict 2/2 passed, zero findings retained; no new findings, audit, native execution or suite reset. Prior rows and both earlier immutable bundles preserved."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.hosting",
+      "source_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two independent sessions: c44e0f808e48, 35aac0a677bc)",
+        "model": "radient/auto (served model not disclosed by the route)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace wire.errors.hosting (1 key: the owned display cause the startup refusal splices into its {error} slot) authored at base 87ca846245b2 against frozen English sha256 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63. fr 'La plateforme d’hébergement n’est pas configurée.' keeps the typographic apostrophes and the corpus term for hosting platform. Two independent readers, neither the translator nor the code author, both PASSED on these bytes with 0 blocker/major/minor/nit (sessions c44e0f808e48, 35aac0a677bc). Source-only assembly: no rendered, native-speaker, width, RTL or validator proof, and no activation, shipped or release claim. Evidence: i18n/audits/evidence/fr/wire.errors.hosting/ (bundles ['frhost1', 'frhost2'], frozen inputs under _inputs/)."
     }
   ]
 }

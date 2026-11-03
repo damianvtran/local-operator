@@ -1,0 +1,42 @@
+{
+  "audit_id": "hosting-es-r1",
+  "round": "R1",
+  "locale": "es",
+  "namespace": "wire.errors.hosting",
+  "audit_date": "2026-11-03",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "f50d87966867",
+    "model_requested": "anthropic/claude-sonnet-5-5",
+    "model_served": "anthropic/claude-sonnet-5-5"
+  },
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9"
+    },
+    "target": {
+      "path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/hosting-es/wire.errors.hosting.json",
+      "sha256": "8de6f07aa22bb654bc0e45390bc803ba28f37698e6e08ffe95399d895ff3c5cf"
+    }
+  },
+  "companions": {
+    "record.json": "99127823548557a6f45d50b4d0a90794d206b4380ae533197d30d8cef823b83c",
+    "report.md": "735a2e6469684949eb57f34f67cf79c6eb7f909f9cff0bd1bd45843c83bdd145",
+    "findings.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+    "audit.log": "cdc15829ed5b0fb729b83a3091f91bb188d82758cd6fe0f071867b3b0a84cbfc"
+  },
+  "native_holds": {
+    "native_speaker": "NOT RUN",
+    "rendered_frame": "NOT RUN",
+    "pseudo_localisation": "NOT RUN",
+    "rtl": "NOT APPLICABLE — es is LTR",
+    "runtime_consumer": "NOT RUN"
+  }
+}

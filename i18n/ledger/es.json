@@ -2717,6 +2717,26 @@
       },
       "status": "passed",
       "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 3c7f2c58053e260ac34cc8e7758c538ce12f4ee2c3da3b22548aa52449aa4f06. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/es/cli.browser/pair2/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.errors.hosting",
+      "source_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two independent sessions: f50d87966867, 425221b9b2c6)",
+        "model": "anthropic/claude-sonnet-5-5 (reader 1, explicit header); radient/auto with served model unexposed (reader 2)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace wire.errors.hosting (1 key: the owned display cause the startup refusal splices into its {error} slot) authored at base 87ca846245b2 against frozen English sha256 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63. es 'La plataforma de alojamiento no está configurada.' keeps the condition only; the surrounding refusal carries the remedy. Two independent readers, neither the translator nor the code author, both PASSED on these bytes with 0 blocker/major/minor/nit (sessions f50d87966867, 425221b9b2c6). Source-only assembly: no rendered, native-speaker, width, RTL or validator proof, and no activation, shipped or release claim. Evidence: i18n/audits/evidence/es/wire.errors.hosting/ (bundles ['eshost1', 'eshost2'], frozen inputs under _inputs/)."
     }
   ]
 }

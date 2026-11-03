@@ -2592,6 +2592,26 @@
       },
       "status": "passed",
       "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 f1ea69b3906c503cc1900aae698f3a9c715b68a4f28deaa55940fd7d8b0bc8e7. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/ur/cli.browser/pair2/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.hosting",
+      "source_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two independent sessions: 1b7a2a90c876, 25304c88781e)",
+        "model": "radient/auto (reader 1); anthropic/claude-sonnet-5-5 requested with served model unexposed (reader 2)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace wire.errors.hosting (1 key: the owned display cause the startup refusal splices into its {error} slot) authored at base 87ca846245b2 against frozen English sha256 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63. ur 'ہوسٹنگ پلیٹ فارم ترتیب نہیں دیا گیا۔' is a complete RTL sentence with a terminal full stop; no shaping, bidi-isolation or width claim is made here. Two independent readers, neither the translator nor the code author, both PASSED on these bytes with 0 blocker/major/minor/nit (sessions 1b7a2a90c876, 25304c88781e). Source-only assembly: no rendered, native-speaker, width, RTL or validator proof, and no activation, shipped or release claim. Evidence: i18n/audits/evidence/ur/wire.errors.hosting/ (bundles ['urhost1', 'urhost2'], frozen inputs under _inputs/)."
     }
   ]
 }
