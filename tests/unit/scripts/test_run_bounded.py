@@ -764,3 +764,52 @@ def test_negative_control_an_over_budget_setsid_descendant_is_stopped(tmp_path):
                 os.kill(int(pidfile.read_text()), signal.SIGKILL)
             except (OSError, ValueError):
                 pass
+
+
+_SETUID_TOP_CODE = """
+import os, sys, time
+child = os.fork()
+if child == 0:
+    os.setsid()
+    null = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(null, fd)
+    os.execv("/usr/bin/top", ["top", "-l", "4", "-s", "1"])
+os.waitpid(child, 0)
+"""
+
+
+@pytest.mark.skipif(
+    not os.path.exists("/usr/bin/top") or sys.platform != "darwin",
+    reason="setuid top is the macOS EPERM case",
+)
+def test_a_setuid_escaped_descendant_is_disclosed_not_failed_closed():
+    """Review R1 repro on PR #3369: a setsid'd child exec'ing setuid `top`
+    (~14 MiB, footprint EPERM) under a generous grant must finish rc 0 with the
+    pid disclosed, not be stopped fail-closed as "unreadable"."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_")}
+    env.pop("LOCAL_OPERATOR_RESOLVED_MEMORY_MB", None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(WRAPPER),
+            *CONTRACT_ARGS,
+            "--memory-mb",
+            "512",
+            "--timeout",
+            "30",
+            "--",
+            sys.executable,
+            "-c",
+            _SETUID_TOP_CODE,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "fail closed" not in result.stderr
+    assert "not readable by this account" in result.stderr
+    assert result.stderr.count("not readable by this account") == 1  # once

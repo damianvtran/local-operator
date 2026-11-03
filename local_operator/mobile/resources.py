@@ -285,6 +285,45 @@ def _darwin_footprint_bytes(pid: int) -> int | None:
         return None
 
 
+def footprint_denied(pid: int) -> bool:
+    """Whether this account is NOT PERMITTED to read ``pid``'s footprint.
+
+    The distinction the descendant census needs (review R1, PR #3369): a setuid
+    or other-account process (``/usr/bin/top``, ``ps``, ``sudo``) answers
+    ``proc_pid_rusage`` with ``EPERM`` — measured: ``top`` gives errno 1, a gone
+    pid errno 3 — and its memory can never be read this way however long one
+    waits, so it is a credential boundary, not an unknown. Linux: ``smaps_rollup``
+    raising ``PermissionError``. False for every other outcome, including a
+    read that succeeds, so a caller only ever downgrades on a positive answer.
+    """
+    import errno as _errno
+
+    if sys.platform == "darwin":
+        lib = _darwin_libproc()
+        if lib is None:
+            return False
+        try:
+            import ctypes
+
+            buffer = ctypes.create_string_buffer(_RUSAGE_BUFFER_SIZE)
+            ctypes.set_errno(0)
+            if lib.proc_pid_rusage(pid, _RUSAGE_INFO_V2, ctypes.byref(buffer)) == 0:
+                return False
+            return ctypes.get_errno() in (_errno.EPERM, _errno.EACCES)
+        except Exception:  # noqa: BLE001 — an unanswered probe is not a denial
+            return False
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{pid}/smaps_rollup", "rb") as handle:
+                handle.read(1)
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return False
+    return False
+
+
 def _darwin_ppid_pgid(pid: int) -> tuple[int, int] | None:
     """``(ppid, pgid)`` of one pid via ``proc_pidinfo(PROC_PIDTBSDINFO)``, or ``None``.
 

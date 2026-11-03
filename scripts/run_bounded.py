@@ -936,6 +936,15 @@ def _run_cleanup_required(
             if guard is not None and now >= next_sample:
                 sample = guard.sample_sync()
                 next_sample = now + guard.tick_s
+                # Disclosed ONCE per pid (review R1): unreadable by credential is
+                # named, never counted toward fail-closed.
+                fresh = (
+                    guard.new_not_permitted(sample) if hasattr(guard, "new_not_permitted") else []
+                )
+                if fresh:
+                    _report(
+                        stream, f"[run_bounded] {memory_guard.not_permitted_line(sample, fresh)}"
+                    )
                 if guard.should_kill(sample):
                     # getattr: guard and sample are injectable seams; a
                     # stand-in that predates descendant accounting has neither.
@@ -956,6 +965,11 @@ def _run_cleanup_required(
                             stream,
                             "[run_bounded] SIGKILL to escaped descendant(s) "
                             + ", ".join(str(pid) for pid in stopped),
+                        )
+                    unsignalled = getattr(guard, "unsignalled", None)
+                    if unsignalled:
+                        _report(
+                            stream, f"[run_bounded] {memory_guard.unsignalled_line(unsignalled)}"
                         )
                     send(signal.SIGKILL, "memory", begin_cleanup(0.25))
                     break

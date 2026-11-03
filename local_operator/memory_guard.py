@@ -54,6 +54,7 @@ from local_operator.mobile.resources import (
     direct_footprint_bytes,
     direct_group_pids,
     direct_ppid_pgid,
+    footprint_denied,
 )
 
 
@@ -142,14 +143,21 @@ GroupProbe = Callable[[int], "list[int] | None"]
 #: :func:`~local_operator.mobile.resources.direct_descendant_pids`.
 DescendantProbe = Callable[[set[int]], "dict[int, int] | None"]
 
-#: Consecutive ticks a descendant census may leave memory UNACCOUNTED (an
-#: escaped descendant whose footprint cannot be read, or a census that cannot
-#: answer) before :meth:`Guard.should_kill` treats the run as over budget. At
+#: Consecutive ticks ONE escaped descendant may stay unreadable (or the census
+#: may stay unanswered) before :meth:`Guard.should_kill` treats the run as over
+#: budget. Counted PER PID (review R1, PR #3369): a global streak was kept alive
+#: by a churn of different short-lived ``ps``/``top`` children, none of which
+#: was itself persistently unknown. At
 #: the 250 ms tick that is ~1 s: long enough that a pid caught mid-exit (its
 #: footprint already unreadable, its corpse not yet visible) is not a kill,
 #: short enough that a permanently unmeasurable descendant cannot hold an
 #: unknown amount of memory for the rest of the run.
 UNACCOUNTED_TICK_LIMIT = 4
+
+#: Bound and reuse window for the one ``ps -o rss=`` read a not-permitted
+#: escaped descendant gets. Short: it runs inside a guard tick.
+_NOT_PERMITTED_RSS_TIMEOUT_S = 1.0
+_NOT_PERMITTED_RSS_TTL_S = 2.0
 
 
 def _run_probe(argv: list[str], timeout_s: float) -> tuple[int, str]:
@@ -673,8 +681,15 @@ class Sample:
     escaped: Mapping[int, int] = field(default_factory=dict)
     #: Why some memory in the tree could not be charged this tick, or ``None``.
     unaccounted: str | None = None
-    #: Consecutive ticks (including this one) with ``unaccounted`` set.
+    #: The longest per-pid (or census) unreadable streak, this tick included.
     unaccounted_streak: int = 0
+    #: Bytes this tick charged to escaped descendants, so a stop can say the
+    #: memory was theirs rather than "this command's process group" (R2/Q1).
+    escaped_bytes: int = 0
+    #: Escaped descendants this account may not read (setuid/other uid), charged
+    #: by ``ps`` RSS where it answered, otherwise disclosed and NOT counted
+    #: toward fail-closed: ``{pid: rss_bytes or None}``.
+    not_permitted: Mapping[int, "int | None"] = field(default_factory=dict)
 
 
 class Guard:
@@ -727,6 +742,7 @@ class Guard:
         group_probe: GroupProbe | None = None,
         descendants: bool = False,
         descendant_probe: DescendantProbe | None = None,
+        permission_probe: Callable[[int], bool] | None = None,
         tick_s: float = 0.25,
     ) -> None:
         self.pgid = pgid
@@ -735,8 +751,19 @@ class Guard:
         #: unchanged by this opt-in; see :meth:`_escaped_descendants`.
         self.descendants = descendants or descendant_probe is not None
         self.descendant_probe = descendant_probe
-        self._unaccounted_streak = 0
+        #: "May this account NOT read pid's footprint?" — injectable so tests with
+        #: synthetic pids never ask the live kernel about a real pid of that number.
+        self.permission_probe = permission_probe or footprint_denied
+        #: Per-pid consecutive unreadable ticks; a pid that leaves the census or
+        #: becomes readable drops out, so its count restarts if it returns.
+        self._unreadable_ticks: dict[int, int] = {}
+        self._census_miss_ticks = 0
         self._last_escaped: dict[int, int] = {}
+        #: Pids already disclosed as not-permitted, so each is named ONCE.
+        self.disclosed_not_permitted: set[int] = set()
+        self._rss_cache: dict[int, tuple[float, int | None]] = {}
+        #: Verified escaped descendants the last stop could not signal (R3).
+        self.unsignalled: list[int] = []
         self.budget = budget
         self.runner = runner
         self.footprint_probe = footprint_probe
@@ -809,9 +836,41 @@ class Guard:
         except Exception:  # noqa: BLE001 — an unanswerable listing is not a kill
             return None
 
+    def _denied(self, pid: int) -> bool:
+        try:
+            return bool(self.permission_probe(pid))
+        except Exception:  # noqa: BLE001 — an unanswered probe is not a denial
+            return False
+
+    def _rss_of(self, pid: int) -> int | None:
+        """``ps -o rss=`` for one pid in bytes, or ``None`` — the not-permitted path.
+
+        ``/bin/ps`` is setuid root, so it can read RSS for a process
+        ``proc_pid_rusage`` refuses. A fork, so it is spent only on
+        not-permitted pids, bounded at :data:`_NOT_PERMITTED_RSS_TIMEOUT_S`, and cached per pid for
+        :data:`_NOT_PERMITTED_RSS_TTL_S` so a long-lived setuid helper costs one
+        ``ps`` every few seconds, not one per 250 ms tick.
+        """
+        now = time.monotonic()
+        cached = self._rss_cache.get(pid)
+        if cached is not None and now - cached[0] < _NOT_PERMITTED_RSS_TTL_S:
+            return cached[1]
+        value = self._read_rss(pid)
+        self._rss_cache[pid] = (now, value)
+        return value
+
+    def _read_rss(self, pid: int) -> int | None:
+        run = self.runner or (lambda argv: _run_probe(argv, _NOT_PERMITTED_RSS_TIMEOUT_S))
+        try:
+            code, out = run(["ps", "-o", "rss=", "-p", str(pid)])
+        except Exception:  # noqa: BLE001 — an unanswered ps is just no RSS
+            return None
+        token = out.strip() if code == 0 else ""
+        return int(token) * 1024 if token.isdigit() else None
+
     def _escaped_descendants(
         self, members: set[int], footprint_of: Callable[[Iterable[int]], int]
-    ) -> tuple[dict[int, int], str | None]:
+    ) -> tuple[dict[int, int], list[int], dict[int, int | None]]:
         """Descendants that left the group, and why any of them went uncharged.
 
         WHY. A process group is not a process tree: a descendant that calls
@@ -838,9 +897,10 @@ class Guard:
         except Exception:  # noqa: BLE001 — a raising census is an unanswered one
             census = None
         if census is None:
-            return {}, "descendant census could not answer"
+            raise _CensusUnanswered
         escaped = {pid: parent for pid, parent in census.items() if pid not in members}
         unreadable: list[int] = []
+        not_permitted: dict[int, int | None] = {}
         for pid in escaped:
             if footprint_of([pid]) > 0:
                 continue
@@ -849,12 +909,16 @@ class Guard:
             sample = procstate.process_sample(pid)
             if sample is not None and sample.zombie:
                 continue
+            # A CREDENTIAL BOUNDARY IS NOT AN UNKNOWN (review R1): a setuid
+            # ``top`` can never be read by this account, so counting it toward
+            # fail-closed killed a healthy 14 MiB run. Charge ``ps`` RSS where it
+            # answers; otherwise disclose it and do not count it. Only a pid we
+            # SHOULD be able to read and cannot stays fail-closed.
+            if self._denied(pid):
+                not_permitted[pid] = self._rss_of(pid)
+                continue
             unreadable.append(pid)
-        reason = None
-        if unreadable:
-            shown = ", ".join(str(pid) for pid in sorted(unreadable)[:5])
-            reason = f"footprint unreadable for escaped descendant(s) {shown}"
-        return escaped, reason
+        return escaped, unreadable, not_permitted
 
     def stop_escaped(self, signum: int) -> list[int]:
         """Signal the last tick's escaped descendants whose parent edge re-verifies.
@@ -887,13 +951,27 @@ class Guard:
                 continue  # the group signal covers it, or it is ours
             verified.append(pid)
         sent: list[int] = []
+        self.unsignalled = []
         for pid in verified:
             try:
                 os.kill(pid, signum)
+            except ProcessLookupError:
+                continue  # already gone: nothing left to stop
             except OSError:
+                # Verified ours but not ours to signal (setuid, EPERM): named via
+                # ``unsignalled`` rather than dropped silently (review R3).
+                self.unsignalled.append(pid)
                 continue
             sent.append(pid)
         return sent
+
+    def new_not_permitted(self, sample: Sample) -> list[int]:
+        """Not-permitted pids in ``sample`` not yet disclosed; marks them disclosed."""
+        fresh = sorted(
+            pid for pid in sample.not_permitted if pid not in self.disclosed_not_permitted
+        )
+        self.disclosed_not_permitted.update(fresh)
+        return fresh
 
     def _verified_members(self) -> set[int]:
         """Last-known members that are still in OUR group, plus the leader.
@@ -1018,11 +1096,31 @@ class Guard:
         footprint_sum = footprint_of(known) if known else 0
         escaped: dict[int, int] = {}
         unaccounted: str | None = None
+        escaped_bytes = 0
+        not_permitted: dict[int, int | None] = {}
+        streak = 0
         if self.descendants:
-            escaped, unaccounted = self._escaped_descendants(known, footprint_of)
-            footprint_sum += footprint_of(set(escaped) - known)
+            try:
+                escaped, unreadable, not_permitted = self._escaped_descendants(known, footprint_of)
+            except _CensusUnanswered:
+                self._census_miss_ticks += 1
+                streak = self._census_miss_ticks
+                unaccounted = "descendant census could not answer"
+            else:
+                self._census_miss_ticks = 0
+                # PER PID: a pid absent from this tick's unreadable set (gone,
+                # readable again) is dropped, so churn never accumulates.
+                self._unreadable_ticks = {
+                    pid: self._unreadable_ticks.get(pid, 0) + 1 for pid in unreadable
+                }
+                streak = max(self._unreadable_ticks.values(), default=0)
+                if unreadable:
+                    shown = ", ".join(str(pid) for pid in sorted(unreadable)[:5])
+                    unaccounted = f"footprint unreadable for escaped descendant(s) {shown}"
+            escaped_bytes = footprint_of(set(escaped) - known)
+            escaped_bytes += sum(v for v in not_permitted.values() if v)
+            footprint_sum += escaped_bytes
         self._last_escaped = escaped
-        self._unaccounted_streak = self._unaccounted_streak + 1 if unaccounted else 0
         rss_sum = sum(table.values()) if table else None
         measured_fp = footprint_sum if footprint_sum > 0 else None
 
@@ -1051,7 +1149,9 @@ class Guard:
             membership=membership if used is not None else "none",
             escaped=escaped,
             unaccounted=unaccounted,
-            unaccounted_streak=self._unaccounted_streak,
+            unaccounted_streak=streak,
+            escaped_bytes=escaped_bytes,
+            not_permitted=not_permitted,
         )
 
     def should_kill(self, sample: Sample) -> bool:
@@ -1127,14 +1227,55 @@ class Guard:
             device = f" (on a {self.budget.total_mb / 1024:.0f} GB host)"
         if escape is None:
             escape = "pass memory_mb on the bash call or raise bash.memory.limit_mb in settings"
+        # The SUBJECT must say whose memory it was (review R2 / QA Q1). The bash
+        # tool never enables the census, so its text stays byte-identical.
+        failed_closed = not sample.over_hard and bool(sample.unaccounted)
+        if failed_closed:
+            subject = (
+                f"descendant memory could not be measured ({sample.unaccounted}) and was "
+                f"treated as over budget (fail closed) at {reached} measured"
+            )
+        elif sample.escaped_bytes:
+            escaped = sample.escaped_bytes / (1024**2 if unit == "MiB" else 1024**3)
+            escaped_text = f"{escaped:.0f} MiB" if unit == "MiB" else f"{escaped:.1f} GB"
+            subject = (
+                f"this command's process group and its escaped descendant(s) "
+                f"(left the group by setsid; {escaped_text} of it) reached {reached}"
+            )
+        else:
+            subject = f"this command's process group reached {reached}"
         return (
-            f"MEMORY LIMIT EXCEEDED: this command's process group reached "
-            f"{reached}, over the {ceiling} budget for one command"
+            f"MEMORY LIMIT EXCEEDED: {subject}, over the {ceiling} budget for one command"
             f"{device}. The command was killed; the session is fine. Reduce peak "
             f"memory and retry: stream instead of loading all rows, lower the batch "
             f"size, or process the input in chunks. To allow a deliberately large "
             f"command, {escape}."
         )
+
+
+class _CensusUnanswered(Exception):
+    """The descendant census could not answer this tick (internal signal)."""
+
+
+def not_permitted_line(sample: Sample, pids: Iterable[int]) -> str:
+    """The once-per-pid disclosure for descendants this account may not read."""
+    parts = []
+    for pid in pids:
+        rss = sample.not_permitted.get(pid)
+        parts.append(
+            f"{pid} (ps rss {rss // (1024**2)} MiB, charged)" if rss else f"{pid} (uncharged)"
+        )
+    return (
+        "escaped descendant(s) not readable by this account (setuid/other user), "
+        "not counted toward fail-closed: " + ", ".join(parts)
+    )
+
+
+def unsignalled_line(pids: Iterable[int]) -> str:
+    """Verified escaped descendants a stop could not signal (EPERM)."""
+    return "could not signal escaped descendant(s) (not permitted): " + ", ".join(
+        str(pid) for pid in pids
+    )
 
 
 def unaccounted_line(sample: Sample) -> str:

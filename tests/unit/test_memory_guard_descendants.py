@@ -31,19 +31,23 @@ def _budget(ceiling_mb: int) -> mg.Budget:
     return mg.Budget(ceiling_mb, int(ceiling_mb * 0.8), 4096, 16384, 2048, "auto", "test")
 
 
-def _guard(ceiling_mb, *, group, footprints, census, monkeypatch, alive=True):
+def _guard(ceiling_mb, *, group, footprints, census, monkeypatch, alive=True, denied=(), ps=None):
     # pid_liveness/process_sample are the gone-or-zombie discriminators; pin them
     # so a synthetic pid never consults the live process table.
     monkeypatch.setattr(mg.procstate, "pid_liveness", lambda pid: alive)
     monkeypatch.setattr(mg.procstate, "process_sample", lambda pid: None)
-    return mg.Guard(
+    guard = mg.Guard(
         100,
         _budget(ceiling_mb),
         runner=lambda argv: (1, ""),
         footprint_probe=lambda pid: footprints.get(pid),
         group_probe=lambda pgid: list(group),
         descendant_probe=census,
+        permission_probe=lambda pid: pid in denied,
     )
+    if ps is not None:
+        guard.runner = lambda argv: ps(int(argv[-1]))
+    return guard
 
 
 # --- count vs bytes ----------------------------------------------------------
@@ -240,3 +244,157 @@ def test_stop_escaped_signals_only_pids_whose_parent_edge_reverifies(monkeypatch
     monkeypatch.setattr(mg.os, "kill", lambda pid, sig: sent.append((pid, sig)))
     assert guard.stop_escaped(9) == [900, 901]
     assert sent == [(900, 9), (901, 9)]
+
+
+# --- review R1/R2/R3 (PR #3369) ---------------------------------------------
+
+
+def test_a_not_permitted_descendant_is_charged_by_ps_and_never_fails_closed(monkeypatch):
+    """A setuid ``top`` (EPERM) is a credential boundary, not an unknown."""
+    guard = _guard(
+        1536,
+        group=[100],
+        footprints={100: 5 * _MIB},
+        census=lambda roots: {900: 100},
+        monkeypatch=monkeypatch,
+        denied={900},
+        ps=lambda pid: (0, "14336\n"),
+    )
+    for _ in range(mg.UNACCOUNTED_TICK_LIMIT * 3):
+        sample = guard.sample_sync()
+        assert sample.unaccounted is None and guard.should_kill(sample) is False
+    assert sample.not_permitted == {900: 14 * _MIB}
+    assert sample.bytes_used == 19 * _MIB
+    assert guard.new_not_permitted(sample) == [900]
+    assert guard.new_not_permitted(sample) == []  # disclosed ONCE
+    assert "900 (ps rss 14 MiB, charged)" in mg.not_permitted_line(sample, [900])
+
+
+def test_a_not_permitted_descendant_ps_cannot_size_is_disclosed_uncharged(monkeypatch):
+    guard = _guard(
+        300,
+        group=[100],
+        footprints={100: 5 * _MIB},
+        census=lambda roots: {900: 100},
+        monkeypatch=monkeypatch,
+        denied={900},
+        ps=lambda pid: (1, ""),
+    )
+    for _ in range(mg.UNACCOUNTED_TICK_LIMIT * 2):
+        sample = guard.sample_sync()
+        assert guard.should_kill(sample) is False
+    assert sample.not_permitted == {900: None}
+    assert "900 (uncharged)" in mg.not_permitted_line(sample, [900])
+
+
+def test_a_churn_of_short_lived_unreadable_pids_does_not_fail_closed(monkeypatch):
+    """Each tick a FRESH unreadable pid (a ps/top call per second): no single pid
+    is persistently unknown, so the per-pid count never reaches the limit."""
+    tick = {"n": 0}
+
+    def census(roots):
+        tick["n"] += 1
+        return {1000 + tick["n"]: 100}
+
+    guard = _guard(
+        300, group=[100], footprints={100: 5 * _MIB}, census=census, monkeypatch=monkeypatch
+    )
+    for _ in range(mg.UNACCOUNTED_TICK_LIMIT * 3):
+        sample = guard.sample_sync()
+        assert sample.unaccounted is not None and sample.unaccounted_streak == 1
+        assert guard.should_kill(sample) is False
+
+
+def test_a_pid_that_disappears_restarts_its_count(monkeypatch):
+    present = {"on": True}
+    guard = _guard(
+        300,
+        group=[100],
+        footprints={100: 5 * _MIB},
+        census=lambda roots: {900: 100} if present["on"] else {},
+        monkeypatch=monkeypatch,
+    )
+    for _ in range(mg.UNACCOUNTED_TICK_LIMIT - 1):
+        guard.sample_sync()
+    present["on"] = False
+    guard.sample_sync()
+    present["on"] = True
+    sample = guard.sample_sync()
+    assert sample.unaccounted_streak == 1 and guard.should_kill(sample) is False
+
+
+def test_the_headline_names_escaped_memory_and_fail_closed_stops(monkeypatch):
+    guard = _guard(
+        300,
+        group=[100],
+        footprints={100: 5 * _MIB, 900: 400 * _MIB},
+        census=lambda roots: {900: 100},
+        monkeypatch=monkeypatch,
+    )
+    sample = guard.sample_sync()
+    text = guard.over_budget_message(sample, unit="MiB")
+    assert "escaped descendant(s)" in text and "400 MiB of it" in text
+    assert "this command's process group reached" not in text
+
+    closed = _guard(
+        300,
+        group=[100],
+        footprints={100: 5 * _MIB},
+        census=lambda roots: {901: 100},
+        monkeypatch=monkeypatch,
+    )
+    for _ in range(mg.UNACCOUNTED_TICK_LIMIT):
+        sample = closed.sample_sync()
+    assert closed.should_kill(sample)
+    text = closed.over_budget_message(sample, unit="MiB")
+    assert "could not be measured" in text and "fail closed" in text
+    assert "process group reached" not in text
+
+
+def test_the_bash_tool_headline_is_unchanged_without_the_census() -> None:
+    guard = mg.Guard(
+        100,
+        _budget(100),
+        runner=lambda argv: (1, ""),
+        footprint_probe=lambda pid: 400 * _MIB,
+        group_probe=lambda g: [100],
+    )
+    sample = guard.sample_sync()
+    assert guard.over_budget_message(sample).startswith(
+        "MEMORY LIMIT EXCEEDED: this command's process group reached 0.4 GB"
+    )
+
+
+def test_a_verified_descendant_that_refuses_the_signal_is_reported(monkeypatch):
+    guard = _guard(
+        300,
+        group=[100],
+        footprints={100: 1, 900: 400 * _MIB, 901: 1},
+        census=lambda roots: {900: 100, 901: 100},
+        monkeypatch=monkeypatch,
+    )
+    guard.sample_sync()
+    monkeypatch.setattr(mg, "direct_ppid_pgid", {900: (100, 900), 901: (100, 901)}.get)
+
+    def kill(pid, sig):
+        if pid == 901:
+            raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(mg.os, "kill", kill)
+    assert guard.stop_escaped(9) == [900]
+    assert guard.unsignalled == [901]
+    assert "901" in mg.unsignalled_line(guard.unsignalled)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="libproc EPERM is macOS-specific")
+def test_the_live_permission_probe_tells_setuid_top_from_a_gone_pid():
+    top = subprocess.Popen(["/usr/bin/top", "-l", "3", "-s", "1"], stdout=subprocess.DEVNULL)
+    try:
+        time.sleep(0.3)
+        assert resources.direct_footprint_bytes(top.pid) is None
+        assert resources.footprint_denied(top.pid) is True
+        assert resources.footprint_denied(os.getpid()) is False
+    finally:
+        top.kill()
+        top.wait()
+    assert resources.footprint_denied(top.pid) is False  # gone (ESRCH), not denied

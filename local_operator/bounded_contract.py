@@ -530,6 +530,14 @@ def supervise_direct(
             if guard is not None and not killed and now >= next_sample:
                 sample = guard.sample_sync()
                 next_sample = now + guard.tick_s
+                # Disclosed ONCE per pid (review R1): unreadable by credential
+                # is named, never counted toward fail-closed.
+                new_np = getattr(guard, "new_not_permitted", None)
+                fresh = new_np(sample) if new_np else []
+                if fresh:
+                    from local_operator.memory_guard import not_permitted_line
+
+                    report(f"[run_bounded] {not_permitted_line(sample, fresh)}")
                 if guard.should_kill(sample):
                     if getattr(sample, "unaccounted", None):
                         from local_operator.memory_guard import unaccounted_line
@@ -553,6 +561,11 @@ def supervise_direct(
                             "[run_bounded] SIGKILL to escaped descendant(s) "
                             + ", ".join(str(pid) for pid in stopped)
                         )
+                    unsignalled = getattr(guard, "unsignalled", None)
+                    if unsignalled:
+                        from local_operator.memory_guard import unsignalled_line
+
+                        report(f"[run_bounded] {unsignalled_line(unsignalled)}")
                     if escalating is None:
                         outcome.wrapper_exit_code = 128 + signal.SIGKILL
                         outcome.termination_cause = "memory-policy"
