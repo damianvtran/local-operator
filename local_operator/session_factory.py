@@ -3382,9 +3382,7 @@ _TEAM_BRIDGE_INTENT = re.compile(
 #: "ask Ben to …", "ping Aida", "coordinate with Damian": the verb followed by a
 #: capitalised word. Case-SENSITIVE on the name on purpose ("ask the API",
 #: "tell me about" stay quiet); the stop-list drops capitalised non-people.
-_TEAM_BRIDGE_NAMED = re.compile(
-    rf"(?i:\b{_TEAM_BRIDGE_VERB})\s+(?P<name>[A-Z][a-z]+)\b(?!\.\w)"
-)
+_TEAM_BRIDGE_NAMED = re.compile(rf"(?i:\b{_TEAM_BRIDGE_VERB})\s+(?P<name>[A-Z][a-z]+)\b(?!\.\w)")
 _TEAM_BRIDGE_NOT_A_NAME = frozenset(
     {"Slack", "Claude", "Gemini", "Google", "GitHub", "GitLab", "The", "It", "This",
      "That", "Them", "Me", "Us", "Him", "Her", "Codex", "OpenAI", "Linear", "Notion"}
@@ -3443,7 +3441,9 @@ def _team_bridge_recommendation(
             return None
     except Exception:  # noqa: BLE001 - a probe never breaks a prompt build
         return None
-    return _ClassificationCandidate("guide", "team-bridge", _TEAM_BRIDGE_RULE, "guide://team-bridge")
+    return _ClassificationCandidate(
+        "guide", "team-bridge", _TEAM_BRIDGE_RULE, "guide://team-bridge"
+    )
 
 
 def _classification_block(
