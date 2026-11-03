@@ -361,7 +361,7 @@ export function AsksSheet({
 						{/* Data, not copy: the projection's own conversation name, once per
 						    conversation (UX round 2, U6). */}
 						{crossConversation ? (
-							<p className="truncate px-1 text-meta font-medium text-ink-dim">{block.name}</p>
+							<p dir="auto" className="truncate px-1 text-meta font-medium text-ink-dim">{block.name}</p>
 						) : null}
 						{/* THE WAIT IS STATED BEFORE THE TAP, AND ONLY WHERE THERE IS ONE
 						    (design round 1, D4 = UX U4; round-2 corrections below).

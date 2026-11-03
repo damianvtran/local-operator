@@ -144,7 +144,7 @@ export function TodosPanel({
 						forceCollapsed && HELD_DIM,
 					)}
 				>
-					<span className="min-w-0 truncate">
+					<span dir="auto" className="min-w-0 truncate">
 						tasks{" "}
 						<span className="font-mono text-mono-sm text-ink-dim">
 							{done}/{items.length}

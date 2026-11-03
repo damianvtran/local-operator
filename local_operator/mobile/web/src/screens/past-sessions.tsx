@@ -127,7 +127,7 @@ export function PastSessionsScreen() {
 							className="flex items-center gap-2 rounded-sm px-2 py-1 active:bg-elevated"
 						>
 							<div className="min-w-0 flex-1">
-								<span className="block truncate text-body">
+								<span dir="auto" className="block truncate text-body">
 									{/* A PREFIX, dim, ahead of the name — the same
 									   mark and the same position the TUI's /resume
 									   picker uses, because it is one fact on two

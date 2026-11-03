@@ -116,7 +116,7 @@ const SoundSlot = memo(function SoundSlot({
 	return (
 		<div className="flex min-w-0 flex-col gap-0.5" data-supplement-sound="">
 			{sound.title && (
-				<span
+				<span dir="auto"
 					className="truncate text-meta text-ink-muted"
 					title={sound.title}
 					data-supplement-sound-title=""
@@ -422,7 +422,7 @@ export const SupplementBlock = memo(function SupplementBlock({
 							<div className="flex flex-col gap-1 pb-1">
 								{beat.more.slice(0, MORE_MAX).map((item) => (
 									<div key={item} className="flex items-center gap-2 text-meta">
-										<span className="min-w-0 flex-1 truncate text-ink-muted">
+										<span dir="auto" className="min-w-0 flex-1 truncate text-ink-muted">
 											{displayText(item)}
 										</span>
 									</div>
@@ -604,7 +604,7 @@ function CalloutRow({
 						{path && name ? <span dir="ltr" className="ms-2 text-ink-muted">{path}</span> : null}
 					</button>
 				) : (
-					<span className="min-w-0 flex-1 truncate text-meta text-ink">
+					<span dir="auto" className="min-w-0 flex-1 truncate text-meta text-ink">
 						{name || displayText(file.path)}
 						{path && name ? <span dir="ltr" className="ms-2 text-ink-muted">{path}</span> : null}
 					</span>

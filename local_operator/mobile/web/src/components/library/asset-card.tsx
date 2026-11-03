@@ -143,17 +143,17 @@ export function AssetCard({
 			</div>
 			<div className="flex min-w-0 flex-col gap-1 px-2 py-1.5">
 				<p className="line-clamp-2 text-body-sm font-medium text-ink">{asset.name}</p>
-				<p className="truncate text-meta text-ink-muted">{subtitle}</p>
+				<p dir="auto" className="truncate text-meta text-ink-muted">{subtitle}</p>
 				{source ? (
-					<p className="truncate pe-8 text-meta text-ink-dim">
-						<span aria-hidden className="lo-directional">↳ </span>
-						{source}
+					<p className="flex min-w-0 pe-8 text-meta text-ink-dim">
+						<span aria-hidden className="lo-directional shrink-0">↳ </span>
+						<span dir="auto" className="min-w-0 truncate">{source}</span>
 					</p>
 				) : null}
 				{shownTags.length ? (
 					<div className="flex min-w-0 flex-wrap gap-1">
 						{shownTags.map((tag) => (
-							<span
+							<span dir="auto"
 								key={tag.id}
 								className="max-w-full truncate rounded-xs bg-elevated px-1 text-meta text-ink-muted"
 							>

@@ -134,10 +134,10 @@ export function FoldBar({
 				<Header id={entry.key} open={open} onToggle={onToggle} failed={group.failedCount > 0} failedCount={group.failedCount} live>
 					<span className="flex min-w-0 flex-1 flex-col justify-center">
 						<span className="flex min-w-0 items-center gap-1.5 text-body-sm">
-							<span className="shrink truncate text-ink-muted">{liveRow.record.kind === "tool" ? liveRow.record.toolName : ""}</span>
-							<span className="min-w-0 flex-1 truncate font-mono text-ink-dim">{liveRow.record.kind === "tool" ? liveRow.record.summary : ""}</span>
+							<span dir="auto" className="shrink truncate text-ink-muted">{liveRow.record.kind === "tool" ? liveRow.record.toolName : ""}</span>
+							<span dir="auto" className="min-w-0 flex-1 truncate font-mono text-ink-dim">{liveRow.record.kind === "tool" ? liveRow.record.summary : ""}</span>
 						</span>
-						<span className="truncate text-meta text-ink-dim">{totalActions}</span>
+						<span dir="auto" className="truncate text-meta text-ink-dim">{totalActions}</span>
 					</span>
 				</Header>
 			</div>

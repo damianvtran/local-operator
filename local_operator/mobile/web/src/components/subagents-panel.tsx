@@ -83,7 +83,7 @@ export function AgentRow({
 				{AGENT_GLYPH[agent.status]}
 			</span>
 			<span className="min-w-0 flex flex-1 flex-col">
-				<span className="truncate text-body-sm text-ink">{agent.label}</span>
+				<span dir="auto" className="truncate text-body-sm text-ink">{agent.label}</span>
 				{agent.model_fallback === true ? (
 					/* The pin-integrity badge (PR review round 1, reviewer MAJOR): the wire
 					   has carried `model_label` as the `A → B ⚠ fallback` string since the
@@ -101,7 +101,7 @@ export function AgentRow({
 					<span className="break-words text-meta text-warning">{agent.model_label}</span>
 				) : null}
 				{showMetadata ? (
-					<span className="truncate text-meta text-ink-dim">
+					<span dir="auto" className="truncate text-meta text-ink-dim">
 						{agent.agent}{agent.effort ? ` · ${agent.effort}` : ""}
 					</span>
 				) : null}
@@ -237,7 +237,7 @@ export function AgentRoster({
 					    WHOLE (worst case "sub… 1/5 running"); a clipped LABEL is the
 					    loss this row can afford, and it stays recoverable by opening
 					    the panel. */}
-					<span className={cn("min-w-0 truncate", forceCollapsed && HELD_DIM)}>
+					<span dir="auto" className={cn("min-w-0 truncate", forceCollapsed && HELD_DIM)}>
 						{label}
 					</span>
 					<span

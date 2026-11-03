@@ -293,7 +293,7 @@ export function ImageGenCard({
 						{view.logs.length > 0 ? (
 							<div className="flex w-full flex-col gap-0.5 pe-1.5">
 								{view.logs.map((line, i) => (
-									<p
+									<p dir="auto"
 										key={i}
 										className="truncate font-mono text-mono-sm text-ink-dim"
 									>

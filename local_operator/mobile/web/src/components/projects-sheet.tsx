@@ -277,7 +277,7 @@ function ProjectRow({
 			className="flex w-full flex-col gap-0.5 rounded-sm px-2 py-2 text-start active:bg-surface"
 		>
 			<span className="flex min-w-0 items-baseline gap-2">
-				<span className="min-w-0 flex-1 truncate text-body font-medium text-ink">
+				<span dir="auto" className="min-w-0 flex-1 truncate text-body font-medium text-ink">
 					{project.name}
 				</span>
 				{showStatus ? (
@@ -289,7 +289,7 @@ function ProjectRow({
 				    construction for a record with none, and painting every fresh
 				    project's "no progress" as a warning would spend the loudest ink
 				    on the honest default. */}
-				<span
+				<span dir="auto"
 					className={cn(
 						"min-w-0 truncate",
 						project.progress_updated_at !== null && project.progress_stale
@@ -1053,7 +1053,7 @@ export function ProjectsSheet({
 												>
 													{milestone.completed_at !== null ? "☑" : "☐"}
 												</span>
-												<span
+												<span dir="auto"
 													className={cn(
 														"min-w-0 flex-1 truncate text-body-sm",
 														milestone.completed_at !== null ? "text-ink-dim" : "text-ink",
@@ -1120,7 +1120,7 @@ export function ProjectsSheet({
 												key={row.session_id}
 												className="flex min-h-11 items-center gap-2 px-1"
 											>
-												<span className="min-w-0 flex-1 truncate text-body-sm text-ink">
+												<span dir="auto" className="min-w-0 flex-1 truncate text-body-sm text-ink">
 													{row.title || row.session_id}
 												</span>
 												<span className={cn("shrink-0 text-meta", state.ink)}>
@@ -1609,7 +1609,7 @@ export function ProjectsSheet({
 									className="flex min-h-11 w-full flex-col items-start gap-0.5 rounded-sm px-1 py-1 text-start active:bg-surface disabled:opacity-50"
 								>
 									<span className="flex w-full min-w-0 items-baseline gap-2">
-										<span className="min-w-0 flex-1 truncate text-body-sm text-ink">
+										<span dir="auto" className="min-w-0 flex-1 truncate text-body-sm text-ink">
 											{session.conversation_name || session.session_id}
 										</span>
 										<span className="shrink-0 font-mono text-mono-sm text-ink-dim">
@@ -1620,7 +1620,7 @@ export function ProjectsSheet({
 									    model and working directory, and a picker offering only a name
 									    and a hex id leaves the reader guessing what they are about to
 									    attach (design round 6, D4). */}
-									<span className="w-full truncate text-meta text-ink-dim">
+									<span dir="auto" className="w-full truncate text-meta text-ink-dim">
 										{[session.section, session.model_label, session.cwd]
 											.filter(Boolean)
 											.join(" · ")}

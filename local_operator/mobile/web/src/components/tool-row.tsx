@@ -464,7 +464,7 @@ export function ToolRow({
 				   (it names the op and who), so at 320px the chip and the name
 				   share the squeeze instead of crushing the summary to one glyph
 				   ("bridge o." measured before this floor). */}
-				<span
+				<span dir="auto"
 					className={cn(
 						"min-w-0 flex-1 truncate text-body-sm text-ink-dim",
 						bridge && outcome && "min-w-[4.5rem]",

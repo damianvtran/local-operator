@@ -302,6 +302,7 @@ function Header({
 					    reachable is truthful; a name painted in full that pushes the phone
 					    sideways is not. */}
 					<span
+						dir="auto"
 						className="block truncate text-heading font-semibold"
 						title={projection.conversation_name || undefined}
 					>{projection.conversation_name || "untitled"}</span>

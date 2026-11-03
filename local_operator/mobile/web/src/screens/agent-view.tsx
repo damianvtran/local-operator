@@ -316,8 +316,8 @@ function AgentHeader({
 				<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 			</button>
 			<div className="min-w-0 flex-1">
-				<p className="truncate text-body-sm font-medium">{shown?.label || "Agent"}</p>
-				<p className="truncate text-meta text-ink-dim">
+				<p dir="auto" className="truncate text-body-sm font-medium">{shown?.label || "Agent"}</p>
+				<p dir="auto" className="truncate text-meta text-ink-dim">
 					{shown
 						? `${shown.agent}${shown.effort ? ` · ${formatEffort(shown.effort)}` : ""}`
 						: fallbackSubtitle}

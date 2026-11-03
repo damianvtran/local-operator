@@ -79,7 +79,7 @@ export function WorkingLine({
 			>
 				{SPINNER[frame % SPINNER.length]}
 			</span>
-			<span className="lo-shimmer min-w-0 flex-1 truncate text-ink-muted">
+			<span dir="auto" className="lo-shimmer min-w-0 flex-1 truncate text-ink-muted">
 				{activity}
 			</span>
 			{/* The clock's SLOT is reserved, not measured: ``w-[6ch]`` is the width of

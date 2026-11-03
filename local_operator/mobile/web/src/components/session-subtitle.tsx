@@ -47,6 +47,6 @@ export function SessionSubtitle({ projection, connected }: { projection: Session
 	return <>
 		{/* No dot of its own: the header's status control draws the ONE dot
 		    beside this line (the link-down mark used to live here). */}
-		<span className="block truncate text-meta text-ink-dim">{label}</span>
+		<span dir="auto" className="block truncate text-meta text-ink-dim">{label}</span>
 	</>;
 }

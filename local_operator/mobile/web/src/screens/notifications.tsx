@@ -328,7 +328,7 @@ export function NotificationsScreen() {
 			<header className="flex h-[calc(52px+env(safe-area-inset-top))] shrink-0 items-center gap-1 px-1 pt-[env(safe-area-inset-top)]">
 				<button type="button" onClick={() => navigateUp("/")} aria-label={messageRuntime.t("relay.notifications.back")}
 					className="flex size-11 shrink-0 items-center justify-center rounded-md text-ink-muted active:bg-surface">‹</button>
-				<h1 className="min-w-0 flex-1 truncate text-heading font-semibold">{selecting
+				<h1 dir="auto" className="min-w-0 flex-1 truncate text-heading font-semibold">{selecting
 					? messageRuntime.t("relay.notifications.select.count", { count: selected.size })
 					: messageRuntime.t("relay.notifications.title")}</h1>
 				{selecting ? <Button variant="ghost" onClick={endSelect}>{messageRuntime.t("relay.notifications.select.cancel")}</Button>
@@ -401,7 +401,7 @@ export function NotificationsScreen() {
 			</main>
 			{selecting ? <div className="absolute inset-x-0 bottom-0 z-20 flex items-center gap-2 bg-surface px-3 pt-2 pb-[max(env(safe-area-inset-bottom),0.5rem)] shadow-overlay">
 				<span className="flex min-w-0 flex-1 flex-col">
-					<span className="truncate text-body-sm text-ink-muted">{messageRuntime.t("relay.notifications.select.count", { count: selected.size })}</span>
+					<span dir="auto" className="truncate text-body-sm text-ink-muted">{messageRuntime.t("relay.notifications.select.count", { count: selected.size })}</span>
 					{selectedQuestions > 0 ? <span className="text-meta text-ink-dim">{messageRuntime.t("relay.notifications.receipt.live_ask", { count: selectedQuestions })}</span> : null}
 				</span>
 				<Button disabled={selectedRows.length === 0 || writing || writesPaused}

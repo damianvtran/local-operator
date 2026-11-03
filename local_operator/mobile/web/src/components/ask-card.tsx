@@ -1112,7 +1112,7 @@ export function AskCard({
 							    open, the body states it in full, and a truncated copy one line
 							    above it said the same thing twice. */}
 							{open ? null : (
-								<span className="min-w-0 truncate text-body-sm text-ink-muted">
+								<span dir="auto" className="min-w-0 truncate text-body-sm text-ink-muted">
 									{questions[0]?.question ?? ""}
 								</span>
 							)}

@@ -154,3 +154,14 @@ describe("agent picture on list rows", () => {
 		);
 	});
 });
+
+// happy-dom checks markup only; the browser fixture proves actual ellipsis pixels.
+
+it("keeps a mixed-direction conversation title's own truncation end in RTL chrome", () => {
+ sessionList = [summary({ conversation_name: "Identifying prefix — لمبی گفتگو" })];
+ const { container } = render(<div dir="rtl"><SessionListScreen /></div>);
+ const title = screen.getByText("Identifying prefix — لمبی گفتگو");
+ expect(title.getAttribute("dir")).toBe("auto");
+ expect(title.className).toContain("truncate");
+ expect(title.closest('[dir="rtl"]')).toBe(container.firstElementChild);
+});

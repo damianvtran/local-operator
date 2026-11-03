@@ -313,7 +313,7 @@ export function SessionTagsSheet({
 												onChange={() => toggle(row.id)}
 												className="size-4 shrink-0 accent-[var(--color-accent)]"
 											/>
-											<span className="min-w-0 truncate text-body">
+											<span dir="auto" className="min-w-0 truncate text-body">
 												{row.name}
 											</span>
 											{row.missing ? (

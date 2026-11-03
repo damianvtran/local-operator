@@ -158,3 +158,14 @@ describe("agent picture in the session header", () => {
 		expect(failed).toBe(plain.querySelector("header")!.innerHTML);
 	});
 });
+
+// happy-dom checks markup only; the browser fixture proves actual ellipsis pixels.
+
+it("isolates the header title's truncation direction, not its controls", () => {
+ slot = { projection: projection({ conversation_name: "Identifying prefix — لمبی گفتگو" }), connected: true };
+ render(<div dir="rtl"><SessionScreen sessionId="s1" /></div>);
+ const title = screen.getByText("Identifying prefix — لمبی گفتگو");
+ expect(title.getAttribute("dir")).toBe("auto");
+ expect(title.className).toContain("truncate");
+ expect(title.closest("button")?.hasAttribute("dir")).toBe(false);
+});

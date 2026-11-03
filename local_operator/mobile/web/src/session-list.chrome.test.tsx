@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { createHash } from "node:crypto";
 import brandIcon from "./assets/brand-icon.png?inline";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { THEMES } from "./theme";
 import { SessionListScreen } from "./screens/session-list";
 
 vi.mock("./store", async (importOriginal) => {
@@ -96,4 +97,16 @@ describe("conversation chrome", () => {
 		fireEvent.click(screen.getByRole("button", { name: /search/i }));
 		expect(view.container.querySelector<HTMLInputElement>("header input")?.value).toBe("");
 	});
+});
+
+// happy-dom checks markup only; the browser fixture proves actual ellipsis pixels.
+
+it("gives English-fallback Appearance descriptions their own truncation direction", () => {
+ render(<div dir="rtl"><SessionListScreen /></div>);
+ fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+ fireEvent.click(screen.getByRole("button", { name: /Appearance/ }));
+ const description = screen.getByText(THEMES[0].description);
+ expect(description.getAttribute("dir")).toBe("auto");
+ expect(description.className).toContain("truncate");
+ expect(description.closest("button")?.hasAttribute("dir")).toBe(false);
 });

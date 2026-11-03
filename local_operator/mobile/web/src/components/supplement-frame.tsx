@@ -502,7 +502,7 @@ export function SupplementFrame({
 			 * per component, `text-meta`/`ink-muted`, single line with the full
 			 * text in the tooltip. The document prints none (§2.8, D13).
 			 */}
-			<span
+			<span dir="auto"
 				className="block truncate text-meta text-ink-muted"
 				title={sourceLine(component.source)}
 				data-supplement-source=""

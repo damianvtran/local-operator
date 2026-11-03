@@ -299,7 +299,7 @@ export function LibraryAssetScreen({ assetId }: { assetId: string }) {
 				>
 					<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 				</button>
-				<h1 className="min-w-0 flex-1 truncate px-1 text-heading text-ink">{asset.name}</h1>
+				<h1 dir="auto" className="min-w-0 flex-1 truncate px-1 text-heading text-ink">{asset.name}</h1>
 				<button
 					type="button"
 					onClick={() => setEditOpen(true)}
@@ -336,7 +336,7 @@ export function LibraryAssetScreen({ assetId }: { assetId: string }) {
 				) : null}
 
 				{asset.ref.display_path ? (
-					<p className="truncate font-mono text-mono-sm text-ink-dim">{asset.ref.display_path}</p>
+					<p data-ltr className="truncate font-mono text-mono-sm text-ink-dim">{asset.ref.display_path}</p>
 				) : null}
 
 				{asset.tags.length ? (
@@ -362,7 +362,7 @@ export function LibraryAssetScreen({ assetId }: { assetId: string }) {
 								onClick={() => navigate(`/s/${encodeURIComponent(occurrence.session_id)}`)}
 								className="flex min-h-11 items-center justify-between gap-2 rounded-sm border border-hairline bg-surface px-2 text-start active:bg-elevated"
 							>
-								<span dir={occurrence.session_title ? undefined : "ltr"} className="min-w-0 flex-1 truncate text-body-sm text-ink">
+								<span dir={occurrence.session_title ? "auto" : "ltr"} className="min-w-0 flex-1 truncate text-body-sm text-ink">
 									{occurrence.session_title || occurrence.session_id}
 								</span>
 								<span className="text-meta text-ink-dim">{occurrence.origin}</span>
@@ -378,7 +378,7 @@ export function LibraryAssetScreen({ assetId }: { assetId: string }) {
 						className="flex min-h-11 items-center gap-2 rounded-sm border border-info-border bg-info-wash px-2 text-start text-body-sm text-info active:bg-elevated"
 					>
 						<span aria-hidden className="lo-directional">↳</span>
-						<span className="min-w-0 flex-1 truncate">
+						<span dir="auto" className="min-w-0 flex-1 truncate">
 							chat: {asset.chat.title || asset.chat.session_id}
 						</span>
 					</button>

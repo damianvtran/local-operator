@@ -54,7 +54,7 @@ export function SessionTagLine({
 							</span>
 						</>
 					) : null}
-					<span className="truncate">{tag.name}</span>
+					<span dir="auto" className="truncate">{tag.name}</span>
 				</span>
 			))}
 			{overflow > 0 ? (
