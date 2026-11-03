@@ -226,6 +226,12 @@ COPY_SET_NAMES: tuple[str, ...] = (
     # guard exists for, arriving through the guard (review round 2, MAJOR 1). A
     # judged goal is work in progress that the user cannot get back, so it travels.
     "goal.json",
+    # THE PER-SESSION RULES RECORD (``resume.RULES_SIDECAR_NAME``). Listed even
+    # while the feature is behind its flag: ``assert_complete`` refuses a deleting
+    # move over any unlisted name, so a session that once had a rule would become
+    # unmovable — and the rules are the operator's standing constraints on this
+    # conversation, which a move must not silently drop.
+    "rules.json",
     # A FORK'S UNCONSUMED OPENING MESSAGE (``fork.BOOT_PROMPT_NAME``): ``/fork <msg>``
     # parks the message here and the fork's first boot consumes it. If the fork is
     # moved before it was ever opened, leaving this behind would silently discard the

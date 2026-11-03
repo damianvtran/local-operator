@@ -432,6 +432,11 @@ ATTACHMENT_SIDECAR_NAME = "attachment.json"
 #: downgrade round trip.
 GOAL_SIDECAR_NAME = "goal.json"
 
+#: The per-session rules record (``session/rules.py``), a sibling of
+#: ``goal.json`` for the same downgrade-survival reason. Declared here beside the
+#: other sidecar names so the fork and sync copy sets name it from one place.
+RULES_SIDECAR_NAME = "rules.json"
+
 #: The two openings only the subagent runner can produce, used ONLY by the
 #: one-time backfill for directories that predate the marker.
 #:

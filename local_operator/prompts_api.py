@@ -926,6 +926,7 @@ def build_system_blocks(
     deferred_tools: Collection[str] = (),
     open_asks: str = "",
     has_notify: bool | None = None,
+    session_rules: str | None = None,
 ) -> list[str]:
     """Build the system prompt blocks; see the module docstring.
 
@@ -1029,6 +1030,13 @@ def build_system_blocks(
     what refuses to turn the first into a removal the model would read as "your
     asks are gone" (QA round 1, Q2). Callers with a queue pass its render;
     callers without one pass nothing.
+
+    ``session_rules`` is the ALREADY-RENDERED ``<rules>`` section
+    (``session.rules.render_rules_section``), and unlike ``open_asks`` its
+    ``None`` and ``""`` differ on purpose. ``None`` is "the rules feature is
+    off" and renders exactly the tree before it existed. ``""`` is "on, with no
+    rules": block 0 still gains the precedence sentence, so the first rule added
+    mid-session moves only the tail and never the cached head.
     """
     # THREE states, not two, and conflating the last two ships a false claim.
     # Membership, not visibility: a hidden tool is still callable, and telling
@@ -1109,6 +1117,14 @@ def build_system_blocks(
         "and existing approval requirements still apply. Older snapshots "
         "describe the state at that point in the conversation."
     )
+    if session_rules is not None:
+        # Flag on, WHATEVER the rule count: block 0 is the cached head, and a
+        # sentence that appeared with the first rule would start a new prefix
+        # epoch mid-session (cold cache). The rules themselves ride the tail.
+        instructions += (
+            " A <rules> section is the operator's standing instruction for this "
+            "session and is binding, unlike other host context."
+        )
     if repo_guidance.strip():
         # Same head-block, read-once discipline as user_instructions: the
         # files are part of the project's standing state, edited between
@@ -1174,6 +1190,11 @@ def build_system_blocks(
             f"{tail}\n\n<goal>\nThe user's standing objective for this "
             f"session:\n{goal}\n</goal>"
         )
+    if session_rules:
+        # Directly after the goal: both are standing state the operator set on
+        # this session, and the tail (not block 0) is where a mid-session edit
+        # ships as a [session-state] delta without repricing the cached head.
+        tail = f"{tail}\n\n{session_rules}"
     if team_brief.strip():
         # A /team launch stamps the group's collaboration and project briefs
         # here rather than in the cached head: attaching a team mid-session
@@ -1318,6 +1339,7 @@ _TAIL_SECTION_MARKERS: tuple[tuple[str, str], ...] = (
     ("mcps", "<mcps>"),
     ("recs", "<resource_recommendations>"),
     ("goal", "<goal>"),
+    ("rules", "<rules>"),
     ("team", "<team>"),
     ("agent", "<agent>"),
     ("run", "<configuration-run>"),
@@ -1386,6 +1408,7 @@ STATE_SECTION_HEADINGS: dict[str, str] = {
     "mcps": "MCP catalogue",
     "recs": "Recommendations",
     "goal": "Goal",
+    "rules": "Rules",
     "team": "Team",
     "agent": "Agent",
     "run": "Configuration run",

@@ -3814,6 +3814,40 @@ def _make_system_blocks_provider(
     host_has_browser, host_has_console = host_capability_probes()
     cached_key: tuple[Any, ...] | None = None
     cached_blocks: list[str] = []
+    # Per-session rules (POC, ``session/rules.py``). The flag is read ONCE, here,
+    # because it decides block 0's precedence sentence: a flip read per step
+    # would start a new prefix epoch mid-session. Off means the sidecar is never
+    # touched and ``session_rules`` is never passed, so the render (and the
+    # cache key) are exactly what they were before the feature.
+    from local_operator.resume import RULES_SIDECAR_NAME
+    from local_operator.session.rules import (
+        load_rules,
+        render_rules_section,
+        rules_enabled,
+    )
+
+    rules_dir: Path | None = None
+    if rules_enabled():
+        directory = getattr(transcript, "directory", None)
+        rules_dir = Path(directory) if directory is not None else None
+    rules_stamp: tuple[int, int] | None = None
+    rules_text = ""
+
+    def current_rules(rules_dir: Path) -> str:
+        # Re-read every step, so an operator edit through the dev CLI reaches
+        # the very next request; the (mtime, size) stamp skips the parse when
+        # nothing moved. A missing or unreadable file renders no section.
+        nonlocal rules_stamp, rules_text
+        try:
+            stat = (rules_dir / RULES_SIDECAR_NAME).stat()
+            stamp: tuple[int, int] | None = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            stamp = None
+        if stamp is None:
+            rules_stamp, rules_text = None, ""
+        elif stamp != rules_stamp:
+            rules_stamp, rules_text = stamp, render_rules_section(load_rules(rules_dir))
+        return rules_text
 
     async def provider(model_label: str = "") -> list[str]:
         nonlocal cached_key, cached_blocks
@@ -3899,6 +3933,7 @@ def _make_system_blocks_provider(
         # (unknown must not ship as a removal), because only that layer can see the
         # section the model is already reading (QA round 1, Q2).
         open_asks = goal_state.open_asks() if goal_state is not None else None
+        session_rules = current_rules(rules_dir) if rules_dir is not None else None
         key = (
             knowledge_block,
             date_str,
@@ -3914,6 +3949,7 @@ def _make_system_blocks_provider(
             open_asks or "",
             tuple((tool.name, tool.description) for tool in tools),
             has_notify,
+            session_rules,
         )
         # ``deferred_tools`` is deliberately NOT passed here and NOT part of
         # ``key``: this render is the CACHED head only, and the session
@@ -3947,6 +3983,7 @@ def _make_system_blocks_provider(
             has_notify=has_notify,
             host_has_browser=host_has_browser,
             host_has_console=host_has_console,
+            session_rules=session_rules,
         )
         cached_key = key
         return list(cached_blocks)

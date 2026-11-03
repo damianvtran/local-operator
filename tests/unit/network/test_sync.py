@@ -72,6 +72,7 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
         ATTACHMENT_SIDECAR_NAME,
         GOAL_SIDECAR_NAME,
         ORIGIN_NAME,
+        RULES_SIDECAR_NAME,
         TITLE_SIDECAR_NAME,
     )
     from local_operator.session.channel_spend import (
@@ -192,6 +193,9 @@ def seed(root: Path, session_id: str, *, rows: int = 3) -> Path:
     (directory / GOAL_SIDECAR_NAME).write_text(
         json.dumps({"goal": "ship the move", "status": "active"}), encoding="utf-8"
     )
+    (directory / RULES_SIDECAR_NAME).write_text(
+        json.dumps({"v": 1, "next": 2, "rules": []}), encoding="utf-8"
+    )
     (directory / BOOT_PROMPT_NAME).write_text(
         json.dumps({"version": 1, "text": "start here"}), encoding="utf-8"
     )
@@ -287,6 +291,7 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         ATTACHMENT_SIDECAR_NAME,
         GOAL_SIDECAR_NAME,
         ORIGIN_NAME,
+        RULES_SIDECAR_NAME,
         TITLE_SIDECAR_NAME,
     )
     from local_operator.session.channel_spend import PENDING_SIDECAR_NAME
@@ -342,6 +347,9 @@ def test_the_copy_set_names_match_the_modules_that_own_them() -> None:
         # opening message: both are a session's own content, and both landed in neither
         # list while this branch was open.
         GOAL_SIDECAR_NAME,
+        # The operator's per-session rules: standing constraints on this
+        # conversation, so a move carries them like the goal record.
+        RULES_SIDECAR_NAME,
         BOOT_PROMPT_NAME,
         # The eval kernel's restart marker: a fact about the SESSION, not a
         # liveness claim about the source process, so it travels — the

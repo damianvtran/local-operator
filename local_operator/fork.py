@@ -66,6 +66,7 @@ from local_operator.resume import (
     ATTACHMENT_SIDECAR_NAME,
     GOAL_SIDECAR_NAME,
     ORIGIN_FORK,
+    RULES_SIDECAR_NAME,
     TITLE_SIDECAR_NAME,
     TRANSCRIPT_NAME,
     mark_session_origin,
@@ -147,11 +148,16 @@ FORK_BOUNDARY_INSTRUCTION = (
 #:   the same work, so it inherits the objective, its status and its settled
 #:   history — but NOT the live judge, which is rewritten to a fresh state at the
 #:   fork boundary (see :func:`_rewrite_fork_goal_judge`).
+#: - ``rules.json`` carries the operator's per-session rules
+#:   (``session/rules.py``). A fork is the same conversation continued, so the
+#:   constraints the operator set on it still bind; inert when absent (the copy
+#:   skips names that are not files).
 COPIED_SIDECARS: tuple[str, ...] = (
     TRANSCRIPT_NAME,
     ATTACHMENT_SIDECAR_NAME,
     TITLE_SIDECAR_NAME,
     GOAL_SIDECAR_NAME,
+    RULES_SIDECAR_NAME,
 )
 
 #: Files that exist in a parent directory and must NOT reach the fork. Not read
