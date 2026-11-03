@@ -77,6 +77,7 @@ from local_operator.i18n.frames import config_frame_payload
 from local_operator.i18n.keys import relay_login
 from local_operator.i18n.messages import Msg, render
 from local_operator.i18n.resolve import resolve_language
+from local_operator.macos_disclaim import spawn_disclaimed
 from local_operator.mobile import mesh as mobile_mesh
 from local_operator.mobile import projects as mobile_projects
 from local_operator.mobile import push_devices as mobile_push_devices
@@ -108,7 +109,6 @@ from local_operator.mobile.types import (
     SubagentRow,
 )
 from local_operator.network.types import MeshRefusal
-from local_operator.macos_disclaim import spawn_disclaimed
 from local_operator.session.creation import session_created_at
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import ENGAGED_ENV, reported_subagent_count

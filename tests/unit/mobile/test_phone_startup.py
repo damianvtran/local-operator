@@ -314,9 +314,8 @@ async def test_a_daemon_that_inherited_a_warm_claim_does_not_pass_it_on(
     the session runtime's exec-time environment, readable by ``ps -E``.
     """
     from local_operator.agent_shell import DAEMON_BEARER_ENVS
-    from local_operator.session.runtime.types import ENGAGED_ENV
-
     from local_operator.mobile import daemon as daemon_mod
+    from local_operator.session.runtime.types import ENGAGED_ENV
 
     inner = daemon_mod.spawn_disclaimed
     envs: list[dict[str, str]] = []
@@ -426,8 +425,7 @@ async def test_a_start_that_times_out_still_reaps_its_child(tmp_path, monkeypatc
 
     def wedged(argv, **kwargs):
         script = (
-            "import os, time\n"
-            f"while not os.path.exists({str(release)!r}): time.sleep(0.02)\n"
+            "import os, time\n" f"while not os.path.exists({str(release)!r}): time.sleep(0.02)\n"
         )
         child = actual_spawn([sys.executable, "-c", script], **{**kwargs, "executable": None})
         children.append(child)
