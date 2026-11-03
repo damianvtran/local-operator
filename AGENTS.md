@@ -2160,6 +2160,17 @@ re-dispatching the stage workflow is the practical way to read the queue state
 deliberately does not translate error reasons into behaviour — it only prints
 the store's body — so treat the rejection as an observation, not a contract.
 
+Prefer the read-only poller to that: `chrome-web-store-status.yml` runs hourly
+on main (or `gh workflow run chrome-web-store-status.yml -R
+damianvtran/local-operator --ref main`), does one `GET …:fetchStatus` with a
+`chromewebstore.readonly` token, and uploads the `chrome-web-store-status`
+artifact — `chrome-web-store-status.json` with `submitted.state` (`PENDING_REVIEW`, `STAGED`,
+`REJECTED`, …), the version, `warned`/`taken_down`, and
+`expected_version_staged_at_full` against main's manifest version. Watch that,
+not the public listing: a `STAGED_PUBLISH` approval is private until promoted.
+It never uploads, publishes or cancels; a rejection's reason is only in the
+dashboard and the review email, since `fetchStatus` does not carry one.
+
 Google publishes no SLA for review. Extensions using the `debugger` permission
 with broad host access routinely draw extended manual review (the 0.1.8 review
 took ~4.5 days). **Do not cancel a pending review to force a new submission** —
