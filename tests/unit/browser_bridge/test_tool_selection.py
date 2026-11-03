@@ -124,6 +124,9 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
             # Keyboard input is owned-page CDP input on the desktop host;
             # cmux cannot honor this narrow key contract.
             "press",
+            # Trusted pointer movement is owned-page CDP input on the desktop host.
+            "hover",
+            "select",
             "scroll",
             "logs",
             "tabs",
@@ -2468,3 +2471,64 @@ async def test_read_actions_degrade_on_cmux(monkeypatch) -> None:
         )
         assert "not supported on the cmux backend" in result.text, action
         assert "desktop app" in result.text and "browser extension" in result.text
+
+
+# --- Host-named site approvals (operator report, 2026-11-02) ------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backend", "named", "other"),
+    [("extension", "the browser extension", "'ui'"), ("ui", "desktop app", "'extension'")],
+)
+async def test_request_access_names_the_host_it_was_answered_on(
+    monkeypatch, backend: str, named: str, other: str
+) -> None:
+    """An approval is per host, so "is allowed" must say WHICH host.
+
+    The reported trap: `request_access` answered "is allowed" for the DESKTOP
+    APP's grant, the agent then opened with backend='extension', and that open
+    failed with "not allowed yet". The answer now names its host and says how to
+    ask about the other one, and `backend` routes the request itself.
+    """
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: False)
+    monkeypatch.setattr(builtin, "bridge_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "ui_browser_available", lambda: True, raising=False)
+    seen: list[str] = []
+
+    async def fake_call(tool_call_id, action, params, *, surface="", client=None):
+        seen.append(builtin._host_of_client(client))
+        return {"origin": "https://example.com", "state": "allowed"}, None
+
+    async def reachable(classified=None) -> bool:
+        return True
+
+    monkeypatch.setattr(builtin, "_bridge_call", fake_call)
+    monkeypatch.setattr(builtin, "ui_browser_reachable", reachable, raising=False)
+    monkeypatch.setattr(builtin, "bridge_browser_reachable", reachable, raising=False)
+    result = await builtin.execute_browser(
+        "t",
+        {"action": "request_access", "url": "https://example.com", "backend": backend},
+        None,
+        None,
+        ToolContext(browser=BrowserSurface()),
+    )
+    assert not result.is_error, result.text
+    expected_prefix = builtin.HOST_UI_PREFIX if backend == "ui" else builtin.HOST_BRIDGE_PREFIX
+    assert seen == [expected_prefix], seen
+    assert named in result.text, result.text
+    assert f"backend={other}" in result.text, result.text
+
+
+def test_backend_on_an_access_action_must_name_a_host_with_approvals() -> None:
+    for action in ("request_access", "await_access", "cancel_access"):
+        ok = builtin._validate_browser_args(
+            action,
+            builtin.BrowserParams(action=action, url="https://example.com", backend="extension"),
+        )
+        assert ok == "", (action, ok)
+        refused = builtin._validate_browser_args(
+            action,
+            builtin.BrowserParams(action=action, url="https://example.com", backend="cmux"),
+        )
+        assert "cmux has no site approvals" in refused, (action, refused)

@@ -1264,10 +1264,11 @@ async def test_a_quiet_completion_ends_the_turn_without_another_call() -> None:
 
 @pytest.mark.asyncio
 async def test_a_quiet_result_early_in_a_batch_does_not_end_the_turn() -> None:
-    """REVIEW R8: the quiet end reads the batch's LAST result only. A batch
-    that asked for ``no_reply`` and then something else must run to completion
-    and feed EVERY result back — a quiet call short-circuiting its siblings
-    would drop their results on the floor and continue the model blind."""
+    """Early quiet requests refuse, without skipping ordinary siblings.
+
+    A successful marker could otherwise claim completion before later work.
+    The refusal and every sibling result must still reach the provider.
+    """
     executed: list[str] = []
     echo = echo_tool(executed)
     stream = ScriptedStream(
@@ -1292,9 +1293,9 @@ async def test_a_quiet_result_early_in_a_batch_does_not_end_the_turn() -> None:
     second = stream.requests[1].messages
     tool_rows = [m for m in second if isinstance(m, Message) and m.role == "tool"]
     assert len(tool_rows) == 2, "the whole batch's results are fed back"
-    assert any(
+    assert not any(
         ((m.provider_payload or {}).get("details") or {}).get(QUIET_TURN_KEY) for m in tool_rows
-    ), "the quiet result is among them"
+    ), "an early refusal must not claim a successful quiet exchange"
     assert any("ok:" in (m.text or "") for m in tool_rows), "so is the sibling's"
 
 

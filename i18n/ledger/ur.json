@@ -2519,6 +2519,82 @@
     },
     {
       "locale": "ur",
+      "namespace": "relay.shell",
+      "source_sha256": "388f23d29d082106ccb706ed041f48238eca32a6cfaf6cfa05517ee8dc773a01",
+      "translator": {
+        "agent": "coder subagent e8f92ac9fa94 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 92826ef0767b (lopdev team, independent i18n auditor)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "relay.shell 64 keys read in full at this en hash. Fixes: countdown_days, countdown_hours and countdown_hour rendered the hour noun as a bare number with the plural گھنٹے, so 1 hour read '1 گھنٹے' — upgraded to the lossless number→plural form {hours, plural, one {# گھنٹہ} other {# گھنٹے}} (scripts/i18n/check.py arguments_match WHY note; matches relay.asks.duration.hours). دن/منٹ/سیکنڈ are invariant. Disposition (not changed): this namespace says ریفریش while tui.usage says تازہ for the same feature — ریفریش is an established loanword and consistent within relay.shell; reset is بحالی matching the namespace's existing relay.shell.usage.reset. آپ-imperative and ۔/، punctuation verified; Opus/Sonnet/Fable/Zread kept Latin. Rendered RTL/bidi, Nastaliq shaping and narrow-width layout not exercised; no rendered sign-off claimed. 0 blocker / 0 major unresolved."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.shell",
+      "source_sha256": "412c31bd9071bc06a886dd3144a350afa4c6cc0c89dedac696f7f38d5c30fc22",
+      "translator": {
+        "agent": "coder subagent 763f25259988 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 2926722c72a8 (lopdev team, independent i18n auditor, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). Fix: accounts_order spelled 'سائن اِن' (zer); relay.shell reauth/reauth_short and relay.login use 'سائن ان', so aligned. Round-1 fix intact: countdown_hour/hours/days keep the one/other hour plural (گھنٹہ/گھنٹے). Urdu comma ، in row_a11y_bare_reset; throttled avoids 'حد'. 0 blocker / 0 major unresolved. No rendered RTL, Nastaliq or native-speaker pass claimed."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.browser",
+      "source_sha256": "5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24",
+      "translator": {
+        "agent": "translator (job 5d6bbe1050a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 54930f3283db, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "CLI-first browser pairing delta (14 keys rewritten/added, open_popup removed) at source_sha256 5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24; target catalogue_sha256 4e9abf18a0cd1f603a8de9d4f804b93b6cee43cd1900f8a8ddfb2beca15b8fdb. Independent audit PASS, 0B/0M/3m/1n; dispositions: T1-T4 applied verbatim (T1/T2: polite دیں per style guide). Zero unresolved blocker/major. Translator and auditor are separate sessions sharing the Claude model family (disclosed). Not verified: native-speaker review. Evidence: i18n/audits/evidence/ur/cli.browser/pair1/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.browser",
+      "source_sha256": "af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019",
+      "translator": {
+        "agent": "translator (job f364d94792a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 68b1b726839c, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 f1ea69b3906c503cc1900aae698f3a9c715b68a4f28deaa55940fd7d8b0bc8e7. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/ur/cli.browser/pair2/record.json"
+    },
+    {
+      "locale": "ur",
       "namespace": "cli.team_bridge_alert",
       "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
       "translator": {

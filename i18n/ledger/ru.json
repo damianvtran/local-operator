@@ -2737,6 +2737,82 @@
     },
     {
       "locale": "ru",
+      "namespace": "relay.shell",
+      "source_sha256": "388f23d29d082106ccb706ed041f48238eca32a6cfaf6cfa05517ee8dc773a01",
+      "translator": {
+        "agent": "coder subagent e8f92ac9fa94 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 92826ef0767b (lopdev team, independent i18n auditor)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "relay.shell 64 keys read in full at this en hash. No defects: glossary использование, вы-imperative, throttled plural one/few/many/other in the accusative after через (секунду/секунды/секунд), countdown abbreviations д/ч/мин. Аккаунт vs учётная запись both occur in the catalogues; kept аккаунт (short card label). 0 blocker / 0 major. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.shell",
+      "source_sha256": "412c31bd9071bc06a886dd3144a350afa4c6cc0c89dedac696f7f38d5c30fc22",
+      "translator": {
+        "agent": "coder subagent 763f25259988 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 2926722c72a8 (lopdev team, independent i18n auditor, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). throttled drops 'лимит', keeps one/few/many/other accusative after через; аккаунт consistent with account/reauth; 'Обновлено: {when}' / 'Сброс: {when}' fit both time-only and date+time. No fixes needed. 0 blocker / 0 major. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.browser",
+      "source_sha256": "5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24",
+      "translator": {
+        "agent": "translator (job 4945a527ff76, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 53be3a51c939, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "CLI-first browser pairing delta (14 keys rewritten/added, open_popup removed) at source_sha256 5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24; target catalogue_sha256 f34a9abb0b6c3895e15576f192c244f5b32b467a04eacb5d80d2fffc1ccf66fb. Independent audit PASS, 0B/0M/1m/2n; dispositions: T1-T3 applied verbatim. Zero unresolved blocker/major. Translator and auditor are separate sessions sharing the Claude model family (disclosed). Not verified: native-speaker review. Evidence: i18n/audits/evidence/ru/cli.browser/pair1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.browser",
+      "source_sha256": "af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019",
+      "translator": {
+        "agent": "translator (job f364d94792a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 68b1b726839c, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 16411468b187915515f4bd9eb520f83a60b7341ce20da8295f938fe3e0e279ee. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/ru/cli.browser/pair2/record.json"
+    },
+    {
+      "locale": "ru",
       "namespace": "cli.team_bridge_alert",
       "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
       "translator": {

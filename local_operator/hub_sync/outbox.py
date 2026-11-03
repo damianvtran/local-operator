@@ -653,9 +653,36 @@ class AsyncDispatcher:
         """
         remaining = budget.require(stage)
         client = self._ensure()
+        # WHY the commit read timeout is the budget, not ``read_timeout``: a
+        # commit legitimately waits on SERVER-SIDE moderation (observed 19s in
+        # production against a 15s socket read limit). The write has usually
+        # ALREADY landed by then, so cutting the read early turned a successful
+        # publication into a false failure. The attempt budget is the one
+        # authority on how long a commit may run (and its expiry is already the
+        # uncertain, reconcilable outcome), so the transport belt must never be
+        # shorter than it. Connect stays short: a connect that has not completed
+        # proves the request was never sent. Preview keeps the short read limit:
+        # nothing is written by a preview, so a timeout there is a plain retry.
+        per_request: Any = (
+            httpx.Timeout(
+                connect=self.connect_timeout,
+                read=remaining,
+                write=self.read_timeout,
+                pool=self.connect_timeout,
+            )
+            if stage == "commit"
+            else httpx.USE_CLIENT_DEFAULT
+        )
         try:
             return await asyncio.wait_for(
-                client.request(method, url, json=json_body, headers=headers, params=params),
+                client.request(
+                    method,
+                    url,
+                    json=json_body,
+                    headers=headers,
+                    params=params,
+                    timeout=per_request,
+                ),
                 timeout=remaining,
             )
         except asyncio.TimeoutError:

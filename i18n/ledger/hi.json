@@ -2719,6 +2719,82 @@
     },
     {
       "locale": "hi",
+      "namespace": "relay.shell",
+      "source_sha256": "388f23d29d082106ccb706ed041f48238eca32a6cfaf6cfa05517ee8dc773a01",
+      "translator": {
+        "agent": "coder subagent e8f92ac9fa94 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 92826ef0767b (lopdev team, independent i18n auditor)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "relay.shell 64 keys read in full at this en hash. No defects: glossary उपयोग/मॉडल, आप-imperative, ।-punctuation, throttled plural one/other with # (सेकंड invariant), countdown abbreviations घं/मि are uninflected abbreviations so no plural upgrade needed. Disposition: relay.shell keeps प्रोवाइडर as elsewhere in Hindi relay copy. 0 blocker / 0 major. No rendered pass claimed."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.shell",
+      "source_sha256": "412c31bd9071bc06a886dd3144a350afa4c6cc0c89dedac696f7f38d5c30fc22",
+      "translator": {
+        "agent": "coder subagent 763f25259988 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 2926722c72a8 (lopdev team, independent i18n auditor, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). Fix: accounts_order used the heavy 'क्रमांकित किया गया है' passive, against the hi guide's no-Sanskritisation rule; now 'खातों के नंबर … क्रम में दिए गए हैं'. throttled avoids 'सीमा'; one/other plural kept; nukta in रीफ़्रेश. 0 blocker / 0 major unresolved. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.browser",
+      "source_sha256": "5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24",
+      "translator": {
+        "agent": "translator (job bbc13889029a, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 8d1048426a50, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "CLI-first browser pairing delta (14 keys rewritten/added, open_popup removed) at source_sha256 5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24; target catalogue_sha256 255a236a620ab56fe81a3b544adc5097525351d27ecefe126ab9aac28f51b7f8. Independent audit PASS, 0B/0M/0m/0n; dispositions: none needed. Zero unresolved blocker/major. Translator and auditor are separate sessions sharing the Claude model family (disclosed). Not verified: native-speaker review. Evidence: i18n/audits/evidence/hi/cli.browser/pair1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.browser",
+      "source_sha256": "af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019",
+      "translator": {
+        "agent": "translator (job f364d94792a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 68b1b726839c, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 cde43c6578a8d972e6ceaa2bb63c5b794290a224ae60c63f12833a10789339ee. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/hi/cli.browser/pair2/record.json"
+    },
+    {
+      "locale": "hi",
       "namespace": "cli.team_bridge_alert",
       "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
       "translator": {

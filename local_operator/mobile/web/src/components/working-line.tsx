@@ -15,6 +15,7 @@
  * clock says how long, and neither is a spinner beside a state line for the
  * same thing (which §7 forbids).
  */
+import { contentDir } from "../lib/content-direction";
 import { useEffect, useState } from "react";
 import { formatElapsed } from "../lib/format";
 
@@ -79,7 +80,7 @@ export function WorkingLine({
 			>
 				{SPINNER[frame % SPINNER.length]}
 			</span>
-			<span className="lo-shimmer min-w-0 flex-1 truncate text-ink-muted">
+			<span dir={contentDir(activity)} className="lo-shimmer min-w-0 flex-1 truncate text-ink-muted">
 				{activity}
 			</span>
 			{/* The clock's SLOT is reserved, not measured: ``w-[6ch]`` is the width of

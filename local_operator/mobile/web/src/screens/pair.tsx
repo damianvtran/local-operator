@@ -132,7 +132,7 @@ export function PairScreen() {
 	}
 
 	return (
-		<div className="mx-auto flex h-dvh w-full max-w-[520px] flex-col gap-3 overflow-y-auto px-3 pb-6 pt-[max(env(safe-area-inset-top),0.5rem)]">
+		<div className="mx-auto flex h-dvh w-full max-w-[520px] flex-col gap-3 overflow-y-auto px-3 pb-[max(env(safe-area-inset-bottom),1.5rem)] pt-[max(env(safe-area-inset-top),0.5rem)]">
 			<header className="flex items-center gap-2">
 				<button
 					type="button"

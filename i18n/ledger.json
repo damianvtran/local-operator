@@ -2643,6 +2643,82 @@
     },
     {
       "locale": "es",
+      "namespace": "relay.shell",
+      "source_sha256": "388f23d29d082106ccb706ed041f48238eca32a6cfaf6cfa05517ee8dc773a01",
+      "translator": {
+        "agent": "coder subagent e8f92ac9fa94 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 92826ef0767b (lopdev team, independent i18n auditor)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "relay.shell 64 keys read in full at this en hash (4 changed + 30 new usage keys). No defects: glossary uso, tú register (Has alcanzado / Vuelve a iniciar sesión), throttled plural one/many/other with #, countdown abbreviations d/h/min, ordenador consistent with the catalogue. 0 blocker / 0 major. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.shell",
+      "source_sha256": "412c31bd9071bc06a886dd3144a350afa4c6cc0c89dedac696f7f38d5c30fc22",
+      "translator": {
+        "agent": "coder subagent 763f25259988 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 2926722c72a8 (lopdev team, independent i18n auditor, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). Fix: accounts_order said the accounts themselves 'se iniciaron' (were started); now 'se inició sesión con ellas', matching reauth's 'iniciar sesión'. tú register, ordenador, plural one/many/other kept; throttled avoids 'límite'. 0 blocker / 0 major unresolved. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.browser",
+      "source_sha256": "5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24",
+      "translator": {
+        "agent": "translator (job 7d8f653a8e01, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job e2309841534b, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "CLI-first browser pairing delta (14 keys rewritten/added, open_popup removed) at source_sha256 5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24; target catalogue_sha256 6f32b209acfc15e169147bca6c6c75e0badbfcde5835143f97bbba9a3e6b4333. Independent audit PASS, 0B/0M/0m/2n; dispositions: T1-T2 applied verbatim. Zero unresolved blocker/major. Translator and auditor are separate sessions sharing the Claude model family (disclosed). Not verified: native-speaker review. Evidence: i18n/audits/evidence/es/cli.browser/pair1/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.browser",
+      "source_sha256": "af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019",
+      "translator": {
+        "agent": "translator (job f364d94792a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 68b1b726839c, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 3c7f2c58053e260ac34cc8e7758c538ce12f4ee2c3da3b22548aa52449aa4f06. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/es/cli.browser/pair2/record.json"
+    },
+    {
+      "locale": "es",
       "namespace": "cli.team_bridge_alert",
       "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
       "translator": {
@@ -5264,6 +5340,139 @@
       },
       "status": "passed",
       "note": "Dual blind passes: i18n/audits/evidence/fr/wire.errors.session_host/fr31a/record.json; i18n/audits/evidence/fr/wire.errors.session_host/h3222b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.shell",
+      "source_sha256": "388f23d29d082106ccb706ed041f48238eca32a6cfaf6cfa05517ee8dc773a01",
+      "translator": {
+        "agent": "coder subagent e8f92ac9fa94 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 92826ef0767b (lopdev team, independent i18n auditor)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "relay.shell 64 keys read in full at this en hash (4 changed + 30 new usage keys; 30 unchanged keys re-read for context). Fixes: row_a11y and row_a11y_reset used a plain space before ':' — now U+202F per the fr guide. Glossary usage→utilisation, vous-imperative, ’ apostrophe and … ellipsis verified; throttled plural keeps one/many/other with #. 0 blocker / 0 major unresolved. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.shell",
+      "source_sha256": "412c31bd9071bc06a886dd3144a350afa4c6cc0c89dedac696f7f38d5c30fc22",
+      "translator": {
+        "agent": "coder subagent 763f25259988 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 2926722c72a8 (lopdev team, independent i18n auditor, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round 2 re-audit at this en hash: changed updated/reset ({when}, now pre-formatted by the phone) and throttled (cooldown, no 'limite'); new refresh_ready, unlimited_generic, accounts_order, row_a11y_bare, row_a11y_bare_reset. U+202F before ':' kept in updated, reset and both new row_a11y_bare keys; round-1 fix intact. throttled keeps one/many/other with #. No fixes needed. 0 blocker / 0 major. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.browser",
+      "source_sha256": "5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24",
+      "translator": {
+        "agent": "translator (job 0b05118032a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 24a5a2a00bbb, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "CLI-first browser pairing delta (14 keys rewritten/added, open_popup removed) at source_sha256 5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24; target catalogue_sha256 40493323c2bb895d5f9d4f6df7411bd059693d3b3c4acb43a4871e37ee3acc3c. Independent audit PASS, 0B/0M/2m/3n; dispositions: T1-T5 applied verbatim from the auditor's replacement text. Zero unresolved blocker/major. Translator and auditor are separate sessions sharing the Claude model family (disclosed). Not verified: native-speaker review. Evidence: i18n/audits/evidence/fr/cli.browser/pair1/record.json"
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.browser",
+      "source_sha256": "af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019",
+      "translator": {
+        "agent": "translator (job f364d94792a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 68b1b726839c, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 6240c18909d6b7b2d6123f961671a02173101a9c262c1a1a434995cbf712e77b. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/fr/cli.browser/pair2/record.json"
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.aida_cadence",
+      "source_sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic/mechanical audit passed 2/2 keys with zero findings. Translator session a58a48732351; independent auditor session 05c51f9b1aba; both actual openai/gpt-6.1-sol (provider-quota fallback). Byte-identical audit bundle: i18n/audits/evidence/fr/wire.aida_cadence/frca-05c51/{record.json,receipt.json,report.md,audit.log}. Preserves zero daily-local mode, inclusive whole elapsed-hour range 1–168, illustrative 4, and already-owed check-ins. No rendered proof or second independent pass: label 36 cells / help 206 cells; no declared maxCells budget. Narrow settings/editor wrapping remains unverified."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.aida_cadence",
+      "source_sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Unified #3349 D2/Q1 source-fit remediation: independent delta audit passed 2/2 revised keys, zero findings. Translator session a58a48732351 resumed on actual anthropic/claude-sonnet-5-5 per manager delegation; auditor session 05c51f9b1aba actual anthropic/claude-sonnet-5-5, no fallback observed in resumed audit. Immutable bundle i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-05c51/{record.json,receipt.json,report.md,audit.log}; its report repeats the delegation-supplied earlier translator model openai/gpt-6.1-sol, superseded for this delta by manager-confirmed resumed model, not rewritten in historical evidence. French SHA-256 42333772890dd59733f0bcff715c9d608ff1f7c069c8dbb025ee3b2f0548ed63. Label 25 cells <=29; help 133 <=137 external fit targets, not source maxCells metadata. Zero daily-local mode, inclusive whole elapsed-hour range 1–168, illustrative 4 and already-owed meaning preserved. New rendered recapture pending: source fit is not pixel proof. Earlier audit bundle and ledger rows preserved."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.aida_cadence",
+      "source_sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Provenance-only correction superseding the prior delta row serving-model claims, not a new semantic audit or execution. Both translator a58a48732351 and independent auditor 05c51f9b1aba actually served openai/gpt-6.1-sol; earlier Sonnet/no-fallback claims inferred from runtime headers were wrong and are withdrawn. Source: manager/coordinator independently parsed all 21 usage-bearing records in auditor history (GPT only); translator verified own transcript usage/native_replay lines 63/66/68. These verification results are coordinator/translator-reported to this implementer, not independently re-executed here. Immutable auditor-authored correction i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-prov-05c51/{record.json,receipt.json,report.md}; its host-reported-only verification level describes the auditor child, while this wrapper records subsequent coordinator usage verification. No fallback sequence/cause inferred. French hash remains 42333772890dd59733f0bcff715c9d608ff1f7c069c8dbb025ee3b2f0548ed63; EN/context unchanged. Original semantic delta verdict 2/2 passed, zero findings retained; no new findings, audit, native execution or suite reset. Prior rows and both earlier immutable bundles preserved."
     },
     {
       "locale": "fr",
@@ -8024,6 +8233,82 @@
     },
     {
       "locale": "hi",
+      "namespace": "relay.shell",
+      "source_sha256": "388f23d29d082106ccb706ed041f48238eca32a6cfaf6cfa05517ee8dc773a01",
+      "translator": {
+        "agent": "coder subagent e8f92ac9fa94 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 92826ef0767b (lopdev team, independent i18n auditor)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "relay.shell 64 keys read in full at this en hash. No defects: glossary उपयोग/मॉडल, आप-imperative, ।-punctuation, throttled plural one/other with # (सेकंड invariant), countdown abbreviations घं/मि are uninflected abbreviations so no plural upgrade needed. Disposition: relay.shell keeps प्रोवाइडर as elsewhere in Hindi relay copy. 0 blocker / 0 major. No rendered pass claimed."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.shell",
+      "source_sha256": "412c31bd9071bc06a886dd3144a350afa4c6cc0c89dedac696f7f38d5c30fc22",
+      "translator": {
+        "agent": "coder subagent 763f25259988 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 2926722c72a8 (lopdev team, independent i18n auditor, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). Fix: accounts_order used the heavy 'क्रमांकित किया गया है' passive, against the hi guide's no-Sanskritisation rule; now 'खातों के नंबर … क्रम में दिए गए हैं'. throttled avoids 'सीमा'; one/other plural kept; nukta in रीफ़्रेश. 0 blocker / 0 major unresolved. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.browser",
+      "source_sha256": "5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24",
+      "translator": {
+        "agent": "translator (job bbc13889029a, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 8d1048426a50, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "CLI-first browser pairing delta (14 keys rewritten/added, open_popup removed) at source_sha256 5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24; target catalogue_sha256 255a236a620ab56fe81a3b544adc5097525351d27ecefe126ab9aac28f51b7f8. Independent audit PASS, 0B/0M/0m/0n; dispositions: none needed. Zero unresolved blocker/major. Translator and auditor are separate sessions sharing the Claude model family (disclosed). Not verified: native-speaker review. Evidence: i18n/audits/evidence/hi/cli.browser/pair1/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.browser",
+      "source_sha256": "af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019",
+      "translator": {
+        "agent": "translator (job f364d94792a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 68b1b726839c, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 cde43c6578a8d972e6ceaa2bb63c5b794290a224ae60c63f12833a10789339ee. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/hi/cli.browser/pair2/record.json"
+    },
+    {
+      "locale": "hi",
       "namespace": "cli.team_bridge_alert",
       "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
       "translator": {
@@ -10778,6 +11063,82 @@
     },
     {
       "locale": "ru",
+      "namespace": "relay.shell",
+      "source_sha256": "388f23d29d082106ccb706ed041f48238eca32a6cfaf6cfa05517ee8dc773a01",
+      "translator": {
+        "agent": "coder subagent e8f92ac9fa94 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 92826ef0767b (lopdev team, independent i18n auditor)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "relay.shell 64 keys read in full at this en hash. No defects: glossary использование, вы-imperative, throttled plural one/few/many/other in the accusative after через (секунду/секунды/секунд), countdown abbreviations д/ч/мин. Аккаунт vs учётная запись both occur in the catalogues; kept аккаунт (short card label). 0 blocker / 0 major. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.shell",
+      "source_sha256": "412c31bd9071bc06a886dd3144a350afa4c6cc0c89dedac696f7f38d5c30fc22",
+      "translator": {
+        "agent": "coder subagent 763f25259988 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 2926722c72a8 (lopdev team, independent i18n auditor, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). throttled drops 'лимит', keeps one/few/many/other accusative after через; аккаунт consistent with account/reauth; 'Обновлено: {when}' / 'Сброс: {when}' fit both time-only and date+time. No fixes needed. 0 blocker / 0 major. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.browser",
+      "source_sha256": "5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24",
+      "translator": {
+        "agent": "translator (job 4945a527ff76, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 53be3a51c939, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "CLI-first browser pairing delta (14 keys rewritten/added, open_popup removed) at source_sha256 5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24; target catalogue_sha256 f34a9abb0b6c3895e15576f192c244f5b32b467a04eacb5d80d2fffc1ccf66fb. Independent audit PASS, 0B/0M/1m/2n; dispositions: T1-T3 applied verbatim. Zero unresolved blocker/major. Translator and auditor are separate sessions sharing the Claude model family (disclosed). Not verified: native-speaker review. Evidence: i18n/audits/evidence/ru/cli.browser/pair1/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.browser",
+      "source_sha256": "af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019",
+      "translator": {
+        "agent": "translator (job f364d94792a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 68b1b726839c, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 16411468b187915515f4bd9eb520f83a60b7341ce20da8295f938fe3e0e279ee. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/ru/cli.browser/pair2/record.json"
+    },
+    {
+      "locale": "ru",
       "namespace": "cli.team_bridge_alert",
       "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
       "translator": {
@@ -13332,6 +13693,82 @@
       },
       "status": "passed",
       "note": "Dual blind passes: i18n/audits/evidence/ur/wire.errors.session_host/hura1/record.json; i18n/audits/evidence/ur/wire.errors.session_host/u31h8b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.shell",
+      "source_sha256": "388f23d29d082106ccb706ed041f48238eca32a6cfaf6cfa05517ee8dc773a01",
+      "translator": {
+        "agent": "coder subagent e8f92ac9fa94 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 92826ef0767b (lopdev team, independent i18n auditor)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "relay.shell 64 keys read in full at this en hash. Fixes: countdown_days, countdown_hours and countdown_hour rendered the hour noun as a bare number with the plural گھنٹے, so 1 hour read '1 گھنٹے' — upgraded to the lossless number→plural form {hours, plural, one {# گھنٹہ} other {# گھنٹے}} (scripts/i18n/check.py arguments_match WHY note; matches relay.asks.duration.hours). دن/منٹ/سیکنڈ are invariant. Disposition (not changed): this namespace says ریفریش while tui.usage says تازہ for the same feature — ریفریش is an established loanword and consistent within relay.shell; reset is بحالی matching the namespace's existing relay.shell.usage.reset. آپ-imperative and ۔/، punctuation verified; Opus/Sonnet/Fable/Zread kept Latin. Rendered RTL/bidi, Nastaliq shaping and narrow-width layout not exercised; no rendered sign-off claimed. 0 blocker / 0 major unresolved."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.shell",
+      "source_sha256": "412c31bd9071bc06a886dd3144a350afa4c6cc0c89dedac696f7f38d5c30fc22",
+      "translator": {
+        "agent": "coder subagent 763f25259988 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 2926722c72a8 (lopdev team, independent i18n auditor, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). Fix: accounts_order spelled 'سائن اِن' (zer); relay.shell reauth/reauth_short and relay.login use 'سائن ان', so aligned. Round-1 fix intact: countdown_hour/hours/days keep the one/other hour plural (گھنٹہ/گھنٹے). Urdu comma ، in row_a11y_bare_reset; throttled avoids 'حد'. 0 blocker / 0 major unresolved. No rendered RTL, Nastaliq or native-speaker pass claimed."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.browser",
+      "source_sha256": "5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24",
+      "translator": {
+        "agent": "translator (job 5d6bbe1050a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 54930f3283db, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "CLI-first browser pairing delta (14 keys rewritten/added, open_popup removed) at source_sha256 5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24; target catalogue_sha256 4e9abf18a0cd1f603a8de9d4f804b93b6cee43cd1900f8a8ddfb2beca15b8fdb. Independent audit PASS, 0B/0M/3m/1n; dispositions: T1-T4 applied verbatim (T1/T2: polite دیں per style guide). Zero unresolved blocker/major. Translator and auditor are separate sessions sharing the Claude model family (disclosed). Not verified: native-speaker review. Evidence: i18n/audits/evidence/ur/cli.browser/pair1/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.browser",
+      "source_sha256": "af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019",
+      "translator": {
+        "agent": "translator (job f364d94792a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 68b1b726839c, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 f1ea69b3906c503cc1900aae698f3a9c715b68a4f28deaa55940fd7d8b0bc8e7. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/ur/cli.browser/pair2/record.json"
     },
     {
       "locale": "ur",
@@ -16090,6 +16527,82 @@
     },
     {
       "locale": "vi",
+      "namespace": "relay.shell",
+      "source_sha256": "388f23d29d082106ccb706ed041f48238eca32a6cfaf6cfa05517ee8dc773a01",
+      "translator": {
+        "agent": "coder subagent e8f92ac9fa94 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 92826ef0767b (lopdev team, independent i18n auditor)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "relay.shell 64 keys read in full at this en hash. Fixes: countdown_days used 'ng' and countdown_hours used 'ph' — neither is a standard Vietnamese unit abbreviation and both were inconsistent with the sibling countdown_day ('ngày') and countdown_minutes ('phút'); now the full words. Plural other-only and NFC verified. 0 blocker / 0 major unresolved. No rendered pass claimed."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.shell",
+      "source_sha256": "412c31bd9071bc06a886dd3144a350afa4c6cc0c89dedac696f7f38d5c30fc22",
+      "translator": {
+        "agent": "coder subagent 763f25259988 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 2926722c72a8 (lopdev team, independent i18n auditor, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). Fix: refresh_ready dropped the redundant 'Bạn' (vi guide: pronoun only at first contact/blocking decisions). Round-1 fix intact: countdown keys use full ngày/giờ/phút. throttled avoids 'giới hạn'; other-only plural. 0 blocker / 0 major unresolved. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.browser",
+      "source_sha256": "5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24",
+      "translator": {
+        "agent": "translator (job 53664a0640df, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 539c7893d3b3, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "CLI-first browser pairing delta (14 keys rewritten/added, open_popup removed) at source_sha256 5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24; target catalogue_sha256 58613b7c49d704bbb64d2ed51c5eda9d7d63cffed35989f2638c9cdff4734609. Independent audit PASS, 0B/0M/0m/0n; dispositions: none needed. Zero unresolved blocker/major. Translator and auditor are separate sessions sharing the Claude model family (disclosed). Not verified: native-speaker review. Evidence: i18n/audits/evidence/vi/cli.browser/pair1/record.json"
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.browser",
+      "source_sha256": "af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019",
+      "translator": {
+        "agent": "translator (job f364d94792a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 68b1b726839c, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 b0bdef4063fed876cf38099e9c17df6efde0fbe6bfd46195054da0389664a933. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/vi/cli.browser/pair2/record.json"
+    },
+    {
+      "locale": "vi",
       "namespace": "cli.team_bridge_alert",
       "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
       "translator": {
@@ -18530,6 +19043,82 @@
       },
       "status": "passed",
       "note": "Dual blind passes: i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/record.json; i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.shell",
+      "source_sha256": "388f23d29d082106ccb706ed041f48238eca32a6cfaf6cfa05517ee8dc773a01",
+      "translator": {
+        "agent": "coder subagent e8f92ac9fa94 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 92826ef0767b (lopdev team, independent i18n auditor)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "relay.shell 64 keys read in full at this en hash. Fixes: updated and throttled carried spaces between Chinese text and the time/number runs — removed per the zh-CN guide (no space between Chinese and Latin/digit runs; throttled arm '#秒'); account/reauth used 账号 while the catalogues use 账户 (43 vs 4) — standardised on 账户 and dropped the space before the index. Plural other-only, …… ellipsis and full-width punctuation verified. 0 blocker / 0 major unresolved. No rendered pass claimed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.shell",
+      "source_sha256": "412c31bd9071bc06a886dd3144a350afa4c6cc0c89dedac696f7f38d5c30fc22",
+      "translator": {
+        "agent": "coder subagent 763f25259988 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 2926722c72a8 (lopdev team, independent i18n auditor, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). Fix: reset was '{when}重置', which reads as a past event; now '将于{when}重置' (future, matching 'Resets at'). Round-1 fixes intact: no spaces around CJK/number runs (#秒, 更新于{when}), 账户 throughout incl. accounts_order; throttled drops 上限. other-only plural. 0 blocker / 0 major unresolved. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.browser",
+      "source_sha256": "5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24",
+      "translator": {
+        "agent": "translator (job 0faa675bccf9, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 558baa6e079b, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "CLI-first browser pairing delta (14 keys rewritten/added, open_popup removed) at source_sha256 5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24; target catalogue_sha256 f1bfb87cc4ed9fa5de6c7a10924b58d5f9487588a277b317877de29471c8c866. Independent audit PASS, 0B/0M/0m/2n; dispositions: T1-T2 applied verbatim. Zero unresolved blocker/major. Translator and auditor are separate sessions sharing the Claude model family (disclosed). Not verified: native-speaker review. Evidence: i18n/audits/evidence/zh-CN/cli.browser/pair1/record.json"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.browser",
+      "source_sha256": "af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019",
+      "translator": {
+        "agent": "translator (job f364d94792a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 68b1b726839c, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 064822d38ede40517e1c425b4c9af422b44874408b933715918e493c42fd9997. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/zh-CN/cli.browser/pair2/record.json"
     },
     {
       "locale": "zh-CN",

@@ -982,6 +982,28 @@ test("every wire method has a worker handler", async () => {
   assert.deepEqual(missing, [], `wire methods with no handler: ${missing}`);
 });
 
+// `hover` and `press` need trusted Input.dispatch{Mouse,Key}Event, which Chrome
+// drops on the extension's intentionally-inactive tab (see the constraint in
+// commands/input.ts). They are desktop-only, and the extension must therefore
+// neither serve nor ADVERTISE them: `capabilities` is derived from HANDLERS, so a
+// handler added here would make the harness send them to a host that can only
+// fake them in-page. Keep this test until a measured safe mechanism exists.
+test("the extension serves neither hover nor press (desktop-only)", async () => {
+  const generated = await readFile(new URL("../src/protocol.gen.ts", import.meta.url), "utf8");
+  const union = generated.match(/export type DesktopOnlyMethod = ([^;]+);/);
+  assert.ok(union, "protocol.gen.ts must declare the DesktopOnlyMethod union");
+  const desktopOnly = [...union[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  for (const method of ["hover", "press"]) {
+    assert.ok(desktopOnly.includes(method), `${method} must be generated as desktop-only`);
+  }
+  const worker = await readFile(new URL("../src/worker.ts", import.meta.url), "utf8");
+  const table = worker.match(/const HANDLERS[\s\S]*?=\s*\{([\s\S]*?)\n\};/);
+  assert.ok(table, "worker.ts must declare the HANDLERS table");
+  for (const method of ["hover", "press"]) {
+    assert.doesNotMatch(table[1], new RegExp(`^\\s{2}${method}\\s*[,:]`, "m"), `${method} has a handler`);
+  }
+});
+
 // The daemon accepts a WINDOW of protocol versions (MIN_SUPPORTED_PROTO..
 // PROTO_VERSION), which is only worth anything if the extension can MOVE inside
 // that window. A build whose hello pins the literal 1 keeps working, so nothing
@@ -999,7 +1021,9 @@ test("no hello send site carries a numeric proto literal", async () => {
   // Every file that sends a `hello`. Named individually, not globbed: a new
   // sender added in a new file must be added here deliberately, and a rename of
   // one of these must fail this test rather than silently dropping its coverage.
-  const senders = ["../src/worker.ts", "../src/popup/popup.ts", "../src/options/options.ts"];
+  // The popup's and the pairing tab's hello live in ONE shared module
+  // (pair/submit.ts), so both surfaces submit a code identically.
+  const senders = ["../src/worker.ts", "../src/pair/submit.ts", "../src/options/options.ts"];
   for (const file of senders) {
     const source = await readFile(new URL(file, import.meta.url), "utf8");
     const hellos = [...source.matchAll(/event:\s*"hello"[\s\S]{0,400}?\}/g)].map((m) => m[0]);
@@ -1061,7 +1085,7 @@ test("no FOURTH hello sender can appear without failing this suite", async () =>
   }
   assert.deepEqual(
     senders.sort(),
-    ["options/options.ts", "popup/popup.ts", "worker.ts"],
+    ["options/options.ts", "pair/submit.ts", "worker.ts"],
     "every file that sends a hello must be listed in the source scan above",
   );
 });

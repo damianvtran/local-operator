@@ -13,13 +13,14 @@
 // client in the PR's capture rig.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	applyWideView,
 	DEFAULT_VIEWPORT_CONTENT,
 	FIT_SCALE_PROP,
 	getWideView,
 	initWideView,
+	isStandalone,
 	WIDE_VIEWPORT_CONTENT,
 	wideFitScale,
 } from "./viewport";
@@ -160,5 +161,71 @@ describe("wide view fit scale (issue #2017)", () => {
 		expect(css).toContain(
 			'html[data-view="wide"] :is(input, textarea, select) { font-size: max(calc(16px / var(--lo-fit-scale)), 1em); }',
 		);
+	});
+});
+
+describe("installed app (standalone)", () => {
+	function stubDisplayMode(standalone: boolean): void {
+		vi.stubGlobal("matchMedia", (query: string) => ({
+			matches: standalone && query === "(display-mode: standalone)",
+			media: query,
+		}));
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		delete (navigator as { standalone?: boolean }).standalone;
+	});
+
+	it("detects display-mode: standalone, iOS navigator.standalone, and neither", () => {
+		stubDisplayMode(false);
+		expect(isStandalone()).toBe(false);
+		stubDisplayMode(true);
+		expect(isStandalone()).toBe(true);
+
+		stubDisplayMode(false);
+		Object.defineProperty(navigator, "standalone", { value: true, configurable: true });
+		expect(isStandalone()).toBe(true);
+	});
+
+	it("is false, not a throw, where matchMedia is absent", () => {
+		vi.stubGlobal("matchMedia", undefined);
+		expect(isStandalone()).toBe(false);
+	});
+
+	for (const how of ["display-mode", "navigator.standalone"]) {
+		it(`ignores a persisted wide preference at boot (${how}) without deleting it`, () => {
+			localStorage.setItem("lo-mobile-wide-view", "1");
+			if (how === "display-mode") stubDisplayMode(true);
+			else Object.defineProperty(navigator, "standalone", { value: true, configurable: true });
+			// A stale wide state from earlier in the page's life is also cleaned.
+			meta().setAttribute("content", WIDE_VIEWPORT_CONTENT);
+			document.documentElement.dataset.view = "wide";
+			document.documentElement.style.setProperty(FIT_SCALE_PROP, "0.761");
+
+			initWideView();
+
+			expect(meta().getAttribute("content")).toBe(DEFAULT_VIEWPORT_CONTENT);
+			expect(document.documentElement.dataset.view).toBeUndefined();
+			expect(document.documentElement.style.getPropertyValue(FIT_SCALE_PROP)).toBe("");
+			// The tab keeps its opt-in: shared storage on Android Chrome.
+			expect(localStorage.getItem("lo-mobile-wide-view")).toBe("1");
+		});
+	}
+
+	it("applyWideView(true) is a no-op: no meta, no data-view, nothing persisted", () => {
+		stubDisplayMode(true);
+		applyWideView(true);
+		expect(meta().getAttribute("content")).toBe(DEFAULT_VIEWPORT_CONTENT);
+		expect(document.documentElement.dataset.view).toBeUndefined();
+		expect(localStorage.getItem("lo-mobile-wide-view")).toBeNull();
+	});
+
+	it("leaves a browser tab's opt-in unchanged", () => {
+		stubDisplayMode(false);
+		localStorage.setItem("lo-mobile-wide-view", "1");
+		initWideView();
+		expect(meta().getAttribute("content")).toBe(WIDE_VIEWPORT_CONTENT);
+		expect(document.documentElement.dataset.view).toBe("wide");
 	});
 });

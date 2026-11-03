@@ -111,8 +111,10 @@ class TurnEnded(SessionEvent):
         cut_off: bool = False,
         cut_off_cause: str = "",
         notify: bool = True,
+        quiet_accepted: bool = False,
     ) -> None:
         super().__init__()
+        self.quiet_accepted = quiet_accepted
         self.aborted = aborted
         self.error = error
         #: True when the session CLASSIFIED this end as an involuntary cut-off
@@ -1054,6 +1056,7 @@ class EventController:
                 # §14: the session's ONE notify value, forwarded untouched;
                 # `_finalize_turn` gates the completion/error toasts on it.
                 notify=bool(getattr(event, "notify", True)),
+                quiet_accepted=bool(getattr(event, "quiet_accepted", False)),
             )
         )
 

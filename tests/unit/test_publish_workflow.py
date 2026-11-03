@@ -452,6 +452,171 @@ def test_the_pypi_publisher_still_depends_on_the_signed_macos_wheel() -> None:
     )
 
 
+# The Radient Inc. organization identity and its key-agent profile. The team id did
+# not change when the individual account became an organization, so a run fed the
+# retired individual p12 + profile (still stored, as the rollback path) would pass
+# every structural check in the job; only these bindings and the post-sign Authority
+# assertion distinguish the two identities.
+KEYAGENT_SECRETS = {
+    "MACOS_DEVID_APP_P12_BASE64",
+    "MACOS_DEVID_APP_P12_PASSWORD",
+    "MACOS_KEYAGENT_PROFILE_BASE64",
+}
+RETIRED_KEYAGENT_SECRETS = {
+    "MACOS_SIGNING_P12_BASE64",
+    "MACOS_SIGNING_P12_PASSWORD",
+    "MACOS_SIGNING_PROFILE_BASE64",
+}
+KEYAGENT_AUTHORITY = "Developer ID Application: Radient Inc. (SHA2U6KT7V)"
+KEYAGENT_TEAM = "SHA2U6KT7V"
+_KEYAGENT_SIGN_STEP = "Assemble and sign lop-keyagent.app"
+_KEYAGENT_WHEEL_STEP = "Build the macOS wheel"
+# What the assertion step has to DO, not only declare. Pinning `env` alone let a
+# `run: true` (or a comparison weakened to `in`) keep the test green while nothing
+# was asserted. Each fragment is one load-bearing part of the step: reading the
+# finished signature, comparing the whole chain and the team against the pinned
+# values, and failing the job on a mismatch rather than printing it.
+_KEYAGENT_ASSERTION_FRAGMENTS = (
+    "set -euo pipefail",
+    'codesign -dv --verbose=4 "$RUNNER_TEMP/lop-keyagent.app"',
+    'os.environ["EXPECTED_AUTHORITY"]',
+    "if authorities != wanted:\n    raise SystemExit(",
+    'if teams != [os.environ["EXPECTED_TEAM"]]:\n    raise SystemExit(',
+)
+
+
+def _keyagent_identity_problems(doc: dict[Any, Any]) -> list[str]:
+    job = doc["jobs"]["keyagent-macos"]
+    steps = job["steps"]
+    # The whole job serialized, so a secret read through `with:` or inline in a
+    # `run:` script counts the same as one bound in `env:`. YAML comments are gone
+    # after parsing, so the workflow's prose about the retired names is not a hit.
+    job_text = yaml.safe_dump(job, width=10**6)
+    problems = [
+        f"{name} is not bound"
+        for name in sorted(KEYAGENT_SECRETS)
+        if f"secrets.{name} " not in job_text.replace("}}", " }}")
+    ]
+    problems += [
+        f"{name} (retired) is still read"
+        for name in sorted(RETIRED_KEYAGENT_SECRETS)
+        if f"secrets.{name}" in job_text
+    ]
+    assertions = [i for i, s in enumerate(steps) if (s.get("env") or {}).get("EXPECTED_AUTHORITY")]
+    if len(assertions) != 1:
+        return [*problems, "no post-sign assertion of the organization Authority"]
+    index = assertions[0]
+    step = steps[index]
+    if step["env"]["EXPECTED_AUTHORITY"] != KEYAGENT_AUTHORITY:
+        problems.append("no post-sign assertion of the organization Authority")
+    if str(step["env"].get("EXPECTED_TEAM")) != KEYAGENT_TEAM:
+        problems.append(f"the assertion does not pin EXPECTED_TEAM to {KEYAGENT_TEAM}")
+    run = str(step.get("run", ""))
+    problems += [
+        f"the assertion step does not run {fragment!r}"
+        for fragment in _KEYAGENT_ASSERTION_FRAGMENTS
+        if fragment not in run
+    ]
+    # An assertion after the wheel build has already let the wrong identity into
+    # the uploaded artefact; one before the signing step reads nothing.
+    names = [s.get("name") for s in steps]
+    for needed in (_KEYAGENT_SIGN_STEP, _KEYAGENT_WHEEL_STEP):
+        if needed not in names:
+            problems.append(f"no step named {needed!r}")
+    if _KEYAGENT_SIGN_STEP in names and not names.index(_KEYAGENT_SIGN_STEP) < index:
+        problems.append("the assertion runs before the key agent is signed")
+    if _KEYAGENT_WHEEL_STEP in names and not index < names.index(_KEYAGENT_WHEEL_STEP):
+        problems.append("the assertion runs after the macOS wheel is built")
+    return problems
+
+
+def _keyagent_assertion_step(doc: dict[Any, Any]) -> dict[Any, Any]:
+    (step,) = [
+        s
+        for s in doc["jobs"]["keyagent-macos"]["steps"]
+        if (s.get("env") or {}).get("EXPECTED_AUTHORITY")
+    ]
+    return step
+
+
+def test_the_key_agent_is_signed_with_the_organization_identity() -> None:
+    """The signing job reads the organization secrets and asserts who signed."""
+    assert _keyagent_identity_problems(_workflow()) == []
+
+
+def test_the_identity_checker_catches_a_reverted_secret_and_a_dropped_assertion() -> None:
+    doc = _workflow()
+    reverted = copy.deepcopy(doc)
+    for step in reverted["jobs"]["keyagent-macos"]["steps"]:
+        for key, value in (step.get("env") or {}).items():
+            step["env"][key] = str(value).replace(
+                "MACOS_KEYAGENT_PROFILE_BASE64", "MACOS_SIGNING_PROFILE_BASE64"
+            )
+    assert "MACOS_SIGNING_PROFILE_BASE64 (retired) is still read" in (
+        _keyagent_identity_problems(reverted)
+    )
+    dropped = copy.deepcopy(doc)
+    dropped["jobs"]["keyagent-macos"]["steps"] = [
+        s
+        for s in dropped["jobs"]["keyagent-macos"]["steps"]
+        if not (s.get("env") or {}).get("EXPECTED_AUTHORITY")
+    ]
+    assert "no post-sign assertion of the organization Authority" in (
+        _keyagent_identity_problems(dropped)
+    )
+
+
+def _neuter_the_assertion(doc: dict[Any, Any]) -> str:
+    _keyagent_assertion_step(doc)["run"] = "true\n"
+    return "the assertion step does not run 'codesign -dv"
+
+
+def _read_a_retired_secret_inline(doc: dict[Any, Any]) -> str:
+    step = _keyagent_assertion_step(doc)
+    step["run"] = 'echo "${{ secrets.MACOS_SIGNING_P12_BASE64 }}" >/dev/null\n' + step["run"]
+    return "MACOS_SIGNING_P12_BASE64 (retired) is still read"
+
+
+def _move_the_assertion_after_the_wheel(doc: dict[Any, Any]) -> str:
+    steps = doc["jobs"]["keyagent-macos"]["steps"]
+    step = _keyagent_assertion_step(doc)
+    steps.remove(step)
+    names = [s.get("name") for s in steps]
+    steps.insert(names.index(_KEYAGENT_WHEEL_STEP) + 1, step)
+    return "the assertion runs after the macOS wheel is built"
+
+
+def _change_the_expected_team(doc: dict[Any, Any]) -> str:
+    _keyagent_assertion_step(doc)["env"]["EXPECTED_TEAM"] = "ABCDE12345"
+    return f"the assertion does not pin EXPECTED_TEAM to {KEYAGENT_TEAM}"
+
+
+def _weaken_the_comparison(doc: dict[Any, Any]) -> str:
+    step = _keyagent_assertion_step(doc)
+    step["run"] = step["run"].replace(
+        "if authorities != wanted:", "if wanted[0] not in authorities:"
+    )
+    return "the assertion step does not run 'if authorities != wanted:"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        _neuter_the_assertion,
+        _read_a_retired_secret_inline,
+        _move_the_assertion_after_the_wheel,
+        _change_the_expected_team,
+        _weaken_the_comparison,
+    ],
+)
+def test_the_identity_checker_catches_a_hollowed_assertion(mutate: Any) -> None:
+    """Negative control: each regression QA measured returning ``[]`` is now caught."""
+    doc = _workflow()
+    expected = mutate(doc)
+    problems = _keyagent_identity_problems(doc)
+    assert any(problem.startswith(expected) for problem in problems), problems
+
+
 # --- the checker itself, against the two defects it exists to catch -------------
 # Without these, a checker that returned `[]` for every input would pass every
 # assertion above — the failure mode this whole module is a response to.

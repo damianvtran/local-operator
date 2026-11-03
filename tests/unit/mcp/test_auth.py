@@ -3452,6 +3452,9 @@ class TestRefreshLockDegradePaths:
         await storage.set_tokens(
             OAuthToken(access_token="a-old", refresh_token="r-old", expires_in=1)
         )
+        # A newly issued one-second token is outside the capped half-life
+        # lead. Age it explicitly so these lock controls still reach refresh.
+        store.rows[0].data["tokens_obtained_at"] -= 2
         await storage.set_client_info(OAuthClientInformationFull(client_id="cid"))
 
         endpoints = self._endpoints()
@@ -3492,6 +3495,9 @@ class TestRefreshLockDegradePaths:
         await storage.set_tokens(
             OAuthToken(access_token="a-old", refresh_token="r-old", expires_in=1)
         )
+        # A newly issued one-second token is outside the capped half-life
+        # lead. Age it explicitly so these lock controls still reach refresh.
+        store.rows[0].data["tokens_obtained_at"] -= 2
         await storage.set_client_info(OAuthClientInformationFull(client_id="cid"))
 
         endpoints = self._endpoints()

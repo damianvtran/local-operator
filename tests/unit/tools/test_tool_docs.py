@@ -390,7 +390,24 @@ MEASURED_TOKENS: dict[str, int] = {
     # 1801 -> 1803 (+2, review round 2 m2): "not expected in Chrome's <video>" replaces
     # "not Chrome's <video>", because Chrome playback was never tested. Measured by
     # this test's own print.
-    "browser": 1863,
+    # 1863 -> 1908 (+45, issue #3248): the `hover` op and the chord/selector
+    # wording on `press`. Measured by this test's own print.
+    # 1908 -> 1968 (+60, issue #3333): the `select` op, its native/ARIA
+    # operation and its host scope, after adding the one-line
+    # BrowserParams.options. Measured by this test's own print.
+    # 1968 -> 2094 (+126, agent-chosen recording size, RS1-RS5): the
+    # width=/height= bounds and the 4K cap arithmetic (about 150 s at 64 MiB,
+    # 75 s in a scratchpad) must be discoverable from the op the model calls;
+    # the measured cost table and the viewport-reflow caveat stay in
+    # `guide://browser`, which is where the reference detail belongs. The cap
+    # figures are a WORST CASE, not a typical rate, so that qualifier rides
+    # beside them (review round 1, m4). Both branches moved this one doc, and
+    # together they pushed it past the 8 KiB soft cap, so the op row and the
+    # note drop the host-only clause they each duplicated from the other
+    # (-5 tokens against the branch's own +131); the number below is measured
+    # on the rebased tree by this test's own print, not a sum of branch deltas.
+    # No other tool's entry moved.
+    "browser": 2097,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
@@ -530,7 +547,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # doc — the argumentless call's description plus the "when NOT to call
     # it" notes. Re-measured via this test's own print, and it is the ONLY
     # entry that moved: every other count above is byte-identical.
-    "no_reply": 109,
+    # PR #3318: 109 -> 121, measured by this test's canonical cl100k_base
+    # ruler. The first wrapper wording measured 148; trimming it saves 27
+    # tokens while keeping call-once/final-eval/stop and host-acceptance rules.
+    "no_reply": 121,
     # NEW (notifications inbox, docs/design/notifications-inbox.md §3.1): the
     # ``notify`` doc — its description plus the five-field schema rendered by
     # this file's own renderer. Re-measured via this test's print; it is the

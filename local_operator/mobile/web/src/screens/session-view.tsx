@@ -22,6 +22,7 @@
  * pinned height as a custom property gives those caps the same unit as the
  * box they are bounded by, so they tighten exactly when the space does.
  */
+import { contentDir } from "../lib/content-direction";
 import { flushSync } from "react-dom";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { setSessionPin } from "../api";
@@ -302,6 +303,7 @@ function Header({
 					    reachable is truthful; a name painted in full that pushes the phone
 					    sideways is not. */}
 					<span
+						dir={contentDir(projection.conversation_name || "untitled")}
 						className="block truncate text-heading font-semibold"
 						title={projection.conversation_name || undefined}
 					>{projection.conversation_name || "untitled"}</span>

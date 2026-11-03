@@ -1813,7 +1813,12 @@ test("Q1: the pair latch clears on a STANDBY confirmation, so a later revoke re-
     for (const handler of nodes.get("pair-form")._handlers.submit || []) {
       handler({ preventDefault: () => {} });
     }
-    await tick(60);
+    // Wait for the OUTCOME, not a fixed tick: under fleet load (load average
+    // ~30) a 60ms tick ran out before the stubbed socket's 5ms frame, and the
+    // row failed on the clock rather than on the behaviour it pins.
+    for (let waited = 0; waited < 3000 && visibleState(nodes).includes("pairing"); waited += 10) {
+      await tick(10);
+    }
     assert.ok(
       !visibleState(nodes).includes("pairing"),
       "after a successful pair the form must be replaced by the success view",

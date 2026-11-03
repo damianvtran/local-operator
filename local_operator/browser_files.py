@@ -113,6 +113,17 @@ RECORD_MAX_BYTES = 64 * 1024 * 1024
 RECORD_DEFAULT_DURATION_S = 120
 RECORD_MIN_DURATION_S = 1
 RECORD_MAX_DURATION_S = 600
+#: The viewport an agent-chosen `record_start` may ask for (RS1). The desktop
+#: host mirrors these three names; they live here because this module is where
+#: every recording LIMIT the harness polices already lives (bytes, seconds).
+#: 4K is the shipped ceiling rather than the encoder's: 8K and 10K encode too
+#: (measured 778 % / 715 % CPU and 1.2 / 1.9 GB encoder RSS), and that price is
+#: not what a clip is for. Raising the ceiling is a constant change plus docs.
+RECORD_MIN_SIDE = 240
+RECORD_MAX_SIDE = 3840
+#: 3840x2160 in pixels. A LIMIT ON AREA, not on either side, so a portrait
+#: 2160x3840 passes while a square 3840x3840 (14.7 Mpx) does not.
+RECORD_MAX_PIXELS = RECORD_MAX_SIDE * 2160
 
 #: Fallback basename when a page-supplied name sanitises to nothing usable.
 _FALLBACK_STEM = "download"

@@ -430,7 +430,15 @@ def test_inherited_trace_destination_is_untouched_by_real_collection(
     if collect_only:
         command.append("--collect-only")
     result = subprocess.run(
-        [sys.executable, str(repo / "scripts" / "run_bounded.py"), "--timeout", "120", "--"]
+        # Status-only: the default contract refuses before spawn on Darwin.
+        [
+            sys.executable,
+            str(repo / "scripts" / "run_bounded.py"),
+            "--contract=command-status",
+            "--timeout",
+            "120",
+            "--",
+        ]
         + command,
         cwd=repo,
         env=env,

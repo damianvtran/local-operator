@@ -38,6 +38,16 @@ import pytest
 REPO = Path(__file__).resolve().parents[3]
 WRAPPER = REPO / "scripts" / "run_bounded.py"
 
+#: The contract these real-process cases exercise. Linux keeps the strict
+#: certified path (its /proc backend exists). Elsewhere cleanup-required refuses
+#: before spawn by design, so the same group-reaping behaviours -- bound, sweep,
+#: forwarded signal, external kill -- are asserted through command-status, which
+#: signals the owned group too (architect ruling on PR #3274). The safety
+#: assertions (`_wait_until_gone(token) == []`) are identical on both.
+CONTRACT_ARGS: tuple[str, ...] = (
+    () if sys.platform.startswith("linux") else ("--contract=command-status",)
+)
+
 #: These spawn real processes and wait on real signals; the suite marks that
 #: shape `slow` (see pyproject.toml's marker list).
 pytestmark = pytest.mark.slow
@@ -126,7 +136,7 @@ def _wrapper(args: Sequence[str], *, timeout_s: float = 60.0) -> subprocess.Comp
         err_path = Path(tmp) / "stderr"
         with out_path.open("w") as out, err_path.open("w") as err:
             result = subprocess.run(
-                [sys.executable, str(WRAPPER), *args],
+                [sys.executable, str(WRAPPER), *CONTRACT_ARGS, *args],
                 stdout=out,
                 stderr=err,
                 text=True,
@@ -162,7 +172,7 @@ def test_handlers_are_installed_before_the_child_is_spawned():
     cannot be hit on demand.
     """
     source = (REPO / "scripts" / "run_bounded.py").read_text()
-    body = source[source.index("def run(") : source.index("def main(")]
+    body = source[source.index("def _run_cleanup_required(") : source.index("def run(")]
 
     assert "signal.signal(" in body, "the wrapper installs no signal handler at all"
     assert body.index("signal.signal(") < body.index("subprocess.Popen("), (
@@ -245,7 +255,13 @@ def test_a_signal_to_the_wrapper_reaches_the_group(reap_markers, forwarded):
         err_path = Path(tmp) / "stderr"
         with err_path.open("w") as err:
             wrapper = subprocess.Popen(
-                [sys.executable, str(WRAPPER), "--", *_spawning_inner(token, linger=True)],
+                [
+                    sys.executable,
+                    str(WRAPPER),
+                    *CONTRACT_ARGS,
+                    "--",
+                    *_spawning_inner(token, linger=True),
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=err,
                 text=True,
@@ -286,7 +302,13 @@ def test_a_child_killed_by_someone_else_reports_128_plus_the_signal(reap_markers
         err_path = Path(tmp) / "stderr"
         with err_path.open("w") as err:
             wrapper = subprocess.Popen(
-                [sys.executable, str(WRAPPER), "--", *_spawning_inner(token, linger=True)],
+                [
+                    sys.executable,
+                    str(WRAPPER),
+                    *CONTRACT_ARGS,
+                    "--",
+                    *_spawning_inner(token, linger=True),
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=err,
                 text=True,
@@ -322,6 +344,14 @@ def memory_wrapper(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.delenv(module.memory_guard.RESOLVED_MEMORY_MB_ENV, raising=False)
+    # These tests inject kernel/process facts, so choose the synthetic authority
+    # explicitly. Native Darwin cannot supply coverage and must never be promoted
+    # merely to keep this shared synthetic matrix running.
+    monkeypatch.setattr(
+        module.bounded_contract,
+        "selected_backend",
+        lambda: module.bounded_contract.Backend("synthetic-authoritative", True, "test kernel"),
+    )
     return module
 
 
@@ -420,7 +450,9 @@ def test_child_memory_unsupported_positive_refuses_before_spawn(memory_wrapper, 
     from types import SimpleNamespace
 
     monkeypatch.setattr(memory_wrapper, "_memory_budget", lambda value: (_test_budget(48), "unit"))
-    monkeypatch.setattr(memory_wrapper, "os", SimpleNamespace())
+    # Remove only the unsupported primitive; the real dispatcher now builds the
+    # environment and receipt before entering this synthetic strict boundary.
+    monkeypatch.setattr(memory_wrapper, "os", SimpleNamespace(environ=dict(os.environ)))
     monkeypatch.setattr(
         memory_wrapper,
         "subprocess",
@@ -439,12 +471,13 @@ def test_child_memory_unsupported_positive_refuses_before_spawn(memory_wrapper, 
         ("unknown", 0),
         ("timeout", 124),
         ("interrupt", 130),
+        ("child-signal", 137),
         ("monitor-error", None),
         ("spawn-error", 125),
     ],
 )
 def test_child_memory_loop_preserves_owned_cleanup_contract(
-    memory_wrapper, monkeypatch, mode, expected
+    memory_wrapper, monkeypatch, tmp_path, mode, expected
 ):
     """Exercise real Guard decisions; fake only readings/process/clock/syscalls.
 
@@ -455,6 +488,7 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
     from types import SimpleNamespace
 
     wrapper = memory_wrapper
+    monkeypatch.setenv("LOCAL_OPERATOR_SCRATCHPAD", str(tmp_path))
     mg = wrapper.memory_guard
     budget = _test_budget(48)
     monkeypatch.setattr(wrapper, "_memory_budget", lambda value: (budget, "inherited"))
@@ -490,13 +524,20 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
             self.polls += 1
             if mode == "interrupt" and self.polls == 1:
                 handlers[signal.SIGINT](signal.SIGINT, None)
+            if self.status is None and mode == "child-signal":
+                self.status = -signal.SIGKILL
             if self.status is None and self.polls >= 12 and mode in ("soft", "unknown"):
                 self.status = 0
             return self.status
 
-        def wait(self):
+        def wait(self, timeout=None):
             self.waits += 1
             return self.status
+
+        @property
+        def returncode(self):
+            # The strict runner reads the reaped status here after its one wait.
+            return self.status if self.waits else None
 
     process = Process()
 
@@ -506,15 +547,65 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
         spawned.append(kwargs)
         return process
 
-    monkeypatch.setattr(wrapper, "subprocess", SimpleNamespace(Popen=popen))
+    monkeypatch.setattr(
+        wrapper,
+        "subprocess",
+        SimpleNamespace(Popen=popen, TimeoutExpired=subprocess.TimeoutExpired),
+    )
 
-    def group(pgid, signum):
-        assert pgid == process.pid
-        group_calls.append((pgid, signum))
-        process.status = -int(signum)
-        return True
+    # This memory-policy matrix fakes the authority boundary. The separate
+    # owned-group matrix exercises real authority with injected kernel facts.
+    opg = wrapper.owned_process_group
 
-    monkeypatch.setattr(wrapper, "_signal_group", group)
+    class Owner:
+        pgid = process.pid
+        receipts = {}
+        last = opg.Verdict("VERIFIED", "fake acquisition")
+        # The capability surface the strict finalizer now calls: terminal census
+        # flag, revoke-before-wait, and exact-terminal acceptance. Missing these
+        # made finalization raise and soft/unknown spin forever (CI shard stall).
+        terminating_sends = [signal.SIGKILL]
+        revoked = False
+
+        def revoke(self):
+            self.revoked = True
+
+        terminal = None
+
+        def accepted_terminal(self, verdict):
+            # Exact-object acceptance before revocation, as the real owner does:
+            # strict rc 0 now requires this certificate, not merely child status.
+            return not self.revoked and verdict is self.terminal
+
+        def refresh(self, *, terminal=False, **kwargs):
+            verdict = opg.Verdict(
+                "OBSERVED_EMPTY" if process.status is not None else "VERIFIED", "fake"
+            )
+            if terminal:
+                self.terminal = verdict
+            return verdict
+
+        def leader_terminal(self, deadline):
+            # The seam that replaced Popen.poll(): the same mode gating (the fake's
+            # poll counter drives soft/unknown exit and the interrupt), asked of
+            # the capability instead of the child handle, so the loop never reaps.
+            return process.poll() is not None
+
+        def signal(self, signum, **kwargs):
+            group_calls.append((self.pgid, signum))
+            # A signal cannot rewrite a corpse's status: once the leader has
+            # exited, the finalizer's group SIGKILL leaves its exit code alone.
+            if process.status is None:
+                process.status = -int(signum)
+            return opg.Verdict("SIGNALED", "fake")
+
+    monkeypatch.setattr(
+        wrapper,
+        "owned_process_group",
+        SimpleNamespace(
+            OwnedGroup=SimpleNamespace(capture=lambda *args, **kwargs: Owner()), Verdict=opg.Verdict
+        ),
+    )
     real_guard = mg.Guard
 
     def guard(pgid, resolved):
@@ -538,9 +629,12 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
     monkeypatch.setattr(mg, "Guard", guard)
     output = io.StringIO()
     if mode == "monitor-error":
-        with pytest.raises(RuntimeError, match="controlled monitor failure"):
-            wrapper.run(["synthetic"], timeout=None, grace=0, stream=output)
+        # The contract dispatcher turns a monitor exception into a published
+        # failure receipt and 126 instead of letting it escape (the safety
+        # property -- never success, failure named -- is what is asserted).
+        assert wrapper.run(["synthetic"], timeout=None, grace=0, stream=output) == 126
         assert "owned-child monitor failed" in output.getvalue()
+        assert "cause=supervision-failure" in output.getvalue()
     else:
         assert (
             wrapper.run(
@@ -558,6 +652,13 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
     if mode == "hard":
         assert "MEMORY LIMIT EXCEEDED" in output.getvalue()
         assert "BOUND" not in output.getvalue()
+    if mode == "interrupt":
+        assert "signal 2 received" in output.getvalue()
+    if mode == "child-signal":
+        assert "child killed by signal 9" in output.getvalue()
+    if mode == "timeout":
+        assert "that is the BOUND" in output.getvalue()
+        assert "raise it" in output.getvalue()
     if mode == "soft":
         assert output.getvalue().count("advisory only") == 1
     if mode == "unknown":
@@ -575,7 +676,12 @@ def test_help_describes_memory_exit_status_and_budget_defaults(memory_wrapper, c
     assert stopped.value.code == 0
     help_text = " ".join(capsys.readouterr().out.split())
     assert "default: bash tool's resolved budget, otherwise auto" in help_text
-    assert "child process-group ceiling in MiB" in help_text
+    assert "owned-group ceiling in MiB, enforced by both contracts" in help_text
+    # D2/D3/Q2: what command-status enforces and never certifies, and which
+    # record is authoritative, are stated in --help itself.
+    assert "NEVER certifies cleanup" in help_text
+    assert "<invocation_id>.completion.json" in help_text
+    assert "legacy <run_id>.spawn.json/.exit.json" in help_text
     assert "137 with MEMORY LIMIT EXCEEDED" in help_text
     assert "137 alone can also mean external SIGKILL" in help_text
     assert "124 on timeout" in help_text and "125 on start or budget refusal" in help_text
