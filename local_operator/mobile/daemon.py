@@ -5571,7 +5571,15 @@ class MobileDaemon:
             self.release_phone_view(session_id)
             # ``poll`` rather than ``returncode``: a sync process object only
             # learns its status when someone asks, and the watcher thread may not
-            # have run yet. Both serialise on the object's own wait lock.
+            # have run yet. It is best-effort, not authoritative: on the ``Popen``
+            # fallback (Linux, Windows) a ``poll`` racing the reaper thread's
+            # blocking ``wait`` can still read ``None`` for a child that has just
+            # exited (only ``DisclaimedProcess`` serialises the two on one lock).
+            # That misread is harmless: the branch below only asks a published,
+            # pid-matched owner to retire itself. ``find_runtime_record`` resolves
+            # only a LIVE owner, so a dead child matches nothing, and a stale match
+            # fails at connect, which the bounded wait below swallows. Either way
+            # nothing is signalled.
             if process.poll() is None:
                 # A known resume route can receive work from another surface
                 # before this HTTP request finishes. Even a missing welcome is
