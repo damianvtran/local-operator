@@ -21,8 +21,8 @@
       "sha256": "86741c3b884bb4e51ff69f178dae54b1ad2cff53418dc58732f73d29c40adf7a"
     },
     "SOURCE-AUDIT.json": {
-      "bytes": 22895,
-      "sha256": "81c1e113243afdb1393c76b3bd256c58bd74e9e05daa12bf2c72271407d1ec69"
+      "bytes": 23422,
+      "sha256": "12d44eaaa7ec91715ce1bf6c6df7e425dc873bfc4b13674692dd840b88ff4402"
     },
     "TASKS.md": {
       "bytes": 10352,
@@ -37,8 +37,8 @@
       "sha256": "097d35cda53ae8c1fca585a1c8f120baee8c362d0263fa5de4e79fbb78a75d47"
     },
     "VERIFICATION.md": {
-      "bytes": 8340,
-      "sha256": "d219be781ded0f91e55f690aafa20e17ab4131cd0c0b0a92aca61d659fd8913a"
+      "bytes": 9557,
+      "sha256": "57a9a9346cd1b770c48d9b52f7d4de247d45a686d0c228452910054d6bb9680e"
     },
     "cache_forwarder.py": {
       "bytes": 3290,
@@ -97,8 +97,8 @@
       "sha256": "e52cbc0913b1b18c20fa321fe7de8add5fbb690a7a8a8e7fc0de8b74833acbba"
     },
     "coding/budget_guard.py": {
-      "bytes": 8060,
-      "sha256": "36eaa1897435229a275f6d19fbbf44b33afadbff5044153ad2d7796312ed8d17"
+      "bytes": 8707,
+      "sha256": "8155383fa0d51b0fdab9f4adfb6f407481919ad33c74b07b73c946e8fab08579"
     },
     "coding/codex-model-catalog.json": {
       "bytes": 23154,
@@ -135,6 +135,10 @@
     "coding/test_guard.py": {
       "bytes": 8739,
       "sha256": "e155ef7b48e042d37e04fc948dc6b9b28af6f447408914760a54d214a71a1964"
+    },
+    "coding/test_guard_asgi.py": {
+      "bytes": 2617,
+      "sha256": "8caa433e276e7652493bf0edf676b66ff37c834ee6258060734295abe05b9e8c"
     },
     "evaluate.py": {
       "bytes": 7304,
