@@ -1,0 +1,65 @@
+{
+  "retrieved_utc": "2026-11-03",
+  "note": "Upstream license texts from main; package pins and schema provenance are in public_mcp_schemas.json",
+  "sources": [
+    {
+      "server": "twilio",
+      "url": "https://raw.githubusercontent.com/twilio-labs/mcp/main/LICENSE",
+      "sha256": "9bfb2715037dfd1d7d81189efd24ecdf0c1954dc3646e93e1858dcd43d74a4d7"
+    },
+    {
+      "server": "grafana",
+      "url": "https://raw.githubusercontent.com/grafana/mcp-grafana/main/LICENSE",
+      "sha256": "6ec12926d6478d895ccec681c3739c170a88773d6c54d0a57e46682ae6f0adc0"
+    },
+    {
+      "server": "aws-billing-cost-management",
+      "url": "https://raw.githubusercontent.com/awslabs/mcp/main/LICENSE",
+      "sha256": "09e8a9bcec8067104652c168685ab0931e7868f9c8284b66f5ae6edae5f1130b"
+    },
+    {
+      "server": "supabase",
+      "url": "https://raw.githubusercontent.com/supabase-community/supabase-mcp/main/LICENSE",
+      "sha256": "2709b46247ffa63d4ac07a9df00de1a47995d6fec89d1390e107d7543eee41fd"
+    },
+    {
+      "server": "launchdarkly",
+      "url": "https://raw.githubusercontent.com/launchdarkly/mcp-server/main/LICENSE",
+      "sha256": "769b9fcf07605d976c8a5055d8a606e4e7530042d01a05ecf8032caee7bfd87e"
+    },
+    {
+      "server": "playwright",
+      "url": "https://raw.githubusercontent.com/microsoft/playwright-mcp/main/LICENSE",
+      "sha256": "9a7110fc2d2f964038e5dc49128f908f29f47a574c961cba16085914e879cbda"
+    },
+    {
+      "server": "notion",
+      "url": "https://raw.githubusercontent.com/makenotion/notion-mcp-server/main/LICENSE",
+      "sha256": "2fd3e5272a40483e9cc8140136b4438708a496ea2da2537b98f0f2bbb68148ee"
+    },
+    {
+      "server": "kubernetes",
+      "url": "https://raw.githubusercontent.com/Flux159/mcp-server-kubernetes/main/LICENSE",
+      "sha256": "fcb4608bf73e05981c120361dd148559da0937c0acb04f01aeafc451284257e6"
+    },
+    {
+      "server": "heroku",
+      "url": "https://raw.githubusercontent.com/heroku/heroku-mcp-server/main/LICENSE.txt",
+      "sha256": "3c203ae639ff8d0da80ab09b759b758f88bb2b3ba094719105358e0999430331"
+    }
+  ],
+  "notice_checks": {
+    "twilio": null,
+    "grafana": null,
+    "aws-billing-cost-management": {
+      "url": "https://raw.githubusercontent.com/awslabs/mcp/main/NOTICE",
+      "sha256": "d4290ed64c2edd0fce1d84e3f9dfb2881240fe534def76b8cd29ed6af683e287"
+    },
+    "supabase": null,
+    "launchdarkly": null,
+    "playwright": null,
+    "notion": null,
+    "kubernetes": null,
+    "heroku": null
+  }
+}

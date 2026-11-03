@@ -1,0 +1,102 @@
+{
+  "local-operator": {
+    "write": 0.0364025,
+    "read": 0.0172760375,
+    "uncached": 0.0007539999999999999,
+    "output": 0.01854625,
+    "total": 0.0729787875,
+    "side": 0.001226,
+    "n": 8,
+    "tokens": {
+      "mean_all_long": 187698.375,
+      "n": 8,
+      "mean_4long": 158208.5
+    },
+    "cache_write_5m": 0.0364025,
+    "cache_write_1h": 0.0,
+    "label": "EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/",
+    "side_note": "subset of components, not additive",
+    "radient_classifier_cost_usd": 0.0,
+    "total_including_classifier_usd": 0.0729787875
+  },
+  "omp": {
+    "write": 0.06002843750000001,
+    "read": 0.023578762500000003,
+    "uncached": 0.0005594,
+    "output": 0.021021375000000002,
+    "total": 0.105187975,
+    "side": 0.0009705250000000001,
+    "n": 8,
+    "tokens": {
+      "mean_all_long": 265165,
+      "n": 8,
+      "mean_4long": 267100.5
+    },
+    "cache_write_5m": 0.06002843750000001,
+    "cache_write_1h": 0.0,
+    "label": "EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/",
+    "side_note": "subset of components, not additive",
+    "radient_classifier_cost_usd": 0.0,
+    "total_including_classifier_usd": 0.105187975
+  },
+  "opencode": {
+    "write": 0.070441109375,
+    "read": 0.011759715,
+    "uncached": 2.5899999999999996e-05,
+    "output": 0.02055975,
+    "total": 0.10278647437499999,
+    "side": 8.2399375e-05,
+    "n": 8,
+    "tokens": {
+      "mean_all_long": 146800.625,
+      "n": 8,
+      "mean_4long": 170504
+    },
+    "cache_write_5m": 0.070441109375,
+    "cache_write_1h": 0.0,
+    "label": "EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/",
+    "side_note": "subset of components, not additive",
+    "radient_classifier_cost_usd": 0.0,
+    "total_including_classifier_usd": 0.10278647437499999
+  },
+  "claude-code": {
+    "write": 0.07878,
+    "read": 0.021429550000000002,
+    "uncached": 3.2e-05,
+    "output": 0.0209975,
+    "total": 0.12123905,
+    "side": 0.003938,
+    "n": 8,
+    "tokens": {
+      "mean_all_long": 245823.5,
+      "n": 8,
+      "mean_4long": 249854.25
+    },
+    "cache_write_5m": 0.07878,
+    "cache_write_1h": 0.0,
+    "label": "EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/",
+    "side_note": "subset of components, not additive",
+    "radient_classifier_cost_usd": 0.0,
+    "total_including_classifier_usd": 0.12123905
+  },
+  "codex": {
+    "write": 4.4056662499999995,
+    "read": 0.99784955,
+    "uncached": 0.0004679999999999994,
+    "output": 0.34805500000000006,
+    "total": 5.7520388,
+    "side": 1.562965,
+    "n": 4,
+    "tokens": {
+      "mean_all_long": 11740996,
+      "n": 4,
+      "mean_4long": 11740996
+    },
+    "cache_write_5m": 4.4056662499999995,
+    "cache_write_1h": 0.0,
+    "label": "EXPLORATORY v1 — materially confounded; see CORRECTIONS.md and reviews/",
+    "side_note": "subset of components, not additive",
+    "radient_classifier_cost_usd": 0.0,
+    "total_including_classifier_usd": 5.7520388
+  }
+}
