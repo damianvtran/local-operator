@@ -22,7 +22,8 @@ from tests.unit.team_bridge.test_screening import _item, _setup
 
 
 @contextmanager
-def _provider(monkeypatch, root, *, status=200, error="", fallback=False, script=None, on_request=None):
+def _provider(monkeypatch, root, *, status=200, error="", fallback=False, script=None, on_request=None,
+              reply=chain.DELIVER):
     observed = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -35,7 +36,7 @@ def _provider(monkeypatch, root, *, status=200, error="", fallback=False, script
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"error": message} if code != 200 else {"text": chain.DELIVER}).encode())
+            self.wfile.write(json.dumps({"error": message} if code != 200 else {"text": message or reply}).encode())
 
         def log_message(self, *_args):
             pass
@@ -210,3 +211,54 @@ def test_account_ceilings_shared_across_namespaces_and_unknown_types(tmp_path):
         })
     with pytest.raises(StoreRefused):
         Store(tmp_path).reserve_screening_attempt(other)
+
+
+def test_cached_primary_answer_hold_retries_spend_nothing(tmp_path, monkeypatch):
+    store, owner = _setup(tmp_path)
+    monkeypatch.setattr(chain, "_item", lambda message_id: _identity_item(message_id))
+    with _provider(monkeypatch, tmp_path, reply=chain.HOLD) as requests:
+        for _ in range(3):
+            result = chain._cycle(tmp_path, owner, "bmsg_cached")
+            assert (result.disposition, result.hold_code) == ("hold", "model_hold")
+        assert len(requests) == 1
+    assert _counts(tmp_path) == [("http", "sender-a", 1), ("logical", "sender-a", 1)]
+
+
+def test_each_account_bucket_stays_independently_forty_with_two_known_senders(tmp_path):
+    store, owner = _setup(tmp_path)
+    # Direct native reservations isolate bucket accounting from model retries.
+    # Actual guarded HTTP charging is independently exercised by loopback cells.
+    for bucket in ("logical", "http"):
+        for sender in ("sender-a", "sender-b"):
+            for _ in range(20):
+                store._reserve_bucket(owner, kind=bucket, message_id="bmsg_one", fingerprint="f",
+                                      sender_account_id=sender, sender_kind="human")
+        with pytest.raises(StoreRefused, match="account hourly"):
+            store._reserve_bucket(owner, kind=bucket, message_id="bmsg_one", fingerprint="f",
+                                  sender_account_id="sender-c", sender_kind="agent")
+    assert _counts(tmp_path) == [
+        ("http", "sender-a", 20), ("http", "sender-b", 20),
+        ("logical", "sender-a", 20), ("logical", "sender-b", 20),
+    ]
+
+
+def test_pre_contract_rows_are_not_reset_or_ignored(tmp_path):
+    import time
+
+    store, owner = _setup(tmp_path)
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(screening_attempts)")}
+        assert "sender_account_id" not in columns
+        conn.executemany(
+            "INSERT INTO screening_attempts "
+            "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, at) "
+            "VALUES (?, 'logical', ?, ?, 'bmsg_legacy', NULL, ?)",
+            [(f"legacy-{n}", store._account_scope(owner), "old-namespace", time.time())
+             for n in range(20)],
+        )
+    with pytest.raises(StoreRefused, match="sender hourly"):
+        Store(tmp_path).reserve_screening_attempt(owner, input_proof={
+            "sender_account_id": "fresh-sender", "sender_kind": "human",
+        })
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM screening_attempts").fetchone()[0] == 20

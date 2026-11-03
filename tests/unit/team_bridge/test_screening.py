@@ -763,13 +763,15 @@ def test_policy_epoch_fences_commit(tmp_path) -> None:
 
 def test_budget_boundaries_aggregation_and_kinds(tmp_path) -> None:
     store, owner = _setup(tmp_path)
-    for _ in range(40):
+    # Legacy/unattributed spend is conservatively limited to20; the known
+    # two-sender account40 control lives in test_sender_allocation.py.
+    for _ in range(20):
         store.reserve_screening_attempt(owner, message_id="m", fingerprint="f")
     with pytest.raises(StoreRefused) as refusal:
         store.reserve_screening_attempt(owner, message_id="m", fingerprint="f")
     assert refusal.value.code == "budget_exhausted"
-    # The HTTP bucket is separate and independently bounded.
-    for _ in range(40):
+    # The HTTP bucket is separate, with the same unknown-provenance bound.
+    for _ in range(20):
         store.reserve_http_attempt(owner, message_id="m")
     with pytest.raises(StoreRefused):
         store.reserve_http_attempt(owner, message_id="m")
@@ -809,7 +811,7 @@ def test_early_holds_are_durable(tmp_path) -> None:
         elif kind == "template-mismatch":
             policy.template_sha256 = "0" * 64
         else:
-            for _ in range(40):
+            for _ in range(20):
                 store.reserve_screening_attempt(owner, message_id="m", fingerprint="f")
         result = _run(owner, path, Runner(), policy=policy)
         assert result.disposition == "hold", kind
@@ -1158,7 +1160,8 @@ def test_status_law_normalizer_positive_and_refusal_arms(tmp_path) -> None:
     assert "currency" in message or "current" in message
 
 
-def test_first_bind_refuses_mutated_job_fields(tmp_path) -> None:
+@pytest.mark.parametrize("changed", ["provider", "sender_account_id", "sender_kind"])
+def test_first_bind_refuses_mutated_job_fields(tmp_path, changed) -> None:
     """R8/Q3: the input proof registered at reservation pins provider/model/
     template/tenant/approved/epoch; a DispatchJob whose field was mutated
     between reservation and bind refuses BEFORE any I/O."""
@@ -1188,6 +1191,8 @@ def test_first_bind_refuses_mutated_job_fields(tmp_path) -> None:
         "message": "bmsg_1",
         "tenant": "tnt_1",
         "logical": "rev-1|b|e",
+        "sender_account_id": "sender-a",
+        "sender_kind": "human",
     }
     attempt = store.reserve_screening_attempt(
         owner, message_id="bmsg_1", fingerprint="rev-1|b|e", input_proof=proof
@@ -1213,8 +1218,11 @@ def test_first_bind_refuses_mutated_job_fields(tmp_path) -> None:
         revision="rev-1",
         epoch=1,
         turn="cap",
+        sender_account_id="sender-a",
+        sender_kind="human",
     )
-    mutated = _dataclasses.replace(job, provider="anthropic")
+    mutation = {"provider": "anthropic", "sender_account_id": "sender-b", "sender_kind": "agent"}
+    mutated = _dataclasses.replace(job, **{changed: mutation[changed]})
     with pytest.raises(StoreRefused) as err:
         store.bind_attempt_fingerprint(
             owner, attempt_id=attempt, fingerprint=mutated.digest, job=mutated
