@@ -439,6 +439,8 @@ def test_importing_without_the_signal_primitive_succeeds_and_refuses():
         scheme=lambda: "fixture",
         clock=world.clock,
     )
+    # Prove population independently before testing the absent signal primitive.
+    cap.refresh(deadline=world.clock() + 1.0)
     assert cap.last.status == "VERIFIED"
     verdict = cap.signal(signal.SIGTERM, deadline=time_budget())
     assert verdict.status == "REFUSED", verdict.reason
