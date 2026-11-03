@@ -32,6 +32,7 @@ from local_operator.harness.types import (
     CapturedFrame,
     ChatRequest,
     CompactionEndEvent,
+    Content,
     DocumentContent,
     ImageContent,
     Message,
@@ -1704,6 +1705,88 @@ async def test_the_culprit_threshold_is_a_sixteenth_of_the_window_inclusive(tmp_
         )
         assert await session._recover_if_request_too_large(_CONTEXT_ERROR) is expect, name
         await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_threshold_is_met_by_the_sum_of_documents_not_only_the_largest(tmp_path):
+    """Each file is below the gate; together they are not. The gate is on the
+    set, so the largest is degraded and the next refusal takes the next."""
+    from local_operator.compaction.tokens import _document_token_estimate
+    from local_operator.harness.document_limits import DOCUMENT_CULPRIT_SHARE
+
+    window = 128_000
+    threshold = window // DOCUMENT_CULPRIT_SHARE
+    each = _document_token_estimate(_text_document("p.txt", 15_000))
+    assert each < threshold <= 2 * each, "the fixture must sit between one and two files"
+
+    def documents(count: int) -> list[Content]:
+        return [_text_document(f"part{index}.txt", 15_000) for index in range(count)]
+
+    for name, count, expect in (("one", 1, False), ("two", 2, True)):
+        session = _window_session(tmp_path / name, window, ScriptedOk())
+        await session.seed_history(
+            [Message(role="user", content=documents(count)), Message.assistant("ok")]
+        )
+        assert await session._recover_if_request_too_large(_CONTEXT_ERROR) is expect, name
+        assert len(_live_documents(session)) == (count - 1 if expect else count), name
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_collection_of_mid_sized_documents_recovers(tmp_path):
+    """Reviewer round 6 B1: 17 files of 15,000 chars, each charged below the
+    per-document gate, were refused LOCALLY on every turn (5 in 5) with nothing
+    degraded and no compaction. Now the guard drops one document on the first
+    refusal; that lowers the estimate under the compaction trigger, whose pass
+    clears the rest, and the session answers from the next turn on."""
+    window = 128_000
+    stream = RefusesByRealTokenCount(window)
+    session = _window_session(tmp_path, window, stream)
+    documents = [_text_document(f"part{index}.txt", 15_000) for index in range(17)]
+    await session.prompt("what is in these files?", documents=documents)
+    # The attach turn is the refused one: no request reached the stream.
+    assert stream.statuses == []
+    assert len(_live_documents(session)) == 16, "one document per refused turn, largest first"
+    for turn in range(4):
+        await session.prompt(f"follow-up {turn}")
+    assert stream.statuses and set(stream.statuses) == {200}, stream.statuses
+    assert len(_live_documents(session)) < 16
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_huge_declared_window_does_not_disable_the_guard(tmp_path):
+    """A 2M-declared route that enforces ~128k: ``window // 16`` is 125k tokens,
+    which would decline a 100k-token document. The ceiling keeps it in play."""
+    from local_operator.compaction.tokens import _document_token_estimate
+    from local_operator.harness.document_limits import DOCUMENT_CULPRIT_CEILING
+
+    big = _text_document("big.txt", 200_000)
+    assert 2_000_000 // 16 > _document_token_estimate(big) >= DOCUMENT_CULPRIT_CEILING
+    session = _window_session(tmp_path, 2_000_000, ScriptedOk())
+    await session.seed_history([Message(role="user", content=[big]), Message.assistant("ok")])
+    assert await session._recover_if_request_too_large(_CONTEXT_ERROR) is True
+    assert _live_documents(session) == []
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_image_refusal_falls_through_to_documents_once_images_are_rejected(tmp_path):
+    """The image handler declines when images are already rejected; a document
+    that is the real cause must then still be answered."""
+    session = _window_session(tmp_path, 128_000, ScriptedOk())
+    await session.seed_history(
+        [
+            Message(role="user", content=[_text_document("big.txt", 400_000)]),
+            Message.assistant("ok"),
+        ]
+    )
+    error = "invalid request (HTTP 400): image exceeds the maximum size of 5 MB"
+    assert await session._recover_if_request_too_large(error) is False
+    session._images_rejected = True
+    assert await session._recover_if_request_too_large(error) is True
+    assert _live_documents(session) == []
+    await session.dispose()
 
 
 @pytest.mark.asyncio

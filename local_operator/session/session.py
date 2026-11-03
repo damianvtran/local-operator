@@ -6085,16 +6085,25 @@ class Session:
         skips a message id the transcript already holds, so the mutated message
         is never rewritten.
 
-        Only a document that is a material share of the window is touched
-        (``DOCUMENT_CULPRIT_SHARE``). Otherwise the cause is elsewhere (history,
-        tool output), degrading a small file would not fix it, and the notice
-        would blame the wrong thing: the error surfaces exactly as before.
+        Documents are touched only when they are a material share of the window
+        (``DOCUMENT_CULPRIT_SHARE``, capped at ``DOCUMENT_CULPRIT_CEILING``):
+        the largest one, OR all of them together, must reach the threshold. The
+        sum matters because the cause can be a collection (17 files of ~7.6k
+        tokens each, none individually over the gate). Otherwise the cause is
+        elsewhere (history, tool output), degrading a small file would not fix
+        it, and the notice would blame the wrong thing: the error surfaces
+        exactly as before. A window of 0 or unknown makes the threshold 0, so
+        every document qualifies: the cause-blind behaviour, accepted there
+        because nothing is known to judge by.
 
         The error filter is the context-length marker list, which is wider than
         "the prompt is over the window": it also matches an attached-file size
         cap, a tool-definition cap and an image size cap. An image refusal is
-        left to ``_degrade_if_image_rejected`` (it never reaches here); the other
-        two are bounded by the share gate, since neither is cured by a small
+        left to ``_degrade_if_image_rejected`` while images can still be rejected
+        (it never reaches here); once they all already are, it falls through to
+        the document guard, since an image handler with nothing left to do would
+        otherwise leave a document-driven overflow unanswered. The other two
+        are bounded by the share gate, since neither is cured by a small
         document and a large one is the thing a size cap names.
 
         Returns ``False`` when the error is not a context-length refusal or no
@@ -6105,7 +6114,10 @@ class Session:
             _document_token_estimate,
             invalidate_message_cache,
         )
-        from local_operator.harness.document_limits import DOCUMENT_CULPRIT_SHARE
+        from local_operator.harness.document_limits import (
+            DOCUMENT_CULPRIT_CEILING,
+            DOCUMENT_CULPRIT_SHARE,
+        )
         from local_operator.incidents import CONTEXT_LENGTH_MARKERS
         from local_operator.providers.documents import _reference_text
         from local_operator.providers.failover import (
@@ -6114,7 +6126,7 @@ class Session:
             is_image_rejection,
         )
 
-        if is_image_rejection(error):
+        if is_image_rejection(error) and not self._images_rejected:
             # "Image exceeds the maximum size" also matches the context markers;
             # it is a poisoned-block refusal with its own handler, which the
             # caller runs when this declines.
@@ -6130,9 +6142,13 @@ class Session:
         if not any(marker in haystack for marker in CONTEXT_LENGTH_MARKERS):
             return False
 
-        threshold = int(self.effective_model.context_window) // DOCUMENT_CULPRIT_SHARE
+        threshold = min(
+            int(self.effective_model.context_window) // DOCUMENT_CULPRIT_SHARE,
+            DOCUMENT_CULPRIT_CEILING,
+        )
 
         largest: tuple[int, Message, int] | None = None
+        total = 0
         for message in self._context.messages:
             if not isinstance(message, Message):
                 continue
@@ -6140,9 +6156,10 @@ class Session:
                 if not isinstance(block, DocumentContent):
                     continue
                 cost = _document_token_estimate(block)
-                if cost >= threshold and (largest is None or cost > largest[0]):
+                total += cost
+                if largest is None or cost > largest[0]:
                     largest = (cost, message, index)
-        if largest is None:
+        if largest is None or (largest[0] < threshold and total < threshold):
             return False
 
         _, message, index = largest

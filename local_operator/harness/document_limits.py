@@ -20,14 +20,28 @@ MAX_FALLBACK_TEXT_CHARS = 400_000
 #: shed OTHER history, could never make the next request fit.
 DOCUMENT_WINDOW_SHARE = 4
 
-#: A document is blamed for a context-length refusal only when its rendered
-#: charge is at least ``1 / DOCUMENT_CULPRIT_SHARE`` of the window. A document at
-#: its render cap is ``1 / DOCUMENT_WINDOW_SHARE`` (a quarter), so every real
-#: culprit clears this easily; a 1 KB note does not, and stripping it would
-#: leave the actual cause (history, tool output) in place while telling the user
-#: an attachment was the problem. A share of the window rather than of the
-#: request: the estimate of the request is exactly what is unreliable here.
+#: Attachments are blamed for a context-length refusal only when they are a
+#: material share of the window: the largest document, or all of them together,
+#: must have a charged estimate of at least ``1 / DOCUMENT_CULPRIT_SHARE`` of the
+#: window (capped by :data:`DOCUMENT_CULPRIT_CEILING`). One document at its
+#: render cap is ``1 / DOCUMENT_WINDOW_SHARE`` (a quarter), so a single real
+#: culprit clears this easily; so does a set of mid-sized files that together
+#: overflow, which the per-document view alone missed. A 1 KB note does not, and
+#: stripping it would leave the actual cause (history, tool output) in place
+#: while telling the user an attachment was the problem. A share of the window
+#: rather than of the request: the estimate of the request is exactly what is
+#: unreliable here.
 DOCUMENT_CULPRIT_SHARE = 16
+
+#: Absolute ceiling on that threshold, in estimated tokens. The window a model
+#: DECLARES can be far above what a route enforces (a 2M-declared route that
+#: refuses at ~128k), and ``window // 16`` there is 125k tokens, which would
+#: decline a 100k-token document that is plainly the cause. No provider error
+#: reports the enforced limit in a form this harness already parses, so a fixed
+#: ceiling keeps a huge declared window from disabling the guard. It only binds
+#: above a 512k window (below that ``window // 16`` is already smaller), and 32k
+#: is far above any note-sized charge (a 1.2 KB file is ~600).
+DOCUMENT_CULPRIT_CEILING = 32_000
 
 #: Characters per token an ASCII character is budgeted at. Measured on
 #: o200k_base, in characters per token: English prose ~4.5, minified JSON ~2.3,
