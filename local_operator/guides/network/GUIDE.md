@@ -301,6 +301,14 @@ work, and that gap is the whole of this phase. The verdict is one command:
 lop network ready --peer <device> --json     # every member, when --peer is omitted
 ```
 
+For work in a particular repository, add `--repository-path <PEER_PATH>` and/or
+`--repository-url <CLONE_URL>`. The path belongs to the peer: `~/...` and relative
+paths resolve under that peer's home, never the viewer's cwd. A URL alone lets
+the existing peer probe derive its destination name. Omitting both preserves
+the installed-project default. This is a read-only check, not a clone or grant;
+when no relay answers, the existing fallback says the peer was not asked and
+does not check the viewer's local checkout as a substitute.
+
 Its top-level `ok` is true only when every ADMISSION row and every still-gating
 EQUIPMENT row passes. When it is false the payload carries `code: "unhealthy"`
 and a `message` naming the failures, and every row carries its own `state`
