@@ -340,6 +340,13 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="hover",
                 blurb="Move the pointer onto selector= XOR x+y; desktop app only.",
             ),
+            ToolDocOp(
+                op="select",
+                blurb=(
+                    "Choose options by label/value or zero-based index in selector=; "
+                    "native or ARIA (desktop); extension native only. [] clears native multiples."
+                ),
+            ),
             ToolDocOp(op="scroll", blurb="Move the viewport."),
             ToolDocOp(op="logs", blurb="Console + errors."),
             ToolDocOp(

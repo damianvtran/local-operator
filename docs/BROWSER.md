@@ -162,6 +162,38 @@ safety, so neither is offered there.
   that an older host would silently mis-handle.
 - Both are `write`-tier, like `click`/`type`, with the same origin gate.
 
+## Selecting options
+
+`select` accepts `selector` (CSS, snapshot ref or a11y locator) plus `options`:
+strings match trimmed option label (exact, then case-insensitive), then option
+value; integers are zero-based indexes. Native `<select>` state is changed via
+prototype setters, followed by bubbling `input` and `change` events: no OS popup,
+no foreground activation and no reliance on `Input.*` on the inactive tab.
+The extension re-resolves the live control after a bounded reconciliation grace
+and reads selection from that node, never detached pre-render options; a missing
+or detached target is reported unverified.
+Single selects take exactly one option; multiple selects replace the whole
+set. `options:[]` clears a native multiple select; single selects refuse it
+(`element_not_found`, reason `single_select`, no mutation). Disabled
+selects/options are refused before changes. Blank strings and lists over 100
+entries are refused; use a zero-based index for an option with a blank label.
+
+The desktop host also handles ARIA combobox/listbox (or `aria-haspopup=listbox`)
+triggers: open, click the matching role=option and verify observable selection.
+The extension implements **native only** through its existing Runtime/node
+resolution path. It refuses ARIA/custom controls with `capability_unsupported`
+pointing to `backend='ui'`, rather than claiming native setters implement
+application-specific popup semantics. Cmux is unsupported.
+
+The wire method/capability is `select`, params `{tab, selector, options}`; result
+`{selected:[{index,value,label}], kind:'native'|'aria', url, title}` with optional
+`verified:false` when the host cannot verify selection. The harness surfaces that
+limitation honestly. No match uses existing `element_not_found` with
+`data.reason='option_not_found'` and `data.available:[{index,label,value}]`
+(capped at 50 entries, strings capped at 120 characters). The harness renders that
+correction list, so agents need not hallucinate labels. Older hosts refuse before
+send with `capability_unsupported`. `select` stays write-tier like click/type.
+
 ## Network telemetry
 
 Four actions expose the owned tab's request stream: `network_start`,

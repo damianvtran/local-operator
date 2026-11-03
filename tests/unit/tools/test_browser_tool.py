@@ -997,9 +997,11 @@ def test_every_action_degrades_without_cmux(monkeypatch) -> None:
         context = _ctx()
         # Key validation precedes backend admission; a valid press must reach
         # the unavailable-host refusal rather than testing unsupported_key here.
-        args = {"action": action, "url": "https://x.y"}
+        args: dict[str, Any] = {"action": action, "url": "https://x.y"}
         if action == "press":
             args["key"] = "Tab"
+        if action == "select":
+            args.update(selector="#s", options=[0])
         if action == "hover":
             # Same rule: a well-formed target reaches the unavailable-host refusal.
             args["selector"] = "#menu"

@@ -392,7 +392,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # this test's own print.
     # 1863 -> 1908 (+45, issue #3248): the `hover` op and the chord/selector
     # wording on `press`. Measured by this test's own print.
-    "browser": 1908,
+    # Select adds the native/ARIA operation and its host scope; deliberately
+    # measured by this test after adding the one-line BrowserParams.options.
+    "browser": 1968,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the

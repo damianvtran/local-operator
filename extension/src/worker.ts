@@ -11,6 +11,7 @@ import { hitTest } from "./commands/hit-test";
 import { ancestors } from "./commands/ancestors";
 import { query } from "./commands/query";
 import { upload } from "./commands/upload";
+import { selectOptions } from "./commands/select";
 import { download } from "./commands/download";
 import { disabledCapabilities, hasConsentSwitch } from "./consent";
 import { BridgeCommandError, releaseAllSurfaces } from "./cdp";
@@ -50,6 +51,7 @@ const HANDLERS: Record<
   screenshot,
   click,
   type: typeText,
+  select: selectOptions,
   close,
   status,
   tabs,

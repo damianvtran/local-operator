@@ -21288,6 +21288,7 @@ BROWSER_ACTIONS = (
     # tooltips and hover menus can be exercised. Desktop host only: see
     # DESKTOP_ONLY_METHODS for why the extension cannot deliver it.
     "hover",
+    "select",
     "close",
     # scroll and logs are served by BOTH non-cmux hosts (the paired Local
     # Operator browser extension and the desktop app's browser host); the cmux
@@ -21383,6 +21384,7 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
     {
         "press",
         "hover",
+        "select",
         "scroll",
         "logs",
         "network_start",
@@ -21605,6 +21607,30 @@ class BrowserParams(BaseModel):
             "(desktop app only); text entry belongs in 'type'."
         ),
     )
+    options: list[str | int] = Field(
+        default_factory=list,
+        description=(
+            "'select': labels/values or zero-based indexes; [] clears native multiple selects."
+        ),
+    )
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def _strict_select_options(cls, value: Any) -> Any:
+        # bool is an int in Python, and pydantic otherwise coerces numbers. An
+        # index must be an integer the caller actually supplied, not a guess.
+        if not isinstance(value, list) or any(type(item) not in (str, int) for item in value):
+            raise ValueError(
+                "'options' must be a list of strings or integer indexes (not booleans)"
+            )
+        if len(value) > 100:
+            raise ValueError("'options' accepts at most 100 entries")
+        if any(isinstance(item, str) and not item.strip() for item in value):
+            raise ValueError("'options' strings must not be empty or blank; use an index instead")
+        if any(isinstance(item, int) and item < 0 for item in value):
+            raise ValueError("'options' indexes must be zero-based and non-negative")
+        return value
+
     url: str = Field(
         default="",
         description=(
@@ -21637,7 +21663,7 @@ class BrowserParams(BaseModel):
     selector: str = Field(
         default="",
         description="CSS selector, snapshot ref, or a11y locator for the "
-        'click/type/hover target (role=checkbox[name="Active"], label=…, text=…) '
+        'click/type/hover/select target (role=checkbox[name="Active"], label=…, text=…) '
         "resolved against the a11y tree, so it survives framework ids. Also the "
         "read/snapshot scope, query CSS, scroll element, 'press' focus target or "
         "download/upload control.",
@@ -22495,7 +22521,7 @@ def _validate_locator_target(action: str, params: BrowserParams) -> str:
     kind = _locator_kind(params.selector)
     if not kind:
         return ""
-    if action in ("click", "type", "upload", "hover", "press"):
+    if action in ("click", "type", "upload", "hover", "press", "select"):
         # `upload` resolves its input through the same ref/CSS/locator path in
         # both hosts, so `label="Choose file"` names a file input there too
         # (agent review round 1, R1-5).
@@ -22742,6 +22768,25 @@ def _browser_press_refusal(
     )
 
 
+def _select_available_options(raw: Any) -> list[dict[str, Any]]:
+    """Bound a host's suggestions too: page labels are untrusted/model-visible.
+
+    Cap both count and strings, even if a newer peer forgets its own caps. This
+    is a correction list, not a dump of a potentially enormous select menu.
+    """
+    if not isinstance(raw, list):
+        return []
+    return [
+        {
+            "index": item.get("index"),
+            "label": str(item.get("label", ""))[:120],
+            "value": str(item.get("value", ""))[:120],
+        }
+        for item in raw[:50]
+        if isinstance(item, dict)
+    ]
+
+
 def _hover_failure_hint(message: str) -> str:
     """Agent guidance for the two hover failures the host can only describe tersely.
 
@@ -22903,6 +22948,12 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
             # read-back comparison in the lane still catches a failed fill.
             return ""
         return _validate_typed_text(params.text)
+    if action == "select":
+        if "options" not in params.model_fields_set:
+            return (
+                "'select' needs options: labels/values (strings) or zero-based indexes (integers)"
+            )
+        return _validate_selector(params.selector, "select")
     if action == "hover":
         return _validate_hover_args(params)
     if action == "press":
@@ -24559,6 +24610,17 @@ async def _bridge_call(
                     "(or the browser extension), or pass a snapshot ref ('snapshot' shows "
                     "them) / a CSS selector instead."
                 )
+        if action == "select" and exc.data.get("reason") == "option_not_found":
+            available = _select_available_options(exc.data.get("available"))
+            message += "\nAvailable options (zero-based indexes):" + (
+                "\n"
+                + "\n".join(
+                    f"[{item['index']}] {item['label']!r} (value={item['value']!r})"
+                    for item in available
+                )
+                if available
+                else " (none reported)"
+            )
         if action == "hover":
             # Older host copy suggests hit_test for the inner target, but that
             # tool only sees the iframe itself. Do not leave conflicting advice
@@ -24578,6 +24640,8 @@ async def _bridge_call(
         # it from the code alone (`busy` covers `record_active` and
         # `record_limit`), and substring-matching the rendered sentence is the
         # failure mode the typed code exists to remove (review round 2, F1).
+        if action == "select" and exc.data.get("reason") == "option_not_found":
+            problem.details["available"] = _select_available_options(exc.data.get("available"))
         reason = exc.data.get("reason")
         if isinstance(reason, str) and reason:
             problem.details["reason"] = reason
@@ -27046,6 +27110,9 @@ async def _bridge_action(
         wire["key"] = chord
         if params.selector.strip():
             wire["selector"] = params.selector.strip()
+    elif action == "select":
+        wire["selector"] = params.selector.strip()
+        wire["options"] = list(params.options)
     elif action == "hover":
         # selector XOR x/y is guaranteed by _validate_browser_args; send only the
         # half the caller chose so the host never sees a second target.
@@ -27209,6 +27276,31 @@ async def _bridge_action(
             "browser",
             f"Pressed {chord!r} in the owned page{target}. Page: {_page_line(title, href)}",
             details={**details, "key": chord},
+        )
+    if action == "select":
+        selected = _geometry_entry_list(result, "selected")
+        # Do not infer successful selection from a returned label alone: ARIA
+        # controls may ignore a click, and hosts explicitly flag that case.
+        verified = result.get("verified")
+        labels = ", ".join(repr(str(item.get("label", ""))) for item in selected)
+        verdict = " (selection unverified — check the page)" if verified is False else ""
+        details.update(selected=selected, kind=result.get("kind"))
+        if isinstance(verified, bool):
+            details["verified"] = verified
+        # [] is a legitimate clear request for a native multiple select. Only
+        # the host knows multiplicity; the harness must pass it through, while
+        # retaining honest unverified feedback if the live read is inconclusive.
+        operation = (
+            "Cleared selection"
+            if not params.options and not selected
+            else f"Selected {labels or '(none)'}"
+        )
+        return _text(
+            tool_call_id,
+            "browser",
+            f"{operation} in {params.selector.strip()}{verdict}. "
+            f"Page: {_page_line(title, href)}",
+            details=details,
         )
     if action == "hover":
         raw_hit = result.get("hit")
@@ -27471,7 +27563,7 @@ async def execute_browser(
     # a peer. Keep the preflight specific to this additive action so existing
     # actions retain their established validation/ownership ordering.
     preflight_action = str(args.get("action", "")).strip().lower()
-    if preflight_action in ("press", "hover"):
+    if preflight_action in ("press", "hover", "select"):
         try:
             keyboard = BrowserParams(**args)
         except ValidationError as exc:
@@ -28094,7 +28186,7 @@ async def _execute_browser(
     refusal = _browser_press_refusal(tool_call_id, action, params)
     if refusal is not None:
         return refusal
-    if action in ("press", "hover"):
+    if action in ("press", "hover", "select"):
         # Host-free target validation, before ANY discovery (the same ordering
         # execute_browser's preflight gives the public entry point).
         invalid = _validate_browser_args(action, params)
