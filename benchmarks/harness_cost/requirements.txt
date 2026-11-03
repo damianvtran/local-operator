@@ -7,5 +7,5 @@ numpy==2.3.4
 packaging==26.3
 pillow==13.0.0
 pyparsing==3.3.3
-python-dateutil==4.0.0
+python-dateutil==2.9.0.post0
 tzdata==2026.6

@@ -7,36 +7,62 @@ paid-run authorization or evidence of quality. No secrets/environment captured.
 The inventory excludes itself, caches and generated runtime logs; run only on a
 clean publication folder, not a working directory containing runtime artifacts.
 """
+
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
 from pathlib import Path
+from typing import TypedDict
+
+
+class FileRecord(TypedDict):
+    sha256: str
+    bytes: int
+
+
+class Inventory(TypedDict):
+    status: str
+    files: dict[str, FileRecord]
+    shared_inputs: dict[str, FileRecord]
+
 
 HERE = Path(__file__).resolve().parent
 NAME = "EXPERIMENTAL-MANIFEST.json"
 
 
-def inventory() -> dict:
-    files = {}
+def inventory() -> Inventory:
+    files: dict[str, FileRecord] = {}
     for path in sorted(HERE.rglob("*")):
         if not path.is_file() or "__pycache__" in path.parts or path.name == NAME:
             continue
         if path.is_symlink():
             raise ValueError("Symlinks cannot freeze portable inputs")
         rel = path.relative_to(HERE).as_posix()
-        files[rel] = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "bytes": path.stat().st_size}
-    shared = {}
+        files[rel] = {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "bytes": path.stat().st_size,
+        }
+    shared: dict[str, FileRecord] = {}
     for name in ("public_mcp_schemas.json", "public_user_instructions.md", "public_skills.sha256"):
         path = HERE.parent / "public_loadout" / name
-        shared["../public_loadout/" + name] = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "bytes": path.stat().st_size}
-    return {"status": "experimental-draft-not-run-authorization", "files": files, "shared_inputs": shared}
+        shared["../public_loadout/" + name] = {
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "bytes": path.stat().st_size,
+        }
+    return {
+        "status": "experimental-draft-not-run-authorization",
+        "files": files,
+        "shared_inputs": shared,
+    }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--write", action="store_true", help="Explicitly replace experimental inventory only")
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
+    parser.add_argument(
+        "--write", action="store_true", help="Explicitly replace experimental inventory only"
+    )
     args = parser.parse_args()
     actual = inventory()
     path = HERE / NAME
@@ -46,7 +72,9 @@ def main() -> None:
     else:
         expected = json.loads(path.read_text())
         if expected != actual:
-            raise SystemExit("Experimental inventory differs; inspect changes before explicit regeneration")
+            raise SystemExit(
+                "Experimental inventory differs; inspect changes before explicit regeneration"
+            )
         print("Experimental and shared input hashes match")
 
 

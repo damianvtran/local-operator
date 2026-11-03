@@ -13,7 +13,9 @@ search bridge are explicitly reaped. Model usage and Radient classification
 spend are separate USD columns. A passed filesystem/config check is NOT wire
 validation: missing capture evidence blocks paid execution.
 """
+
 from __future__ import annotations
+
 import argparse
 import collections
 import hashlib
@@ -29,18 +31,163 @@ import time
 import urllib.request
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal, Mapping, NotRequired, Sequence, TypedDict
+
+# The external task and capture formats have distinct shapes. Keep their
+# contracts explicit so a metadata dictionary cannot become a command by accident.
+JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
+
+
+class TaskParameters(TypedDict):
+    files: list[dict[str, str]]
+    command: str | list[str]
+
+
+class TaskConfig(TypedDict):
+    type: str
+    parameters: TaskParameters
+
+
+class TaskEvaluator(TypedDict):
+    result: dict[str, str]
+
+
+class TaskIdentity(TypedDict):
+    id: str
+
+
+class PreparedTask(TaskIdentity):
+    _domain: str
+    config: list[TaskConfig]
+
+
+class Task(PreparedTask):
+    instruction: str
+    evaluator: TaskEvaluator
+
+
+class RuntimeIdentity(TypedDict):
+    binary: str
+    sha256: str
+    entry: NotRequired[str]
+    source_head: NotRequired[str]
+    interpreter_sha256: NotRequired[str]
+    components: NotRequired[dict[str, str]]
+
+
+class PublicTool(TypedDict):
+    name: str
+    description: NotRequired[str]
+    inputSchema: NotRequired[JSONValue]
+
+
+class PublicServer(TypedDict):
+    tools: list[PublicTool]
+
+
+class PublicSnapshot(TypedDict):
+    servers: dict[str, PublicServer]
+
+
+class ToolDeclaration(TypedDict, total=False):
+    type: str
+    name: str
+
+
+class ToolUse(TypedDict):
+    type: Literal["tool_use"]
+    id: str
+    name: str
+    input: dict[str, JSONValue]
+
+
+class ToolResult(TypedDict):
+    type: Literal["tool_result"]
+    tool_use_id: str
+    content: JSONValue | RPCResult
+
+
+class TextPart(TypedDict):
+    type: Literal["text"]
+    text: str
+
+
+ContentPart = ToolUse | ToolResult | TextPart
+
+
+class Message(TypedDict, total=False):
+    role: str
+    content: str | list[ContentPart]
+
+
+class WireBody(TypedDict, total=False):
+    model: str
+    messages: list[Message]
+    tools: list[ToolDeclaration]
+    input: list[JSONValue]
+
+
+class RPCParams(TypedDict, total=False):
+    name: str
+    arguments: dict[str, JSONValue]
+
+
+class RPCRequest(TypedDict, total=False):
+    id: JSONValue
+    method: str
+    params: RPCParams
+
+
+class RPCResult(TypedDict, total=False):
+    tools: list[PublicTool]
+    isError: bool
+    content: list[dict[str, JSONValue]]
+
+
+class RPCResponse(TypedDict, total=False):
+    id: JSONValue
+    result: RPCResult
+
+
+class RPCExchange(TypedDict, total=False):
+    server: str
+    request: RPCRequest
+    response: RPCResponse
+
 
 HERE = Path(__file__).resolve().parent
-PUBLIC_LOADOUT = Path(os.environ.get("BENCH_PUBLIC_LOADOUT", str(HERE.parent / "public_loadout"))).expanduser().resolve()
-TASKS_DIR = Path(os.environ.get("BENCH_TASKS_DIR", str(HERE / "missing-external-tasks"))).expanduser().resolve()
-TASKS_FILE = Path(os.environ.get("BENCH_TASKS_FILE", str(TASKS_DIR / "tasks.json"))).expanduser().resolve()
-TASK_CACHE = Path(os.environ.get("BENCH_TASK_CACHE", str(TASKS_DIR / "cache"))).expanduser().resolve()
-EVALUATOR = Path(os.environ.get("BENCH_EVALUATOR", str(HERE / "evaluate.py"))).expanduser().resolve()
+PUBLIC_LOADOUT = (
+    Path(os.environ.get("BENCH_PUBLIC_LOADOUT", str(HERE.parent / "public_loadout")))
+    .expanduser()
+    .resolve()
+)
+TASKS_DIR = (
+    Path(os.environ.get("BENCH_TASKS_DIR", str(HERE / "missing-external-tasks")))
+    .expanduser()
+    .resolve()
+)
+TASKS_FILE = (
+    Path(os.environ.get("BENCH_TASKS_FILE", str(TASKS_DIR / "tasks.json"))).expanduser().resolve()
+)
+TASK_CACHE = (
+    Path(os.environ.get("BENCH_TASK_CACHE", str(TASKS_DIR / "cache"))).expanduser().resolve()
+)
+EVALUATOR = (
+    Path(os.environ.get("BENCH_EVALUATOR", str(HERE / "evaluate.py"))).expanduser().resolve()
+)
 MODEL = "claude-sonnet-5-5"
 CONTEXT = 1000000
 LOP_HEAD = "07c324e9f613b378c437936ede1978c9fc0b49db"
 HARNESSES = ("claude-code", "codex", "local-operator", "omp", "opencode", "hermes", "dsh")
-SCRATCH = Path(os.environ.get("BENCH_SCRATCH", str(Path(os.environ.get("TMPDIR", "/var/tmp")) / "harness-cost-bench"))).expanduser().resolve()
+SCRATCH = (
+    Path(
+        os.environ.get(
+            "BENCH_SCRATCH", str(Path(os.environ.get("TMPDIR", "/var/tmp")) / "harness-cost-bench")
+        )
+    )
+    .expanduser()
+    .resolve()
+)
 PROXY = os.environ.get("BENCH_PROXY", "http://127.0.0.1:8787").rstrip("/")
 MCP = os.environ.get("BENCH_MCP_URL", "http://127.0.0.1:8790").rstrip("/")
 LITELLM = os.environ.get("BENCH_LITELLM_URL", "http://127.0.0.1:4000/v1").rstrip("/")
@@ -48,15 +195,31 @@ TIMEOUT_S = int(os.environ.get("BENCH_TIMEOUT_S", "900"))
 PATH = os.environ.get("BENCH_TASK_PATH", os.defpath)
 TASK_PY = str(Path(os.environ.get("BENCH_TASK_PY", sys.executable)).expanduser().absolute())
 INSTRUCTION_PATHS = {
-    "claude-code": ".claude/CLAUDE.md", "codex": ".codex/AGENTS.md",
-    "local-operator": ".local-operator/system_prompt.md", "omp": ".omp/agent/AGENTS.md",
-    "opencode": ".config/opencode/AGENTS.md", "hermes": ".hermes/SOUL.md", "dsh": ".dsh/AGENTS.md",
+    "claude-code": ".claude/CLAUDE.md",
+    "codex": ".codex/AGENTS.md",
+    "local-operator": ".local-operator/system_prompt.md",
+    "omp": ".omp/agent/AGENTS.md",
+    "opencode": ".config/opencode/AGENTS.md",
+    "hermes": ".hermes/SOUL.md",
+    "dsh": ".dsh/AGENTS.md",
 }
-SKILL_ROOTS = (".local-operator/skills", ".claude/skills", ".codex/skills", ".agents/skills",
-               ".config/opencode/skills", ".omp/agent/skills", ".hermes/skills", ".dsh/skills")
-BIN_KEYS = {"claude-code": ("BENCH_CLAUDE_BIN", "claude"), "codex": ("BENCH_CODEX_BIN", "codex"),
-            "omp": ("BENCH_OMP_BIN", "omp"), "opencode": ("BENCH_OPENCODE_BIN", "opencode"),
-            "hermes": ("BENCH_HERMES_BIN", "hermes")}
+SKILL_ROOTS = (
+    ".local-operator/skills",
+    ".claude/skills",
+    ".codex/skills",
+    ".agents/skills",
+    ".config/opencode/skills",
+    ".omp/agent/skills",
+    ".hermes/skills",
+    ".dsh/skills",
+)
+BIN_KEYS = {
+    "claude-code": ("BENCH_CLAUDE_BIN", "claude"),
+    "codex": ("BENCH_CODEX_BIN", "codex"),
+    "omp": ("BENCH_OMP_BIN", "omp"),
+    "opencode": ("BENCH_OPENCODE_BIN", "opencode"),
+    "hermes": ("BENCH_HERMES_BIN", "hermes"),
+}
 
 
 def resolve_program(key: str, default: str | None = None) -> str:
@@ -81,7 +244,7 @@ def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def public_snapshot() -> dict:
+def public_snapshot() -> PublicSnapshot:
     """Load the exact public nine-server surface; reject partial snapshots."""
     d = json.loads((PUBLIC_LOADOUT / "public_mcp_schemas.json").read_text())
     if len(d["servers"]) != 9 or sum(len(s["tools"]) for s in d["servers"].values()) != 493:
@@ -107,7 +270,7 @@ def expected_skills() -> dict[str, str]:
     return out
 
 
-def public_home_check(home: Path, full: bool, complete: bool = True) -> dict:
+def public_home_check(home: Path, full: bool, complete: bool = True) -> dict[str, object]:
     """Check exact public bytes and ban imported credential/plugin state.
 
     Cross-harness instruction paths in a template are expected, but the run
@@ -133,11 +296,23 @@ def public_home_check(home: Path, full: bool, complete: bool = True) -> dict:
             raise ValueError(f"Public instruction bytes differ: {rel}")
         if not full and p.exists():
             raise ValueError(f"Clean template contains instructions: {rel}")
-    forbidden = (".env", ".hermes/.env", ".hermes/auth.json", ".dsh/.credentials.yaml", ".dsh/.env",
-                 ".codex/auth.json", ".claude/.credentials.json", ".claude/plugins", ".codex/plugins")
+    forbidden = (
+        ".env",
+        ".hermes/.env",
+        ".hermes/auth.json",
+        ".dsh/.credentials.yaml",
+        ".dsh/.env",
+        ".codex/auth.json",
+        ".claude/.credentials.json",
+        ".claude/plugins",
+        ".codex/plugins",
+    )
     if any((home / p).exists() for p in forbidden):
         raise ValueError("Template contains credential/private-plugin state")
-    return {"public_skills": 19 if full else 0, "instruction_sha256": sha(PUBLIC_LOADOUT / "public_user_instructions.md") if full else None}
+    return {
+        "public_skills": 19 if full else 0,
+        "instruction_sha256": sha(PUBLIC_LOADOUT / "public_user_instructions.md") if full else None,
+    }
 
 
 def augment_public_home(home: Path) -> None:
@@ -169,7 +344,9 @@ def augment_public_home(home: Path) -> None:
     for p in facts:
         v = json.loads(p.read_text())["packages"]["venv"]
         if "anthropic" not in v["extras"]:
-            raise ValueError("Prepare Hermes anthropic extra outside this runner; no auto-install allowed")
+            raise ValueError(
+                "Prepare Hermes anthropic extra outside this runner; no auto-install allowed"
+            )
         if "relocatable = true" not in (Path(v["environment"]) / "pyvenv.cfg").read_text():
             raise ValueError("Hermes environment is not relocatable")
     dst = home / ".hermes/installs"
@@ -179,10 +356,11 @@ def augment_public_home(home: Path) -> None:
     _hermes_relocate(home)
     public_home_check(home, True)
 
-def build_prompt(task: dict) -> str:
+
+def build_prompt(task: Task) -> str:
     """OSWorld instruction + a fixed, harness-neutral offline adapter."""
     ev = task["evaluator"]
-    result_rel = ev["result"]["path"][len("/home/user/"):]
+    result_rel = ev["result"]["path"][len("/home/user/") :]
     if task["_domain"] == "vs_code":
         ctx = (
             "Environment note: there is no GUI. The current working directory is the "
@@ -212,6 +390,7 @@ def build_prompt(task: dict) -> str:
         )
     return f"{task['instruction'].strip()}\n\n{ctx}"
 
+
 def base_env(home: Path) -> dict[str, str]:
     return {
         "HOME": str(home),
@@ -229,6 +408,7 @@ def base_env(home: Path) -> dict[str, str]:
         "XDG_CACHE_HOME": str(home / ".cache"),
     }
 
+
 def _hermes_relocate(home: Path) -> None:
     """Point the cloned Hermes dependency record at THIS run's home.
 
@@ -243,9 +423,13 @@ def _hermes_relocate(home: Path) -> None:
     missing or outside this install"), so the prefix is rewritten here.
     """
     import re
+
     for facts in (home / ".hermes/installs").glob("*/facts.json"):
         text = facts.read_text()
-        facts.write_text(re.sub(r'"[^"]*/\.hermes/installs/', '"' + str(home) + '/.hermes/installs/', text))
+        facts.write_text(
+            re.sub(r'"[^"]*/\.hermes/installs/', '"' + str(home) + "/.hermes/installs/", text)
+        )
+
 
 def _hermes_teardown(home: Path, env: dict[str, str]) -> None:
     """Stop the Hermes gateway this run started; it is NOT in our process group.
@@ -277,27 +461,45 @@ def _hermes_teardown(home: Path, env: dict[str, str]) -> None:
         # A stale pid file must not authorize killing another root's gateway
         # after pid reuse. Inspect environment locally; never print it (it can
         # hold credentials). The per-run HERMES_HOME is the ownership fence.
-        identity = subprocess.run(["/bin/ps", "-E", "-p", str(pid), "-o", "command="],
-                                  capture_output=True, text=True).stdout
+        identity = subprocess.run(
+            ["/bin/ps", "-E", "-p", str(pid), "-o", "command="], capture_output=True, text=True
+        ).stdout
         if f"HERMES_HOME={home / '.hermes'}" not in identity:
             pid = None
         else:
-            out = subprocess.run(["/bin/ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True)
+            out = subprocess.run(
+                ["/bin/ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True
+            )
             ppid = int(out.stdout.strip()) if out.stdout.strip().isdigit() else None
     labels = []
     if ppid:
-        listed = subprocess.run(["/bin/launchctl", "list"], capture_output=True, text=True).stdout.splitlines()
-        labels = [ln.split()[2] for ln in listed if len(ln.split()) == 3 and ln.split()[0] == str(ppid)
-                  and ln.split()[2].startswith("com.nousresearch.hermes.runtime.")]
+        listed = subprocess.run(
+            ["/bin/launchctl", "list"], capture_output=True, text=True
+        ).stdout.splitlines()
+        labels = [
+            ln.split()[2]
+            for ln in listed
+            if len(ln.split()) == 3
+            and ln.split()[0] == str(ppid)
+            and ln.split()[2].startswith("com.nousresearch.hermes.runtime.")
+        ]
     try:
-        subprocess.run([resolve_program("BENCH_HERMES_BIN", "hermes"), "gateway", "stop", "-y"], env=env, cwd=home, capture_output=True,
-                       stdin=subprocess.DEVNULL, timeout=60)
+        subprocess.run(
+            [resolve_program("BENCH_HERMES_BIN", "hermes"), "gateway", "stop", "-y"],
+            env=env,
+            cwd=home,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+        )
     except subprocess.TimeoutExpired:
         pass
     for p in (pid, ppid):
         if not p or p == 1:
             continue
-        cmd = subprocess.run(["/bin/ps", "-o", "command=", "-p", str(p)], capture_output=True, text=True).stdout
+        cmd = subprocess.run(
+            ["/bin/ps", "-o", "command=", "-p", str(p)], capture_output=True, text=True
+        ).stdout
         if "hermes_cli.main" in cmd and "gateway run" in cmd:
             try:
                 os.kill(p, signal.SIGKILL)
@@ -308,14 +510,25 @@ def _hermes_teardown(home: Path, env: dict[str, str]) -> None:
     remaining = []
     for p in (pid, ppid):
         if p and p != 1:
-            check = subprocess.run(["/bin/ps", "-o", "command=", "-p", str(p)], capture_output=True, text=True)
+            check = subprocess.run(
+                ["/bin/ps", "-o", "command=", "-p", str(p)], capture_output=True, text=True
+            )
             if "hermes_cli.main" in check.stdout and "gateway run" in check.stdout:
                 remaining.append(p)
-    (home.parent / "hermes-teardown.json").write_text(json.dumps({
-        "gateway_pid": pid, "launcher_pid": ppid, "labels_removed": len(labels), "remaining_pids": remaining
-    }) + "\n")
+    (home.parent / "hermes-teardown.json").write_text(
+        json.dumps(
+            {
+                "gateway_pid": pid,
+                "launcher_pid": ppid,
+                "labels_removed": len(labels),
+                "remaining_pids": remaining,
+            }
+        )
+        + "\n"
+    )
     if remaining:
         raise RuntimeError(f"Hermes gateway cleanup failed for exact pids {remaining}")
+
 
 def write_dsh_patch(home: Path, run_id: str, full: bool) -> None:
     """Per-run $DSH_HOME/cordis.patch.yml (DSH_HOME = ~/.dsh under the scratch HOME).
@@ -333,13 +546,37 @@ def write_dsh_patch(home: Path, run_id: str, full: bool) -> None:
     here and must be recorded as a departure from its shipped default.
     Full arm: the replayed MCP servers via dsh-mcp-client (streamable-http).
     """
-    entry = {"id": MODEL, "name": "Claude Sonnet 5.5", "contextWindow": 1000000, "maxTokens": 128000,
-             "reasoningEfforts": {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max"},
-             "compat": {"forceAdaptiveThinking": True, "supportsStrictTools": True}}
+    entry = {
+        "id": MODEL,
+        "name": "Claude Sonnet 5.5",
+        "contextWindow": 1000000,
+        "maxTokens": 128000,
+        "reasoningEfforts": {
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max",
+        },
+        "compat": {"forceAdaptiveThinking": True, "supportsStrictTools": True},
+    }
     patch = [
-        {"id": "llm-pi-ai", "config": {"providers": {"anthropic": {
-            "apiKeyEnv": "ANTHROPIC_API_KEY", "baseURL": f"{PROXY}/r/{run_id}", "models": [entry]}}}},
-        {"id": "agent-default-model", "config": {"provider": "anthropic", "model": MODEL, "reasoningEffort": "high"}},
+        {
+            "id": "llm-pi-ai",
+            "config": {
+                "providers": {
+                    "anthropic": {
+                        "apiKeyEnv": "ANTHROPIC_API_KEY",
+                        "baseURL": f"{PROXY}/r/{run_id}",
+                        "models": [entry],
+                    }
+                }
+            },
+        },
+        {
+            "id": "agent-default-model",
+            "config": {"provider": "anthropic", "model": MODEL, "reasoningEffort": "high"},
+        },
     ]
     if full:
         # Cordis patches override EXISTING ids; a new id/name row alone is
@@ -347,30 +584,49 @@ def write_dsh_patch(home: Path, run_id: str, full: bool) -> None:
         # Surface connection failures as plugin errors. Cordis still treats
         # these plugins as optional, so this is NOT a global fail-closed
         # gate: validate full-arm schema exposure on the wire after the run.
-        patch.append({"insert": [
-            {"id": f"mcp-{s}", "name": "@deepseek-ai/dsh-mcp-client",
-             "config": {"serverName": s, "transport": "streamable-http", "url": f"{MCP}/{run_id}/{s}/mcp",
-                        "failOnStartupError": True}}
-            for s in MCP_SERVERS
-        ]})
+        patch.append(
+            {
+                "insert": [
+                    {
+                        "id": f"mcp-{s}",
+                        "name": "@deepseek-ai/dsh-mcp-client",
+                        "config": {
+                            "serverName": s,
+                            "transport": "streamable-http",
+                            "url": f"{MCP}/{run_id}/{s}/mcp",
+                            "failOnStartupError": True,
+                        },
+                    }
+                    for s in MCP_SERVERS
+                ]
+            }
+        )
     (home / ".dsh").mkdir(exist_ok=True)
     # JSON is a YAML subset: no PyYAML-specific tags reach dsh's loader.
     (home / ".dsh/cordis.patch.yml").write_text(json.dumps(patch, indent=1) + "\n")
 
 
-def runtime_identity(harness: str) -> dict:
+def runtime_identity(harness: str) -> RuntimeIdentity:
     """Resolve all runtime inputs without launching a model or reading credentials."""
     if harness == "local-operator":
         binary = resolve_program("BENCH_LOP_PY")
         code = "import inspect,local_operator;print(inspect.getfile(local_operator))"
         p = subprocess.run([binary, "-c", code], capture_output=True, text=True, check=True)
         source = Path(p.stdout.strip()).parent.parent
-        head = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"],
-                              capture_output=True, text=True, check=True).stdout.strip()
+        head = subprocess.run(
+            ["git", "-C", str(source), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
         if head != LOP_HEAD:
             raise ValueError("BENCH_LOP_PY must import the independently reviewed fixed LOP head")
-        dirty = subprocess.run(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
-                               capture_output=True, text=True, check=True).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
         if dirty:
             raise ValueError("Reviewed LOP worktree has tracked changes")
         return {"binary": binary, "sha256": sha(Path(binary)), "source_head": head}
@@ -378,39 +634,61 @@ def runtime_identity(harness: str) -> dict:
         binary = resolve_program("BENCH_NODE_BIN", "node")
         raw = os.environ.get("BENCH_DSH_ENTRY")
         if not raw or not Path(raw).expanduser().is_file():
-            raise ValueError("Set BENCH_DSH_ENTRY to installed CLI lib/bin.js (not a HOME-relative wrapper)")
+            raise ValueError(
+                "Set BENCH_DSH_ENTRY to installed CLI lib/bin.js (not a HOME-relative wrapper)"
+            )
         entry = Path(raw).expanduser().resolve()
         package = entry.parent.parent
-        components = ("node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js",
-                      "node_modules/@deepseek-ai/dsh-mcp-client/lib/index.js",
-                      "node_modules/@earendil-works/pi-ai/dist/providers/data/anthropic.json")
-        return {"binary": binary, "entry": str(entry), "sha256": sha(entry), "interpreter_sha256": sha(Path(binary)),
-                "components": {rel: sha(package / rel) for rel in components}}
+        components = (
+            "node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js",
+            "node_modules/@deepseek-ai/dsh-mcp-client/lib/index.js",
+            "node_modules/@earendil-works/pi-ai/dist/providers/data/anthropic.json",
+        )
+        return {
+            "binary": binary,
+            "entry": str(entry),
+            "sha256": sha(entry),
+            "interpreter_sha256": sha(Path(binary)),
+            "components": {rel: sha(package / rel) for rel in components},
+        }
     key, default = BIN_KEYS[harness]
     binary = resolve_program(key, default)
     # A wrapper can attach to a personal service/keychain before the scratch
     # config is read. Refuse implicit script wrappers; explicit env is required.
     if key not in os.environ and Path(binary).read_bytes()[:2] == b"#!":
-        raise ValueError(f"{default} resolves to a wrapper; set {key} to the actual isolated runtime")
-    identity = {"binary": binary, "sha256": sha(Path(binary))}
+        raise ValueError(
+            f"{default} resolves to a wrapper; set {key} to the actual isolated runtime"
+        )
+    identity: RuntimeIdentity = {"binary": binary, "sha256": sha(Path(binary))}
     if harness == "hermes":
         if sys.platform != "darwin":
             raise ValueError("Hermes Linux lifecycle cleanup is incomplete; do not dispatch")
         source = Path(os.environ.get("BENCH_HERMES_SOURCE", str(Path(binary).parents[2]))).resolve()
-        head = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"],
-                              capture_output=True, text=True, check=True).stdout.strip()
-        dirty = subprocess.run(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
-                               capture_output=True, text=True, check=True).stdout.strip()
+        head = subprocess.run(
+            ["git", "-C", str(source), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
         if dirty:
             raise ValueError("Hermes source contains tracked modifications")
         identity["source_head"] = head
     return identity
 
 
-def runtime_fingerprint(runtime: dict) -> str:
+def runtime_fingerprint(runtime: RuntimeIdentity) -> str:
     """Ignore machine paths but bind binary, interpreter and source content identities."""
-    return hashlib.sha256(json.dumps({k: v for k, v in runtime.items() if k not in ("binary", "entry")},
-                                     sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(
+            {k: v for k, v in runtime.items() if k not in ("binary", "entry")}, sort_keys=True
+        ).encode()
+    ).hexdigest()
 
 
 def clone_path(source: Path, destination: Path) -> None:
@@ -426,14 +704,18 @@ def clone_path(source: Path, destination: Path) -> None:
     subprocess.run([binary, *flags, str(source), str(destination)], check=True)
 
 
-def _prepare(run_id: str, task: dict, arm: str, harness: str) -> tuple[Path, Path]:
+def _prepare(run_id: str, task: PreparedTask, arm: str, harness: str) -> tuple[Path, Path]:
     """Clone only vetted public/clean state and map OSWorld files into scratch HOME."""
     full = arm == "public-full"
     key = "BENCH_PUBLIC_BASEHOME" if full else "BENCH_CLEAN_BASEHOME"
-    base = Path(os.environ.get(key, str(SCRATCH / ("basehome-public" if full else "basehome")))).expanduser()
+    base = Path(
+        os.environ.get(key, str(SCRATCH / ("basehome-public" if full else "basehome")))
+    ).expanduser()
     public_home_check(base, full)
     if SCRATCH.is_relative_to(Path.home()):
-        raise ValueError("BENCH_SCRATCH must be outside the account HOME to prevent parent-config discovery")
+        raise ValueError(
+            "BENCH_SCRATCH must be outside the account HOME to prevent parent-config discovery"
+        )
     if shutil.disk_usage(SCRATCH.parent).free < 15 * 1024**3:
         raise ValueError("Disk below the 15 GiB floor")
     root = SCRATCH / "runs" / run_id
@@ -449,11 +731,16 @@ def _prepare(run_id: str, task: dict, arm: str, harness: str) -> tuple[Path, Pat
     if harness == "hermes":
         facts = list((home / ".hermes/installs").glob("*/facts.json"))
         if not facts:
-            raise ValueError("Hermes runtime hook absent; --augment-public needs prepared runtime state")
+            raise ValueError(
+                "Hermes runtime hook absent; --augment-public needs prepared runtime state"
+            )
         _hermes_relocate(home)
         for record in facts:
             v = json.loads(record.read_text())["packages"]["venv"]
-            if "anthropic" not in v["extras"] or "relocatable = true" not in (Path(v["environment"]) / "pyvenv.cfg").read_text():
+            if (
+                "anthropic" not in v["extras"]
+                or "relocatable = true" not in (Path(v["environment"]) / "pyvenv.cfg").read_text()
+            ):
                 raise ValueError("Hermes hook lacks prepared relocatable Anthropic dependencies")
         # A scratch profile must not seed the install owner's bundled catalog.
         (home / ".hermes/.no-bundled-skills").touch()
@@ -474,7 +761,7 @@ def _prepare(run_id: str, task: dict, arm: str, harness: str) -> tuple[Path, Pat
     return root, home
 
 
-def prepare(run_id: str, task: dict, arm: str, harness: str) -> tuple[Path, Path]:
+def prepare(run_id: str, task: PreparedTask, arm: str, harness: str) -> tuple[Path, Path]:
     """Never delete a prior trial; clean only a new partial clone on failure."""
     root = SCRATCH / "runs" / run_id
     if root.exists():
@@ -487,74 +774,206 @@ def prepare(run_id: str, task: dict, arm: str, harness: str) -> tuple[Path, Path
         raise
 
 
-def configure(harness: str, run_id: str, prompt: str, home: Path, full: bool,
-              runtime: dict, bridge_port: int = 0) -> tuple[list[str], dict]:
+def configure(
+    harness: str,
+    run_id: str,
+    prompt: str,
+    home: Path,
+    full: bool,
+    runtime: RuntimeIdentity,
+    bridge_port: int = 0,
+) -> tuple[list[str], dict[str, str]]:
     """Write native public configs only; never resolve credentials in config-only mode."""
     global MCP_SERVERS
     MCP_SERVERS = tuple(public_snapshot()["servers"])
     env = base_env(home)
     binary = runtime["binary"]
     url = f"{PROXY}/r/{run_id}"
-    servers = {s: {"type": "http", "url": f"{MCP}/{run_id}/{s}/mcp"} for s in MCP_SERVERS} if full else {}
+    servers = (
+        {s: {"type": "http", "url": f"{MCP}/{run_id}/{s}/mcp"} for s in MCP_SERVERS} if full else {}
+    )
     if harness == "claude-code":
-        (home / ".claude.json").write_text(json.dumps({"hasCompletedOnboarding": True, "mcpServers": servers}))
-        env.update(ANTHROPIC_BASE_URL=url, ANTHROPIC_API_KEY="bench-dummy", ENABLE_TOOL_SEARCH="true",
-                   DISABLE_TELEMETRY="1", DISABLE_AUTOUPDATER="1", DISABLE_ERROR_REPORTING="1")
-        return [binary, "-p", prompt, "--model", MODEL, "--effort", "high", "--output-format", "json",
-                "--dangerously-skip-permissions", "--no-session-persistence", *([] if full else ["--strict-mcp-config"])], env
+        (home / ".claude.json").write_text(
+            json.dumps({"hasCompletedOnboarding": True, "mcpServers": servers})
+        )
+        env.update(
+            ANTHROPIC_BASE_URL=url,
+            ANTHROPIC_API_KEY="bench-dummy",
+            ENABLE_TOOL_SEARCH="true",
+            DISABLE_TELEMETRY="1",
+            DISABLE_AUTOUPDATER="1",
+            DISABLE_ERROR_REPORTING="1",
+        )
+        return [
+            binary,
+            "-p",
+            prompt,
+            "--model",
+            MODEL,
+            "--effort",
+            "high",
+            "--output-format",
+            "json",
+            "--dangerously-skip-permissions",
+            "--no-session-persistence",
+            *([] if full else ["--strict-mcp-config"]),
+        ], env
     if harness == "codex":
         (home / ".codex").mkdir(exist_ok=True)
         cfg = home / ".codex/config.toml"
         with cfg.open("a") as f:
             for name, spec in servers.items():
-                f.write(f'\n[mcp_servers.{name.replace("-", "_")}]\nurl = {json.dumps(spec["url"])}\n')
+                f.write(
+                    f'\n[mcp_servers.{name.replace("-", "_")}]\nurl = {json.dumps(spec["url"])}\n'
+                )
         env.update(CODEX_HOME=str(home / ".codex"))
-        catalog = Path(os.environ.get("BENCH_CODEX_CATALOG", str(HERE / "codex-model-catalog.json"))).resolve()
+        catalog = Path(
+            os.environ.get("BENCH_CODEX_CATALOG", str(HERE / "codex-model-catalog.json"))
+        ).resolve()
         # Primary Codex is ALWAYS catalog+tool_search bridge, never fallback.
-        provider = '{name="bench",base_url="http://127.0.0.1:' + str(bridge_port) + '/v1",env_key="BENCH_LITELLM_KEY",wire_api="responses"}'
-        return [binary, "exec", "--json", "--skip-git-repo-check", "--ephemeral",
-                "--dangerously-bypass-approvals-and-sandbox", "-m", MODEL, "-c", "model_provider=bench",
-                "-c", f"model_providers.bench={provider}", "-c", f"model_catalog_json={json.dumps(str(catalog))}", prompt], env
+        provider = (
+            '{name="bench",base_url="http://127.0.0.1:'
+            + str(bridge_port)
+            + '/v1",env_key="BENCH_LITELLM_KEY",wire_api="responses"}'
+        )
+        return [
+            binary,
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-m",
+            MODEL,
+            "-c",
+            "model_provider=bench",
+            "-c",
+            f"model_providers.bench={provider}",
+            "-c",
+            f"model_catalog_json={json.dumps(str(catalog))}",
+            prompt,
+        ], env
     if harness == "local-operator":
-        d = home / ".local-operator"; d.mkdir(exist_ok=True)
+        d = home / ".local-operator"
+        d.mkdir(exist_ok=True)
         (d / "mcp.json").write_text(json.dumps({"mcpServers": servers}))
-        env.update(LOP_BENCH_PYTHON=binary,
-                   LOP_BENCH_SOURCE_ROOT=os.environ.get("LOP_BENCH_SOURCE_ROOT", ""),
-                   LOCAL_OPERATOR_CONFIG_DIR=str(d), BENCH_ANTHROPIC_URL=url, ANTHROPIC_API_KEY="bench-dummy",
-                   LOCAL_OPERATOR_NO_NOTIFICATIONS="1", LOCAL_OPERATOR_ALLOW_NESTED_SESSION="1")
-        return [binary, str(HERE / "lop_launch.py"), "exec", "--hosting", "anthropic", "--model", MODEL,
-                "--effort", "high", "--yolo", "--json", prompt], env
+        env.update(
+            LOP_BENCH_PYTHON=binary,
+            LOP_BENCH_SOURCE_ROOT=os.environ.get("LOP_BENCH_SOURCE_ROOT", ""),
+            LOCAL_OPERATOR_CONFIG_DIR=str(d),
+            BENCH_ANTHROPIC_URL=url,
+            ANTHROPIC_API_KEY="bench-dummy",
+            LOCAL_OPERATOR_NO_NOTIFICATIONS="1",
+            LOCAL_OPERATOR_ALLOW_NESTED_SESSION="1",
+        )
+        return [
+            binary,
+            str(HERE / "lop_launch.py"),
+            "exec",
+            "--hosting",
+            "anthropic",
+            "--model",
+            MODEL,
+            "--effort",
+            "high",
+            "--yolo",
+            "--json",
+            prompt,
+        ], env
     if harness == "omp":
-        d = home / ".omp/agent"; d.mkdir(parents=True, exist_ok=True)
+        d = home / ".omp/agent"
+        d.mkdir(parents=True, exist_ok=True)
         (d / "mcp.json").write_text(json.dumps({"mcpServers": servers}))
-        env.update(ANTHROPIC_BASE_URL=url, ANTHROPIC_API_KEY="bench-dummy", PI_CODING_AGENT_DIR=str(d))
-        return [binary, "-p", "--mode", "json", "--model", f"anthropic/{MODEL}", "--thinking", "high",
-                "--auto-approve", "--no-session", "--allow-home", "--cwd", str(home), prompt], env
+        env.update(
+            ANTHROPIC_BASE_URL=url, ANTHROPIC_API_KEY="bench-dummy", PI_CODING_AGENT_DIR=str(d)
+        )
+        return [
+            binary,
+            "-p",
+            "--mode",
+            "json",
+            "--model",
+            f"anthropic/{MODEL}",
+            "--thinking",
+            "high",
+            "--auto-approve",
+            "--no-session",
+            "--allow-home",
+            "--cwd",
+            str(home),
+            prompt,
+        ], env
     if harness == "opencode":
-        cfg = {"$schema": "https://opencode.ai/config.json", "autoupdate": False, "share": "disabled",
-               "provider": {"anthropic": {"options": {"baseURL": f"{url}/v1", "apiKey": "bench-dummy"}}},
-               "mcp": {s: {"type": "remote", "url": v["url"], "enabled": True} for s, v in servers.items()}}
+        cfg = {
+            "$schema": "https://opencode.ai/config.json",
+            "autoupdate": False,
+            "share": "disabled",
+            "provider": {
+                "anthropic": {"options": {"baseURL": f"{url}/v1", "apiKey": "bench-dummy"}}
+            },
+            "mcp": {
+                s: {"type": "remote", "url": v["url"], "enabled": True} for s, v in servers.items()
+            },
+        }
         env.update(OPENCODE_CONFIG_CONTENT=json.dumps(cfg), OPENCODE_DISABLE_AUTOUPDATE="1")
-        return [binary, "run", "--standalone", "--auto", "--format", "json", "-m", f"anthropic/{MODEL}#high", prompt], env
+        return [
+            binary,
+            "run",
+            "--standalone",
+            "--auto",
+            "--format",
+            "json",
+            "-m",
+            f"anthropic/{MODEL}#high",
+            prompt,
+        ], env
     if harness == "hermes":
-        d = home / ".hermes"; d.mkdir(exist_ok=True)
-        cfg = {"model": {"default": MODEL, "provider": "bench", "context_length": CONTEXT},
-               "providers": {"bench": {"api": url, "key_env": "ANTHROPIC_API_KEY", "transport": "anthropic_messages"}},
-               "mcp_servers": {s: {"url": v["url"]} for s, v in servers.items()}}
+        d = home / ".hermes"
+        d.mkdir(exist_ok=True)
+        cfg = {
+            "model": {"default": MODEL, "provider": "bench", "context_length": CONTEXT},
+            "providers": {
+                "bench": {
+                    "api": url,
+                    "key_env": "ANTHROPIC_API_KEY",
+                    "transport": "anthropic_messages",
+                }
+            },
+            "mcp_servers": {s: {"url": v["url"]} for s, v in servers.items()},
+        }
         # JSON is also YAML; no dependency needed. No MEMORY.md import, no
         # private config, and no inherited 44-skill catalog in the public arm.
         (d / "config.yaml").write_text(json.dumps(cfg))
-        env.update(HERMES_HOME=str(d), ANTHROPIC_API_KEY="bench-dummy", HERMES_DISABLE_LAZY_INSTALLS="1")
-        return [binary, "-z", prompt, "-m", MODEL, "--provider", "bench", "--reasoning", "high",
-                "--usage-file", str(home.parent / "hermes-usage.json")], env
+        env.update(
+            HERMES_HOME=str(d), ANTHROPIC_API_KEY="bench-dummy", HERMES_DISABLE_LAZY_INSTALLS="1"
+        )
+        return [
+            binary,
+            "-z",
+            prompt,
+            "-m",
+            MODEL,
+            "--provider",
+            "bench",
+            "--reasoning",
+            "high",
+            "--usage-file",
+            str(home.parent / "hermes-usage.json"),
+        ], env
     if harness == "dsh":
+        if "entry" not in runtime:
+            raise ValueError("DSH runtime identity lacks its installed CLI entry")
         write_dsh_patch(home, run_id, full)
-        env.update(ANTHROPIC_API_KEY="bench-dummy", DSH_PERMISSION_MODE="danger-full-access", DSH_TELEMETRY_DISABLED="1")
+        env.update(
+            ANTHROPIC_API_KEY="bench-dummy",
+            DSH_PERMISSION_MODE="danger-full-access",
+            DSH_TELEMETRY_DISABLED="1",
+        )
         return [binary, runtime["entry"], "--profile", "headless", "--json", prompt], env
     raise ValueError("Unsupported harness")
 
 
-def verify_metadata() -> dict:
+def verify_metadata() -> dict[str, object]:
     """Fail closed on model/catalog metadata before any request can cost money."""
     p = Path(os.environ.get("BENCH_MODEL_METADATA", str(HERE / "model_metadata.json")))
     d = json.loads(p.read_text())
@@ -564,13 +983,19 @@ def verify_metadata() -> dict:
         raise ValueError("Unverified Sonnet 5.5 output cap")
     catalog = Path(os.environ.get("BENCH_CODEX_CATALOG", str(HERE / "codex-model-catalog.json")))
     m = next(m for m in json.loads(catalog.read_text())["models"] if m["slug"] == MODEL)
-    if (m.get("context_window"), m.get("max_context_window"), m.get("supports_search_tool"),
-        m.get("default_reasoning_level")) != (CONTEXT, CONTEXT, True, "high"):
-        raise ValueError("Primary Codex requires best catalog: 1M window, high effort and tool search")
+    if (
+        m.get("context_window"),
+        m.get("max_context_window"),
+        m.get("supports_search_tool"),
+        m.get("default_reasoning_level"),
+    ) != (CONTEXT, CONTEXT, True, "high"):
+        raise ValueError(
+            "Primary Codex requires best catalog: 1M window, high effort and tool search"
+        )
     return {"model_metadata_sha256": sha(p), "codex_catalog_sha256": sha(catalog)}
 
 
-def verify_replay(run_id: str) -> dict:
+def verify_replay(run_id: str) -> dict[str, int]:
     """Fetch every tools/list and compare exact definitions, not only total count.
 
     The legacy private replay on :8790 intentionally fails this check. This
@@ -581,7 +1006,9 @@ def verify_replay(run_id: str) -> dict:
     counts = {}
     for name, rec in expected.items():
         url = f"{MCP}/{run_id}/{name}/mcp"
-        data = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).encode()
+        data = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+        ).encode()
         req = urllib.request.Request(url, data=data, headers={"content-type": "application/json"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             result = json.load(resp)
@@ -592,22 +1019,40 @@ def verify_replay(run_id: str) -> dict:
     return counts
 
 
-
 def integration_inputs() -> dict[str, str]:
     """One shared input digest binds captures and freeze to the same helpers/catalog."""
-    out = {name: sha(HERE / name) for name in (
-        "codex_toolsearch_bridge.py", "lop_launch.py", "lop_shim/sitecustomize.py")}
+    out = {
+        name: sha(HERE / name)
+        for name in ("codex_toolsearch_bridge.py", "lop_launch.py", "lop_shim/sitecustomize.py")
+    }
     out["tasks.json"] = sha(TASKS_FILE)
-    out.update({name: sha(PUBLIC_LOADOUT / name) for name in (
-        "public_skills.sha256", "public_mcp_schemas.json", "public_user_instructions.md")})
+    out.update(
+        {
+            name: sha(PUBLIC_LOADOUT / name)
+            for name in (
+                "public_skills.sha256",
+                "public_mcp_schemas.json",
+                "public_user_instructions.md",
+            )
+        }
+    )
     out["task_manifest"] = sha(TASKS_FILE.parent / "task-manifest.json")
     out["evaluator"] = sha(EVALUATOR)
-    out["codex_catalog"] = sha(Path(os.environ.get("BENCH_CODEX_CATALOG", str(HERE / "codex-model-catalog.json"))))
-    out["model_metadata"] = sha(Path(os.environ.get("BENCH_MODEL_METADATA", str(HERE / "model_metadata.json"))))
+    out["codex_catalog"] = sha(
+        Path(os.environ.get("BENCH_CODEX_CATALOG", str(HERE / "codex-model-catalog.json")))
+    )
+    out["model_metadata"] = sha(
+        Path(os.environ.get("BENCH_MODEL_METADATA", str(HERE / "model_metadata.json")))
+    )
     return out
 
 
-def validate_deferred_exchanges(bodies: list[dict], rpc: list[dict], responses: list[dict], codex: bool) -> None:
+def validate_deferred_exchanges(
+    bodies: Sequence[WireBody],
+    rpc: Sequence[RPCExchange],
+    responses: Sequence[WireBody],
+    codex: bool,
+) -> None:
     """Validate captured exchanges, not asserted booleans/server-name summaries.
 
     Messages artifacts must contain the real harness's accumulated conversation:
@@ -626,17 +1071,22 @@ def validate_deferred_exchanges(bodies: list[dict], rpc: list[dict], responses: 
             if not isinstance(content, list):
                 continue
             for part in content:
-                if part.get("type") == "tool_use":
+                if "type" not in part:
+                    continue
+                if part["type"] == "tool_use":
                     uses[part["id"]] = part
-                elif part.get("type") == "tool_result":
+                elif part["type"] == "tool_result":
                     results[part["tool_use_id"]] = part
+
     def contains_result(value, expected_result, depth=0):
         if value == expected_result or value == expected_result.get("content"):
             return True
         if depth > 8:
             return False
         if isinstance(value, str):
-            plain = "".join(p.get("text", "") for p in expected_result.get("content", []) if isinstance(p, dict))
+            plain = "".join(
+                p.get("text", "") for p in expected_result.get("content", []) if isinstance(p, dict)
+            )
             if value == plain:
                 return True
             try:
@@ -680,8 +1130,15 @@ def validate_deferred_exchanges(bodies: list[dict], rpc: list[dict], responses: 
                 continue
             name = use.get("name", "").lower()
             args, result = json.dumps(use.get("input", {})), json.dumps(results[ident])
-            is_discovery = any(x in name for x in ("search", "describe")) or name in ("read", "read_file")
-            if is_discovery and any(v in name or v in args for v in variants) and any(v in result for v in variants):
+            is_discovery = any(x in name for x in ("search", "describe")) or name in (
+                "read",
+                "read_file",
+            )
+            if (
+                is_discovery
+                and any(v in name or v in args for v in variants)
+                and any(v in result for v in variants)
+            ):
                 discovered = True
         listed, correlated_call = False, False
         known = {t["name"] for t in rec["tools"]}
@@ -691,27 +1148,52 @@ def validate_deferred_exchanges(bodies: list[dict], rpc: list[dict], responses: 
             request, response = exchange.get("request", {}), exchange.get("response", {})
             if request.get("id") is None or request.get("id") != response.get("id"):
                 continue
-            if request.get("method") == "tools/list" and response.get("result", {}).get("tools") == rec["tools"]:
+            if (
+                request.get("method") == "tools/list"
+                and response.get("result", {}).get("tools") == rec["tools"]
+            ):
                 listed = True
             if request.get("method") != "tools/call":
                 continue
             params, result = request.get("params", {}), response.get("result", {})
-            if params.get("name") not in known or result.get("isError") is not True or not result.get("content"):
+            if (
+                params.get("name") not in known
+                or result.get("isError") is not True
+                or not result.get("content")
+            ):
                 continue
             for ident, use in uses.items():
-                if ident in results and matches_invocation(use, server, params["name"], params.get("arguments", {})):
+                if ident in results and matches_invocation(
+                    use, server, params.get("name"), params.get("arguments", {})
+                ):
                     correlated_call |= contains_result(results[ident].get("content"), result)
         if not discovered or not listed or not correlated_call:
-            raise ValueError(f"Deferred capture lacks correlated discovery/call/arguments/result: {server}")
+            raise ValueError(
+                f"Deferred capture lacks correlated discovery/call/arguments/result: {server}"
+            )
     if codex:
-        search_declared = any(t.get("type") == "tool_search" for b in responses for t in b.get("tools", []))
-        outputs = [i for b in responses for i in b.get("input", []) if isinstance(i, dict) and i.get("type") == "tool_search_output"]
+        search_declared = any(
+            t.get("type") == "tool_search" for b in responses for t in b.get("tools", [])
+        )
+        outputs = [
+            i
+            for b in responses
+            for i in b.get("input", [])
+            if isinstance(i, dict) and i.get("type") == "tool_search_output"
+        ]
         loaded = json.dumps(outputs, sort_keys=True)
         translated = any(t.get("name") == "tool_search" for b in bodies for t in b.get("tools", []))
-        if not search_declared or not translated or not all(s in loaded or s.replace("-", "_") in loaded for s in expected):
-            raise ValueError("Codex native Responses search/output -> Messages bridge exchanges missing")
+        if (
+            not search_declared
+            or not translated
+            or not all(s in loaded or s.replace("-", "_") in loaded for s in expected)
+        ):
+            raise ValueError(
+                "Codex native Responses search/output -> Messages bridge exchanges missing"
+            )
 
-def attest(harness: str, arm: str, runtime: dict) -> dict:
+
+def attest(harness: str, arm: str, runtime: RuntimeIdentity) -> dict[str, object]:
     """Require hashed, runtime-bound zero-cost captures; no config-only attestation.
 
     This manifest is supplied by the independent prereg/capture lane. Lazy tool
@@ -733,17 +1215,25 @@ def attest(harness: str, arm: str, runtime: dict) -> dict:
         raise ValueError("Wire evidence belongs to another MCP loadout")
     if record.get("context_window") != CONTEXT or record.get("main_effort") != "high":
         raise ValueError("Wire metadata attestation is incomplete")
-    if record.get("model") != MODEL or record.get("thinking_type") != "adaptive" or record.get("main_native_tools", 0) < 1:
+    if (
+        record.get("model") != MODEL
+        or record.get("thinking_type") != "adaptive"
+        or record.get("main_native_tools", 0) < 1
+    ):
         raise ValueError("Missing model/thinking/native-tool evidence")
     if record.get("instruction_occurrences") != int(full):
         raise ValueError("Instruction duplication or missing instructions on wire")
-    if record.get("instruction_sha256") != (sha(PUBLIC_LOADOUT / "public_user_instructions.md") if full else None):
+    if record.get("instruction_sha256") != (
+        sha(PUBLIC_LOADOUT / "public_user_instructions.md") if full else None
+    ):
         raise ValueError("Wire instructions do not match identical public bytes")
     if record.get("skill_count") != (19 if full else 0):
         raise ValueError("Wire skill catalog count differs")
     if record.get("mcp_server_counts") != expected:
         raise ValueError("Wire evidence omits MCP servers/tools")
-    if record.get("mcp_mode") == "deferred" and set(record.get("mcp_roundtrip_servers", [])) != set(expected):
+    if record.get("mcp_mode") == "deferred" and set(record.get("mcp_roundtrip_servers", [])) != set(
+        expected
+    ):
         raise ValueError("Deferred schemas have no complete tool-search/call roundtrip evidence")
     if full and record.get("mcp_mode") not in ("deferred", "eager"):
         raise ValueError("Unknown MCP exposure mode")
@@ -762,8 +1252,11 @@ def attest(harness: str, arm: str, runtime: dict) -> dict:
             data = json.loads(p.read_text())
             bodies = data if isinstance(data, list) else [data]
             message_bodies.extend(b.get("body", b) for b in bodies)
-            observed_main.extend(b.get("body", b) for b in bodies
-                                 if b.get("body", b).get("tools") and b.get("body", b).get("model") == MODEL)
+            observed_main.extend(
+                b.get("body", b)
+                for b in bodies
+                if b.get("body", b).get("tools") and b.get("body", b).get("model") == MODEL
+            )
         elif item.get("kind") in ("mcp-rpc", "responses"):
             data = json.loads(p.read_text())
             values = data if isinstance(data, list) else [data]
@@ -774,10 +1267,15 @@ def attest(harness: str, arm: str, runtime: dict) -> dict:
     if not observed_main:
         raise ValueError("No actual main Messages body in capture artifacts")
     first = observed_main[0]
-    if first.get("thinking", {}).get("type") != "adaptive" or first.get("output_config", {}).get("effort") != "high":
+    if (
+        first.get("thinking", {}).get("type") != "adaptive"
+        or first.get("output_config", {}).get("effort") != "high"
+    ):
         raise ValueError("Actual captured main wire is not adaptive/high")
     texts = []
-    for content in [first.get("system", "")] + [m.get("content", "") for m in first.get("messages", [])]:
+    for content in [first.get("system", "")] + [
+        m.get("content", "") for m in first.get("messages", [])
+    ]:
         if isinstance(content, str):
             texts.append(content)
         elif isinstance(content, list):
@@ -789,7 +1287,9 @@ def attest(harness: str, arm: str, runtime: dict) -> dict:
     if sum(text.count(instruction.strip()) for text in texts) != int(full):
         raise ValueError("Actual captured prompt instruction count differs (omp duplication guard)")
     if full and record.get("mcp_mode") == "deferred":
-        validate_deferred_exchanges(message_bodies, rpc_exchanges, response_bodies, harness == "codex")
+        validate_deferred_exchanges(
+            message_bodies, rpc_exchanges, response_bodies, harness == "codex"
+        )
     if full and record.get("mcp_mode") == "eager":
         counts = collections.Counter()
         for tool in first["tools"]:
@@ -799,11 +1299,13 @@ def attest(harness: str, arm: str, runtime: dict) -> dict:
                     counts[server] += 1
         if dict(counts) != expected:
             raise ValueError("Actual eager wire omits public MCP server schemas")
-    return {"wire_attestation_sha256": sha(root / f"{harness}.{arm}.json"),
-            "attested_main_tool_count": len(first["tools"])}
+    return {
+        "wire_attestation_sha256": sha(root / f"{harness}.{arm}.json"),
+        "attested_main_tool_count": len(first["tools"]),
+    }
 
 
-def frozen_prereg(harness: str, arm: str, runtime: dict) -> dict:
+def frozen_prereg(harness: str, arm: str, runtime: RuntimeIdentity) -> dict[str, object]:
     """An explicit frozen, hash-bound prereg is required; never freezes itself."""
     raw = os.environ.get("BENCH_PREREG_FILE")
     if not raw:
@@ -815,7 +1317,9 @@ def frozen_prereg(harness: str, arm: str, runtime: dict) -> dict:
         raise ValueError("Preregistered schema changed")
     if d.get("instruction_sha256") != sha(PUBLIC_LOADOUT / "public_user_instructions.md"):
         raise ValueError("Preregistered instructions changed")
-    if d.get("runtime_fingerprints", {}).get(harness) != runtime_fingerprint(runtime) or arm not in d.get("arms", []):
+    if d.get("runtime_fingerprints", {}).get(harness) != runtime_fingerprint(
+        runtime
+    ) or arm not in d.get("arms", []):
         raise ValueError("Runtime/arm is not preregistered")
     if d.get("runner_sha256") != sha(Path(__file__)) or d.get("lop_head") != LOP_HEAD:
         raise ValueError("Runner or reviewed LOP head differs from preregistration")
@@ -829,15 +1333,19 @@ def radient_token(lop_python: str) -> str:
     """Resolve the operator's credential into memory, never argv/config/artifacts."""
     if os.environ.get("RADIENT_API_KEY"):
         return os.environ["RADIENT_API_KEY"]
-    code = ("import asyncio,sys\nfrom local_operator.classification.vendors import auth_store_api_key\n"
-            "t=asyncio.run(auth_store_api_key(None,'radient'))\nsys.stdout.write(t or '')\n")
+    code = (
+        "import asyncio,sys\nfrom local_operator.classification.vendors import auth_store_api_key\n"
+        "t=asyncio.run(auth_store_api_key(None,'radient'))\nsys.stdout.write(t or '')\n"
+    )
     proc = subprocess.run([lop_python, "-c", code], capture_output=True, text=True, timeout=60)
     if proc.returncode or not proc.stdout.strip():
         raise ValueError("Radient login unavailable; sign in outside the runner")
     return proc.stdout.strip()
 
 
-def money(rows: list[dict], stderr: str, classification: bool) -> dict:
+def money(
+    rows: Sequence[Mapping[str, object]], stderr: str, classification: bool
+) -> dict[str, float | int | bool | None]:
     """Account for every recorded Messages attempt, independent of HTTP success.
 
     An error can be billed; a missing/invalid bill is unknown, never zero. Keep
@@ -867,23 +1375,29 @@ def money(rows: list[dict], stderr: str, classification: bool) -> dict:
         measured += amount
     model_complete = bool(messages) and unknown == 0
     charges = re.findall(r"classification:.*?cost=\$([0-9]+(?:\.[0-9]+)?)", stderr)
-    radient = sum((Decimal(v) for v in charges), Decimal(0)) if charges or not classification else None
+    radient = (
+        sum((Decimal(v) for v in charges), Decimal(0)) if charges or not classification else None
+    )
     complete = model_complete and radient is not None
-    return {"model_cost_usd": float(measured) if model_complete else None,
-            "measured_model_cost_usd": float(measured),
-            "radient_cost_usd": float(radient) if radient is not None else None,
-            "total_cost_usd": float(measured + radient) if complete else None,
-            "message_attempts": len(messages), "unknown_billing_attempts": unknown,
-            "non_200_message_attempts": sum(row.get("status") != 200 for row in messages),
-            "non_model_rows": len(rows) - len(messages),
-            "classification_calls_charged": len(charges), "cost_complete": complete}
+    return {
+        "model_cost_usd": float(measured) if model_complete else None,
+        "measured_model_cost_usd": float(measured),
+        "radient_cost_usd": float(radient) if radient is not None else None,
+        "total_cost_usd": float(measured + radient) if complete and radient is not None else None,
+        "message_attempts": len(messages),
+        "unknown_billing_attempts": unknown,
+        "non_200_message_attempts": sum(row.get("status") != 200 for row in messages),
+        "non_model_rows": len(rows) - len(messages),
+        "classification_calls_charged": len(charges),
+        "cost_complete": complete,
+    }
 
 
-def stop_group(proc: subprocess.Popen | None) -> None:
+def stop_group(proc: subprocess.Popen[str] | subprocess.Popen[bytes] | None) -> None:
     """Reap only an owned exact process group, once, including orphaned children."""
     if proc is None or getattr(proc, "_bench_group_reaped", False):
         return
-    proc._bench_group_reaped = True
+    setattr(proc, "_bench_group_reaped", True)
     try:
         os.killpg(proc.pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -901,7 +1415,15 @@ def stop_group(proc: subprocess.Popen | None) -> None:
     proc.wait(timeout=5)
 
 
-def execute(harness: str, run_id: str, arm: str, rep: int, task: dict, runtime: dict, preflight: dict) -> dict:
+def execute(
+    harness: str,
+    run_id: str,
+    arm: str,
+    rep: int,
+    task: Task,
+    runtime: RuntimeIdentity,
+    preflight: dict[str, object],
+) -> dict[str, object]:
     """Run only after freeze/evidence gates; keep credentials in memory and env.
 
     Codex's shared translator uses current_run: hold an exclusive file lock so
@@ -914,8 +1436,11 @@ def execute(harness: str, run_id: str, arm: str, rep: int, task: dict, runtime: 
     # a working reservation path. This gate must be implemented and validated
     # before classifier-enabled paid LOP collection becomes available.
     if harness == "local-operator":
-        raise ValueError("Paid LOP pending validated classifier reservation/accounting; do not disable Radient")
+        raise ValueError(
+            "Paid LOP pending validated classifier reservation/accounting; do not disable Radient"
+        )
     import fcntl
+
     root = home = None
     proc = bridge = None
     hermes_cleaned = False
@@ -937,36 +1462,56 @@ def execute(harness: str, run_id: str, arm: str, rep: int, task: dict, runtime: 
             old_current = current_file.read_bytes() if current_file.exists() else None
             current_file.write_text(run_id)
             with socket.socket() as sock:
-                sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]
-        argv, env = configure(harness, run_id, build_prompt(task), home, arm == "public-full", runtime, port)
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+        argv, env = configure(
+            harness, run_id, build_prompt(task), home, arm == "public-full", runtime, port
+        )
         if harness == "local-operator":
             token = radient_token(runtime["binary"])
             env["RADIENT_API_KEY"] = token
         if harness == "codex":
             key = os.environ.get("BENCH_LITELLM_KEY")
             if not key:
-                raise ValueError("Provide BENCH_LITELLM_KEY in environment; no config credential reads")
+                raise ValueError(
+                    "Provide BENCH_LITELLM_KEY in environment; no config credential reads"
+                )
             env["BENCH_LITELLM_KEY"] = key
             token = key
             bridge_py = resolve_program("BENCH_BRIDGE_PY", "python3")
-            bridge_env = base_env(home) | {"BRIDGE_UPSTREAM": LITELLM.removesuffix("/v1"),
-                                          "BRIDGE_LOG": str(root / "bridge-usage.jsonl")}
-            bridge = subprocess.Popen([bridge_py, str(HERE / "codex_toolsearch_bridge.py"), str(port)],
-                                      env=bridge_env, cwd=HERE, stdout=subprocess.DEVNULL,
-                                      stderr=subprocess.DEVNULL, start_new_session=True)
+            bridge_env = base_env(home) | {
+                "BRIDGE_UPSTREAM": LITELLM.removesuffix("/v1"),
+                "BRIDGE_LOG": str(root / "bridge-usage.jsonl"),
+            }
+            bridge = subprocess.Popen(
+                [bridge_py, str(HERE / "codex_toolsearch_bridge.py"), str(port)],
+                env=bridge_env,
+                cwd=HERE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
             for _ in range(100):
                 if bridge.poll() is not None:
                     raise ValueError("Codex bridge exited during startup")
                 try:
-                    with socket.create_connection(("127.0.0.1", port), timeout=.1):
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.1):
                         break
                 except OSError:
-                    time.sleep(.05)
+                    time.sleep(0.05)
             else:
                 raise ValueError("Codex bridge did not become reachable")
         started = time.time()
-        proc = subprocess.Popen(argv, cwd=home, env=env, stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        proc = subprocess.Popen(
+            argv,
+            cwd=home,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
         try:
             stdout, stderr = proc.communicate(timeout=TIMEOUT_S)
         except subprocess.TimeoutExpired:
@@ -983,11 +1528,13 @@ def execute(harness: str, run_id: str, arm: str, rep: int, task: dict, runtime: 
         # already hit disk. Do not write the complete environment or argv.
         for secret in (token, env.get("RADIENT_API_KEY", ""), env.get("BENCH_LITELLM_KEY", "")):
             if secret:
-                stdout, stderr = stdout.replace(secret, "[credential removed]"), stderr.replace(secret, "[credential removed]")
+                stdout, stderr = stdout.replace(secret, "[credential removed]"), stderr.replace(
+                    secret, "[credential removed]"
+                )
         (root / "stdout.log").write_text(stdout)
         (root / "stderr.log").write_text(stderr)
         log = Path(os.environ.get("BENCH_REQUEST_LOG", str(SCRATCH / "logs/requests.jsonl")))
-        rows = [r for r in (json.loads(l) for l in log.open()) if r.get("run_id") == run_id]
+        rows = [r for r in (json.loads(line) for line in log.open()) if r.get("run_id") == run_id]
         main_rows = [r for r in rows if r.get("n_tools", 0) > 0 and r.get("usage")]
         if not main_rows:
             raise ValueError("Run lost all native tools on the actual metered wire")
@@ -1010,21 +1557,43 @@ def execute(harness: str, run_id: str, arm: str, rep: int, task: dict, runtime: 
                             counts[server] += 1
                 verified = verified or dict(counts) == expected
             if not verified:
-                raise ValueError("No actual retained dsh body proves all nine public MCP partitions")
-        scored = subprocess.run([resolve_program("BENCH_EVAL_PY"), str(EVALUATOR), task["id"], str(home)],
-                                capture_output=True, text=True, check=True,
-                                env={**os.environ, "BENCH_TASKS_FILE": str(TASKS_FILE),
-                                     "BENCH_TASK_CACHE": str(TASK_CACHE)})
+                raise ValueError(
+                    "No actual retained dsh body proves all nine public MCP partitions"
+                )
+        scored = subprocess.run(
+            [resolve_program("BENCH_EVAL_PY"), str(EVALUATOR), task["id"], str(home)],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={
+                **os.environ,
+                "BENCH_TASKS_FILE": str(TASKS_FILE),
+                "BENCH_TASK_CACHE": str(TASK_CACHE),
+            },
+        )
         score = json.loads(scored.stdout.strip().splitlines()[-1])
-        rec = {"run_id": run_id, "harness": harness, "adapter_variant": "codex-best" if harness == "codex" else harness,
-               "arm": arm, "rep": rep, "development_only": True, "task_id": task["id"], **score,
-               "exit_code": proc.returncode, "timed_out": timed_out, "wall_s": round(time.time()-started, 2),
-               "lop_head": LOP_HEAD if harness == "local-operator" else None,
-               **money(rows, stderr, harness == "local-operator"), **preflight}
+        rec = {
+            "run_id": run_id,
+            "harness": harness,
+            "adapter_variant": "codex-best" if harness == "codex" else harness,
+            "arm": arm,
+            "rep": rep,
+            "development_only": True,
+            "task_id": task["id"],
+            **score,
+            "exit_code": proc.returncode,
+            "timed_out": timed_out,
+            "wall_s": round(time.time() - started, 2),
+            "lop_head": LOP_HEAD if harness == "local-operator" else None,
+            **money(rows, stderr, harness == "local-operator"),
+            **preflight,
+        }
         result = home / task["evaluator"]["result"]["path"].removeprefix("/home/user/")
         if result.is_file():
-            (root / "kept").mkdir(exist_ok=True); shutil.copy(result, root / "kept" / result.name)
-        logs = SCRATCH / "logs"; logs.mkdir(exist_ok=True)
+            (root / "kept").mkdir(exist_ok=True)
+            shutil.copy(result, root / "kept" / result.name)
+        logs = SCRATCH / "logs"
+        logs.mkdir(exist_ok=True)
         with (logs / "runs_v2dev.jsonl").open("a") as f:
             f.write(json.dumps(rec) + "\n")
         return rec
@@ -1044,18 +1613,26 @@ def execute(harness: str, run_id: str, arm: str, rep: int, task: dict, runtime: 
             lock.close()
 
 
-def validate_external_task(task: dict) -> None:
+def validate_external_task(task: TaskIdentity) -> None:
     """Reject unfetched/tampered external assets through the pinned evaluator.
 
     The evaluator preflight only imports the selected upstream metric and checks
     pins/hashes; it neither scores a task nor calls a harness/model.
     """
-    proc = subprocess.run([resolve_program("BENCH_EVAL_PY"), str(EVALUATOR), task["id"],
-                           str(SCRATCH), "--preflight"], capture_output=True, text=True,
-                          env={**os.environ, "BENCH_TASKS_FILE": str(TASKS_FILE),
-                               "BENCH_TASK_CACHE": str(TASK_CACHE)})
+    proc = subprocess.run(
+        [resolve_program("BENCH_EVAL_PY"), str(EVALUATOR), task["id"], str(SCRATCH), "--preflight"],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "BENCH_TASKS_FILE": str(TASKS_FILE),
+            "BENCH_TASK_CACHE": str(TASK_CACHE),
+        },
+    )
     if proc.returncode:
-        raise ValueError("External task preflight failed; check pin, fetched hashes and metric dependencies")
+        raise ValueError(
+            "External task preflight failed; check pin, fetched hashes and metric dependencies"
+        )
 
 
 def main() -> None:
@@ -1072,7 +1649,9 @@ def main() -> None:
     mode.add_argument("--augment-public", type=Path)
     args = parser.parse_args()
     if args.augment_public:
-        augment_public_home(args.augment_public.resolve()); print(json.dumps({"public_hook": "verified"})); return
+        augment_public_home(args.augment_public.resolve())
+        print(json.dumps({"public_hook": "verified"}))
+        return
     if not args.harness or not args.task or args.rep not in range(40, 50) or not args.arm:
         parser.error("harness, task, dev rep 40–49 and explicit clean/public-full are required")
     tasks = json.loads((TASKS_FILE).read_text())
@@ -1086,18 +1665,33 @@ def main() -> None:
     if args.config_only:
         root, home = prepare(rid, task, args.arm, args.harness)
         try:
-            argv, env = configure(args.harness, rid, build_prompt(task), home, args.arm == "public-full", runtime, 8797)
+            argv, env = configure(
+                args.harness,
+                rid,
+                build_prompt(task),
+                home,
+                args.arm == "public-full",
+                runtime,
+                8797,
+            )
             # No credential resolution; persist neither environment nor prompt.
-            result = {"run_id": rid, "adapter": "codex-best" if args.harness == "codex" else args.harness,
-                      "config_only": True, "credentials_resolved": False, "model_calls": 0,
-                      "public_schema_sha256": sha(PUBLIC_LOADOUT / "public_mcp_schemas.json")}
+            result = {
+                "run_id": rid,
+                "adapter": "codex-best" if args.harness == "codex" else args.harness,
+                "config_only": True,
+                "credentials_resolved": False,
+                "model_calls": 0,
+                "public_schema_sha256": sha(PUBLIC_LOADOUT / "public_mcp_schemas.json"),
+            }
             print(json.dumps(result))
         finally:
             shutil.rmtree(home)
         return
     full = args.arm == "public-full"
     base_key = "BENCH_PUBLIC_BASEHOME" if full else "BENCH_CLEAN_BASEHOME"
-    base = Path(os.environ.get(base_key, str(SCRATCH / ("basehome-public" if full else "basehome")))).expanduser()
+    base = Path(
+        os.environ.get(base_key, str(SCRATCH / ("basehome-public" if full else "basehome")))
+    ).expanduser()
     checks = public_home_check(base, full)
     checks.update(verify_metadata())
     if args.arm == "public-full":
@@ -1105,7 +1699,8 @@ def main() -> None:
         checks["verified_mcp_tools"] = sum(counts.values())
     checks.update(attest(args.harness, args.arm, runtime))
     if args.preflight_only:
-        print(json.dumps({"run_id": rid, "preflight": checks, "model_calls": 0})); return
+        print(json.dumps({"run_id": rid, "preflight": checks, "model_calls": 0}))
+        return
     checks.update(frozen_prereg(args.harness, args.arm, runtime))
     print(json.dumps(execute(args.harness, rid, args.arm, args.rep, task, runtime, checks)))
 

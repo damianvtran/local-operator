@@ -1,4 +1,5 @@
-"""Responses-API shim that lets Codex's client-side `tool_search` survive a Responses->Messages translator.
+"""Responses-API shim that lets Codex's client-side `tool_search` survive a
+Responses->Messages translator.
 
 WHY: Codex (rust-v0.147.0) defers MCP tools behind its own `tool_search` tool
 when the model's catalog entry says `supports_search_tool: true`. That tool is
@@ -51,6 +52,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import TypedDict, TypeGuard
 
 import httpx
 from starlette.applications import Starlette
@@ -72,34 +74,83 @@ HOP = {"host", "content-length", "connection", "transfer-encoding", "accept-enco
 client = httpx.AsyncClient(timeout=httpx.Timeout(900, connect=30))
 
 
-def _tool_names(spec: dict) -> list[str]:
+class _ToolSpec(TypedDict, total=False):
+    type: str
+    name: str
+    tools: list[_ToolSpec]
+    description: str
+    parameters: dict[str, object]
+    strict: bool
+
+
+class _InputItem(TypedDict, total=False):
+    type: str
+    call_id: str | None
+    name: str
+    arguments: object
+    tools: list[_ToolSpec]
+    output: str
+
+
+class _RequestBody(TypedDict, total=False):
+    tools: list[_ToolSpec]
+    input: list[_InputItem | str]
+
+
+class _RewriteStats(TypedDict):
+    tool_search_tool: bool
+    search_calls: int
+    loaded_specs: int
+
+
+class _SearchFunctionCall(TypedDict, total=False):
+    type: str
+    name: str
+    id: str
+    call_id: str
+    arguments: str
+
+
+def _tool_names(spec: _ToolSpec) -> list[str]:
     if spec.get("type") == "namespace":
         return [f'{spec.get("name")}.{t.get("name")}' for t in spec.get("tools") or []]
     return [str(spec.get("name"))]
 
 
-def rewrite_request(body: dict) -> dict:
+def rewrite_request(body: _RequestBody) -> tuple[_RequestBody, _RewriteStats]:
     """Map Codex's tool_search request shapes onto plain function tools/items."""
-    stats = {"tool_search_tool": False, "search_calls": 0, "loaded_specs": 0}
-    tools = []
+    stats: _RewriteStats = {"tool_search_tool": False, "search_calls": 0, "loaded_specs": 0}
+    tools: list[_ToolSpec] = []
     for t in body.get("tools") or []:
         if t.get("type") == NAME:
             stats["tool_search_tool"] = True
-            tools.append({"type": "function", "name": NAME, "description": t.get("description", ""),
-                          "parameters": t.get("parameters") or {"type": "object", "properties": {}},
-                          "strict": False})
+            tools.append(
+                {
+                    "type": "function",
+                    "name": NAME,
+                    "description": t.get("description", ""),
+                    "parameters": t.get("parameters") or {"type": "object", "properties": {}},
+                    "strict": False,
+                }
+            )
         else:
             tools.append(t)
     present = {n for t in tools for n in _tool_names(t)}
-    new_input = []
+    new_input: list[_InputItem | str] = []
     for item in body.get("input") or []:
         typ = item.get("type") if isinstance(item, dict) else None
-        if typ == "tool_search_call":
+        if typ == "tool_search_call" and isinstance(item, dict):
             stats["search_calls"] += 1
             args = item.get("arguments")
-            new_input.append({"type": "function_call", "call_id": item.get("call_id"), "name": NAME,
-                              "arguments": args if isinstance(args, str) else json.dumps(args or {})})
-        elif typ == "tool_search_output":
+            new_input.append(
+                {
+                    "type": "function_call",
+                    "call_id": item.get("call_id"),
+                    "name": NAME,
+                    "arguments": args if isinstance(args, str) else json.dumps(args or {}),
+                }
+            )
+        elif typ == "tool_search_output" and isinstance(item, dict):
             loaded = item.get("tools") or []
             listing = []
             for spec in loaded:
@@ -111,14 +162,25 @@ def rewrite_request(body: dict) -> dict:
                     # A later search can return more members of a namespace
                     # already loaded: append only the new members, so no
                     # flattened tool name is ever declared twice.
-                    fresh = [t for t in spec.get("tools") or [] if f'{spec.get("name")}.{t.get("name")}' not in present]
-                    spec = {**spec, "tools": fresh}
+                    fresh = [
+                        t
+                        for t in spec.get("tools") or []
+                        if f'{spec.get("name")}.{t.get("name")}' not in present
+                    ]
+                    fresh_spec: _ToolSpec = {**spec, "tools": fresh}
+                    spec = fresh_spec
                     names = _tool_names(spec)
                 tools.append(spec)
                 present.update(names)
                 stats["loaded_specs"] += 1
-            text = ("Loaded tools (now callable): " + ", ".join(listing)) if listing else "No matching tools."
-            new_input.append({"type": "function_call_output", "call_id": item.get("call_id"), "output": text})
+            text = (
+                ("Loaded tools (now callable): " + ", ".join(listing))
+                if listing
+                else "No matching tools."
+            )
+            new_input.append(
+                {"type": "function_call_output", "call_id": item.get("call_id"), "output": text}
+            )
         else:
             new_input.append(item)
     body["tools"] = tools
@@ -126,17 +188,25 @@ def rewrite_request(body: dict) -> dict:
     return body, stats
 
 
-def _convert_item(item: dict) -> dict:
+def _convert_item(item: _SearchFunctionCall) -> dict[str, object]:
     try:
         args = json.loads(item.get("arguments") or "{}")
     except json.JSONDecodeError:
         args = {"query": item.get("arguments") or ""}
-    return {"type": "tool_search_call", "id": item.get("id"), "call_id": item.get("call_id"),
-            "status": "completed", "execution": "client", "arguments": args}
+    return {
+        "type": "tool_search_call",
+        "id": item.get("id"),
+        "call_id": item.get("call_id"),
+        "status": "completed",
+        "execution": "client",
+        "arguments": args,
+    }
 
 
-def _is_search_fc(item) -> bool:
-    return isinstance(item, dict) and item.get("type") == "function_call" and item.get("name") == NAME
+def _is_search_fc(item: object) -> TypeGuard[_SearchFunctionCall]:
+    return (
+        isinstance(item, dict) and item.get("type") == "function_call" and item.get("name") == NAME
+    )
 
 
 async def responses(request: Request) -> Response:
@@ -148,11 +218,23 @@ async def responses(request: Request) -> Response:
     key = os.environ.get("CODING_TRANSLATOR_API_KEY")
     if key:
         headers["authorization"] = "Bearer " + key
-    req = client.build_request("POST", f"{UPSTREAM}/v1/responses", headers=headers, content=json.dumps(body).encode())
+    req = client.build_request(
+        "POST", f"{UPSTREAM}/v1/responses", headers=headers, content=json.dumps(body).encode()
+    )
     resp = await client.send(req, stream=True)
-    out_headers = {k: v for k, v in resp.headers.items()
-                   if k.lower() not in {"content-length", "content-encoding", "transfer-encoding", "connection"}}
-    row = {"ts": time.time(), "status": resp.status_code, "n_tools": len(body["tools"]), **stats, "search_calls_out": 0}
+    out_headers = {
+        k: v
+        for k, v in resp.headers.items()
+        if k.lower()
+        not in {"content-length", "content-encoding", "transfer-encoding", "connection"}
+    }
+    row = {
+        "ts": time.time(),
+        "status": resp.status_code,
+        "n_tools": len(body.get("tools") or []),
+        **stats,
+        "search_calls_out": 0,
+    }
 
     if "text/event-stream" not in resp.headers.get("content-type", ""):
         content = await resp.aread()
@@ -162,7 +244,7 @@ async def responses(request: Request) -> Response:
         return Response(content, status_code=resp.status_code, headers=out_headers)
 
     async def gen():
-        hidden: set[str] = set()  # item ids of tool_search function calls
+        hidden: set[str | None] = set()  # item ids of tool_search function calls
         try:
             async for event, data in iter_sse(resp.aiter_raw()):
                 if data is None:
@@ -186,9 +268,13 @@ async def responses(request: Request) -> Response:
                 if t == "response.output_item.done" and _is_search_fc(item):
                     d["item"] = _convert_item(item)
                     row["search_calls_out"] += 1
-                elif t in ("response.completed", "response.incomplete") and isinstance(d.get("response"), dict):
-                    d["response"]["output"] = [_convert_item(i) if _is_search_fc(i) else i
-                                               for i in d["response"].get("output") or []]
+                elif t in ("response.completed", "response.incomplete") and isinstance(
+                    d.get("response"), dict
+                ):
+                    d["response"]["output"] = [
+                        _convert_item(i) if _is_search_fc(i) else i
+                        for i in d["response"].get("output") or []
+                    ]
                 else:
                     yield event
                     continue
@@ -205,4 +291,5 @@ app = Starlette(routes=[Route("/v1/responses", responses, methods=["POST"])])
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="127.0.0.1", port=int(sys.argv[1]), log_level="warning")

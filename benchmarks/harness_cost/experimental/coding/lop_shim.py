@@ -6,12 +6,14 @@ while measuring the same wire as other harnesses. Imported by lop_launch.py,
 NOT as global sitecustomize/PYTHONPATH, which would break task Python tools.
 No credentials are handled here and no installed provider source is modified.
 """
+
 import dataclasses
 import os
 
 _url = os.environ.get("BENCH_ANTHROPIC_URL")
 if _url:
     from local_operator.providers import clients, registry
+
     clients.ANTHROPIC_API_URL = _url
     for i, definition in enumerate(registry.PROVIDER_REGISTRY):
         if definition.id in ("anthropic", "anthropic-key"):

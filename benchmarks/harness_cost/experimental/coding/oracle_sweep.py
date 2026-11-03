@@ -32,15 +32,15 @@ import argparse
 import json
 import os
 import random
-import re
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import time
 import tomllib
 import urllib.request
 from pathlib import Path
+from typing import TypedDict
 
 HERE = Path(__file__).resolve().parent
 TASKS = Path(os.environ.get("CODING_TASK_ROOT", "tasks/terminal-bench-2-1")).resolve()
@@ -56,27 +56,69 @@ def free_mb() -> int:
     return shutil.disk_usage(DATA_VOL).free // (1024 * 1024)
 
 
-def hub_meta(image: str) -> dict:
+class _HubMeta(TypedDict):
+    repo_storage: int | None
+    tag_full_size: int
+    archs: list[str]
+    hub_digest: str | None
+
+
+class _TaskMeta(_HubMeta):
+    image: str
+
+
+class _OracleResult(TypedDict):
+    exit: int
+    reward: float | None
+    wall_s: float
+    disk_stop: bool
+    min_free_mb: int
+    tail: str
+
+
+def hub_meta(image: str) -> _HubMeta:
     repo, tag = image.split(":")
-    r = json.load(urllib.request.urlopen(f"https://hub.docker.com/v2/repositories/{repo}/", timeout=30))
-    t = json.load(urllib.request.urlopen(f"https://hub.docker.com/v2/repositories/{repo}/tags/{tag}", timeout=30))
-    return {"repo_storage": r.get("storage_size"), "tag_full_size": t.get("full_size"),
-            "archs": sorted({i.get("architecture") for i in t.get("images", [])}), "hub_digest": t.get("digest")}
+    r = json.load(
+        urllib.request.urlopen(f"https://hub.docker.com/v2/repositories/{repo}/", timeout=30)
+    )
+    t = json.load(
+        urllib.request.urlopen(
+            f"https://hub.docker.com/v2/repositories/{repo}/tags/{tag}", timeout=30
+        )
+    )
+    return {
+        "repo_storage": r.get("storage_size"),
+        "tag_full_size": t.get("full_size"),
+        "archs": sorted({i.get("architecture") for i in t.get("images", [])}),
+        "hub_digest": t.get("digest"),
+    }
 
 
-def seeded_order() -> tuple[list[str], dict]:
-    tasks = {d.name: tomllib.loads((d / "task.toml").read_text()) for d in sorted(TASKS.iterdir()) if (d / "task.toml").exists()}
-    meta = {}
+def seeded_order() -> tuple[list[str], dict[str, _TaskMeta]]:
+    tasks = {
+        d.name: tomllib.loads((d / "task.toml").read_text())
+        for d in sorted(TASKS.iterdir())
+        if (d / "task.toml").exists()
+    }
+    meta: dict[str, _TaskMeta] = {}
     for n, c in tasks.items():
-        meta[n] = {"image": c["environment"]["docker_image"], **hub_meta(c["environment"]["docker_image"])}
-    cand = [n for n in tasks if not n.startswith("qemu-") and n != "install-windows-3.11"
-            and (meta[n]["repo_storage"] or 0) <= SIZE_CAP]
+        meta[n] = {
+            "image": c["environment"]["docker_image"],
+            **hub_meta(c["environment"]["docker_image"]),
+        }
+    cand = [
+        n
+        for n in tasks
+        if not n.startswith("qemu-")
+        and n != "install-windows-3.11"
+        and (meta[n]["repo_storage"] or 0) <= SIZE_CAP
+    ]
     order = sorted(cand)
     random.Random(SEED).shuffle(order)
     return order, meta
 
 
-def run_oracle(name: str) -> dict:
+def run_oracle(name: str) -> _OracleResult:
     jobs = OUTPUT / "jobs-oracle"
     job = f"oracle-{name}"
     retry = 0
@@ -88,9 +130,29 @@ def run_oracle(name: str) -> dict:
     # floor while a verifier installs dependencies or another session writes.
     output = OUTPUT / ("oracle-" + name + ".out")
     with output.open("w") as fh:
-        p = subprocess.Popen(["harbor", "run", "-p", str(TASKS / name), "-a", "oracle", "-o", str(jobs), "--job-name", job,
-                              "-n", "1", "-q", "-y", "--timeout-multiplier", "3"], stdout=fh, stderr=fh,
-                             start_new_session=True)
+        p = subprocess.Popen(
+            [
+                "harbor",
+                "run",
+                "-p",
+                str(TASKS / name),
+                "-a",
+                "oracle",
+                "-o",
+                str(jobs),
+                "--job-name",
+                job,
+                "-n",
+                "1",
+                "-q",
+                "-y",
+                "--timeout-multiplier",
+                "3",
+            ],
+            stdout=fh,
+            stderr=fh,
+            start_new_session=True,
+        )
         minimum, disk_stop = free_mb(), False
         while p.poll() is None:
             minimum = min(minimum, free_mb())
@@ -105,13 +167,22 @@ def run_oracle(name: str) -> dict:
             os.killpg(p.pid, signal.SIGKILL)
             code = p.wait()
     rewards = [float(f.read_text().strip()) for f in (jobs / job).glob("*/verifier/reward.txt")]
-    return {"exit": code, "reward": rewards[0] if rewards else None, "wall_s": round(time.time() - t0, 1),
-            "disk_stop": disk_stop, "min_free_mb": minimum,
-            "tail": output.read_text()[-400:] if code else ""}
+    return {
+        "exit": code,
+        "reward": rewards[0] if rewards else None,
+        "wall_s": round(time.time() - t0, 1),
+        "disk_stop": disk_stop,
+        "min_free_mb": minimum,
+        "tail": output.read_text()[-400:] if code else "",
+    }
 
 
 def image_digest(image: str) -> str | None:
-    p = subprocess.run(["docker", "image", "inspect", image, "--format", "{{json .RepoDigests}}"], capture_output=True, text=True)
+    p = subprocess.run(
+        ["docker", "image", "inspect", image, "--format", "{{json .RepoDigests}}"],
+        capture_output=True,
+        text=True,
+    )
     try:
         ds = json.loads(p.stdout)
         return ds[0].split("@", 1)[1] if ds else None
@@ -150,7 +221,12 @@ def main() -> None:
             done[r["task"]] = r
     previous_min = free_mb()
     if (OUTPUT / "subset.json").exists():
-        previous_min = min(previous_min, json.loads((OUTPUT / "subset.json").read_text()).get("min_free_mb_during_sweep", previous_min))
+        previous_min = min(
+            previous_min,
+            json.loads((OUTPUT / "subset.json").read_text()).get(
+                "min_free_mb_during_sweep", previous_min
+            ),
+        )
     accepted, skipped, hw = [], [], {"min_free_mb": previous_min}
     for name in order:
         if len(accepted) >= a.n:
@@ -159,33 +235,66 @@ def main() -> None:
             r = done[name]
         else:
             m = meta[name]
-            need = int(m["tag_full_size"] / (1024 * 1024) * 3) + 512  # compressed -> unpacked + VM growth, conservative
+            need = (
+                int(m["tag_full_size"] / (1024 * 1024) * 3) + 512
+            )  # compressed -> unpacked + VM growth, conservative
             if free_mb() < START_MB or free_mb() - need < FLOOR_MB:
-                print(f"STOP: free {free_mb()} MB; need >= {START_MB} MB before work and estimated post-pull >= {FLOOR_MB} MB", file=sys.stderr)
+                print(
+                    f"STOP: free {free_mb()} MB; need >= {START_MB} MB before work "
+                    f"and estimated post-pull >= {FLOOR_MB} MB",
+                    file=sys.stderr,
+                )
                 break
             res = run_oracle(name)
             hw["min_free_mb"] = min(hw["min_free_mb"], free_mb(), res.get("min_free_mb", free_mb()))
             dig = image_digest(m["image"])
             drop_image(m["image"])
-            r = {"task": name, **res, "image": m["image"], "image_digest": dig or m["hub_digest"],
-                 "hub_tag_full_size": m["tag_full_size"], "repo_storage": m["repo_storage"], "ts": time.time()}
+            r = {
+                "task": name,
+                **res,
+                "image": m["image"],
+                "image_digest": dig or m["hub_digest"],
+                "hub_tag_full_size": m["tag_full_size"],
+                "repo_storage": m["repo_storage"],
+                "ts": time.time(),
+            }
             with log.open("a") as fh:
                 fh.write(json.dumps(r) + "\n")
             print(json.dumps({k: r[k] for k in ("task", "reward", "wall_s")}), flush=True)
         if r.get("reward") is None or r.get("disk_stop"):
-            print(f"STOP: infrastructure failure for {name}; retain candidate order for retry", file=sys.stderr)
+            print(
+                f"STOP: infrastructure failure for {name}; retain candidate order for retry",
+                file=sys.stderr,
+            )
             break
         (accepted if r.get("reward") == 1.0 else skipped).append(r)
-    out = {"bench": "terminal-bench-2.1", "dataset": "terminal-bench/terminal-bench-2-1", "seed": SEED,
-           "python": sys.version.split()[0], "size_cap_bytes": SIZE_CAP, "candidates": len(order),
-           "seeded_order": order,
-           "tasks": [{"name": r["task"], "task8": r["task"][:8], "image": r["image"], "image_digest": r["image_digest"],
-                      "hub_tag_full_size_bytes": r.get("hub_tag_full_size"),
-                      "oracle_reward": r["reward"]} for r in accepted],
-           "replaced": [{"name": r["task"], "oracle_reward": r.get("reward"), "exit": r.get("exit")} for r in skipped],
-           "complete": len(accepted) == a.n,
-           "target_count": a.n,
-           "min_free_mb_during_sweep": hw["min_free_mb"]}
+    out = {
+        "bench": "terminal-bench-2.1",
+        "dataset": "terminal-bench/terminal-bench-2-1",
+        "seed": SEED,
+        "python": sys.version.split()[0],
+        "size_cap_bytes": SIZE_CAP,
+        "candidates": len(order),
+        "seeded_order": order,
+        "tasks": [
+            {
+                "name": r["task"],
+                "task8": r["task"][:8],
+                "image": r["image"],
+                "image_digest": r["image_digest"],
+                "hub_tag_full_size_bytes": r.get("hub_tag_full_size"),
+                "oracle_reward": r["reward"],
+            }
+            for r in accepted
+        ],
+        "replaced": [
+            {"name": r["task"], "oracle_reward": r.get("reward"), "exit": r.get("exit")}
+            for r in skipped
+        ],
+        "complete": len(accepted) == a.n,
+        "target_count": a.n,
+        "min_free_mb_during_sweep": hw["min_free_mb"],
+    }
     (OUTPUT / "subset.json").write_text(json.dumps(out, indent=1) + "\n")
     print(f"accepted {len(accepted)} skipped {len(skipped)} min_free {hw['min_free_mb']} MB")
 

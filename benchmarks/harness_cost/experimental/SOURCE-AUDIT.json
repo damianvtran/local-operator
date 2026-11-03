@@ -41,11 +41,11 @@
     },
     {
       "destination": "README.md",
-      "destination_sha256": "8f12479d373e6695c29abbed29f6fae63b6a764a86a8ee4fb9f7286cc412b0d0",
+      "destination_sha256": "6bfb4d7e6984ec430bc4396b2a1241c666134a200a356b814827a38ddb896281",
       "sources": [],
       "treatment": "new experimental documentation or offline guard/check",
-      "previous_destination_sha256": "f6d9e71630a80f69023a1b17f3498dffb6f4bb4301fb954489cf1c4fe0cc1763",
-      "remediation": "PR3345 round2 experimental-only bounded R2-F1..F4 batch"
+      "previous_destination_sha256": "8f12479d373e6695c29abbed29f6fae63b6a764a86a8ee4fb9f7286cc412b0d0",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "RUNNER_V2.md",
@@ -85,33 +85,37 @@
     },
     {
       "destination": "VERIFICATION.md",
-      "destination_sha256": "57a9a9346cd1b770c48d9b52f7d4de247d45a686d0c228452910054d6bb9680e",
+      "destination_sha256": "b988869a2c7553013df170c49cafc4456317186748a28d6938a19a028ad57ad8",
       "sources": [],
       "treatment": "new experimental documentation or offline guard/check",
-      "previous_destination_sha256": "d219be781ded0f91e55f690aafa20e17ab4131cd0c0b0a92aca61d659fd8913a",
-      "remediation": "Actual Starlette 1.10 lifecycle startup reproduction and lifespan compatibility fix"
+      "previous_destination_sha256": "57a9a9346cd1b770c48d9b52f7d4de247d45a686d0c228452910054d6bb9680e",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "cache_forwarder.py",
-      "destination_sha256": "355ce8046cf3e862accc51b6329cc3536fb3384d8e95963e5dd97bb3e8b1df1a",
+      "destination_sha256": "29395147b72ed60b2cdaa4f8319177398dc134a25a87f1cc64a00b4fdf777c64",
       "sources": [
         {
           "path": "harness-cost-bench/cache_forwarder.py",
           "sha256": "355ce8046cf3e862accc51b6329cc3536fb3384d8e95963e5dd97bb3e8b1df1a"
         }
       ],
-      "treatment": "byte-identical copy"
+      "treatment": "byte-identical copy",
+      "previous_destination_sha256": "355ce8046cf3e862accc51b6329cc3536fb3384d8e95963e5dd97bb3e8b1df1a",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "cache_namespace.py",
-      "destination_sha256": "51de8c51ab0519195cf17c389d31e37e89f9305345c40269ee41600a1cb76516",
+      "destination_sha256": "ee3959ad6a1add97d0a8448bff3605b64d56992edb5dc15ee878bfe21adc8699",
       "sources": [
         {
           "path": "harness-cost-bench/cache_namespace.py",
           "sha256": "51de8c51ab0519195cf17c389d31e37e89f9305345c40269ee41600a1cb76516"
         }
       ],
-      "treatment": "byte-identical copy"
+      "treatment": "byte-identical copy",
+      "previous_destination_sha256": "51de8c51ab0519195cf17c389d31e37e89f9305345c40269ee41600a1cb76516",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "codex-model-catalog.eager.json",
@@ -137,18 +141,20 @@
     },
     {
       "destination": "codex_catalog.py",
-      "destination_sha256": "3a4a29d099e86bb55a79ec3b3bca60b234ed4dae79a0edd26066f279b2377afb",
+      "destination_sha256": "0e89e3c7622f7ef5840b7000070254e371767d4bbc78dd5e587191964816ee4a",
       "sources": [
         {
           "path": "harness-cost-bench/codex_catalog.py",
           "sha256": "3a4a29d099e86bb55a79ec3b3bca60b234ed4dae79a0edd26066f279b2377afb"
         }
       ],
-      "treatment": "byte-identical copy"
+      "treatment": "byte-identical copy",
+      "previous_destination_sha256": "3a4a29d099e86bb55a79ec3b3bca60b234ed4dae79a0edd26066f279b2377afb",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "codex_toolsearch_bridge.py",
-      "destination_sha256": "a65acb12afdf74b68da36f7964f7d938adc00397e83c9a66644298e7dc174efb",
+      "destination_sha256": "4a25f0d45cdda53ac8b4d0cd02094372ee5f25997bd5cf570aa50445fe664956",
       "sources": [
         {
           "path": "harness-cost-bench/codex_toolsearch_bridge.py",
@@ -156,8 +162,8 @@
         }
       ],
       "treatment": "sanitized/adapted derivative",
-      "previous_destination_sha256": "e589373d09dc4668e26496f322369577dc877a39e2174127d38e21ea47de4d03",
-      "remediation": "PR3345 round2 experimental-only bounded R2-F1..F4 batch"
+      "previous_destination_sha256": "a65acb12afdf74b68da36f7964f7d938adc00397e83c9a66644298e7dc174efb",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "coding/CODEX-LICENSE",
@@ -230,18 +236,20 @@
     },
     {
       "destination": "coding/adapters.py",
-      "destination_sha256": "e52cbc0913b1b18c20fa321fe7de8add5fbb690a7a8a8e7fc0de8b74833acbba",
+      "destination_sha256": "3fab43b3eb2b05de3707128324d28f79ea7ec8178b05f839408f3e90c307faaf",
       "sources": [
         {
           "path": "harness-cost-bench/coding/adapters.py",
           "sha256": "71ab509ba8bf2ce1e272a1d7a055658fe9946819ca333a5e81b43b98e239a9f1"
         }
       ],
-      "treatment": "sanitized/adapted derivative"
+      "treatment": "sanitized/adapted derivative",
+      "previous_destination_sha256": "e52cbc0913b1b18c20fa321fe7de8add5fbb690a7a8a8e7fc0de8b74833acbba",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "coding/budget_guard.py",
-      "destination_sha256": "8155383fa0d51b0fdab9f4adfb6f407481919ad33c74b07b73c946e8fab08579",
+      "destination_sha256": "6feaafc7943ff8d3f2d3221e997afff90e09de5e5fb61c1977b19884c707fe69",
       "sources": [
         {
           "path": "harness-cost-bench/coding/budget_guard.py",
@@ -249,8 +257,8 @@
         }
       ],
       "treatment": "sanitized/adapted derivative",
-      "previous_destination_sha256": "36eaa1897435229a275f6d19fbbf44b33afadbff5044153ad2d7796312ed8d17",
-      "remediation": "Actual Starlette 1.10 lifecycle startup reproduction and lifespan compatibility fix"
+      "previous_destination_sha256": "8155383fa0d51b0fdab9f4adfb6f407481919ad33c74b07b73c946e8fab08579",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "coding/codex-model-catalog.json",
@@ -265,7 +273,7 @@
     },
     {
       "destination": "coding/codex_bridge.py",
-      "destination_sha256": "7b7983d40126dce71b9ef20ddc2e887136d0f5a71a17ef918ca37fac726fdd39",
+      "destination_sha256": "1adf87f9009d1d7a366f7b2ff5bda6894d0e859c0dc7314bec518342a39210df",
       "sources": [
         {
           "path": "harness-cost-bench/coding/codex_bridge.py",
@@ -273,12 +281,12 @@
         }
       ],
       "treatment": "sanitized/adapted derivative",
-      "previous_destination_sha256": "0b6aaa2667c3a22a83daba140d4d6290de6bc2b63cdc94f9d3f2c2c5f9f5471b",
-      "remediation": "PR3345 round2 experimental-only bounded R2-F1..F4 batch"
+      "previous_destination_sha256": "7b7983d40126dce71b9ef20ddc2e887136d0f5a71a17ef918ca37fac726fdd39",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "coding/driver.py",
-      "destination_sha256": "0d12015a7e91dafcbb5e6e5a5ae0f359fdfe761afdfa96a3fa731e37b89fde84",
+      "destination_sha256": "76d269d539a38d91a826b827f8b1ecd9dda15848b39214939868f99fa516a64f",
       "sources": [
         {
           "path": "harness-cost-bench/coding/driver.py",
@@ -286,41 +294,47 @@
         }
       ],
       "treatment": "sanitized/adapted derivative",
-      "previous_destination_sha256": "a7602f9e146423eee4ec0b03ff097de8f79b2e51ce50d9d60ebae4aa25753672",
-      "remediation": "PR3345 round2 experimental-only bounded R2-F1..F4 batch"
+      "previous_destination_sha256": "0d12015a7e91dafcbb5e6e5a5ae0f359fdfe761afdfa96a3fa731e37b89fde84",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "coding/lop_launch.py",
-      "destination_sha256": "b9792ed9f116295ce48224459270b4703488bdb974df83096c74625ba07fe0b3",
+      "destination_sha256": "26a96aae82e465ab0fbe50f95f043816d7ffac7e22648a006a697cafd2728199",
       "sources": [
         {
           "path": "harness-cost-bench/coding/lop_launch.py",
           "sha256": "5d021f43edafd2c50c2bec33f189a695fd21299ec55f02b0d90ae31c0e4b4806"
         }
       ],
-      "treatment": "sanitized/adapted derivative"
+      "treatment": "sanitized/adapted derivative",
+      "previous_destination_sha256": "b9792ed9f116295ce48224459270b4703488bdb974df83096c74625ba07fe0b3",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "coding/lop_shim.py",
-      "destination_sha256": "e09089d4690c7171cc3582a911558b1f2e038a90c855b868abea9e55884f250d",
+      "destination_sha256": "875bcedb0699cc64f8a4eb8e4a81836c27bb418cfdce3840a99de6f641f8f069",
       "sources": [
         {
           "path": "harness-cost-bench/coding/lop_shim.py",
           "sha256": "e09089d4690c7171cc3582a911558b1f2e038a90c855b868abea9e55884f250d"
         }
       ],
-      "treatment": "byte-identical copy"
+      "treatment": "byte-identical copy",
+      "previous_destination_sha256": "e09089d4690c7171cc3582a911558b1f2e038a90c855b868abea9e55884f250d",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "coding/oracle_sweep.py",
-      "destination_sha256": "9aaa8182cdf066da152aeeff99ec9b1c4b03c7250b7a6aa829b3808167d982f9",
+      "destination_sha256": "54e9d53cfc7560fb34a9f9cc14890defa91ba600bf52f76efb394fdafbbed4b6",
       "sources": [
         {
           "path": "harness-cost-bench/coding/oracle_sweep.py",
           "sha256": "9571214e325cf17a0b0d124223797d35ab863f0104de0d8bf9e6d10e53d774ee"
         }
       ],
-      "treatment": "sanitized/adapted derivative"
+      "treatment": "sanitized/adapted derivative",
+      "previous_destination_sha256": "9aaa8182cdf066da152aeeff99ec9b1c4b03c7250b7a6aa829b3808167d982f9",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "coding/subset.json",
@@ -335,32 +349,37 @@
     },
     {
       "destination": "coding/test_driver_safety.py",
-      "destination_sha256": "7b226c635ec94a29c2a764bad2412d25fef70f1e46bdef2fd73381f6292025af",
+      "destination_sha256": "cf9993392e501c0e70905605d7d643f62119570ebcce681d780873fc8c66c62d",
       "sources": [],
       "treatment": "new shared incremental SSE framing or offline remediation regression",
-      "remediation": "PR3345 round2 experimental-only bounded R2-F1..F4 batch"
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests",
+      "previous_destination_sha256": "7b226c635ec94a29c2a764bad2412d25fef70f1e46bdef2fd73381f6292025af"
     },
     {
       "destination": "coding/test_guard.py",
-      "destination_sha256": "e155ef7b48e042d37e04fc948dc6b9b28af6f447408914760a54d214a71a1964",
+      "destination_sha256": "5f4bea4ba27c0c5c1e42af7602018492e716aeac3dbfa046161b528ed51f3dbb",
       "sources": [
         {
           "path": "harness-cost-bench/coding/test_guard.py",
           "sha256": "5354c968ecf1a7bcb27e2f58445bdb5c8a71724898a7d58bf5eba80abdcf3f53"
         }
       ],
-      "treatment": "sanitized/adapted derivative"
+      "treatment": "sanitized/adapted derivative",
+      "previous_destination_sha256": "e155ef7b48e042d37e04fc948dc6b9b28af6f447408914760a54d214a71a1964",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "evaluate.py",
-      "destination_sha256": "51e0c35414649e56ebcbc830dca9182dc943c63de26c006dedb81ecf49ffb477",
+      "destination_sha256": "6a81dccc0b3e040476b32ea407cf0a2bfcddd9ecce4655962ab973e4882bc36b",
       "sources": [
         {
           "path": "harness-cost-bench/evaluate.py",
           "sha256": "585f46a401910cd8ac78938ed1af1a8156396c5b3c87a794673652eddcdfc3df"
         }
       ],
-      "treatment": "sanitized/adapted derivative"
+      "treatment": "sanitized/adapted derivative",
+      "previous_destination_sha256": "51e0c35414649e56ebcbc830dca9182dc943c63de26c006dedb81ecf49ffb477",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "evidence/cache-controls.json",
@@ -388,7 +407,7 @@
     },
     {
       "destination": "fetch_task.py",
-      "destination_sha256": "b744be71b68821e09601092133f5ac3de7265890322bbd78f6b6c1878f3a3313",
+      "destination_sha256": "7b9af5a7b28bba6e32bf2c49d312dcff1a74af8880b83f9172eef7cd03e8756a",
       "sources": [
         {
           "path": "harness-cost-bench/tasks.json",
@@ -400,13 +419,17 @@
           "selection": "Pinned public task definitions consumed only on explicit external fetch"
         }
       ],
-      "treatment": "sanitized/adapted derivative"
+      "treatment": "sanitized/adapted derivative",
+      "previous_destination_sha256": "b744be71b68821e09601092133f5ac3de7265890322bbd78f6b6c1878f3a3313",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "freeze_inputs.py",
-      "destination_sha256": "be407ed271e6aedeb56131fc68b9d79593c10fa5475a73bcaf5e3cae49aefd24",
+      "destination_sha256": "df6f1c8dc17caecedb53464d831ad4565098464bccf4999c6f664f83600c9381",
       "sources": [],
-      "treatment": "new experimental documentation or offline guard/check"
+      "treatment": "new experimental documentation or offline guard/check",
+      "previous_destination_sha256": "be407ed271e6aedeb56131fc68b9d79593c10fa5475a73bcaf5e3cae49aefd24",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "licenses/CODEX-APACHE-2.0.txt",
@@ -443,40 +466,46 @@
     },
     {
       "destination": "lop_launch.py",
-      "destination_sha256": "cad89d3a82c329551ead29d3038abaf2d21eb828fde1128ae268ad479c1058a0",
+      "destination_sha256": "1cf9fb27a65948bd30cc5f2a39449e5d948d632090565456d072d353225137f8",
       "sources": [
         {
           "path": "harness-cost-bench/lop_launch.py",
           "sha256": "c9d3fc741c288c697277238ffc89db77bc584aa4750e485c1bd224dd1d613c2b"
         }
       ],
-      "treatment": "sanitized/adapted derivative"
+      "treatment": "sanitized/adapted derivative",
+      "previous_destination_sha256": "cad89d3a82c329551ead29d3038abaf2d21eb828fde1128ae268ad479c1058a0",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "lop_shim/sitecustomize.py",
-      "destination_sha256": "e501ff238f36e5b671b60a806a1f7e8357c5ce231bd679096da4ed1279b43f97",
+      "destination_sha256": "156c8779eb105272fa002083260ce059ecc2583b3bd9511b4a9d440b1a414cb8",
       "sources": [
         {
           "path": "harness-cost-bench/lop_shim/sitecustomize.py",
           "sha256": "e501ff238f36e5b671b60a806a1f7e8357c5ce231bd679096da4ed1279b43f97"
         }
       ],
-      "treatment": "byte-identical copy"
+      "treatment": "byte-identical copy",
+      "previous_destination_sha256": "e501ff238f36e5b671b60a806a1f7e8357c5ce231bd679096da4ed1279b43f97",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "meter_proxy.py",
-      "destination_sha256": "fdc3df60467b486a77ed19ae14b28c289014be9e0cbc6432dba28518b18c7269",
+      "destination_sha256": "098ce294c1a194053ccc390d66730b65b6509744238586ee4ef79b1c094e5834",
       "sources": [
         {
           "path": "harness-cost-bench/meter_proxy.py",
           "sha256": "d6443faf38a0f7dc9f7081063b7276756359271058944378d34ef0a8cb0dbffe"
         }
       ],
-      "treatment": "sanitized/adapted derivative"
+      "treatment": "sanitized/adapted derivative",
+      "previous_destination_sha256": "fdc3df60467b486a77ed19ae14b28c289014be9e0cbc6432dba28518b18c7269",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "runner_v2.py",
-      "destination_sha256": "e0f6ef5d30c7740943bbb822797ea98f413f3844e8be8cc1a8dc067f110a7ec8",
+      "destination_sha256": "d8e4a5cc468fd16b5a69e6bb12e67d4b1600779c22a38e692b74a182b8af9b76",
       "sources": [
         {
           "path": "harness-cost-bench/runner_v2.py",
@@ -484,8 +513,8 @@
         }
       ],
       "treatment": "sanitized/adapted derivative",
-      "previous_destination_sha256": "8d386d9c70b628fa98cb991b44f27e3ccf8de529758205a0ad583a49ffc33ef6",
-      "remediation": "PR3345 round2 experimental-only bounded R2-F1..F4 batch"
+      "previous_destination_sha256": "e0f6ef5d30c7740943bbb822797ea98f413f3844e8be8cc1a8dc067f110a7ec8",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "sse_stream.py",
@@ -496,48 +525,57 @@
     },
     {
       "destination": "test_adapters.py",
-      "destination_sha256": "93d7ed0416f613b1587fe96a63ecaecabaeeb18fb5ee37272806ec4ce680f942",
+      "destination_sha256": "858d5da576c4551a28e631b296bbebdc89174b3dcd63280a74cc5787048af734",
       "sources": [],
-      "treatment": "new experimental documentation or offline guard/check"
+      "treatment": "new experimental documentation or offline guard/check",
+      "previous_destination_sha256": "93d7ed0416f613b1587fe96a63ecaecabaeeb18fb5ee37272806ec4ce680f942",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "test_bridge_sse.py",
-      "destination_sha256": "ae79f9ca3073ef9628014365ff96971f13d7537fe98e3d3dcace168c08cf83b5",
+      "destination_sha256": "be923d69cbb80adcf2f9dbf340c3c795b3f366374bf374e35e37f15a65d43cb7",
       "sources": [],
       "treatment": "new shared incremental SSE framing or offline remediation regression",
-      "remediation": "PR3345 round2 experimental-only bounded R2-F1..F4 batch"
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests",
+      "previous_destination_sha256": "ae79f9ca3073ef9628014365ff96971f13d7537fe98e3d3dcace168c08cf83b5"
     },
     {
       "destination": "test_cache_bridge.py",
-      "destination_sha256": "5184223ab5fcd664622a00e02ea779094bf5e3a6df6a380df4187b751ffc2093",
+      "destination_sha256": "d167224849f279682d0615f2883fc7efd66f121d57ec32237f91d8685c1998fc",
       "sources": [
         {
           "path": "harness-cost-bench/test_cache_bridge.py",
           "sha256": "5184223ab5fcd664622a00e02ea779094bf5e3a6df6a380df4187b751ffc2093"
         }
       ],
-      "treatment": "byte-identical copy"
+      "treatment": "byte-identical copy",
+      "previous_destination_sha256": "5184223ab5fcd664622a00e02ea779094bf5e3a6df6a380df4187b751ffc2093",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "test_cache_forwarder.py",
-      "destination_sha256": "6648b228acb443e4ea2fa1b377cfb3baed4022af4310167e125f7a8073ace8cf",
+      "destination_sha256": "7e1aa1b2c3fe46cab1dd7d214ebbd676d0e6abba9d3b09fafa94b79f2901215f",
       "sources": [],
-      "treatment": "new experimental documentation or offline guard/check"
+      "treatment": "new experimental documentation or offline guard/check",
+      "previous_destination_sha256": "6648b228acb443e4ea2fa1b377cfb3baed4022af4310167e125f7a8073ace8cf",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "test_cache_namespace.py",
-      "destination_sha256": "eaf2af05ce4eb9acfcb5ca3e9dd261fef95ad310ec8bcc84a0886c249bc484e8",
+      "destination_sha256": "935d1c950ebbfe4a95744b56b28e462ac04fbe47e44575dfd66b68d84a730241",
       "sources": [
         {
           "path": "harness-cost-bench/test_cache_namespace.py",
           "sha256": "eaf2af05ce4eb9acfcb5ca3e9dd261fef95ad310ec8bcc84a0886c249bc484e8"
         }
       ],
-      "treatment": "byte-identical copy"
+      "treatment": "byte-identical copy",
+      "previous_destination_sha256": "eaf2af05ce4eb9acfcb5ca3e9dd261fef95ad310ec8bcc84a0886c249bc484e8",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "test_runner_v2.py",
-      "destination_sha256": "d0bdc86e7548dea768f4af5f0c31a14e755ea06097fd544ff3801fde69784d54",
+      "destination_sha256": "762335a758be09b520ce8fd2c1c081c81270eacf0ae888b3baacce0f3f59e451",
       "sources": [
         {
           "path": "harness-cost-bench/test_runner_v2.py",
@@ -545,8 +583,8 @@
         }
       ],
       "treatment": "sanitized/adapted derivative",
-      "previous_destination_sha256": "9ee5c166a8449e8a609952c02753c21a463127077d93590a5d5a8c4da3cfc2cb",
-      "remediation": "PR3345 round2 experimental-only bounded R2-F1..F4 batch"
+      "previous_destination_sha256": "d0bdc86e7548dea768f4af5f0c31a14e755ea06097fd544ff3801fde69784d54",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "translator_config.example.json",
@@ -556,15 +594,25 @@
     },
     {
       "destination": "verify_cache_evidence.py",
-      "destination_sha256": "387866a212f24662f176f9b06fd93527e9198df59cf91ed784ddf89fba7fc9cf",
+      "destination_sha256": "7343173b83b8fdc83faa4c310aee7cc2abef59b5b1ce241d12f5f1cc2689061f",
       "sources": [],
-      "treatment": "new experimental documentation or offline guard/check"
+      "treatment": "new experimental documentation or offline guard/check",
+      "previous_destination_sha256": "387866a212f24662f176f9b06fd93527e9198df59cf91ed784ddf89fba7fc9cf",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
       "destination": "coding/test_guard_asgi.py",
-      "destination_sha256": "8caa433e276e7652493bf0edf676b66ff37c834ee6258060734295abe05b9e8c",
+      "destination_sha256": "59863cca976bcc2c2616242d10d5adf28b62579dce984f8a7cc91edbdb25e317",
       "sources": [],
-      "treatment": "new real in-process ASGI lifecycle and refusal regression controls; no paid dispatch"
+      "treatment": "new real in-process ASGI lifecycle and refusal regression controls; no paid dispatch",
+      "previous_destination_sha256": "8caa433e276e7652493bf0edf676b66ff37c834ee6258060734295abe05b9e8c",
+      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
+    },
+    {
+      "destination": "coding/test_adapters.py",
+      "destination_sha256": "e0b35977d38c197ec06abdf63470fe2b987c0d28b4d1b56761d027ec056ba05f",
+      "sources": [],
+      "treatment": "new offline optional plugin boundary regression controls"
     }
   ],
   "remediation_review": {

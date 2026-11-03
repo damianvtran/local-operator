@@ -132,6 +132,48 @@ This is source compatibility/lifecycle evidence, not a coding pilot or permissio
 to lift either paid-dispatch hold. Verified optional dependency versions were
 Starlette **1.10.0** and httpx **0.28.1**; no new environment was installed.
 
+## CI lint/type and optional dependency follow-up
+
+The first hosted whole-tree checks exposed formatting/type errors in the newly
+added standalone scripts and absent optional scientific imports in CI's core
+`[dev]` environment. Source was formatted and typed rather than excluded or
+suppressed. The optional Harbor/LiteLLM boundaries validate required attributes,
+callability and real runtime bases; their new structural tests do **not** prove
+installed plugin signatures or native integration. Missing DSH entry metadata
+now fails closed before writing a configuration. Model-facing strings, cache
+counter arrays, paid holds and historical numerical outputs remain unchanged.
+
+The benchmark offline suite is now **84 tests**: 16 core, 46 experimental and
+22 coding tests. The coordinator also ran **213 CI workflow/scoping contract
+tests** with this checkout's own Python environment. A foreign editable test
+environment was rejected by the repository guard before collection, and was not
+used as passing evidence.
+
+CI installs this kit's pinned optional analysis requirements only in its
+analysis/type-check job; no application runtime dependency was added. The
+`python-dateutil` pin is **2.9.0.post0**, compatible with core botocore's `<3`
+constraint. The coordinator assembled one worktree-owned Python 3.14 environment
+from the shared offline uv cache with Matplotlib 3.10.7, NumPy 2.3.4 and SciPy
+1.16.3; `uv pip check` confirms all 113 installed packages are compatible.
+An earlier Python 3.12 offline-only attempt lacked the exact cached Matplotlib
+wheel and did not install it. Hosted Linux Python 3.12 validation remains a
+separate CI result, not inferred from this local environment.
+
+The coordinator executed the exact new workflow shell step locally in the
+compatible pinned Python 3.14 environment: publication verification passed,
+16 core + 46 experimental + 22 coding tests passed, and historical numerical
+regeneration passed. Targeted whole-kit Pyright reported **0 errors and 0
+warnings**; flake8 was clean. The first isolated attempt exposed that fixture
+tests need an explicit scratch directory; the workflow allowlist now supplies
+one, and the ordinary-terminal instructions document the same setup.
+
+The workflow's offline step clears environment credentials, uses an isolated
+HOME/config and temporary output directory, checks publication integrity, runs
+the offline suite and regenerates analysis without model/harness/Docker/login
+operations. Checkout credentials are not persisted in this read-only job.
+Real LiteLLM transformation and Harbor native integration remain unverified;
+no optional integration failure was converted to a passing skip.
+
 ## Remaining gates — not ready
 
 - Frozen/amended preregistration and feasible source selection; original 60-task

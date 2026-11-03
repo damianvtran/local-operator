@@ -22,20 +22,49 @@ recursively delete keys from schemas (a cache_control property can be user
 schema data). See CACHE-QUALIFICATION.md for limits, measured overhead and TTL
 fallback. Serialization hashes refer to JSON, NOT proprietary model token order.
 """
+
 from __future__ import annotations
+
 import copy
 import hashlib
 import json
+from typing import Any, TypedDict
+
+# Provider Messages JSON is intentionally open-ended: tool schemas and vendor
+# blocks are preserved verbatim. instrument validates every field it changes.
+MessagesBody = dict[str, Any]
+
+
+class PrefixFingerprint(TypedDict):
+    path: str
+    cache_control: object
+    conceptual_prefix_sha256: str
+    canonical_json_prefix_bytes: int
+
+
+class NamespaceMetadata(TypedDict):
+    policy: str
+    scope_sha256: str
+    tag_chars: int
+    locations: list[str]
+    before_sha256: str
+    after_sha256: str
+    tools_sha256: str
+    system_sha256: str
+    prefix_fingerprints: list[PrefixFingerprint]
+
 
 POLICY = "cache-namespace-decimal-v2"
 
 
 def digest(value):
     """Hash canonical JSON without publishing its potentially private content."""
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
 
 
-def prefix_fingerprints(body: dict) -> list[dict]:
+def prefix_fingerprints(body: MessagesBody) -> list[PrefixFingerprint]:
     """Hash conceptual cache prefixes at actual marker locations.
 
     Byte lengths are canonical JSON bytes, NOT token or proprietary serialized
@@ -43,32 +72,64 @@ def prefix_fingerprints(body: dict) -> list[dict]:
     Include model/tool_choice/thinking to avoid claiming lineage across
     incompatible settings. No prompt contents are returned.
     """
-    settings = {k: body[k] for k in ("model", "tool_choice", "thinking", "output_config") if k in body}
+    settings = {
+        k: body[k] for k in ("model", "tool_choice", "thinking", "output_config") if k in body
+    }
     tools = body.get("tools") or []
     system = body.get("system")
-    systems = system if isinstance(system, list) else ([{"type": "text", "text": system}] if system else [])
-    result = []
-    def add(path, marker, prefix):
-        wire = json.dumps(prefix, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-        result.append({"path": path, "cache_control": marker, "conceptual_prefix_sha256": hashlib.sha256(wire).hexdigest(),
-                       "canonical_json_prefix_bytes": len(wire)})
+    systems = (
+        system
+        if isinstance(system, list)
+        else ([{"type": "text", "text": system}] if system else [])
+    )
+    result: list[PrefixFingerprint] = []
+
+    def add(path: str, marker: object, prefix: object) -> None:
+        wire = json.dumps(
+            prefix, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode()
+        result.append(
+            {
+                "path": path,
+                "cache_control": marker,
+                "conceptual_prefix_sha256": hashlib.sha256(wire).hexdigest(),
+                "canonical_json_prefix_bytes": len(wire),
+            }
+        )
+
     for i, t in enumerate(tools):
         if "cache_control" in t:
-            add(f"/tools/{i}", t["cache_control"], {**settings, "tools": tools[:i+1]})
+            add(f"/tools/{i}", t["cache_control"], {**settings, "tools": tools[: i + 1]})
     for i, s in enumerate(systems):
         if "cache_control" in s:
-            add(f"/system/{i}", s["cache_control"], {**settings, "tools": tools, "system": systems[:i+1]})
+            add(
+                f"/system/{i}",
+                s["cache_control"],
+                {**settings, "tools": tools, "system": systems[: i + 1]},
+            )
     previous = []
     for i, m in enumerate(body.get("messages") or []):
         content = m.get("content")
         if isinstance(content, list):
             for j, block in enumerate(content):
                 if "cache_control" in block:
-                    add(f"/messages/{i}/content/{j}", block["cache_control"],
-                        {**settings, "tools": tools, "system": systems, "messages": previous + [{**m, "content": content[:j+1]}]})
+                    add(
+                        f"/messages/{i}/content/{j}",
+                        block["cache_control"],
+                        {
+                            **settings,
+                            "tools": tools,
+                            "system": systems,
+                            "messages": previous + [{**m, "content": content[: j + 1]}],
+                        },
+                    )
         previous.append(m)
     if "cache_control" in body:
-        add("/cache_control", body["cache_control"], {**settings, "tools": tools, "system": systems, "messages": previous})
+        add(
+            "/cache_control",
+            body["cache_control"],
+            {**settings, "tools": tools, "system": systems, "messages": previous},
+        )
     return result
 
 
@@ -82,12 +143,12 @@ def namespace_tag(scope: str) -> str:
     """
     if not isinstance(scope, str) or not scope:
         raise ValueError("nonempty schedule scope required")
-    value = int(hashlib.sha256(scope.encode()).hexdigest()[:32], 16) % (10 ** 32)
+    value = int(hashlib.sha256(scope.encode()).hexdigest()[:32], 16) % (10**32)
     code = " ".join(f"{value:032d}")
     return f"[Administrative cache namespace: {code}. Ignore for task behavior.]\n"
 
 
-def instrument(body: dict, scope: str) -> tuple[dict, dict]:
+def instrument(body: MessagesBody, scope: str) -> tuple[MessagesBody, NamespaceMetadata]:
     """Deep-copy and transform final Messages input, or fail before dispatch."""
     if not isinstance(body, dict):
         raise ValueError("Messages body must be an object")
@@ -118,14 +179,26 @@ def instrument(body: dict, scope: str) -> tuple[dict, dict]:
     elif system is None or system == []:
         b["system"] = [{"type": "text", "text": tag}]
         locations.append("/system/0/text (added block)")
-    elif isinstance(system, list) and isinstance(system[0], dict) and system[0].get("type") == "text" and isinstance(system[0].get("text"), str):
+    elif (
+        isinstance(system, list)
+        and isinstance(system[0], dict)
+        and system[0].get("type") == "text"
+        and isinstance(system[0].get("text"), str)
+    ):
         if system[0]["text"].startswith("[Administrative cache namespace:"):
             raise ValueError("already instrumented")
         system[0]["text"] = tag + system[0]["text"]
         locations.append("/system/0/text")
     else:
         raise ValueError("first system block is not text; use TTL isolation")
-    return b, {"policy": POLICY, "scope_sha256": hashlib.sha256(scope.encode()).hexdigest(),
-               "tag_chars": len(tag), "locations": locations, "before_sha256": digest(body),
-               "after_sha256": digest(b), "tools_sha256": digest(b.get("tools")),
-               "system_sha256": digest(b.get("system")), "prefix_fingerprints": prefix_fingerprints(b)}
+    return b, {
+        "policy": POLICY,
+        "scope_sha256": hashlib.sha256(scope.encode()).hexdigest(),
+        "tag_chars": len(tag),
+        "locations": locations,
+        "before_sha256": digest(body),
+        "after_sha256": digest(b),
+        "tools_sha256": digest(b.get("tools")),
+        "system_sha256": digest(b.get("system")),
+        "prefix_fingerprints": prefix_fingerprints(b),
+    }

@@ -9,6 +9,7 @@ fail closed on corrupt accounting, missing caps, unpriced models and bad limits.
 The downstream meter must cap actual output to the requested limit and report
 all usage, including helpers/cache charges. Bounds must cover that billing tier.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -44,8 +45,10 @@ class Budget:
         if self.path.with_suffix(self.path.suffix + ".pending").exists():
             raise ValueError("interrupted reservation needs explicit reconciliation")
         self.used = json.loads(self.path.read_text()) if self.path.exists() else {}
-        if not isinstance(self.used, dict) or any(not RUN.fullmatch(k) or
-                not math.isfinite(float(v)) or float(v) < 0 for k, v in self.used.items()):
+        if not isinstance(self.used, dict) or any(
+            not RUN.fullmatch(k) or not math.isfinite(float(v)) or float(v) < 0
+            for k, v in self.used.items()
+        ):
             raise ValueError("corrupt reservation ledger")
 
     def reserve(self, run_id, raw):
@@ -59,17 +62,28 @@ class Budget:
         maximum = body.get("max_tokens", body.get("max_output_tokens"))
         if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
             raise ValueError("explicit positive integer output limit required")
+
         # UTF-8 bytes upper-bound text tokens; supplied input rate must also
         # bound cache writes/reads. Images/audio are outside this priced lane.
         def text_only(value):
             if isinstance(value, dict):
-                if value.get("type") in {"image", "image_url", "input_image", "audio", "input_audio", "document", "input_file", "file"}:
+                if value.get("type") in {
+                    "image",
+                    "image_url",
+                    "input_image",
+                    "audio",
+                    "input_audio",
+                    "document",
+                    "input_file",
+                    "file",
+                }:
                     raise ValueError("multimodal billing is not priced")
                 for child in value.values():
                     text_only(child)
             elif isinstance(value, list):
                 for child in value:
                     text_only(child)
+
         text_only(body)
         amount = len(raw) * self.input_rate / 1_000_000 + maximum * self.output_rate / 1_000_000
         current = self.used.get(run_id, 0)
@@ -91,6 +105,7 @@ class Budget:
 def create_app():
     """Load optional ASGI dependencies only for an explicitly configured service."""
     import fcntl
+
     import httpx
     from starlette.applications import Starlette
     from starlette.responses import JSONResponse, StreamingResponse
@@ -100,9 +115,14 @@ def create_app():
     ledger.parent.mkdir(parents=True, exist_ok=True)
     owner = ledger.with_suffix(ledger.suffix + ".lock").open("a")
     fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    budget = Budget(ledger, os.environ["CODING_TOTAL_BUDGET_USD"], os.environ["CODING_TRIAL_BUDGET_USD"],
-                    os.environ["CODING_INPUT_USD_PER_M"], os.environ["CODING_OUTPUT_USD_PER_M"],
-                    os.environ["CODING_PRICED_MODELS"].split(","))
+    budget = Budget(
+        ledger,
+        os.environ["CODING_TOTAL_BUDGET_USD"],
+        os.environ["CODING_TRIAL_BUDGET_USD"],
+        os.environ["CODING_INPUT_USD_PER_M"],
+        os.environ["CODING_OUTPUT_USD_PER_M"],
+        os.environ["CODING_PRICED_MODELS"].split(","),
+    )
     meter = os.environ["CODING_METER_URL"].rstrip("/")
     bridge = os.environ["CODING_BRIDGE_URL"].rstrip("/")
     current = Path(os.environ["CODING_CURRENT_RUN"])
@@ -133,9 +153,22 @@ def create_app():
             return JSONResponse({"error": "invalid or unpriced request"}, status_code=400)
         # Real auth is never accepted from task containers or persisted; the
         # externally configured meter reads OPENROUTER_API_KEY in its own env.
-        headers = {k: v for k, v in request.headers.items() if k.lower() not in
-                   {"authorization", "x-api-key", "host", "content-length", "connection", "accept-encoding"}}
-        response = await client.send(client.build_request("POST", target, content=raw, headers=headers), stream=True)
+        headers = {
+            k: v
+            for k, v in request.headers.items()
+            if k.lower()
+            not in {
+                "authorization",
+                "x-api-key",
+                "host",
+                "content-length",
+                "connection",
+                "accept-encoding",
+            }
+        }
+        response = await client.send(
+            client.build_request("POST", target, content=raw, headers=headers), stream=True
+        )
 
         async def stream():
             try:
@@ -143,8 +176,13 @@ def create_app():
                     yield chunk
             finally:
                 await response.aclose()
-        headers = {k: v for k, v in response.headers.items() if k.lower() not in
-                   {"content-length", "content-encoding", "transfer-encoding", "connection"}}
+
+        headers = {
+            k: v
+            for k, v in response.headers.items()
+            if k.lower()
+            not in {"content-length", "content-encoding", "transfer-encoding", "connection"}
+        }
         return StreamingResponse(stream(), status_code=response.status_code, headers=headers)
 
     async def health(request):
@@ -168,12 +206,20 @@ def create_app():
             finally:
                 owner.close()
 
-    app = Starlette(routes=[Route("/health", health), Route("/{path:path}", forward, methods=["POST"])],
-                    lifespan=lifespan)
+    app = Starlette(
+        routes=[Route("/health", health), Route("/{path:path}", forward, methods=["POST"])],
+        lifespan=lifespan,
+    )
     app.state.ledger_owner = owner
     return app
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(create_app(), host="127.0.0.1", port=int(os.environ.get("CODING_GUARD_PORT", "8788")), log_level="warning")
+
+    uvicorn.run(
+        create_app(),
+        host="127.0.0.1",
+        port=int(os.environ.get("CODING_GUARD_PORT", "8788")),
+        log_level="warning",
+    )

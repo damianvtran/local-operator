@@ -54,10 +54,13 @@ import argparse
 import json
 from pathlib import Path
 
+# Catalog fields mirror upstream JSON, including nested optional metadata.
+type JSONValue = None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]
+
 SLUG = "claude-sonnet-5-5"
 
 
-def fallback_entry(slug: str, instructions: str) -> dict:
+def fallback_entry(slug: str, instructions: str) -> dict[str, JSONValue]:
     """Mirror of `model_info_from_slug` (rust-v0.147.0), field for field."""
     return {
         "slug": slug,
@@ -106,7 +109,7 @@ def fallback_entry(slug: str, instructions: str) -> dict:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     ap.add_argument("--prompt", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--slug", default=SLUG)
@@ -122,9 +125,23 @@ def main() -> None:
     if a.reasoning:
         m["default_reasoning_level"] = a.reasoning
         m["supported_reasoning_levels"] = [
-            {"effort": e, "description": e} for e in ("low", "medium", "high", "xhigh")]
+            {"effort": e, "description": e} for e in ("low", "medium", "high", "xhigh")
+        ]
     a.out.write_text(json.dumps({"models": [m]}, indent=1) + "\n")
-    print(json.dumps({k: m[k] for k in ("slug", "supports_search_tool", "context_window", "max_context_window", "default_reasoning_level")}))
+    print(
+        json.dumps(
+            {
+                k: m[k]
+                for k in (
+                    "slug",
+                    "supports_search_tool",
+                    "context_window",
+                    "max_context_window",
+                    "default_reasoning_level",
+                )
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

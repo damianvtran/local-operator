@@ -17,19 +17,22 @@ It does not implement production concurrent budget admission or session mapping.
 Usage: CACHE_FORWARD_LOG=<path> python cache_forwarder.py <port>
   translator api_base: adapter origin plus /r/cachedev__<trial>
 """
+
 from __future__ import annotations
+
 import json
 import os
 import re
 import sys
 import time
 from pathlib import Path
+
 import httpx
+from cache_namespace import instrument
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
-from cache_namespace import instrument
 
 LOG = Path(os.environ.get("CACHE_FORWARD_LOG", "cache-forwarder.jsonl"))
 METER = os.environ.get("CACHE_METER_BASE", "http://127.0.0.1:8787").rstrip("/")
@@ -45,17 +48,35 @@ async def forward(request: Request):
     except (ValueError, TypeError, KeyError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     started = time.time()
-    headers = {k: v for k, v in request.headers.items() if k.lower() not in
-               {"host", "content-length", "connection", "accept-encoding", "transfer-encoding"}}
+    headers = {
+        k: v
+        for k, v in request.headers.items()
+        if k.lower()
+        not in {"host", "content-length", "connection", "accept-encoding", "transfer-encoding"}
+    }
     headers["accept-encoding"] = "identity"
     response = await client.post(f"{METER}/r/{run_id}/v1/messages", json=body, headers=headers)
     with LOG.open("a") as f:
-        f.write(json.dumps({"run_id": run_id, "started": started, "ended": time.time(),
-                            "status": response.status_code, **meta}) + "\n")
+        f.write(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "started": started,
+                    "ended": time.time(),
+                    "status": response.status_code,
+                    **meta,
+                }
+            )
+            + "\n"
+        )
     # Buffering is deliberate for the bounded development control: preserve
     # SSE bytes/events, but no claim about production streaming latency.
-    out_headers = {k: v for k, v in response.headers.items() if k.lower() not in
-                   {"content-length", "content-encoding", "transfer-encoding", "connection"}}
+    out_headers = {
+        k: v
+        for k, v in response.headers.items()
+        if k.lower()
+        not in {"content-length", "content-encoding", "transfer-encoding", "connection"}
+    }
     return Response(response.content, status_code=response.status_code, headers=out_headers)
 
 
@@ -63,4 +84,5 @@ app = Starlette(routes=[Route("/r/{run_id}/v1/messages", forward, methods=["POST
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="127.0.0.1", port=int(sys.argv[1]), log_level="warning")

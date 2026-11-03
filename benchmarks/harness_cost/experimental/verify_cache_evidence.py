@@ -4,14 +4,21 @@ Why: every numeric claim in CACHE-QUALIFICATION must derive from supplied rows.
 Constraints: hashes attest withheld inputs only; this is not a live cache rerun
 or independent verification of provider telemetry. No network/imported harness.
 """
+
 from __future__ import annotations
 
 import json
 import re
 from pathlib import Path
+from typing import TypedDict
 
 
-def verify(root: Path | None = None) -> dict:
+class ControlSummary(TypedDict):
+    read_tokens: list[int]
+    rows: int
+
+
+def verify(root: Path | None = None) -> dict[str, ControlSummary]:
     root = root or Path(__file__).resolve().parent
     rows = json.loads((root / "evidence/cache-controls.json").read_text())
     expected = {
@@ -20,7 +27,7 @@ def verify(root: Path | None = None) -> dict:
     }
     if len(rows) != 8:
         raise ValueError("Expected exactly eight minimal evidence rows")
-    result = {}
+    result: dict[str, ControlSummary] = {}
     for control, reads in expected.items():
         group = sorted((r for r in rows if r["control"] == control), key=lambda r: r["ordinal"])
         if [r["ordinal"] for r in group] != [0, 1, 2, 3]:

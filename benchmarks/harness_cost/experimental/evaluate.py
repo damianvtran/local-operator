@@ -4,7 +4,8 @@ WHY: importing desktop_env normally initializes VM dependencies. Namespace-only
 packages let us call the upstream file metrics without starting a VM, replacing
 GUI save postconfig with the runner's requirement to save outputs in place.
 This is an offline adaptation, NOT the original GUI benchmark or oracle proof.
-Source: https://github.com/xlang-ai/OSWorld/tree/8903ebeb0efdf74331bd7dc37ed91ccbbff22317/desktop_env/evaluators/metrics
+Source: https://github.com/xlang-ai/OSWorld/tree/8903ebeb0efdf74331bd7dc37ed91ccbbff22317
+Metric directory within that pinned tree: desktop_env/evaluators/metrics
 Apache-2.0 attribution: licenses/OSWorld-LICENSE. OCR is deliberately unavailable:
 any metric path requesting it fails explicitly rather than downloading a model.
 """
@@ -14,10 +15,10 @@ import importlib
 import json
 import math
 import os
-from pathlib import Path
 import subprocess
 import sys
 import types
+from pathlib import Path
 
 from fetch_task import PIN, assets, check_pin, git, sha256, vm_relative
 
@@ -67,7 +68,9 @@ def load_task(task_file, cache, task_id, root):
     if record["path"] != rel or record["sha256"] != sha256(original):
         raise ValueError("upstream task provenance mismatch")
     public = json.loads(original)
-    if {k: v for k, v in task.items() if k not in ("_domain", "_tier", "_development_only")} != public:
+    if {
+        k: v for k, v in task.items() if k not in ("_domain", "_tier", "_development_only")
+    } != public:
         raise ValueError("task definition differs from pinned public source")
     expected_assets = assets(task)
     for rel, item in expected_assets.items():
@@ -79,6 +82,7 @@ def load_task(task_file, cache, task_id, root):
         if not asset.get("sha256") or not path.is_file():
             raise ValueError("fixture missing/unhashed; run fetch_task.py with --download")
         import hashlib
+
         with path.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         if digest != asset["sha256"]:
@@ -90,14 +94,16 @@ def metric_function(root, function):
     if function not in MODULES:
         raise ValueError(f"unsupported metric: {function!r}")
     # Do not execute package __init__ files (gym/VM controller side effects).
-    for name, rel in [("desktop_env", "desktop_env"),
-                      ("desktop_env.evaluators", "desktop_env/evaluators"),
-                      ("desktop_env.evaluators.metrics", "desktop_env/evaluators/metrics")]:
+    for name, rel in [
+        ("desktop_env", "desktop_env"),
+        ("desktop_env.evaluators", "desktop_env/evaluators"),
+        ("desktop_env.evaluators.metrics", "desktop_env/evaluators/metrics"),
+    ]:
         module = types.ModuleType(name)
         module.__path__ = [str(root / rel)]
         sys.modules[name] = module
     ocr = types.ModuleType("easyocr")
-    ocr.Reader = no_ocr
+    setattr(ocr, "Reader", no_ocr)
     sys.modules["easyocr"] = ocr
     module = importlib.import_module("desktop_env.evaluators.metrics." + MODULES[function])
     return getattr(module, function)
@@ -120,7 +126,11 @@ def main():
     parser.add_argument("--osworld-root")
     parser.add_argument("--tasks-file")
     parser.add_argument("--task-cache")
-    parser.add_argument("--preflight", action="store_true", help="verify pin, assets and metric imports; do not score")
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="verify pin, assets and metric imports; do not score",
+    )
     args = parser.parse_args()
     root = configured(args, "osworld_root", "BENCH_OSWORLD_ROOT")
     task_file = configured(args, "tasks_file", "BENCH_TASKS_FILE")
@@ -131,8 +141,17 @@ def main():
         raise ValueError("only vm_file result getters are supported")
     function = metric_function(root, ev["func"])
     if args.preflight:
-        print(json.dumps({"preflight": "ok", "task_id": args.task_id, "source_pin": PIN,
-                          "metric": ev["func"], "oracles_validated": False}))
+        print(
+            json.dumps(
+                {
+                    "preflight": "ok",
+                    "task_id": args.task_id,
+                    "source_pin": PIN,
+                    "metric": ev["func"],
+                    "oracles_validated": False,
+                }
+            )
+        )
         return
     result = checked_path(args.workdir.resolve(), str(vm_relative(ev["result"]["path"])))
     if not result.is_file():
@@ -153,7 +172,11 @@ def main():
         # turn missing dependencies or setup failures into ordinary task failures.
         if isinstance(exc, (ImportError, FileNotFoundError)):
             raise
-        print(json.dumps({"score": 0.0, "reason": f"checker error: {type(exc).__name__}: {exc}"[:400]}))
+        print(
+            json.dumps(
+                {"score": 0.0, "reason": f"checker error: {type(exc).__name__}: {exc}"[:400]}
+            )
+        )
         return
     if not math.isfinite(score) or not 0 <= score <= 1:
         raise ValueError("upstream metric returned an invalid score")
@@ -163,7 +186,13 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, OSError, KeyError, ImportError, UnsupportedMetricPath,
-            subprocess.CalledProcessError) as exc:
+    except (
+        ValueError,
+        OSError,
+        KeyError,
+        ImportError,
+        UnsupportedMetricPath,
+        subprocess.CalledProcessError,
+    ) as exc:
         print(json.dumps({"error": f"{type(exc).__name__}: {exc}"[:600]}))
         sys.exit(2)

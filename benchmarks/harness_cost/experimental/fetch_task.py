@@ -10,12 +10,12 @@ OSWorld is Apache-2.0; see licenses/OSWorld-LICENSE. No setup commands execute h
 import argparse
 import hashlib
 import json
-from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
 import urllib.parse
 import urllib.request
+from pathlib import Path, PurePosixPath
 
 PIN = "8903ebeb0efdf74331bd7dc37ed91ccbbff22317"
 SMOKE = "37608790-6147-45d0-9f20-1137bb35703d"
@@ -34,14 +34,22 @@ def check_pin(root, pin):
         raise ValueError(f"only the reviewed full source pin {PIN} is supported")
     if git(root, "rev-parse", "HEAD").decode().strip() != pin:
         raise ValueError("OSWorld checkout HEAD does not match --pin")
-    if git(root, "status", "--porcelain", "--untracked-files=all", "--", "desktop_env", "evaluation_examples"):
+    if git(
+        root,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--",
+        "desktop_env",
+        "evaluation_examples",
+    ):
         raise ValueError("OSWorld task/metric tree must be clean, including untracked files")
 
 
 def vm_relative(value):
     if not isinstance(value, str) or not value.startswith("/home/user/"):
         raise ValueError(f"unsupported VM path: {value!r}")
-    rel = PurePosixPath(value[len("/home/user/"):])
+    rel = PurePosixPath(value[len("/home/user/") :])
     if not rel.parts or ".." in rel.parts or rel.is_absolute():
         raise ValueError("unsafe VM path")
     return rel
@@ -75,9 +83,15 @@ def assets(task):
 def public_url(url):
     parsed = urllib.parse.urlparse(url)
     # Restrict downloads to the public fixture collection, not task-supplied arbitrary hosts.
-    if (parsed.scheme != "https" or parsed.netloc != "huggingface.co"
-            or not parsed.path.startswith("/datasets/xlangai/ubuntu_osworld_file_cache/resolve/")
-            or parsed.username or parsed.password or parsed.query or parsed.fragment):
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "huggingface.co"
+        or not parsed.path.startswith("/datasets/xlangai/ubuntu_osworld_file_cache/resolve/")
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
         raise ValueError(f"unsupported public fixture URL: {url!r}")
 
 
@@ -86,9 +100,16 @@ def main():
     parser.add_argument("--osworld-root", required=True, type=Path)
     parser.add_argument("--pin", required=True)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--task", action="append", required=True, metavar="DOMAIN:UUID:TIER",
-                        help="repeat explicitly; tier is short or long")
-    parser.add_argument("--download", action="store_true", help="explicitly permit HTTPS fixture downloads")
+    parser.add_argument(
+        "--task",
+        action="append",
+        required=True,
+        metavar="DOMAIN:UUID:TIER",
+        help="repeat explicitly; tier is short or long",
+    )
+    parser.add_argument(
+        "--download", action="store_true", help="explicitly permit HTTPS fixture downloads"
+    )
     args = parser.parse_args()
     root, out = args.osworld_root.resolve(), args.output_dir.resolve()
     check_pin(root, args.pin)
@@ -98,7 +119,9 @@ def main():
     tasks, records, planned, seen = [], {}, {}, set()
     for selection in args.task:
         domain, task_id, tier = selection.split(":")
-        if not re.fullmatch(r"[a-z_]+", domain) or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", task_id):
+        if not re.fullmatch(r"[a-z_]+", domain) or not re.fullmatch(
+            r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", task_id
+        ):
             raise ValueError("invalid public task domain/UUID")
         if tier not in ("short", "long") or task_id in seen:
             raise ValueError("tier must be short/long and task IDs unique")
@@ -119,17 +142,26 @@ def main():
     if out.exists() and any(out.iterdir()):
         raise ValueError("output directory must be empty")
     out.mkdir(parents=True, exist_ok=True)
-    manifest = {"schema": 1, "source_url": "https://github.com/xlang-ai/OSWorld",
-                "source_pin": args.pin, "tasks_sha256": sha256(payload), "tasks": records,
-                "downloads_complete": False, "assets": {}}
+    manifest = {
+        "schema": 1,
+        "source_url": "https://github.com/xlang-ai/OSWorld",
+        "source_pin": args.pin,
+        "tasks_sha256": sha256(payload),
+        "tasks": records,
+        "downloads_complete": False,
+        "assets": {},
+    }
     for rel, item in sorted(planned.items()):
         public_url(item["url"])
-        record = dict(item, sha256=None)
+        record: dict[str, str | None] = dict(item, sha256=None)
         if args.download:
             target = out / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             # The redirect is necessary for Hugging Face's public CDN. No auth headers are sent.
-            with urllib.request.urlopen(item["url"], timeout=60) as response, target.open("xb") as dest:
+            with (
+                urllib.request.urlopen(item["url"], timeout=60) as response,
+                target.open("xb") as dest,
+            ):
                 digest = hashlib.sha256()
                 while block := response.read(1024 * 1024):
                     dest.write(block)
@@ -139,8 +171,16 @@ def main():
     manifest["downloads_complete"] = args.download or not planned
     (out / "tasks.json").write_bytes(payload)
     (out / "task-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    print(json.dumps({"tasks": len(tasks), "assets": len(planned), "output_dir": str(out),
-                      "downloads_complete": manifest["downloads_complete"]}))
+    print(
+        json.dumps(
+            {
+                "tasks": len(tasks),
+                "assets": len(planned),
+                "output_dir": str(out),
+                "downloads_complete": manifest["downloads_complete"],
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

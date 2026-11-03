@@ -11,20 +11,25 @@ Prompt capture is opt-in; logs contain usage/count metadata, never auth headers.
 from __future__ import annotations
 
 import fcntl
+import json
 import math
+import os
+import re
+import time
 import uuid
 from contextlib import contextmanager
-import re
-import json
-import os
-import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
+
+# Only the provider JSON boundary is dynamic: nested schemas, tool arguments,
+# and provider usage extensions must survive without a lossy local schema.
+WireObject = dict[str, Any]
 
 UPSTREAM = os.environ.get("BENCH_UPSTREAM", "https://openrouter.ai/api").rstrip("/")
 MODEL = os.environ.get("BENCH_MODEL", "claude-sonnet-5-5")
@@ -85,13 +90,20 @@ class BudgetGuard:
             fcntl.flock(lock, fcntl.LOCK_EX)
             if self.path.exists():
                 data = json.loads(self.path.read_text())
-                if (set(data) != {"usd", "trials", "pending", "blocked"}
-                        or not isinstance(data["blocked"], bool)
-                        or not isinstance(data["pending"], dict)
-                        or not isinstance(data["trials"], dict)):
+                if (
+                    set(data) != {"usd", "trials", "pending", "blocked"}
+                    or not isinstance(data["blocked"], bool)
+                    or not isinstance(data["pending"], dict)
+                    or not isinstance(data["trials"], dict)
+                ):
                     raise ValueError("invalid budget ledger")
                 for value in [data["usd"], *data["trials"].values()]:
-                    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, (int, float))
+                        or not math.isfinite(value)
+                        or value < 0
+                    ):
                         raise ValueError("invalid ledger spend")
             else:
                 data = {"usd": 0.0, "trials": {}, "pending": {}, "blocked": False}
@@ -103,19 +115,39 @@ class BudgetGuard:
                 os.fsync(fh.fileno())
             tmp.replace(self.path)
 
-    def validate(self, body: dict, raw: bytes) -> None:
+    def validate(self, body: WireObject, raw: bytes) -> None:
         if or_model(body.get("model")) != or_model(MODEL):
             raise ValueError("model is not explicitly priced")
         tokens = body.get("max_tokens")
-        if isinstance(tokens, bool) or not isinstance(tokens, int) or not 0 < tokens <= self.max_tokens:
+        if (
+            isinstance(tokens, bool)
+            or not isinstance(tokens, int)
+            or not 0 < tokens <= self.max_tokens
+        ):
             raise ValueError("max_tokens is missing or exceeds priced limit")
         if len(raw) > self.max_bytes:
             raise ValueError("input exceeds priced byte bound")
         if body.get("service_tier", "default") != "default":
             raise ValueError("unpriced service tier")
-        allowed = {"model", "messages", "system", "max_tokens", "stream", "tools",
-                   "tool_choice", "temperature", "top_p", "top_k", "stop_sequences",
-                   "metadata", "thinking", "output_config", "cache_control", "service_tier", "provider"}
+        allowed = {
+            "model",
+            "messages",
+            "system",
+            "max_tokens",
+            "stream",
+            "tools",
+            "tool_choice",
+            "temperature",
+            "top_p",
+            "top_k",
+            "stop_sequences",
+            "metadata",
+            "thinking",
+            "output_config",
+            "cache_control",
+            "service_tier",
+            "provider",
+        }
         if set(body) - allowed:
             raise ValueError("unpriced request extension")
 
@@ -126,11 +158,17 @@ class BudgetGuard:
             elif isinstance(value, dict):
                 kind = value.get("type")
                 if kind is not None and kind not in {
-                    "text", "tool_use", "tool_result", "thinking", "redacted_thinking"}:
+                    "text",
+                    "tool_use",
+                    "tool_result",
+                    "thinking",
+                    "redacted_thinking",
+                }:
                     raise ValueError("unpriced content block")
                 # Arbitrary tool arguments are data, not provider modalities.
                 if "content" in value:
                     check_content(value["content"])
+
         check_content(body.get("messages"))
         check_content(body.get("system"))
         for tool in body.get("tools", []):
@@ -138,8 +176,9 @@ class BudgetGuard:
                 raise ValueError("unpriced server tool")
         # UTF-8 bytes overbound text tokens; 4x plus framing slack deliberately
         # over-reserves rather than estimating from a favorable tokenizer.
-        bound = ((4 * self.max_bytes + 65536) * self.input_rate
-                 + self.max_tokens * self.output_rate) / 1_000_000
+        bound = (
+            (4 * self.max_bytes + 65536) * self.input_rate + self.max_tokens * self.output_rate
+        ) / 1_000_000
         if bound > self.reserve:
             raise ValueError("request reservation is below worst-case token/rate bound")
 
@@ -148,8 +187,10 @@ class BudgetGuard:
         with self.ledger() as data:
             if data["blocked"] or data["pending"]:
                 raise ValueError("unreconciled or in-flight request; budget fails closed")
-            if (data["usd"] + self.reserve > self.total
-                    or data["trials"].get(run_id, 0.0) + self.reserve > self.trial):
+            if (
+                data["usd"] + self.reserve > self.total
+                or data["trials"].get(run_id, 0.0) + self.reserve > self.trial
+            ):
                 raise ValueError("total or per-trial budget exhausted")
             data["pending"][token] = {"run_id": run_id, "usd": self.reserve}
         return token
@@ -157,8 +198,12 @@ class BudgetGuard:
     def settle(self, token: str, cost) -> None:
         with self.ledger() as data:
             pending = data["pending"][token]
-            if (isinstance(cost, bool) or not isinstance(cost, (int, float))
-                    or not math.isfinite(cost) or cost < 0):
+            if (
+                isinstance(cost, bool)
+                or not isinstance(cost, (int, float))
+                or not math.isfinite(cost)
+                or cost < 0
+            ):
                 data["blocked"] = True
                 return
             data["usd"] += cost
@@ -180,8 +225,8 @@ def or_model(model: str | None) -> str | None:
     return f"anthropic/{m.group(1)}-{m.group(2)}" if m else f"anthropic/{model}"
 
 
-def _patch_body(body: dict) -> dict:
-    meta = {"requested_model": body.get("model")}
+def _patch_body(body: WireObject) -> dict[str, object]:
+    meta: dict[str, object] = {"requested_model": body.get("model")}
     # Model pin is OFF by default: side-calls a harness deliberately routes to
     # a cheaper model (e.g. Claude Code's Haiku title/summary calls) are part
     # of its real cost profile. The report prices each row by the model the
@@ -193,7 +238,11 @@ def _patch_body(body: dict) -> dict:
     if isinstance(system, str):
         has_identity = system.startswith(IDENTITY)
         if not has_identity and INJECT_IDENTITY:
-            body["system"] = [{"type": "text", "text": IDENTITY}, {"type": "text", "text": system}] if system else [{"type": "text", "text": IDENTITY}]
+            body["system"] = (
+                [{"type": "text", "text": IDENTITY}, {"type": "text", "text": system}]
+                if system
+                else [{"type": "text", "text": IDENTITY}]
+            )
     elif isinstance(system, list):
         first = system[0] if system else {}
         has_identity = isinstance(first, dict) and str(first.get("text", "")).startswith(IDENTITY)
@@ -213,7 +262,7 @@ def _patch_body(body: dict) -> dict:
     return meta
 
 
-def _merge_usage(acc: dict, usage: dict | None) -> None:
+def _merge_usage(acc: WireObject, usage: WireObject | None) -> None:
     if not usage:
         return
     for k, v in usage.items():
@@ -242,7 +291,15 @@ async def proxy(request: Request) -> Response:
     headers = {
         k: v
         for k, v in request.headers.items()
-        if k.lower() not in {"host", "content-length", "x-api-key", "authorization", "accept-encoding", "connection"}
+        if k.lower()
+        not in {
+            "host",
+            "content-length",
+            "x-api-key",
+            "authorization",
+            "accept-encoding",
+            "connection",
+        }
     }
     if path.rstrip("/") == "api/hello":
         return JSONResponse({"ok": True})  # Claude Code connectivity ping
@@ -257,9 +314,16 @@ async def proxy(request: Request) -> Response:
         guard.validate(body, raw)
         key = await upstream_key()
     except (KeyError, ValueError, TypeError, AttributeError, OSError):
-        return JSONResponse({"error": "invalid request or missing explicit budget/auth configuration"}, status_code=402)
+        return JSONResponse(
+            {"error": "invalid request or missing explicit budget/auth configuration"},
+            status_code=402,
+        )
     headers["authorization"] = f"Bearer {key}"
-    beta = [b.strip() for b in headers.get("anthropic-beta", "").split(",") if b.strip() and not b.strip().startswith("oauth-")]
+    beta = [
+        b.strip()
+        for b in headers.get("anthropic-beta", "").split(",")
+        if b.strip() and not b.strip().startswith("oauth-")
+    ]
     if beta:
         headers["anthropic-beta"] = ",".join(beta)
     else:
@@ -270,7 +334,7 @@ async def proxy(request: Request) -> Response:
     # (Claude Code then silently retried non-streaming -> double-counted calls).
     headers["accept-encoding"] = "identity"
 
-    meta: dict = {}
+    meta: dict[str, object] = {}
     is_messages = path.rstrip("/").endswith("v1/messages") and request.method == "POST"
     is_count = path.rstrip("/").endswith("count_tokens")
     if (is_messages or is_count) and raw:
@@ -298,14 +362,17 @@ async def proxy(request: Request) -> Response:
         meta["upstream_model"] = body["model"] = or_model(body.get("model"))
         body["service_tier"] = "default"
         body["provider"] = {
-            "order": ["anthropic"], "allow_fallbacks": False,
+            "order": ["anthropic"],
+            "allow_fallbacks": False,
             "max_price": {"prompt": guard.input_rate, "completion": guard.output_rate},
         }
         raw = json.dumps(body).encode()
         try:
             guard.validate(body, raw)
         except (ValueError, TypeError, AttributeError):
-            return JSONResponse({"error": "final wire body exceeds explicit bounds"}, status_code=402)
+            return JSONResponse(
+                {"error": "final wire body exceeds explicit bounds"}, status_code=402
+            )
 
     url = f"{UPSTREAM}/{path}"
     if request.url.query:
@@ -313,7 +380,9 @@ async def proxy(request: Request) -> Response:
     try:
         reservation = guard.acquire(run_id)
     except (ValueError, KeyError, OSError, TypeError):
-        return JSONResponse({"error": "budget ledger unavailable, exhausted, or unreconciled"}, status_code=402)
+        return JSONResponse(
+            {"error": "budget ledger unavailable, exhausted, or unreconciled"}, status_code=402
+        )
     started = time.time()
     upstream_req = client.build_request(request.method, url, headers=headers, content=raw)
     try:
@@ -321,14 +390,19 @@ async def proxy(request: Request) -> Response:
     except Exception:
         # The upstream may have billed before a disconnect: leave it unresolved.
         guard.settle(reservation, None)
-        return JSONResponse({"error": "upstream transport failed; reconcile reservation"}, status_code=502)
+        return JSONResponse(
+            {"error": "upstream transport failed; reconcile reservation"}, status_code=502
+        )
     ctype = resp.headers.get("content-type", "")
     row = {"ts": started, "run_id": run_id, "path": path, "status": resp.status_code, **meta}
     passthrough_headers = {
-        k: v for k, v in resp.headers.items() if k.lower() not in {"content-length", "content-encoding", "transfer-encoding", "connection"}
+        k: v
+        for k, v in resp.headers.items()
+        if k.lower()
+        not in {"content-length", "content-encoding", "transfer-encoding", "connection"}
     }
 
-    def write_row(usage: dict, extra: dict | None = None) -> None:
+    def write_row(usage: WireObject, extra: dict[str, object] | None = None) -> None:
         # OpenRouter returns the billed amount in usage.cost: it feeds the
         # hard budget stop and is reported beside our list-price computation.
         guard.settle(reservation, usage.get("cost"))
@@ -340,8 +414,9 @@ async def proxy(request: Request) -> Response:
             fh.write(json.dumps(row) + "\n")
 
     if "text/event-stream" in ctype:
+
         async def gen():
-            usage: dict = {}
+            usage: WireObject = {}
             buf = b""
             stop = None
             err = None
@@ -374,7 +449,8 @@ async def proxy(request: Request) -> Response:
 
     content = await resp.aread()
     await resp.aclose()
-    usage, extra = {}, {"stream": False}
+    usage: WireObject = {}
+    extra: dict[str, object] = {"stream": False}
     try:
         d = json.loads(content)
         if is_messages:
@@ -398,11 +474,17 @@ async def health(_: Request) -> Response:
 app = Starlette(
     routes=[
         Route("/health", health),
-        Route("/r/{run_id}/{path:path}", proxy, methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"]),
+        Route(
+            "/r/{run_id}/{path:path}",
+            proxy,
+            methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"],
+        ),
     ]
 )
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("BENCH_PORT", "8787")), log_level="warning")
+    uvicorn.run(
+        app, host="127.0.0.1", port=int(os.environ.get("BENCH_PORT", "8787")), log_level="warning"
+    )
