@@ -3472,7 +3472,25 @@ class Session:
         system_blocks_provider: Callable[..., list[str]] | Callable[..., Awaitable[list[str]]],
     ) -> None:
         self._model = model
+        # Tri-state conversation choice: None follows the global setting/agent
+        # pin; True/False are explicit overrides journaled for resume.
+        self.radient_saver_choice: bool | None = None
+        #: The last real balance read for this session's gate, cached so a
+        #: reporting surface never has to guess or block (see
+        #: ``saver/command.py::cached_availability``). ``None`` = never read.
+        self._saver_availability: Any = None
+        #: The last sign-in answer, stamped by the same read. Read by the
+        #: badge instead of the credential store, which shells out per call.
+        self._saver_signed_in: bool | None = None
+        #: The launching agent's Saver pin (team slot, then profile), stamped by
+        #: ``harness.subagent`` on a child it spawns and read by
+        #: ``saver.command.saver_choices``. ``None`` = no pin, the resolver's
+        #: "fall through" value, which is what every non-child session holds.
+        self._saver_agent_pin_value: bool | None = None
         self._stream_fn = stream_fn
+        saver_bridge = getattr(self._stream_fn, "bind_saver_session", None)
+        if callable(saver_bridge):
+            saver_bridge(self)
         notice_bridge = getattr(self._stream_fn, "set_notice_handler", None)
         if callable(notice_bridge):
             # The stream owns provider routing; the session owns ordered event
@@ -3596,6 +3614,13 @@ class Session:
         _process_boot_build()
         self._attention: dict[str, Any] = {}
         self._attention_outcome: AgentEndEvent | None = None
+        # Pipeline-local terminal latch. Reset only on admission, not internal
+        # _run_turn continuations sharing the same externally visible owner.
+        self._quiet_accepted_generation: int | None = None
+        # A clean candidate may outlive its settled Team Bridge reservation.
+        # Capture its body ownership before _settle_pending_body clears it;
+        # only the final host recheck may use this per-owner witness.
+        self._quiet_requested_by_body = False
         self._attention_run_token: str | None = None
         #: §14's per-run trigger record: which origins this run's inputs had
         #: ("user" / "wake_prompt" / "monitor_prompt" / "internal") and
@@ -5192,6 +5217,9 @@ class Session:
         # that model already restored, or the pin reads as stranded and is
         # dropped.
         self._restore_selected_model()
+        from local_operator.saver.command import restore_saver_choice
+
+        restore_saver_choice(self)
         # Subagents and todos: both live only in memory during a session, so a
         # resume rebuilds them from the transcript here — the job rows and comms
         # records that make the subagent panel and ``hub op='resume'`` work, and
@@ -10209,6 +10237,15 @@ class Session:
         second row. Empty means the receiver mints its own, which is what every
         pre-field sender gets.
         """
+        # Reserved display carriage must never leak through the advisory sender
+        # fallback, including an invalid receipt or a non-Bridge custom kind.
+        # Copy first: spool/live callers may still own the supplied dictionary.
+        sender = dict(sender)
+        display_carriage = {
+            key: sender.pop(key)
+            for key in ("bridge_receipt", "bridge_receipt_source")
+            if key in sender
+        }
         pid = sender.get("pid")
         conversation = sender.get("conversation_name", "")
         model_label = sender.get("model_label", "")
@@ -10301,6 +10338,17 @@ class Session:
             # byte-identical to what this function built before the carriage.
             peer_fields["id"] = entry_id
         details: dict[str, Any] = {"text": wrapped, "body": text, "sender": sender}
+        if chosen == TEAM_BRIDGE_MESSAGE_TYPE and display_carriage:
+            from local_operator.team_bridge.authority import authority_fence
+            from local_operator.team_bridge.display_receipt import (
+                validated_display_receipt,
+            )
+            from local_operator.team_bridge.store import Store as DisplayStore
+
+            runtime = getattr(self, "bridge_runtime", None)
+            if runtime is not None and authority_fence(runtime) is None:
+                owner = DisplayStore(runtime.config_dir).active_owner()
+                details.update(validated_display_receipt(display_carriage, owner=owner))
         if bridge_meta is not None:
             # The internal bridge LOCATOR (H5a/F3) rides the row so the
             # issuance hook beside the durable append can find THIS machine's
@@ -10842,7 +10890,11 @@ class Session:
         await self._emit(
             PeerMessageDeliveredEvent(
                 body=str(message.details.get("body", "")),
-                sender=sender,
+                sender={
+                    key: value
+                    for key, value in sender.items()
+                    if key not in ("bridge_receipt", "bridge_receipt_source")
+                },
                 message_id=message.id,
                 # The row's OWN provenance kind, so the live surface paints the
                 # same card the history replay will (§13.4); empty stays peer.
@@ -16425,33 +16477,21 @@ class Session:
         return ""
 
     def _run_ended_quiet(self, event: AgentEndEvent) -> bool:
-        """Whether this run ended with a ``no_reply`` call and no answer after it.
+        """One owning outcome for notification and publication consumers.
 
-        THE QUIET-TURN PREDICATE (docs/design/quiet-turns.md §4): true when the
-        run's LAST tool result carries the ``QUIET_TURN_KEY`` marker and no
-        assistant text exists after it — the marker must be the run's last
-        word. Read by exactly two consumers, ``_finalize_attention_notify``
-        (suppress the notify) and ``_publish_attention_outcome`` (publish
-        nothing), and it is a pure function of the end event's messages, so the
-        two cannot disagree.
-
-        A backwards scan, and the order is load-bearing: walking back from the
-        end, the first thing seen is either assistant TEXT (a real answer
-        produced after the call — not quiet, and it does not matter whether the
-        marker is still in the history) or the run's LAST tool result (its
-        marker decides). Earlier narration does NOT block the verdict — text
-        already streamed stays visible and persisted; the explicit quiet signal
-        governs the END — which is why this is not "no assistant text in the
-        run". A run with no tool result at all is not quiet.
+        Permission, finite peer-exchange certificates and persisted child
+        markers are not terminal acceptance. Earlier narration remains visible;
+        only the Session's clean committed end suppresses completion delivery.
+        Error/abort/cutoff always wins, including classification after the loop.
         """
-        for message in reversed(event.messages):
-            if getattr(message, "role", None) == "tool":
-                payload = getattr(message, "provider_payload", None)
-                details = payload.get("details") if isinstance(payload, Mapping) else None
-                return bool(details) and details.get(QUIET_TURN_KEY) is True
-            if getattr(message, "role", None) == "assistant" and getattr(message, "text", ""):
-                return False
-        return False
+        # A child marker proves only the finite exchange. Never reconstruct
+        # terminal acceptance from history, a renderer certificate, or repr.
+        return bool(
+            event.quiet_accepted
+            and not event.error
+            and not event.aborted
+            and not event.cut_off_cause
+        )
 
     def _quiet_end_callable(self) -> Callable[[], Awaitable[str | None]] | None:
         """The ``no_reply`` tool's quiet-end door, or ``None`` where silence is unavailable.
@@ -16964,7 +17004,7 @@ class Session:
         except Exception:  # noqa: BLE001 — unknown is "not active"
             return None
 
-    async def _quiet_end_refusal(self) -> str | None:
+    async def _quiet_end_refusal(self, *, held_body_request: bool = False) -> str | None:
         """The refusal sentence for a quiet end, or ``None`` when it is allowed.
 
         THE RULE IS A DENYLIST (review R4, docs/design/quiet-turns.md §4):
@@ -16998,7 +17038,11 @@ class Session:
         folds the queued row into its next request, so it keeps the refusal.
         """
         if "user" in self._run_triggers or (
-            self._has_awaiting_user() and not self._body_turn_yields_to_person()
+            self._has_awaiting_user()
+            and not (
+                self._body_turn_yields_to_person()
+                or (held_body_request and self._person_steer_queued())
+            )
         ):
             return "A person asked this turn; answer them in one line."
         # A ``notify:true`` delivery is answered by an inbox item as well as by
@@ -17008,6 +17052,10 @@ class Session:
         # still wins — a human waiting on words gets words.
         if self._run_notify_requested and not self._run_notified:
             return "This wake or monitor asked to tell the user; say what they need to know."
+        # Only the live runtime objective is an obligation. Agent personality,
+        # proactive defaults and profile prose do not make peer pings actionable.
+        if self.goal_status in {"", "active"} and self.goal.strip():
+            return "The active runtime goal still requires work; continue or settle that goal."
         return None
 
     async def _silent_end_is_a_failure(self) -> bool:
@@ -17882,6 +17930,8 @@ class Session:
             # publish) does the right thing without being taught a new field. A
             # deliberate stop is left exactly as it was.
             event = self._classify_cut_off(event)
+            if event.error or event.aborted or event.cut_off_cause:
+                event = event.model_copy(update={"quiet_accepted": False})
             # A held item banner decides whether this run's completion banner
             # is redundant, so it settles first (bounded; see the method).
             await self._settle_item_banners()
@@ -18463,6 +18513,8 @@ class Session:
         if callable(begin_message):
             begin_message()
         self._attention_outcome = None
+        self._quiet_accepted_generation = None
+        self._quiet_requested_by_body = False
         self._attention_run_token = str(uuid.uuid4())
         # This run has not yet said how it ended; a teardown that finds it so
         # must publish the outcome itself (see ``Session.dispose``).
@@ -18538,7 +18590,7 @@ class Session:
                 drain_steering_on_open=drain_steering_on_open,
                 opened_body=opened_body,
             )
-            await self._drain_continuation()
+            await self._settle_quiet_request()
         except ImportError as exc:
             # A lazy import against a HALF-REPLACED install is the one failure
             # whose cause the traceback cannot state: ``lop-update`` replaces
@@ -19057,6 +19109,59 @@ class Session:
             self._body_answered_turn = None
             self._body_turn_opening_tail = None
 
+    async def _settle_quiet_request(self) -> None:
+        """Commit silence only at the HOST boundary, after compaction/obligations.
+
+        The loop's candidate carries actual dispatch evidence but cannot know
+        what persistence/compaction will queue. Retain the logical generation
+        until every required continuation is done. No acceptance survives a
+        failed/aborted continuation, and no drain follows successful commitment.
+        """
+        while True:
+            await self._drain_continuation()
+            held = self._held_end
+            if (
+                held is None
+                or not held.quiet_requested
+                or held.error
+                or held.aborted
+                or held.cut_off_cause
+                or self._abort_requested
+                or self._disposed
+            ):
+                return
+            # _run_turn already settled the reservation in its finally. Its
+            # clean body candidate must retain the same held-person exception
+            # as the tool-time door (Q-R3-1), without admitting a person into
+            # that body's owner. Consumed-user triggers still win unconditionally.
+            refusal = (
+                await self._quiet_end_refusal(held_body_request=True)
+                if self._quiet_requested_by_body
+                else await self._quiet_end_refusal()
+            )
+            if self._abort_requested or self._disposed:
+                return
+            if refusal:
+                # Do not consume or copy queued input here: the ordinary
+                # steering-on-open path owns it exactly once. The correction is
+                # harness chrome, not a manufactured new person/notification.
+                from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+
+                self._held_end = None
+                correction = Message.user(
+                    "Harness quiet request was not accepted: " + refusal,
+                    provider_payload={RENDERED_INJECTION_KEY: True},
+                )
+                await self._run_turn([correction], drain_steering_on_open=True)
+                continue
+            # _quiet_end_refusal currently has no suspended await internally;
+            # after its awaited permission result, commit synchronously and
+            # return immediately to the pipeline's sole terminal flush. Any
+            # later input remains ordinary next-turn ingress, never drained here.
+            self._quiet_accepted_generation = self._logical_generation or held.generation
+            self._held_end = held.model_copy(update={"quiet_accepted": True})
+            return
+
     async def _flush_held_end(self) -> None:
         """Emit the boundary event the pipeline was holding, if any."""
         held = self._held_end
@@ -19095,6 +19200,11 @@ class Session:
         continuation runs ``_drain_continuation`` opens call this method
         directly and inherit the default — a continuation is not an opening.
         """
+        if self._quiet_accepted_generation is not None:
+            # Fail before touching initial/queued input or issuing inference.
+            # A real new turn must use pipeline admission, which resets the
+            # latch; an internal call cannot relabel itself as a new owner.
+            raise RuntimeError("Accepted quiet owner is terminal; new pipeline admission required.")
         runtime = getattr(self, "bridge_runtime", None)
         if runtime is not None:
             runtime.bridge_input_presented = False
@@ -19349,6 +19459,12 @@ class Session:
             # "the stream was iterated" the observable, so the pre-aborted path
             # leaves the flag False while every dispatched round-trip sets it.
             base_stream_fn = self._stream_fn
+            from local_operator.providers.turn_state import CodexTurnState
+
+            # This wrapper belongs to one attention turn, including tool rounds
+            # and provider retries. Helpers use the base stream directly and
+            # must not share the server's turn routing with unrelated work.
+            codex_turn_state = CodexTurnState()
 
             def marking_stream_fn(
                 request: ChatRequest, stream_signal: AbortSignal | None = None
@@ -19359,6 +19475,8 @@ class Session:
                     # frame. Refuse dispatch, rather than just stopping future
                     # transforms after these bytes have crossed the boundary.
                     raise RuntimeError("bridge body authority changed before dispatch")
+                request = request.model_copy()
+                request._codex_turn_state = codex_turn_state
                 inner = base_stream_fn(request, stream_signal)
                 # The context this request was built from, taken before any
                 # later boundary can extend it.
@@ -19641,6 +19759,9 @@ class Session:
                         # Held until _maybe_compact has had its say; the
                         # pipeline flushes it if no continuation is queued.
                         self._held_end = event
+                        self._quiet_requested_by_body = bool(
+                            event.quiet_requested and self._pending_body_turn is not None
+                        )
                     continue
                 # The worked-turn guard for the project guardrail: a turn that
                 # ran no tools cannot have moved a project's record. Both halves
@@ -20130,6 +20251,10 @@ class Session:
         sequential turns inside the same lock hold, capped at
         ``_MAX_CONTINUATIONS`` — the remainder is dropped with a warning
         notice so a thrashing recovery band cannot re-prompt forever."""
+        if self._quiet_accepted_generation is not None:
+            # Do not consume late work into an owner whose terminal boundary
+            # has committed. Ordinary ingress owns the next admission.
+            return
         continuations = 0
         while self._continuation_queue and not self._disposed:
             if self._abort_requested:
@@ -24109,6 +24234,14 @@ class Session:
         # the later agent-end reduction, every frontend briefly paints `after`
         # from compaction_end and then rebounds to `before` at turn settlement.
         self._held_context_tokens = outcome.tokens_after
+        if self._quiet_accepted_generation is not None or (
+            self._held_end is not None and self._held_end.quiet_requested
+        ):
+            # A settled explicit quiet request supersedes stale length-based
+            # resume bookkeeping, not genuine user/goal continuations. Gate the
+            # producer: leaving this synthetic resume queued would revive it on
+            # the next unrelated input or extend the already accepted owner.
+            return
 
         # (5) Recovery band: only schedule a continuation when the pass
         # actually created headroom (an anti-thrash guard).

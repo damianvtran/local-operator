@@ -5596,6 +5596,27 @@ def _canonical_remote(fields: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _same_content(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+    """Whether two skill manifests carry the same CONTENT (not the same bytes).
+
+    Comparison is by ``fingerprint_snapshot`` after ``_canonical_for_compare``, so
+    for a document it is deliberately TOLERANT of exactly what the Hub's canonical
+    form changes on write: every text field and file body goes through
+    ``segment.norm`` -- CRLF/CR to LF, trailing spaces stripped per line, runs of
+    blank lines collapsed to one, and leading/trailing newlines trimmed (which is
+    how the Hub's single dropped terminal LF per file compares equal). A bundle
+    manifest is NOT tolerant: it compares by its exact tree hash.
+
+    Why that tolerance is safe for its callers (the manual-confirm reconciler and
+    the push replay's read-before-replay): both use equality only to decide that
+    "the Hub already serves what we sent", and both ALSO require that the Hub's
+    revision moved past the one the commit was conditioned on. An exact comparison
+    would call every clean landing "different" because the Hub rewrites the
+    spelling it returns. The residual risk -- a different writer producing
+    content that differs from ours ONLY by blank-line runs -- is the same
+    normalization the Hub itself applies, so such content is not distinct to it.
+    An unfingerprintable side proves no equality.
+    """
+
     try:
         return prov.fingerprint_snapshot(
             "skill", _canonical_for_compare("skill", a)
@@ -5723,7 +5744,7 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
     from local_operator.hub_sync.budget import OperationBudget
     from local_operator.hub_sync.outbound import project_outbound, refuses
     from local_operator.hub_sync.outbox import Outbox
-    from local_operator.hub_sync.push import push_item
+    from local_operator.hub_sync.push import org_skill_operation_id, push_item
 
     def changed(message: str) -> LinkError:
         return LinkError("publication-preview-changed", message)
@@ -5805,9 +5826,11 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
         # hub's current content. Anything else (a later edit, a different reviewed
         # proposal, a hub that moved elsewhere) falls through to the normal path,
         # which pushes once or refuses -- never reports a push that did not happen.
-        reconciled, landed_revision = _reconcile_landed_commit(
-            ctx, check, f"push-skill-{check.local_id}", receipt
+        operation_id = f"push-skill-{check.local_id}"
+        reconcile_id = (
+            org_skill_operation_id(operation_id) if identity.visibility == "org" else operation_id
         )
+        reconciled, landed_revision = _reconcile_landed_commit(ctx, check, reconcile_id, receipt)
         if reconciled is not None:
             _delete_publication_preview(ctx.config_dir, preview_receipt, PUSH_PREVIEW_DIR)
             return _push_answer(identity, check, reconciled)
@@ -5881,6 +5904,7 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
                 ),
                 bundle_attested=not is_bundle or _capability_bundle(ctx.store().load(), identity),
                 bundle_upload=(bundle_upload_hook(ctx, identity, record) if is_bundle else None),
+                org_skill=identity.visibility == "org",
             )
         )
         record_push_outcome(ctx, check, outcome)

@@ -61,6 +61,8 @@ export type SubagentStatus =
 	| "queued";
 
 export interface TranscriptEntryDetails {
+	/** Older non-peer receipts carried this positive custom-type marker here. */
+	custom_kind?: string;
 	/** Owner-certified display context, never trusted without projection negotiation. */
 	peer_cycle?: unknown;
 	held?: boolean;

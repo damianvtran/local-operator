@@ -121,6 +121,12 @@ def test_scroll_logs_and_tabs_are_advertised_actions() -> None:
     # app's browser host serves every one of them.
     assert builtin.CMUX_UNSUPPORTED_BROWSER_ACTIONS == frozenset(
         {
+            # Keyboard input is owned-page CDP input on the desktop host;
+            # cmux cannot honor this narrow key contract.
+            "press",
+            # Trusted pointer movement is owned-page CDP input on the desktop host.
+            "hover",
+            "select",
             "scroll",
             "logs",
             "tabs",

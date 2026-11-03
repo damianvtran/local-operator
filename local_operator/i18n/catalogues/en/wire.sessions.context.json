@@ -1,0 +1,47 @@
+{
+  "wire.sessions.approval_stop_local": {
+    "role": "approval prompt line shown to the operator before the agent runs the sessions tool's stop op",
+    "tone": "plain, factual, no alarm",
+    "note": "{address} is the operator's own words for the target (a session name or an id, keep it verbatim). This op only ends an IDLE session; a session that is working is refused rather than interrupted, and no OS signal is ever sent by this tool. Say that, because the previous wording promised it would end a run."
+  },
+  "wire.sessions.approval_stop_peer": {
+    "role": "approval prompt line shown to the operator before a remote sessions stop the build always refuses",
+    "tone": "plain, factual",
+    "note": "{address} is the session name or id, {peer} is the device name; both are the operator's own words, keep them verbatim. The refusal is unconditional on this build, so the line must say nothing will be sent — the operator is being told, not asked to weigh a risk."
+  },
+  "wire.sessions.stop_pending": {
+    "role": "tool-result receipt painted in the tool card when a stop was accepted but the exit was still unconfirmed",
+    "tone": "calm warning, not an error",
+    "note": "{name} is the session name (keep verbatim, it is quoted in the English). {seconds} is a whole number of seconds the tool waited before giving up, rendered next to the unit letter s. The stop IS underway: the owner accepted it, so this is not a failure. 'No signal was sent' is a safety statement and must survive. 'the session list' means the sessions listing surface."
+  },
+  "wire.sessions.stop_refused_busy": {
+    "role": "tool-result receipt painted in the tool card when the stop was refused because the target has work in flight",
+    "tone": "calm, actionable",
+    "note": "{name} is the session name (keep verbatim). 'working' covers a live turn, a parked approval, a subagent and a background job — keep that parenthesis as the definition of working. Nothing was stopped and no signal was sent; both statements are safety facts and must survive. The next step is to retry once idle."
+  },
+  "wire.sessions.stop_refused_old_owner": {
+    "role": "tool-result receipt painted in the tool card when the target runs a build that cannot promise an idle-only stop",
+    "tone": "plain, definitive",
+    "note": "{name} is the session name (keep verbatim). The target is an older build without the idle-only capability. Retrying cannot help — that must read as final, not as a transient failure. The remedy is a person: the operator stops it from a surface that owns the escalation ladder."
+  },
+  "wire.sessions.stop_refused_unanswered": {
+    "role": "tool-result receipt painted in the tool card when the target's runtime did not answer the stop request",
+    "tone": "calm, tentative",
+    "note": "{name} is the session name (keep verbatim). Silence, not a refusal: the process may be wedged or already gone. No signal was sent. 'the session list' means the sessions listing surface; checking it first is the point, because a gone session makes the retry pointless."
+  },
+  "wire.sessions.stop_refused_wake": {
+    "role": "tool-result receipt painted in the tool card when the stop was refused because a scheduled wake is due shortly",
+    "tone": "calm, actionable",
+    "note": "{name} is the session name (keep verbatim). This owner is NOT busy — do not reuse the working wording. A scheduled wake is due inside the short hold window a runtime keeps to avoid paying a wake twice; waiting for it to fire is the next step. No signal was sent."
+  },
+  "wire.sessions.stop_remote_refused": {
+    "role": "tool-result receipt painted in the tool card for the sessions stop op with a remote peer",
+    "tone": "plain, definitive",
+    "note": "No placeholders. A stop belonging to another device cannot be performed by this build's tool at all, so nothing was sent. The remedy is the operator acting on that device; do not name a command or a force flag here."
+  },
+  "wire.sessions.stop_self_refused": {
+    "role": "tool-result receipt painted in the tool card when the agent tries to stop the session it is running in",
+    "tone": "plain, corrective",
+    "note": "No placeholders. The caller and the target are the same session, so the call would kill the very run that must report the outcome. 'another session' is the way out; do not mention signals or ladders."
+  }
+}

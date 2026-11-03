@@ -63,6 +63,14 @@ TAGS_COMMAND = "tags"
 #: namespace, the ``/library`` precedent, so the audited catalogue stays
 #: byte-identical. Exempted from the key walk; the exact count still pins it.
 NOTIFICATIONS_PAGE_COMMAND = "notifications"
+#: ``/radient`` and ``/saver`` are the LO2 Saver command family: their copy lives
+#: in the ``wire.radient_saver`` namespace, deliberately out of the audited
+#: ``wire.slash`` catalogue — admitting them here would void every translated
+#: locale's ledger hash for that namespace. Exempt from the key walk below; the
+#: exact command count still pins both rows.
+RADIENT_COMMAND = "radient"
+SAVER_COMMAND = "saver"
+
 #: The completion-receipt listing MOVED to ``/unread`` with its meaning
 #: unchanged, so it keeps the audited ``wire.slash.notifications`` key (a key's
 #: identity is its meaning, docs/I18N.md "Add a string" step 2) and every
@@ -146,7 +154,9 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
     # and `/view` are deliberately absent from wire.slash: their copy lives
     # in separate namespaces (tui.viewer is fully translated), preserving the
     # audited wire.slash hash. The census still catches an unaccounted row.
-    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 10 == 62
+    # +12: the ten commands above plus the LO2 pair (/radient, /saver), whose
+    # copy lives in wire.radient_saver rather than in this audited namespace.
+    assert len(SLASH_COMMANDS) == len(PREVIOUS_ENGLISH) + 12 == 64
     for command in SLASH_COMMANDS:
         if command.name in (
             MEMORY_COMMAND,
@@ -159,6 +169,8 @@ def test_every_registry_description_is_the_pre_slice_english() -> None:
             TAG_COMMAND,
             TAGS_COMMAND,
             NOTIFICATIONS_PAGE_COMMAND,
+            RADIENT_COMMAND,
+            SAVER_COMMAND,
         ):
             continue
         key = KEY_FOR_COMMAND.get(command.name, command.name)
@@ -192,6 +204,8 @@ def test_each_generated_key_resolves_to_the_previous_english_under_en() -> None:
             TAG_COMMAND,
             TAGS_COMMAND,
             NOTIFICATIONS_PAGE_COMMAND,
+            RADIENT_COMMAND,
+            SAVER_COMMAND,
         ):
             continue
         key = KEY_FOR_COMMAND.get(command.name, command.name)

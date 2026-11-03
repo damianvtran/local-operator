@@ -368,8 +368,16 @@ jobs:
 
       - name: Import the Developer ID identity into a throwaway keychain
         env:
-          P12_BASE64: ${{ secrets.MACOS_SIGNING_P12_BASE64 }}
-          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+          # THE RADIENT INC. ORGANIZATION IDENTITY. The key agent was first signed with
+          # an individual Developer ID identity held under MACOS_SIGNING_P12_*; the
+          # account was converted to an organization, so the TEAM ID IS UNCHANGED
+          # (SHA2U6KT7V) and only the leaf certificate moved. Those older secrets are
+          # deliberately left in the store as the rollback path and are not read here.
+          # The identity and the profile below must be rotated TOGETHER: the profile
+          # embeds the certificate it authorizes, and step 5b of the assembly script
+          # refuses a profile that does not name the signing leaf.
+          P12_BASE64: ${{ secrets.MACOS_DEVID_APP_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_DEVID_APP_P12_PASSWORD }}
         run: |
           set -euo pipefail
           # The operator's login keychain is never touched: no import into
@@ -477,7 +485,7 @@ jobs:
           # papered over: there is no stdin form for this flag.
           if ! security import "$RUNNER_TEMP/identity.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" \
             -T /usr/bin/codesign -T /usr/bin/security; then
-            echo "::error::security import of the identity p12 failed — the secret store's MACOS_SIGNING_P12_PASSWORD may not match the p12 in MACOS_SIGNING_P12_BASE64"
+            echo "::error::security import of the identity p12 failed — the secret store's MACOS_DEVID_APP_P12_PASSWORD may not match the p12 in MACOS_DEVID_APP_P12_BASE64"
             exit 1
           fi
           # The partition list is what lets `codesign` read the key WITHOUT a UI
@@ -509,10 +517,12 @@ jobs:
             echo "::error::no valid code-signing identity in the throwaway keychain"
             exit 1
           fi
-          # Addressed by HASH rather than by name, so this workflow does not carry
-          # a person's name and signs with whatever identity the p12 provides —
-          # whose app id the assembly script then checks against the profile and
-          # the entitlements.
+          # Addressed by HASH rather than by name, so the SIGN step uses whatever
+          # identity the p12 provides — whose app id the assembly script then checks
+          # against the profile and the entitlements. WHICH identity that is gets
+          # asserted after signing ("Assert the signing identity"), against the
+          # job's EXPECTED_AUTHORITY, so a p12 swapped for another identity fails the
+          # job instead of shipping under a name nobody chose.
           echo "IDENTITY_SHA=$IDENTITY_SHA" >> "$GITHUB_ENV"
 
       # THE SIGNATURE MUST CARRY A SECURE TIMESTAMP, AND THE SCRIPT READS IT BACK.
@@ -541,7 +551,12 @@ jobs:
       # makes the distinction moot: either way it cannot ship silently.
       - name: Assemble and sign lop-keyagent.app
         env:
-          PROFILE_BASE64: ${{ secrets.MACOS_SIGNING_PROFILE_BASE64 }}
+          # The key agent's own Developer ID profile ("Local Operator key agent
+          # (Developer ID, Radient Inc)", App ID SHA2U6KT7V.com.local-operator.lopkeyagent),
+          # issued against the organization certificate imported above. The older
+          # MACOS_SIGNING_PROFILE_BASE64 embeds the individual certificate, so it would
+          # now fail the assembly script's profile/leaf pairing check by design.
+          PROFILE_BASE64: ${{ secrets.MACOS_KEYAGENT_PROFILE_BASE64 }}
         run: |
           set -euo pipefail
           umask 077
@@ -561,6 +576,43 @@ jobs:
             --out "$RUNNER_TEMP/lop-keyagent.app" \
             --identity "$IDENTITY_SHA" \
             --profile "$RUNNER_TEMP/keyagent.provisionprofile"
+
+      # THE SIGNING IDENTITY IS ASSERTED, NOT INFERRED. Every check above proves the
+      # bundle is internally consistent — the profile names the leaf that signed it,
+      # the leaf is from team SHA2U6KT7V — and none of them says WHOSE leaf that is.
+      # Because the team id did not change when the individual account became the
+      # Radient Inc. organization, a p12 holding the OLD individual certificate (with a
+      # matching old profile) would pass every one of them and ship under the retired
+      # identity. Reading `Authority=` and `TeamIdentifier=` off the finished signature
+      # makes the identity a release-blocking fact. The full chain is pinned too: a
+      # leaf under some other Apple CA is not a Developer ID signature at all. A fork
+      # with its own identity edits these two values with its profile and entitlements.
+      - name: Assert the signing identity
+        env:
+          EXPECTED_AUTHORITY: "Developer ID Application: Radient Inc. (SHA2U6KT7V)"
+          EXPECTED_TEAM: SHA2U6KT7V
+        run: |
+          set -euo pipefail
+          codesign -dv --verbose=4 "$RUNNER_TEMP/lop-keyagent.app" > "$RUNNER_TEMP/codesign-dv.txt" 2>&1
+          # Printed whole on purpose: this is the line a reviewer of the run reads to
+          # see who signed the artefact, and none of it is secret.
+          grep -E '^(Identifier|Authority|TeamIdentifier|Timestamp)=' "$RUNNER_TEMP/codesign-dv.txt"
+          python3 - "$RUNNER_TEMP/codesign-dv.txt" <<'PY'
+          import os, sys
+          lines = open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines()
+          authorities = [line.split("=", 1)[1] for line in lines if line.startswith("Authority=")]
+          teams = [line.split("=", 1)[1] for line in lines if line.startswith("TeamIdentifier=")]
+          wanted = [
+              os.environ["EXPECTED_AUTHORITY"],
+              "Developer ID Certification Authority",
+              "Apple Root CA",
+          ]
+          if authorities != wanted:
+              raise SystemExit(f"the key agent is signed by {authorities}, not {wanted}")
+          if teams != [os.environ["EXPECTED_TEAM"]]:
+              raise SystemExit(f"the key agent reports TeamIdentifier {teams}, not {os.environ['EXPECTED_TEAM']}")
+          print(f"signing identity: {authorities[0]} (team {teams[0]})")
+          PY
 
       - name: The helper's own ownership selftest
         run: |

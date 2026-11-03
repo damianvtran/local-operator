@@ -135,6 +135,8 @@ from local_operator.harness.wake import (
     build_wake_schedule,
     format_duration,
 )
+from local_operator.i18n.keys import wire_sessions as _ws
+from local_operator.i18n.text import tr
 from local_operator.imaging import (
     IMAGE_INGEST_MAX_EDGE,
     IMAGE_JPEG_QUALITY,
@@ -1776,21 +1778,30 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
         from local_operator import browser_files as _files
 
         raw_path = str(args.get("path") or "")
+        # RS7: the size rides in the SAME row as the destination — the question
+        # the user answers is one fact, "write a 3840x2160 clip to HERE", not two
+        # they would have to join themselves. Parsed through `BrowserParams`, the
+        # SAME coercion the executor uses, so a string or integral float in the
+        # raw arguments names the size the clip will really have; a malformed
+        # value returns None and must not crash a description the renderer treats
+        # as unavailability (the executor refuses it properly afterwards).
+        pair = _record_size_from_args(args)
+        size = "" if pair is None else f" at {pair[0]}x{pair[1]}"
         if not raw_path.strip():
             root = str(_files.recordings_root())
             home = str(Path.home())
             shown = root.replace(home, "~", 1) if root.startswith(home) else root
-            return f"record \u2192 {_display_target(shown)}/"
+            return f"record \u2192 {_display_target(shown)}/{size}"
         if _SCHEME_SHAPED_RE.match(raw_path.strip()):
             # This tool resolves no scheme, so the call will be refused: naming
             # the invented relative path would describe a write that never
             # happens (the same reason the screenshot branch refuses to).
-            return f"record: {_display_target(raw_path.strip())}"
+            return f"record: {_display_target(raw_path.strip())}{size}"
         try:
             path, inside, resolvable = _resolve_workspace_path(raw_path, cwd or ".")
         except (OSError, ValueError):
-            return f"record: {_display_target(raw_path)}"
-        return _approval_description(path, inside, "record", resolvable)
+            return f"record: {_display_target(raw_path)}{size}"
+        return f"{_approval_description(path, inside, 'record', resolvable)}{size}"
     if action == "download":
         # The consent question is "may this page write files to your disk", and the
         # DIRECTORY is the answer — the file names are the page's to choose, and a
@@ -16750,13 +16761,18 @@ _SESSIONS_OP_DOCS: dict[str, _SessionsOpDoc] = {
         ),
     ),
     "stop": _SessionsOpDoc(
-        summary="end a running session gracefully (the graceful ladder only — this"
-        " tool never SIGKILLs). With `peer`, ends it where it lives; the force"
-        " escalation stays the CLI's (`lop network sessions --stop <id> --force`).",
+        summary="end an IDLE local session and release its lease. It never signals"
+        " and never cuts work: a session that is working (a turn, an approval, a"
+        " subagent or a job), or one due a wake inside the hold window, is refused"
+        " with the reason. With `peer`, always refused — an idle-only remote stop is"
+        " not on the wire yet.",
         example="sessions(op='stop', session='a1b2c3d4e5f6')",
         refusals=(
             "needs an address; a stored (not running) session is refused; the"
-            " calling session cannot stop itself.",
+            " calling session cannot stop itself; a working or wake-due session is"
+            " refused; a remote (`peer`) target is always refused; an owner too old"
+            " to promise an idle-only stop is refused; an owner that does not answer"
+            " is refused rather than signalled.",
         ),
     ),
     "peek": _SessionsOpDoc(
@@ -17290,8 +17306,14 @@ def _describe_sessions_approval(args: dict[str, Any], cwd: str) -> str:
         )
     if op == "stop":
         if peer:
-            return f"stop {address} on {peer}: ends its run on that device"
-        return f"stop {address}: ends its current run and releases the session lease"
+            # The remote form is refused unconditionally on this build, so the
+            # prompt says that instead of asking the operator to approve an act
+            # that will not happen (UX round 1 U3, design round 1 D5).
+            return _sessions_copy(_ws.approval_stop_peer(address=address, peer=peer))
+        # The idle-only precondition is the promise now: a working session is
+        # refused, so "ends its current run" over-promised (design round 1 D5,
+        # UX round 1 U5).
+        return _sessions_copy(_ws.approval_stop_local(address=address))
     if op == "resume":
         if peer:
             # The remote form: engage (warm) or a driven turn whose reply comes
@@ -18509,18 +18531,59 @@ async def _sessions_stop_mesh(
     return _text(tool_call_id, "sessions", text, details=details)
 
 
+#: The sessions tool's own receipts, resolved at render time so a live language
+#: change moves them without a restart (``tr``'s own contract). One namespace for
+#: the whole tool's operator-visible copy: ``wire.sessions``, the ``wire.host_speed``
+#: shape of an independently-owned namespace, so adding these receipts could not
+#: move any already-audited locale's bytes (agent review round 1 R2).
+_sessions_copy = tr("wire.sessions")
+
+
+def _sessions_receipt(outcome: Any, timeout_s: float) -> str:
+    """The operator-visible line for one ``StopOutcome``, keyed by OUTCOME.
+
+    ``method`` is the machine category every front end switches on and stays
+    English; this function is the only place the human sentence is chosen, so
+    the wording can be translated without any of that logic moving. The
+    `refused` branch splits on ``reason` — the owner's own account of why —
+    because the remedies differ: busy clears on its own, an older build never
+    will, and silence means the session may already be gone (UX round 1 U2,
+    design round 1 D2).
+
+    Every branch falls back to the ladder's own English line, which is the same
+    degrade path ``messages.render`` documents: a wheel without its catalogues
+    loses the translation, never the receipt.
+    """
+    from local_operator.session.runtime import control
+
+    if outcome.method == "pending":
+        return _sessions_copy(_ws.stop_pending(name=outcome.name, seconds=f"{timeout_s:g}"))
+    if outcome.method == "refused":
+        by_reason = {
+            control.REASON_BUSY: _ws.stop_refused_busy,
+            control.REASON_WAKE: _ws.stop_refused_wake,
+            control.REASON_OLD_OWNER: _ws.stop_refused_old_owner,
+            control.REASON_UNANSWERED: _ws.stop_refused_unanswered,
+        }
+        build = by_reason.get(outcome.reason)
+        if build is not None:
+            return _sessions_copy(build(name=outcome.name))
+    return outcome.line
+
+
 async def _sessions_stop(
     tool_call_id: str, params: SessionsParams, context: "ToolContext | None" = None
 ) -> ToolResult:
-    """End one running session via the existing kill-switch ladder.
+    """End an idle owner without inheriting the CLI's signal escalation.
 
-    ``force=False``: v1 is the graceful ladder only — no SIGKILL from the
-    tool (design §6.1). The outcome line is the ladder's own receipt, painted
-    verbatim, because the TUI, the CLI and this tool must report the same
-    event in the same words.
+    ``force=False`` alone still permits SIGKILL in the legacy ladder. The
+    explicit graceful-only mode also requires an owner-side idle latch, so
+    pending work is refused rather than discarded by a cooperative socket stop.
     """
     if str(params.peer or "").strip():
-        return await _sessions_stop_mesh(tool_call_id, params, context)
+        # The remote transport does not yet carry the idle-only capability.
+        # Refuse rather than forwarding a weaker stop under this tool's promise.
+        return _error(tool_call_id, "sessions", _sessions_copy(_ws.stop_remote_refused()))
     from local_operator.session.runtime import control
 
     target = await _sessions_target(params, context)
@@ -18542,19 +18605,14 @@ async def _sessions_stop(
         # session making the call. The ladder would socket-op (then signal)
         # our own runtime and the call would die mid-flight with no receipt —
         # refuse before the ladder (review round 1, R-2).
-        return _error(
-            tool_call_id,
-            "sessions",
-            "that target is this session; a session cannot stop itself — the ladder "
-            "would signal the very run making this call, which would die before it "
-            "could report anything back. Stop it from outside the session.",
-        )
+        return _error(tool_call_id, "sessions", _sessions_copy(_ws.stop_self_refused()))
 
     waited: list[str] = []
     outcome = await control.stop_session(
         target.record,
         timeout_s=control.DEFAULT_TIMEOUT_S,
         force=False,
+        graceful_only=True,
         _command="sessions tool",
         on_wait=waited.append,
     )
@@ -18567,7 +18625,22 @@ async def _sessions_stop(
         "wakes_dormant": outcome.wakes_dormant,
         "monitors_dormant": outcome.monitors_dormant,
     }
-    return _text(tool_call_id, "sessions", "\n".join([*waited, outcome.line]), details=details)
+    if outcome.reason:
+        # The same closed token the owner sent, carried out unchanged so a caller
+        # can switch on WHY without reading the sentence.
+        details["reason"] = outcome.reason
+    # THE RESULT LEADS. This card paints its first line as the collapsed
+    # headline (``tui/app.py``'s ``mark_failed(_first_line(text), text)``), and
+    # the wait lines describe an attempt while ``outcome.line`` describes what
+    # happened — the headline has to be the outcome, or the reader sees the
+    # interim step and has to expand to learn the result (design round 1 D4).
+    render = _error if outcome.method in ("refused", "busy", "draining") else _text
+    return render(
+        tool_call_id,
+        "sessions",
+        "\n".join([_sessions_receipt(outcome, control.DEFAULT_TIMEOUT_S), *waited]),
+        details=details,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -21219,6 +21292,12 @@ BROWSER_ACTIONS = (
     "screenshot",
     "click",
     "type",
+    "press",
+    # Trusted pointer movement (selector or viewport x/y) so :hover styles,
+    # tooltips and hover menus can be exercised. Desktop host only: see
+    # DESKTOP_ONLY_METHODS for why the extension cannot deliver it.
+    "hover",
+    "select",
     "close",
     # scroll and logs are served by BOTH non-cmux hosts (the paired Local
     # Operator browser extension and the desktop app's browser host); the cmux
@@ -21312,6 +21391,9 @@ BROWSER_ACTIONS = (
 #: drift apart.
 CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
     {
+        "press",
+        "hover",
+        "select",
         "scroll",
         "logs",
         "network_start",
@@ -21403,6 +21485,10 @@ _RECORD_ABSENT_REASONS = frozenset(
         "record_unsupported",
         "record_av1_unavailable",
         "record_failed",
+        # A refused SIZE starts nothing, so the approval must not survive
+        # it — and it is listed here rather than inferred from the reason's
+        # prefix, because this set is the whitelist that PROVES absence.
+        "record_size",
     }
 )
 
@@ -21527,6 +21613,37 @@ class BrowserParams(BaseModel):
     # … expected one of …`), which is the self-correction path that makes the
     # cut safe (slimming wave, audit item 2).
     action: str = Field(description="The browser action to run.")
+    key: str = Field(
+        default="",
+        description=(
+            "'press': one key chord like 'Control+K', 'e', 'Shift+Tab' "
+            "(desktop app only); text entry belongs in 'type'."
+        ),
+    )
+    options: list[str | int] = Field(
+        default_factory=list,
+        description=(
+            "'select': labels/values or zero-based indexes; [] clears native multiple selects."
+        ),
+    )
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def _strict_select_options(cls, value: Any) -> Any:
+        # bool is an int in Python, and pydantic otherwise coerces numbers. An
+        # index must be an integer the caller actually supplied, not a guess.
+        if not isinstance(value, list) or any(type(item) not in (str, int) for item in value):
+            raise ValueError(
+                "'options' must be a list of strings or integer indexes (not booleans)"
+            )
+        if len(value) > 100:
+            raise ValueError("'options' accepts at most 100 entries")
+        if any(isinstance(item, str) and not item.strip() for item in value):
+            raise ValueError("'options' strings must not be empty or blank; use an index instead")
+        if any(isinstance(item, int) and item < 0 for item in value):
+            raise ValueError("'options' indexes must be zero-based and non-negative")
+        return value
+
     url: str = Field(
         default="",
         description=(
@@ -21559,9 +21676,10 @@ class BrowserParams(BaseModel):
     selector: str = Field(
         default="",
         description="CSS selector, snapshot ref, or a11y locator for the "
-        'click/type target (role=checkbox[name="Active"], label=…, text=…) '
+        'click/type/hover/select target (role=checkbox[name="Active"], label=…, text=…) '
         "resolved against the a11y tree, so it survives framework ids. Also the "
-        "read/snapshot scope, query CSS, scroll element or download/upload control.",
+        "read/snapshot scope, query CSS, scroll element, 'press' focus target or "
+        "download/upload control.",
     )
     # The snapshot window. Three fields rather than a page token, because the
     # three questions an agent asks a cut tree are different: "give me the next
@@ -21611,11 +21729,11 @@ class BrowserParams(BaseModel):
     # extension/src/commands/scroll.ts).
     x: float | None = Field(
         default=None,
-        description="'scroll': x delta (right positive); for 'hit_test', the viewport x.",
+        description="'scroll': x delta (right positive); for 'hit_test'/'hover', the viewport x.",
     )
     y: float | None = Field(
         default=None,
-        description="'scroll': y delta (down positive); for 'hit_test', the viewport y.",
+        description="'scroll': y delta (down positive); for 'hit_test'/'hover', the viewport y.",
     )
     direction: str = Field(
         default="",
@@ -21668,6 +21786,14 @@ class BrowserParams(BaseModel):
         "(default 120, max 600); 'record_start' max recording seconds "
         "(default 120, max 600; the host auto-stops and saves at it).",
     )
+    width: int | None = Field(
+        default=None,
+        description="'record_start' viewport width in pixels (240-3840, even; needs height).",
+    )
+    height: int | None = Field(
+        default=None,
+        description="'record_start' viewport height in pixels (240-3840, even; needs width).",
+    )
 
     @field_validator("x", "y", mode="before")
     @classmethod
@@ -21683,6 +21809,30 @@ class BrowserParams(BaseModel):
         """
         if isinstance(value, bool):
             raise ValueError("must be a number, not a boolean")
+        return value
+
+    @field_validator("width", "height", mode="before")
+    @classmethod
+    def _refuse_uncoercible_size(cls, value: Any) -> Any:
+        """Refuse a size that is not a whole number of pixels, in every spelling.
+
+        Pydantic's lax mode coerces ``"3840"`` and ``3840.0`` to 3840, and the
+        executor records at the coerced value — so the APPROVAL row must read the
+        same coercion or it describes a different clip from the one that starts
+        (review M3: a string size rendered a row with no size at all). A bool is
+        refused for the same reason ``x``/``y`` refuse one: ``True`` would
+        otherwise become a 1-pixel side. The fractional cases raise the field's
+        own error rather than a silent truncation to 3840.
+        """
+        if isinstance(value, bool):
+            raise ValueError("must be a whole number of pixels, not a boolean")
+        if isinstance(value, (str, float)):
+            try:
+                number = float(value)
+            except ValueError:
+                return value  # let the int field name the malformed shape
+            if not number.is_integer():
+                raise ValueError("must be a whole number of pixels")
         return value
 
 
@@ -22416,7 +22566,7 @@ def _validate_locator_target(action: str, params: BrowserParams) -> str:
     kind = _locator_kind(params.selector)
     if not kind:
         return ""
-    if action in ("click", "type", "upload"):
+    if action in ("click", "type", "upload", "hover", "press", "select"):
         # `upload` resolves its input through the same ref/CSS/locator path in
         # both hosts, so `label="Choose file"` names a file input there too
         # (agent review round 1, R1-5).
@@ -22431,6 +22581,220 @@ def _validate_locator_target(action: str, params: BrowserParams) -> str:
         f"{kind}= locators resolve a click/type TARGET; '{action}' takes a CSS "
         "selector (or a snapshot ref)"
     )
+
+
+def _record_size_problem(params: BrowserParams) -> tuple[str, str, str]:
+    """``(param, why, sentence)`` for an unusable width/height, or three empty strings.
+
+    One function for the sentence and the two codes, because the harness answers
+    this fault on TWO paths: the pre-dispatch argument check (which can only
+    return text) and the recording lane's typed result (which carries
+    ``reason``/``param``/``why`` the way the host's own refusal does). Two
+    spellings of the same refusal is the defect the shared-reason tables exist
+    to prevent, so the wording lives here and both paths call it.
+
+    The bounds are the host's (mirrored in ``browser_files``): both sides
+    or neither, each even, 240..3840, area at most 3840x2160. Area rather than
+    side is what makes 2160x3840 portrait legal and 3840x3840 illegal — the
+    encoder's price tracks pixels, not the longer edge.
+    """
+    from local_operator import browser_files as _files
+
+    width, height = params.width, params.height
+    if width is None and height is None:
+        return "", "", ""
+    if width is None or height is None:
+        given = "width" if width is not None else "height"
+        missing = "height" if width is not None else "width"
+        return (
+            "size",
+            "incomplete",
+            f"'width' and 'height' must be given together (got {given} only): a clip is "
+            f"sized in both dimensions, and one side alone would record at the default "
+            f"1280x720. Add {missing} or drop {given} for a 1280x720 clip. Nothing was "
+            "started.",
+        )
+    for name, side in (("width", width), ("height", height)):
+        if not _files.RECORD_MIN_SIDE <= side <= _files.RECORD_MAX_SIDE:
+            return (
+                name,
+                "range",
+                f"'{name}' for 'record_start' must be {_files.RECORD_MIN_SIDE} to "
+                f"{_files.RECORD_MAX_SIDE} pixels (got {side}). Nothing was started.",
+            )
+        if side % 2:
+            return (
+                name,
+                "odd",
+                f"'{name}' must be even (got {side}): a sized recording takes even sides, so "
+                "the clip is coded at exactly the viewport you asked for. Nothing was "
+                "started.",
+            )
+    area = width * height
+    if area > _files.RECORD_MAX_PIXELS:
+        return (
+            "size",
+            "area",
+            f"{width}x{height} is {area:,} pixels, over the {_files.RECORD_MAX_PIXELS:,}-pixel "
+            "limit (3840x2160): a recording may be portrait or any aspect inside that "
+            "area, but not larger. Nothing was started.",
+        )
+    return "", "", ""
+
+
+#: Longest caller value quoted back in a size refusal, in characters. The value
+#: is the caller's own argument, but a model can emit a page of digits and the
+#: answer has to stay a sentence the transcript can hold.
+_SIZE_ECHO_CHARS = 24
+
+
+def _shown_size_value(value: Any) -> str:
+    """The caller's own value, quoted for a refusal and bounded."""
+    text = repr(value)
+    if len(text) <= _SIZE_ECHO_CHARS:
+        return text
+    return text[: _SIZE_ECHO_CHARS - 1] + "\u2026"
+
+
+def _record_size_type_problem(exc: ValidationError, action: Any) -> tuple[str, str, str]:
+    """``(param, why, sentence)`` for a size ``BrowserParams`` REJECTED, or empty strings.
+
+    A size is type-checked HERE because nothing else does it: the params schema
+    spells ``width``/``height`` as ``anyOf: [integer, null]``, which the loop's
+    pre-dispatch schema pass reads as "not mine to check", so ``True``, ``3840.5``
+    and ``'abc'`` used to reach the approval prompt and only then be refused —
+    untyped — by ``execute``. The operator approved a clip that could never start.
+
+    Answers only a fault that is confined to width/height on a ``record_start``:
+    any other malformed field belongs to the executor's validation error, which
+    names the field the caller actually got wrong.
+    """
+    from local_operator import browser_files as _files
+
+    locations = {str(err["loc"][0]) for err in exc.errors() if err["loc"]}
+    if not locations or not locations <= {"width", "height"}:
+        return "", "", ""
+    if any(not err["loc"] for err in exc.errors()):
+        # A fault with no field on it is not the size's: answering it here would
+        # hide the field the caller really got wrong.
+        return "", "", ""
+    if str(action or "").strip().lower() != "record_start":
+        return "", "", ""
+    # One side, or both. ``size`` is the param the cross-field bounds already
+    # use, so a consumer grouping these refusals learns no second spelling.
+    faulted = exc.errors()
+    if len(locations) == 1:
+        param = next(iter(locations))
+        side = f"'{param}'"
+        shown = _shown_size_value(faulted[0].get("input"))
+    else:
+        # Each side is quoted against its own name: one value against "width and
+        # height" would describe a fault the caller cannot find.
+        param = "size"
+        side = "'width' and 'height'"
+        shown = " and ".join(
+            f"{_shown_size_value(err.get('input'))} for '{err['loc'][0]}'" for err in faulted
+        )
+    return (
+        param,
+        "type",
+        f"{side} for 'record_start' must be a whole number of pixels, "
+        f"{_files.RECORD_MIN_SIDE} to {_files.RECORD_MAX_SIDE} and even (got {shown}): a clip "
+        "is sized in whole pixels so the viewport is exactly the one approved. "
+        "Nothing was started.",
+    )
+
+
+def _record_size_from_args(args: dict[str, Any]) -> tuple[int, int] | None:
+    """The ``(width, height)`` the executor will record at, from RAW arguments.
+
+    ``BrowserParams`` is the one coercion both halves use: the approval describer
+    sees the arguments before pydantic does, so a string ``"3840"`` (a spelling
+    models emit) used to render a row with no size while the executor recorded at
+    3840x2160 (review M3). A pair that cannot be parsed returns ``None`` — the
+    description must not raise for a call the executor is about to refuse.
+    """
+    try:
+        params = BrowserParams(**args)
+    except ValidationError:
+        return None
+    if params.width is None or params.height is None:
+        return None
+    return params.width, params.height
+
+
+def _record_size_result(tool_call_id: str, problem: tuple[str, str, str]) -> ToolResult | None:
+    """The TYPED refusal for a size the host could not honour, or ``None``.
+
+    ``reason`` is the same spelling the host uses (``record_size``), so one
+    consumer — a transcript reader, the absent-reason whitelist, a later stop —
+    reads both producers the same way.
+    """
+    param, why, sentence = problem
+    if not sentence:
+        return None
+    return _error(
+        tool_call_id,
+        "browser",
+        sentence,
+        details={"error_code": "record_size", "reason": "record_size", "param": param, "why": why},
+    )
+
+
+def _record_size_refusal(tool_call_id: str, params: BrowserParams) -> ToolResult | None:
+    """The typed refusal for the size an already-parsed call asks for, or ``None``."""
+    return _record_size_result(tool_call_id, _record_size_problem(params))
+
+
+def _browser_args_problem(
+    tool_call_id: str, action: str, params: BrowserParams
+) -> ToolResult | None:
+    """The argument refusal for one call, TYPED where a typed code exists.
+
+    Every check but the size has no host counterpart and stays the historical
+    plain message. The size does: the host reports the same ``record_size`` /
+    ``param`` / ``why`` triple over the wire, so the harness's own refusal must
+    carry it too — a transcript reader and the absent-reason whitelist treat both
+    producers alike. Called from BOTH dispatcher entries (`execute_browser`, the
+    real path, and `_execute_browser`, which tests and the dispatch bridge reach
+    directly), so neither spelling can reach the lane without the typed result
+    (review M1).
+    """
+    invalid = _validate_browser_args(action, params)
+    if invalid:
+        return _error(tool_call_id, "browser", invalid)
+    if action != "record_start":
+        # `record_stop` and every other action carrying width/height is already
+        # refused above by `_validate_record_fields`; a size on them is never a
+        # `record_size` fault.
+        return None
+    return _record_size_refusal(tool_call_id, params)
+
+
+def _browser_record_size_refusal(args: dict[str, Any], offered: frozenset[str]) -> str | None:
+    """The PLAN-TIME half of the size check, run by the loop before approval.
+
+    The approval prompt is painted before a tool body runs, so a refusal that
+    lived only in `execute` made the operator approve a clip that could never
+    start (review M2, the same defect class as Q-2 on #1546). This hook answers
+    with the same sentence the typed result carries, ending "Nothing was
+    started."; it is text only because ``AgentTool.refuse_args`` returns text,
+    so the codes (`record_size`/`param`/`why`) ride the execute-time result.
+
+    Never raises: the loop skips a hook that throws, and a skipped hook means the
+    prompt comes back. A shape ``BrowserParams`` rejects is refused here too when
+    the fault is confined to width/height; any other malformed field is left to
+    `execute_browser`'s validation error, which names it.
+    """
+    try:
+        params = BrowserParams(**args)
+    except ValidationError as exc:
+        _param, _why, sentence = _record_size_type_problem(exc, args.get("action"))
+        return sentence or None
+    if params.action.strip().lower() != "record_start":
+        return None
+    _param, _why, sentence = _record_size_problem(params)
+    return sentence or None
 
 
 def _validate_record_fields(action: str, params: BrowserParams) -> str:
@@ -22449,6 +22813,15 @@ def _validate_record_fields(action: str, params: BrowserParams) -> str:
     from local_operator import browser_files as _files
 
     if action not in _RECORD_ACTIONS:
+        if params.width is not None or params.height is not None:
+            # The same house rule `timeout_s`/`path` follow: a field an action
+            # ignores is refused rather than dropped, because a caller that sent
+            # a size to `screenshot` would otherwise believe it had chosen the
+            # capture's dimensions.
+            return (
+                "'width'/'height' are only valid for 'record_start' (got them on "
+                f"'{action}'): they resize the viewport of the tab being RECORDED"
+            )
         return ""
     if action == "record_stop":
         if params.path.strip():
@@ -22460,6 +22833,11 @@ def _validate_record_fields(action: str, params: BrowserParams) -> str:
             return (
                 "'timeout_s' is only valid for 'record_start' (got it on 'record_stop'): "
                 "it is the recording LENGTH, fixed before the capture begins"
+            )
+        if params.width is not None or params.height is not None:
+            return (
+                "'width'/'height' are only valid for 'record_start' (got them on "
+                "'record_stop'): the clip's size is fixed when the recording starts"
             )
         return ""
     raw_path = params.path.strip()
@@ -22499,6 +22877,290 @@ def _validate_record_fields(action: str, params: BrowserParams) -> str:
                 f"({_files.RECORD_MIN_DURATION_S:g} to {_files.RECORD_MAX_DURATION_S:g}; "
                 f"default {_files.RECORD_DEFAULT_DURATION_S:g}); got {params.timeout_s:g}"
             )
+    # The SIZE is checked by `_browser_args_problem`, the typed entry both
+    # dispatchers call: `record_size` carries the host's own codes, and this
+    # function can only return text, so leaving the check here shadowed the
+    # typed refusal on the real path (review M1).
+    return ""
+
+
+# ---- press chords ---------------------------------------------------------
+#
+# ``press`` sends ONE keyboard chord to the owned page: optional modifiers joined
+# by '+', then exactly one base key. The grammar is closed on purpose — the
+# desktop host maps each base key to a CDP key definition from a fixed table, and
+# the harness canonicalises BEFORE sending so the host never has to guess at
+# aliases or case. It is not a text-entry path: credentials and prose belong in
+# ``type`` (``secret_ref`` keeps a secret out of the transcript), and a chord is
+# the only thing ``press`` will ever accept, so there is no repeat count and no
+# key sequence to smuggle a typed string through.
+#
+# The original allowlist (Tab, Shift+Tab, Enter, Escape, the four arrows) is a
+# strict subset of this grammar and canonicalises to itself, so existing callers
+# and the wire frames an older desktop host understands are unchanged.
+_BROWSER_PRESS_LEGACY_KEYS = (
+    "Tab",
+    "Shift+Tab",
+    "Enter",
+    "Escape",
+    "ArrowUp",
+    "ArrowDown",
+    "ArrowLeft",
+    "ArrowRight",
+)
+
+#: Canonical modifier spellings, in the order a canonical chord lists them.
+#: This is the desktop host's own ``MODIFIER_ORDER`` (it echoes the chord in this
+#: order), so the key the harness sends, the key the host reports and the key the
+#: model reads back are one string, not two spellings of the same chord.
+_BROWSER_PRESS_MODIFIERS = ("Control", "Alt", "Shift", "Meta")
+
+#: Accepted spelling (lower-cased) -> canonical modifier. The aliases are the
+#: names agents and other tools habitually use; the host only ever sees the
+#: canonical four.
+_BROWSER_PRESS_MODIFIER_ALIASES = {
+    "shift": "Shift",
+    "control": "Control",
+    "ctrl": "Control",
+    "alt": "Alt",
+    "option": "Alt",
+    "meta": "Meta",
+    "cmd": "Meta",
+    "command": "Meta",
+}
+
+#: The closed table of named base keys (lower-cased -> canonical).
+_BROWSER_PRESS_NAMED_KEYS = {
+    name.lower(): name
+    for name in (
+        "Enter",
+        "Escape",
+        "Tab",
+        "Backspace",
+        "Delete",
+        "Space",
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+        "Home",
+        "End",
+        "PageUp",
+        "PageDown",
+        *(f"F{number}" for number in range(1, 13)),
+    )
+}
+
+_BROWSER_PRESS_GRAMMAR = (
+    "'press' takes ONE chord: optional modifiers (Shift, Control, Alt, Meta; also Ctrl, "
+    "Cmd, Command, Option) joined by '+', then one base key — a single printable ASCII "
+    "character, or Enter, Escape, Tab, Backspace, Delete, Space, ArrowUp/Down/Left/Right, "
+    "Home, End, PageUp, PageDown, F1-F12 (e.g. 'Control+K', 'Shift+Tab', 'e'). Entering "
+    "text is not a key press: use 'type' (with 'secret_ref' for credentials)."
+)
+
+
+#: How much of a refused key the harness echoes back. The host applies the same
+#: bound (its ``describeRefusedKey``) so a credential-sized string pasted into
+#: ``key`` is not copied whole into an error, its ``details`` and the logs.
+_PRESS_ECHO_MAX = 24
+
+
+def _press_echo(raw: str) -> str:
+    """``repr`` of at most ``_PRESS_ECHO_MAX`` characters of a refused key."""
+    if len(raw) <= _PRESS_ECHO_MAX:
+        return repr(raw)
+    return repr(raw[:_PRESS_ECHO_MAX]) + "..."
+
+
+def _canonical_press_chord(raw: str) -> tuple[str, str]:
+    """``(canonical chord, "")`` or ``("", reason)`` for a requested ``press`` key.
+
+    Whitespace is never trimmed: ``"Shift+Tab "`` was refused by the original
+    allowlist and a stray space is more likely a pasted string than a chord.
+    """
+    if not raw:
+        return "", "the key is empty"
+    # A literal '+' as the base key ("Control++", or "+" alone) is the one place
+    # the separator is also content, so peel it off before splitting.
+    if raw.startswith("+") and raw != "+":
+        return "", "a chord cannot start with '+'; name the modifier first (e.g. 'Shift++')"
+    if raw == "+":
+        modifiers_part, base = "", "+"
+    elif raw.endswith("++"):
+        modifiers_part, base = raw[:-2], "+"
+        if not modifiers_part:
+            return "", "'++' is ambiguous; name the modifier first (e.g. 'Shift++')"
+    else:
+        modifiers_part, _, base = raw.rpartition("+")
+    seen: list[str] = []
+    for token in modifiers_part.split("+") if modifiers_part else []:
+        canonical = _BROWSER_PRESS_MODIFIER_ALIASES.get(token.lower())
+        if canonical is None:
+            # Multi-character junk before the last '+' is the signature of typed
+            # text ("hello+world"); name it as such rather than as a bad modifier.
+            return "", f"{_press_echo(token)} is not a modifier"
+        if canonical in seen:
+            return "", f"duplicate modifier {canonical}"
+        seen.append(canonical)
+    if not base:
+        return "", "no base key after the modifiers"
+    named = _BROWSER_PRESS_NAMED_KEYS.get(base.lower())
+    if named is not None:
+        base = named
+    elif len(base) != 1:
+        return "", f"{_press_echo(base)} is not a key name (this looks like text entry)"
+    elif not base.isascii():
+        # The host's printable table is ASCII only; refusing here keeps the
+        # refusal local and accurate instead of a round trip to the same answer.
+        return "", f"{_press_echo(base)} is not printable ASCII (only ASCII can be pressed)"
+    elif not base.isprintable() or base.isspace():
+        return "", "a whitespace or control character cannot be pressed by value (use 'Space')"
+    ordered = [name for name in _BROWSER_PRESS_MODIFIERS if name in seen]
+    return "+".join([*ordered, base]), ""
+
+
+def _press_is_legacy_shape(chord: str, selector: str) -> bool:
+    """Whether an older desktop host (the original 8-key allowlist) can serve it."""
+    return not selector.strip() and chord in _BROWSER_PRESS_LEGACY_KEYS
+
+
+def _browser_press_refusal(
+    tool_call_id: str, action: str, params: BrowserParams
+) -> ToolResult | None:
+    if action != "press":
+        return None
+    chord, reason = _canonical_press_chord(params.key)
+    if chord:
+        return None
+    return _error(
+        tool_call_id,
+        "browser",
+        f"unsupported_key: {_press_echo(params.key)} ({reason}). {_BROWSER_PRESS_GRAMMAR}",
+        details={
+            "error_code": "unsupported_key",
+            "key": params.key[:_PRESS_ECHO_MAX]
+            + ("..." if len(params.key) > _PRESS_ECHO_MAX else ""),
+        },
+    )
+
+
+def _select_available_options(raw: Any) -> list[dict[str, Any]]:
+    """Bound a host's suggestions too: page labels are untrusted/model-visible.
+
+    Cap both count and strings, even if a newer peer forgets its own caps. This
+    is a correction list, not a dump of a potentially enormous select menu.
+    """
+    if not isinstance(raw, list):
+        return []
+    return [
+        {
+            "index": item.get("index"),
+            "label": str(item.get("label", ""))[:120],
+            "value": str(item.get("value", ""))[:120],
+        }
+        for item in raw[:50]
+        if isinstance(item, dict)
+    ]
+
+
+def _hover_failure_hint(message: str) -> str:
+    """Agent guidance for the two hover failures the host can only describe tersely.
+
+    Appended by the harness, not the host, so the wording can improve without a
+    desktop release. Both cases were measured (QA round 1 on PR #3326):
+
+    * ``Node does not have a layout object`` — the target exists but is not
+      rendered (``display:none``), the usual Slack-style row action that appears
+      only while its row is hovered. ``click`` fails identically; the way through
+      is to hover whatever REVEALS it, then retry.
+    * a target inside an iframe — a selector cannot cross the frame boundary,
+      and ``hit_test`` at a point inside a frame reports only the ``iframe``/
+      ``body``/``html`` chain, so it cannot find the inner element. ``hover`` with
+      x/y does reach into same- and cross-origin frames, so the advice is to
+      derive the point from the iframe's own rect plus the inner offset (a
+      ``screenshot`` shows it).
+    """
+    lowered = message.lower()
+    if "layout object" in lowered:
+        return (
+            "\nThe element has no layout box (it is hidden until something reveals it). "
+            "Hover the row or parent that reveals it first (by selector, or by x/y), "
+            "then hover this element."
+        )
+    if "frame" in lowered:
+        return (
+            "\nA selector cannot cross an iframe boundary, and 'hit_test' inside a frame "
+            "only reports the frame element itself. Hover with x and y instead: take the "
+            "iframe's position from its rect ('query' or 'hit_test' on the <iframe>) and "
+            "the inner element's offset from a 'screenshot'."
+        )
+    return ""
+
+
+def _press_chord_gate(
+    tool_call_id: str, chord: str, selector: str, client: Any
+) -> ToolResult | None:
+    """Refuse a widened ``press`` the attached host has not said it understands.
+
+    Hosts that advertise ``press`` today implement only the original eight keys
+    and ignore ``selector``: sending them ``Control+K`` would be answered with
+    ``unsupported_key`` (a lie about the key) and a selector would be dropped
+    without focusing anything (a silent mis-send). ``PRESS_CHORD_CAPABILITY`` is
+    the host's statement that it parses the full grammar, so the harness checks it
+    from the discovery record, before any socket call, and degrades to a typed
+    ``capability_unsupported`` that tells the caller what still works.
+
+    A host that does not serve ``press`` at all is NOT handled here: the ordinary
+    method gate in ``_bridge_call`` refuses it with the established copy (and the
+    extension with its desktop-only copy), which is the better sentence for it.
+    """
+    from local_operator.browser_bridge.backend import HostCapabilities
+    from local_operator.browser_bridge.protocol import PRESS_CHORD_CAPABILITY
+
+    if _press_is_legacy_shape(chord, selector):
+        return None
+    capabilities = client.capabilities() if client is not None else HostCapabilities()
+    if not capabilities.serves("press") or capabilities.serves(PRESS_CHORD_CAPABILITY):
+        return None
+    why = "a 'selector' to focus first" if selector.strip() else f"the chord {chord!r}"
+    problem = _error(
+        tool_call_id,
+        "browser",
+        "the attached desktop app's 'press' only understands "
+        f"{', '.join(_BROWSER_PRESS_LEGACY_KEYS)} with no selector, so {why} was not "
+        "sent. Please update the desktop app, then retry; those keys still work now, "
+        "and every other browser action is unaffected.",
+    )
+    problem.details = {
+        "error_code": "capability_unsupported",
+        "method": "press",
+        "capability": PRESS_CHORD_CAPABILITY,
+        "key": chord,
+    }
+    return problem
+
+
+def _validate_hover_args(params: BrowserParams) -> str:
+    """``hover`` names its target by selector XOR a viewport point.
+
+    Mutually exclusive rather than precedence-ordered (unlike ``scroll``): hover
+    moves a real pointer, and silently preferring one target over a second one
+    the caller also supplied would put the pointer somewhere they did not expect.
+    """
+    has_selector = bool(params.selector.strip())
+    has_x, has_y = params.x is not None, params.y is not None
+    if has_selector and (has_x or has_y):
+        return "'hover' takes a selector OR x and y, not both"
+    if has_selector:
+        return _validate_selector(params.selector, "hover")
+    if has_x != has_y:
+        return "'hover' needs both x and y (viewport pixels), or a selector"
+    if not has_x:
+        return "'hover' needs a selector (use 'snapshot' to find one) or x and y (viewport pixels)"
+    for axis, value in (("x", params.x), ("y", params.y)):
+        if value is None or not math.isfinite(value) or value < 0:
+            return f"'hover' {axis} must be a finite, non-negative viewport pixel (got {value!r})"
     return ""
 
 
@@ -22563,6 +23225,18 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
             # read-back comparison in the lane still catches a failed fill.
             return ""
         return _validate_typed_text(params.text)
+    if action == "select":
+        if "options" not in params.model_fields_set:
+            return (
+                "'select' needs options: labels/values (strings) or zero-based indexes (integers)"
+            )
+        return _validate_selector(params.selector, "select")
+    if action == "hover":
+        return _validate_hover_args(params)
+    if action == "press":
+        # The selector only says where focus goes first, so it is optional; a
+        # flag-shaped one is refused for the same reason every selector is.
+        return _validate_selector(params.selector, "press") if params.selector.strip() else ""
     if action == "snapshot":
         # Optional here — an absent selector snapshots the whole document —
         # which is why this is not the same shape as click/type.
@@ -24213,6 +24887,26 @@ async def _bridge_call(
                     "(or the browser extension), or pass a snapshot ref ('snapshot' shows "
                     "them) / a CSS selector instead."
                 )
+        if action == "select" and exc.data.get("reason") == "option_not_found":
+            available = _select_available_options(exc.data.get("available"))
+            message += "\nAvailable options (zero-based indexes):" + (
+                "\n"
+                + "\n".join(
+                    f"[{item['index']}] {item['label']!r} (value={item['value']!r})"
+                    for item in available
+                )
+                if available
+                else " (none reported)"
+            )
+        if action == "hover":
+            # Older host copy suggests hit_test for the inner target, but that
+            # tool only sees the iframe itself. Do not leave conflicting advice
+            # ahead of the corrective hint.
+            message = message.replace(
+                "(take them from hit_test)",
+                "(take them from a screenshot or the iframe's rect plus the inner offset)",
+            )
+            message += _hover_failure_hint(message)
         problem = _error(tool_call_id, "browser", message)
         # Carry the TYPED wire code so callers can branch on it (dead-pin
         # recovery, handle-drop) instead of substring-matching the human
@@ -24223,6 +24917,8 @@ async def _bridge_call(
         # it from the code alone (`busy` covers `record_active` and
         # `record_limit`), and substring-matching the rendered sentence is the
         # failure mode the typed code exists to remove (review round 2, F1).
+        if action == "select" and exc.data.get("reason") == "option_not_found":
+            problem.details["available"] = _select_available_options(exc.data.get("available"))
         reason = exc.data.get("reason")
         if isinstance(reason, str) and reason:
             problem.details["reason"] = reason
@@ -25702,6 +26398,22 @@ def _recording_landed(
     )
 
 
+def _record_echo_side(result: dict[str, Any], key: str) -> int | None:
+    """One side of the size a host ECHOED in its start result, or ``None``.
+
+    Strict on purpose: ``True`` is not 1 px and a float is not a viewport, and
+    a comparison that coerced them would certify a clip nobody asked for. The
+    echo is the harness's only evidence that the recording is the size the
+    approval named, so "unreadable" must never read as "matches".
+    """
+    value = result.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if float(value) != int(value):
+        return None
+    return int(value)
+
+
 async def _browser_record(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -25721,12 +26433,27 @@ async def _browser_record(
     """
     from local_operator import browser_files as files
 
+    # No size check here: both dispatcher entries (`execute_browser`, and the
+    # direct `_execute_browser`) refuse a bad size before this lane runs, so a
+    # second spelling of the same refusal would be unreachable (review M1).
+    # The capability gate and the echo check below stay POST-approval because
+    # they need the selected client, which does not exist at plan time.
     problem = _capability_problem(tool_call_id, action, client, surface=state.surface_id)
     if problem is not None:
         # The capability gate the other stateful actions use, before any path is
         # resolved or any wire call is made: a pre-feature app must produce the
         # typed refusal, not a dial that times out on an unknown method.
         return problem
+    sized = params.width is not None and params.height is not None
+    if sized:
+        # `record_size` is a CAPABILITY, not a wire method: a host that
+        # does not advertise it would record at its default size and report
+        # success, so the harness asks its own record first and refuses with
+        # copy that names the working fallback instead of a version story about
+        # an action that does exist.
+        problem = _capability_problem(tool_call_id, "record_size", client, surface=state.surface_id)
+        if problem is not None:
+            return problem
     wire: dict[str, Any] = {
         "tab": state.surface_id,
         # Identity and display label are trusted host metadata, exactly as every
@@ -25737,10 +26464,11 @@ async def _browser_record(
         target, refusal = _recording_destination(tool_call_id, params.path, context)
         if refusal is not None or target is None:
             return refusal or _error(tool_call_id, "browser", "no recording destination")
-        # Fixed capture parameters (D14): up to 1280x720 (a ceiling; the clip is
-        # scaled to fit) at 10 fps with audio off, the same viewport the agent's
-        # hidden tab already paints. Not tunable in v1
-        # and not sent as fields the host might read as requests to change.
+        # Capture parameters: 10 fps with audio off, the
+        # same viewport the agent's hidden tab already paints, UNLESS the caller
+        # named a size — then the host resizes the tab's viewport to it and
+        # records exactly there. Absent, the fields are not sent at all, so an
+        # unsized start is byte-identical to the pre-feature wire.
         # WHOLE seconds: the validator refuses a fraction, and the host's
         # `durationOf` would too (R1-2). `int()` here is a lossless narrow of a
         # value already proven integral, not a round.
@@ -25753,6 +26481,8 @@ async def _browser_record(
         duration = max(files.RECORD_MIN_DURATION_S, min(duration, files.RECORD_MAX_DURATION_S))
         cap = _recording_cap_bytes(target, context)
         wire.update(path=str(target), max_duration_s=duration, max_bytes=cap)
+        if sized:
+            wire.update(width=params.width, height=params.height)
         result, problem = await _bridge_call(
             tool_call_id, action, wire, surface=state.surface_id, client=client
         )
@@ -25782,11 +26512,52 @@ async def _browser_record(
         # which is correct: the host replaces a different owner's recording, and
         # a same-owner second start is refused before this line.
         _APPROVED_RECORDINGS[state.surface_id] = str(target)
+        if sized:
+            # The capability file can be one app-swap stale, and an old host
+            # answers a SIZED start by silently recording at its default size
+            # and reporting success. The echo is the only evidence the clip is
+            # the size the user approved, so a missing or different pair is a
+            # FAILED start — but the encoder is running, so the approval is kept
+            # and the caller is told how to save what is actually recording.
+            echoed = (_record_echo_side(result, "width"), _record_echo_side(result, "height"))
+            if echoed != (params.width, params.height):
+                running = f"{echoed[0]}x{echoed[1]}" if None not in echoed else "an unreported size"
+                return _error(
+                    tool_call_id,
+                    "browser",
+                    f"the clip is NOT at the {params.width}x{params.height} asked for: the "
+                    f"desktop app started it at {running}. A build without sized recording "
+                    "records at its default 1280x720 and still reports success. The "
+                    f"approved destination {target} is kept, so 'record_stop' saves this "
+                    "clip; stop it and update Local Operator before retrying for a sized one.",
+                    details={
+                        "target": str(target),
+                        # A size DISTINCT from `record_size`: that reason is in
+                        # `_RECORD_ABSENT_REASONS` (a refused start proves no
+                        # encoder is running), while this one proves the OPPOSITE
+                        # — a clip IS recording, at the wrong size, and must
+                        # remain stoppable (review m3).
+                        "error_code": "record_size_mismatch",
+                        "reason": "record_size_mismatch",
+                        "param": "size",
+                        "why": "not_applied",
+                        "requested_width": params.width,
+                        "requested_height": params.height,
+                    },
+                )
+        at_size = f" at {params.width}x{params.height}" if sized else ""
+        details: dict[str, Any] = {
+            "target": str(target),
+            "max_duration_s": duration,
+            "max_bytes": cap,
+        }
+        if sized:
+            details.update(width=params.width, height=params.height)
         return _text(
             tool_call_id,
             "browser",
             f"Recording started: {target} (max {duration:g} s, up to "
-            f"{cap // (1024 * 1024)} MiB). Stop it with 'record_stop' to save the file. "
+            f"{cap // (1024 * 1024)} MiB{at_size}). Stop it with 'record_stop' to save the file. "
             "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; it is not "
             "expected to play in Chrome's <video> (not tested).",
             # `target`, not `path`: a started recording has not written anything
@@ -25794,7 +26565,7 @@ async def _browser_record(
             # produced file (session_files.scan records it as an artifact). A
             # phantom row pointing at a file that does not exist until the stop
             # would be worse than no row at all.
-            details={"target": str(target), "max_duration_s": duration, "max_bytes": cap},
+            details=details,
         )
     result, problem = await _bridge_call(
         tool_call_id, action, wire, surface=state.surface_id, client=client
@@ -26635,6 +27406,9 @@ async def _bridge_action(
     — so this function is shared rather than forked, and only the handful of
     sentences that name a PROCESS use the host.
     """
+    refusal = _browser_press_refusal(tool_call_id, action, params)
+    if refusal is not None:
+        return refusal
     host = _host_of_client(client)
     surface = state.surface_id
     if action in _NETWORK_ACTIONS:
@@ -26678,6 +27452,27 @@ async def _bridge_action(
         wire["selector"] = params.selector.strip()
         if action == "type":
             wire["text"] = params.text
+    elif action == "press":
+        # Canonical spelling, never the caller's: the host's table knows only
+        # these names, and an alias that reached it would be refused there.
+        chord, _reason = _canonical_press_chord(params.key)
+        gated = _press_chord_gate(tool_call_id, chord, params.selector, client)
+        if gated is not None:
+            return gated
+        wire["key"] = chord
+        if params.selector.strip():
+            wire["selector"] = params.selector.strip()
+    elif action == "select":
+        wire["selector"] = params.selector.strip()
+        wire["options"] = list(params.options)
+    elif action == "hover":
+        # selector XOR x/y is guaranteed by _validate_browser_args; send only the
+        # half the caller chose so the host never sees a second target.
+        if params.selector.strip():
+            wire["selector"] = params.selector.strip()
+        else:
+            wire["x"] = params.x
+            wire["y"] = params.y
     elif action == "scroll":
         # Only send the params the caller actually set, so the extension's
         # precedence (selector > x/y > direction > default) sees an unset param
@@ -26825,6 +27620,78 @@ async def _bridge_action(
         return _bridge_logs_result(tool_call_id, params, result, details, title, href)
     if action in ("styles", "hit_test", "ancestors", "query"):
         return _bridge_geometry_result(tool_call_id, action, params, result, details)
+    if action == "press":
+        chord = _canonical_press_chord(params.key)[0]
+        target = f" after focusing {params.selector.strip()}" if params.selector.strip() else ""
+        return _text(
+            tool_call_id,
+            "browser",
+            f"Pressed {chord!r} in the owned page{target}. Page: {_page_line(title, href)}",
+            details={**details, "key": chord},
+        )
+    if action == "select":
+        selected = _geometry_entry_list(result, "selected")
+        # Do not infer successful selection from a returned label alone: ARIA
+        # controls may ignore a click, and hosts explicitly flag that case.
+        verified = result.get("verified")
+        labels = ", ".join(repr(str(item.get("label", ""))) for item in selected)
+        verdict = " (selection unverified — check the page)" if verified is False else ""
+        details.update(selected=selected, kind=result.get("kind"))
+        if isinstance(verified, bool):
+            details["verified"] = verified
+        # [] is a legitimate clear request for a native multiple select. Only
+        # the host knows multiplicity; the harness must pass it through, while
+        # retaining honest unverified feedback if the live read is inconclusive.
+        operation = (
+            "Cleared selection"
+            if not params.options and not selected
+            else f"Selected {labels or '(none)'}"
+        )
+        return _text(
+            tool_call_id,
+            "browser",
+            f"{operation} in {params.selector.strip()}{verdict}. "
+            f"Page: {_page_line(title, href)}",
+            details=details,
+        )
+    if action == "hover":
+        raw_hit = result.get("hit")
+        hit: dict[str, Any] = raw_hit if isinstance(raw_hit, dict) else {}
+        # The host's `hit` is the whole hit_test answer, `{count, elements: [...]}`
+        # topmost first (verbatim capture in local-operator-ui#1602), NOT a single
+        # descriptor: the element under the pointer is `elements[0]`. A flat
+        # descriptor is still tolerated so an older/other host reads sensibly.
+        elements = _geometry_entry_list(hit, "elements")
+        top = elements[0] if elements else (hit if hit.get("tag") else {})
+        hx, hy = result.get("x"), result.get("y")
+        has_point = isinstance(hx, (int, float)) and isinstance(hy, (int, float))
+        # An x/y call already states the point; only a selector call needs it echoed.
+        at = (
+            f" at ({_geometry_number(hx)}, {_geometry_number(hy)})"
+            if has_point and params.selector.strip()
+            else ""
+        )
+        asked = params.selector.strip() or (
+            f"({_geometry_number(params.x)}, {_geometry_number(params.y)})"
+        )
+        under = f"; element under the pointer: {_geometry_ident(top)}" if top else ""
+        # `hovered` is the host's own check that the page entered :hover on that
+        # element. False means the move was delivered but the page ignored it, so
+        # the reply must not read as a plain success.
+        hovered = result.get("hovered")
+        verdict = "; the page shows no :hover on that element" if hovered is False else ""
+        details.update(hit=hit)
+        if has_point:
+            details.update(x=hx, y=hy)
+        if isinstance(hovered, bool):
+            details.update(hovered=hovered)
+        return _text(
+            tool_call_id,
+            "browser",
+            f"Hovered {_target_phrase(asked, result)}{at}{under}{verdict}. "
+            f"Page: {_page_line(title, href)}",
+            details=details,
+        )
     if action == "click":
         navigation = "" if result.get("navigated") else " (no navigation)"
         return _text(
@@ -27044,6 +27911,45 @@ async def execute_browser(
             else {"version": 1, "local_scope_missing": True}
         )
         return _text(tool_call_id, "browser", json.dumps(result, sort_keys=True), details=result)
+    # Keyboard arguments must fail before ownership discovery/recovery can dial
+    # a peer. Keep the preflight specific to this additive action so existing
+    # actions retain their established validation/ownership ordering.
+    preflight_action = str(args.get("action", "")).strip().lower()
+    if preflight_action in ("press", "hover", "select"):
+        try:
+            keyboard = BrowserParams(**args)
+        except ValidationError as exc:
+            return _validation_error(tool_call_id, "browser", exc)
+        refusal = _browser_press_refusal(tool_call_id, preflight_action, keyboard)
+        if refusal is not None:
+            return refusal
+        # Target shape (selector vs x/y, flag-shaped selectors) is as host-free as
+        # the key grammar, so it fails before a peer can be dialled too.
+        invalid = _validate_browser_args(preflight_action, keyboard)
+        if invalid:
+            return _error(tool_call_id, "browser", invalid)
+    # The recording SIZE is refused here, before ownership or host selection:
+    # the typed result carries the error code the generic validation path
+    # cannot, and a bad size must not depend on a host being reachable to be
+    # answered (review M1). Every OTHER argument check keeps its established
+    # ordering, later in this function, after the lane is chosen.
+    try:
+        early = BrowserParams(**args)
+    except ValidationError as exc:
+        # A size shaped wrong (`True`, `3840.5`, `'abc'`) is typed here for the
+        # same reason the semantic refusal above is: the generic validation error
+        # names the field but carries no `record_size` code, so a reader could
+        # not tell "nothing started" from any other bad argument.
+        size_refusal = _record_size_result(
+            tool_call_id, _record_size_type_problem(exc, args.get("action"))
+        )
+        if size_refusal is not None:
+            return size_refusal
+        early = None  # the established path below names the malformed field
+    if early is not None and early.action.strip().lower() == "record_start":
+        size_refusal = _record_size_refusal(tool_call_id, early)
+        if size_refusal is not None:
+            return size_refusal
     state = _browser_state(context)
     resource = getattr(state, "resource", None)
     if resource is None or state.surface_id.startswith("surface:"):
@@ -27112,9 +28018,9 @@ async def execute_browser(
             "browser",
             f"unknown action: {action} (expected one of {', '.join(BROWSER_ACTIONS)})",
         )
-    invalid = _validate_browser_args(action, validated)
-    if invalid:
-        return _error(tool_call_id, "browser", invalid)
+    refusal = _browser_args_problem(tool_call_id, action, validated)
+    if refusal is not None:
+        return refusal
     from local_operator.browser_bridge.backend import BridgeError, BridgeUnreachable
     from local_operator.browser_bridge.resources import BrowserOwnershipError
 
@@ -27651,6 +28557,15 @@ async def _execute_browser(
             "browser",
             f"unknown action: {action} (expected one of {', '.join(BROWSER_ACTIONS)})",
         )
+    refusal = _browser_press_refusal(tool_call_id, action, params)
+    if refusal is not None:
+        return refusal
+    if action in ("press", "hover", "select"):
+        # Host-free target validation, before ANY discovery (the same ordering
+        # execute_browser's preflight gives the public entry point).
+        invalid = _validate_browser_args(action, params)
+        if invalid:
+            return _error(tool_call_id, "browser", invalid)
     cmux_available = cmux_browser_available()
     # Classify EACH host ONCE per action and reuse that answer for both the
     # backend decision and the demotion diagnostic, so they can never describe
@@ -27691,10 +28606,12 @@ async def _execute_browser(
             "logins.",
         )
     # Before the state lookup and before every subprocess, including the
-    # liveness probe below: see _validate_browser_args.
-    problem = _validate_browser_args(action, params)
-    if problem:
-        return _error(tool_call_id, "browser", problem)
+    # liveness probe below: a direct caller (the dispatch bridge, tests) can
+    # reach this function without `execute_browser`, so the check repeats here —
+    # carrying the same typed record-size refusal as the outer entry.
+    problem = _browser_args_problem(tool_call_id, action, params)
+    if problem is not None:
+        return problem
     if action == "type" and params.secret_ref.strip():
         # Resolve the ref into `params.text` BEFORE any lane sees the call, so
         # both dispatch lanes (the bridge wire and cmux) carry the value in the
@@ -28209,6 +29126,12 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         name="browser",
         label="Browser",
         describe_approval=_describe_browser_approval,
+        # The size is refused at PLAN time, before the gate paints a consent row
+        # for a clip that cannot start (review M2). Everything that needs the
+        # client — the `record_size` capability check and the echo comparison —
+        # stays after approval, because neither can be answered until a host is
+        # selected.
+        refuse_args=_browser_record_size_refusal,
         description=(
             # Footprint: this description rides in EVERY session's cache prefix, so
             # the per-action detail lives in `guide://browser` (the playbook the
@@ -33884,11 +34807,11 @@ class NoReplyParams(BaseModel):
 #: until the tool is activated, while the system prompt is paid on EVERY
 #: request of every session — including the children that can never call it.
 _NO_REPLY_DESCRIPTION = (
-    "End this turn silently when a peer message, wake, monitor or job result "
-    "needs no reply and no action. Nothing is shown or notified — never answer "
-    "an acknowledgement with an acknowledgement, and never write filler such "
-    "as '(no action needed)'. Refused if the user asked something or the "
-    "wake/monitor asked to notify."
+    "Request silence for a peer, wake, monitor or job result needing no reply "
+    "or action. Call once: final root call, or last action in the final foreground "
+    "eval. Then stop — no final text, polling or repeat. Host checks precede "
+    "acceptance; later tool() calls invalidate it. Never acknowledge acknowledgements "
+    "or write filler. Pending person, notification or active-goal obligations refuse."
 )
 
 
@@ -33966,11 +34889,12 @@ async def execute_no_reply(
     return _text(
         tool_call_id,
         "no_reply",
-        "Quiet.",
-        # ``useless`` so the prune pass blanks the content later; the marker
-        # rides ``details``, which never reaches a provider.
+        "Quiet requested; pending the owning session's terminal checks.",
+        # Retain the historical finite-exchange fact for display/certificates,
+        # but it is NOT acceptance. Only the owning terminal event carries that
+        # authority; neither persisted details nor Python repr can create it.
         useless=True,
-        details={QUIET_TURN_KEY: True},
+        details={QUIET_TURN_KEY: True, "quiet_request_pending": True},
     )
 
 

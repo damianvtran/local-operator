@@ -42,7 +42,7 @@ The loop has no "final response required" rule. A model message with no tool cal
 | Output contract / final-response gate | `loop.py:2398-2434`, `_last_assistant_text` `loop.py:4984` | **Misreads silence as failure**: `None` becomes "the turn produced no assistant message", and `""` is a failing answer. Only hosts that set a contract (`lop exec --output-format`, `s.py:13684`). The tool must be absent there. |
 | Ask gate | `_gate_ask` `s.py:9343-9445` | Not a turn-end check. It is the `ask` tool's clearance fork and runs only when an ask is enqueued. Unaffected. |
 | Supplements | `docs/design/turn-supplements.md` §2.2 (PROPOSED, PR #2116) | Eligible only for a "real user run"; wake/peer/monitor runs are ineligible and the persisted-final-message rule fails closed. Unaffected. |
-| Goal judge | `serving.py:3101`, `_maybe_judge_goal` `serving.py:3632` | Reads only `error/aborted/generation`, never text. A quiet end still triggers a judge call when a goal is active. Unchanged; no regression. |
+| Goal judge | Session refusal/host settlement; shared serving/TUI subscriber fence | A nonempty runtime goal with legacy blank or active status refuses quiet before commitment. Accepted completion cannot schedule a judge call. Personality/proactive-role prose is not a runtime goal. |
 | Attention outcome | `_publish_attention_outcome` `s.py:12025`; republish skips `eligible:false` `s.py:11536`; import skips it `attention.py:1175` | Textless complete turn is `eligible:false`: no row, no unread mark, no banner on resume. **This is the existing silent path.** |
 | Stop notice | `rows.assistant_stop_notice` `harness/rows.py:1379` | Only `refusal`, `length`, and `error`/`aborted` with nothing produced yield a notice. `stop`/`toolUse` with no text yields none, so it is not misread. |
 | Aida banner veto | `_aida_cadence_banner_veto` `s.py:11909`; `_run_last_assistant_text` `s.py:12007` returns `""` | An empty reply already counts as quiet. Consistent with a silent end. |
@@ -71,12 +71,23 @@ Consolidation, not duplication:
 
 ## 4. Recommendation: a dedicated `no_reply` tool, no turn-end text signal
 
-A nested `eval(tool('no_reply'))` emits a typed child outcome, but is **not**
-a global loop-end signal: the outer eval result and existing batch-last-result
-rule remain authoritative. A separate display-only peer-exchange proof may seal
-at the successful enclosing root end while a later genuine answer is still
-pending. That proof never enriches model messages, changes notification policy,
-or suppresses the later answer; its durable custom record is renderer metadata.
+A foreground `eval(tool('no_reply'))` may request quiet completion from the
+actual dispatch bridge. The child result is PROVISIONAL, never terminal success.
+The final root must settle successfully with no ignored child error or later
+tool() call; later nested dispatch is refused BEFORE resolution and invalidates
+the request even when Python ignores the error. Arbitrary Python may still run
+before settlement: there is no immediate termination or rollback promise.
+
+Only the owning Session commits `AgentEndEvent.quiet_accepted`, after normal
+end hooks, persistence/compaction continuations and current obligations settle.
+No inference or input drain follows acceptance in that owning generation. Input
+arriving later remains ordinary next-turn ingress. Earlier refusals/continuations
+are not accepted silence. Default-false event fields never manufacture acceptance
+from replayed tool dictionaries or historical markers.
+
+The existing typed child marker/certificate remains a separate finite-exchange
+fact. Historical live/cold display validation stays intact; a certificate cannot
+suppress a genuine later answer/error or authorize owning-turn acceptance.
 
 Why a tool and not a sentinel or "empty reply = silent": the model must perform an affirmative act; an empty reply is indistinguishable from the provider glitches measured above (68 `error`+empty). Treating those as intentional would hide real failures. A text sentinel streams and persists.
 
@@ -84,10 +95,17 @@ Why a tool and not a sentinel or "empty reply = silent": the model must perform 
 - Name `no_reply`. Parameters: none (`extra="forbid"`, no fields). No `reason`: a reason can only live in the call's persisted arguments (re-billed), and the trigger row beside it already says why.
 - Description (about 50 tokens): "End this turn silently when a peer message, wake, monitor or job result needs no reply and no action. Nothing is shown or notified — never answer an acknowledgement with an acknowledgement, and never write filler such as '(no action needed)'. Refused if the user asked something or the wake/monitor asked to notify." The acknowledgement ban lives HERE rather than in `system.md` (review R6): the schema is deferred, so this text is unbilled until the tool is activated, while the system prompt is paid on every request of every session.
 - Tier `read`, `concurrency="exclusive"`, `interruptible=False` (like `patience`, `builtin.py:13308`).
-- Result: short text "Quiet." with `useless=True` (`harness/types.py:523`, so the existing prune pass `compaction/pruning.py:671` blanks it) and `details={QUIET_TURN_KEY: True}`. `ToolResult.details` is never sent to providers, the same carrier as `OUTPUT_LIMIT_KEY` (`loop.py` limit arm).
+- Result: provisional request text, `useless=True`, with the historical finite-exchange `QUIET_TURN_KEY` and explicit `quiet_request_pending`. Details are not provider control authority. Only the host's clean accepted terminal outcome suppresses attention publication/notification.
 
-**Loop (one change)**
-At `loop.py:2268`: `has_more_tool_calls = bool(assistant.tool_calls) and not _batch_ends_quiet(tool_results)`. `_batch_ends_quiet` reads the batch's **LAST result only** (review R8): a `no_reply` earlier in a batch must never shorten the turn — its siblings' results would otherwise never be fed back — so a batch that does not END in the quiet result continues normally. Everything after runs as for a normal end: `on_before_yield`, yield injections (open todos re-nudge, a late steer or peer message re-enters the loop, so no inbound message is lost), then `AgentEndEvent`. There is no new event field: the session derives quietness from the end event's messages. Old viewers see an ordinary end.
+**Owning boundary**
+The loop tracks actual built-in dispatch, not nested repr or copied metadata.
+Early/non-final direct calls and wrappers refuse before the quiet permission door;
+ordinary siblings still execute. Only a successful complete final-root batch may
+nominate `quiet_requested`. Required hooks and queued work may still continue
+before acceptance. The Session then drains its ordinary host continuations,
+rechecks current quiet permission and abort/error/active-runtime-goal obligations,
+and commits acceptance immediately onto its sole terminal-flush branch. Genuine
+queued people use existing ingress exactly once; no second queue is introduced.
 
 **Availability (`createIf`, footprint rung 3)**
 - Add a `ToolContext` capability `quiet_end: Callable | None` beside `gate_ask` (`harness/types.py:1600`); bind it with the other per-turn callables near `s.py:14530`. Its presence IS the fact that this session may end quiet. It is `None` for: subagent children (`_job_id` set; a parent's `wait` expects final text, `subagent.py:2014`), one-shot/headless hosts (`_one_shot_exit`), sessions with an output contract, and when `LOP_NO_REPLY=0` (env kill switch, mirroring `LOP_ASK_GATE`; no config key).
@@ -99,13 +117,13 @@ At `loop.py:2268`: `has_more_tool_calls = bool(assistant.tool_calls) and not _ba
 
 | Situation | Behaviour | Why |
 |---|---|---|
-| REFUSE iff `"user" in _run_triggers`, or `_has_awaiting_user()`, or `_run_notify_requested` | Tool result `is_error`: "A person asked this turn; answer them in one line." / "this wake or monitor asked to tell the user; say what they need to know." The model then writes text. Never coerce silently. | R15a user semantics win; never override a user-expected notification. Costs one extra call, rare. |
+| REFUSE for consumed/awaiting people (retaining the held-body exception), `_run_notify_requested and not _run_notified`, or a live runtime goal with active status | Tool result `is_error`: "A person asked this turn; answer them in one line." / "this wake or monitor asked to tell the user; say what they need to know." The model then writes text. Never coerce silently. | R15a user semantics win; never override a user-expected notification. Costs one extra call, rare. |
 | Everything else, including `internal` runs — peer, hub_message, job_result, `session_incident` notice, session_state, resume catch-up, wake/monitor with notify=false | Allowed. Stamps `notify=false`, `eligible:false`. | The denylist is the implementable rule (note above). An incident notice's operator-visible row is already published, so silence about it loses nothing; pinned by test. |
 | Pending queued `ask` | Allowed. | The ask card is its own notification; the turn end is separate. |
 | Open todos / stale projects | Allowed; guardrails run at the yield boundary exactly as for any end (a moved fingerprint re-nudges once). | One end semantics. |
-| Same batch has other calls | They run; the turn ends quietly ONLY if the quiet call is the batch's LAST result (review R8). An earlier `no_reply` never shortens the turn — the whole batch's results are fed back and the model continues. | Pinned by test. |
+| Same batch has other calls | Early/non-final requests refuse without success marker; ordinary siblings run. A final request requires the complete batch to settle successfully. | Never report acceptance before outstanding work. |
 | Earlier narration text in the same run | Stays visible and persisted. Quiet end still publishes nothing. | Explicit signal wins; text already streamed cannot be recalled. |
-| Steer/peer message arrives after the call | Loop re-enters via yield injection and answers it. | `loop.py:2307`. |
+| Steer/peer message arrives after request | Before acceptance, ordinary ingress/continuation may process it; after acceptance it belongs to the next owning turn. | No same-generation inference after accepted completion, no dropped/copied input. |
 
 **Brief answer recorded (requirement 3):** a peer-only run that WRITES TEXT stays notifying in v1 — the write is the agent's own choice to surface, and `no_reply` is the suppress half made newly expressible. The alternative reading — silent-by-default for peer, with an explicit notify opt-in re-aiming clause 3 of §14.2's formula (`_finalize_attention_notify`) — is recorded, not taken; it is the change to make if the operator wants peer turns quiet unless raised.
 

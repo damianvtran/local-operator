@@ -1494,6 +1494,10 @@ class TeamBridgeClient:
                     headers=headers,
                     files=files,
                     content=content,
+                    # A response cap must not silently erase a JSON mutation.
+                    # All body forms share the bounded path, just as they do
+                    # the ordinary request path below.
+                    json=body,
                 ) as streamed:
                     # Avatar reads need a hard allocation bound as well as a
                     # decoded-size bound. Refuse an ignored identity request
@@ -4152,33 +4156,153 @@ class TeamBridgeClient:
             avatar_cache.AVATAR_CACHE.put(key, Entity(response.content, mime, etag))
         return response.content, mime
 
+    async def account_profile_request(
+        self,
+        operation: Literal["read", "update", "upload", "remove"],
+        *,
+        expected_account_id: str,
+        expected_scope: str | None = None,
+        fields: Mapping[str, str] | None = None,
+        image: bytes | None = None,
+        mode: Literal["uploaded", "provider"] = "uploaded",
+    ) -> dict[str, Any]:
+        """One self-profile request under the exact login that opened the editor.
+
+        This reuses person OAuth, not Bridge enrollment or membership. The
+        opaque scope is a freshness receipt, NOT authorization: desktop auth
+        still gates the route and the stored OAuth JWT alone owns the upstream
+        target. Capture BEFORE refresh (including A→B→A), check immediately
+        before dispatch and after response, and never replay a mutation on 401.
+        A post-dispatch refusal suppresses stale success; it cannot undo a write
+        the upstream already committed.
+        """
+        import hashlib
+        import json
+
+        from local_operator.team_bridge.types import is_account_id
+
+        if not is_account_id(expected_account_id):
+            raise ValueError("Invalid account identifier")
+        captured = self._account_authority(expected_account_id)
+        scope_token = hashlib.sha256(json.dumps(captured).encode()).hexdigest()
+
+        def check_owner() -> None:
+            try:
+                current = self._account_authority(expected_account_id)
+            except (BridgeSignInRequired, BridgeRefusal):
+                current = None
+            if current != captured or (
+                expected_scope is not None and expected_scope != scope_token
+            ):
+                raise BridgeRefusal(
+                    ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409
+                )
+
+        check_owner()
+        if operation != "read" and expected_scope is None:
+            raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
+        access = await self._guarded_access(expected_account_id)
+        check_owner()
+        if access is None or access.credential_id != captured[1][0]:
+            raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
+        method, path = {
+            "read": ("GET", f"/accounts/{expected_account_id}/profile"),
+            "update": ("PATCH", "/account/profile"),
+            "upload": ("PUT", "/account/avatar"),
+            "remove": ("DELETE", "/account/avatar"),
+        }[operation]
+        try:
+            response = await self._dispatch(
+                method,
+                path,
+                access.access_token,
+                params={"mode": mode} if operation == "remove" else None,
+                body=dict(fields) if operation == "update" and fields is not None else None,
+                files=(
+                    {"file": ("avatar", image, "application/octet-stream")}
+                    if operation == "upload" and image is not None
+                    else None
+                ),
+                max_response_bytes=32 * 1024,
+                identity_response_only=True,
+                pre_http_guard=check_owner,
+            )
+        except httpx.HTTPError as failure:
+            raise BridgeUnreachable() from failure
+        check_owner()
+        if response.status_code >= 400:
+            raise _refusal(response)
+        profile = _envelope_result(response)
+        # The account API may grow sensitive fields. The native editor only
+        # needs this presentation allowlist, never arbitrary upstream metadata.
+        allowed = {
+            "account_id",
+            "display_name",
+            "display_label",
+            "title",
+            "description",
+            "timezone",
+            "avatar_url",
+        }
+        projected: dict[str, Any] = {
+            k: v for k, v in profile.items() if k in allowed and isinstance(v, str)
+        }
+        if projected.get("account_id") != expected_account_id:
+            raise BridgeRefusal(
+                "bridge_invalid_response",
+                # i18n: ignore internal diagnosis; desktop sends only the code
+                "Radient returned an invalid response.",
+                http_status=502,
+            )
+        avatar = profile.get("avatar")
+        if isinstance(avatar, dict):
+            projected["avatar"] = {
+                k: v
+                for k, v in avatar.items()
+                if k in {"source", "hash", "updated_at"} and isinstance(v, str)
+            }
+        return {"scope": scope_token, "profile": projected}
+
     def _avatar_authority(
         self, expected_account_id: str
     ) -> tuple[tuple[str, str], tuple[int, str, str]]:
-        """``(scope, authority)`` for the CURRENT login, exactly as ``fetch_avatar`` keys it.
+        """Admit an image cache only after the shared login fence succeeds."""
+        from local_operator.team_bridge import avatar_cache
 
-        Local only (no refresh, no network): the notification composite uses it
-        to fence its render to the same login ``fetch_avatar`` authorized under.
-        Refuses like ``fetch_avatar`` does when the captured viewer is not the
-        signed-in login.
+        try:
+            scope, authority = self._account_authority(expected_account_id)
+        except (BridgeRefusal, BridgeSignInRequired):
+            from local_operator.paths import config_dir
+
+            scope = (str((self._config_dir or config_dir()).resolve()), self._base_url)
+            avatar_cache.admit(scope, None)
+            raise
+        avatar_cache.admit(scope, authority)
+        return scope, authority
+
+    def _account_authority(
+        self, expected_account_id: str
+    ) -> tuple[tuple[str, str], tuple[int, str, str]]:
+        """Cache-neutral authority for the current person OAuth login.
+
+        Local only (no refresh/network): both private image reads and account
+        profile writes capture the same row/account/durable incarnation before
+        any await. Cache admission belongs to the image wrapper, never to a
+        profile authorization check.
         """
 
         from local_operator.paths import config_dir
-        from local_operator.team_bridge import avatar_cache
 
         self._require_destination()
         store = self._auth_store()
         scope = (str((self._config_dir or config_dir()).resolve()), self._base_url)
         row = self._pinned_row()
         if row is None:
-            avatar_cache.admit(scope, None)
             raise BridgeSignInRequired(SIGN_IN_SENTENCE)
         incarnation = store.native_login_incarnation(row.id)
         if not incarnation or row.data.get("account_id") != expected_account_id:
-            avatar_cache.admit(scope, None)
             raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
         authority = (row.id, expected_account_id, incarnation)
-        avatar_cache.admit(scope, authority)
         return scope, authority
 
     async def notification_avatar(

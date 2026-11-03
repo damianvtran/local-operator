@@ -163,6 +163,12 @@ PREFIXES_TEXT_POLICY = {
     # A key NAME, with the secret entered in the masked form.
     "credential": False,
     "mobile": False,
+    # FALSE for the `/fast` reason: the vocabulary is CLOSED (`on`, `off`,
+    # `status`, `inherit`), so the text is validated by the SUBCOMMAND/WORD
+    # shape below rather than owned as free prose. `/radient` takes the same
+    # vocabulary one level up (`saver <word>`).
+    "saver": False,
+    "radient": False,
     # FALSE, for the reason `/mobile` and `/notifications` state: the family is a
     # vocabulary of WORDS (`ls`, `panic`, `member rm …`), so a sentence after the
     # word must stay a message. The SUBCOMMAND shape below draws that line, and
@@ -332,6 +338,11 @@ ARGUMENT_SHAPE_POLICY = {
     "failovers": ArgumentShape.NONE,
     "info": ArgumentShape.NONE,
     "mobile": ArgumentShape.NONE,
+    # A WORD for `/saver` (the `/fast` shape: one word from a closed set) and
+    # SUBCOMMAND for `/radient`, whose closed set is its own `saver` word.
+    # Anything else is refused rather than forwarded as prose.
+    "saver": ArgumentShape.WORD,
+    "radient": ArgumentShape.SUBCOMMAND,
     # The page is the receipt and takes no argument at all.
     "library": ArgumentShape.NONE,
     # The operator's own row, and the reason it is NONE rather than ANY: the

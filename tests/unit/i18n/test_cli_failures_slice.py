@@ -71,7 +71,7 @@ def test_recognised_shapes_route_through_the_catalogue(monkeypatch: pytest.Monke
 
 
 def test_unrecognised_shapes_pass_through() -> None:
-    for text in ("unrecognized arguments: --x", "expected one argument", "exec takes ONE prompt"):
+    for text in ("plugin-specific refusal: --x", "expected one argument", "exec takes ONE prompt"):
         assert localise_failure(text) == text
 
 

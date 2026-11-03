@@ -904,6 +904,22 @@ class ServingSessionHandle(SessionHandle):
     #: exists to catch. See ``create_session`` for what waits on it.
     mcp_publication_gate: PublicationGate | None = None
 
+    #: The idle latch's recorded refusal cause, or ``""`` until ``begin_retire``
+    #: records one. ``server._idle_refusal_reason`` is its only reader: it turns the
+    #: string into the stop refusal's token (``busy`` / ``wake`` / ``leaving``), so
+    #: a handle that cannot answer the probe would report every refusal as work in
+    #: flight — the answer R3/Q-1 exists to stop producing.
+    #:
+    #: Declared at CLASS level for the reason the latch above gives: the server
+    #: reaches for it with a ``getattr`` capability probe, and the
+    #: capability-surface guard reads ``hasattr(ServingSessionHandle, name)``, so an
+    #: attribute that lived only on the instance reads as a capability the handle
+    #: cannot answer (measured: the guard's first report after this PR added the
+    #: probe). ``begin_retire`` is the only writer, and every path that refuses sets
+    #: it before returning ``False``, so the reader never sees this default in
+    #: practice — the class still has to state it for the probe to resolve.
+    _retire_refusal: str = ""
+
     def __init__(
         self,
         session: Any,
@@ -2359,13 +2375,36 @@ class ServingSessionHandle(SessionHandle):
         read as an invitation.
         """
         if getattr(self, "_disposing", False):
+            self._retire_refusal = "already disposing"
+            return False
+        # A stop cannot take over the successor promised by an update window.
+        # begin_update sets the handle flag before publishing it; end_update
+        # clears it only when that window closes. Checking the authoritative
+        # flag HERE keeps exclusion and retirement in the same owner-loop step,
+        # including the await while the update announces its handover (R7-1 /
+        # Q4-1). Do not put this in may_refresh or reject every retirement: the
+        # update itself must still latch runtime-retired inside its own window.
+        if cause == "user-stop" and getattr(self, "_updating", ""):
+            self._retire_refusal = "updating"
             return False
         try:
             reason = str(self.may_refresh() or "")
         except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
             reason = "busy probe failed"
         if reason:
+            # THE REFUSAL'S CAUSE, KEPT FOR THE CALLER THAT ASKED. The reasons
+            # ``may_refresh`` gives have different next steps — work in flight
+            # clears on its own, a wake due in the warm window clears when it
+            # fires, and an unevaluable probe may not clear at all — and the
+            # stop ladder's receipt names one step, not three. Recorded here
+            # rather than re-probed by the caller, because a second sample would
+            # describe state this decision did not see (agent review round 1 D2,
+            # UX round 1 U2). Read back by
+            # ``server._idle_refusal_reason``; this attribute is that field's
+            # only reader.
+            self._retire_refusal = reason
             return False
+        self._retire_refusal = ""
         self._retiring_cause = cause or "retiring"
         self._retiring_detail = detail
         self._exit_committed = True
@@ -4411,10 +4450,13 @@ class ServingSessionHandle(SessionHandle):
         not a latent bug. Naming the real type is what lets the type gate agree
         with the guard instead of having to be told to look away.
         """
-        from local_operator.session.goal_judge import owns_the_session
+        from local_operator.session.goal_judge import (
+            owns_the_session,
+            quiet_completion_accepted,
+        )
 
         try:
-            if not owns_the_session(self._session):
+            if quiet_completion_accepted(event) or not owns_the_session(self._session):
                 return
             driver = self._goal_judge_driver()
             if driver is None:
@@ -4435,10 +4477,13 @@ class ServingSessionHandle(SessionHandle):
         notifications always go out first. Ownership is checked here for the judge's reason:
         a follower must never spend or write.
         """
-        from local_operator.session.goal_judge import owns_the_session
+        from local_operator.session.goal_judge import (
+            owns_the_session,
+            quiet_completion_accepted,
+        )
 
         try:
-            if not owns_the_session(self._session):
+            if quiet_completion_accepted(event) or not owns_the_session(self._session):
                 return
             loop_running = self._goal_loop is not None and bool(self._goal_loop.running)
             self._supplements.on_agent_end(event, goal_loop_running=loop_running)
@@ -8604,6 +8649,39 @@ class ServingSessionHandle(SessionHandle):
             return await self._effort_slash(session, args, SlashResult)
         if command == "fast":
             return self._fast_slash(session, args, SlashResult)
+        # ONE BRANCH PER WORD, spelled `command ==`, not a set membership: the
+        # dispatch-surface guard reads this body for `command == "<name>"` and a
+        # tuple membership is invisible to it, which is how `/saver` came to be
+        # advertised as authoritative_session while the reader believed nothing
+        # dispatched it (measured: `test_the_runtime_dispatches_every_slash_command
+        # _it_advertises`).
+        if command == "saver":
+            from local_operator.saver.command import saver_slash
+
+            result = await saver_slash(session, args, SlashResult)
+            self._notify()
+            return result
+        if command == "radient":
+            from local_operator.i18n.keys import wire_radient_saver
+            from local_operator.i18n.text import tr
+            from local_operator.saver.command import saver_slash
+
+            word, _, rest = args.partition(" ")
+            if word != "saver":
+                return SlashResult(
+                    kind="notice",
+                    text=str(tr("wire.radient_saver")(wire_radient_saver.command_usage())),
+                    style="warning",
+                )
+            # Same rule as the app host: a bare `/radient saver` REPORTS rather
+            # than toggles, so a namespace command completed by return keys cannot
+            # change state (QA round 3, Q1). STRIPPED, because this host forwards
+            # `body.args` verbatim (desktop_sessions.py) and `rest or "status"` is a
+            # TRUTHINESS test: a whitespace-only argument is truthy, so `/radient
+            # saver␣␣` reported in the app and WROTE Saver on here (round 4).
+            result = await saver_slash(session, (rest or "").strip() or "status", SlashResult)
+            self._notify()
+            return result
         if command == "approvals":
             # ``may_loosen`` (issue #1310; design round 2 D10, UX round 2 U9):
             # whether THIS connection could carry `/approvals auto`, as the seam
