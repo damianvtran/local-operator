@@ -120,19 +120,74 @@ async def test_the_serving_switch_skips_the_roster_pass_and_reads_credentials_of
     this PR's first head (review round 1, R1-1): the event handler re-read the
     store synchronously on the loop, beside the off-loop read — two reads, one
     of them on the loop thread.
+
+    The roster pass the switch must NOT run is the SYNCHRONOUS one. The
+    subscribed handler deliberately schedules a coalesced republish for every
+    non-subagent event, ``ModelChangeEvent`` included (``_schedule_roster_refresh``,
+    commit 83c4c775), and that timer fires 50 ms later from the loop. Counting
+    ``set_subagent_details`` globally let that deliberate flush land inside the
+    measurement window on a slow runner (CI run 41395371685: ``assert 1 == 0``,
+    stack-confirmed as ``_flush_roster_refresh`` by forcing the interval to 0).
+    So the window holds the coalescer shut, requires that NO flush ran inside it
+    (a switch that called ``_flush_roster_refresh`` itself would be running the
+    roster pass inline under another name), and then drives the still-pending
+    flush explicitly so the deferred pass is pinned to run exactly once.
     """
     import threading
 
     from local_operator.mobile.projection import ProjectionFold
     from local_operator.providers import model_access
+    from local_operator.session.runtime import serving
 
+    # Hold the coalesced flush out of the measurement window so its firing does
+    # not depend on how long the off-loop credential read takes on this host.
+    # ``_schedule_roster_refresh`` reads the module global at call time, and
+    # ``setattr`` raises if it is ever renamed, so the hold cannot silently lapse.
+    held = 3600.0
+    monkeypatch.setattr(serving, "_ROSTER_REFRESH_COALESCE_S", held)
     session = _session(tmp_path)
     loop = asyncio.get_running_loop()
+    # Keep the held timers so ``finally`` can cancel them: a 3600 s handle must
+    # not outlive this test if it ever runs on a shared loop.
+    held_timers: list[asyncio.TimerHandle] = []
+    original_call_later = loop.call_later
+
+    def call_later(delay: float, callback: Any, *args: Any, **kw: Any) -> asyncio.TimerHandle:
+        timer = original_call_later(delay, callback, *args, **kw)
+        if delay == held:
+            held_timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(loop, "call_later", call_later)
     handle = ServingSessionHandle(session, loop, cwd=str(tmp_path), config_dir=tmp_path)
     unsubscribe = handle.subscribe(lambda: None)
     session._frontend_state_store.subscribe(lambda *_a, **_k: None)
     try:
-        roster = _count(monkeypatch, ProjectionFold, "set_subagent_details")
+        # Attribute each roster pass by whether it ran inside the class-method
+        # wrapper on ``_flush_roster_refresh``: only a pass made OUTSIDE it is
+        # one the switch ran itself. ``flushes`` then proves that wrapper ran
+        # only from the explicit drive below, never from the switch.
+        in_flush = [False]
+        flushes = [0]
+        roster = [0]
+        flushed_roster = [0]
+        original_flush = ServingSessionHandle._flush_roster_refresh
+        original_details = ProjectionFold.set_subagent_details
+
+        def flush(self: Any) -> None:
+            flushes[0] += 1
+            in_flush[0] = True
+            try:
+                original_flush(self)
+            finally:
+                in_flush[0] = False
+
+        def details(self: Any, *a: Any, **kw: Any) -> Any:
+            (flushed_roster if in_flush[0] else roster)[0] += 1
+            return original_details(self, *a, **kw)
+
+        monkeypatch.setattr(ServingSessionHandle, "_flush_roster_refresh", flush)
+        monkeypatch.setattr(ProjectionFold, "set_subagent_details", details)
         rescans = _count(monkeypatch, FrontendStateStore, "refresh_from_session")
         loop_thread = threading.get_ident()
         read_threads: list[int] = []
@@ -167,7 +222,20 @@ async def test_the_serving_switch_skips_the_roster_pass_and_reads_credentials_of
         assert loop_thread not in read_threads, "the credential read ran on the session loop"
         assert handle._projection.model_label.endswith("switch-b")
         assert session.model.reasoning_effort == "low"
+
+        # The switch's event still reached the coalescer, which folds the whole
+        # burst into ONE deferred pass. Nothing may have flushed it yet: the
+        # timer is held, so an earlier flush can only be the switch flushing
+        # synchronously. Drive the pending pass now rather than wait on a clock.
+        assert flushes[0] == 0, "the switch flushed the roster itself, on the loop"
+        assert handle._roster_refresh_scheduled, "the switch's event scheduled no roster pass"
+        assert len(held_timers) == 1, f"one held roster timer, got {held_timers}"
+        handle._flush_roster_refresh()
+        assert (flushes[0], flushed_roster[0]) == (1, 1), "the coalesced pass runs once"
+        assert roster[0] == 0, "the coalesced pass was counted as the switch's"
     finally:
+        for timer in held_timers:
+            timer.cancel()
         unsubscribe()
         await handle.dispose()
         await session.dispose()
