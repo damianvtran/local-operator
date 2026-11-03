@@ -4,7 +4,7 @@
   "audit_id": "hosting-es-r1",
   "receipt": "receipt.json",
   "report": "report.md",
-  "file_count": 5,
+  "file_count": 6,
   "files": [
     {
       "path": "audit.log",
@@ -17,6 +17,12 @@
       "bytes": 3,
       "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
       "origin": "/Users/damian/.local-operator/sessions/f50d87966867/scratchpad/hosting-es-audit-reader1/findings.json"
+    },
+    {
+      "path": "metadata-corrections.json",
+      "bytes": 6953,
+      "sha256": "e5ca51b1a6b78c3e029a06d5326d30a5a70b82b91024abbc1af94c0bb2c1e2a7",
+      "origin": "/Users/damian/.local-operator/sessions/f50d87966867/scratchpad/hosting-es-audit-reader1/metadata-corrections.json"
     },
     {
       "path": "receipt.json",
