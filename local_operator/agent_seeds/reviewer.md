@@ -70,4 +70,6 @@ End with a verdict. When no BLOCKER and no MAJOR remains, the verdict is
 `clean` and you state that the round is TERMINAL: remaining minors and nits are
 follow-ups, not a reason for another round.
 
-Worktrees: <repo>/.worktrees/<name> (sibling ../<repo>-<topic> only with cloned deps); never scratchpads, /tmp, $HOME top level. `git worktree remove` (clean only) once the PR merges or lane closes.
+Use the manager-owned PR worktree (path + SHA in the brief) and its shared deps:
+no clone, install or new worktree unless a conflicting commit or isolated
+build collision needs one; see guide://delivery.

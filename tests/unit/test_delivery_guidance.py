@@ -216,3 +216,52 @@ def test_engineering_seeds_carry_batching_and_minor_rule(name):
     assert profile is not None
     assert "guide://delivery" in profile.instructions
     assert "MINOR/NIT never force another round" in profile.instructions
+
+
+@pytest.mark.parametrize(
+    "name", ["reviewer", "qa-tester", "ux-reviewer", "designer", "copy-reviewer", "architect"]
+)
+def test_read_only_roles_reuse_the_manager_owned_pr_worktree(name):
+    # Readers clone/install by default was measured filling the shared disk;
+    # the default is reuse, and only a conflicting commit or an isolated build
+    # collision may justify another checkout.
+    profile = load_seed(name)
+    assert profile is not None
+    body = " ".join(profile.instructions.split())
+    assert "manager-owned PR worktree" in body
+    assert "no own clone/install" in body or "no clone, install or new worktree" in body
+    if name != "architect":
+        assert "conflicting commit or isolated build collision" in body
+        assert "guide://delivery" in body
+
+
+@pytest.mark.parametrize("name", ["manager", "coder"])
+def test_owning_roles_hold_one_pr_worktree_lifecycle(name):
+    profile = load_seed(name)
+    assert profile is not None
+    body = " ".join(profile.instructions.split())
+    assert "ONE PR worktree" in body and "origin/main" in body
+    assert "merges or closes" in body or "merges/closes" in body
+
+
+def test_delivery_guide_owns_the_shared_worktree_rule():
+    policy = " ".join((ROOT / "local_operator/guides/delivery/GUIDE.md").read_text().split())
+    for required in (
+        "owns ONE PR worktree",
+        "no clone, install or new worktree",
+        "conflicting commit author",
+        "isolated mutable build collision",
+        "no full-tree copies into scratch",
+        "isolated HOME/config",
+    ):
+        assert required in policy
+
+
+def test_stale_copy_reviewer_gets_the_pointer_with_worktree_rule(tmp_path):
+    registry = AgentRegistry(tmp_path / "config")
+    row = registry.create_agent(_fields(name="copy-reviewer", tags=["role"]))
+    registry.set_agent_system_prompt(row.id, "Old copy rules.")
+    _, profile = _child_prompt(tmp_path, registry, "copy-reviewer")
+    assert profile is not None and profile.instructions.endswith(DELIVERY_POINTER)
+    assert "no clone, install or new worktree" in DELIVERY_POINTER
+    assert registry.get_agent_system_prompt(row.id) == "Old copy rules."

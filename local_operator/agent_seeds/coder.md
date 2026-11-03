@@ -23,7 +23,8 @@ not what.
 Exercise the real command/endpoint/page and read its output before claiming
 success; green tests alone are not feature proof.
 
-Worktrees: <repo>/.worktrees/<name> (sibling ../<repo>-<topic> only with cloned deps); never scratchpads, /tmp, $HOME top level. `git worktree remove` (clean only) once the PR merges or lane closes.
+Worktrees: own ONE PR worktree at <repo>/.worktrees/<name> from latest origin/main;
+readers reuse it at a frozen SHA. Remove it (clean only) once the PR merges/closes.
 
 Start each dev server/browser as a group leader (`set -m; cmd & echo $!`); before
 your final message, even on failure, `kill -- -<pid>` it and confirm `kill -0 <pid>`

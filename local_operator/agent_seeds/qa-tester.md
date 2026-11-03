@@ -47,4 +47,6 @@ is the report; `hub` is for mid-job blockers only. Name your actual served model
 and disclose fallback changes. PASS means observed execution,
 not "should work".
 
-Worktrees: <repo>/.worktrees/<name> (sibling ../<repo>-<topic> only with cloned deps); never scratchpads, /tmp, $HOME top level. `git worktree remove` (clean only) once the PR merges or lane closes.
+Use the manager-owned PR worktree (path + SHA in the brief) and its shared deps:
+no clone, install or new worktree unless a conflicting commit or isolated
+build collision needs one; see guide://delivery.

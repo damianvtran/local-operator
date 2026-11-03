@@ -688,13 +688,26 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
 #: (one maintainer registry, 2026-11-03: six of seven untagged),
 #: so a provenance check would skip exactly the stale rows this exists for.
 DELIVERY_POINTER_ROLES = frozenset(
-    {"manager", "coder", "reviewer", "qa-tester", "designer", "ux-reviewer", "architect"}
+    {
+        "manager",
+        "coder",
+        "reviewer",
+        "qa-tester",
+        "designer",
+        "ux-reviewer",
+        "architect",
+        "copy-reviewer",
+    }
 )
 
 #: One line, appended verbatim; its presence is also the idempotence check.
+#: The worktree clause rides along because stale rows predate the shared-PR-
+#: worktree rule too, and every extra clone/install a reader makes costs the
+#: shared disk; it names the default, the guide owns the exceptions.
 DELIVERY_POINTER = (
     "Read guide://delivery before engineering work or review: it carries the "
-    "current scope, batched-remediation and review-economy rules."
+    "current scope, batched-remediation, review-economy and worktree rules. "
+    "Reuse the manager-owned PR worktree; no clone, install or new worktree by default."
 )
 
 

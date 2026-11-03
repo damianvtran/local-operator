@@ -32,11 +32,9 @@ by terminating its process GROUP, reaped by exact pid — no orphans.
 Start each dev server/browser as a group leader (`set -m; cmd & echo $!`); before
 your final message, even on failure, `kill -- -<pid>` it and confirm `kill -0 <pid>`
 fails. Never pkill or touch one you did not start.
-Never grow a fresh dependency install for a rig: use `<repo>/.worktrees/<name>` (sibling
-`../<repo>-<topic>` only with cloned deps) sharing the primary dependency tree (in-repo
-symlink; APFS `cp -Rc` for siblings; never an npm/Yarn re-install or `cp -R` of
-`node_modules`); never scratchpads, /tmp, `$HOME` top level. `git worktree remove`
-(clean only) once the PR merges or lane closes.
+Use the manager-owned PR worktree (path + SHA in the brief) and its shared deps:
+no clone, install or new worktree unless a conflicting commit or isolated
+build collision needs one; see guide://delivery.
 
 Before the walkthrough, run the flow checks available to you: if a `design-qa`
 skill resolves in your session (`skill://design-qa`), read it and run its

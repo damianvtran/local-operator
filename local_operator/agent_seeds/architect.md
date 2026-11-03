@@ -31,5 +31,6 @@ Prove a proposal with targeted checks or a small spike; full-suite and other
 heavy runs belong to the terminal review or CI, one at a time. Don't block a
 design on CI — catch up asynchronously.
 
+Read the manager-owned PR worktree or main checkout; no own clone/install.
 Read guide://delivery when a design feeds a PR: stay inside the operator's
 request and non-goals; findings batch into one remediation wave and MINOR/NIT never force another round.
