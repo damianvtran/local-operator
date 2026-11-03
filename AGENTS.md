@@ -1584,9 +1584,16 @@ pypi/support#12738 and pypi/support#12882.
    would be the silent downgrade the design forbids. The consequence for this checklist is
    that an expired Developer ID identity or a revoked App ID stops the Linux and Windows
    release too — and the remedy is a re-issued p12/profile refilled into
-   `secrets.MACOS_SIGNING_P12_BASE64` / `secrets.MACOS_SIGNING_PROFILE_BASE64`, not a
-   skipped job. `keyagent-macos` runs on the pinned `macos-15` runner deliberately, so do
-   not bump that pin during a release window.
+   `secrets.MACOS_DEVID_APP_P12_BASE64` / `secrets.MACOS_DEVID_APP_P12_PASSWORD` /
+   `secrets.MACOS_KEYAGENT_PROFILE_BASE64` (the Radient Inc. organization identity,
+   team `SHA2U6KT7V`; certificate expires 2027-12-02), not a skipped job. The job
+   also asserts the signature's `Authority=` is that organization identity, so a
+   refill with any other certificate fails loudly; the retired
+   `MACOS_SIGNING_P12_*` / `MACOS_SIGNING_PROFILE_BASE64` secrets are rollback only,
+   and the tests forbid them, so a rollback reverts that PR with its tests and docs
+   (it would also commit the individual's name). Renewal procedure:
+   `docs/design/operator-key-agent.md` §8. `keyagent-macos` runs on the pinned
+   `macos-15` runner deliberately, so do not bump that pin during a release window.
 5. **Post the refs** (tag, release URL, installed `.lop-source` revision and
    the verified `lop --version`) as a comment on every PR in the window, and
    `send` them to each contributor still running.

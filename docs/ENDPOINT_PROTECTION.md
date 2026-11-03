@@ -652,10 +652,29 @@ and is what an exclusion keys on.
 
 Three honest qualifications.
 
-**First, that certificate is personal, not an organisation's.** It is a
-Developer ID issued to an individual, so an exclusion written against it is tied
-to one person's Apple account rather than to the company, and it will not
-survive a change of maintainer. §5 says what fixes that.
+**First, the certificate in those captures is personal, and is being replaced
+while the team is not.** The blocks above carry a Developer ID issued to an
+individual. That Apple account was converted to an organization, so the team
+(`SHA2U6KT7V`) is now Radient Inc.'s. The CLI's macOS key agent
+(`lop-keyagent`) is signed with the organization identity
+`Developer ID Application: Radient Inc. (SHA2U6KT7V)` from the CLI release that
+moved its signing job onward, and desktop app releases from the Radient Inc.
+migration onward carry that organization leaf instead of the individual one;
+releases before those, including the captures above, carry the individual
+leaf. What the change means for an existing allow-list depends on what it keys
+on:
+
+- **keyed on the Team ID** (`SHA2U6KT7V`, the usual macOS "signer identity" /
+  Team ID rule): keeps matching both old and new builds — nothing to do;
+- **keyed on the leaf certificate** — its common name, serial, SHA-1/SHA-256
+  hash, or a full certificate chain export: does NOT match new builds; add the
+  organization certificate beside the old one, and keep the old one until
+  installs signed by it have been replaced;
+- **keyed on a path or a file hash**: unaffected by the signer, and governed by
+  §4 as before.
+
+The organization identity belongs to the company rather than to one person's
+Apple account, so it outlives any one maintainer.
 
 **Second, a certificate exclusion on macOS is not a cheap way to key on it.**
 SentinelOne's exclusion-mode documentation is explicit: *"macOS — The
@@ -966,19 +985,20 @@ the file to exist — and then reinstall.
 
 Two pieces of work, stated as work rather than intent:
 
-- **Sign and notarize with a Developer ID issued to the company** — an
-  organisation Apple Developer account rather than the personal certificate in
-  use today, so the identity an admin keys an exclusion against belongs to the
-  company and outlives any one maintainer. The gap is narrower than "the
-  artefacts are unsigned", and worth stating precisely after §2: the desktop
-  app bundle is signed and notarized, the app-provisioned interpreter images
-  under Application Support carry that same Developer ID and team, but the
-  **CLI install path carries no identity signature an admin can key on**
-  (Class 1), and where a Developer ID is present it is an individual's, not
-  the organisation's.
-  A company certificate closes both halves: the CLI artefact gains an identity
-  to key on, and the identity an admin keys on becomes one the organisation
-  owns. Note the cost before reaching for it as a shortcut, though — on macOS a
+- **Sign the CLI artefact with the company's Developer ID.** The identity half
+  is under way: CLI releases from the signing-job move onward sign the macOS
+  key agent with the Radient Inc. organization identity, and desktop app
+  releases from the Radient Inc. migration onward move to it too (same team,
+  §2), so the identity an admin keys an exclusion against becomes one the
+  company owns and that outlives any one maintainer. Until a desktop release carrying it is installed, the app and
+  its interpreters still carry the individual's certificate. What remains is
+  narrower than "the artefacts are unsigned", and worth stating precisely after
+  §2: the desktop app bundle is signed and notarized, the app-provisioned
+  interpreter images under Application Support carry that same Developer ID and
+  team, but the **CLI install path carries no identity signature an admin can
+  key on** (Class 1).
+  Signing it would give the CLI artefact an identity to key on. Note the
+  cost before reaching for it as a shortcut, though — on macOS a
   certificate exclusion is a performance-focus exclusion (§2), so it disables
   monitoring of everything it covers rather than only suppressing alerts, and
   it reaches past the detection that prompted it. The path-scoped exclusion

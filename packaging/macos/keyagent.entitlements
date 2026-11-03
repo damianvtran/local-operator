@@ -26,7 +26,8 @@
        codesign's flag verbatim. The
        PROFILE is different — it carries the Developer ID certificate, is bound to
        this team, and must be refreshable when it or the certificate is rotated, so
-       it travels as the `MACOS_SIGNING_PROFILE_BASE64` secret and is written into
+       it travels as the `MACOS_KEYAGENT_PROFILE_BASE64` secret (issued to the
+       Radient Inc. organization identity) and is written into
        Contents/embedded.provisionprofile by the build. Committing it would put one
        team's identity into every fork's build; committing this string only means a
        fork edits it (and Info.plist, and its profile) together. -->
