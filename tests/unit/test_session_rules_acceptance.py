@@ -20,11 +20,9 @@ they are read here:
   ``session_dir=``/``rules_dir=``/``rules_directory=``/``session_directory=``
   keyword when the factory has one. Both routes are accepted because the spec
   says "from the session's own directory" and never names the seam.
-* **The dev CLI envelope.** The spec pins the exit codes and that every command
-  speaks JSON, but not whether ``list`` prints a bare array or
-  ``{"rules": [...]}``, nor whether a mutation prints the rule, ``{"rule": ...}``
-  or the whole list. Those shapes are read tolerantly; the ids, texts and exit
-  codes are asserted exactly.
+* **The dev CLI envelope** is pinned to the spec exactly: ``list`` prints
+  ``{"rules": [...]}``, a mutation prints ``{"rule": {...}}``, invalid input
+  prints ``{"error": "..."}`` with exit code 2, and nothing else is on stdout.
 """
 
 from __future__ import annotations
@@ -524,37 +522,65 @@ def _run_cli(session_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _cli_rules(result: subprocess.CompletedProcess[str]) -> list[dict[str, Any]]:
-    """The rule list a successful ``list`` printed (bare array or ``{"rules": ...}``)."""
+def _cli_envelope(result: subprocess.CompletedProcess[str], key: str) -> Any:
+    """The one-key envelope the CLI printed on stdout.
+
+    SPEC D3: one JSON object on stdout and nothing else -- ``{"rules": [...]}``
+    for ``list``, ``{"rule": {...}}`` for a mutation, ``{"error": "..."}`` on
+    refusal. ``json.loads`` refusing trailing text is part of the check, so a
+    line of prose after the object is a failure, not a tolerance.
+    """
     assert result.returncode == 0, (result.stdout, result.stderr)
     payload = json.loads(result.stdout)
-    if isinstance(payload, dict):
-        payload = payload["rules"]
-    assert isinstance(payload, list), payload
-    return payload
+    assert isinstance(payload, dict), payload
+    assert set(payload) == {key}, (key, payload)
+    return payload[key]
+
+
+def _cli_rules(result: subprocess.CompletedProcess[str]) -> list[dict[str, Any]]:
+    """``{"rules": [...]}`` from a successful ``list``."""
+    rules = _cli_envelope(result, "rules")
+    assert isinstance(rules, list), rules
+    return rules
 
 
 def _cli_rule(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
-    """The one rule a successful mutation printed, whatever envelope it chose."""
-    assert result.returncode == 0, (result.stdout, result.stderr)
-    payload = json.loads(result.stdout)
-    if isinstance(payload, list):
-        payload = payload[-1]
-    elif isinstance(payload, dict) and "rule" in payload:
-        payload = payload["rule"]
-    elif isinstance(payload, dict) and "rules" in payload:
-        payload = payload["rules"][-1]
-    assert isinstance(payload, dict), payload
-    assert {"id", "text"} <= set(payload), payload
-    return payload
+    """``{"rule": {...}}`` from a successful mutation."""
+    rule = _cli_envelope(result, "rule")
+    assert isinstance(rule, dict), rule
+    assert {"id", "text", "created", "updated"} <= set(rule), rule
+    return rule
+
+
+def test_cli_stdout_is_exactly_one_json_object(tmp_path: Path) -> None:
+    """One object with the documented single key, and nothing around it.
+
+    ``json.loads`` refuses trailing text, so this proves the object is the whole
+    of stdout rather than a line inside a report: the spec's "one JSON object on
+    stdout" is a parsing contract for the caller.
+    """
+    session_dir = tmp_path / "cli"
+    session_dir.mkdir()
+
+    listing = _run_cli(session_dir, "list")
+    added = _run_cli(session_dir, "add", "Alpha")
+    refused = _run_cli(session_dir, "rm", "r99")
+
+    assert listing.returncode == 0, (listing.returncode, listing.stdout, listing.stderr)
+    assert json.loads(listing.stdout) == {"rules": []}
+    assert added.returncode == 0, (added.returncode, added.stdout, added.stderr)
+    assert set(json.loads(added.stdout)) == {"rule"}
+    assert refused.returncode == 2, (refused.returncode, refused.stdout, refused.stderr)
+    assert set(json.loads(refused.stdout)) == {"error"}
 
 
 def _cli_error(result: subprocess.CompletedProcess[str]) -> str:
-    """``{"error": ...}`` on stdout and exit code 2, for any invalid input."""
+    """``{"error": "..."}`` alone on stdout, and exit code 2, for invalid input."""
     assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
     payload = json.loads(result.stdout)
     assert isinstance(payload, dict), payload
-    message = payload.get("error")
+    assert set(payload) == {"error"}, payload
+    message = payload["error"]
     assert isinstance(message, str) and message, payload
     return message
 
