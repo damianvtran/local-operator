@@ -56,6 +56,23 @@ It also builds a checksummed ZIP for independent review.
 > public-loadout experiments must clear their methodology and reproducibility
 > gates before any new claim is published.
 
+**Exploratory full-loadout sample — the same 24 tasks, one run per task.**
+Costs below are USD per task. The cold column is a counterfactual estimate,
+not a measured cold run. Logged passes do not establish equivalent effectiveness.
+
+| Harness | Observed USD/task | Cold estimate USD/task | Passed / tasks |
+|---|---:|---:|---:|
+| Local Operator | $0.043441 | $0.110046 | 16 / 24 |
+| omp | $0.068227 | $0.158845 | 17 / 24 |
+| OpenCode | $0.079233 | $0.090708 | 17 / 24 |
+| Claude Code | $0.092382 | $0.125941 | 14 / 24 |
+
+**Separate population:** Codex's full-loadout pilot covered only four selected
+long tasks (3 / 4 passed; observed $5.752039 per task), with an incorrect model
+catalog and repeated compaction. It is not a valid current-performance
+comparison. The [complete accessible tables](benchmarks/harness_cost/generated/cost-per-task-table.md)
+include all populations, both cold estimates, and the same figures' data.
+
 <p align="center">
   <img src="./benchmarks/harness_cost/generated/fig1-cost-per-task.png"
        alt="Exploratory cost-per-task results showing observed model costs and explicitly counterfactual cold-cache estimates; Codex's confounded four-task sample is shown separately"

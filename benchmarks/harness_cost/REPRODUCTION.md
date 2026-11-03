@@ -7,6 +7,70 @@ frozen source's 13 SHA256SUMS entries were independently verified before final
 publication. This document is implementation evidence, not a new independent
 review of the kit, nor a repair of the confounded study.
 
+## PR 3345 unified round-1 remediation — C1, C2, D1, D2
+
+**Core remediation is complete; global manifest/ZIP packaging is provisional
+until the parallel experimental-port lane freezes its own folder.** The
+coordinator will regenerate the global inventory and final archive afterwards.
+The sealed standalone-copy checks below cover the captured snapshot, not a claim
+that concurrently edited source files are immutable or a privacy failure.
+
+Scope is the requested code/design delta, not a new audit of previously cleared
+runtime/experimental-driver code. No commit, push, real-index staging, model/API
+call or root README edit was performed by this lane. The coordinator owns the
+single unified remediation commit and review-thread responses.
+
+- **C1:** graph labels now derive Codex n from the actual panel rows: **n=16**
+  for clean and **n=4** for full. A contextual-label regression test covers both.
+- **C2:** metering publication uses a recursively closed schema, including
+  `usage.cache_creation` and scalar leaf types. Unknown nested keys, private
+  dictionaries/lists hidden in token counters, null nested metadata and boolean
+  token counts fail closed. Eight synthetic nested/leaf corruptions exercise
+  the actual publication scanner with benign text that does not match any
+  secret pattern. Valid null top-level usage for discovery/incomplete responses
+  remains allowed; the clean frozen snapshot still passes.
+- **D1:** `generated/cost-per-task-table.png` and `.md` are produced by the same
+  analysis command from the same derived rows, with full-precision `.json`/`.csv`
+  companions. There are **10 rows in three explicitly separate populations**:
+  five clean-16, four full-24, one Codex-full-4. Columns are observed USD/task,
+  two labelled counterfactual estimates and logged passed/n counts. No historical
+  adjusted Codex cost/ratio, current ranking or quality-parity claim is included.
+  Regeneration parses the exported Markdown numeric cells and checks them against
+  exported JSON at the six-place USD rounding tolerance; deliberate wrong costs,
+  pass/sample counts and population headings are rejected by regression tests.
+  The kit README displays graph plus table graphic with the accessible Markdown
+  link immediately next to the graph. Root README integration remains external.
+- **D2:** graphs use vertically stacked panels, larger type, no tiny rotated
+  numeric labels, distinct hatches and dark bar/stack boundaries. Graph numbers
+  are readable in the companion table instead of tiny bar-label glyphs. Observed,
+  historical-cold and cross-run-cold fills have **9.11 / 4.76 / 5.02** contrast
+  ratios against white. Stack boundaries have **at least 12.48:1** contrast with
+  each adjacent fill. Every estimate/component has a distinct solid/pattern
+  encoding; hue is not the sole distinguishing signal.
+
+Actual PNGs were opened using the image reader, then resized to **exactly 861 px
+wide** and opened again: graph 861×963, components 861×786, table 861×792.
+No titles, legends, counts, numbers or footnotes clip; all remain readable.
+`figure_geometry.json` records **37 / 33 / 73** text artists respectively, minimum
+font sizes at 861 CSS px of **13.916 / 13.916 / 13.884 px**, no canvas overflow,
+no tick/legend overlap, and no table text overlap. The producer gates every
+visible text artist at **≥12 CSS px** at this embed width. Smaller screens should
+use the selectable Markdown table. Numeric parity, not cross-platform pixel
+identity, remains the reproducibility acceptance criterion.
+
+The targeted suite now has **16 passing tests** (the prior 12 plus four direct
+regression tests); all historical numeric fields and reconciliation totals still
+pass. Seven CSV exports, including the new table, use LF only. Manifests and the
+privacy scan were refreshed. The versioned archive is
+**`harness-cost-kit-review-r1-remediation.zip`**; older archives were left untouched
+and are superseded. Because the new table files intentionally remain unstaged,
+packaging uses a fresh standalone manifest-only copy, then extraction verifies
+all members, regenerated numerical outputs, the table, and all 16 tests with
+network connections disabled for the analysis. The checkout builder's normal
+tracked-file gate remains unchanged; the coordinator can rebuild there after
+staging the unified remediation. This implementation evidence is not a claim
+that the independent design re-review has already signed off.
+
 ## Publication hardening follow-up (integration round 2)
 
 Integration found two defects before any successful push: an offline dummy

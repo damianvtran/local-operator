@@ -31,6 +31,23 @@ It fails on population, duplicate, missing-value, per-call/per-run reconciliatio
 or numerical-parity discrepancies; checks are active under `python -O` too.
 Use `--out /chosen/output` or `--snapshot /chosen/snapshot` if needed.
 
+## Readable cost graph and companion table — exploratory v1
+
+![Exploratory observed model costs and counterfactual cold estimates, with separate clean-16, full-24 and Codex-full-4 populations](generated/fig1-cost-per-task.png)
+
+**[Accessible, selectable cost-per-task table (Markdown)](generated/cost-per-task-table.md)**
+— the same derived values and pass/sample counts as the graph, with observed
+USD/task separated from both counterfactual cold estimates. No current ranking
+or quality-parity claim is supported. No historical adjusted Codex cost is shown.
+
+![Exploratory cost-per-task table graphic with observed and counterfactual USD/task plus logged pass counts for each separate population](generated/cost-per-task-table.png)
+
+The graphs and table use text of at least 12 CSS pixels when embedded at 861 CSS
+pixels wide, with source geometry checks (current minimum exceeds 13.8 px).
+Hatching and dark boundaries distinguish estimates/components without color
+alone. Smaller widths should use the accessible Markdown table rather than
+shrinking the numeric graphic.
+
 `generated/` contains:
 
 - `results.json` / `.csv`: 180 rep-0 rows, raw model costs, scores, cold estimates,
@@ -45,7 +62,13 @@ Use `--out /chosen/output` or `--snapshot /chosen/snapshot` if needed.
 - `fig1-cost-per-task.png`: observed and both counterfactual cold estimates,
   clean and full arms, separate Codex panel;
 - `fig2-why-costs-differ.png`: complete observed cost-component stacks;
-- `figure_geometry.json`: rendered text-versus-canvas bounds, clipping gate.
+- `cost-per-task-table.png` / `.md`: readable graphic and accessible numeric
+  table, separating clean-16/full-24/Codex-full-4; observed costs, counterfactuals
+  and pass/sample counts from the same derived rows;
+- `cost-per-task-table.json` / `.csv`: full-precision source rows for that table;
+  Markdown numeric cells are checked against this JSON during regeneration;
+- `figure_geometry.json`: text-versus-canvas bounds, table overlap gate,
+  861-CSS-pixel font measurements, and pattern/boundary-contrast evidence.
 
 All machine-readable money is **USD**, not cents. All token counts are tokens,
 not bytes. Float comparisons use absolute tolerance $1e-10 / relative 1e-11;
@@ -91,6 +114,23 @@ not validated by reproducing these v1 numbers. A new public loadout is included
 for transparent methods, not as a byte-matched v1 replacement or a measured v2
 result. No v2 harness runs are performed by this kit.
 
+## Experimental live-rerun methods — not yet qualified
+
+The separate [experimental methods directory](experimental/README.md) contains
+seven-harness configuration tooling, Codex's model catalog/tool-search bridge,
+a guarded metering proxy, a candidate cache-isolation adapter, opt-in pinned
+OSWorld fixture fetching/evaluation, and Terminal-Bench/Harbor drivers. Its
+[verification record](experimental/VERIFICATION.md) distinguishes offline tests
+from native/live runs that remain unverified.
+
+**This is not a completed expanded benchmark.** The preregistration is a draft;
+task eligibility, full runtime/tool exposure, conservative hosted-classifier
+billing reservations, and coding pilots remain gates. In particular, the public
+runner refuses paid Local Operator execution until its Radient classifier
+reservation is qualified; it does not silently disable recommendations. A
+reproducer supplies their own `lop login radient` session—no token is included.
+These scripts neither run during zero-spend analysis nor establish quality parity.
+
 ## Public loadout (optional; not used for analysis)
 
 `public_loadout/` carries 493 OSS MCP tool schemas, neutral instructions, pinned
@@ -113,7 +153,7 @@ under `v1-snapshot/` solely for numerical parity; it is not an endorsed report.
 
 ```sh
 python3 publication.py scan       # verify checksums + bounded secret/PII scan
-python3 publication.py zip --output /chosen/path/harness-cost-kit-publication-r2.zip
+python3 publication.py zip --output /chosen/path/harness-cost-kit-review-r1-remediation.zip
 ```
 
 In Git, the ZIP builder refuses inventory members not yet tracked. The
@@ -121,10 +161,14 @@ coordinator must stage/review this new folder first; it never stages files,
 commits, or opens PRs. Outside Git, the verified manifest is the package
 allowlist. ZIP members have normalized timestamps, contain only this kit,
 and never include `.git`, environments, caches, fetched skills or extra files.
-An existing ZIP is not overwritten. The current checked archive is
-`harness-cost-kit-publication-r2.zip`; any older `harness-cost-kit.zip` is
+An existing ZIP is not overwritten. While the parallel experimental port is
+active, global manifests/ZIPs remain provisional; the coordinator must refresh
+them once all files are frozen. The core-remediation snapshot archive is
+`harness-cost-kit-review-r1-remediation.zip`; any older `harness-cost-kit.zip` is
 obsolete and must not be distributed (it predates the invocation-metadata
-privacy and CSV-LF fixes). Maintainers who intentionally change files
+privacy and CSV-LF fixes). The intermediate publication-r2 archive is also
+superseded by the review-r1-remediation archive, which adds accessible tables,
+readable patterned figures and recursive metering metadata validation. Maintainers who intentionally change files
 run `python3 publication.py manifest` after scanning/review and regenerate it
 again after updating evidence. The manifest excludes its own two control files
 to avoid circular hashes; SHA256SUMS includes MANIFEST.json. Regeneration on a
@@ -134,7 +178,7 @@ metadata without changing numerical results. Verify the distributed manifest
 `python3 publication.py manifest` again before `zip`.
 
 Run `TMPDIR=/chosen/scratch .venv/bin/python test_kit.py` for the bounded
-regression/negative controls (12 tests, no additional dependencies).
+regression/negative controls (16 tests, no additional dependencies).
 
 See [REPRODUCTION.md](REPRODUCTION.md) for the kit-only extraction test,
 negative controls, actual reconciliations and rendered-frame checks. Numerical
