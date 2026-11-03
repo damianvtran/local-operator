@@ -4,14 +4,23 @@ Status: **PROPOSED — POC for peer review, not for merge.** Base: `origin/main`
 (v0.95.2). Branch: `poc/session-rules-b`. Date: 2026-11-03.
 
 Everything here is behind `LOP_SESSION_RULES=1`. With the variable unset, the session reads and
-writes no `rules.json`, and every system block is byte-identical to `origin/main`. The flag-off
+writes no `rules.json`, and every system block is byte-identical to `origin/main`. The single
+flag-off-visible change is listed in §9. The flag-off
 proof and every run log are in the PR comments, not in this tree (AGENTS.md "Evidence goes on
 the PR").
 
 ## 1. Recommendation
 
-**Yes, add rules as a thin native primitive.** But the measured failure is mostly about
-*capture*, not storage, so the primitive is only worth graduating together with a capture path.
+**Yes, add rules as a thin native primitive.** This is a product judgement informed by the
+evidence below, not a result the evidence proves on its own. What the evidence does show:
+
+- the memory/decisions path is the wrong instrument for standing rules, because it is untrusted by
+  design and rarely read back;
+- with one cheap model and one rule type, a tail `<rules>` section followed every edit, removal,
+  restart and compaction, while the same rule held in block 0 followed edits only 1 time in 3.
+
+Most standing instructions in the scan were never written anywhere the scan could see. So the
+primitive is only worth graduating together with a capture path.
 
 - **Do not reuse memory/decisions for this.** Memory is untrusted by design
   (`guides/memory/GUIDE.md:20`; the only ambient injection is a ≤180-token block headed
@@ -32,7 +41,7 @@ calls. The script is attached to the PR.
 
 | Measure | Value |
 |---|---|
-| operator turns phrased as standing instructions (`always`, `never`, `from now on`, …) | 515 turns in 363 sessions |
+| user-role turns matching a broad standing-instruction regex (`always`, `never`, `from now on`, …) — **an upper bound, not hand-sampled; it includes agent-written briefs in delegated sessions** | 515 turns in 363 sessions |
 | of those 363 sessions, how many ever called `memory store` | **12** |
 | `memory store` calls / `memory recall` calls (all sessions) | 63 / 33 |
 | sessions that stored something / of those, how many later recalled anything | 13 / **6** |
@@ -41,15 +50,17 @@ calls. The script is attached to the PR.
 
 A standing instruction can be lost at three points. The data separates them:
 
-1. **Never captured.** This is the dominant loss. Operators state rules in chat 515 times, and
-   in 351 of the 363 sessions nothing writes them anywhere durable or listable.
-2. **Captured but not read back.** 7 of the 13 storing sessions never recall. Reads cluster at
-   compaction boundaries, as a hand-off write or a recovery read, not as a standing reference.
+1. **Never captured.** 351 of the 363 matching sessions made no `memory store` call. The scan
+   does not see other durable homes (an AGENTS.md edit, `/goal`, a todo, an external task), so
+   this is an upper bound on loss, and the largest one the data can show.
+2. **Captured but not read back.** 7 of the 13 storing sessions never recall, and the median gap
+   to the next recall where one happened is about 970 tool calls. The scan does not show that
+   recalls cluster at compaction: only 3 of 33 recalls fall within 20 tool calls of one.
 3. **Read back but not obeyed.** The store cannot answer this: recalled text is labelled
    untrusted, so it carries no instruction weight by construction.
 
-So the store does decay. More than that, it is the wrong instrument for rules. Fixing recall
-frequency would not help with point 1 or point 3.
+So the store is used rarely and read back less. More importantly, it is the wrong instrument
+for rules. Fixing recall frequency would not help with point 1 or point 3.
 
 ## 3. What a rule is (vs its neighbours)
 
@@ -137,18 +148,28 @@ restart and then two forced compaction passes.
 |---|---|---|---|
 | rule followed (t1, t2) | marker 0/6 | 6/6 | **6/6** |
 | edited mid-session → next turns follow the new text (t4, t5) | — | **2/6** (kept the old marker) | **6/6** |
-| removed → stops (t6) | — | **0/3** (marker kept) | **3/3** |
+| removed → stops (t6)¹ | — | **0/3** (a marker kept) | **3/3** |
 | re-added + process restart (t7, t8) | — | 2/6 | **6/6** |
 | after forced compaction (t9, t10) | — | 4/6 | **6/6** |
-| operator says "no sign-off this time" (t3, recorded, not scored) | — | rule kept 3/3 | rule yielded 3/3 |
+| operator says "no sign-off this time" (t3, recorded, not scored)² | — | rule kept 3/3 | rule yielded 3/3 |
 
-**Why the block-0 alternative failed edits.** The transcripts show its system prefix *was*
-re-frozen with the new text on the edit turn: a `system_prefix` entry carrying `-- R2`, and the
-first edit costing a cold cache. The model nevertheless kept repeating the pattern in its own
-history. In the tail arm the edit arrives as an explicit `## Rules` `[session-state]` message in
-the conversation, and the model switched every time. One reply on removal said: "No sign-off
-line — the standing rule was removed from this session's state". **Announcing the change is
-what makes an edit stick, not where the rule lives.**
+¹ The harness's own check on t6 was `absent:R2`, which false-passes a stale `-- R1` line. The
+block-0 replies end `-- R1`, `-- R1`, `-- R2`, so none stopped. The matrix attached to the PR is
+re-scored as "no marker of any kind".
+² The raw harness output marks t3 PASS for block 0 because the marker was present. It is a
+precedence probe, not a pass/fail check (§8.1).
+
+**Why the block-0 alternative failed edits (a hypothesis).** The transcripts show its system
+prefix *was* re-frozen with the new text on the edit turn: in all three repeats a
+`system_prefix` entry carries `-- R2`. In 2 of 3 repeats the model kept repeating the old marker
+from its own history anyway. In the tail arm the edit arrives as an explicit `## Rules`
+`[session-state]` message in the conversation, and the model switched every time. One reply on
+removal said: "No sign-off line — the standing rule was removed from this session's state".
+
+The data are *consistent with* "an announced change sticks better than a silently rewritten
+system prompt". They do not isolate it. The two arms differ in placement and in announcement at
+once, and no arm tested an announced block-0 change or a tail change with no delta. N=3, one
+model.
 
 **Compaction.** Rules live in a system block, which is never summarised. After the compaction
 pass, the re-anchoring delta re-shipped `rules` alongside `knowledge` and `memory_hint`, as seen
@@ -163,10 +184,16 @@ in the transcript state trail.
   - An edit re-ships the whole section once (`{'3': ['rules']}`), and that delta then stays in
     history until compaction.
 - **Live measurement**, paired turn by turn against the control:
-  - Median +254 input tokens per turn (range +83..+610).
-  - That figure includes the longer replies the rule itself causes, and the accumulated deltas.
-  - The median uncached delta is −5 tokens. 0 of 30 tail turns ran cold, against 1 of 30 for
-    the block-0 alternative, whose edit restarted the cache.
+  - Tail: median +254 input tokens per turn (range +83..+610).
+  - Block-0 alternative: median +108 (range −277..+342).
+  - Both figures include the longer replies the rule itself causes. The tail figure also includes
+    the accumulated `[session-state]` deltas.
+  - Median uncached delta: −5 (tail) and −14 (block 0), so caching absorbs almost all of it in
+    both arms.
+  - One block-0 edit turn ran cold (repeat 1, t4: 2,560 of 19,540 tokens from cache). The other
+    two repeats did not, and no tail turn did. One event is not evidence of a cache advantage.
+    The structural point is still real: a block-0 edit starts a new prefix epoch
+    (`session.py:6729`), and a tail edit does not.
 
 ## 7. Limits of this evidence
 
@@ -211,4 +238,12 @@ in the transcript state trail.
   it.
 - Decide §8.1 and encode it in the rendered text.
 - Make `rules.json` non-writable by model tools: the POC accepts that `bash` can rewrite it.
+- Surface a voided `rules.json` to the operator and the model. The POC only logs a warning, so a
+  rejected file silently stops binding.
+- Lock read-modify-write in the CLI. Only the final replace is atomic today, so two concurrent
+  `add` calls can lose one update.
+- Decide on the delta splitter. Registering `<rules>` in `_TAIL_SECTION_MARKERS` applies even
+  with the flag off, so a knowledge paragraph that starts `<rules>` would be split into a
+  `## Rules` delta. It round-trips byte-for-byte, and no shipped guide or skill contains one,
+  but it is the one flag-off-visible change. `<goal>` sets the precedent.
 - Optionally, add deterministic pre-dispatch checks for rules that a machine can check.
