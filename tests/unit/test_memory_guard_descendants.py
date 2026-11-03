@@ -85,11 +85,12 @@ def test_libproc_wrappers_disagree_by_exactly_sizeof_int():
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         lib = resources._darwin_libproc()
+        assert lib is not None
         buf = (ctypes.c_int * 64)()
         nbytes = lib.proc_listpids(resources._PROC_PPID_ONLY, os.getpid(), buf, ctypes.sizeof(buf))
         count = lib.proc_listchildpids(os.getpid(), buf, ctypes.sizeof(buf))
         assert nbytes == count * ctypes.sizeof(ctypes.c_int) and count >= 1
-        assert child.pid in resources._darwin_child_pids(os.getpid())
+        assert child.pid in (resources._darwin_child_pids(os.getpid()) or [])
     finally:
         child.kill()
         child.wait()
@@ -169,8 +170,10 @@ def test_an_unreadable_live_descendant_fails_closed_after_the_streak(monkeypatch
         monkeypatch=monkeypatch,
     )
     decisions = []
-    for _ in range(mg.UNACCOUNTED_TICK_LIMIT):
-        sample = guard.sample_sync()
+    sample = guard.sample_sync()
+    for tick in range(mg.UNACCOUNTED_TICK_LIMIT):
+        if tick:
+            sample = guard.sample_sync()
         assert sample.unaccounted and "900" in sample.unaccounted
         decisions.append(guard.should_kill(sample))
     # Never read as zero: below the streak it is reported, at the streak it kills.

@@ -493,10 +493,7 @@ def direct_descendant_pids(roots: Iterable[int]) -> dict[int, int] | None:
         children: dict[int, list[int]] = {}
         for pid, ppid in parents.items():
             children.setdefault(ppid, []).append(pid)
-
-        def kids(pid: int) -> list[int] | None:
-            return children.get(pid, [])
-
+        kids = lambda pid: children.get(pid, [])  # noqa: E731 — one /proc scan, many lookups
     elif sys.platform == "darwin":
         kids = _darwin_child_pids
     else:
