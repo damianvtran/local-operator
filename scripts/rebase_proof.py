@@ -33,6 +33,13 @@ MECHANICAL — and the rebased head fails at import (reproduced by review R1-2
 and QA Q3). The proof is file-level by design; green CI on the REBASED head is
 the guard for this class, which is why merge-time CI stays required.
 
+Merge-of-main updates (GitHub's "Update branch", ``git merge origin/main``)
+are covered too, with the same command: range-diff skips the merge commit, the
+patch comparison against the new merge-base catches any PR content smuggled in
+through the merge resolution, and the overlap check is unchanged. A MECHANICAL
+merge-of-main keeps prior clean rounds fresh exactly as a rebase does
+(``guide://delivery``, review economy) — tests pin both shapes.
+
 The old head is usually gone from the branch after a force-push; fetch it by
 SHA first (``git fetch origin <old-sha>``) — GitHub serves PR heads by SHA.
 After the PR has MERGED, ``origin/main`` already contains the new head, so its

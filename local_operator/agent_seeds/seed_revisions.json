@@ -518,6 +518,16 @@
         "effort": "default",
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "d0e744e487df709cff3522409713f798519705dd",
+        "version": "1.3.6",
+        "instructions_sha256": "3300a619189b352f64ec75a59ce90434961fb5312fdcd750e712e489d1d3f796",
+        "description": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
+        "tools": null,
+        "effort": "default",
+        "delegate": false,
+        "class": null
       }
     ],
     "copy-reviewer": [
@@ -737,6 +747,16 @@
         "sha": "6d4eb95824178b1df5b62d7e2d6951a54ba34675",
         "version": "1.5.8",
         "instructions_sha256": "d66e01775b0002d739da5f36b2ef2cfdb7ca43c553235c42b03a99d25bd4c413",
+        "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "d0e744e487df709cff3522409713f798519705dd",
+        "version": "1.5.9",
+        "instructions_sha256": "75526ed0abcf858771c224bde74420bb72efc138323e28bd3652f7e86e98f5b3",
         "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
         "tools": null,
         "effort": null,
@@ -1163,6 +1183,27 @@
         "effort": null,
         "delegate": true,
         "class": null
+      },
+      {
+        "sha": "d0e744e487df709cff3522409713f798519705dd",
+        "version": "1.6.9",
+        "instructions_sha256": "ca6de3f6504353c6a175c18367b277885c9cbcc552b4ebea3ed855327b4303db",
+        "description": "Coordinating and tracking multi-part work across several agents or repositories, chasing what is blocked, or producing a status roll-up or progress report.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": true,
+        "class": null
       }
     ],
     "qa-tester": [
@@ -1275,6 +1316,48 @@
         "sha": "6d4eb95824178b1df5b62d7e2d6951a54ba34675",
         "version": "1.0.5",
         "instructions_sha256": "c312e0044676f3c3e57334f0ff858394a320478c850a9aa977f0c5bb5188dc58",
+        "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch",
+          "browser"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "d0e744e487df709cff3522409713f798519705dd",
+        "version": "1.0.6",
+        "instructions_sha256": "5de353c7e6827e31a5bae5c541a1337b5e07fc6aebe251d8c3d51e45dee2bf53",
+        "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch",
+          "browser"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "e9812b4f7ceb978ffe602f032807abf62130ce9f",
+        "version": "1.0.7",
+        "instructions_sha256": "ad00ec39d45743cbde7af7d104263b089654920d57f47e2dfe1903cfeda7b99d",
         "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
         "tools": [
           "read",
@@ -1620,6 +1703,48 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "d0e744e487df709cff3522409713f798519705dd",
+        "version": "1.3.11",
+        "instructions_sha256": "2bdf02ad0ac042cfb3709e24ac6daf5443ef6c395075969a173af8be6d3c6bcc",
+        "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "e9812b4f7ceb978ffe602f032807abf62130ce9f",
+        "version": "1.3.12",
+        "instructions_sha256": "1ba24383270100ba89adbc455767cf4b68ebeda726a8fb365ebcdbf57edb9abd",
+        "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "scout": [
@@ -1946,6 +2071,16 @@
         "sha": "6d4eb95824178b1df5b62d7e2d6951a54ba34675",
         "version": "1.4.8",
         "instructions_sha256": "f536fbed18459532c67798eb368a1c64cabf93a8046ffd38be37e66359e78367",
+        "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "d0e744e487df709cff3522409713f798519705dd",
+        "version": "1.4.9",
+        "instructions_sha256": "4db04ed0ae4aec1a41d916f1320c2f461f80a583705591a76c9d6b9e6421f82e",
         "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
         "tools": null,
         "effort": null,
