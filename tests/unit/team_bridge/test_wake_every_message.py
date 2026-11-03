@@ -447,11 +447,10 @@ def test_the_ten_minute_rate_window_holds_sixty(tmp_path: Path) -> None:
     assert refused.retry_after_s == int(now + reply_guard.RATE_LONG_WINDOW_S - when + 0.999)
 
 
-def test_a_duplicate_body_is_refused_for_ten_minutes(tmp_path: Path) -> None:
+def test_a_duplicate_with_nothing_new_since_is_refused_for_ten_minutes(tmp_path: Path) -> None:
     now = 1_000_000.0
     _trigger(tmp_path, "agent", now)
     assert isinstance(_reserve(tmp_path, now, body="Thanks!"), reply_guard.Reservation)
-    _trigger(tmp_path, "agent", now + 30)
     # Case and whitespace do not make it a different post.
     refused = _reserve(tmp_path, now + 30, body="  thanks!\n")
     assert isinstance(refused, reply_guard.Refusal) and refused.code == reply_guard.CODE_DUPLICATE
@@ -459,19 +458,102 @@ def test_a_duplicate_body_is_refused_for_ten_minutes(tmp_path: Path) -> None:
     assert isinstance(_reserve(tmp_path, now + 30, body="Thanks, done."), reply_guard.Reservation)
 
 
-def test_only_a_hash_of_the_body_is_stored(tmp_path: Path) -> None:
+def test_the_same_answer_to_a_new_agent_request_is_admitted(tmp_path: Path) -> None:
+    """Round 1, M1 (reviewer's reproduction): an approval relay must not wait.
+
+    Agent B asks twice, two minutes apart; A answers ``Approved.`` both times.
+    The head under review refused the second with ``retry_after_s=480``.
+    """
+
+    now = 1_000_000.0
+    _trigger(tmp_path, "agent", now)
+    assert isinstance(_reserve(tmp_path, now + 5, body="Approved."), reply_guard.Reservation)
+    _trigger(tmp_path, "agent", now + 120)
+    second = _reserve(tmp_path, now + 125, body="Approved.")
+    assert isinstance(second, reply_guard.Reservation), second
+
+
+def test_a_third_identical_answer_inside_the_window_is_the_loop(tmp_path: Path) -> None:
+    """ "Thanks!" / "You're welcome!" still ends, on its third turn (M1)."""
+
+    now = 1_000_000.0
+    for index in range(2):
+        _trigger(tmp_path, "agent", now + 20 * index)
+        assert isinstance(
+            _reserve(tmp_path, now + 20 * index, body="Thanks!"), reply_guard.Reservation
+        )
+    _trigger(tmp_path, "agent", now + 40)
+    refused = _reserve(tmp_path, now + 40, body="thanks!")
+    assert isinstance(refused, reply_guard.Refusal) and refused.code == reply_guard.CODE_DUPLICATE
+    # Admitted once fewer than two copies remain: the first ages out at +600.
+    assert refused.retry_after_s == int(reply_guard.DUPLICATE_WINDOW_S) - 40
+    assert isinstance(_reserve(tmp_path, now + 600, body="thanks!"), reply_guard.Reservation)
+
+
+def test_only_a_keyed_digest_of_the_body_is_stored(tmp_path: Path) -> None:
+    """Round 1, S-3: a plain SHA-256 of "approved" is a dictionary lookup."""
+
     import sqlite3
+    import stat
 
     _trigger(tmp_path, "agent", 1.0)
-    _reserve(tmp_path, 1.0, body="secret approval text")
+    _reserve(tmp_path, 1.0, body="approved")
+    key = reply_guard.key_path(tmp_path).read_bytes()
+    assert len(key) == 32
+    assert stat.S_IMODE(reply_guard.key_path(tmp_path).stat().st_mode) == 0o600
     conn = sqlite3.connect(reply_guard.guard_path(tmp_path))
     try:
         rows = conn.execute("SELECT body_hash FROM posts").fetchall()
         dump = "\n".join(conn.iterdump())
     finally:
         conn.close()
-    assert rows == [(reply_guard.body_hash("secret approval text"),)]
-    assert "secret approval text" not in dump
+    assert rows == [(reply_guard.body_hash("approved", key=key),)]
+    assert hashlib.sha256(b"approved").hexdigest() not in dump
+    assert "approved" not in dump
+    # Each install draws its own key, so equal bodies do not match across files.
+    other = tmp_path / "other"
+    _trigger(other, "agent", 1.0)
+    _reserve(other, 1.0, body="approved")
+    assert reply_guard.key_path(other).read_bytes() != key
+
+
+def test_an_unusable_digest_key_fails_closed(tmp_path: Path) -> None:
+    reply_guard.key_path(tmp_path).parent.mkdir(parents=True)
+    reply_guard.key_path(tmp_path).write_bytes(b"short")
+    with pytest.raises(reply_guard.ReplyGuardUnavailable):
+        _reserve(tmp_path, 1.0, body="hello")
+    reply_guard.key_path(tmp_path).unlink()
+    reply_guard.key_path(tmp_path).mkdir()  # unreadable as a file
+    with pytest.raises(reply_guard.ReplyGuardUnavailable):
+        _reserve(tmp_path, 1.0, body="hello")
+
+
+def test_the_digest_key_survives_a_creation_race(tmp_path: Path) -> None:
+    """Eight processes create the key at once: one key, every digest agrees."""
+
+    import subprocess
+    import sys
+
+    start = time.time() + 2.0
+    script = (
+        "import sys, time\n"
+        "from local_operator.team_bridge import reply_guard\n"
+        "while time.time() < float(sys.argv[2]): pass\n"
+        "print(reply_guard._digest_key(sys.argv[1]).hex())\n"
+    )
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(tmp_path), str(start)],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(8)
+    ]
+    keys = {proc.communicate(timeout=60)[0].strip() for proc in procs}
+    assert all(proc.returncode == 0 for proc in procs)
+    assert keys == {reply_guard.key_path(tmp_path).read_bytes().hex()}
+    leftovers = [p.name for p in reply_guard.key_path(tmp_path).parent.iterdir()]
+    assert leftovers == ["reply_guard.key"], "no temp file is left behind"
 
 
 def test_a_person_may_get_the_same_answer_after_asking_again(tmp_path: Path) -> None:
@@ -594,6 +676,155 @@ def test_an_unreadable_guard_fails_closed(tmp_path: Path) -> None:
     (tmp_path / "team_bridge").write_text("not a directory")
     with pytest.raises(reply_guard.ReplyGuardUnavailable):
         _reserve(tmp_path, 1.0)
+
+
+def test_the_unavailable_refusal_keeps_the_draft_too() -> None:
+    """Round 1, m3: the fail-closed arm is a retryable refusal, not a drop."""
+
+    result = reply_guard.unavailable_result()
+    assert result["ok"] is False and result["code"] == reply_guard.CODE_UNAVAILABLE
+    assert result["retry_after_s"] == reply_guard.UNAVAILABLE_RETRY_S
+    assert "Keep your draft" in result["next"]
+    assert f"{reply_guard.UNAVAILABLE_RETRY_S}s" in result["error"]
+
+
+def test_retry_after_is_a_true_ceiling_for_fractional_delays(tmp_path: Path) -> None:
+    """Round 1, m2: 290.0004 s must read 291, or a retry on time is refused."""
+
+    now = 1_000_000.0
+    _trigger(tmp_path, "agent", now)
+    for offset in (0.0004, 1.0, 2.0):
+        assert isinstance(
+            _reserve(tmp_path, now + offset, body=f"p{offset}"), reply_guard.Reservation
+        )
+    refused = _reserve(tmp_path, now + 10, body="late")
+    assert isinstance(refused, reply_guard.Refusal)
+    assert refused.retry_after_s == 291
+    assert isinstance(_reserve(tmp_path, now + 10 + 290, body="late"), reply_guard.Refusal)
+    assert isinstance(_reserve(tmp_path, now + 10 + 291, body="late"), reply_guard.Reservation)
+
+
+def test_the_hourly_agent_ceiling_ends_a_model_speed_loop(tmp_path: Path) -> None:
+    """Round 1, S-1: every post answers a NEW agent message, 25 s apart.
+
+    Neither the per-inbound rule (always fresh) nor the rate rules (2.4/min,
+    24/10 min) can bind, so on a hub without a wake brake only this ceiling
+    ends the loop. A new inbound message does not reset it.
+    """
+
+    now = 1_000_000.0
+    step = 25.0
+    for index in range(reply_guard.AGENT_HOURLY_POSTS):
+        when = now + step * index
+        _trigger(tmp_path, "agent", when)
+        slot = _reserve(tmp_path, when, body=f"reply {index}")
+        assert isinstance(slot, reply_guard.Reservation), (index, slot)
+    when = now + step * reply_guard.AGENT_HOURLY_POSTS
+    _trigger(tmp_path, "agent", when)
+    refused = _reserve(tmp_path, when, body="reply 120")
+    assert isinstance(refused, reply_guard.Refusal)
+    assert refused.code == reply_guard.CODE_AGENT_HOURLY
+    # Honest: the oldest slot (t=0) leaves the 60-minute window at t=3600.
+    assert refused.retry_after_s == int(now + reply_guard.AGENT_HOURLY_WINDOW_S - when)
+    assert isinstance(
+        _reserve(tmp_path, now + reply_guard.AGENT_HOURLY_WINDOW_S + 1, body="later"),
+        reply_guard.Reservation,
+    )
+
+
+def test_the_hourly_ceiling_never_counts_or_blocks_answers_to_a_person(tmp_path: Path) -> None:
+    import sqlite3
+
+    now = 1_000_000.0
+    path = reply_guard.guard_path(tmp_path)
+    _reserve(tmp_path, now - 4000, body="init")  # create the file
+    conn = sqlite3.connect(path)
+    try:
+        # A full hour of agent-to-agent posts, spaced so no other rule binds.
+        conn.executemany(
+            "INSERT INTO posts (endpoint_id, conversation_id, at, agent_to_agent) "
+            "VALUES ('bep_a', ?, ?, 1)",
+            [(CONV, now - 3500 + 29 * i) for i in range(reply_guard.AGENT_HOURLY_POSTS)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    _trigger(tmp_path, "agent", now)
+    assert _reserve(tmp_path, now, body="to agent").code == reply_guard.CODE_AGENT_HOURLY
+    # A person writes: the answer is admitted, and it does not spend the ceiling.
+    _trigger(tmp_path, "human", now + 1)
+    slot = _reserve(tmp_path, now + 1, body="to the person")
+    assert isinstance(slot, reply_guard.Reservation) and not slot.agent_to_agent
+
+
+def test_a_human_trigger_exempts_for_ten_minutes_not_thirty(tmp_path: Path) -> None:
+    """Round 1, S-2: one ambient human line no longer opens a 30-minute window."""
+
+    now = 1_000_000.0
+    _trigger(tmp_path, "human", now)
+    later = now + reply_guard.HUMAN_TRIGGER_TTL_S + 1
+    for index in range(reply_guard.PER_INBOUND_POSTS):
+        assert isinstance(
+            _reserve(tmp_path, later + index, body=f"s{index}"), reply_guard.Reservation
+        )
+    refused = _reserve(tmp_path, later + 10, body="s3")
+    assert isinstance(refused, reply_guard.Refusal)
+    assert refused.code == reply_guard.CODE_NO_NEW_INBOUND
+
+
+def test_an_upgrade_race_between_processes_never_fails_closed(tmp_path: Path) -> None:
+    """Round 1, m1: concurrent first opens of an old file both tried the ALTER.
+
+    Eight processes open ten fresh previous-build files in lockstep (one file
+    per 0.4 s slot). Measured on the head under review: about 1 in 15 opens
+    failed with ``duplicate column name: body_hash``. Every open must succeed.
+    """
+
+    import sqlite3
+    import subprocess
+    import sys
+
+    old_schema = (
+        "CREATE TABLE triggers (endpoint_id TEXT NOT NULL, conversation_id TEXT NOT NULL,"
+        " at REAL NOT NULL, sender_kind TEXT NOT NULL, mention INTEGER NOT NULL,"
+        " directed INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (endpoint_id, conversation_id));"
+        "CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint_id TEXT NOT NULL,"
+        " conversation_id TEXT NOT NULL, at REAL NOT NULL, agent_to_agent INTEGER NOT NULL,"
+        " human_prompted INTEGER NOT NULL DEFAULT 0);"
+    )
+    trials = 10
+    for trial in range(trials):
+        path = reply_guard.guard_path(tmp_path / f"t{trial}")
+        path.parent.mkdir(parents=True)
+        conn = sqlite3.connect(path)
+        conn.executescript(old_schema)
+        conn.close()
+    start = time.time() + 2.0
+    script = (
+        "import sys, time\n"
+        "from local_operator.team_bridge import reply_guard\n"
+        "root, start, trials, me = sys.argv[1], float(sys.argv[2]), int(sys.argv[3]), sys.argv[4]\n"
+        "failures = 0\n"
+        "for trial in range(trials):\n"
+        "    while time.time() < start + 0.4 * trial: pass\n"
+        "    try:\n"
+        "        reply_guard.reserve_post(f'{root}/t{trial}', endpoint_id=me,\n"
+        "            conversation_id='bcv_race', body=None)\n"
+        "    except reply_guard.ReplyGuardUnavailable:\n"
+        "        failures += 1\n"
+        "print(failures)\n"
+    )
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(tmp_path), str(start), str(trials), f"bep_{n}"],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        for n in range(8)
+    ]
+    failures = [int(proc.communicate(timeout=120)[0].strip()) for proc in procs]
+    assert all(proc.returncode == 0 for proc in procs)
+    assert sum(failures) == 0, failures
 
 
 # -- the shared multi-message rig ------------------------------------------------
@@ -1006,15 +1237,23 @@ def test_a_post_the_hub_refuses_does_not_spend_budget(
 
 
 def _converse(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, caps: bool, rounds: int = 60
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    caps: bool,
+    rounds: int = 60,
+    step: float = 5.0,
+    varied: bool = False,
 ) -> tuple[Hub, list[dict[str, Any]], list[dict[str, Any]]]:
     """Drive two "reply to every wake" agents until the conversation goes quiet.
 
     Each round: every agent's connector runs one real iteration (feed →
     screen → admit → coalesced card); every card it received becomes ONE
     ``channel_post`` through the real bridge tool (the guard decides whether
-    it lands). A refusal is the agent ending its turn with no_reply. The
-    clock advances 5 s per round so coalescing windows elapse.
+    it lands). A refusal is the agent ending its turn. The clock advances
+    ``step`` seconds per round so coalescing windows elapse. ``varied`` gives
+    every post its own text, the way model replies differ, so no duplicate
+    rule can be what ends the loop.
     """
 
     clock = Clock()
@@ -1037,10 +1276,11 @@ def _converse(
         new = wakes[before:]
         for wake in new:
             name = wake["endpoint"].removeprefix("bep_")
-            outcome = _post(runtimes[name], body=f"{name} answering")
+            body = f"{name} answering #{len(hub.agent_posts())}" if varied else f"{name} answering"
+            outcome = _post(runtimes[name], body=body)
             if not outcome["ok"]:
                 refusals.append(outcome)
-        clock.now += 5.0
+        clock.now += step
         if not new and not any(hub.feeds.values()):
             break
     else:
@@ -1066,16 +1306,40 @@ def test_two_reply_to_everything_agents_stop_on_the_client_guard_alone(
 ) -> None:
     """An OLD hub fans every message out to every agent. The client guard
     must end it: a loop that repeats itself ("a answering" every turn) is
-    refused as a duplicate on its second identical post per agent."""
+    refused as a duplicate on its third identical post per agent (M1: the
+    second answers a new message and is admitted)."""
 
     hub, wakes, refusals = _converse(tmp_path, monkeypatch, caps=False)
     posts = hub.agent_posts()
     per_agent = {e: sum(1 for m in posts if m.sender_endpoint == e) for e in ("bep_a", "bep_b")}
     for endpoint, count in per_agent.items():
-        assert count <= 1, per_agent
+        assert count <= 2, per_agent
     assert refusals, "the guard, not luck, ended it"
     assert {r["code"] for r in refusals} == {reply_guard.CODE_DUPLICATE}
     print(f"\ncaps off: {per_agent}, {len(wakes)} wakes, refusals={[r['code'] for r in refusals]}")
+
+
+def test_a_varied_text_loop_ends_on_the_hourly_ceiling_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 1, S-1 / n1: two agents, an old hub, every reply different.
+
+    12 s per round, so each agent answers every 24 s: under both rate rules,
+    always a new inbound, never a duplicate. Only the hourly agent-to-agent
+    ceiling can end it, and it must.
+    """
+
+    hub, wakes, refusals = _converse(
+        tmp_path, monkeypatch, caps=False, rounds=400, step=12.0, varied=True
+    )
+    posts = hub.agent_posts()
+    per_agent = {e: sum(1 for m in posts if m.sender_endpoint == e) for e in ("bep_a", "bep_b")}
+    # One human-prompted opening post each, then the hourly ceiling.
+    for endpoint, count in per_agent.items():
+        assert count <= 1 + reply_guard.AGENT_HOURLY_POSTS, per_agent
+    assert refusals, "the guard, not luck, ended it"
+    assert {r["code"] for r in refusals} == {reply_guard.CODE_AGENT_HOURLY}, refusals[:3]
+    print(f"\nvaried caps off: {per_agent}, refusals={[r['code'] for r in refusals]}")
 
 
 # -- the buffered card survives a stop (review round 1, M1) --------------------

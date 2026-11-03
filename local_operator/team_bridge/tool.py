@@ -1077,10 +1077,7 @@ async def _direct_message(
             body=text,
         )
     except reply_guard.ReplyGuardUnavailable:
-        return _error(
-            "the reply guard could not read its state; not posting",
-            code=reply_guard.CODE_UNAVAILABLE,
-        )
+        return reply_guard.unavailable_result()
     if isinstance(slot, reply_guard.Refusal):
         return slot.as_result()
     try:
@@ -1902,12 +1899,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                         body=params.body,
                     )
                 except reply_guard.ReplyGuardUnavailable:
-                    raise DispatchRefused(
-                        _error(
-                            "the reply guard could not read its state; not posting",
-                            code=reply_guard.CODE_UNAVAILABLE,
-                        )
-                    ) from None
+                    raise DispatchRefused(reply_guard.unavailable_result()) from None
                 if isinstance(reserved, reply_guard.Refusal):
                     raise DispatchRefused(reserved.as_result())
                 slot = reserved

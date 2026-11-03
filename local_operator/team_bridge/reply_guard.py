@@ -28,26 +28,50 @@ shapes:
   agents is a post every several seconds at most (each one is a model turn);
   twenty in a minute is two endpoints answering each other as fast as the
   hardware allows.
+* **Hourly agent-to-agent ceiling** (``reply_agent_hourly``) —
+  ``AGENT_HOURLY_POSTS`` (120) posts answering an AGENT per
+  ``AGENT_HOURLY_WINDOW_S`` (60 min), sliding, read from the stored
+  ``agent_to_agent`` column. In a two-agent loop every post answers a new
+  inbound message, so the per-inbound rule never binds, and at model speed
+  (10-30 s a turn) neither rate rule does: without this ceiling such a loop
+  runs for ever on a hub with no wake brake (review round 1, S-1; the dev hub
+  at agent-server 96822331 has none). It is the client's STANDALONE bound. A
+  new inbound message does not reset it, and a post answering a person never
+  counts. 120/h is about two posts a minute sustained, far above any real
+  exchange; the incident's relays and approvals are a handful of posts. It is
+  deliberately not a consecutive-run cool-down: that shape is what the
+  incident removed.
 * **Duplicate body** (``reply_duplicate``) — the same normalized body posted by
   this endpoint in this conversation within ``DUPLICATE_WINDOW_S`` (10 min).
-  Loops repeat themselves ("Thanks!" / "You're welcome!"). Only a SHA-256 of
-  the normalized body is stored, never the body.
+  Loops repeat themselves ("Thanks!" / "You're welcome!"). With no new message
+  since the identical post, the 2nd copy is refused. Once a new message has
+  arrived, the same short answer to a new request is legitimate ("Approved."
+  to two distinct requests, review round 1, M1), so for an agent-prompted post
+  only the 3rd copy inside the window is refused. The stored value is an
+  HMAC-SHA256 under a random per-install key (``reply_guard.key``, 0600, beside
+  the database), never the body: a plain hash of "approved" or "yes" would be
+  recoverable with a small dictionary (review round 1, S-3). Equality within
+  this install is all the rule needs; losing the key only resets the rule.
 * **Absolute floor** (``reply_absolute_cap``) — ``ABSOLUTE_POSTS`` (120) posts
   per conversation per ``ABSOLUTE_WINDOW_S`` (10 min), counting EVERY post.
   Policy above may be wrong; this floor exists so no bug can make one
   conversation an unbounded spend. Distinct code, because the answer differs.
 
 A post that ANSWERS A PERSON (the latest trigger recorded for this conversation
-is human-sent and younger than ``TRIGGER_TTL_S``) is exempt from the first two
-rules: a person talking to their agent must never be throttled, and a person's
-request often legitimately produces several progress posts. Its duplicate check
-is narrower — refused only when no new message has arrived since the identical
-post — so "status?" asked twice can be answered "still running" twice. The
-absolute floor still applies.
+is human-sent and younger than ``HUMAN_TRIGGER_TTL_S``, 10 min) is exempt from
+the per-inbound, rate and hourly rules: a person talking to their agent must
+never be throttled, and a person's request often legitimately produces several
+progress posts. ANY human message counts, ambient or addressed, because the
+operator wants no cap where a person participates; the TTL is 10 minutes, not
+30, so one ambient line cannot exempt a runaway for half an hour (review round
+1, S-2), and the absolute floor bounds whatever remains. Its duplicate check is
+narrower — refused only when no new message has arrived since the identical
+post — so "status?" asked twice can be answered "still running" twice.
 
 REFUSALS DO NOT DROP THE MESSAGE. Every refusal carries ``code``,
-``retry_after_s`` (the earliest time the guard would admit THIS post absent a
-new inbound message; computed as the latest of the violated rules) and a
+``retry_after_s`` (the earliest whole second at which the guard would admit
+THIS post absent a new inbound message: the latest of the violated rules'
+admit times, rounded UP) and a
 ``next`` telling the agent to keep its draft and retry after that delay. An
 automatic deferred send is not implemented here: the outbox
 (``outbox.py``) records send intents for crash-safe retry of an ACCEPTED post,
@@ -69,18 +93,29 @@ post. They meet in ONE small SQLite file beside the bridge store,
 table in ``state.sqlite3``: that store's schema is migration-versioned, and this
 state is disposable (losing it only resets budgets, it never loses a message).
 Keys are the agent ENDPOINT and the conversation id; nothing content-bearing is
-stored. Schema changes are additive only: an older build may share the file
-during an upgrade (the connector and a session can run different builds).
+stored (the body digest is keyed, see above). Schema changes are additive
+only: an older build may share the file during an upgrade (the connector and a
+session can run different builds), and they run inside the same IMMEDIATE
+transaction as the decision, so two processes opening an old file at once
+cannot both try the same ``ALTER`` (review round 1, m1).
 
-FAIL CLOSED. If the file cannot be opened or written, a post is refused with
-``reply_guard_unavailable``: loop/cost safety is the requirement, and a
-silently disabled guard is how a runaway would start.
+FAIL CLOSED. If the file or the digest key cannot be opened, created or
+written, a post is refused with ``reply_guard_unavailable`` (with a short
+``retry_after_s`` and the same keep-your-draft guidance as every refusal):
+loop/cost safety is the requirement, and a silently disabled guard is how a
+runaway would start. The trigger side still fails OPEN (``record_trigger``
+never raises), a pre-existing asymmetry left as is in this change.
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
+import math
+import os
+import secrets
 import sqlite3
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -95,32 +130,52 @@ RATE_SHORT_POSTS = 20
 RATE_SHORT_WINDOW_S = 60.0
 RATE_LONG_POSTS = 60
 RATE_LONG_WINDOW_S = 600.0
+#: The client's standalone bound on agent-to-agent posts (module docstring).
+AGENT_HOURLY_POSTS = 120
+AGENT_HOURLY_WINDOW_S = 3600.0
 #: Same normalized body from the same endpoint in the same conversation.
 DUPLICATE_WINDOW_S = 600.0
 #: Hard ceiling per conversation per window over EVERY post.
 ABSOLUTE_POSTS = 120
 ABSOLUTE_WINDOW_S = 600.0
 
-#: A trigger older than this no longer explains a post: the agent is acting on
-#: its own, not answering the person who last wrote.
+#: An agent trigger older than this no longer explains a post: the agent is
+#: acting on its own, not answering the agent that last wrote.
 TRIGGER_TTL_S = 1800.0
+#: A human trigger exempts posts for this long (S-2: shorter than the agent
+#: TTL, so one ambient human line cannot open a long exemption window).
+HUMAN_TRIGGER_TTL_S = 600.0
 
-#: Rows older than this carry no decision (the longest window above, doubled).
-_RETAIN_S = 2 * max(PER_INBOUND_WINDOW_S, RATE_LONG_WINDOW_S, DUPLICATE_WINDOW_S, ABSOLUTE_WINDOW_S)
+#: The longest window any rule looks back over.
+_HORIZON_S = max(
+    PER_INBOUND_WINDOW_S,
+    RATE_LONG_WINDOW_S,
+    AGENT_HOURLY_WINDOW_S,
+    DUPLICATE_WINDOW_S,
+    ABSOLUTE_WINDOW_S,
+)
+#: Rows older than this carry no decision (the horizon, doubled).
+_RETAIN_S = 2 * _HORIZON_S
+#: The retry hint on ``reply_guard_unavailable``: the usual cause is a busy or
+#: mid-upgrade file, which clears in seconds.
+UNAVAILABLE_RETRY_S = 5
 
 CODE_NO_NEW_INBOUND = "reply_no_new_inbound"
 CODE_RATE = "reply_rate_limited"
+CODE_AGENT_HOURLY = "reply_agent_hourly"
 CODE_DUPLICATE = "reply_duplicate"
 CODE_ABSOLUTE = "reply_absolute_cap"
 CODE_UNAVAILABLE = "reply_guard_unavailable"
 
 _BUSY_TIMEOUT_S = 5.0
+_KEY_BYTES = 32
 
 # ``runs`` is the retired cool-down's table. It is still CREATED so an older
 # build sharing this file during an upgrade finds it, but this build never reads
 # it: a ``cooldown_until`` an older build wrote must not block a post (an agent
 # in cool-down at upgrade time posts as soon as the new build runs).
-_SCHEMA = """
+_SCHEMA = (
+    """
 CREATE TABLE IF NOT EXISTS triggers (
     endpoint_id TEXT NOT NULL,
     conversation_id TEXT NOT NULL,
@@ -129,7 +184,8 @@ CREATE TABLE IF NOT EXISTS triggers (
     mention INTEGER NOT NULL,
     directed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (endpoint_id, conversation_id)
-);
+)""",
+    """
 CREATE TABLE IF NOT EXISTS posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     endpoint_id TEXT NOT NULL,
@@ -138,17 +194,19 @@ CREATE TABLE IF NOT EXISTS posts (
     agent_to_agent INTEGER NOT NULL,
     human_prompted INTEGER NOT NULL DEFAULT 0,
     body_hash TEXT
-);
+)""",
+    """
 CREATE INDEX IF NOT EXISTS posts_by_conversation
-    ON posts (endpoint_id, conversation_id, at);
+    ON posts (endpoint_id, conversation_id, at)""",
+    """
 CREATE TABLE IF NOT EXISTS runs (
     endpoint_id TEXT NOT NULL,
     conversation_id TEXT NOT NULL,
     consecutive INTEGER NOT NULL DEFAULT 0,
     cooldown_until REAL NOT NULL DEFAULT 0,
     PRIMARY KEY (endpoint_id, conversation_id)
-);
-"""
+)""",
+)
 
 
 class ReplyGuardUnavailable(RuntimeError):
@@ -179,16 +237,58 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE triggers ADD COLUMN directed INTEGER NOT NULL DEFAULT 0")
 
 
-def body_hash(body: str) -> str:
-    """SHA-256 of the body with case and whitespace normalized.
+def body_hash(body: str, *, key: bytes) -> str:
+    """HMAC-SHA256 of the body with case and whitespace normalized.
 
     Normalized so a loop that varies only spacing or capitalization ("Thanks!"
-    vs "thanks! ") still reads as the same post. The digest is all that is ever
-    stored: the guard file must never hold message content.
+    vs "thanks! ") still reads as the same post. Keyed so the stored digest of
+    a short reply cannot be reversed with a dictionary (S-3). The digest is all
+    that is ever stored: the guard file must never hold message content.
     """
 
     normalized = " ".join(body.casefold().split())
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    return hmac.new(key, normalized.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def key_path(config_dir: Path | str) -> Path:
+    return Path(config_dir) / "team_bridge" / "reply_guard.key"
+
+
+def _digest_key(config_dir: Path | str) -> bytes:
+    """The per-install digest key, created on first use. Raises ``ReplyGuardUnavailable``.
+
+    CREATED ATOMICALLY: the random key is written to a private temp file (0600,
+    ``mkstemp``) and published with ``os.link``, which fails if the name exists.
+    Two processes racing on first use therefore never see a half-written key,
+    and the loser adopts the winner's key, so both compute the same digests. A
+    key of the wrong size is damage, not something to overwrite: refusing keeps
+    the rule honest (fail closed, like the database). The key is never logged.
+    """
+
+    path = key_path(config_dir)
+    try:
+        try:
+            key = path.read_bytes()
+        except FileNotFoundError:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle, temp = tempfile.mkstemp(dir=path.parent, prefix=".reply_guard.key.")
+            try:
+                with os.fdopen(handle, "wb") as stream:
+                    stream.write(secrets.token_bytes(_KEY_BYTES))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                try:
+                    os.link(temp, path)
+                except FileExistsError:
+                    pass  # another process published first; read its key below
+            finally:
+                os.unlink(temp)
+            key = path.read_bytes()
+    except OSError as failure:
+        raise ReplyGuardUnavailable("reply guard key unavailable") from failure
+    if len(key) != _KEY_BYTES:
+        raise ReplyGuardUnavailable("reply guard key damaged")
+    return key
 
 
 @dataclass(frozen=True)
@@ -222,6 +322,24 @@ class Refusal:
         }
 
 
+def unavailable_result() -> dict[str, Any]:
+    """The ``reply_guard_unavailable`` refusal, in the same shape as every other.
+
+    Round 1, m3: this arm used to say only "not posting", which read as "drop
+    it". The usual cause (a busy or mid-upgrade file) clears in seconds, so it
+    carries a short ``retry_after_s`` and the same keep-your-draft guidance.
+    """
+
+    return Refusal(
+        code=CODE_UNAVAILABLE,
+        retry_after_s=UNAVAILABLE_RETRY_S,
+        message=(
+            "not sent — the reply guard could not read its state; "
+            f"posting resumes in {UNAVAILABLE_RETRY_S}s if it recovers"
+        ),
+    ).as_result()
+
+
 def guard_path(config_dir: Path | str) -> Path:
     return Path(config_dir) / "team_bridge" / "reply_guard.sqlite3"
 
@@ -235,12 +353,16 @@ def _connect(config_dir: Path | str) -> Iterator[sqlite3.Connection]:
     except (OSError, sqlite3.Error) as failure:
         raise ReplyGuardUnavailable("reply guard state unavailable") from failure
     try:
-        conn.executescript(_SCHEMA)
-        _ensure_columns(conn)
         # IMMEDIATE: check-then-reserve is one decision. Two sessions of the
         # same endpoint posting at once must not both see the last free slot.
+        # The schema and the additive ALTERs run INSIDE it (round 1, m1): run
+        # before it, two processes opening an older file both saw a column
+        # missing and the loser failed closed on "duplicate column name".
         conn.execute("BEGIN IMMEDIATE")
         try:
+            for statement in _SCHEMA:
+                conn.execute(statement)
+            _ensure_columns(conn)
             yield conn
         except BaseException:
             conn.execute("ROLLBACK")
@@ -313,7 +435,7 @@ def record_trigger(
 def _seconds(delay: float) -> int:
     """Whole seconds, rounded UP: a retry at the stated time must be admitted."""
 
-    return max(1, int(delay + 0.999))
+    return max(1, math.ceil(delay))
 
 
 def reserve_post(
@@ -332,35 +454,35 @@ def reserve_post(
     The absolute floor's code wins when it is among them (its answer is
     "stop", not "wait"); otherwise the binding rule's code is reported.
 
-    ``body`` feeds the duplicate check; ``None`` (a caller that has no body)
-    skips that rule only. The slot is recorded BEFORE the post goes out (so a
+    ``body`` feeds the duplicate check (digested under the per-install key, so
+    a key that cannot be read or created fails closed); ``None`` (a caller that
+    has no body) skips that rule only. The slot is recorded BEFORE the post goes out (so a
     concurrent post sees it) and must be given back through :func:`release`
     when the hub did not accept the post.
     """
 
     now = time.time() if now is None else now
-    digest = body_hash(body) if body is not None else None
-    horizon = now - max(
-        PER_INBOUND_WINDOW_S, RATE_LONG_WINDOW_S, DUPLICATE_WINDOW_S, ABSOLUTE_WINDOW_S
-    )
+    digest = body_hash(body, key=_digest_key(config_dir)) if body is not None else None
+    horizon = now - _HORIZON_S
     with _connect(config_dir) as conn:
-        recent = [
-            (float(row[0]), bool(row[1]), row[2])
+        rows = [
+            (float(row[0]), bool(row[1]), row[2], bool(row[3]))
             for row in conn.execute(
-                "SELECT at, human_prompted, body_hash FROM posts "
+                "SELECT at, human_prompted, body_hash, agent_to_agent FROM posts "
                 "WHERE endpoint_id = ? AND conversation_id = ? AND at > ? ORDER BY at",
                 (endpoint_id, conversation_id, horizon),
             )
         ]
+        recent = [(at, human, digested) for at, human, digested, _ in rows]
         trigger = conn.execute(
             "SELECT at, sender_kind FROM triggers WHERE endpoint_id = ? AND conversation_id = ?",
             (endpoint_id, conversation_id),
         ).fetchone()
         inbound_at = float(trigger[0]) if trigger is not None else None
         kind = str(trigger[1]) if trigger is not None else ""
-        fresh = inbound_at is not None and now - inbound_at <= TRIGGER_TTL_S
-        human_prompted = fresh and kind == "human"
-        agent_to_agent = fresh and kind == "agent"
+        age = now - inbound_at if inbound_at is not None else None
+        human_prompted = age is not None and kind == "human" and age <= HUMAN_TRIGGER_TTL_S
+        agent_to_agent = age is not None and kind == "agent" and age <= TRIGGER_TTL_S
 
         violations: list[tuple[str, float, str]] = []
 
@@ -415,16 +537,48 @@ def reserve_post(
                         )
                     )
 
+            # HOURLY AGENT-TO-AGENT CEILING (S-1): the standalone bound on a
+            # loop where every post answers a new message. Counts only posts
+            # recorded as answering an agent, and only when THIS one does too:
+            # an unprompted post is bounded by the per-inbound rule instead.
+            if agent_to_agent:
+                hourly = [
+                    at
+                    for at, _, _, to_agent in rows
+                    if to_agent and at > now - AGENT_HOURLY_WINDOW_S
+                ]
+                if len(hourly) >= AGENT_HOURLY_POSTS:
+                    violations.append(
+                        (
+                            CODE_AGENT_HOURLY,
+                            hourly[len(hourly) - AGENT_HOURLY_POSTS] + AGENT_HOURLY_WINDOW_S - now,
+                            f"hourly limit: {AGENT_HOURLY_POSTS} replies to agents in this "
+                            f"conversation within {int(AGENT_HOURLY_WINDOW_S // 60)} minutes",
+                        )
+                    )
+
         if digest is not None:
             same = [at for at, _, h in recent if h == digest and at > now - DUPLICATE_WINDOW_S]
-            # Answering a person, an identical post is refused only when nothing
-            # new arrived since it ("status?" asked twice may get the same
-            # answer twice); otherwise any repeat inside the window is a loop.
-            if same and (not human_prompted or inbound_at is None or same[-1] >= inbound_at):
+            nothing_new = bool(same) and (inbound_at is None or same[-1] >= inbound_at)
+            if nothing_new:
+                # Nothing arrived since the identical post: repeating it is a
+                # loop, whoever prompted it. Admitted once that copy ages out.
+                freeing: float | None = same[-1]
+            elif same and not human_prompted and len(same) >= 2:
+                # A new message arrived, so one repeat is a legitimate answer
+                # to a new request ("Approved." twice, M1); a THIRD identical
+                # answer inside the window is the loop ("Thanks!" / "You're
+                # welcome!"). Admitted once fewer than two copies remain.
+                freeing = same[-2]
+            else:
+                # Answering a person after a new message: "still running" may
+                # answer "status?" as often as it is asked.
+                freeing = None
+            if freeing is not None:
                 violations.append(
                     (
                         CODE_DUPLICATE,
-                        same[-1] + DUPLICATE_WINDOW_S - now,
+                        freeing + DUPLICATE_WINDOW_S - now,
                         "duplicate: you already posted this text in this conversation "
                         f"within {int(DUPLICATE_WINDOW_S // 60)} minutes",
                     )
@@ -480,23 +634,31 @@ def release(
 __all__ = [
     "ABSOLUTE_POSTS",
     "ABSOLUTE_WINDOW_S",
+    "AGENT_HOURLY_POSTS",
+    "AGENT_HOURLY_WINDOW_S",
     "CODE_ABSOLUTE",
+    "CODE_AGENT_HOURLY",
     "CODE_DUPLICATE",
     "CODE_NO_NEW_INBOUND",
     "CODE_RATE",
     "CODE_UNAVAILABLE",
     "DUPLICATE_WINDOW_S",
+    "HUMAN_TRIGGER_TTL_S",
     "PER_INBOUND_POSTS",
     "PER_INBOUND_WINDOW_S",
     "RATE_LONG_POSTS",
     "RATE_LONG_WINDOW_S",
     "RATE_SHORT_POSTS",
     "RATE_SHORT_WINDOW_S",
+    "TRIGGER_TTL_S",
+    "UNAVAILABLE_RETRY_S",
     "Refusal",
     "ReplyGuardUnavailable",
     "Reservation",
     "body_hash",
     "guard_path",
+    "key_path",
+    "unavailable_result",
     "record_trigger",
     "release",
     "reserve_post",
