@@ -641,7 +641,9 @@ def test_python_snapshot_parser_preserves_terminal_truth(status):
     text = watchdog.PYTHON_MARKER + "{}\nframe\n"
     if status is not None:
         text += "[worker Python snapshot terminal] " + status + "\n"
-    excerpt = "\n".join(watchdog._fired_lines(text))
+    lines = watchdog._fired_lines(text)
+    assert lines is not None, "a Python snapshot marker must produce an observed excerpt"
+    excerpt = "\n".join(lines)
     assert (status if status is not None else "incomplete-failed") in excerpt
     assert watchdog._fired_lines("[shard stall] armed only") is None
 
