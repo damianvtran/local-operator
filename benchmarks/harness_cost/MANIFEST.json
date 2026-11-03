@@ -39,8 +39,8 @@
     },
     {
       "path": "experimental/ADAPTERS.md",
-      "bytes": 11975,
-      "sha256": "01dd4c3c738a9f05603797b04af2bf1bf015314290ff37756b2204ec0b93ef5f"
+      "bytes": 13327,
+      "sha256": "4bff45ffacf57b181e4433cd759a082f7d4b97cf1439778b1adadba7a0193db9"
     },
     {
       "path": "experimental/CACHE-QUALIFICATION.md",
@@ -50,12 +50,12 @@
     {
       "path": "experimental/EXPERIMENTAL-MANIFEST.json",
       "bytes": 9495,
-      "sha256": "0c99849046f0e7e9121819232920b15f297fe425eb51a0866dd00faebb4689b3"
+      "sha256": "8fc42308c544d886240bd7518add2b92257fbbd97dad5ad9ed5265fe0556ce0c"
     },
     {
       "path": "experimental/LOP-EDGE-VERIFICATION.md",
-      "bytes": 14477,
-      "sha256": "12386a252d632461221b82f94d4bf19be30f81ca740b3fc6b8b0c80587f15f0c"
+      "bytes": 15544,
+      "sha256": "1070f337f4798dfe75f7c70487c6b91c59ce0031286ff355474dce1f2c7e1fd7"
     },
     {
       "path": "experimental/PREREGISTRATION.md",
@@ -274,8 +274,8 @@
     },
     {
       "path": "experimental/meter_proxy.py",
-      "bytes": 37741,
-      "sha256": "46ab98792824e8a37beb0452e7d8e9695be4aa37b997810e65361d1109815c19"
+      "bytes": 40406,
+      "sha256": "10c5a3b2cfef5c5db37db8a4d1fac803e6a995df868acfacdcd9d04f33f7c015"
     },
     {
       "path": "experimental/radient_meter/classifier.py",
@@ -309,8 +309,8 @@
     },
     {
       "path": "experimental/test_adapters.py",
-      "bytes": 33099,
-      "sha256": "56256e61ebc1c1bfe1a0aa71ee3d8d4c80d5f0968075e67bce38cd719ad5c119"
+      "bytes": 38089,
+      "sha256": "dd755605a08f34b207af8286cc0c81ed66b19deced4dda42820d34dfece0c07d"
     },
     {
       "path": "experimental/test_bridge_sse.py",

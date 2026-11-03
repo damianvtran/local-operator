@@ -167,8 +167,16 @@ experimental `Ran 114 tests — OK`; coding `Ran 23 tests — OK`; core `test_ki
 | F5 | any admission refusal voids the run with its reason | `test_decisions_admission_refusal_voids_the_run`, `test_concurrent_admissions_queue_against_pending_exposure`, `test_total_cap_independent_of_trial_ids` |
 | F6 | one guard built at startup; bad env fails construction/startup | `test_configuration_errors_fail_at_startup`, `test_misconfigured_meter_environment_fails_at_construction`, entrypoint test |
 | D1 | per-request reservation from the request's own bytes and `max_tokens` | `test_reservation_is_per_request_not_a_flat_worst_case` + reserve repro above |
-| D2/D3 | rate card = exact native allowlist with provenance; other models refused + void; non-200 upstream voids; unbilled latches | `test_rate_card_is_the_exact_native_allowlist_with_provenance`, `test_haiku_is_priced_from_the_card_and_recorded_per_model`, `test_unpriced_model_is_refused_and_voids_the_run`, `test_upstream_overload_voids_the_run_even_when_billed`, `test_unbilled_overload_latches_with_reason` |
+| D2/D3 | rate card = exact native allowlist with provenance; other models refused + void; provider 5xx/429 voids (R2: harness 4xx counted); unbilled latches | `test_rate_card_is_the_exact_native_allowlist_with_provenance`, `test_haiku_is_priced_from_the_card_and_recorded_per_model`, `test_unpriced_model_is_refused_and_voids_the_run`, `test_upstream_overload_voids_the_run_even_when_billed`, `test_unbilled_overload_latches_with_reason` |
 | coding | Harbor LoP path repinned to `500883ef`; shim deleted; launcher refuses | `test_coding_lop_path_has_no_endpoint_shim_and_refuses_the_candidate` |
+
+## Remediation round 2 (review `LOP-EDGE-REVIEW-R2.md`)
+
+| Finding | Behaviour | Test |
+|---|---|---|
+| F7 | per-trial cap on SETTLED spend (identical for every native `max_tokens`); reservations gate only the total budget; cap stop recorded in `cost_caps` as a primary cost-cap failure, never a void | `test_trial_cap_is_enforced_on_settled_spend_not_native_max_tokens` (reviewer P7: $5 cap, $3.70 settled, 60 kB; 32k reserve $0.736 and 128k reserve $2.176 both admitted), `test_cost_capped_trial_is_refused_without_voiding_and_others_continue`, `test_real_asgi_route_settles_and_stops_trial` |
+| F8 | only provider 429/5xx (and transport) void; a harness-caused 4xx settles its stated bill and the trial continues; an unbilled 4xx still latches, without a rerun void | `test_provider_429_and_5xx_void_for_rerun`, `test_harness_caused_4xx_is_counted_and_the_trial_continues`, `test_harness_caused_4xx_without_a_bill_latches_but_is_not_a_rerun` |
+| N4 | Haiku provenance: omp and OpenCode only (Claude Code 203/203 Sonnet) | docs/comment |
 
 ## Provenance of vendored code
 

@@ -63,7 +63,8 @@ unpriced side models.
 **Rate card.** The meter prices exactly `NATIVE_MODELS` — every model a
 benchmarked harness natively requests in the wire captures
 (`anthropic/claude-sonnet-5.5` main turns for all seven;
-`anthropic/claude-haiku-5.5` helpers for omp, OpenCode and Claude Code). At run
+`anthropic/claude-haiku-5.5` helpers for omp and OpenCode; Claude Code's
+captured rows are all Sonnet). At run
 start fetch the live `https://openrouter.ai/api/v1/models` listing and build
 the card with `meter_proxy.rate_card_from_models_listing(raw, source_url=…,
 fetched_at=…)`; it keeps the response SHA-256 and fetch time as provenance and
@@ -88,14 +89,29 @@ reserve_USD = ((body_bytes + FRAMING_TOKENS) * max(prompt, cache_write)_USD_per_
 
 UTF-8 bytes overbound text tokens and `FRAMING_TOKENS` (8192) covers framing;
 it is not a tokenizer estimate, and any bill above the reservation latches at
-settle. `max_tokens` is never lowered: at Sonnet 5.5 a native 128000-token
-main call alone reserves $1.28 of output, so the per-trial cap must sit above
-one main reservation plus the run's expected spend. **The per-trial cap is a
-planning/abort control, not a price**: default $5 (long Terminal-Bench tasks
-make many calls and actual spend accumulates), $2 minimum for a pilot
-spot-check, the same rule and cap for all seven harnesses, recorded with each
-run. Set it above the expected per-trial spend so refusals are rare; every
-refusal is reported because it voids the run. Explicit provider rate ceilings
+settle. `max_tokens` is never lowered. Reservations gate only the **total**
+campaign budget (settled spend plus every pending reservation), so the total
+allowance is never overspent.
+
+**The per-trial cap is decided on settled actual spend**, not on reservations:
+a request is admitted whenever the trial's settled spend is below the cap,
+whatever its native `max_tokens`. A reservation-gated trial cap would bind at
+`cap − reserve(next request)` — about $3.7 of $5 for the six 128k-output
+harnesses but $4.6 for Claude Code (32k) — which is not the same limit for all
+harnesses (PREREGISTRATION §9.1). The last admitted request may overshoot the
+cap; the overshoot is recorded (`cost_caps[<run_id>]`: settled USD and cap) and
+the trial ends as a **primary cost-cap failure**: cost counted, Y=0, never a
+void or rerun (§9.2). The cap is a planning/abort control, not a price, and is
+identical for all seven harnesses and recorded with each run: default $5 (long
+Terminal-Bench tasks make many calls), $2 minimum for a pilot spot-check.
+
+**The preregistered caps are infeasible for long tasks.** §9.1's $0.30
+(OSWorld) and $0.45 (Terminal-Bench) per trial are below what a single native
+128k main turn can bill and below observed long-task spend, so most long trials
+would end as cost-capped truncations (§9.1 itself says to replan then). The
+cap for the 28-task cohort must be set prospectively in the amendment draft
+(proposal recorded there: $5/trial, not frozen), before any holdout outcome.
+Explicit provider rate ceilings
 are also sent in `provider.max_price`, with Anthropic routing and fallbacks
 disabled. This is client-side enforcement, not a provider-side account
 spending limit. Local Operator's Radient classifier spend is metered by
@@ -106,10 +122,15 @@ across trials and harnesses. Admission sums settled spend plus every pending
 reservation and waits (bounded by `BENCH_ADMISSION_WAIT_S`) when only in-flight
 exposure stands in the way. Two kinds of failure are recorded:
 
-* `voids[<run_id>]` — the run can no longer be published as measured (rerun
-  it): any refused request (unpriced model, unpriced extension, admission
-  deadline or cap), and any non-200 upstream status such as a 529 overload,
-  even when billed. A void blocks only that run.
+* `voids[<run_id>]` — an infrastructure or metering defect: the attempt is
+  invalid and may be rerun at most once (§9.2). Causes: a provider 5xx/429
+  (incl. a 529 overload, even when billed), transport failure, a request the
+  meter cannot price (unpriced model or extension), a campaign-budget or
+  admission-deadline refusal. A void blocks only that run. A harness-caused
+  4xx (e.g. "prompt is too long") is **not** a void: its stated bill (often 0)
+  settles, the trial continues, and the outcome is the harness's own.
+* `cost_caps[<run_id>]` — the trial's settled spend reached the per-trial cap:
+  a primary cost-cap failure with its full cost, not a void.
 * `blocked` — spend may be unaccounted for; every later admission on the
   shared ledger refuses until the operator reconciles: missing/nonfinite/
   negative cost, a bill above its reservation, transport failure, and any

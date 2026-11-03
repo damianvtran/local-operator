@@ -1,16 +1,16 @@
 {
   "files": {
     "ADAPTERS.md": {
-      "bytes": 11975,
-      "sha256": "01dd4c3c738a9f05603797b04af2bf1bf015314290ff37756b2204ec0b93ef5f"
+      "bytes": 13327,
+      "sha256": "4bff45ffacf57b181e4433cd759a082f7d4b97cf1439778b1adadba7a0193db9"
     },
     "CACHE-QUALIFICATION.md": {
       "bytes": 5927,
       "sha256": "e6eaa4ae8e2122e938d48b3355881be6e14939125f429dff5775e7315eadf8cc"
     },
     "LOP-EDGE-VERIFICATION.md": {
-      "bytes": 14477,
-      "sha256": "12386a252d632461221b82f94d4bf19be30f81ca740b3fc6b8b0c80587f15f0c"
+      "bytes": 15544,
+      "sha256": "1070f337f4798dfe75f7c70487c6b91c59ce0031286ff355474dce1f2c7e1fd7"
     },
     "PREREGISTRATION.md": {
       "bytes": 43078,
@@ -185,8 +185,8 @@
       "sha256": "afefded4938e6384a472d88c08005c29370c4036aa9edac55b99bef109f86287"
     },
     "meter_proxy.py": {
-      "bytes": 37741,
-      "sha256": "46ab98792824e8a37beb0452e7d8e9695be4aa37b997810e65361d1109815c19"
+      "bytes": 40406,
+      "sha256": "10c5a3b2cfef5c5db37db8a4d1fac803e6a995df868acfacdcd9d04f33f7c015"
     },
     "radient_meter/classifier.py": {
       "bytes": 6611,
@@ -213,8 +213,8 @@
       "sha256": "6be4440a9d4d7f955d973f9ea13d6f2fe168b6702ef86bf538264145dd0ef8ac"
     },
     "test_adapters.py": {
-      "bytes": 33099,
-      "sha256": "56256e61ebc1c1bfe1a0aa71ee3d8d4c80d5f0968075e67bce38cd719ad5c119"
+      "bytes": 38089,
+      "sha256": "dd755605a08f34b207af8286cc0c81ed66b19deced4dda42820d34dfece0c07d"
     },
     "test_bridge_sse.py": {
       "bytes": 8812,

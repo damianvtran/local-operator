@@ -157,6 +157,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         return json.loads(Path(os.environ["BENCH_SPEND_FILE"]).read_text())
 
     async def test_real_asgi_route_settles_and_stops_trial(self):
+        # Settled 0.12 reaches the 0.1 cap: the trial ends as a cost-cap failure.
+        self.serve(BENCH_TRIAL_BUDGET_USD="0.1")
         self.assertEqual((await self.post()).status_code, 200)
         self.assertEqual((await self.post()).status_code, 402)
         self.assertEqual(len(self.calls), 1)
@@ -168,8 +170,11 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ledger["usd"], 0.12)
         self.assertEqual(ledger["trials"]["trial"], 0.12)
         self.assertEqual(ledger["models"], {"anthropic/claude-sonnet-5.5": 0.12})
-        # F5: the cap refusal changed the harness's run, so the run is void.
-        self.assertIn("admission refused", " ".join(ledger["voids"]["trial"]))
+        # F7: a trial-cap stop is a primary cost-cap failure (cost counted,
+        # quality Y=0, PREREGISTRATION §9.2) -- never a void, never a rerun.
+        self.assertNotIn("trial", ledger["voids"])
+        self.assertEqual(ledger["cost_caps"]["trial"]["settled_usd"], 0.12)
+        self.assertFalse(ledger["blocked"])
         self.assertNotIn(os.environ["OPENROUTER_API_KEY"], meter.LOG.read_text())
         self.assertNotIn("hello", meter.LOG.read_text())
 
@@ -214,10 +219,94 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual((await self.post()).status_code, 529)
         ledger = self.ledger()
-        self.assertIn("upstream status 529", " ".join(ledger["voids"]["trial"]))
+        self.assertIn("provider status 529", " ".join(ledger["voids"]["trial"]))
         self.assertFalse(ledger["blocked"])  # billed zero: spend is still bounded
         self.assertEqual((await self.post()).status_code, 402)  # native retry refused
         self.assertEqual(len(self.calls), 1)
+
+    def test_trial_cap_is_enforced_on_settled_spend_not_native_max_tokens(self):
+        # F7 reviewer repro P7: same $5 cap, same $3.70 settled spend, same 60 kB
+        # body; only native max_tokens differs (Claude Code 32k vs the 128k six).
+        # Real Sonnet-class rates make the 128k reservation $2.176 > $1.30 headroom.
+        card = Path(self.tmp.name) / "list-rate-card.json"
+        rates = {"prompt": "0.000003", "completion": "0.000015",
+                 "input_cache_write": "0.00000375"}
+        write_rate_card(card, json.dumps({"data": [
+            {"id": mid, "pricing": rates} for mid in meter.NATIVE_MODELS]}).encode())
+        self.serve(BENCH_RATE_CARD=str(card), BENCH_TRIAL_BUDGET_USD="5",
+                   BENCH_BUDGET_USD="100")
+        Path(os.environ["BENCH_SPEND_FILE"]).write_text(json.dumps({
+            "usd": 3.70, "trials": {"trial": 3.70}, "pending": {}, "blocked": False,
+            "channels": {"model": 3.70, "classifier": 0.0},
+            "models": {"anthropic/claude-sonnet-5.5": 3.70}, "voids": {}, "cost_caps": {},
+        }))
+        sonnet = "anthropic/claude-sonnet-5.5"
+        raw = b"x" * 60000
+        for max_tokens, reserve in ((32000, 0.736), (128000, 2.176)):
+            usd = self.guard.reservation_usd(sonnet, raw, max_tokens)
+            self.assertAlmostEqual(usd, reserve, places=3)
+            token = self.guard.try_acquire("trial", "model", usd, sonnet)
+            self.assertIsNotNone(token, f"max_tokens={max_tokens} refused")
+            assert token is not None
+            self.guard.settle(token, 0.30)
+        ledger = self.ledger()
+        self.assertEqual(ledger["cost_caps"], {})
+        self.assertEqual(ledger["voids"], {})
+        # Settled $4.30 < $5: still admitted; one more bill crosses the cap.
+        token = self.guard.try_acquire("trial", "model", 2.176, sonnet)
+        assert token is not None
+        self.guard.settle(token, 0.90)
+        with self.assertRaises(meter.CostCapReached):
+            self.guard.try_acquire("trial", "model", 0.736, sonnet)
+        ledger = self.ledger()
+        self.assertAlmostEqual(ledger["cost_caps"]["trial"]["settled_usd"], 5.20)
+        self.assertEqual(ledger["cost_caps"]["trial"]["cap_usd"], 5.0)
+        self.assertEqual(ledger["voids"], {})
+        self.assertFalse(ledger["blocked"])
+
+    async def test_cost_capped_trial_is_refused_without_voiding_and_others_continue(self):
+        self.serve(BENCH_TRIAL_BUDGET_USD="0.1")
+        self.assertEqual((await self.post()).status_code, 200)  # settled 0 < cap
+        refused = await self.post()
+        self.assertEqual(refused.status_code, 402)
+        self.assertIn("cost cap", refused.text)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual((await self.post("other")).status_code, 200)
+        self.assertNotIn("trial", self.ledger()["voids"])
+
+    async def test_harness_caused_4xx_is_counted_and_the_trial_continues(self):
+        # F8: a 4xx the harness provoked is its own behaviour (primary outcome),
+        # not infrastructure: a stated zero bill settles, no void, no rerun.
+        self.status = 400
+        self.response = {"type": "error", "error": {"type": "invalid_request_error",
+                                                    "message": "prompt is too long"},
+                         "usage": {"cost": 0}}
+        self.assertEqual((await self.post()).status_code, 400)
+        ledger = self.ledger()
+        self.assertNotIn("trial", ledger["voids"])
+        self.assertFalse(ledger["blocked"])
+        self.assertEqual(ledger["pending"], {})
+        self.status = 200
+        self.response = {"model": "anthropic/claude-sonnet-5.5", "usage": {"cost": 0.01}}
+        self.assertEqual((await self.post()).status_code, 200)
+
+    async def test_harness_caused_4xx_without_a_bill_latches_but_is_not_a_rerun(self):
+        self.status = 400
+        self.response = {"type": "error", "error": {"type": "invalid_request_error"}}
+        await self.post()
+        ledger = self.ledger()
+        self.assertTrue(ledger["blocked"])  # unknown bill: latch as before
+        self.assertNotIn("upstream status 400", " ".join(ledger["voids"].get("trial", [])))
+
+    async def test_provider_429_and_5xx_void_for_rerun(self):
+        for status in (429, 500, 503, 529):
+            with self.subTest(status=status):
+                Path(os.environ["BENCH_SPEND_FILE"]).unlink(missing_ok=True)
+                self.status = status
+                self.response = {"type": "error", "usage": {"cost": 0}}
+                await self.post()
+                reasons = " ".join(self.ledger()["voids"]["trial"])
+                self.assertIn(f"provider status {status}", reasons)
 
     async def test_unbilled_overload_latches_with_reason(self):
         self.status = 529

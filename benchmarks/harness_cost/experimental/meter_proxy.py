@@ -77,10 +77,11 @@ def positive(name: str) -> float:
 
 
 # Every model a benchmarked harness natively requests on the wire (captured in
-# logs/requests.jsonl: all seven send Sonnet 5.5 main turns; omp, OpenCode and
-# Claude Code also send Haiku 5.5 helpers, e.g. 425 omp Haiku calls over 25
-# runs). Pricing only the main model would refuse those helpers on paid runs
-# and silently change those harnesses, so the card is exactly this allowlist:
+# logs/requests.jsonl: all seven send Sonnet 5.5 main turns; omp and OpenCode
+# also send Haiku 5.5 helpers -- 425 omp Haiku calls over 25 runs, 57 OpenCode;
+# Claude Code's 203 captured rows are all Sonnet). Pricing only the main model
+# would refuse those helpers on paid runs and silently change those harnesses,
+# so the card is exactly this allowlist:
 # nothing less (a missing native model refuses startup) and nothing more (any
 # other model -- e.g. a failover target -- is refused AND voids the run).
 NATIVE_MODELS = ("anthropic/claude-sonnet-5.5", "anthropic/claude-haiku-5.5")
@@ -92,7 +93,25 @@ RATE_CARD_MAX_AGE_S = 6 * 3600
 # bill above the reservation still latches at settle.
 FRAMING_TOKENS = 8192
 # The durable ledger file's exact schema (a pre-voids ledger reads as invalid).
-LEDGER_KEYS = ("usd", "trials", "pending", "blocked", "channels", "models", "voids")
+LEDGER_KEYS = ("usd", "trials", "pending", "blocked", "channels", "models", "voids", "cost_caps")
+
+
+class CostCapReached(ValueError):
+    """The trial's SETTLED spend reached its cap: a primary cost-cap failure.
+
+    PREREGISTRATION §9.2 counts a cost-cap stop as Y=0 with its cost retained,
+    never as an invalid attempt to rerun, so callers must not void on it.
+    """
+
+
+def _provider_fault(status: int) -> bool:
+    """Statuses that are the provider's fault, not the harness's (§9.2).
+
+    Only overload/rate-limit/server errors (429, 5xx incl. Anthropic's 529)
+    are external infrastructure. Any other 4xx (e.g. "prompt is too long") is
+    a response to what the harness sent: its own behaviour, counted as is.
+    """
+    return status == 429 or status >= 500
 
 
 def _per_million(pricing: dict[str, Any], key: str, *, required: bool) -> float:
@@ -190,8 +209,18 @@ class BudgetGuard:
     Each reservation is that request's OWN upper bound: (body bytes + framing)
     input tokens at the model's highest input rate plus its own ``max_tokens``
     at the output rate. UTF-8 bytes overbound text tokens. A bill above it
-    latches at settle. The per-trial cap is a planning/abort control, not a
-    price: set it above the expected per-trial spend so refusals are rare.
+    latches at settle. Reservations gate ONLY the total campaign budget (with
+    every pending reservation summed), so the total allowance is never
+    overspent.
+
+    The per-trial cap is enforced on SETTLED spend: a request is admitted while
+    the trial's settled spend is below the cap, whatever its native
+    ``max_tokens``. Gating the trial cap on the worst-case reservation would
+    make the effective cap ``cap - reserve(next request)`` -- about $3.7 of $5
+    for the six 128k-output harnesses but $4.6 for Claude Code (32k), i.e. not
+    the same limit for all harnesses (PREREGISTRATION §9.1). Overshoot past
+    the cap is recorded in ``cost_caps`` and the trial ends as a primary
+    cost-cap failure (cost counted, Y=0, §9.2), never a void.
 
     A reservation that never settles must not fail open (the base rule was:
     any pending entry refuses everything). Three backstops restore that:
@@ -200,10 +229,12 @@ class BudgetGuard:
     admission latches when a pending entry's owner process is dead or the entry
     is older than ``BENCH_MAX_REQUEST_S``.
 
-    ``voids`` records, per run, why it can no longer be published as measured:
-    any refusal of a request the harness natively sent changes its behaviour.
-    A void is per run and does not block other runs; ``blocked`` is global and
-    means spend may be unaccounted for.
+    ``voids`` records, per run, an infrastructure or metering reason it can no
+    longer be published as measured (invalid + at most one rerun, §9.2): a
+    provider 5xx/429, a transport failure, an unpriced request the meter
+    refused, a campaign-budget or admission-deadline refusal. A void is per
+    run and does not block other runs; ``blocked`` is global and means spend
+    may be unaccounted for.
     """
 
     def __init__(self):
@@ -281,6 +312,7 @@ class BudgetGuard:
                     "channels": {name: 0.0 for name in CHANNELS},
                     "models": {},
                     "voids": {},
+                    "cost_caps": {},
                 }
             yield data
             tmp = self.path.with_suffix(self.path.suffix + ".new")
@@ -289,6 +321,13 @@ class BudgetGuard:
                 fh.flush()
                 os.fsync(fh.fileno())
             tmp.replace(self.path)
+
+    def _record_cost_cap(self, data: dict[str, Any], run_id: str) -> None:
+        """Record (or refresh, as late in-flight bills settle) a cost-cap stop."""
+        data["cost_caps"][run_id] = {
+            "settled_usd": data["trials"].get(run_id, 0.0),
+            "cap_usd": self.trial,
+        }
 
     @staticmethod
     def _void(data: dict[str, Any], run_id: str, reason: str) -> None:
@@ -411,16 +450,21 @@ class BudgetGuard:
             # (raising inside it would skip the write-back).
             self._reap(data)
             trial = data["trials"].get(run_id, 0.0)
+            capped = False
             if data["blocked"]:
                 refusal = "unreconciled request; budget fails closed"
             elif run_id in data["voids"]:
                 refusal = "run is void; no further admissions"
-            elif data["usd"] + usd > self.total or trial + usd > self.trial:
-                refusal = "total or per-trial budget exhausted"
+            elif trial >= self.trial:
+                capped = True
+                self._record_cost_cap(data, run_id)
+                refusal = "trial cost cap reached on settled spend"
+            elif data["usd"] + usd > self.total:
+                refusal = "total campaign budget exhausted"
             if refusal is None:
-                token_or_wait = self._reserve(data, token, run_id, channel, usd, model, trial)
+                token_or_wait = self._reserve(data, token, run_id, channel, usd, model)
         if refusal is not None:
-            raise ValueError(refusal)
+            raise (CostCapReached if capped else ValueError)(refusal)
         if token_or_wait is not None:
             self._mine.add(token_or_wait)
         return token_or_wait
@@ -433,16 +477,15 @@ class BudgetGuard:
         channel: str,
         usd: float,
         model: str,
-        trial: float,
     ) -> str | None:
-        """Add the reservation if it fits beside every pending one, else ``None``."""
-        pending = list(data["pending"].values())
-        exposure = sum(p["usd"] for p in pending)
-        trial_exposure = sum(p["usd"] for p in pending if p["run_id"] == run_id)
-        if (
-            data["usd"] + exposure + usd > self.total
-            or trial + trial_exposure + usd > self.trial
-        ):
+        """Add the reservation if it fits the TOTAL beside every pending one, else ``None``.
+
+        No per-trial exposure term on purpose (F7): the trial cap is decided on
+        settled spend in ``try_acquire``, so it binds identically for every
+        harness regardless of native ``max_tokens``.
+        """
+        exposure = sum(p["usd"] for p in data["pending"].values())
+        if data["usd"] + exposure + usd > self.total:
             return None
         data["pending"][token] = {
             "run_id": run_id,
@@ -457,8 +500,10 @@ class BudgetGuard:
     async def acquire(self, run_id: str, channel: str, usd: float, model: str) -> str:
         """Wait (bounded by BENCH_ADMISSION_WAIT_S) for room, then reserve.
 
-        Any refusal -- exhaustion, deadline, latched ledger -- changes what the
-        harness natively does next, so it voids the run with its reason (F5).
+        A refusal for an infrastructure/metering reason -- campaign budget,
+        deadline, latched ledger -- changes what the harness natively does next,
+        so it voids the run with its reason (F5). A trial cost-cap stop is the
+        harness's own primary outcome and is NOT voided (F7).
         """
         deadline = time.monotonic() + self.admission_wait
         try:
@@ -469,6 +514,8 @@ class BudgetGuard:
                 if time.monotonic() >= deadline:
                     raise ValueError("admission wait expired with exposure still pending")
                 await asyncio.sleep(0.02)
+        except CostCapReached:
+            raise
         except ValueError as exc:
             with contextlib.suppress(ValueError, OSError):
                 self.void(run_id, f"admission refused: {exc}")
@@ -521,6 +568,8 @@ class BudgetGuard:
             if cost > pending["usd"] or not qualified:
                 data["blocked"] = True
                 self._void(data, run_id, "charge above reservation or unqualified bill")
+            if data["trials"][run_id] >= self.trial:
+                self._record_cost_cap(data, run_id)
             del data["pending"][token]
 
 
@@ -696,6 +745,11 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
     reserve = guard.reservation_usd(priced_model, raw, body["max_tokens"])
     try:
         reservation = await guard.acquire(run_id, "model", reserve, priced_model)
+    except CostCapReached:
+        return JSONResponse(
+            {"error": "trial cost cap reached; the trial ends as a cost-cap failure"},
+            status_code=402,
+        )
     except (ValueError, KeyError, OSError, TypeError):
         return JSONResponse(
             {"error": "budget ledger unavailable, exhausted, or unreconciled"}, status_code=402
@@ -740,11 +794,13 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
             # OpenRouter returns the billed amount in usage.cost: it feeds the
             # hard budget stop and is reported beside our list-price computation.
             guard.settle(reservation, usage.get("cost"))
-            if status != 200:
-                # An upstream error (529 overload, 5xx, 4xx) is a run the harness
-                # did not complete natively: void it so it is rerun, never
-                # counted as a measured success (crash = invalid + rerun policy).
-                guard.void(run_id, f"upstream status {status}")
+            if _provider_fault(status):
+                # Provider overload/rate-limit/server error: external
+                # infrastructure, so the attempt is invalid and may be rerun
+                # once (§9.2), never counted as a measured result. A harness-
+                # caused 4xx is NOT here: its bill settled above like any other
+                # (a missing bill still latches) and the trial continues.
+                guard.void(run_id, f"provider status {status}")
             row["latency_s"] = round(time.time() - started, 3)
             row["usage"] = usage
             if extra:
