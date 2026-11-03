@@ -97,7 +97,7 @@ export function PastSessionsScreen() {
 				/>
 			</div>
 
-			<main className="flex flex-1 flex-col gap-0.5 px-2 pb-3">
+			<main className="flex flex-1 flex-col gap-0.5 px-2 pb-[max(env(safe-area-inset-bottom),0.75rem)]">
 				{resumeError ? (
 					<p className="px-2 pb-1 text-body-sm text-danger">
 						{resumeError}

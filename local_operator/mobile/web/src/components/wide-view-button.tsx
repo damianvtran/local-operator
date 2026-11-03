@@ -23,7 +23,7 @@
  */
 import { useState } from "react";
 import { cn } from "../lib/cn";
-import { applyWideView, getWideView } from "../lib/viewport";
+import { applyWideView, getWideView, isStandalone } from "../lib/viewport";
 
 export function WideViewButton({ className }: { className?: string }) {
 	/* Seeded from the persisted preference on mount, so the control states the
@@ -31,6 +31,9 @@ export function WideViewButton({ className }: { className?: string }) {
 	   (the list and the session are separate routes), so there is no second source
 	   of truth to synchronise — `applyWideView` writes the one. */
 	const [wide, setWide] = useState(getWideView);
+	/* No control in an installed app: wide view is never applied there (see
+	   `isStandalone`), so a button would be a dead, easy-to-hit toggle. */
+	if (isStandalone()) return null;
 	return (
 		<button
 			type="button"
