@@ -921,7 +921,20 @@ def test_scheduled_create_refuses_files_because_reserve_is_image_only(proxy):
 #: ``local_operator.logger.quiet_wire_clients`` pins the wire clients to WARNING
 #: in-process; a test that ran earlier on the same xdist worker leaves that pin,
 #: and the capture then sees nothing (CI run 41679932548, shard 3).
-_NAME_LOG_SCOPES = ("httpx", "httpcore", "urllib3", "local_operator", "uvicorn", "")
+#: ``uvicorn.error``/``uvicorn.access`` are listed by name although they sit
+#: under ``uvicorn``: the proxy fixture's ``uvicorn.Config(log_level="error")``
+#: gives each its OWN explicit ERROR level, so lowering ``uvicorn`` alone left a
+#: WARNING leak there invisible (measured with an injected leak).
+_NAME_LOG_SCOPES = (
+    "httpx",
+    "httpcore",
+    "urllib3",
+    "local_operator",
+    "uvicorn",
+    "uvicorn.error",
+    "uvicorn.access",
+    "",
+)
 
 
 def test_file_display_name_never_reaches_a_log(proxy, caplog):
@@ -931,10 +944,29 @@ def test_file_display_name_never_reaches_a_log(proxy, caplog):
     ``caplog``), so the capture is independent of what earlier tests did to
     logger levels. Two controls keep it non-vacuous: the hub really received
     the name, and a name logged through the same loggers IS seen.
+
+    PROPAGATION: any earlier test on the worker that built a ``uvicorn.Config``
+    with the default ``log_config`` (the e2e access-log test above) leaves
+    ``uvicorn``/``uvicorn.access`` ``propagate=False``, and pytest < 9 attaches
+    ``caplog.handler`` to ROOT only, so such a record never reaches the capture
+    (CI run 41689897128, shard 2, on pytest 8.4.2). So the handler is attached
+    DIRECTLY to every covered logger, and to every currently non-propagating
+    logger, for the test's duration; ``addHandler`` is idempotent where pytest
+    already attached it.
     """
 
     client, _, state = proxy
     with contextlib.ExitStack() as stack:
+        attach_to = {logging.getLogger(n) for n in _NAME_LOG_SCOPES if n}
+        attach_to |= {
+            lg
+            for lg in logging.root.manager.loggerDict.values()
+            if isinstance(lg, logging.Logger) and not lg.propagate
+        }
+        for lg in attach_to:
+            if caplog.handler not in lg.handlers:
+                lg.addHandler(caplog.handler)
+                stack.callback(lg.removeHandler, caplog.handler)
         for name in _NAME_LOG_SCOPES:
             stack.enter_context(caplog.at_level(logging.DEBUG, logger=name or None))
         response = client.post(
@@ -953,7 +985,14 @@ def test_file_display_name_never_reaches_a_log(proxy, caplog):
         assert FILE_NAME not in caplog.text and FILE_NAME_WIRE not in caplog.text
         assert "rëport" not in caplog.text
         # Control 2 (negative): a leak through any covered logger would be seen.
+        # The handler sits on the probe logger itself, so this holds whatever
+        # an earlier test did to propagation anywhere above it.
         for name in _NAME_LOG_SCOPES[:-1]:
             caplog.clear()
-            logging.getLogger(f"{name}.leak-probe").debug("leak %s", FILE_NAME_WIRE)
-            assert FILE_NAME_WIRE in caplog.text, name
+            probe = logging.getLogger(f"{name}.leak-probe")
+            probe.addHandler(caplog.handler)
+            try:
+                probe.debug("leak %s", FILE_NAME_WIRE)
+                assert FILE_NAME_WIRE in caplog.text, name
+            finally:
+                probe.removeHandler(caplog.handler)
