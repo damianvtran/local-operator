@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import difflib
 import hashlib
-import uuid
 import os
+import posixpath
 import re
 import stat
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, Sequence
@@ -33,9 +34,9 @@ from local_operator.hub_sync.skill_document import (
     SkillDocument,
     SkillFile,
     SkillValidationError,
-    validate_path,
-    validate_name,
     parse_frontmatter,
+    validate_name,
+    validate_path,
 )
 
 #: How the proposal resolves the collision. ``equal`` and ``merge`` come from the
@@ -174,13 +175,19 @@ def read_tree(root: Path) -> LocalTree:
 def durable_snapshot(config_dir: Path, alias: str, tree: LocalTree) -> dict[str, Any]:
     """Persist ORIGINAL layout before any resolver call; never reuse a mutable copy."""
     from local_operator.config_writer import config_write_lock
-    from local_operator.hub_sync.transactions import atomic_json, _sync_directory, _sync_ancestors
+    from local_operator.hub_sync.transactions import (
+        _sync_ancestors,
+        _sync_directory,
+        atomic_json,
+    )
 
     validate_name(alias)
     config_dir = Path(config_dir).resolve()
     with config_write_lock(config_dir):
-        if (tree.root != config_dir / "skills" / alias
-                or read_tree(tree.root).tree_hash != tree.tree_hash):
+        if (
+            tree.root != config_dir / "skills" / alias
+            or read_tree(tree.root).tree_hash != tree.tree_hash
+        ):
             raise AdoptionError("local-concurrent-edit", "local tree changed before snapshot")
         folder = config_dir / "hub" / "backups" / f"skill-adopt-{alias}-{uuid.uuid4().hex}"
         for parent in (config_dir / "hub", folder.parent, folder):
@@ -202,8 +209,10 @@ def durable_snapshot(config_dir: Path, alias: str, tree: LocalTree) -> dict[str,
         snapshot = {"path": str(folder), "tree_hash": tree.tree_hash, "manifest": tree.manifest()}
         atomic_json(folder / "manifest.json", snapshot)
         _sync_ancestors(folder, config_dir / "hub")
-        if (read_tree(content).tree_hash != tree.tree_hash
-                or read_tree(tree.root).tree_hash != tree.tree_hash):
+        if (
+            read_tree(content).tree_hash != tree.tree_hash
+            or read_tree(tree.root).tree_hash != tree.tree_hash
+        ):
             raise AdoptionError("local-concurrent-edit", "local tree changed during snapshot")
         return snapshot
 
@@ -382,19 +391,44 @@ def _norm(text: str) -> str:
     return "\n".join(out)
 
 
-def _rewrite_relocated_refs(text: str, moves: Mapping[str, str]) -> str:
-    """Point bare references to a relocated root file at its new path.
+def _rewrite_relocated_refs(
+    text: str,
+    moves: Mapping[str, str],
+    *,
+    source_path: str = "SKILL.md",
+    destination_path: str | None = None,
+    known_paths: set[str] | None = None,
+) -> str:
+    """Resolve within the captured source tree, then relativize at the destination.
 
-    Only whole path tokens are rewritten (``requirements.md`` but never
-    ``old-requirements.md`` or an already-correct ``references/requirements.md``),
-    so a local text whose ONLY difference from the hub is the relocation compares
-    equal, and a merged text never points at a file that no longer exists.
+    Basename substitution cannot distinguish ../requirements.md from a different
+    file beside the source. Unknown/traversing references to moved names refuse
+    rather than leave a ready proposal with a silently broken link.
     """
+    if not moves:
+        return text
+    destination_path = destination_path or moves.get(source_path, source_path)
+    known = known_paths if known_paths is not None else set(moves)
+    pattern = re.compile(r"(?<![\w/.:~-])(?:[\w.@~+-]+/)*[\w@~+-]+\.[\w.~+-]*[\w~+-]")
 
-    for old, new in moves.items():
-        pattern = re.compile(r"(?<![\w/.-])" + re.escape(old) + r"(?![\w/-])")
-        text = pattern.sub(new, text)
-    return text
+    def rewrite(match: re.Match[str]) -> str:
+        token = match.group()
+        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(source_path), token))
+        if resolved == ".." or resolved.startswith("../"):
+            raise AdoptionError("adoption-needs-choice", "reference escapes captured skill root")
+        if resolved not in known:
+            if posixpath.basename(token) in {posixpath.basename(old) for old in moves}:
+                raise AdoptionError(
+                    "adoption-needs-choice", "ambiguous reference to relocated file"
+                )
+            return token
+        target = moves.get(resolved, resolved)
+        relative = posixpath.relpath(target, posixpath.dirname(destination_path) or ".")
+        if token.startswith("./") and not relative.startswith("."):
+            relative = "./" + relative
+        return relative
+
+    return pattern.sub(rewrite, text)
 
 
 def _hub_text_files(remote: SkillDocument) -> dict[str, str]:
@@ -423,7 +457,12 @@ def _relocation_target(
             return candidate
     wanted = _norm(entry_text)
     for path, content in remote_files.items():
-        if path not in taken and path != "SKILL.md" and _norm(content) == wanted:
+        if (
+            path not in taken
+            and path != "SKILL.md"
+            and path.endswith((".md", ".markdown"))
+            and _norm(content) == wanted
+        ):
             return path
     candidate = "references/" + name
     try:
@@ -496,22 +535,46 @@ def build_proposal(
         for entry in tree.entries:
             text, _ = _carriable(entry.path, entry)
             relocatable = (
-                entry.text() is not None and len(entry.data) <= MAX_FILE_BYTES
+                entry.text() is not None
+                and len(entry.data) <= MAX_FILE_BYTES
                 and _relocation_target(entry.path, entry.text() or "", {}, set()) is not None
             )
             extra = text is None and not relocatable
             if extra:
                 extras.append(entry.path)
-            plans.append(FilePlan(entry.path, "carried" if extra else "kept-local",
-                                  local_path=entry.path, local=entry.text(),
-                                  remote=remote_files.get(entry.path), proposed=entry.text()))
+            plans.append(
+                FilePlan(
+                    entry.path,
+                    "carried" if extra else "kept-local",
+                    local_path=entry.path,
+                    local=entry.text(),
+                    remote=remote_files.get(entry.path),
+                    proposed=entry.text(),
+                )
+            )
         local_paths = {entry.path for entry in tree.entries}
-        plans.extend(FilePlan(path, "not-installed", remote=text, proposed=None,
-                              reason="keep-local leaves the original folder unchanged")
-                     for path, text in remote_files.items() if path not in local_paths)
+        plans.extend(
+            FilePlan(
+                path,
+                "not-installed",
+                remote=text,
+                proposed=None,
+                reason="keep-local leaves the original folder unchanged",
+            )
+            for path, text in remote_files.items()
+            if path not in local_paths
+        )
         projected = local_projection(tree, carried_paths=extras).with_name(remote.name)
-        return AdoptionProposal(alias, "ready", "keep-local", tree.tree_hash,
-                                tuple(tree.manifest()), tuple(plans), projected, "keep-local")
+        return AdoptionProposal(
+            alias,
+            "ready",
+            "keep-local",
+            tree.tree_hash,
+            tuple(tree.manifest()),
+            tuple(plans),
+            projected,
+            "keep-local",
+        )
     local_by_path = {e.path: e for e in tree.entries}
 
     # 1. Classify every local file: carriable text, relocatable root text, or
@@ -537,21 +600,25 @@ def build_proposal(
                 moves[entry.path] = target
                 carried[target] = (entry.path, raw)
                 continue
-            local_collision = (
-                target in local_by_path
-                or ("/" not in entry.path and "references/" + entry.path in local_by_path)
+            local_collision = target in local_by_path or (
+                "/" not in entry.path and "references/" + entry.path in local_by_path
             )
             if local_collision and strategy == "merge":
-                set_aside.append(FilePlan(
-                    entry.path, "needs-choice", local_path=entry.path,
-                    reason="relocation collides with another local file",
-                ))
+                set_aside.append(
+                    FilePlan(
+                        entry.path,
+                        "needs-choice",
+                        local_path=entry.path,
+                        reason="relocation collides with another local file",
+                    )
+                )
                 continue
         action = "set-aside" if strategy == "take-hub" else "carried"
         if strategy == "merge" and entry.path in remote_files:
             action = "needs-choice"
-        set_aside.append(FilePlan(entry.path, action, local_path=entry.path,
-                                  reason=reason or "not carriable"))
+        set_aside.append(
+            FilePlan(entry.path, action, local_path=entry.path, reason=reason or "not carriable")
+        )
 
     if "SKILL.md" not in carried:
         raise AdoptionError(
@@ -562,7 +629,20 @@ def build_proposal(
     #    Deterministic, never a model call, and recorded so the preview can say so.
     if moves:
         carried = {
-            target: (src, _rewrite_relocated_refs(text, moves))
+            target: (
+                src,
+                (
+                    _rewrite_relocated_refs(
+                        text,
+                        moves,
+                        source_path=src,
+                        destination_path=target,
+                        known_paths=set(local_by_path),
+                    )
+                    if target.endswith((".md", ".markdown"))
+                    else text
+                ),
+            )
             for target, (src, text) in carried.items()
         }
 
@@ -607,8 +687,11 @@ def build_proposal(
                 local_path=relocated_from,
                 local=local_text,
                 proposed=None if strategy == "take-hub" else local_text,
-                reason=("kept from the local copy" if strategy != "take-hub"
-                        else "not in the hub version"),
+                reason=(
+                    "kept from the local copy"
+                    if strategy != "take-hub"
+                    else "not in the hub version"
+                ),
             )
             if strategy == "take-hub":
                 # Taking the hub version does not install a local-only file, so
@@ -620,7 +703,11 @@ def build_proposal(
                     local=local_text,
                     reason="not in the hub version; kept in the snapshot",
                 )
-        elif _norm(local_text) == _norm(remote_text):
+        elif (
+            local_text == remote_text
+            if not path.endswith((".md", ".markdown")) or path.startswith(("scripts/", "assets/"))
+            else _norm(local_text) == _norm(remote_text)
+        ):
             plan = FilePlan(
                 path,
                 "relocated" if relocated_from else "same",
@@ -647,11 +734,16 @@ def build_proposal(
                 remote=remote_text,
                 proposed=remote_text,
             )
-        elif path.startswith("assets/"):
+        elif path.startswith(("assets/", "scripts/")) or not path.endswith((".md", ".markdown")):
             # Assets are payloads, even when UTF-8. The resolver must never see
             # or invent their bytes; differing versions require an explicit choice.
-            plan = FilePlan(path, "needs-choice", local=local_text, remote=remote_text,
-                            reason="asset contents differ")
+            plan = FilePlan(
+                path,
+                "needs-choice",
+                local=local_text,
+                remote=remote_text,
+                reason="asset contents differ",
+            )
         elif not allow_llm:
             plan = FilePlan(
                 path,
@@ -725,6 +817,7 @@ def build_proposal(
         raise AdoptionError("skill-too-large", "the consolidated skill exceeds 64 files")
     assert description is not None
     import yaml
+
     adjusted = []
     for file in files:
         if file.path == "SKILL.md":
@@ -733,8 +826,10 @@ def build_proposal(
             meta.update(name=remote.name, description=description)
             file = SkillFile(
                 file.path,
-                "---\n" + yaml.safe_dump(meta, sort_keys=False, allow_unicode=True)
-                + "---\n" + body,
+                "---\n"
+                + yaml.safe_dump(meta, sort_keys=False, allow_unicode=True)
+                + "---\n"
+                + body,
             )
         adjusted.append(file)
     document = SkillDocument(remote.name, description, tuple(adjusted))
@@ -946,7 +1041,21 @@ def local_projection(tree: LocalTree, *, carried_paths: Sequence[str] = ()) -> S
         if target in files:
             raise AdoptionError("adoption-needs-choice", "local relocation collides")
         files[target] = text
-    files = {path: _rewrite_relocated_refs(text, moves) for path, text in files.items()}
+    inverse = {target: source for source, target in moves.items()}
+    files = {
+        path: (
+            _rewrite_relocated_refs(
+                text,
+                moves,
+                source_path=inverse.get(path, path),
+                destination_path=path,
+                known_paths=original,
+            )
+            if path.endswith((".md", ".markdown"))
+            else text
+        )
+        for path, text in files.items()
+    }
     meta = parse_frontmatter(files.get("SKILL.md", ""))
     return SkillDocument(
         meta["name"],

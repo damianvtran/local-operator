@@ -1,5 +1,5 @@
 {
-  "wire.skill_adoption.preview_required": "Kỹ năng cục bộ này cần bản xem trước merge trước khi có thể liên kết. Chạy `lop skills pull <id> --dry-run`, kiểm tra cả hai bản diff, rồi xác nhận bản xem trước đó bằng `--adopt-receipt <receipt> --yes`.",
+  "wire.skill_adoption.preview_required": "Kỹ năng cục bộ này cần bản xem trước merge trước khi có thể liên kết. Chạy `lop skills pull` với cùng ID kỹ năng, phạm vi và các tùy chọn, thêm `--dry-run`. Kiểm tra cả hai bản diff, rồi dùng lại các tùy chọn đó với `--adopt-receipt <receipt> --yes` để xác nhận.",
   "wire.skill_adoption.preview_changed": "Kỹ năng cục bộ, phiên bản Hub hoặc chính sách liên kết đã thay đổi sau bản xem trước này. Tạo bản xem trước mới và kiểm tra trước khi áp dụng.",
   "wire.skill_adoption.needs_choice": "Không thể tạo phiên bản hợp nhất một cách an toàn. Xem trước một lựa chọn rõ ràng: giữ bản cục bộ và liên kết, hoặc dùng bản Hub kèm bản sao lưu.",
   "wire.skill_adoption.preview_title": "Kiểm tra hướng dẫn cục bộ và trên Hub trước khi liên kết",

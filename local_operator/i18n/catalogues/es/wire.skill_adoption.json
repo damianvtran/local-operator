@@ -1,5 +1,5 @@
 {
-  "wire.skill_adoption.preview_required": "Esta habilidad local necesita una vista previa del merge antes de poder vincularse. Ejecuta `lop skills pull <id> --dry-run`, revisa ambos diffs y confirma esa vista previa con `--adopt-receipt <receipt> --yes`.",
+  "wire.skill_adoption.preview_required": "Esta habilidad local necesita una vista previa del merge antes de poder vincularse. Ejecuta `lop skills pull` con el mismo ID de habilidad, ámbito y opciones, añadiendo `--dry-run`. Revisa ambos diffs y repite esas opciones con `--adopt-receipt <receipt> --yes` para confirmar.",
   "wire.skill_adoption.preview_changed": "La habilidad local, la revisión del Hub o la política de vinculación cambió después de esta vista previa. Crea una nueva vista previa y revísala antes de aplicarla.",
   "wire.skill_adoption.needs_choice": "No se pudo generar una versión consolidada de forma segura. Previsualiza una opción explícita: conservar la versión local y vincularla, o usar la versión del Hub con una copia de seguridad.",
   "wire.skill_adoption.preview_title": "Revisa las instrucciones locales y las del Hub antes de vincular",

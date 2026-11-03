@@ -1,5 +1,5 @@
 {
-  "wire.skill_adoption.preview_required": "关联此本地技能前，需要先预览 merge 结果。运行 `lop skills pull <id> --dry-run`，检查两份差异，再用 `--adopt-receipt <receipt> --yes` 确认该预览。",
+  "wire.skill_adoption.preview_required": "关联此本地技能前，需要先预览 merge 结果。运行 `lop skills pull`，使用相同的技能 ID、范围和选项，并加上 `--dry-run`。检查两份差异，再使用这些相同选项并加上 `--adopt-receipt <receipt> --yes` 进行确认。",
   "wire.skill_adoption.preview_changed": "此次预览后，本地技能、Hub 修订版本或关联策略已更改。请重新生成预览，检查后再应用。",
   "wire.skill_adoption.needs_choice": "无法安全生成整合版本。请明确选择并预览：保留本地版本并关联，或备份后采用 Hub 版本。",
   "wire.skill_adoption.preview_title": "关联前检查本地与 Hub 的指导内容",

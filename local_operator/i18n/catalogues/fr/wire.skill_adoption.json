@@ -1,5 +1,5 @@
 {
-  "wire.skill_adoption.preview_required": "Cette compétence locale nécessite un aperçu de merge avant de pouvoir être liée. Exécutez `lop skills pull <id> --dry-run`, examinez les deux diffs, puis confirmez cet aperçu avec `--adopt-receipt <receipt> --yes`.",
+  "wire.skill_adoption.preview_required": "Cette compétence locale nécessite un aperçu de merge avant de pouvoir être liée. Exécutez `lop skills pull` avec le même identifiant de compétence, le même périmètre et les mêmes options, en ajoutant `--dry-run`. Examinez les deux diffs, puis reprenez ces options avec `--adopt-receipt <receipt> --yes` pour confirmer.",
   "wire.skill_adoption.preview_changed": "La compétence locale, la révision du Hub ou la politique de liaison a changé depuis cet aperçu. Créez un nouvel aperçu et examinez-le avant de l’appliquer.",
   "wire.skill_adoption.needs_choice": "Impossible de produire une version consolidée en toute sécurité. Prévisualisez un choix explicite : conserver la version locale et la lier, ou utiliser la version du Hub avec une sauvegarde.",
   "wire.skill_adoption.preview_title": "Examiner les instructions locales et celles du Hub avant la liaison",

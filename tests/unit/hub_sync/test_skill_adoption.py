@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -79,10 +79,10 @@ class FaithfulModel:
     def __init__(self) -> None:
         self.requests: list[ConflictRequest] = []
 
-    def resolve(self, request: ConflictRequest) -> ConflictProposal:
-        self.requests.append(request)
+    def resolve(self, req: ConflictRequest) -> ConflictProposal:
+        self.requests.append(req)
         return ConflictProposal(
-            request.local + "\n\n" + request.remote,
+            req.local + "\n\n" + req.remote,
             covers=("l1", "r1"),
             model="fixture-faithful-model",
         )
@@ -326,7 +326,9 @@ def test_disabling_model_requires_explicit_fallback(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("strategy", ["keep-local", "take-hub"])
-def test_explicit_fallback_resolves_only_the_chosen_guidance(tmp_path: Path, strategy: str) -> None:
+def test_explicit_fallback_resolves_only_the_chosen_guidance(
+    tmp_path: Path, strategy: Literal["keep-local", "take-hub"]
+) -> None:
     folder, remote, local_quality, hub_quality = _municipal(tmp_path)
     model = FaithfulModel()
     before = _bytes(folder)

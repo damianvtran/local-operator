@@ -807,7 +807,8 @@ def test_a_pull_refusal_names_the_personal_copy_and_its_remedy(tmp_path: Path) -
     # A collision now has an in-place recovery path. An unreviewed pull still
     # refuses, but directs the caller to a receipt-bound preview rather than
     # moving their only authored copy out of the way.
-    assert "lop skills pull <id> --dry-run" in message
+    assert "lop skills pull" in message and "--dry-run" in message
+    assert "same skill ID, scope and options" in message
     assert "--adopt-receipt <receipt> --yes" in message
     assert "move it elsewhere" not in message
     # No reviewed receipt was supplied: the personal copy stays byte-identical.

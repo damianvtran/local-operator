@@ -3,7 +3,7 @@
     "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
     "tone": "plain, calm, explicit about review and data preservation",
     "width": "terminal prose; wraps without truncating commands or parameters",
-    "note": "Blocking unlinked same-name local folder. Both diffs compare the proposal against local and Hub guidance. Commands are literal and untranslated; <id> and <receipt> are CLI metavariables, not ICU parameters."
+    "note": "Blocking unlinked same-name local folder. Both diffs compare the proposal against local and Hub guidance. Keep the skill ID, scope and options unchanged from preview through confirmation. Commands and flags are literal and untranslated; <receipt> is a CLI metavariable, not an ICU parameter."
   },
   "wire.skill_adoption.preview_changed": {
     "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",

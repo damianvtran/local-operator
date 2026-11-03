@@ -1,5 +1,5 @@
 {
-  "wire.skill_adoption.preview_required": "This local skill needs a merge preview before it can be linked. Run `lop skills pull <id> --dry-run`, review both diffs, then confirm that preview with `--adopt-receipt <receipt> --yes`.",
+  "wire.skill_adoption.preview_required": "This local skill needs a merge preview before it can be linked. Run `lop skills pull` with the same skill ID, scope and options plus `--dry-run`. Review both diffs, then repeat those options with `--adopt-receipt <receipt> --yes` to confirm.",
   "wire.skill_adoption.preview_changed": "The local skill, Hub revision, or link policy changed after this preview. Create a new preview and review it before applying.",
   "wire.skill_adoption.needs_choice": "A consolidated version could not be produced safely. Preview an explicit choice: keep local and link, or take the Hub version with a backup.",
   "wire.skill_adoption.preview_title": "Review local and Hub guidance before linking",

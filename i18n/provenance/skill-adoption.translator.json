@@ -3,6 +3,37 @@
   "record_kind": "translator_provenance",
   "date": "2026-11-03",
   "status": "translated_independent_audit_required",
+  "remediation_deltas": [
+    {
+      "date": "2026-11-03",
+      "reason": "Unified core remediation D3: executable-neutral scoped recovery instructions",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported in this resumed delta"
+      },
+      "namespace": "wire.skill_adoption",
+      "keys": [
+        "wire.skill_adoption.preview_required"
+      ],
+      "source_before_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+      "source_after_sha256": "e809a3221b21b41951ef45200378d59f9a66dcda81c45c4b81119c1cbba360be",
+      "context_after_sha256": "d24fe484fa7ce9758efc7135b95f2c8c0527a90cde9824b0c82f153779dfacef",
+      "locale_after_sha256": {
+        "en": "e809a3221b21b41951ef45200378d59f9a66dcda81c45c4b81119c1cbba360be",
+        "fr": "8a70390f121dfb5b578e336ae6f2c093bf941a951b1d58c2e9f048ce33f4831c",
+        "es": "1d248150fa49ebdd6109b9d28cd9a1cd0e1fc779223216597772109b9165e65d",
+        "zh-CN": "61318021dd8ce8557c8a9a48c4a4524dadbc9dcd7870df21057a11847771ce9e",
+        "ru": "bef9ef969dcd67bf056d6071b4c66c8837167822ff2e3f74b8c8cd3de84b5608",
+        "vi": "4647ac211d2a456d300667a80dd4404a025b2afd50c709c0c58824e33df5ab57",
+        "ur": "de620a9315a8240bb1b2d1963156124dbda2ba4d7c1f693fb2675086dd6168ed",
+        "hi": "3504e5c579b782f7627dac9776c9ad866d822d6eb622120c4a49068d438a5835"
+      },
+      "status": "translated_independent_delta_reaudit_required",
+      "note": "Historical initial-translation namespace hashes above are retained as provenance, not current eligibility claims. No self-audit, ledger changes or generation. Agent-facing skill_tool recovery hint updated to retain same ID, scope and options."
+    }
+  ],
   "translator": {
     "agent": "coder / skill-adoption-copy",
     "session": "5984801ad25d",

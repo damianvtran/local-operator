@@ -3672,9 +3672,15 @@ def install_skill(
             from local_operator.hub_sync.skill_adoption_service import adopt_skill
 
             return adopt_skill(
-                ctx, resolved, dry_run=dry_run, confirm=confirm,
-                receipt=adoption_receipt, strategy=adoption_strategy,
-                allow_llm=allow_llm, subscribe=subscribe, auto_push=auto_push,
+                ctx,
+                resolved,
+                dry_run=dry_run,
+                confirm=confirm,
+                receipt=adoption_receipt,
+                strategy=adoption_strategy,
+                allow_llm=allow_llm,
+                subscribe=subscribe,
+                auto_push=auto_push,
             )
 
         # 7b-bundle. The bundle preflight runs BEFORE any policy staging or

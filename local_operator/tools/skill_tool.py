@@ -419,8 +419,9 @@ _HINTS: dict[str, str] = {
         "show returned). Show it again and redo the edit on the current text."
     ),
     "alias-occupied": (
-        "For a same-named Hub skill, use `lop skills pull <id> --dry-run` to review "
-        "an in-place adoption merge, then confirm its receipt. Do not move or "
+        "For a same-named Hub skill, use `lop skills pull` with the same skill ID, "
+        "scope and options plus `--dry-run` to review an in-place adoption merge, "
+        "then confirm its receipt with the same options. Do not move or "
         "overwrite the local folder to bypass review. For a new local skill, "
         "choose another name or edit the existing skill."
     ),

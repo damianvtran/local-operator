@@ -1,5 +1,5 @@
 {
-  "wire.skill_adoption.preview_required": "اس مقامی مہارت کو لنک کرنے سے پہلے merge کا پیش منظر ضروری ہے۔ `lop skills pull <id> --dry-run` چلائیں، دونوں فرق دیکھیں، پھر `--adopt-receipt <receipt> --yes` سے اسی پیش منظر کی تصدیق کریں۔",
+  "wire.skill_adoption.preview_required": "اس مقامی مہارت کو لنک کرنے سے پہلے merge کا پیش منظر ضروری ہے۔ `lop skills pull` اسی مہارت کی ID، اسی دائرے اور انہی اختیارات کے ساتھ چلائیں اور `--dry-run` شامل کریں۔ دونوں فرق دیکھیں، پھر تصدیق کے لیے انہی اختیارات کے ساتھ `--adopt-receipt <receipt> --yes` استعمال کریں۔",
   "wire.skill_adoption.preview_changed": "اس پیش منظر کے بعد مقامی مہارت، Hub کا ورژن یا لنک کی پالیسی بدل گئی ہے۔ نیا پیش منظر بنائیں اور اسے لاگو کرنے سے پہلے جائزہ لیں۔",
   "wire.skill_adoption.needs_choice": "یکجا ورژن محفوظ طریقے سے نہیں بنایا جا سکا۔ واضح انتخاب کا پیش منظر دیکھیں: مقامی ورژن رکھ کر لنک کریں، یا بیک اپ کے ساتھ Hub کا ورژن لیں۔",
   "wire.skill_adoption.preview_title": "لنک کرنے سے پہلے مقامی اور Hub کی ہدایات کا جائزہ لیں",
