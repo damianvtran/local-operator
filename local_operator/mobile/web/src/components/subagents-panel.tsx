@@ -22,6 +22,7 @@
  * the word "failed" absent from the page (U5). `· 3 failed` in `text-danger`
  * restores that at a glance and costs no vertical space.
  */
+import { contentDir } from "../lib/content-direction";
 import { useRef } from "react";
 import { cn } from "../lib/cn";
 import { PANEL_FRACTION, columnCap } from "../lib/column";
@@ -83,7 +84,7 @@ export function AgentRow({
 				{AGENT_GLYPH[agent.status]}
 			</span>
 			<span className="min-w-0 flex flex-1 flex-col">
-				<span dir="auto" className="truncate text-body-sm text-ink">{agent.label}</span>
+				<span dir={contentDir(agent.label)} className="truncate text-body-sm text-ink">{agent.label}</span>
 				{agent.model_fallback === true ? (
 					/* The pin-integrity badge (PR review round 1, reviewer MAJOR): the wire
 					   has carried `model_label` as the `A → B ⚠ fallback` string since the
@@ -101,7 +102,7 @@ export function AgentRow({
 					<span className="break-words text-meta text-warning">{agent.model_label}</span>
 				) : null}
 				{showMetadata ? (
-					<span dir="auto" className="truncate text-meta text-ink-dim">
+					<span dir={contentDir(`${agent.agent}${agent.effort ? ` · ${agent.effort}` : ""}`)} className="truncate text-meta text-ink-dim">
 						{agent.agent}{agent.effort ? ` · ${agent.effort}` : ""}
 					</span>
 				) : null}
@@ -237,7 +238,7 @@ export function AgentRoster({
 					    WHOLE (worst case "sub… 1/5 running"); a clipped LABEL is the
 					    loss this row can afford, and it stays recoverable by opening
 					    the panel. */}
-					<span dir="auto" className={cn("min-w-0 truncate", forceCollapsed && HELD_DIM)}>
+					<span dir={contentDir(label)} className={cn("min-w-0 truncate", forceCollapsed && HELD_DIM)}>
 						{label}
 					</span>
 					<span

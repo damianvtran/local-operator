@@ -235,7 +235,7 @@
 	   `start` remains physical left here because the island itself is LTR. */
 	/* RTL truncation defect: the ellipsis end follows the element direction,
 	   not the text language. Chrome direction is not content direction: text
-	   leaves use dir="auto"; known technical labels use this LTR island.
+	   leaves use dominant-script contentDir; known technical labels use this LTR island.
 	   Keep both off controls/glyphs so chrome order and mirroring survive. */
 	:where(code, pre, [data-ltr], [dir="ltr"]:not(html)) {
 		direction: ltr;

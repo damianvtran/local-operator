@@ -165,7 +165,22 @@ it("isolates the header title's truncation direction, not its controls", () => {
  slot = { projection: projection({ conversation_name: "Identifying prefix — لمبی گفتگو" }), connected: true };
  render(<div dir="rtl"><SessionScreen sessionId="s1" /></div>);
  const title = screen.getByText("Identifying prefix — لمبی گفتگو");
- expect(title.getAttribute("dir")).toBe("auto");
+ expect(title.getAttribute("dir")).toBe("ltr");
+ expect(title.className).toContain("truncate");
+ expect(title.closest("button")?.hasAttribute("dir")).toBe(false);
+});
+
+// First-strong loses the Urdu beginning after API; neutral titles inherit chrome.
+it.each([
+ ["API منصوبے کی پیش رفت اور اگلے مرحلے کی تفصیلی گفتگو", "rtl"],
+ ["Pure Latin identifying beginning and a long conversation title", "ltr"],
+ ["تحقیقاتی منصوبے کی پیش رفت اور اگلے مرحلے کی تفصیلی گفتگو", "rtl"],
+ ["2026-11-03 12345678901234567890", null],
+])("resolves truncated title %s by dominant script", (name, direction) => {
+ slot = { projection: projection({ conversation_name: name }), connected: true };
+ render(<div dir="rtl"><SessionScreen sessionId="s1" /></div>);
+ const title = screen.getByText(name);
+ expect(title.getAttribute("dir")).toBe(direction);
  expect(title.className).toContain("truncate");
  expect(title.closest("button")?.hasAttribute("dir")).toBe(false);
 });

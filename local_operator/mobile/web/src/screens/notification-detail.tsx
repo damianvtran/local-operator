@@ -15,6 +15,7 @@
  * Questions are answered in the existing Questions sheet, not here: one
  * answering surface on the phone.
  */
+import { contentDir } from "../lib/content-direction";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getNotification, getNotifications, HttpError, patchNotifications } from "../api";
 import { AsksSheet } from "../components/asks-sheet";
@@ -172,7 +173,7 @@ export function NotificationDetailScreen({ itemId }: { itemId: string }) {
 			<header className="flex h-[calc(52px+env(safe-area-inset-top))] shrink-0 items-center gap-1 px-1 pt-[env(safe-area-inset-top)]">
 				<button type="button" onClick={() => navigateUp("/notifications")} aria-label={messageRuntime.t("relay.notifications.detail.back")}
 					className="flex size-11 shrink-0 items-center justify-center rounded-md text-ink-muted active:bg-surface">‹</button>
-				<h1 dir="auto" className="min-w-0 flex-1 truncate text-heading font-semibold">{messageRuntime.t("relay.notifications.title")}</h1>
+				<h1 dir={contentDir(messageRuntime.t("relay.notifications.title"))} className="min-w-0 flex-1 truncate text-heading font-semibold">{messageRuntime.t("relay.notifications.title")}</h1>
 			</header>
 			<main className="lo-scroll min-h-0 flex-1 overflow-y-auto px-4 pb-[calc(88px+env(safe-area-inset-bottom))]">
 				{load.state === "loading" ? <p aria-busy="true" className="pt-4 text-body-sm text-ink-dim">{messageRuntime.t("relay.notifications.detail.loading")}</p>
@@ -231,7 +232,7 @@ export function NotificationDetailScreen({ itemId }: { itemId: string }) {
 					<section>
 						<h3 className={sectionClass}>{messageRuntime.t("relay.notifications.detail.section.from")}</h3>
 						<div className="flex flex-col gap-1 rounded-md bg-surface px-3 py-2">
-							<span dir="auto" className="truncate text-body text-ink">{sourceName(detail, names)}</span>
+							<span dir={contentDir(sourceName(detail, names))} className="truncate text-body text-ink">{sourceName(detail, names)}</span>
 							<span className="text-meta text-ink-dim">{messageRuntime.t("relay.notifications.detail.from.state", { state: sessionState(detail.session.live) })}</span>
 							{detail.session.id ? <Button variant="ghost" className="self-start !px-0" disabled={writing} onClick={() => void prepareSessionDismiss()}>
 								{messageRuntime.t("relay.notifications.detail.from.dismiss_all")}</Button> : null}
@@ -240,7 +241,7 @@ export function NotificationDetailScreen({ itemId }: { itemId: string }) {
 					{detail.projects && detail.projects.length > 0 ? <section>
 						<h3 className={sectionClass}>{messageRuntime.t("relay.notifications.detail.section.projects")}</h3>
 						<ul className="flex flex-col">{detail.projects.map(project => <li key={project.key} className="flex min-h-11 items-center gap-2 text-body-sm">
-							<span dir="auto" className="min-w-0 flex-1 truncate text-ink">{project.name}</span>
+							<span dir={contentDir(project.name)} className="min-w-0 flex-1 truncate text-ink">{project.name}</span>
 							<span className="shrink-0 text-meta text-ink-dim">{project.status}</span>
 						</li>)}</ul>
 					</section> : null}

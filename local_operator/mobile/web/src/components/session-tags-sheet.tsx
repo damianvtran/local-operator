@@ -25,6 +25,7 @@
  * changes carry the pending mark; every control is disabled while it is in
  * flight, so two writes can never interleave into a state neither requested.
  */
+import { contentDir } from "../lib/content-direction";
 import { useEffect, useId, useRef, useState, type RefObject } from "react";
 import { getTags, setSessionTags } from "../api";
 import { refusalText } from "../lib/refusal";
@@ -313,7 +314,7 @@ export function SessionTagsSheet({
 												onChange={() => toggle(row.id)}
 												className="size-4 shrink-0 accent-[var(--color-accent)]"
 											/>
-											<span dir="auto" className="min-w-0 truncate text-body">
+											<span dir={contentDir(row.name)} className="min-w-0 truncate text-body">
 												{row.name}
 											</span>
 											{row.missing ? (

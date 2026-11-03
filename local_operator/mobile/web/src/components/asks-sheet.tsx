@@ -37,6 +37,7 @@
  * from an open sheet rather than a poll feeding a push, which is the bound
  * `asks/store.index_asks` asks a caller to keep in mind.
  */
+import { contentDir } from "../lib/content-direction";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getAsks } from "../api";
 import { AskCard } from "./ask-card";
@@ -361,7 +362,7 @@ export function AsksSheet({
 						{/* Data, not copy: the projection's own conversation name, once per
 						    conversation (UX round 2, U6). */}
 						{crossConversation ? (
-							<p dir="auto" className="truncate px-1 text-meta font-medium text-ink-dim">{block.name}</p>
+							<p dir={contentDir(block.name)} className="truncate px-1 text-meta font-medium text-ink-dim">{block.name}</p>
 						) : null}
 						{/* THE WAIT IS STATED BEFORE THE TAP, AND ONLY WHERE THERE IS ONE
 						    (design round 1, D4 = UX U4; round-2 corrections below).

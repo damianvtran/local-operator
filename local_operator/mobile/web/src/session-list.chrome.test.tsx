@@ -106,7 +106,7 @@ it("gives English-fallback Appearance descriptions their own truncation directio
  fireEvent.click(screen.getByRole("button", { name: "Open navigation" }));
  fireEvent.click(screen.getByRole("button", { name: /Appearance/ }));
  const description = screen.getByText(THEMES[0].description);
- expect(description.getAttribute("dir")).toBe("auto");
+ expect(description.getAttribute("dir")).toBe("ltr");
  expect(description.className).toContain("truncate");
  expect(description.closest("button")?.hasAttribute("dir")).toBe(false);
 });

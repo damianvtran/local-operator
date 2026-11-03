@@ -161,7 +161,22 @@ it("keeps a mixed-direction conversation title's own truncation end in RTL chrom
  sessionList = [summary({ conversation_name: "Identifying prefix — لمبی گفتگو" })];
  const { container } = render(<div dir="rtl"><SessionListScreen /></div>);
  const title = screen.getByText("Identifying prefix — لمبی گفتگو");
- expect(title.getAttribute("dir")).toBe("auto");
+ expect(title.getAttribute("dir")).toBe("ltr");
  expect(title.className).toContain("truncate");
  expect(title.closest('[dir="rtl"]')).toBe(container.firstElementChild);
+});
+
+// First-strong loses the Urdu beginning after API; neutral titles inherit chrome.
+it.each([
+ ["API منصوبے کی پیش رفت اور اگلے مرحلے کی تفصیلی گفتگو", "rtl"],
+ ["Pure Latin identifying beginning and a long conversation title", "ltr"],
+ ["تحقیقاتی منصوبے کی پیش رفت اور اگلے مرحلے کی تفصیلی گفتگو", "rtl"],
+ ["2026-11-03 12345678901234567890", null],
+])("resolves truncated title %s by dominant script", (name, direction) => {
+ sessionList = [summary({ conversation_name: name })];
+ render(<div dir="rtl"><SessionListScreen /></div>);
+ const title = screen.getByText(name);
+ expect(title.getAttribute("dir")).toBe(direction);
+ expect(title.className).toContain("truncate");
+ expect(title.closest("button")?.hasAttribute("dir")).toBe(false);
 });

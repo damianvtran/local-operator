@@ -1,3 +1,4 @@
+import { contentDir } from "../lib/content-direction";
 import { useScrollCues } from "../lib/use-scroll-cues";
 import { usePriorityFit } from "../lib/use-priority-fit";
 /**
@@ -484,7 +485,7 @@ function SessionCard({
 					</span>
 				) : null}
 				<span
-					dir="auto"
+					dir={contentDir(s.conversation_name || "untitled")}
 					className={cn(
 						"min-w-0 flex-1 truncate text-body font-medium",
 						s.streaming && "lo-shimmer",
@@ -516,7 +517,11 @@ function SessionCard({
 			    24px picture + gap = ps-8 on a row that draws one. */}
 			<div className={cn("flex min-w-0 items-center gap-2 text-meta tabular-nums text-ink-dim", avatar.url ? "ps-8" : "ps-5")}>
 				<SessionTagLine tags={s.tags ?? []} primary={s.primary ?? null} className="max-w-[45%] shrink-0" />
-				<span dir="auto" className="min-w-0 truncate">{[
+				<span dir={contentDir([
+					s.streaming ? messageRuntime.t("relay.chrome.session.subtitle.working_plain") : null,
+					delegating ? delegatedChip(children) : null,
+					s.todos_open ? `${s.todos_open} todo` : null,
+					!s.tags?.length ? cwdText : null].filter(Boolean).join(" · ") || "\u00a0")} className="min-w-0 truncate">{[
 					s.streaming ? messageRuntime.t("relay.chrome.session.subtitle.working_plain") : null,
 					delegating ? delegatedChip(children) : null,
 					s.todos_open ? `${s.todos_open} todo` : null,
@@ -569,10 +574,10 @@ function ThemePicker({
 							{t.id === current ? "✓" : ""}
 						</span>
 						<span className="min-w-0 flex-1">
-							<span dir="auto" className="block truncate text-body">
+							<span dir={contentDir(t.name)} className="block truncate text-body">
 								{t.name}
 							</span>
-							<span dir="auto" className="block truncate text-meta text-ink-dim">
+							<span dir={contentDir(t.description)} className="block truncate text-meta text-ink-dim">
 								{t.description}
 							</span>
 						</span>
@@ -1474,7 +1479,7 @@ export function SessionListScreen() {
 					aria-label={messageRuntime.t("relay.chrome.list.search_label")} placeholder={messageRuntime.t("relay.session.list.search_placeholder")}
 					className="min-h-11 min-w-0 flex-1 rounded-md bg-elevated px-3 text-body text-ink placeholder:text-ink-dim" /> :
 					<div className="flex min-w-0 flex-1 items-center gap-2"><BrandMark />
-						<div className="min-w-0 flex-1"><h1 dir="auto" className="truncate text-heading font-semibold">{messageRuntime.t("relay.chrome.drawer.conversations")}</h1>
+						<div className="min-w-0 flex-1"><h1 dir={contentDir(messageRuntime.t("relay.chrome.drawer.conversations"))} className="truncate text-heading font-semibold">{messageRuntime.t("relay.chrome.drawer.conversations")}</h1>
 							{sessions.length > 0 && !connected ? <p role="status" className="text-meta text-ink-dim">{messageRuntime.t("relay.chrome.link.reconnecting")}</p> : null}</div></div>}
 				<button type="button" className="flex size-11 shrink-0 items-center justify-center rounded-md text-ink-muted active:bg-surface"
 					aria-label={searchOpen ? messageRuntime.t("relay.chrome.list.search_close") : messageRuntime.t("relay.chrome.list.search_open")}
@@ -1502,7 +1507,7 @@ export function SessionListScreen() {
 				<Chip data-fit-fixed selected={filter === "all"} aria-pressed={filter === "all"} onClick={() => setFilter("all")} className="shrink-0 max-[380px]:px-2">{messageRuntime.t("relay.chrome.list.filter.all")}</Chip>
 				<Chip data-fit-fixed selected={filter === "needs"} aria-pressed={filter === "needs"} onClick={() => setFilter("needs")} className="shrink-0 max-[380px]:px-2">{messageRuntime.t("relay.chrome.list.filter.needs_you", { count: needsCount })}</Chip>
 				<Chip data-fit-fixed selected={filter === "unread"} aria-pressed={filter === "unread"} onClick={() => setFilter("unread")} className="shrink-0 max-[380px]:px-2">{messageRuntime.t("relay.chrome.list.filter.unread", { count: unreadCount })}</Chip>
-				{tagsAvailable ? visibleTags.map(tag => <Chip key={tag.id} data-fit-key={tag.id} className="min-w-0 max-w-40 shrink-0" title={tag.name} selected={filter === tag.id} aria-pressed={filter === tag.id} onClick={() => setFilter(tag.id)}><span dir="auto" className="truncate">{tag.name}</span></Chip>) : null}
+				{tagsAvailable ? visibleTags.map(tag => <Chip key={tag.id} data-fit-key={tag.id} className="min-w-0 max-w-40 shrink-0" title={tag.name} selected={filter === tag.id} aria-pressed={filter === tag.id} onClick={() => setFilter(tag.id)}><span dir={contentDir(tag.name)} className="truncate">{tag.name}</span></Chip>) : null}
 				{/* ONE TAP TO EVERY TAG. The visible mark is `+N`; its accessible
 				    name is the existing "N more tags" sentence (the tag line's own
 				    `+N` mark, same meaning). The sheet lists EVERY tag, so the
@@ -1514,7 +1519,7 @@ export function SessionListScreen() {
 			<Sheet open={tagFiltersOpen} onClose={() => setTagFiltersOpen(false)} title={messageRuntime.t("relay.session.tags.sheet_title")}>
 				<div className="flex flex-wrap gap-2 p-3">
 					{tags.map(tag => <Chip key={tag.id} className="min-w-0 max-w-full" selected={filter === tag.id} aria-pressed={filter === tag.id}
-						onClick={() => { setFilter(tag.id); setTagFiltersOpen(false); }}><span dir="auto" className="truncate">{tag.name}</span></Chip>)}
+						onClick={() => { setFilter(tag.id); setTagFiltersOpen(false); }}><span dir={contentDir(tag.name)} className="truncate">{tag.name}</span></Chip>)}
 				</div>
 			</Sheet>
 			<main ref={listCue} onPointerDown={onListPointerDown} onScroll={event => {

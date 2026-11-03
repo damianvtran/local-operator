@@ -8,6 +8,7 @@
  * the send button switches to the `steer` op (same action, different
  * command) and a stop button appears beside it.
  */
+import { contentDir } from "../lib/content-direction";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useFootFit } from "../lib/use-foot-fit";
@@ -298,7 +299,7 @@ function SlashSheet({
 								<span className="text-ink-dim"> …</span>
 							) : null}
 						</span>
-						<span dir="auto" className="min-w-0 flex-1 truncate text-body-sm text-ink-dim">
+						<span dir={contentDir(c.description)} className="min-w-0 flex-1 truncate text-body-sm text-ink-dim">
 							{c.description}
 						</span>
 					</button>
@@ -1717,7 +1718,7 @@ export function Composer({
 					{retryPending ? (
 						<>
 							{retainedPreview ? (
-								<p dir="auto" className="mt-2 truncate text-body-sm text-ink-muted">{retainedPreview}</p>
+								<p dir={contentDir(retainedPreview)} className="mt-2 truncate text-body-sm text-ink-muted">{retainedPreview}</p>
 							) : null}
 							<button
 								type="button"
