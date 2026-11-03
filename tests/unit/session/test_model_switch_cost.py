@@ -128,9 +128,10 @@ async def test_the_serving_switch_skips_the_roster_pass_and_reads_credentials_of
     ``set_subagent_details`` globally let that deliberate flush land inside the
     measurement window on a slow runner (CI run 41395371685: ``assert 1 == 0``,
     stack-confirmed as ``_flush_roster_refresh`` by forcing the interval to 0).
-    So the window holds the coalescer shut, any call made from inside the flush
-    is classified apart from a call the switch made, and the flush is then
-    driven explicitly so the deferred pass is still pinned to run exactly once.
+    So the window holds the coalescer shut, requires that NO flush ran inside it
+    (a switch that called ``_flush_roster_refresh`` itself would be running the
+    roster pass inline under another name), and then drives the still-pending
+    flush explicitly so the deferred pass is pinned to run exactly once.
     """
     import threading
 
@@ -140,16 +141,32 @@ async def test_the_serving_switch_skips_the_roster_pass_and_reads_credentials_of
 
     # Hold the coalesced flush out of the measurement window so its firing does
     # not depend on how long the off-loop credential read takes on this host.
-    monkeypatch.setattr(serving, "_ROSTER_REFRESH_COALESCE_S", 3600.0)
+    # ``_schedule_roster_refresh`` reads the module global at call time, and
+    # ``setattr`` raises if it is ever renamed, so the hold cannot silently lapse.
+    held = 3600.0
+    monkeypatch.setattr(serving, "_ROSTER_REFRESH_COALESCE_S", held)
     session = _session(tmp_path)
     loop = asyncio.get_running_loop()
+    # Keep the held timers so ``finally`` can cancel them: a 3600 s handle must
+    # not outlive this test if it ever runs on a shared loop.
+    held_timers: list[asyncio.TimerHandle] = []
+    original_call_later = loop.call_later
+
+    def call_later(delay: float, callback: Any, *args: Any, **kw: Any) -> asyncio.TimerHandle:
+        timer = original_call_later(delay, callback, *args, **kw)
+        if delay == held:
+            held_timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(loop, "call_later", call_later)
     handle = ServingSessionHandle(session, loop, cwd=str(tmp_path), config_dir=tmp_path)
     unsubscribe = handle.subscribe(lambda: None)
     session._frontend_state_store.subscribe(lambda *_a, **_k: None)
     try:
-        # Classify each roster pass by whether the coalesced flush is on the
-        # stack: only a pass made OUTSIDE it is one the switch ran itself. This
-        # keeps the assertion honest even if the hold above is ever defeated.
+        # Attribute each roster pass by whether it ran inside the class-method
+        # wrapper on ``_flush_roster_refresh``: only a pass made OUTSIDE it is
+        # one the switch ran itself. ``flushes`` then proves that wrapper ran
+        # only from the explicit drive below, never from the switch.
         in_flush = [False]
         flushes = [0]
         roster = [0]
@@ -207,14 +224,18 @@ async def test_the_serving_switch_skips_the_roster_pass_and_reads_credentials_of
         assert session.model.reasoning_effort == "low"
 
         # The switch's event still reached the coalescer, which folds the whole
-        # burst into ONE deferred pass. Drive it if it is still pending rather
-        # than waiting on the clock; if the timer already fired (the hold was
-        # defeated), it must have fired exactly once all the same.
-        if handle._roster_refresh_scheduled:
-            handle._flush_roster_refresh()
+        # burst into ONE deferred pass. Nothing may have flushed it yet: the
+        # timer is held, so an earlier flush can only be the switch flushing
+        # synchronously. Drive the pending pass now rather than wait on a clock.
+        assert flushes[0] == 0, "the switch flushed the roster itself, on the loop"
+        assert handle._roster_refresh_scheduled, "the switch's event scheduled no roster pass"
+        assert len(held_timers) == 1, f"one held roster timer, got {held_timers}"
+        handle._flush_roster_refresh()
         assert (flushes[0], flushed_roster[0]) == (1, 1), "the coalesced pass runs once"
         assert roster[0] == 0, "the coalesced pass was counted as the switch's"
     finally:
+        for timer in held_timers:
+            timer.cancel()
         unsubscribe()
         await handle.dispose()
         await session.dispose()
