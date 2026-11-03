@@ -336,3 +336,24 @@ def test_artifact_write_failure_does_not_replace_original_gate_failure(tmp_path,
     blocked_parent.write_text("synthetic")
     _retain_failure_evidence("acquire refused", 126, tmp_path, blocked_parent / "artifact.json")
     assert "failure evidence unavailable" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("character", ["\U0001f600", "\x00"])
+def test_artifact_byte_bound_includes_json_text_escaping(tmp_path, character):
+    from tests.unit.scripts.test_run_bounded_linux_spawn_load import (
+        _retain_failure_evidence,
+    )
+
+    records = tmp_path / "records"
+    records.mkdir()
+    (records / "synthetic.acquire.json").write_text(
+        json.dumps(
+            {"phase": "acquire", "ownership": {"census_failure": {"oversize": "x" * 100000}}}
+        )
+    )
+    destination = tmp_path / "artifact.json"
+    _retain_failure_evidence(character * 20000, 126, records, destination)
+    assert len(destination.read_bytes()) <= 96 * 1024
+    evidence = json.loads(destination.read_text())
+    assert evidence["records"] == [{"diagnostic_truncated": True}]
+    assert len(evidence["stderr"].encode("utf-8")) <= 16384

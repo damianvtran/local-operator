@@ -62,7 +62,9 @@ def _retain_failure_evidence(output, rc, record_dir, destination):
         evidence = {
             "schema": "run-bounded-churn-failure/v1",
             "rc": rc,
-            "stderr": output[:16384],
+            # 4096 Unicode characters are at most 16 KiB of UTF-8 and
+            # 48 KiB after JSON escaping, leaving the fallback file under 96 KiB.
+            "stderr": output[:4096],
             "records": records,
         }
         encoded = json.dumps(evidence, sort_keys=True)
