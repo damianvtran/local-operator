@@ -6,7 +6,7 @@
 // (the operator's iOS report) and a captioned one lost its thumbnails. The
 // backend already upgrades the steer echo with image refs on the drained event
 // (projection.absorb_user_event); only the renderer dropped them.
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Transcript } from "./transcript";
 import * as api from "../api";
@@ -31,5 +31,17 @@ describe("steer rows with attachments", () => {
 		render(<Transcript pid="s" entries={[steer({ text: "see this", images: [{ index: 0, mime_type: "image/png" }] })]} />);
 		expect(screen.getByText("see this")).toBeTruthy();
 		expect(screen.getAllByAltText("attachment")).toHaveLength(1);
+	});
+});
+
+describe("tap to enlarge", () => {
+	it("opens a full-screen viewer once loaded and closes on tap", () => {
+		render(<Transcript pid="s" entries={[steer({ images: [{ index: 0, mime_type: "image/png" }] })]} />);
+		fireEvent.load(screen.getByAltText("attachment"));
+		fireEvent.click(screen.getByRole("button", { name: "open attachment full screen" }));
+		expect(screen.getByRole("dialog")).toBeTruthy();
+		expect(screen.getByAltText("attachment full size")).toBeTruthy();
+		fireEvent.click(screen.getByRole("dialog"));
+		expect(screen.queryByRole("dialog")).toBeNull();
 	});
 });
