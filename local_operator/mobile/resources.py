@@ -392,6 +392,41 @@ def direct_ppid_pgid(pid: int) -> tuple[int, int] | None:
     return None
 
 
+def listed_ppid_pgid(pid: int, parent: int) -> tuple[int, int] | None:
+    """``(parent, pgid)`` when the kernel lists ``pid`` as a CURRENT child of ``parent``.
+
+    The SECOND parentage source for a stop (QA Q2, PR #3369). The first,
+    :func:`direct_ppid_pgid`, asks about ``pid`` itself, and macOS refuses that
+    (``proc_pidinfo(PROC_PIDTBSDINFO)`` → no answer) for a setuid process such
+    as ``/usr/bin/top`` — so an escaped setuid descendant present at a breach
+    stop was skipped before any signal and survived silently. This asks the
+    other end of the edge instead: ``proc_listpids(PROC_PPID_ONLY, parent)``
+    answers for the parent's children regardless of their credentials
+    (measured: a setsid'd setuid ``top`` is listed under its parent while
+    ``direct_ppid_pgid`` answers ``None``), and ``getpgid`` answers across
+    sessions. Same ownership bar as the first source — membership in that
+    listing IS "pid's current parent is ``parent``" — and still fork-free.
+
+    ``None`` when either half cannot answer or ``pid`` is not listed: the caller
+    must treat that as unverified, never as unchanged.
+    """
+    if pid <= 1 or parent <= 0:
+        return None
+    if sys.platform == "darwin":
+        listed = _darwin_child_pids(parent)
+    elif sys.platform.startswith("linux"):
+        parents = _linux_parent_map()
+        listed = None if parents is None else [p for p, pp in parents.items() if pp == parent]
+    else:
+        return None
+    if listed is None or pid not in listed:
+        return None
+    try:
+        return parent, os.getpgid(pid)
+    except OSError:
+        return None
+
+
 #: ``proc_listpids``'s selector for "every pid in the process group ``typeinfo``".
 _PROC_PGRP_ONLY = 2
 

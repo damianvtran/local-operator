@@ -36,6 +36,11 @@ def _guard(ceiling_mb, *, group, footprints, census, monkeypatch, alive=True, de
     # so a synthetic pid never consults the live process table.
     monkeypatch.setattr(mg.procstate, "pid_liveness", lambda pid: alive)
     monkeypatch.setattr(mg.procstate, "process_sample", lambda pid: None)
+    # The stop path's second parentage source reads the live kernel; a synthetic
+    # tree must never consult it about a real pid of the same number.
+    # raising=False: the same test file must run (and fail) against a base
+    # that predates the second source.
+    monkeypatch.setattr(mg, "listed_ppid_pgid", lambda pid, parent: None, raising=False)
     guard = mg.Guard(
         100,
         _budget(ceiling_mb),
@@ -46,8 +51,18 @@ def _guard(ceiling_mb, *, group, footprints, census, monkeypatch, alive=True, de
         permission_probe=lambda pid: pid in denied,
     )
     if ps is not None:
-        guard.runner = lambda argv: ps(int(argv[-1]))
+        guard.runner = lambda argv: _batched_ps(ps, argv)
     return guard
+
+
+def _batched_ps(ps, argv):
+    """Serve ``ps -o pid=,rss= -p a,b`` from a per-pid ``ps(pid) -> (code, rss)``."""
+    rows = []
+    for token in argv[-1].split(","):
+        code, out = ps(int(token))
+        if code == 0 and out.strip():
+            rows.append(f"{token} {out.strip()}")
+    return (0 if rows else 1), "\n".join(rows)
 
 
 # --- count vs bytes ----------------------------------------------------------
@@ -242,8 +257,9 @@ def test_stop_escaped_signals_only_pids_whose_parent_edge_reverifies(monkeypatch
     monkeypatch.setattr(mg, "direct_ppid_pgid", rows.get)
     sent: list[tuple[int, int]] = []
     monkeypatch.setattr(mg.os, "kill", lambda pid, sig: sent.append((pid, sig)))
-    assert guard.stop_escaped(9) == [900, 901]
-    assert sent == [(900, 9), (901, 9)]
+    assert guard.stop_escaped(9) == [901, 900]
+    # Deepest first (901 is 900's child), each edge re-read before its signal.
+    assert sent == [(901, 9), (900, 9)]
 
 
 # --- review R1/R2/R3 (PR #3369) ---------------------------------------------
@@ -402,3 +418,203 @@ def test_the_live_permission_probe_tells_setuid_top_from_a_gone_pid():
         top.kill()
         top.wait()
     assert resources.footprint_denied(top.pid) is False  # gone (ESRCH), not denied
+
+
+# --- follow-up to PR #3369: QA Q2, review M1/M2/N1/N2 -------------------------
+
+
+def _breached(monkeypatch, census, footprints=None, **kwargs):
+    guard = _guard(
+        300,
+        group=[100],
+        footprints=footprints or {100: 400 * _MIB},
+        census=census,
+        monkeypatch=monkeypatch,
+        **kwargs,
+    )
+    guard.sample_sync()
+    return guard
+
+
+def test_a_setuid_escaped_pid_is_verified_by_the_parent_listing_and_killed(monkeypatch):
+    """Q2: the fork-free self read refuses a setuid pid; the parent's child
+    listing still proves the edge, so it is signalled rather than skipped."""
+    guard = _breached(monkeypatch, lambda roots: {900: 100}, denied={900}, ps=lambda p: (0, "1"))
+    monkeypatch.setattr(mg, "direct_ppid_pgid", lambda pid: None)
+    monkeypatch.setattr(
+        mg,
+        "listed_ppid_pgid",
+        lambda pid, parent: (parent, 900) if pid == 900 else None,
+        raising=False,
+    )
+    sent: list[int] = []
+    monkeypatch.setattr(mg.os, "kill", lambda pid, sig: sent.append(pid))
+    assert guard.stop_escaped(9) == [900]
+    assert sent == [900] and guard.unverified == []
+
+
+def test_an_escaped_pid_no_source_can_verify_is_named_not_signalled(monkeypatch):
+    guard = _breached(monkeypatch, lambda roots: {900: 100})
+    monkeypatch.setattr(mg, "direct_ppid_pgid", lambda pid: None)
+    sent: list[int] = []
+    monkeypatch.setattr(mg.os, "kill", lambda pid, sig: sent.append(pid))
+    assert guard.stop_escaped(9) == []
+    assert sent == [] and guard.unverified == [900]
+    assert "900" in mg.unverified_line(guard.unverified)
+    assert "not signalled" in mg.unverified_line(guard.unverified)
+
+
+def test_an_unverifiable_pid_that_is_gone_is_not_named(monkeypatch):
+    guard = _breached(monkeypatch, lambda roots: {900: 100}, alive=False)
+    monkeypatch.setattr(mg, "direct_ppid_pgid", lambda pid: None)
+    monkeypatch.setattr(mg.os, "kill", lambda pid, sig: pytest.fail("signalled"))
+    assert guard.stop_escaped(9) == [] and guard.unverified == []
+
+
+def test_a_recycled_pid_with_a_readable_stranger_parent_stays_silent(monkeypatch):
+    """A pid whose parent READS as someone else is proven not ours: skipped and
+    not named, and the second source is never asked to overrule it."""
+    guard = _breached(monkeypatch, lambda roots: {900: 100})
+    monkeypatch.setattr(mg, "direct_ppid_pgid", lambda pid: (4242, 900))
+    monkeypatch.setattr(
+        mg, "listed_ppid_pgid", lambda pid, parent: pytest.fail("asked"), raising=False
+    )
+    monkeypatch.setattr(mg.os, "kill", lambda pid, sig: pytest.fail("signalled"))
+    assert guard.stop_escaped(9) == [] and guard.unverified == []
+
+
+def test_the_edge_is_rechecked_immediately_before_each_kill(monkeypatch):
+    """Deepest first, each edge re-read just before its signal: a pid recycled
+    between verification and signal (its parent now reads differently) is
+    skipped, and killing 901 first never strands its parent's proof."""
+    guard = _breached(monkeypatch, lambda roots: {900: 100, 901: 900, 902: 100})
+    reads = {"n": 0}
+    rows = {900: (100, 900), 901: (900, 900)}
+
+    def read(pid):
+        if pid == 902:
+            reads["n"] += 1
+            return (100, 902) if reads["n"] == 1 else (4242, 902)  # recycled mid-stop
+        return rows.get(pid)
+
+    monkeypatch.setattr(mg, "direct_ppid_pgid", read)
+    sent: list[int] = []
+    monkeypatch.setattr(mg.os, "kill", lambda pid, sig: sent.append(pid))
+    assert guard.stop_escaped(9) == [901, 900]
+    assert sent == [901, 900] and reads["n"] == 2 and guard.unverified == []
+
+
+def test_not_permitted_pids_share_one_batched_ps_per_tick(monkeypatch):
+    """M2: N denied pids cost one ``ps`` fork per read, not N."""
+    calls: list[list[str]] = []
+    guard = _guard(
+        1536,
+        group=[100],
+        footprints={100: 5 * _MIB},
+        census=lambda roots: {900: 100, 901: 100, 902: 100},
+        monkeypatch=monkeypatch,
+        denied={900, 901, 902},
+        ps=lambda pid: (0, "2048"),
+    )
+    served = guard.runner
+    guard.runner = lambda argv: (calls.append(argv), served(argv))[1]
+    sample = guard.sample_sync()
+    assert calls == [["ps", "-o", "pid=,rss=", "-p", "900,901,902"]]
+    assert sample.not_permitted == {900: 2 * _MIB, 901: 2 * _MIB, 902: 2 * _MIB}
+    guard.sample_sync()
+    assert len(calls) == 1  # cached inside the TTL
+
+
+def test_a_not_permitted_pid_ps_never_sizes_fails_closed_after_the_read_limit(monkeypatch):
+    """M1: a denied pid ``ps`` cannot size is disclosed, then after
+    NOT_PERMITTED_UNSIZED_READ_LIMIT consecutive failed reads it counts as
+    unaccounted memory and the run fails closed."""
+    monkeypatch.setattr(mg, "_NOT_PERMITTED_RSS_TTL_S", 0.0)  # every tick reads
+    guard = _guard(
+        300,
+        group=[100],
+        footprints={100: 5 * _MIB},
+        census=lambda roots: {900: 100},
+        monkeypatch=monkeypatch,
+        denied={900},
+        ps=lambda pid: (1, ""),
+    )
+    reads = mg.NOT_PERMITTED_UNSIZED_READ_LIMIT
+    for _ in range(reads - 1):
+        sample = guard.sample_sync()
+        assert sample.unaccounted is None and guard.should_kill(sample) is False
+    killed = False
+    for _ in range(mg.UNACCOUNTED_TICK_LIMIT):
+        sample = guard.sample_sync()
+        assert "900" in (sample.unaccounted or "")
+        killed = guard.should_kill(sample)
+    assert killed
+    assert guard.new_not_permitted(sample) == [900]  # still disclosed once
+
+
+def test_a_sized_read_resets_the_unsized_streak(monkeypatch):
+    monkeypatch.setattr(mg, "_NOT_PERMITTED_RSS_TTL_S", 0.0)
+    answers = iter([(1, ""), (1, ""), (0, "1024")] * 10)
+    guard = _guard(
+        300,
+        group=[100],
+        footprints={100: 5 * _MIB},
+        census=lambda roots: {900: 100},
+        monkeypatch=monkeypatch,
+        denied={900},
+        ps=lambda pid: next(answers),
+    )
+    for _ in range(12):
+        sample = guard.sample_sync()
+        assert sample.unaccounted is None and guard.should_kill(sample) is False
+
+
+def test_the_fail_closed_headline_omits_measured_when_nothing_was(monkeypatch):
+    """N1: with no reading at all ``reached`` is the ceiling, not a measurement."""
+    guard = _guard(
+        300,
+        group=[100],
+        footprints={},
+        census=lambda roots: {901: 100},
+        monkeypatch=monkeypatch,
+    )
+    for _ in range(mg.UNACCOUNTED_TICK_LIMIT):
+        sample = guard.sample_sync()
+    assert guard.should_kill(sample) and sample.bytes_used is None
+    text = guard.over_budget_message(sample, unit="MiB")
+    assert "treated as over budget (fail closed), over the 300 MiB budget" in text
+    assert "measured," not in text
+
+
+def test_the_escaped_headline_says_left_the_process_group(monkeypatch):
+    """N2: setpgid escapes the group exactly as setsid does."""
+    guard = _guard(
+        300,
+        group=[100],
+        footprints={100: 5 * _MIB, 900: 400 * _MIB},
+        census=lambda roots: {900: 100},
+        monkeypatch=monkeypatch,
+    )
+    text = guard.over_budget_message(guard.sample_sync(), unit="MiB")
+    assert "(left the process group; 400 MiB of it)" in text and "setsid" not in text
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="setuid top EPERM is macOS-specific")
+def test_the_live_parent_listing_verifies_a_setuid_child_the_self_read_refuses():
+    top = subprocess.Popen(
+        ["/usr/bin/top", "-l", "0"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while resources.footprint_denied(top.pid) is not True and time.monotonic() < deadline:
+            time.sleep(0.05)  # until the exec into setuid top has happened
+        assert resources.direct_ppid_pgid(top.pid) is None  # the refusal Q2 hit
+        assert resources.listed_ppid_pgid(top.pid, os.getpid()) == (os.getpid(), top.pid)
+        assert resources.listed_ppid_pgid(top.pid, 1) is None  # wrong parent
+    finally:
+        top.kill()
+        top.wait()
+    assert resources.listed_ppid_pgid(top.pid, os.getpid()) is None  # gone
