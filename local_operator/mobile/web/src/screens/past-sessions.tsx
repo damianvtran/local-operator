@@ -104,7 +104,7 @@ export function PastSessionsScreen() {
 				/>
 			</div>
 
-			<main className="lo-scroll flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 pb-3">
+			<main className="lo-scroll flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 pb-[max(env(safe-area-inset-bottom),0.75rem)]">
 				{resumeError ? (
 					<p className="px-2 pb-1 text-body-sm text-danger">
 						{resumeError}

@@ -390,7 +390,11 @@ MEASURED_TOKENS: dict[str, int] = {
     # 1801 -> 1803 (+2, review round 2 m2): "not expected in Chrome's <video>" replaces
     # "not Chrome's <video>", because Chrome playback was never tested. Measured by
     # this test's own print.
-    "browser": 1863,
+    # 1863 -> 1908 (+45, issue #3248): the `hover` op and the chord/selector
+    # wording on `press`. Measured by this test's own print.
+    # Select adds the native/ARIA operation and its host scope; deliberately
+    # measured by this test after adding the one-line BrowserParams.options.
+    "browser": 1968,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
@@ -530,7 +534,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # doc — the argumentless call's description plus the "when NOT to call
     # it" notes. Re-measured via this test's own print, and it is the ONLY
     # entry that moved: every other count above is byte-identical.
-    "no_reply": 109,
+    # PR #3318: 109 -> 121, measured by this test's canonical cl100k_base
+    # ruler. The first wrapper wording measured 148; trimming it saves 27
+    # tokens while keeping call-once/final-eval/stop and host-acceptance rules.
+    "no_reply": 121,
     # NEW (notifications inbox, docs/design/notifications-inbox.md §3.1): the
     # ``notify`` doc — its description plus the five-field schema rendered by
     # this file's own renderer. Re-measured via this test's print; it is the

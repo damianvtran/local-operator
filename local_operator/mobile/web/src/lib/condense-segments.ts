@@ -63,6 +63,7 @@ export type TurnCycle = {
 const CONTINUATION_CUSTOMS: ReadonlySet<string> = new Set([
 	"job_result",
 	"hub_message",
+	"team_bridge_message",
 	"monitor_prompt",
 ]);
 
@@ -127,6 +128,9 @@ export function triggerOf(record: CondenseRecord): TriggerKind | null {
 		case "wake":
 			return "wake";
 		case "custom":
+			// Same positive Bridge-to-peer trigger mapping as desktop; this is
+			// presentation continuation, never a peer ownership certificate.
+			if (record.customType === "team_bridge_message") return "peer";
 			return CONTINUATION_CUSTOMS.has(record.customType)
 				? (record.customType as TriggerKind)
 				: null;

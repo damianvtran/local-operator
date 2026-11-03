@@ -5956,6 +5956,17 @@ def build_app(daemon: MobileDaemon):
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    async def manifest(request: Request) -> Response:
+        """The web app manifest — unauthenticated because the OS fetches it
+        without the session cookie, and it holds nothing but the app's name,
+        colours and the public mark. URLs are relative on purpose: a tunnel may
+        mount the app under a path, and an absolute ``/`` would escape it."""
+        response = JSONResponse(_WEB_MANIFEST, media_type="application/manifest+json")
+        # no-store for the same reason as the mark: a cached error or stale
+        # manifest on a phone outlives the fix.
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     async def index(request: Request) -> Response:
         denied = gate(request)
         if denied is not None:
@@ -10438,6 +10449,7 @@ def build_app(daemon: MobileDaemon):
             methods=["POST"],
         ),
         Route("/mark.png", mark_png),
+        Route("/manifest.webmanifest", manifest),
         Route("/", index),
     ]
     if _DIST_DIR.exists():
@@ -11186,6 +11198,21 @@ def _render_login_html(*, error: bool = False) -> str:
 # page is `dir="rtl"` for Urdu, and a field inheriting it puts the caret, and any
 # Latin password, on the wrong edge. The label, submit and error keep the page
 # direction — they are translated copy.
+# Installed-app identity for "Add to Home Screen". ``display: standalone`` is what
+# gives the client its full-screen shell (and what ``isStandalone`` in
+# ``web/src/lib/viewport.ts`` keys the wide-view opt-out off). Colours match the
+# ``theme-color`` meta and the login page ground.
+_WEB_MANIFEST: dict[str, Any] = {
+    "name": "local operator",
+    "short_name": "lop",
+    "start_url": "./",
+    "scope": "./",
+    "display": "standalone",
+    "background_color": "#14110c",
+    "theme_color": "#14110c",
+    "icons": [{"src": "./mark.png", "sizes": "256x256", "type": "image/png"}],
+}
+
 _LOGIN_HTML = """<!doctype html>
 <html lang="__LANG__" dir="__DIR__">
 <head>
@@ -11193,6 +11220,11 @@ _LOGIN_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#14110c">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="local operator">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="mark.png">
 <title>__TITLE__</title>
 <style>
   /* Values from local_operator/tui/theme.py BRAND_TOKENS.dark — the login

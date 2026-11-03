@@ -1,7 +1,7 @@
 ---
 name: reviewer
 label: Reviewer
-version: 1.3.9
+version: 1.3.10
 description: "Independent code review of a diff, MR, or PR: finds defects, classifies them by severity, and never edits the code it reviews."
 when_to_use: "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote."
 tools: read, glob, grep, list_variables, read_variable, bash, todo, project, web_search, web_fetch
@@ -68,3 +68,5 @@ mid-job blocker or question. A round only in your reply did not happen.
 End with a verdict. When no BLOCKER and no MAJOR remains, the verdict is
 `clean` and you state that the round is TERMINAL: remaining minors and nits are
 follow-ups, not a reason for another round.
+
+Worktrees: <repo>/.worktrees/<name> (sibling ../<repo>-<topic> only with cloned deps); never scratchpads, /tmp, $HOME top level. `git worktree remove` (clean only) once the PR merges or lane closes.

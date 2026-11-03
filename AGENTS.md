@@ -900,11 +900,12 @@ members were signalled as a group in the first place.
 ### Every feature worktree owns its own venv. Never symlink one.
 
 This repo is worked through many concurrent worktrees, and **each one gets a
-real `.venv` installed editable from itself**:
+real `.venv` installed editable from itself**. Prefer `<repo>/.worktrees/<name>` (Python: its own `.venv`, below; JS: share the primary dependency tree); a sibling `../<repo>-<topic>` is tolerated with APFS-cloned deps or an absolute link; never session scratchpads, /tmp or `$TMPDIR` dirs, `$HOME` top level or ad-hoc sibling roots. `git worktree remove` (clean only, never discard unpushed work) once the PR merges or the lane closes.
+`scripts/worktree_janitor.py` lists the removable ones (dry-run).
 
 ```sh
-git worktree add -b feat/my-change ~/workspace/repos/lo-my-change main
-cd ~/workspace/repos/lo-my-change
+git worktree add -b feat/my-change ~/local-operator/.worktrees/my-change main
+cd ~/local-operator/.worktrees/my-change
 uv venv --python 3.12 .venv
 uv pip install -e ".[all,dev]" --python .venv/bin/python
 ```
@@ -929,9 +930,9 @@ Verify which source a venv actually resolves before trusting an interactive
 session, especially after any venv repair:
 
 ```sh
-cd ~/workspace/repos/lo-my-change
+cd ~/local-operator/.worktrees/my-change
 .venv/bin/python -c "import local_operator; print(local_operator.__file__)"
-# MUST print .../lo-my-change/local_operator/__init__.py
+# MUST print .../.worktrees/my-change/local_operator/__init__.py
 ```
 
 Wrong path? Rebuild the venv with the two `uv` commands above. `PYTHONPATH=$PWD`
@@ -966,7 +967,7 @@ The fix is to reinstall editable **from the checkout you want to run**, not
 merely to make the error go away:
 
 ```sh
-cd ~/workspace/repos/local-operator   # or the worktree that should own it
+cd ~/local-operator   # or the worktree (~/local-operator/.worktrees/<name>) that should own it
 uv pip install -e ".[all,dev]" --python .venv/bin/python
 ```
 
@@ -1256,11 +1257,12 @@ leftover either blocks the next agent or gets silently reused at a stale
 revision (`git worktree list` presently shows dozens of abandoned ones):
 
 ```sh
-read=$(mktemp -d /tmp/lo-read.XXXXXX)
+read=~/local-operator/.worktrees/read-$$   # in-repo, never /tmp
+# --force is fine here: a detached read-only tree has nothing worth refusing for.
+trap 'git -C ~/local-operator worktree remove --force "$read"' EXIT   # success AND failure
 git -C ~/local-operator fetch origin main --quiet
 git -C ~/local-operator worktree add --detach "$read" origin/main --quiet
-grep -n 'thing you are checking' "$read/AGENTS.md"
-git -C ~/local-operator worktree remove --force "$read"
+grep -n 'thing you are checking' "$read/AGENTS.md"   # the trap removes "$read" on exit
 ```
 
 The `-C ~/local-operator` is load-bearing on every command here: you are
@@ -1582,9 +1584,16 @@ pypi/support#12738 and pypi/support#12882.
    would be the silent downgrade the design forbids. The consequence for this checklist is
    that an expired Developer ID identity or a revoked App ID stops the Linux and Windows
    release too — and the remedy is a re-issued p12/profile refilled into
-   `secrets.MACOS_SIGNING_P12_BASE64` / `secrets.MACOS_SIGNING_PROFILE_BASE64`, not a
-   skipped job. `keyagent-macos` runs on the pinned `macos-15` runner deliberately, so do
-   not bump that pin during a release window.
+   `secrets.MACOS_DEVID_APP_P12_BASE64` / `secrets.MACOS_DEVID_APP_P12_PASSWORD` /
+   `secrets.MACOS_KEYAGENT_PROFILE_BASE64` (the Radient Inc. organization identity,
+   team `SHA2U6KT7V`; certificate expires 2027-12-02), not a skipped job. The job
+   also asserts the signature's `Authority=` is that organization identity, so a
+   refill with any other certificate fails loudly; the retired
+   `MACOS_SIGNING_P12_*` / `MACOS_SIGNING_PROFILE_BASE64` secrets are rollback only,
+   and the tests forbid them, so a rollback reverts that PR with its tests and docs
+   (it would also commit the individual's name). Renewal procedure:
+   `docs/design/operator-key-agent.md` §8. `keyagent-macos` runs on the pinned
+   `macos-15` runner deliberately, so do not bump that pin during a release window.
 5. **Post the refs** (tag, release URL, installed `.lop-source` revision and
    the verified `lop --version`) as a comment on every PR in the window, and
    `send` them to each contributor still running.
@@ -1613,10 +1622,10 @@ git -C ~/local-operator log --oneline "$(git -C ~/local-operator describe --tags
 # 2. Take the lock: an empty claim commit in a throwaway worktree, opened as
 #    a draft PR. (No open chore(release) PR was found in step 1 of "One
 #    release owner per window".) The number is not known yet.
-git -C ~/local-operator worktree add /tmp/lop-release-next origin/main
-git -C /tmp/lop-release-next checkout -b release-next
-git -C /tmp/lop-release-next commit --allow-empty -m 'chore(release): claim release window'
-git -C /tmp/lop-release-next push -u origin release-next
+git -C ~/local-operator worktree add ~/local-operator/.worktrees/release-next origin/main
+git -C ~/local-operator/.worktrees/release-next checkout -b release-next
+git -C ~/local-operator/.worktrees/release-next commit --allow-empty -m 'chore(release): claim release window'
+git -C ~/local-operator/.worktrees/release-next push -u origin release-next
 gh pr create --draft --base main --head release-next \
   --title 'chore(release): claim release window' --assignee damianvtran \
   --body 'Release window claimed. Owner session pid: <pid from lop sessions>.
@@ -1630,9 +1639,9 @@ Replace using .github/RELEASE_NOTES_TEMPLATE.md before ready/tagging.'
 #     merge; then, with the bump decided:
 
 # 2b. Turn the claim into the bump: amend the SAME commit, retitle the SAME PR.
-sed -i '' 's/^version = ".*"$/version = "X.Y.Z"/' /tmp/lop-release-next/pyproject.toml
-git -C /tmp/lop-release-next commit --amend -am 'chore(release): bump version to X.Y.Z'
-git -C /tmp/lop-release-next push --force-with-lease origin release-next
+sed -i '' 's/^version = ".*"$/version = "X.Y.Z"/' ~/local-operator/.worktrees/release-next/pyproject.toml
+git -C ~/local-operator/.worktrees/release-next commit --amend -am 'chore(release): bump version to X.Y.Z'
+git -C ~/local-operator/.worktrees/release-next push --force-with-lease origin release-next
 gh pr edit <claim-pr-number> --title 'chore(release): bump version to X.Y.Z'
 gh pr ready <claim-pr-number>
 # ... independent scope-check round, merge; then:
@@ -1701,8 +1710,9 @@ cd /tmp && ~/.local/bin/lop --version
 #     A docstring can quote a removed line verbatim, so a grep for a code string
 #     is not evidence either way; the symbol is.
 
-# 6. Reclaim the worktree.
-git -C ~/local-operator worktree remove /tmp/lop-release-next
+# 6. Reclaim the worktree (also on an aborted release: a stranded one is
+#    what `scripts/worktree_janitor.py` reports).
+git -C ~/local-operator worktree remove ~/local-operator/.worktrees/release-next
 ```
 
 `lop-update` archives the committed `main` ref, builds and installs that
@@ -2980,11 +2990,13 @@ anyway? Take it from a throwaway worktree, which cannot reach anyone's work
 but yours:
 
 ```sh
-git worktree add --detach /tmp/lo-before HEAD
-ln -s ~/local-operator/.venv /tmp/lo-before/.venv
-cd /tmp/lo-before && env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
-  "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.svg"
-git worktree remove --force /tmp/lo-before
+git worktree add --detach .worktrees/lo-before HEAD
+# --force is fine on removal: a detached, read-only tree holds nothing but the
+# symlinked venv and the shot's output; the trap also covers a failed shot.
+trap 'git worktree remove --force .worktrees/lo-before' EXIT
+ln -s ~/local-operator/.venv .worktrees/lo-before/.venv
+(cd .worktrees/lo-before && env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
+  "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.svg")
 ```
 
 The symlink is safe **here and only here**: a shot script starts with

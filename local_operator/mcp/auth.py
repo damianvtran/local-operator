@@ -46,12 +46,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import json
 import logging
 import math
 import os
 import sys
 import threading
 import time
+import uuid
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
@@ -450,6 +452,44 @@ _DETACHED_REFRESH_EXCHANGES: set["asyncio.Task[RefreshOutcome]"] = set()
 #: exactly the behaviour every boot had BEFORE this marker existed. So the
 #: expiry can only degrade to the status quo ante, never to something worse.
 UNCONFIRMED_SEND_TTL_S = 3600.0
+
+#: The WIRE CONTRACT by which an issuer asserts that a failed refresh did not
+#: consume the presented token. Value on the wire is
+#: :data:`ROTATION_NOT_COMMITTED`; any other value, and any answer without the
+#: header, is treated as ambiguous and keeps the send marker armed.
+#:
+#: Deliberately a header this product owns rather than a status code or an
+#: RFC 6749 error code: a standard code describes what the SERVER could not do,
+#: and cannot promise anything about a rotating token that a proxy, a load
+#: balancer, or a provider that commits-then-fails would not also "satisfy".
+#: See :func:`_non_consumption_assertion` for the reasoning and the counter-case.
+ROTATION_ASSERTION_HEADER = "X-MCP-Refresh-Rotation"
+
+#: The header carrying the CLIENT's nonce for one refresh attempt. The issuer
+#: echoes it beside the assertion so the promise binds to this specific request
+#: rather than to "a" refresh: a captured or replayed header cannot then be
+#: attributed to another attempt, and a bare boolean would have been.
+ROTATION_ATTEMPT_HEADER = "X-MCP-Refresh-Attempt"
+
+#: The capability field an authorization server publishes in its own metadata
+#: document to OPT IN to the assertion above. Absent, False, or unparseable
+#: metadata means the endpoint does not qualify and any assertion header it
+#: sends is ignored — see ``DiscoveredOAuthEndpoints.rotation_assertion_supported``
+#: for why a capability is required at all. Name chosen to be unmistakably ours:
+#: no third party publishes this by accident, and nothing in the OAuth standards
+#: grants it meaning.
+ROTATION_CAPABILITY_FIELD = "mcp_refresh_rotation_assertion"
+
+#: The one value of :data:`ROTATION_ASSERTION_HEADER` that proves the presented
+#: refresh token was not consumed. The companion auth-svc change emits it from
+#: ``authorityUnavailable``, whose call sites all precede the rotation
+#: compare-and-set. **It does not exist on the wire yet**: until that change
+#: ships, no real answer carries the header, so this predicate returns False and
+#: today's behaviour is preserved exactly — the marker still costs up to
+#: :data:`UNCONFIRMED_SEND_TTL_S` per unknown answer. Recorded plainly because a
+#: comment that claimed the server already sent it would be the same class of
+#: overclaim this ticket is about.
+ROTATION_NOT_COMMITTED = "not-committed"
 
 #: Why a refresh was refused — ONE STABLE CODE per truthfully different
 #: situation. This block is the SEAM the user-visible wording hangs off: the auth
@@ -2383,7 +2423,9 @@ def _refresh_request_never_sent(exc: BaseException) -> bool:
     )
 
 
-def _answer_resolves_send_marker(status_code: int, *, invalid_grant: bool) -> bool:
+def _answer_resolves_send_marker(
+    status_code: int, *, invalid_grant: bool, rotation_not_committed: bool = False
+) -> bool:
     """Whether a token-endpoint ANSWER proves our presented token is not spent.
 
     The ONE place the marker's clearing rule lives, so no future status-code
@@ -2399,7 +2441,18 @@ def _answer_resolves_send_marker(status_code: int, *, invalid_grant: bool) -> bo
     * ``400`` whose body names ``invalid_grant`` — the authorization server
       answered that this token is not acceptable (spent, revoked, or already
       rotated away), and the caller records the tombstone that is the outcome.
-      There is nothing left for the marker to protect.
+      There is nothing left for the marker to protect;
+    * a ``5xx`` answer that ALSO carries this server's ``X-MCP-Refresh-Rotation:
+      not-committed`` assertion (``rotation_not_committed``) — the request did
+      not reach the step that consumes the token, so the token is still
+      presentable. The status is necessary but never sufficient: a bare 5xx
+      without the assertion keeps the marker. Keeping the marker for it costs the user up to
+      :data:`UNCONFIRMED_SEND_TTL_S` of refused refreshes and, on a one-hour
+      access token, the very sign-in the operator reported. The flag is
+      produced by :func:`_non_consumption_assertion` from the HEADER alone:
+      no status code and no RFC 6749 error code is accepted as proof, because
+      a standard code describes what the server could not do and cannot say
+      anything about a token that was already rotated.
 
     Everything else is an UNKNOWN answer and keeps the marker: ``5xx`` and
     ``429`` (a provider that commits the rotation and THEN fails the response
@@ -2409,10 +2462,16 @@ def _answer_resolves_send_marker(status_code: int, *, invalid_grant: bool) -> bo
     (:data:`UNCONFIRMED_SEND_TTL_S`), so an authorization-server outage can cost
     the affected grant ONE interactive sign-in rather than risking a fleet-wide
     revocation. That is the trade this module takes on purpose.
+
+    Rejected alternative, recorded so it is not re-proposed: keying on the 5xx
+    STATUS, or on an OAuth error code such as ``temporarily_unavailable``. RFC
+    6749 §5.2 does not promise that either implies no rotation, the fixture
+    models a provider that rotates and then fails with exactly that status, and
+    the cost of being wrong is the family.
     """
     if status_code == 200:
         return True
-    return status_code == 400 and invalid_grant
+    return (status_code == 400 and invalid_grant) or (status_code >= 500 and rotation_not_committed)
 
 
 def _stored_token_is_fresh(storage: "McpTokenStorage", tokens: Any) -> bool:
@@ -3482,6 +3541,31 @@ class DiscoveredOAuthEndpoints:
     oauth_metadata: "OAuthMetadata"
     protected_resource_metadata: "ProtectedResourceMetadata | None" = None
     auth_server_url: str | None = None
+    #: OPT-IN capability: the authorization server we discovered advertises
+    #: support for the per-attempt non-consumption assertion
+    #: (:data:`ROTATION_ASSERTION_HEADER` plus the
+    #: :data:`ROTATION_ATTEMPT_HEADER` echo).
+    #:
+    #: It defaults to False so every construction site that does not explicitly
+    #: prove the capability — including :func:`_fallback_endpoints_for` and any
+    #: server whose metadata could not be parsed — is fail-closed: without the
+    #: opt-in, an assertion header from that endpoint is IGNORED and the send
+    #: marker stays armed.
+    #:
+    #: Why a capability and not just the header: the nonce and URL checks bind a
+    #: RESPONSE to an attempt, but they cannot establish that the endpoint is an
+    #: issuer that honours this private contract at all. A third-party IdP, or a
+    #: proxy in front of one, can emit the same header names and echo the nonce
+    #: — deliberately or by accident. The opt-in is asserted by the issuer in
+    #: the authorization-server metadata document this client discovers, and it
+    #: is only accepted when that metadata answer carried NO redirect (discovery
+    #: follows redirects, so without that check a cross-origin hop could supply
+    #: the capability for an issuer that never published it). An unrelated
+    #: issuer therefore never qualifies unless it publishes the same field at the
+    #: URL the client asked. A hostile on-path intermediary is out of scope for
+    #: this flag: TLS and issuer identity are the boundary there, and no header
+    #: scheme can fix a compromised transport.
+    rotation_assertion_supported: bool = False
 
 
 @dataclass(frozen=True)
@@ -3751,6 +3835,11 @@ async def _discover_oauth_endpoints_uncached(server_url: str) -> _OAuthProbe:
                 break
 
             asm: OAuthMetadata | None = None
+            # Bound before the loop: the populated return reads this, and a
+            # capability must never be inferred from an assignment that did not
+            # happen. The outer best-effort handler would catch an unbound read,
+            # but it would then discard a probe whose metadata was valid.
+            asm_assertion_opt_in = False
             for url in build_oauth_authorization_server_metadata_discovery_urls(
                 auth_server_url, server_url
             ):
@@ -3775,6 +3864,31 @@ async def _discover_oauth_endpoints_uncached(server_url: str) -> _OAuthProbe:
                 except Exception:  # noqa: BLE001 — a body we cannot use is not an answer
                     asm = None
                     asm_unusable = True
+                else:
+                    # The opt-in capability is read from the RAW document rather
+                    # than from the validated model: the SDK's ``OAuthMetadata``
+                    # may drop unknown fields, and a capability that silently
+                    # reads False because of a pydantic default would make this
+                    # branch inert forever without anyone noticing. Parsing the
+                    # bytes we already hold is the honest read; any failure to
+                    # parse leaves it False, which fails closed.
+                    #
+                    # A REDIRECTED metadata answer does not establish the
+                    # capability: this client follows redirects during
+                    # discovery, so without this check a cross-origin hop could
+                    # supply the opt-in for an issuer that never published it.
+                    # No history ⇒ the document came from the URL we asked
+                    # (review SEC-4: the previous comment claimed this property
+                    # without enforcing it).
+                    try:
+                        _asm_doc = json.loads(response.content)
+                    except (ValueError, TypeError):
+                        _asm_doc = None
+                    asm_assertion_opt_in = bool(
+                        not getattr(response, "history", None)
+                        and isinstance(_asm_doc, dict)
+                        and _asm_doc.get(ROTATION_CAPABILITY_FIELD) is True
+                    )
                 break
             if asm is None:
                 return _OAuthProbe(
@@ -3793,6 +3907,7 @@ async def _discover_oauth_endpoints_uncached(server_url: str) -> _OAuthProbe:
                     oauth_metadata=asm,
                     protected_resource_metadata=prm,
                     auth_server_url=auth_server_url,
+                    rotation_assertion_supported=asm_assertion_opt_in,
                 )
             )
     except Exception:  # noqa: BLE001 — discovery is best-effort; degrade, don't fail
@@ -4164,6 +4279,115 @@ def _is_invalid_grant(body: bytes) -> bool:
     except (ValueError, TypeError):
         return False
     return isinstance(payload, dict) and payload.get("error") == "invalid_grant"
+
+
+def _non_consumption_assertion(
+    response: Any, *, endpoint_url: str, attempt_id: str, capability: bool
+) -> bool:
+    """Whether the answer CARRIES this server's assertion that nothing was spent.
+
+    Fail-closed by construction: absent the header, the answer is ambiguous and
+    the marker stays armed. Nothing here infers non-consumption from a status
+    code or from an OAuth error code.
+
+    Why that matters, and why the first draft of this change was wrong: RFC 6749
+    §5.2 defines ``temporarily_unavailable`` as "currently unable to handle the
+    request", which READS like "nothing was spent" — but that is a description
+    of intent, not a guarantee about a rotating token. A provider (or a proxy in
+    front of one) that commits the rotation and then answers 503 is a real shape
+    — the test fixture models it with ``commit_then_fail_status`` — and a client
+    that treated the code as proof would clear the marker and re-present a spent
+    token, which is the reuse-detecting POST that revokes the whole family. A
+    standard error code cannot carry a per-token guarantee; only a statement
+    made by the issuer that owns the token can.
+
+    So the contract is explicit and ours: ``X-MCP-Refresh-Rotation: not-committed``
+    on a failure response means "the request did not reach the step that consumes
+    the presented refresh token". Any other value, and any answer without the
+    header, is ambiguous and keeps the marker. auth-svc is the only issuer that
+    will send it, and the companion change emits it from the pre-CAS failure
+    path alone; a third party cannot satisfy it by accident, which is the
+    property a status code or a shared RFC error code could never have.
+
+    Scope note, from a source audit of the server: auth-svc answers
+    ``temporarily_unavailable`` from more than one place (the refresh authority
+    path, the authorize rate limiter, consent). That is exactly why the
+    assertion cannot be the code — and why, when the server side lands, the
+    header must be emitted from the pre-CAS refresh failure only, or the
+    assertion means nothing.
+
+    Header name and value are a wire contract: see the companion auth-svc change
+    (assertion emitted from ``authorityUnavailable``). Until that ships, this
+    returns False for every real answer, i.e. today's behaviour is preserved
+    exactly and the marker still costs up to
+    :data:`UNCONFIRMED_SEND_TTL_S` per unknown answer.
+    """
+    headers = getattr(response, "headers", None)
+    if headers is None or not attempt_id:
+        return False
+    # (0) The endpoint must have OPTED IN. Without this, a third-party issuer —
+    # or a proxy in front of one — that emits the same header names and echoes
+    # our nonce would clear the marker for a token it knows nothing about. The
+    # capability is asserted by the issuer in its own metadata document, so an
+    # unrelated server does not qualify by accident; a hostile on-path
+    # intermediary is out of scope, because TLS is the boundary there and no
+    # header scheme can repair a compromised transport.
+    if not capability:
+        return False
+    # (1) The answer must come from the endpoint we actually asked. A followed
+    # redirect means some other host produced this response, and its header is
+    # not the configured issuer's promise. This is not a hostname allow-list:
+    # it compares against the URL this exchange posted to, whatever that is.
+    try:
+        if getattr(response, "history", None):
+            return False
+        final_url = str(getattr(response, "url", "") or "")
+        # EXACT comparison, including any trailing slash: ``/token`` and
+        # ``/token/`` can be distinct resources, so normalising them away would
+        # accept an answer attributed to a different one (review SEC-3).
+        if final_url != str(endpoint_url):
+            return False
+    except Exception:  # noqa: BLE001 — a URL check must never break a refresh
+        return False
+
+    def _single(name: str) -> str | None:
+        """The header's ONLY value, or None when absent/repeated/unreadable.
+
+        Duplicates are rejected rather than merged: two conflicting
+        ``X-MCP-Refresh-Rotation`` values are an ambiguous answer, and an
+        ambiguous answer must keep the marker. This REQUIRES a
+        duplicate-preserving header interface (``get_list``, as httpx provides);
+        a mapping without it is refused outright rather than assumed
+        single-valued, because a plain mapping can hold both
+        ``X-MCP-Refresh-Rotation: not-committed`` and
+        ``x-mcp-refresh-rotation: committed`` and a first-wins lookup would
+        silently pick one. Fail closed on an interface that cannot answer the
+        question (review SEC-2).
+        """
+        try:
+            getter = getattr(headers, "get_list", None)
+        except Exception:  # noqa: BLE001
+            return None
+        if not callable(getter):
+            return None
+        try:
+            values = getter(name)
+        except Exception:  # noqa: BLE001
+            return None
+        # ``getattr`` erases the return type to ``object``, so the shape is
+        # checked rather than assumed: anything that is not a list or tuple is
+        # an answer we cannot attribute to this attempt, and failing closed is
+        # the only safe reading.
+        if not isinstance(values, (list, tuple)) or len(values) != 1:
+            return None
+        return str(values[0]).strip().lower()
+
+    # (2) The assertion itself, and (3) the binding to THIS attempt: the issuer
+    # echoes the nonce we sent, so a captured or replayed header cannot be
+    # attributed to a different refresh.
+    if _single(ROTATION_ASSERTION_HEADER) != ROTATION_NOT_COMMITTED:
+        return False
+    return _single(ROTATION_ATTEMPT_HEADER) == str(attempt_id).strip().lower()
 
 
 def _fallback_endpoints_for(server_url: str) -> "DiscoveredOAuthEndpoints":
@@ -4678,6 +4902,20 @@ async def _perform_refresh_exchange(
             # 403 and force a browser grant on the whole fleet.
             "User-Agent": _refresh_user_agent(),
         }
+        # The attempt id, sent with the request so the issuer's assertion can be
+        # BOUND to this specific refresh rather than to "a" refresh. A bare
+        # boolean header is replayable and could be attributed to the wrong
+        # attempt by an intermediary; an echo of our own nonce is not.
+        #
+        # Sent ONLY to issuers that advertise the capability. An issuer that
+        # never opted in must see the same request bytes it saw before this
+        # change: an extra header on a Cloudflare-fronted token endpoint is
+        # precisely the kind of difference a bot rule can react to, and the
+        # nonce is meaningless to an issuer that will not echo it.
+        attempt_id = uuid.uuid4().hex
+        if endpoints.rotation_assertion_supported:
+            headers[ROTATION_ATTEMPT_HEADER] = attempt_id
+
         auth_method = client_info.token_endpoint_auth_method
         if auth_method == "client_secret_post" and client_info.client_secret:
             data["client_secret"] = client_info.client_secret
@@ -4759,15 +4997,29 @@ async def _perform_refresh_exchange(
         if response.status_code != 200:
             # Whether this answer resolves the send marker is a decision, not a
             # reflex: it is cleared only when the response is DEFINITIVE about
-            # our token (a 200 we could parse, or a parsed ``invalid_grant``),
-            # and kept for every answer that leaves the outcome unknown —
-            # ``5xx``/``429`` among them. Clearing it on a 5xx would let the
-            # next connect re-present a token a provider may have spent before
-            # failing the response: the reuse-detection POST that revokes the
-            # family this whole mechanism exists to protect. See
-            # :func:`_answer_resolves_send_marker` for the rule and its cost.
+            # our token (a 200 we could parse, a parsed ``invalid_grant``, or a
+            # failure that carries this server's explicit
+            # ``X-MCP-Refresh-Rotation: not-committed`` assertion), and kept for
+            # every answer that leaves the outcome unknown — every bare
+            # ``5xx``/``429``, every 4xx that is not an ``invalid_grant``, and
+            # every 503 whose body merely names ``temporarily_unavailable``.
+            # Clearing it on any of those would let the next connect re-present
+            # a token a provider may have spent before failing the response:
+            # the reuse-detection POST that revokes the family this whole
+            # mechanism exists to protect. See :func:`_answer_resolves_send_marker`
+            # and :func:`_non_consumption_assertion`.
             invalid_grant = response.status_code == 400 and _is_invalid_grant(response.content)
-            if _answer_resolves_send_marker(response.status_code, invalid_grant=invalid_grant):
+            rotation_not_committed = _non_consumption_assertion(
+                response,
+                endpoint_url=token_endpoint,
+                attempt_id=attempt_id,
+                capability=bool(endpoints.rotation_assertion_supported),
+            )
+            if _answer_resolves_send_marker(
+                response.status_code,
+                invalid_grant=invalid_grant,
+                rotation_not_committed=rotation_not_committed,
+            ):
                 storage.clear_send_unconfirmed()
             else:
                 logger.info(

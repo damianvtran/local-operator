@@ -508,6 +508,16 @@
         "effort": "default",
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "6d4eb95824178b1df5b62d7e2d6951a54ba34675",
+        "version": "1.3.5",
+        "instructions_sha256": "0292888e354f5b396c801642d595860f63998183f527a4b88d22b2c9018b82d5",
+        "description": "Writing or changing code: implementing a ticket, building a feature, fixing a bug, adding a function — an independent, well-specified slice that can proceed without further decisions.",
+        "tools": null,
+        "effort": "default",
+        "delegate": false,
+        "class": null
       }
     ],
     "copy-reviewer": [
@@ -717,6 +727,16 @@
         "sha": "6d6da7dd92097de1bb068377da0f882cac61ad57",
         "version": "1.5.7",
         "instructions_sha256": "8393c1c0c18e8ade3f2b820dd56676c1bbe11d66ee7d8aeb50ebfca1d2adbbab",
+        "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "6d4eb95824178b1df5b62d7e2d6951a54ba34675",
+        "version": "1.5.8",
+        "instructions_sha256": "d66e01775b0002d739da5f36b2ef2cfdb7ca43c553235c42b03a99d25bd4c413",
         "description": "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change.",
         "tools": null,
         "effort": null,
@@ -1250,6 +1270,27 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "6d4eb95824178b1df5b62d7e2d6951a54ba34675",
+        "version": "1.0.5",
+        "instructions_sha256": "c312e0044676f3c3e57334f0ff858394a320478c850a9aa977f0c5bb5188dc58",
+        "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch",
+          "browser"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "reviewer": [
@@ -1542,6 +1583,27 @@
         "sha": "6d6da7dd92097de1bb068377da0f882cac61ad57",
         "version": "1.3.9",
         "instructions_sha256": "836135082620d33464fb8ef1c11d95edc63543a462ecf79d130e206467bded71",
+        "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "6d4eb95824178b1df5b62d7e2d6951a54ba34675",
+        "version": "1.3.10",
+        "instructions_sha256": "6d732ec157cf13c620585fa8fe27a73d19c9bd13f5234a3c38e2c381f653d99f",
         "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
         "tools": [
           "read",
@@ -1874,6 +1936,16 @@
         "sha": "6d6da7dd92097de1bb068377da0f882cac61ad57",
         "version": "1.4.7",
         "instructions_sha256": "db4baaf36887934ef84005d19a3994df1f958fed9f61e8f5b9808346c299d6a2",
+        "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
+        "tools": null,
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "6d4eb95824178b1df5b62d7e2d6951a54ba34675",
+        "version": "1.4.8",
+        "instructions_sha256": "f536fbed18459532c67798eb368a1c64cabf93a8046ffd38be37e66359e78367",
         "description": "Reviewing the user EXPERIENCE of a change — interaction flow, keyboard/input handling, discoverability, feedback and error messaging, copy tone, and whether a task can actually be completed smoothly — as distinct from a visual/design review of how it looks.",
         "tools": null,
         "effort": null,

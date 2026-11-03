@@ -539,6 +539,19 @@ def format_error(
         # for a reason this build does not know (D9). Rendered ahead of the
         # table so a generic `internal` sentence can never stand in for it.
         return record
+    if error.code == ErrorCode.INTERNAL and error.data.get("reason") == "invalid_arguments":
+        # The desktop host reports a refused argument (hover/press target shape)
+        # as `internal` + this reason rather than a new ErrorCode: a code a
+        # released daemon/session does not know hangs it. The harness validates
+        # these arguments before sending, so this only renders for a host whose
+        # rules are stricter or newer — and "the bridge broke" would be the wrong
+        # reading of a plain bad argument.
+        detail = str(error.message or "").strip()
+        return (
+            "the browser host rejected this call's arguments"
+            + (f": {detail}" if detail else "")
+            + ". Nothing was changed; fix the argument and retry."
+        )
     if error.code in messages:
         return messages[error.code]
     if error.code == ErrorCode.TAB_CLOSED:
@@ -820,6 +833,14 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
         DESKTOP_ONLY_METHODS,
     )
 
+    if error.data.get("reason") == "aria_select_unsupported":
+        # This extension build safely serves native <select> without Input.*,
+        # not application-specific ARIA popups. An update/re-pair cannot turn
+        # native setters into an ARIA selection flow.
+        return (
+            "the extension can select native <select> options, but this target is an "
+            "ARIA/custom control. Open the page with backend='ui' to select it."
+        )
     method = str(error.data.get("method") or "that action")
     peer = str(error.data.get("extension_version") or "")
     remedy = _CAPABILITY_HOST_REMEDY.get(host, _CAPABILITY_HOST_REMEDY[HOST_EXTENSION])

@@ -2939,7 +2939,10 @@ to.
  "payload":{"subscription_id":"…","heartbeat_seconds":15,"lease_seconds":45,
             "watch_ttl_seconds":45,"catalogue_revision":98123,
             "authoring_revision":7,
-            "attention":{"session/<id>":{ /* AttentionState */ }}}}
+            "attention":{"session/<id>":{ /* AttentionState */ }},
+            "attention_status":{"session/<id>":{"code":"complete","revision":3}},
+            "notifications":{"revision":42,"unread_count":3,"waiting_count":1,"waiting_unread_count":0},
+            "approvals_pending":false}}
 {"epoch":"…","seq":13,"type":"attention","session_id":"<12 hex>","payload":{ /* AttentionState */ }}
 {"epoch":"…","seq":14,"type":"notification","session_id":"<12 hex>","payload":{ /* per-session payload */ }}
 {"epoch":"…","seq":15,"type":"catalogue","payload":{"revision":98124}}
@@ -2948,10 +2951,30 @@ to.
  "payload":{"code":"approval","label":"Approval needed","revision":3}}
 {"epoch":"…","seq":18,"type":"notifications",
  "payload":{"revision":42,"unread_count":3,"waiting_count":1,"waiting_unread_count":0}}
-{"epoch":"…","seq":19,"type":"heartbeat","payload":{"ts":1699999999.5}}
+{"epoch":"…","seq":19,"type":"approvals","payload":{"pending":true}}
+{"epoch":"…","seq":20,"type":"heartbeat","payload":{"ts":1699999999.5}}
 {"epoch":"…","seq":19,"type":"gap","payload":{"reason":"overflow","subscription_id":"…"}}
 ```
 
+- **Startup attention levels are additive and optional for older backends.**
+  `open.attention_status` maps the same `session/<id>` identities as `attention`
+  to the already-derived status code and its per-session revision. A missing
+  status is unknown: clients must not infer a terminal/acknowledgeable completion
+  from an unseen receipt alone. `open.notifications` has the same level shape as
+  the `notifications` frame below; `null` means the inbox authority could not be
+  read, not a verified zero. `open.approvals_pending` is the existing local
+  approval store's expiry-folded requested-state boolean, or `null` when that
+  optional authority is unreadable. Missing fields likewise mean unsupported or
+  unknown, not empty. The open receipt cursor is reserved before snapshot reads,
+  so level edges queued during those reads remain newer than the snapshot.
+- **`approvals` is a device-local level, not a notification.** Its boolean
+  `payload.pending` changes when requested approvals become present/absent,
+  including expiry, using the same authority as `GET /v1/desktop/approvals`.
+  The poller's baseline prevents replay on a quiet connection; a subscriber's
+  open snapshot never consumes another subscriber's next edge. Checks share the
+  one-second probe budget (two directory stats, records only on change/expiry),
+  and failed reads back off without publishing a fabricated empty level. No peer,
+  secret lookup, banner or consent mutation is performed by this projection.
 - **`notification.payload` is the per-session payload**, built by the SAME
   function the bridge uses (`notifications.compose.notification_payload`), so
   `dedupe_key` is byte-identical and the app's local claim map collapses the pair

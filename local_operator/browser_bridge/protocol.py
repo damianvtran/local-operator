@@ -180,6 +180,10 @@ CAPABILITY_GATED_METHODS: frozenset[str] = frozenset(
         # Old desktop hosts have no keyboard handler; refuse before sending
         # so their missing capability is typed, not a generic bridge failure.
         "press",
+        # Pointer hover is the same story: an app that predates it has no
+        # handler and would answer a bare `internal`.
+        "hover",
+        "select",
         "download",
         "upload",
         "styles",
@@ -198,6 +202,22 @@ CAPABILITY_GATED_METHODS: frozenset[str] = frozenset(
         "record_stop",
     }
 )
+
+#: The capability token a desktop host advertises when its ``press`` understands
+#: the EXTENDED contract: a modifier chord (``Control+K``), any base key from the
+#: closed table (``Space``, ``F5``, a printable character) and an optional
+#: ``selector`` to focus first.
+#:
+#: It is a capability TOKEN and not a wire method: the wire method stays
+#: ``press`` and the frame shape is a superset of the original (``key`` plus an
+#: optional ``selector``). It exists because "advertises ``press``" is true of
+#: every desktop build since the 8-key allowlist shipped, and such a build would
+#: silently ignore ``selector`` and answer ``unsupported_key`` for the rest. The
+#: harness therefore sends a legacy-shaped press (one of the original eight keys,
+#: no selector) on ``press`` alone and refuses anything wider unless this token
+#: is also advertised. Not in ``CAPABILITY_GATED_METHODS`` (that set is keyed by
+#: request method); the tool checks it in ``_press_chord_problem``.
+PRESS_CHORD_CAPABILITY = "press_chord"
 
 #: The first extension TREE that carried the ``owner_*`` ownership lifecycle
 #: (PR #798, ``ee146fb73``), whose manifest reads ``0.1.9`` — verify with
@@ -295,6 +315,11 @@ METHODS = (
     "click",
     "type",
     "press",
+    # Kept beside `press` for readers. The desktop host appends `hover` at the
+    # end of ITS list: METHODS order is vocabulary, not wire, and nothing may
+    # depend on it matching the host's.
+    "hover",
+    "select",
     "close",
     "status",
     # tabs lists every live extension-owned surface. It exists because parallel
@@ -409,6 +434,12 @@ DESKTOP_ONLY_METHODS: tuple[str, ...] = (
     # Owned-page CDP keyboard input is implemented only by the desktop host.
     # Other peers neither advertise nor serve it and get capability_unsupported.
     "press",
+    # Trusted pointer movement needs CDP Input.dispatchMouseEvent, which Chrome
+    # drops on the extension's intentionally-inactive tab (see the constraint
+    # recorded in extension/src/commands/input.ts), and the in-page synthetic
+    # substitute click uses is not a hover: it fires handlers but not CSS :hover
+    # nor a trusted pointer. Desktop only, same reason as `press`.
+    "hover",
     "network_start",
     "network_stop",
     "network_read",
@@ -454,6 +485,10 @@ COMMAND_TIMEOUTS = {
     "click": 25.0,
     "type": 25.0,
     "press": 25.0,
+    # hover scrolls the target into view and moves the pointer once; no settle.
+    "hover": 20.0,
+    # DOM selection + bounded read-back; never waits for an OS popup.
+    "select": 25.0,
     "read": 20.0,
     "snapshot": 20.0,
     "screenshot": 20.0,

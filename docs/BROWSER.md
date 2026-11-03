@@ -121,6 +121,79 @@ handle the tool stored on the context it was handed survived exactly one turn,
 which broke `open X` → next message → `click Y` outright and stranded a cmux
 tab per turn that nothing could close.
 
+## Hover and key chords
+
+`hover` and `press` are served by the desktop app's browser host only; the
+extension and cmux refuse them (`capability_unsupported` naming the desktop app,
+and the cmux degrade). The extension's tab is intentionally inactive and Chrome
+drops synthetic CDP `Input.*` events on a hidden tab — the same measured
+constraint that makes `click`, `type` and `scroll` dispatch in-page — so the only
+thing it could send is an untrusted lookalike that fires handlers but neither
+`:hover` nor a trusted key default. Forcing the tab foreground would break focus
+safety, so neither is offered there.
+
+- `hover`: `selector` (CSS, snapshot ref or a11y locator) **or** `x`+`y` viewport
+  pixels; both is a validation error, so is neither. The host scrolls the target
+  into view without activating the tab/window, moves the pointer to its centre
+  and returns `x`, `y`, `hit` (the whole `hit_test` answer, `{count, elements: [...]}`
+  topmost first — the reply names `elements[0]`), `hovered` (the host's own check
+  that the page entered `:hover` on that element; `false` is reported, not hidden)
+  and the page line. A hidden (`display:none`) target fails with a hint to hover
+  whatever reveals it first; an element inside an iframe cannot be reached by
+  selector — use `x`/`y` (they do reach same- and cross-origin frames), taking the
+  iframe's position from its rect and the inner offset from a `screenshot`.
+- `press`: `key` is one chord — optional modifiers `Shift|Control|Alt|Meta`
+  (`Ctrl`, `Cmd`, `Command`, `Option` accepted; the **harness** canonicalises them
+  and lists them in the host's own order — `Control, Alt, Shift, Meta` — before
+  sending) joined by `+`, then one base key
+  (a single printable ASCII character, or `Enter`, `Escape`, `Tab`, `Backspace`,
+  `Delete`, `Space`, the arrows, `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`).
+  Optional `selector` focuses the element first (no editable requirement). One
+  chord per call; unknown names, multi-character strings, duplicate modifiers and
+  an empty base are refused as `unsupported_key` before any host is dialled, and
+  the refusal points text entry at `type` (credentials via `secret_ref`).
+- **Old desktop hosts.** Both are capability-gated from the host's discovery
+  record. `hover` is gated on the `hover` method. `press` keeps its original
+  eight keys (`Tab`, `Shift+Tab`, `Enter`, `Escape`, arrows) working on any host
+  that advertises `press`; anything wider — another chord, or a `selector` — also
+  needs the host to advertise the `press_chord` capability token
+  (`PRESS_CHORD_CAPABILITY`), otherwise it is a typed `capability_unsupported`
+  telling the caller to update the app and which keys still work. Nothing is sent
+  that an older host would silently mis-handle.
+- Both are `write`-tier, like `click`/`type`, with the same origin gate.
+
+## Selecting options
+
+`select` accepts `selector` (CSS, snapshot ref or a11y locator) plus `options`:
+strings match trimmed option label (exact, then case-insensitive), then option
+value; integers are zero-based indexes. Native `<select>` state is changed via
+prototype setters, followed by bubbling `input` and `change` events: no OS popup,
+no foreground activation and no reliance on `Input.*` on the inactive tab.
+The extension re-resolves the live control after a bounded reconciliation grace
+and reads selection from that node, never detached pre-render options; a missing
+or detached target is reported unverified.
+Single selects take exactly one option; multiple selects replace the whole
+set. `options:[]` clears a native multiple select; single selects refuse it
+(`element_not_found`, reason `single_select`, no mutation). Disabled
+selects/options are refused before changes. Blank strings and lists over 100
+entries are refused; use a zero-based index for an option with a blank label.
+
+The desktop host also handles ARIA combobox/listbox (or `aria-haspopup=listbox`)
+triggers: open, click the matching role=option and verify observable selection.
+The extension implements **native only** through its existing Runtime/node
+resolution path. It refuses ARIA/custom controls with `capability_unsupported`
+pointing to `backend='ui'`, rather than claiming native setters implement
+application-specific popup semantics. Cmux is unsupported.
+
+The wire method/capability is `select`, params `{tab, selector, options}`; result
+`{selected:[{index,value,label}], kind:'native'|'aria', url, title}` with optional
+`verified:false` when the host cannot verify selection. The harness surfaces that
+limitation honestly. No match uses existing `element_not_found` with
+`data.reason='option_not_found'` and `data.available:[{index,label,value}]`
+(capped at 50 entries, strings capped at 120 characters). The harness renders that
+correction list, so agents need not hallucinate labels. Older hosts refuse before
+send with `capability_unsupported`. `select` stays write-tier like click/type.
+
 ## Network telemetry
 
 Four actions expose the owned tab's request stream: `network_start`,

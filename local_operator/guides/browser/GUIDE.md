@@ -402,10 +402,37 @@ Same `browser` tool. Actions:
   with click refs like `e5`)
 - `screenshot` (writes a PNG; works on the background tab)
 - `click` / `type` (by CSS selector or a snapshot ref; trusted input events)
-- `press key="Tab"` (keyboard input to the owned page; desktop app support
-  required). Keys: `Tab`, atomic `Shift+Tab`, `Enter`, `Escape`, `ArrowUp`,
-  `ArrowDown`, `ArrowLeft`, `ArrowRight`. Other keys receive `unsupported_key`;
-  an older app receives `capability_unsupported` with an update instruction.
+- `press key="Control+K"` (ONE key chord to the owned page; desktop app only).
+  `key` = optional modifiers (`Shift`, `Control`, `Alt`, `Meta`; `Ctrl`, `Cmd`,
+  `Command`, `Option` accepted) joined by `+`, then one base key: a single
+  printable ASCII character, or `Enter`, `Escape`, `Tab`, `Backspace`, `Delete`, `Space`, arrows,
+  `Home`, `End`, `PageUp`, `PageDown`, `F1`–`F12`. Optional `selector` focuses
+  that element first. No repeat count, no sequences, and not a way to enter text
+  (use `type`; credentials via `secret_ref`) — anything else is `unsupported_key`.
+  An app that predates chords/`selector` still serves `Tab`, `Shift+Tab`, `Enter`,
+  `Escape` and the arrows; a wider press gets `capability_unsupported` with an
+  update instruction. The extension cannot do either: it holds no foreground tab,
+  and Chrome drops synthetic CDP `Input.*` on the intentionally-inactive one (the
+  recorded constraint behind click/type/scroll's in-page dispatch), so a "press"
+  or "hover" there would be an untrusted lookalike that skips `:hover` and
+  default key actions.
+- `hover` (`selector` or `x`+`y`, not both; desktop app only): scrolls the target
+  into view without activating the tab, moves the pointer to its centre and
+  reports the element under it (and `hovered`: false means the page showed no
+  `:hover`) — for `:hover` styles, tooltips and hover menus. A hidden target
+  (`no layout object`) needs its revealing row hovered first; inside an iframe use
+  `x`/`y` (selectors cannot cross frames; `hit_test` only sees the `<iframe>`).
+- `select selector="#language" options=["English (U.S.)"]`: choose a native
+  `<select>` option by trimmed label (exact, then case-insensitive), then value,
+  or by zero-based integer index. Multiple selects replace the entire set;
+  `options:[]` clears a native multiple select; single selects need exactly one
+  option and refuse `[]`. Blank strings/lists over 100 entries are refused; use
+  an index for a blank-label option.
+  No OS popup/window activation; input/change events notify controlled forms.
+  Desktop also serves ARIA combobox/listbox triggers; the extension serves native
+  selects only (custom controls get a typed desktop-only refusal). A miss lists
+  up to 50 available options; use those, not guessed labels. Unverified
+  selection is reported as such — inspect the page before retrying.
 - `scroll` (by direction, pixel delta, or scroll an element into view)
 - `logs` (the tab's console output and uncaught exceptions since it opened —
   for debugging web apps)
