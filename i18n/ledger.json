@@ -5319,6 +5319,25 @@
       "note": "Independent linguistic/mechanical audit passed 2/2 keys with zero findings. Translator session a58a48732351; independent auditor session 05c51f9b1aba; both actual openai/gpt-6.1-sol (provider-quota fallback). Byte-identical audit bundle: i18n/audits/evidence/fr/wire.aida_cadence/frca-05c51/{record.json,receipt.json,report.md,audit.log}. Preserves zero daily-local mode, inclusive whole elapsed-hour range 1–168, illustrative 4, and already-owed check-ins. No rendered proof or second independent pass: label 36 cells / help 206 cells; no declared maxCells budget. Narrow settings/editor wrapping remains unverified."
     },
     {
+      "locale": "fr",
+      "namespace": "wire.aida_cadence",
+      "source_sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Unified #3349 D2/Q1 source-fit remediation: independent delta audit passed 2/2 revised keys, zero findings. Translator session a58a48732351 resumed on actual anthropic/claude-sonnet-5-5 per manager delegation; auditor session 05c51f9b1aba actual anthropic/claude-sonnet-5-5, no fallback observed in resumed audit. Immutable bundle i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-05c51/{record.json,receipt.json,report.md,audit.log}; its report repeats the delegation-supplied earlier translator model openai/gpt-6.1-sol, superseded for this delta by manager-confirmed resumed model, not rewritten in historical evidence. French SHA-256 42333772890dd59733f0bcff715c9d608ff1f7c069c8dbb025ee3b2f0548ed63. Label 25 cells <=29; help 133 <=137 external fit targets, not source maxCells metadata. Zero daily-local mode, inclusive whole elapsed-hour range 1–168, illustrative 4 and already-owed meaning preserved. New rendered recapture pending: source fit is not pixel proof. Earlier audit bundle and ledger rows preserved."
+    },
+    {
       "locale": "hi",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",

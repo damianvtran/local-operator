@@ -1,4 +1,4 @@
 {
-  "wire.aida_cadence.interval_hours.label": "Intervalle entre les points (heures)",
-  "wire.aida_cadence.interval_hours.help": "0 conserve l’heure locale du point quotidien. De 1 à 168, l’intervalle se compte en heures entières écoulées ; 4 correspond à un point toutes les quatre heures. Toute modification conserve un point déjà dû."
+  "wire.aida_cadence.interval_hours.label": "Intervalle des points (h)",
+  "wire.aida_cadence.interval_hours.help": "0 : point quotidien à l’heure locale. 1–168 : heures entières écoulées (4 : toutes les 4 h). Un point dû le reste après modification."
 }
