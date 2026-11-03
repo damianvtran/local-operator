@@ -166,7 +166,9 @@ def test_relay_serves_size_variants_with_sized_etag(store) -> None:
         assert got.headers["etag"] == f'"{meta.sha256}-{size}"'
         assert got.headers["cache-control"] == "private, no-cache"
         assert _Image.open(io.BytesIO(got.content)).size == (size, size)
-        cached = client.get(url, params={"size": size}, headers={"if-none-match": got.headers["etag"]})
+        cached = client.get(
+            url, params={"size": size}, headers={"if-none-match": got.headers["etag"]}
+        )
         assert cached.status_code == 304
     original = client.get(url)
     assert hashlib.sha256(original.content).hexdigest() == meta.sha256

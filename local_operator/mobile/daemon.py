@@ -6205,7 +6205,8 @@ def build_app(daemon: MobileDaemon):
             size = agent_avatar.parse_size(request.query_params.get("size"))
         except ValueError:
             return JSONResponse(
-                {"error": "invalid size", "code": "invalid_size"},  # i18n: ignore protocol diagnostic
+                # i18n: ignore protocol diagnostic
+                {"error": "invalid size", "code": "invalid_size"},
                 status_code=422,
             )
         root = config_dir()
