@@ -494,8 +494,17 @@ class BudgetGuard:
             "model": model,
             "pid": os.getpid(),
             "ts": time.time(),
+            # This trial's other in-flight requests at admission: the bound on
+            # how far it can overshoot its cap, published per harness (R3 F9).
+            "in_flight": sum(1 for p in data["pending"].values() if p["run_id"] == run_id),
         }
         return token
+
+    def in_flight_at_admission(self, token: str) -> int:
+        """The ``in_flight`` count recorded when ``token`` was admitted."""
+        with self.ledger() as data:
+            entry = data["pending"].get(token)
+            return int(entry.get("in_flight", 0)) if isinstance(entry, dict) else 0
 
     async def acquire(self, run_id: str, channel: str, usd: float, model: str) -> str:
         """Wait (bounded by BENCH_ADMISSION_WAIT_S) for room, then reserve.
@@ -778,6 +787,7 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
             "channel": "model",
             "priced_model": priced_model,
             "reserve_usd": reserve,
+            "in_flight_at_admission": guard.in_flight_at_admission(reservation),
             "path": path,
             "status": resp.status_code,
             **meta,

@@ -597,6 +597,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         row = json.loads(meter.LOG.read_text().splitlines()[-1])
         self.assertEqual(row["channel"], "model")
         self.assertEqual(row["priced_model"], "anthropic/claude-sonnet-5.5")
+        # R3 F9: how many of this trial's requests were in flight beside it.
+        self.assertEqual(row["in_flight_at_admission"], 0)
         self.assertGreater(row["reserve_usd"], 0.128)
 
     async def test_bridge_stream_rewrites_search_results(self):

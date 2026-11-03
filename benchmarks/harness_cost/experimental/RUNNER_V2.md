@@ -22,14 +22,28 @@ experimental manifest. The original development output/logs are not shipped.
 - `BENCH_TASK_PATH` and `BENCH_TASK_PY` select task tools/interpreter. Defaults
   are system command-search paths/current Python, not a supplied task toolchain.
 - `LOP_BENCH_SOURCE_ROOT` plus `BENCH_LOP_PY` are passed explicitly to the LOP
-  launcher. It requires the reviewed source install, not installed 0.94.22.
+  launcher. It requires a clean source checkout of released v0.94.22 (`500883ef`).
 - External evaluator preflight must check source pin, task/fixture hashes and
   metric import before configuration/execution; unfetched planning output fails.
-- Paid LOP is **unconditionally blocked** pending a validated classifier
-  reservation/accounting implementation. The main-model meter cannot bound a
-  separate classifier service. Do not disable Radient or fabricate a boolean
-  attestation to bypass this gate. The user's own `lop login radient` path may
-  be used during separately authorized qualification, but no auth DB is copied.
+- Paid LoP runs **only through its per-run edge** (`lop_edge.py`, S6), behind
+  two fail-closed preflights checked before any auth access or preparation:
+  `BENCH_LOP_EDGE_EVIDENCE` must name an S4/S5 evidence record whose `files`
+  equal the current `runner_v2.py`/`meter_proxy.py`/`lop_edge.py` SHA-256s
+  (any change to one of them refuses until S4/S5 are re-run), and the live
+  `https://api.radienthq.com/v1/prices` listing must still state the reviewed
+  `decisions-rate@2026-09-19` contract. The Radient bearer is resolved host-side
+  (env or the user's own `lop login radient` store, read-only) and handed to the
+  edge on stdin only; the child gets dummy keys. Classification stays on: do not
+  disable Radient to bound cost. Classifier spend is the edge's qualified
+  ledger rows, not a stderr regex; the meter is configured as for the other six.
+- Every trial has a wall-clock limit (`BENCH_TIMEOUT_S`); at expiry the runner
+  reaps the exact process group and records `outcome: timeout` (Y=0, cost
+  counted). Results publish `cap_overshoot_usd` (settled − cap) and
+  `max_in_flight_at_cap` per run.
+- The kernel egress fence (`sandbox-exec`, outbound TCP only to the run's
+  loopback meter/MCP/bridge ports, no Unix sockets) applies to the harnesses in
+  `SANDBOXED_HARNESSES` — those whose zero-paid first-wire launch completed under
+  it (see `LOP-EDGE-VERIFICATION.md`, S6). OpenCode and Hermes are unfenced.
 - CoW is preferred: APFS uses `cp -Rc`; Linux first tries
   `cp --reflink=always -a`. Cross-filesystem copies remain refused.
   `BENCH_CP_BIN` can select the copy executable. If Linux CoW is unavailable,

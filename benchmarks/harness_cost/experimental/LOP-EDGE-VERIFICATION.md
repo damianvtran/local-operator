@@ -14,11 +14,11 @@ resolved. No Docker, no browsers, no auth-store reads.
   the real edge and meter, but every upstream was a loopback fixture with
   synthetic billing. Live pricing (`/api/v1/models` rate card) and real
   Radient/OpenRouter billing are first exercised by the paid pilot.
-* **S6 (runner integration) is out of scope**: `execute()` still refuses paid
-  LoP, and the edge is not wired into `runner_v2.execute`. S6 TODO (D4): the
-  runner must enforce a wall-clock limit on the sandboxed `lop exec` and reap
-  its process group by exact pid — with egress blocked, `lop exec` keeps
-  retrying (observed > 600 s) instead of exiting.
+* **S6 (runner integration) is wired but has never run a paid trial**: paid
+  LoP needs an S4/S5 evidence record for the exact runner/meter/edge hashes
+  (none is issued in this commit, so it still refuses) and a live prices match.
+  The full `execute()` path with a real task, evaluator and shared meter was
+  not driven end to end; its pieces were (section S6 below).
 * The unpriced `GET` metadata allowlist stays **empty**: the only reads seen
   (10× each across S4 runs) were `GET api.anthropic.com/v1/models?limit=1000`
   and the tiktoken encodings fetch; both are denied without latching and LoP
@@ -177,6 +177,46 @@ experimental `Ran 114 tests — OK`; coding `Ran 23 tests — OK`; core `test_ki
 | F7 | per-trial cap on SETTLED spend (identical for every native `max_tokens`); reservations gate only the total budget; cap stop recorded in `cost_caps` as a primary cost-cap failure, never a void | `test_trial_cap_is_enforced_on_settled_spend_not_native_max_tokens` (reviewer P7: $5 cap, $3.70 settled, 60 kB; 32k reserve $0.736 and 128k reserve $2.176 both admitted), `test_cost_capped_trial_is_refused_without_voiding_and_others_continue`, `test_real_asgi_route_settles_and_stops_trial` |
 | F8 | only provider 429/5xx (and transport) void; a harness-caused 4xx settles its stated bill and the trial continues; an unbilled 4xx still latches, without a rerun void | `test_provider_429_and_5xx_void_for_rerun`, `test_harness_caused_4xx_is_counted_and_the_trial_continues`, `test_harness_caused_4xx_without_a_bill_latches_but_is_not_a_rerun` |
 | N4 | Haiku provenance: omp and OpenCode only (Claude Code 203/203 Sonnet) | docs/comment |
+
+## S6 — runner integration (2026-11-03)
+
+| Item | Behaviour | Evidence |
+|---|---|---|
+| paid LoP gate | refuses without an S4/S5 evidence record whose `files` equal the current runner/meter/edge SHA-256s, `lop_head` = `500883ef…`, `s4_s5_passed: true` | `test_paid_lop_requires_evidence_bound_to_exact_runner_meter_edge` (missing / stale meter hash / not passed / old head → refused before auth or prepare), `test_evidence_preflight_accepts_exact_hashes` |
+| live prices | `/v1/prices` must match `decisions-rate@2026-09-19` (provider, aliases, 0.042 USD/M input, 0 output) or the run refuses | `test_live_prices_must_match_the_reviewed_decisions_contract` (rate drift, 503, empty → refused) |
+| credentials | bearer resolved host-side (env or `lop login radient` store via the existing helper), sent on the edge's stdin only; child env = edge env with dummy `RADIENT_API_KEY` | `test_start_edge_hands_the_token_over_stdin_only_and_reaps` (real `lop_edge.py` subprocess: token absent from argv, announced env and every run file; edge group reaped) |
+| classifier accounting | from the edge's qualified ledger rows for the run; a latched ledger → unknown, never 0; stderr ignored | `test_money_classifier_from_ledger_channels_not_stderr`, `test_cost_split_unknown_and_zero` |
+| D4 wall clock | `run_with_wall_clock` reaps the exact group (incl. orphaned child) and records `outcome: timeout` | `test_wall_clock_limit_kills_exact_group_and_records_timeout` (real subprocess tree) |
+| F9 overshoot | meter rows carry `in_flight_at_admission`; results publish `cap_overshoot_usd` and `max_in_flight_at_cap` | `test_run_ledger_summary_sums_channels_and_publishes_cap_overshoot`, `test_model_rows_carry_the_model_channel` |
+| egress fence | `sandboxed()` wraps every fenced harness's argv with its loopback ports only | `test_lop_launch_is_sandboxed_through_its_own_edge`, `test_sandbox_applies_only_to_harnesses_that_passed_the_zero_paid_smoke` |
+
+**Sandbox split** — each harness's REAL `runner_v2.configure()` first-wire
+launch under `sandboxed([fixture_port])`, in a scratch HOME cloned from the
+seeded-keychain base home, against a loopback Anthropic/Responses fixture
+(fake key, no network). Rig: scratch `s6/sandbox_smoke.py`.
+
+| harness | under fence | first wire reached | kernel denials | unfenced control | decision |
+|---|---|---|---|---|---|
+| claude-code 2.1.274 | rc 0 | yes (hello + 2 Messages) | `/private/var/run/mDNSResponder` (DNS, blocked harmlessly) | — | **fenced** |
+| codex (native `codex` binary) | rc 0 | yes (`/v1/responses`) | `/private/var/run/mDNSResponder` | — | **fenced** |
+| omp 18.11.2 | rc 0 | yes | none | — | **fenced** |
+| dsh 0.2.0-rc.2 | rc 0 | yes | none | — | **fenced** |
+| local-operator v0.94.22 | rc 0 (S4) | yes | none | — | **fenced** (via edge) |
+| opencode 2.0.27 | rc 1 — `Transport: Was there a typo in the url or port?` | no | `remote:*:<ephemeral>` (its own internal loopback server) | rc 0, 2 Messages | **unfenced** (fixed port allowlist cannot name it) |
+| hermes 0.22.6 | rc 1 — `no dependency environment is committed for this install; run \`hermes pm repair\`` | no | none | rc 1, same error | **unfenced, not measured** (smoke base home lacks the prepared Hermes venv) |
+
+**Real path at the S6 head** (rig `bfaaadc3…`): S4 `native` 10/10 passes —
+oracle 7 = edge 7, fixture 5/5, 0 denials, ledger clean, no voids. S5
+`decisions-401`: rc 1, oracle 8 = edge 8, fixture 2, the 401 latched
+(`unbilled or unknown charge`) and both native re-resolve retries refused 402.
+
+**Rig defect found and fixed (scratch rig only, no product/meter change):** the
+S4 rig's meter tap replayed the request body and then answered
+`http.disconnect` immediately, which made Starlette cancel a streaming
+response mid-body. The meter then correctly latched it as an incomplete stream
+(`incomplete: true`, ledger blocked), so S4 `native` failed intermittently
+(3/5 at the S6 head, 2/5 at the reviewed `7d6de8ec`, so not introduced here). The
+tap now defers to the real `receive` after the body; 10/10 then pass.
 
 ## Provenance of vendored code
 

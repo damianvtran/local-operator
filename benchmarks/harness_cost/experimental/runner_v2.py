@@ -216,6 +216,25 @@ SKILL_ROOTS = (
     ".hermes/skills",
     ".dsh/skills",
 )
+# Egress fence split, measured 2026-11-03 by running each harness's real
+# configure() first-wire launch under ``sandboxed()`` against a loopback
+# fixture (fake key, no network; evidence in LOP-EDGE-VERIFICATION.md). Only a
+# harness whose native first wire completed under the fence is fenced in paid
+# runs: fencing one that breaks would turn infrastructure into its failures.
+# local-operator is fenced through its own edge (S4/S5).
+SANDBOX_SMOKE_PASSED = ("claude-code", "codex", "local-operator", "omp", "dsh")
+SANDBOX_SMOKE_FAILED = {
+    # Fails ONLY under the fence (unfenced control passes): its CLI connects to
+    # its own internal server on an ephemeral loopback port, which a fixed
+    # port allowlist cannot name -> "Transport: Was there a typo in the url or
+    # port?" with kernel deny(1) network-outbound remote:*:<ephemeral>.
+    "opencode": "sandbox denies its ephemeral internal loopback server port",
+    # Undetermined: fails identically WITHOUT the fence ("no dependency
+    # environment is committed for this install; run `hermes pm repair`") --
+    # the smoke base home lacks the prepared relocatable Hermes venv.
+    "hermes": "smoke prerequisite missing (no prepared dependency env); not measured",
+}
+SANDBOXED_HARNESSES = SANDBOX_SMOKE_PASSED
 BIN_KEYS = {
     "claude-code": ("BENCH_CLAUDE_BIN", "claude"),
     "codex": ("BENCH_CODEX_BIN", "codex"),
@@ -1616,16 +1635,23 @@ def radient_token(lop_python: str) -> str:
 
 
 def money(
-    rows: Sequence[Mapping[str, object]], stderr: str, classification: bool
+    rows: Sequence[Mapping[str, object]],
+    classifier: Mapping[str, object] | None,
+    classification: bool,
 ) -> dict[str, float | int | bool | None]:
     """Account for every recorded Messages attempt, independent of HTTP success.
 
     An error can be billed; a missing/invalid bill is unknown, never zero. Keep
     the measured partial sum separate from nullable complete totals. Discovery
-    and count-token routes are not Messages attempts, but their presence alone
-    cannot establish a measured model run. Retries remain separate ledger rows;
-    do not deduplicate by status, timestamp or request contents. This function
-    cannot detect attempts missing entirely from its caller's metering ledger.
+    routes are not Messages attempts, but their presence alone cannot establish
+    a measured model run. Retries remain separate ledger rows; do not
+    deduplicate by status, timestamp or request contents. This function cannot
+    detect attempts missing entirely from its caller's metering ledger.
+
+    ``classifier`` is the run's ledger summary (``run_ledger_summary``): the
+    Radient spend is the ``classifier`` channel the edge settled from qualified
+    bills, NOT a regex over the product's stderr (a log line is not a bill and
+    a missing one is not a zero). A latched ledger leaves it unknown.
     """
     from decimal import InvalidOperation
 
@@ -1646,10 +1672,11 @@ def money(
             continue
         measured += amount
     model_complete = bool(messages) and unknown == 0
-    charges = re.findall(r"classification:.*?cost=\$([0-9]+(?:\.[0-9]+)?)", stderr)
-    radient = (
-        sum((Decimal(v) for v in charges), Decimal(0)) if charges or not classification else None
-    )
+    radient: Decimal | None = Decimal(0) if not classification else None
+    if classification and classifier is not None and classifier.get("blocked") is False:
+        value = classifier.get("classifier")
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+            radient = Decimal(str(value))
     complete = model_complete and radient is not None
     return {
         "model_cost_usd": float(measured) if model_complete else None,
@@ -1660,9 +1687,130 @@ def money(
         "unknown_billing_attempts": unknown,
         "non_200_message_attempts": sum(row.get("status") != 200 for row in messages),
         "non_model_rows": len(rows) - len(messages),
-        "classification_calls_charged": len(charges),
         "cost_complete": complete,
     }
+
+
+def run_ledger_summary(
+    ledger: Mapping[str, object],
+    run_id: str,
+    meter_rows: Sequence[Mapping[str, object]],
+    edge_rows: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """One run's spend by ledger channel, plus its cost-cap and void facts.
+
+    The classifier sum comes from the edge's qualified decision rows for this
+    run (the shared ledger's channel totals span all runs). ``cap_overshoot_usd``
+    = settled − cap is published per harness (review R3 F9): the last admitted
+    requests can overshoot, by as many as were in flight when the cap was
+    reached, so ``max_in_flight_at_cap`` is reported beside it.
+    """
+    classifier = Decimal(0)
+    for row in edge_rows:
+        if row.get("channel") == "classifier" and row.get("actual_usd") is not None:
+            classifier += Decimal(str(row["actual_usd"]))
+    caps = ledger.get("cost_caps")
+    cap = caps.get(run_id) if isinstance(caps, dict) else None
+    voids = ledger.get("voids")
+    reasons = voids.get(run_id) if isinstance(voids, dict) else None
+    in_flight = [
+        value for row in meter_rows
+        if isinstance(value := row.get("in_flight_at_admission"), int)
+    ]
+    return {
+        "classifier": float(classifier),
+        "blocked": ledger.get("blocked") is not False,
+        "cost_capped": cap is not None,
+        "cap_overshoot_usd": (
+            float(Decimal(str(cap["settled_usd"])) - Decimal(str(cap["cap_usd"])))
+            if isinstance(cap, dict) else None
+        ),
+        "max_in_flight_at_cap": max(in_flight) if cap is not None and in_flight else None,
+        "void_reasons": reasons or None,
+    }
+
+
+def metering_file_hashes() -> dict[str, str]:
+    """The exact bytes S4/S5 evidence must have been produced against."""
+    return {name: sha(HERE / name) for name in ("runner_v2.py", "meter_proxy.py", "lop_edge.py")}
+
+
+def lop_edge_preflight() -> dict[str, object]:
+    """Refuse paid LoP unless S4/S5 evidence names these exact metering files.
+
+    WHY (METERING-ARCHITECTURE §4 S6): the zero-paid full-path gate proved the
+    edge meters every LoP route only for the runner/meter/edge bytes it ran.
+    Any change to one of them invalidates that proof until S4/S5 are re-run
+    and the evidence record is regenerated for the new hashes.
+    """
+    raw = os.environ.get("BENCH_LOP_EDGE_EVIDENCE")
+    if not raw:
+        raise ValueError("No S4/S5 evidence record (BENCH_LOP_EDGE_EVIDENCE): paid LoP refused")
+    record = json.loads(Path(raw).read_text())
+    if (
+        record.get("s4_s5_passed") is not True
+        or record.get("lop_head") != LOP_HEAD
+        or record.get("files") != metering_file_hashes()
+        or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("evidence_sha256", "")))
+    ):
+        raise ValueError("S4/S5 evidence does not match these runner/meter/edge files")
+    return {"lop_edge_evidence_sha256": record["evidence_sha256"]}
+
+
+PRICES_URL = "https://api.radienthq.com/v1/prices"
+
+
+def _fetch_prices() -> tuple[int, bytes]:
+    req = urllib.request.Request(PRICES_URL, headers={"accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=15) as resp:  # unauthenticated public listing
+        return resp.status, resp.read(65537)
+
+
+def check_decision_prices(fetch=_fetch_prices) -> dict[str, str]:
+    """Live ``/v1/prices`` must still state the reviewed decisions contract.
+
+    Fails closed (before any paid decisions call) on any status, size, version,
+    provider, alias or rate drift -- the edge settles at the reviewed rate, so a
+    changed live price would make every settled bill unqualified.
+    """
+    from radient_meter.classifier import qualify_prices
+
+    try:
+        status, raw = fetch()
+        qualified = qualify_prices(raw, status)
+    except (ValueError, OSError, TypeError, KeyError) as exc:
+        raise ValueError(f"live decisions prices do not match the reviewed contract: {exc}")
+    return {"prices_version": qualified.version, "prices_sha256": qualified.response_sha256}
+
+
+def sandboxed(argv: list[str], ports: Sequence[int]) -> list[str]:
+    """Run ``argv`` under the kernel egress profile: outbound TCP only to ``ports``.
+
+    The backstop for anything that ignores proxy/base-URL settings (a tool
+    child, a ``trust_env=False`` client): it gets EPERM instead of escaping
+    the meter. At least one loopback port (the run's meter/edge) is required.
+    """
+    import lop_edge
+
+    if not ports:
+        raise ValueError("a sandboxed run needs its loopback meter/edge port")
+    return ["/usr/bin/sandbox-exec", "-p", lop_edge.sandbox_profile(list(ports)), *argv]
+
+
+def run_with_wall_clock(proc: subprocess.Popen[str], limit_s: float) -> dict[str, object]:
+    """Wait at most ``limit_s``; on expiry reap the exact process group (D4).
+
+    With egress blocked, ``lop exec`` keeps retrying (observed > 600 s) instead
+    of exiting, so the runner -- not the product -- ends the trial. A timeout
+    is a primary outcome (Y=0, cost counted, PREREGISTRATION §9.2).
+    """
+    try:
+        stdout, stderr = proc.communicate(timeout=limit_s)
+        return {"stdout": stdout, "stderr": stderr, "timed_out": False, "outcome": "exited"}
+    except subprocess.TimeoutExpired:
+        stop_group(proc)
+        stdout, stderr = proc.communicate()
+        return {"stdout": stdout, "stderr": stderr, "timed_out": True, "outcome": "timeout"}
 
 
 def stop_group(proc: subprocess.Popen[str] | subprocess.Popen[bytes] | None) -> None:
@@ -1687,6 +1835,63 @@ def stop_group(proc: subprocess.Popen[str] | subprocess.Popen[bytes] | None) -> 
     proc.wait(timeout=5)
 
 
+def _jsonl(path: Path) -> list[dict[str, object]]:
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.is_file() else []
+
+
+def _loopback_port(url: str) -> int:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.hostname not in ("127.0.0.1", "localhost", "::1") or not parsed.port:
+        raise ValueError(f"sandboxed harness endpoint must be loopback with a port: {url}")
+    return parsed.port
+
+
+def start_edge(
+    run_id: str, root: Path, token: str
+) -> tuple[subprocess.Popen[str], dict[str, object]]:
+    """Start this run's ``lop_edge`` process; return it and its announced child env.
+
+    The bearer goes in on stdin only (never argv/env/disk). The edge forwards
+    the model route to this runner's shared meter (``PROXY``), where the
+    OpenRouter key is resolved exactly as for the other six harnesses.
+    """
+    edge = subprocess.Popen(
+        [sys.executable, str(HERE / "lop_edge.py")],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        cwd=HERE,
+        start_new_session=True,
+    )
+    assert edge.stdin is not None and edge.stdout is not None
+    config = {"run_id": run_id, "run_dir": str(root / "edge"), "meter_base": PROXY}
+    config["radient_token"] = token
+    edge.stdin.write(json.dumps(config) + "\n")
+    edge.stdin.flush()
+    del config
+    line = edge.stdout.readline()
+    if not line:
+        stop_group(edge)
+        raise ValueError("lop_edge exited during startup (check meter configuration)")
+    return edge, json.loads(line)
+
+
+def stop_edge(edge: subprocess.Popen[str] | None) -> None:
+    """Close stdin so the edge settles or latches in-flight work, then reap it."""
+    if edge is None or getattr(edge, "_bench_group_reaped", False):
+        return
+    try:
+        if edge.stdin is not None and not edge.stdin.closed:
+            edge.stdin.close()
+        edge.wait(timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    stop_group(edge)
+
+
 def execute(
     harness: str,
     run_id: str,
@@ -1703,18 +1908,16 @@ def execute(
     therefore coordinator must prohibit concurrent legacy Codex executions).
     All subprocess startup errors still pass through explicit cleanup.
     """
-    # The main-model meter cannot bound a separate hosted classifier account.
-    # Do not disable classification or accept a boolean attestation in place of
-    # a working reservation path. This gate must be implemented and validated
-    # before classifier-enabled paid LOP collection becomes available.
+    # Paid LoP runs only through the per-run edge (classifier + model on one
+    # ledger), and only for runner/meter/edge bytes that passed the zero-paid
+    # S4/S5 gate; checked before any auth access or preparation. Classification
+    # stays on: disabling Radient is not an accepted way to bound cost.
     if harness == "local-operator":
-        raise ValueError(
-            "Paid LOP pending validated classifier reservation/accounting; do not disable Radient"
-        )
+        preflight = {**preflight, **lop_edge_preflight(), **check_decision_prices()}
     import fcntl
 
     root = home = None
-    proc = bridge = None
+    proc = bridge = edge = None
     hermes_cleaned = False
     token = ""
     lock = None
@@ -1739,10 +1942,25 @@ def execute(
         argv, env = configure(
             harness, run_id, build_prompt(task), home, arm == "public-full", runtime, port
         )
+        sandbox_ports: list[int] = []
         if harness == "local-operator":
-            # The real bearer belongs to the edge process only (S3); it is
-            # never exported to the child. Unreachable until S6 wires the edge.
+            # The real bearer belongs to the edge process only (S3): resolved
+            # here, handed over on the edge's stdin, never put in argv, the
+            # child env, a file or a log. The child gets the edge's env (proxy,
+            # run CA, dummy RADIENT_API_KEY) and egress only to the edge port.
             token = radient_token(runtime["binary"])
+            edge, edge_env = start_edge(run_id, root, token)
+            child = edge_env["env"]
+            port_value = edge_env["port"]
+            if not isinstance(child, dict) or not isinstance(port_value, int):
+                raise ValueError("lop_edge announced a malformed child environment")
+            env.update({str(k): str(v) for k, v in child.items()})
+            sandbox_ports = [port_value]
+        elif harness in SANDBOXED_HARNESSES:
+            # Codex's only model endpoint is its loopback tool_search bridge
+            # (the bridge itself runs outside the fence and reaches LiteLLM).
+            model_port = port if harness == "codex" else _loopback_port(PROXY)
+            sandbox_ports = [model_port] + ([_loopback_port(MCP)] if arm == "public-full" else [])
         if harness == "codex":
             key = os.environ.get("BENCH_LITELLM_KEY")
             if not key:
@@ -1774,6 +1992,8 @@ def execute(
                     time.sleep(0.05)
             else:
                 raise ValueError("Codex bridge did not become reachable")
+        if sandbox_ports:
+            argv = sandboxed(argv, sandbox_ports)
         started = time.time()
         proc = subprocess.Popen(
             argv,
@@ -1786,17 +2006,16 @@ def execute(
             start_new_session=True,
         )
         try:
-            stdout, stderr = proc.communicate(timeout=TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            stop_group(proc)
-            stdout, stderr = proc.communicate()
+            waited = run_with_wall_clock(proc, TIMEOUT_S)
+            stdout, stderr = str(waited["stdout"]), str(waited["stderr"])
+            timed_out = waited["timed_out"] is True
         finally:
             stop_group(proc)
             if harness == "hermes":
                 _hermes_teardown(home, env)
                 hermes_cleaned = True
             stop_group(bridge)
+            stop_edge(edge)
         # Sanitize before persistence, not after credential-bearing logs have
         # already hit disk. Do not write the complete environment or argv.
         for secret in (token, env.get("RADIENT_API_KEY", ""), env.get("BENCH_LITELLM_KEY", "")):
@@ -1833,6 +2052,14 @@ def execute(
                 raise ValueError(
                     "No actual retained dsh body proves all nine public MCP partitions"
                 )
+        ledger_facts = run_ledger_summary(
+            json.loads(Path(os.environ["BENCH_SPEND_FILE"]).read_text()),
+            run_id,
+            rows,
+            _jsonl(root / "edge" / "edge-requests.jsonl") if harness == "local-operator" else [],
+        )
+        if harness != "local-operator":
+            ledger_facts["blocked"] = False  # no classifier channel to settle
         scored = subprocess.run(
             [resolve_program("BENCH_EVAL_PY"), str(EVALUATOR), task["id"], str(home)],
             capture_output=True,
@@ -1858,7 +2085,9 @@ def execute(
             "timed_out": timed_out,
             "wall_s": round(time.time() - started, 2),
             "lop_head": LOP_HEAD if harness == "local-operator" else None,
-            **money(rows, stderr, harness == "local-operator"),
+            "outcome": "timeout" if timed_out else "exited",
+            **ledger_facts,
+            **money(rows, ledger_facts, harness == "local-operator"),
             **preflight,
         }
         result = home / task["evaluator"]["result"]["path"].removeprefix("/home/user/")
@@ -1873,6 +2102,7 @@ def execute(
     finally:
         stop_group(proc)
         stop_group(bridge)
+        stop_edge(edge)
         if not hermes_cleaned and home and harness == "hermes" and (home / ".hermes").exists():
             _hermes_teardown(home, env)
         if home and home.exists():

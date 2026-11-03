@@ -9,8 +9,8 @@
       "sha256": "e6eaa4ae8e2122e938d48b3355881be6e14939125f429dff5775e7315eadf8cc"
     },
     "LOP-EDGE-VERIFICATION.md": {
-      "bytes": 15544,
-      "sha256": "1070f337f4798dfe75f7c70487c6b91c59ce0031286ff355474dce1f2c7e1fd7"
+      "bytes": 19631,
+      "sha256": "40963569fef9b0b8291ae25a686b43fe566e05a5cedd60d3c66f7f6b74f6129d"
     },
     "PREREGISTRATION.md": {
       "bytes": 43078,
@@ -21,8 +21,8 @@
       "sha256": "92430cd11b80ea2577f87c1cb1bf81a698d9d9a2feeb5610c793a1bf91e2ba6d"
     },
     "RUNNER_V2.md": {
-      "bytes": 9662,
-      "sha256": "4e128af5a9993d1f0d1cfab61dbad87fc100c0ca39d71ec6a729e0ef48082f9d"
+      "bytes": 10712,
+      "sha256": "98ee6ce500aacd516e58d5492b496c15f6986c6d3b9a7659f3225397a600bc57"
     },
     "SOURCE-AUDIT.json": {
       "bytes": 28949,
@@ -185,8 +185,8 @@
       "sha256": "afefded4938e6384a472d88c08005c29370c4036aa9edac55b99bef109f86287"
     },
     "meter_proxy.py": {
-      "bytes": 40406,
-      "sha256": "10c5a3b2cfef5c5db37db8a4d1fac803e6a995df868acfacdcd9d04f33f7c015"
+      "bytes": 41038,
+      "sha256": "abdc2e4cff4a6a53ab95c1c88066a441fb9666d8c35a9e5715ecdc330a4d92dc"
     },
     "radient_meter/classifier.py": {
       "bytes": 6611,
@@ -205,16 +205,16 @@
       "sha256": "6be4440a9d4d7f955d973f9ea13d6f2fe168b6702ef86bf538264145dd0ef8ac"
     },
     "runner_v2.py": {
-      "bytes": 83331,
-      "sha256": "c6b2eb21c10c646eba89dd7d626d4d32009bc67236256dfa193f6409cf89790a"
+      "bytes": 93956,
+      "sha256": "57cb422b9222409c15acfc732239ca0f6eb9a891e1ee596a067878099f20b850"
     },
     "sse_stream.py": {
       "bytes": 2190,
       "sha256": "6be4440a9d4d7f955d973f9ea13d6f2fe168b6702ef86bf538264145dd0ef8ac"
     },
     "test_adapters.py": {
-      "bytes": 38089,
-      "sha256": "dd755605a08f34b207af8286cc0c81ed66b19deced4dda42820d34dfece0c07d"
+      "bytes": 38225,
+      "sha256": "90fac2487cdc25ffc1eb9fc8ba2ca4be0f409da2aae5cc857648a4c6b829038e"
     },
     "test_bridge_sse.py": {
       "bytes": 8812,
@@ -241,8 +241,8 @@
       "sha256": "ae867a1a5f8ee0776332727bcf0ba9b4c1c6a818ea48b81a9ddb1cf304332e84"
     },
     "test_runner_v2.py": {
-      "bytes": 21672,
-      "sha256": "c4222f3628cd74a2685ba626b905419bb7cf65bd06620bb2df1f6954cbe0cacc"
+      "bytes": 29160,
+      "sha256": "4dbe9189fdb939c00a5c00bf774b0d6537fd48a324e38265ed69aa40cd06e83a"
     },
     "translator_config.example.json": {
       "bytes": 394,

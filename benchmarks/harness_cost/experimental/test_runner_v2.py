@@ -50,6 +50,8 @@ class V2Tests(unittest.TestCase):
             "codex_toolsearch_bridge.py",
             "lop_launch.py",
             "lop_edge.py",
+            "meter_proxy.py",
+            "runner_v2.py",
         ):
             (self.root / name).parent.mkdir(parents=True, exist_ok=True)
             if name == "tasks.json":
@@ -98,27 +100,164 @@ class V2Tests(unittest.TestCase):
         self.assertEqual(args.kwargs["env"]["BENCH_TASKS_FILE"], str(r.TASKS_FILE))
         self.assertEqual(args.kwargs["env"]["BENCH_TASK_CACHE"], str(r.TASK_CACHE))
 
-    def test_paid_lop_pending_gate_precedes_auth_and_preparation(self):
+    def _evidence(self, **overrides: object) -> Path:
+        """A synthetic S4/S5 evidence record bound to the current file hashes."""
+        record = {
+            "s4_s5_passed": True,
+            "lop_head": r.LOP_HEAD,
+            "files": r.metering_file_hashes(),
+            "evidence_sha256": "e" * 64,
+            **overrides,
+        }
+        path = self.root / "lop-edge-evidence.json"
+        path.write_text(json.dumps(record))
+        return path
+
+    def test_paid_lop_requires_evidence_bound_to_exact_runner_meter_edge(self):
+        task: r.Task = {"id": "fixture", "_domain": "", "config": [], "instruction": "",
+                        "evaluator": {"result": {}}}
         with (
             patch.object(r, "prepare", side_effect=AssertionError("must not prepare")),
             patch.object(r, "radient_token", side_effect=AssertionError("must not access auth")),
         ):
-            with self.assertRaisesRegex(ValueError, "classifier reservation"):
-                r.execute(
-                    "local-operator",
-                    "v2dev__unit",
-                    "clean",
-                    40,
-                    {
-                        "id": "fixture",
-                        "_domain": "",
-                        "config": [],
-                        "instruction": "",
-                        "evaluator": {"result": {}},
-                    },
-                    self.runtime,
-                    {},
-                )
+            with patch.dict(os.environ, {"BENCH_LOP_EDGE_EVIDENCE": ""}):
+                with self.assertRaisesRegex(ValueError, "S4/S5 evidence"):
+                    r.execute("local-operator", "v2dev__unit", "clean", 40, task,
+                              self.runtime, {})
+            stale = {**r.metering_file_hashes(), "meter_proxy.py": "0" * 64}
+            for bad in (self._evidence(files=stale), self._evidence(s4_s5_passed=False),
+                        self._evidence(lop_head="07c324e9")):
+                with self.subTest(bad=bad.read_text()[:60]), patch.dict(
+                    os.environ, {"BENCH_LOP_EDGE_EVIDENCE": str(bad)}
+                ):
+                    with self.assertRaisesRegex(ValueError, "S4/S5 evidence"):
+                        r.execute("local-operator", "v2dev__unit", "clean", 40, task,
+                                  self.runtime, {})
+
+    def test_evidence_preflight_accepts_exact_hashes(self):
+        with patch.dict(os.environ, {"BENCH_LOP_EDGE_EVIDENCE": str(self._evidence())}):
+            self.assertEqual(r.lop_edge_preflight()["lop_edge_evidence_sha256"], "e" * 64)
+        self.assertEqual(
+            set(r.metering_file_hashes()), {"runner_v2.py", "meter_proxy.py", "lop_edge.py"}
+        )
+
+    def test_live_prices_must_match_the_reviewed_decisions_contract(self):
+        good = json.dumps({"result": {"rates": {"decision_models": {
+            "rate_version": "decisions-rate@2026-09-19",
+            "rates": [{"id": "jev-1.13", "aliases": ["jev-1.13.0", "typesafe/jev-1.13"],
+                       "provider": "typesafe", "unit": "token",
+                       "prompt_unit_price_usd": 4.2e-08, "completion_unit_price_usd": 0,
+                       "price_version": "decisions-rate@2026-09-19"}]}}}}).encode()
+        self.assertEqual(r.check_decision_prices(lambda: (200, good))["prices_version"],
+                         "decisions-rate@2026-09-19")
+        drifted = good.replace(b"4.2e-08", b"5e-08")
+        for fetch in (lambda: (200, drifted), lambda: (503, good), lambda: (200, b"{}")):
+            with self.assertRaisesRegex(ValueError, "prices"):
+                r.check_decision_prices(fetch)
+
+    def test_lop_launch_is_sandboxed_through_its_own_edge(self):
+        argv = [sys.executable, "lop_launch.py", "exec"]
+        wrapped = r.sandboxed(argv, [4242])
+        self.assertEqual(wrapped[:2], ["/usr/bin/sandbox-exec", "-p"])
+        self.assertIn('(remote ip "localhost:4242")', wrapped[2])
+        self.assertEqual(wrapped[3:], argv)
+        with self.assertRaises(ValueError):
+            r.sandboxed(argv, [])
+
+    def test_sandbox_applies_only_to_harnesses_that_passed_the_zero_paid_smoke(self):
+        for harness in r.HARNESSES:
+            with self.subTest(harness=harness):
+                self.assertEqual(harness in r.SANDBOXED_HARNESSES,
+                                 harness in r.SANDBOX_SMOKE_PASSED)
+        self.assertIn("local-operator", r.SANDBOXED_HARNESSES)
+        self.assertEqual(set(r.SANDBOX_SMOKE_PASSED) | set(r.SANDBOX_SMOKE_FAILED),
+                         set(r.HARNESSES))
+        for harness, error in r.SANDBOX_SMOKE_FAILED.items():
+            self.assertTrue(error, harness)
+
+    def test_wall_clock_limit_kills_exact_group_and_records_timeout(self):
+        import subprocess
+        import time
+
+        script = self.root / "sleeper.py"
+        script.write_text(
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "print(child.pid, flush=True)\n"
+            "time.sleep(60)\n"
+        )
+        proc = subprocess.Popen([sys.executable, str(script)], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, start_new_session=True)
+        assert proc.stdout is not None
+        child = int(proc.stdout.readline())
+        started = time.monotonic()
+        outcome = r.run_with_wall_clock(proc, 0.5)
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertTrue(outcome["timed_out"])
+        self.assertEqual(outcome["outcome"], "timeout")
+        self.assertIsNotNone(proc.returncode)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(child, 0)
+
+    def test_start_edge_hands_the_token_over_stdin_only_and_reaps(self):
+        import test_adapters  # shares the offline meter configuration helper
+
+        for name in ("radient_meter",):
+            shutil.copytree(self.real / name, self.root / name, dirs_exist_ok=True)
+        fake = "s6-fake-radient-bearer-not-a-credential"
+        run = self.root / "run"
+        run.mkdir()
+        with patch.dict(os.environ, test_adapters.meter_env(self.root)):
+            edge, announced = r.start_edge("v2dev__unit", run, fake)
+            try:
+                self.assertIsNone(edge.poll())
+                env = announced["env"]
+                assert isinstance(env, dict)
+                import lop_edge
+
+                self.assertEqual(env["RADIENT_API_KEY"], lop_edge.DUMMY_RADIENT_KEY)
+                self.assertIn(f"127.0.0.1:{announced['port']}", env["HTTPS_PROXY"])
+                self.assertNotIn(fake, json.dumps(announced))
+                self.assertNotIn(fake, repr(edge.args))
+                self.assertTrue((run / "edge" / "edge-ca.pem").is_file())
+            finally:
+                r.stop_edge(edge)
+        self.assertIsNotNone(edge.returncode)
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(edge.pid, 0)
+        for path in run.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(fake, path.read_text(errors="ignore"))
+
+    def test_money_classifier_from_ledger_channels_not_stderr(self):
+        rows = [{"path": "v1/messages", "status": 200, "usage": {"cost": 0.05}}]
+        ledger = {"run": {"model": 0.05, "classifier": 0.003, "blocked": False}}
+        cost = r.money(rows, ledger["run"], True)
+        self.assertEqual(cost["radient_cost_usd"], 0.003)
+        self.assertEqual(cost["total_cost_usd"], 0.053)
+        # A latched ledger leaves the classifier total unknown, never zero.
+        cost = r.money(rows, {"model": 0.05, "classifier": 0.0, "blocked": True}, True)
+        self.assertIsNone(cost["radient_cost_usd"])
+        self.assertFalse(cost["cost_complete"])
+        # A stderr line claiming a charge is ignored entirely.
+        self.assertNotIn("classification_calls_charged", cost)
+
+    def test_run_ledger_summary_sums_channels_and_publishes_cap_overshoot(self):
+        ledger = {
+            "usd": 5.9, "trials": {"run": 5.9}, "pending": {}, "blocked": False,
+            "channels": {"model": 5.9, "classifier": 0.0}, "models": {}, "voids": {},
+            "cost_caps": {"run": {"settled_usd": 5.9, "cap_usd": 5.0}},
+            "rows": [],
+        }
+        edge_rows = [{"channel": "classifier", "actual_usd": "0.004", "qualified": True}]
+        meter_rows = [{"run_id": "run", "channel": "model", "usage": {"cost": 5.9},
+                       "in_flight_at_admission": 3}]
+        summary = r.run_ledger_summary(ledger, "run", meter_rows, edge_rows)
+        self.assertAlmostEqual(float(str(summary["classifier"])), 0.004)
+        self.assertTrue(summary["cost_capped"])
+        self.assertAlmostEqual(float(str(summary["cap_overshoot_usd"])), 0.9)
+        self.assertEqual(summary["max_in_flight_at_cap"], 3)
+        self.assertIsNone(summary["void_reasons"])
 
     def test_source_launch_environment_is_explicit(self):
         with patch.dict(os.environ, {"LOP_BENCH_SOURCE_ROOT": "/explicit/reviewed-source"}):
@@ -299,22 +438,19 @@ class V2Tests(unittest.TestCase):
             {"path": "v1/messages", "status": 200, "usage": {"cost": 0.05}},
             {"path": "v1/messages", "status": 200, "usage": {"cost": 0.002}},
         ]
-        cost = r.money(
-            rows, "classification: turn=a cost=$0.001\nclassification: turn=b cost=$0.002", True
-        )
+        cost = r.money(rows, {"model": 0.052, "classifier": 0.003, "blocked": False}, True)
         self.assertEqual(cost["model_cost_usd"], 0.052)
         self.assertEqual(cost["radient_cost_usd"], 0.003)
         self.assertEqual(cost["total_cost_usd"], 0.055)
-        self.assertEqual(cost["classification_calls_charged"], 2)
-        self.assertIsNone(r.money(rows, "", True)["total_cost_usd"])
-        self.assertEqual(r.money(rows, "", False)["total_cost_usd"], 0.052)
+        self.assertIsNone(r.money(rows, None, True)["total_cost_usd"])
+        self.assertEqual(r.money(rows, None, False)["total_cost_usd"], 0.052)
 
     def test_money_missing_attempt_never_reports_complete_total(self):
         rows = [
             {"path": "v1/messages", "status": 200, "usage": {"cost": 0.20}},
             {"path": "v1/messages", "status": 200, "usage": {}},
         ]
-        cost = r.money(rows, "", False)
+        cost = r.money(rows, None, False)
         self.assertFalse(cost["cost_complete"])
         self.assertIsNone(cost["model_cost_usd"])
         self.assertIsNone(cost["total_cost_usd"])
@@ -326,7 +462,7 @@ class V2Tests(unittest.TestCase):
             {"path": "v1/messages", "status": 200, "usage": {"cost": 0.20}},
             {"path": "v1/messages", "status": 500, "usage": {"cost": 0.30}},
         ]
-        cost = r.money(rows, "", False)
+        cost = r.money(rows, None, False)
         self.assertTrue(cost["cost_complete"])
         self.assertEqual(cost["total_cost_usd"], 0.50)
         self.assertEqual(cost["message_attempts"], 2)
@@ -337,13 +473,13 @@ class V2Tests(unittest.TestCase):
             {"path": "mcp/tools/list", "status": 200},
             {"path": "v1/messages/count_tokens", "status": 200},
         ]
-        cost = r.money(rows, "", False)
+        cost = r.money(rows, None, False)
         self.assertFalse(cost["cost_complete"])
         self.assertEqual(cost["message_attempts"], 0)
         self.assertEqual(cost["non_model_rows"], 2)
         self.assertIsNone(cost["total_cost_usd"])
         cost = r.money(
-            rows + [{"path": "v1/messages", "status": 429, "usage": {"cost": 0}}], "", False
+            rows + [{"path": "v1/messages", "status": 429, "usage": {"cost": 0}}], None, False
         )
         self.assertTrue(cost["cost_complete"])
         self.assertEqual(cost["total_cost_usd"], 0)
@@ -352,7 +488,9 @@ class V2Tests(unittest.TestCase):
         for invalid in (None, -1, True, "NaN", "Infinity", "bad", {}, []):
             with self.subTest(invalid=invalid):
                 cost = r.money(
-                    [{"path": "v1/messages", "status": 500, "usage": {"cost": invalid}}], "", False
+                    [{"path": "v1/messages", "status": 500, "usage": {"cost": invalid}}],
+                    None,
+                    False,
                 )
                 self.assertFalse(cost["cost_complete"])
                 self.assertEqual(cost["unknown_billing_attempts"], 1)
