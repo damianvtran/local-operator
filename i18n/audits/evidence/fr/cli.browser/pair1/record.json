@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "audit_id": "pair1",
+  "locale": "fr",
+  "namespace": "cli.browser",
+  "audit_date": "2026-11-02",
+  "scope": "delta: 14 rewritten/new keys + removal of cli.browser.open_popup (PR feat/extension-pairing-flow, CLI-first browser pairing)",
+  "keys": [
+    "cli.browser.already_paired",
+    "cli.browser.enter_code",
+    "cli.browser.enter_code_icon",
+    "cli.browser.enter_each_code",
+    "cli.browser.no_extension_waiting",
+    "cli.browser.pair_after_reset",
+    "cli.browser.pair_code_lifetime",
+    "cli.browser.pair_no_daemon",
+    "cli.browser.pair_no_page_hint",
+    "cli.browser.pair_outdated",
+    "cli.browser.pair_several_header",
+    "cli.browser.pair_unreachable",
+    "cli.browser.pairing_code",
+    "cli.browser.pairing_code_labeled"
+  ],
+  "source_sha256": "5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24",
+  "target_sha256": "40493323c2bb895d5f9d4f6df7411bd059693d3b3c4acb43a4871e37ee3acc3c",
+  "translator": {
+    "agent": "translator subagent (job 0b05118032a6) of session b2810af2074b",
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "auditor": {
+    "agent": "translation-auditor subagent (job 24a5a2a00bbb) of session b2810af2074b; did not translate or edit",
+    "model": "anthropic/claude-opus-5-5",
+    "result": "passed",
+    "findings": "0B/0M/2m/3n"
+  },
+  "dispositions": "T1-T5 applied verbatim from the auditor's replacement text",
+  "independence": "Auditor is a separate subagent session from the translator; both share the Claude model family (disclosed). Not verified: native-speaker review."
+}

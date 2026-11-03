@@ -21529,6 +21529,9 @@ SNAPSHOT_MAX_SEARCH_CHARS = 120
 #: and the conflict checks compare through it so a hint can never be judged
 #: against the other spelling of the same host.
 _BROWSER_BACKENDS = ("ui", "extension", "cmux")
+#: The surface-free site-approval actions. They take `backend` to name the host
+#: whose approval they are about (see `_validate_browser_backend`).
+_ACCESS_ACTIONS = ("request_access", "await_access", "cancel_access")
 
 #: Page text is model input, so it rides the same ceiling as command output
 #: rather than a bespoke one — a single-page app whose body is megabytes would
@@ -21660,9 +21663,9 @@ class BrowserParams(BaseModel):
     backend: str = Field(
         default="",
         description=(
-            "'open' fresh surface only: '' (default order), 'ui', 'extension' "
-            "(the user's real profile) or 'cmux'. A held handle or adoption "
-            "outranks it."
+            "'open' fresh surface or *_access host: '' (default order), 'ui', "
+            "'extension' (the user's real profile) or 'cmux'. A held handle or "
+            "adoption outranks it."
         ),
     )
     path: str = Field(
@@ -22216,10 +22219,25 @@ def _validate_browser_backend(action: str, params: BrowserParams) -> str:
     backend = _backend_hint(params)
     if not backend:
         return ""
+    if action in _ACCESS_ACTIONS:
+        # The access actions accept a host too (operator report, 2026-11-02):
+        # an approval belongs to ONE host's jar, and without a way to name it an
+        # agent planning `open backend='extension'` raised (and was told
+        # "allowed" about) the DESKTOP APP's grant, then the open failed with
+        # "not allowed yet". cmux has no permission model, so it is not a host
+        # an approval can be raised on.
+        if backend not in ("ui", "extension"):
+            return (
+                f"'backend' on '{action}' must be 'ui' or 'extension' (got "
+                f"{params.backend!r}): it names the host whose site approval this is; "
+                "cmux has no site approvals"
+            )
+        return ""
     if action != "open":
         return (
-            f"'backend' is only valid for 'open' (got it on '{action}'): it picks "
-            "the host a FRESH surface opens on; no other action chooses a host"
+            f"'backend' is only valid for 'open' and the access actions (got it on "
+            f"'{action}'): it picks the host a FRESH surface opens on, or the host "
+            "whose site approval request_access/await_access/cancel_access is about"
         )
     if backend not in _BROWSER_BACKENDS:
         return (
@@ -25271,7 +25289,18 @@ def _access_result_text(
     subject = "the session this run was delegated from" if delegated else "this session"
     extension_host = host != HOST_UI_PREFIX
     if state == "allowed":
-        return _wrap_receipt(f"{origin} is allowed. 'open' or 'goto' the URL now.")
+        # NAME THE HOST (operator report, 2026-11-02). An approval is per host:
+        # the desktop app's browser and the extension are different jars with
+        # different grants. A bare "is allowed" about the app's host read as a
+        # go-ahead to an agent about to `open backend='extension'`, which then
+        # failed with "not allowed yet". Saying which host, and how to ask about
+        # the other one, removes the misreading.
+        other = "extension" if host == HOST_UI_PREFIX else "ui"
+        return _wrap_receipt(
+            f"{origin} is allowed on {_host_label(host)}.\n'open' or 'goto' the URL "
+            f"there now. This approval covers that host only: before opening it with "
+            f"backend={other!r}, call request_access with backend={other!r}."
+        )
     if state == "denied":
         return _wrap_receipt(
             f"the operator denied access to {origin}. Do not retry or re-request "
@@ -28642,6 +28671,25 @@ async def _execute_browser(
     # scroll/logs; both non-cmux hosts serve the flow and the hint picks.
     if action in ("request_access", "await_access", "cancel_access"):
         pinned = _host_of_surface(state.surface_id) or _pinned_host_for_access(context)
+        named = _backend_hint(params)
+        if named:
+            # The caller named the host whose approval this is. A HELD surface
+            # still wins (its jar is already decided) — naming a different host
+            # than the one the surface lives on is a contradiction worth saying.
+            wanted = HOST_UI_PREFIX if named == "ui" else HOST_BRIDGE_PREFIX
+            held = _host_of_surface(state.surface_id)
+            if held and held != wanted:
+                return _error(
+                    tool_call_id,
+                    "browser",
+                    f"backend={named!r} contradicts the surface this session holds, which "
+                    f"is on {_host_label(held)}. Site approvals belong to the host a tab "
+                    "lives on; drop 'backend' or close that surface first.",
+                )
+            available = ui_available if wanted == HOST_UI_PREFIX else bridge_available
+            if not available:
+                return _backend_unavailable_result(tool_call_id, named)
+            pinned = wanted
         if state.surface_id.startswith("surface:") or not (ui_available or bridge_available):
             return _error(
                 tool_call_id,

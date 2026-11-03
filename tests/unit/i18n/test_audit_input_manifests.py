@@ -44,6 +44,55 @@ def _body_sha(manifest: dict[str, Any]) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _superseded(locale: str, namespace: str) -> bool:
+    """Whether a LATER passed audit owns this namespace's shipped values.
+
+    The ledger is append-only and its last row per (locale, namespace) is what
+    ships. When the English source has moved on from the bytes cg1 audited (a
+    later PR rewrote copy and had it re-audited), the cg1 manifest describes
+    history, not the shipped catalogue — and comparing them would forbid every
+    future copy change in that namespace. Superseded means exactly: the
+    namespace's cg1 receipt names a source hash that is no longer the English
+    source, AND the ledger's last row for it is ``passed`` at the CURRENT
+    English hash with evidence of its own. Anything less still fails here.
+    """
+    from local_operator.i18n import catalogues
+
+    receipt_path = EVIDENCE / locale / namespace / "cg1" / "receipt.json"
+    if not receipt_path.exists():
+        return False
+    audited_source = json.loads(receipt_path.read_text(encoding="utf-8")).get("source_sha256")
+    current = catalogues.catalogue_sha256("en", namespace)
+    if audited_source == current:
+        return False
+    ledger = json.loads((ROOT / "i18n" / "ledger" / f"{locale}.json").read_text(encoding="utf-8"))
+    rows = ledger.get("entries", ledger.get("rows", []))
+    last = [row for row in rows if row.get("namespace") == namespace][-1:]
+    if not last:
+        return False
+    row = last[0]
+    evidence = str(row.get("note", "")).rsplit("Evidence: ", 1)[-1].split()[0:1]
+    if not (
+        row.get("status") == "passed"
+        and row.get("source_sha256") == current
+        and evidence
+        and (ROOT / evidence[0]).is_file()
+    ):
+        return False
+    # The byte pin MOVES to the audit that now owns the values; it is never
+    # dropped (review R1). Superseded is a verdict on which audit to compare
+    # against, so the shipped catalogue must equal the bytes the later audit
+    # judged — the evidence record's `target_sha256` — or this test fails.
+    record = json.loads((ROOT / evidence[0]).read_text(encoding="utf-8"))
+    shipped = catalogues.catalogue_sha256(locale, namespace)
+    assert record.get("source_sha256") == current, f"{evidence[0]}: source hash is stale"
+    assert record.get("target_sha256") == shipped, (
+        f"{locale}/{namespace}: shipped values differ from the superseding audit "
+        f"({evidence[0]} target_sha256)"
+    )
+    return True
+
+
 @pytest.mark.parametrize("path", MANIFESTS, ids=lambda p: p.parent.parent.name)
 def test_manifest_equals_shipped_catalogue_values_byte_for_byte(path: Path) -> None:
     manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -52,6 +101,8 @@ def test_manifest_equals_shipped_catalogue_values_byte_for_byte(path: Path) -> N
     assert manifest["manifest_sha256"] == _body_sha(manifest), "manifest self-hash is stale"
     mismatched: list[str] = []
     for namespace, keys in manifest["namespaces"].items():
+        if _superseded(locale, namespace):
+            continue
         shipped = json.loads(
             (CATALOGUES / locale / f"{namespace}.json").read_text(encoding="utf-8")
         )
