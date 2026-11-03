@@ -223,6 +223,20 @@ class V2Tests(unittest.TestCase):
             r.prepare("v2dev__public-full__omp__unit", task, "public-full", "omp")
         self.assertTrue(home.exists())  # refusing reuse must not delete a prior home
 
+    def test_real_prepare_on_linux_without_reflinks(self):
+        # Reproduce the runner filesystem failure against the SAME public
+        # synthetic profile and real prepare/config path, not a skipped fixture.
+        import subprocess
+
+        def unsupported(args, **kwargs):
+            raise subprocess.CalledProcessError(1, args, stderr=b"Operation not supported")
+
+        with (
+            patch.object(r.sys, "platform", "linux"),
+            patch.object(r.subprocess, "run", side_effect=unsupported),
+        ):
+            self.test_real_prepare_with_synthetic_skills_keeps_one_omp_instruction()
+
     def test_public_snapshot_is_exactly_493_tools(self):
         snapshot = r.public_snapshot()
         self.assertEqual(len(snapshot["servers"]), 9)

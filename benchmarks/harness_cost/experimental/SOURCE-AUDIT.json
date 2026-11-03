@@ -49,11 +49,11 @@
     },
     {
       "destination": "RUNNER_V2.md",
-      "destination_sha256": "86741c3b884bb4e51ff69f178dae54b1ad2cff53418dc58732f73d29c40adf7a",
+      "destination_sha256": "0486384bea386d663b50067bae8f0210e188742979b263053bce80303717b723",
       "sources": [],
       "treatment": "new experimental documentation or offline guard/check",
-      "previous_destination_sha256": "c73835719b310cea1233f07807e1f418303e26bd27122924b09f2428d3f5467a",
-      "remediation": "PR3345 round2 experimental-only bounded R2-F1..F4 batch"
+      "previous_destination_sha256": "86741c3b884bb4e51ff69f178dae54b1ad2cff53418dc58732f73d29c40adf7a",
+      "remediation": "Hosted non-CoW filesystem: bounded profile-data portability and safety tests"
     },
     {
       "destination": "TASKS.md",
@@ -85,11 +85,11 @@
     },
     {
       "destination": "VERIFICATION.md",
-      "destination_sha256": "b988869a2c7553013df170c49cafc4456317186748a28d6938a19a028ad57ad8",
+      "destination_sha256": "aabc3efd738ea89f70edc15a9fa6f914206cbd71991666e1d91fd7ff832a2597",
       "sources": [],
       "treatment": "new experimental documentation or offline guard/check",
-      "previous_destination_sha256": "57a9a9346cd1b770c48d9b52f7d4de247d45a686d0c228452910054d6bb9680e",
-      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
+      "previous_destination_sha256": "b988869a2c7553013df170c49cafc4456317186748a28d6938a19a028ad57ad8",
+      "remediation": "Hosted non-CoW filesystem: bounded profile-data portability and safety tests"
     },
     {
       "destination": "cache_forwarder.py",
@@ -505,7 +505,7 @@
     },
     {
       "destination": "runner_v2.py",
-      "destination_sha256": "d8e4a5cc468fd16b5a69e6bb12e67d4b1600779c22a38e692b74a182b8af9b76",
+      "destination_sha256": "7434dd9b8e3c9b3d0522d0af826a95fe8661df6f0aaad4653e538e669ab01a9e",
       "sources": [
         {
           "path": "harness-cost-bench/runner_v2.py",
@@ -513,8 +513,8 @@
         }
       ],
       "treatment": "sanitized/adapted derivative",
-      "previous_destination_sha256": "e0f6ef5d30c7740943bbb822797ea98f413f3844e8be8cc1a8dc067f110a7ec8",
-      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
+      "previous_destination_sha256": "d8e4a5cc468fd16b5a69e6bb12e67d4b1600779c22a38e692b74a182b8af9b76",
+      "remediation": "Hosted non-CoW filesystem: bounded profile-data portability and safety tests"
     },
     {
       "destination": "sse_stream.py",
@@ -575,7 +575,7 @@
     },
     {
       "destination": "test_runner_v2.py",
-      "destination_sha256": "762335a758be09b520ce8fd2c1c081c81270eacf0ae888b3baacce0f3f59e451",
+      "destination_sha256": "814de9b2e9f1878338baa5b1570017b71301f0900766dd62d6630d03d76c1995",
       "sources": [
         {
           "path": "harness-cost-bench/test_runner_v2.py",
@@ -583,8 +583,8 @@
         }
       ],
       "treatment": "sanitized/adapted derivative",
-      "previous_destination_sha256": "d0bdc86e7548dea768f4af5f0c31a14e755ea06097fd544ff3801fde69784d54",
-      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
+      "previous_destination_sha256": "762335a758be09b520ce8fd2c1c081c81270eacf0ae888b3baacce0f3f59e451",
+      "remediation": "Hosted non-CoW filesystem: bounded profile-data portability and safety tests"
     },
     {
       "destination": "translator_config.example.json",
@@ -613,6 +613,12 @@
       "destination_sha256": "e0b35977d38c197ec06abdf63470fe2b987c0d28b4d1b56761d027ec056ba05f",
       "sources": [],
       "treatment": "new offline optional plugin boundary regression controls"
+    },
+    {
+      "destination": "test_clone_path.py",
+      "destination_sha256": "af17c73026d09587bc59d042ea3c919c29590c2e594b598397c065ee51f976f4",
+      "sources": [],
+      "treatment": "new bounded profile-data clone portability regression controls"
     }
   ],
   "remediation_review": {

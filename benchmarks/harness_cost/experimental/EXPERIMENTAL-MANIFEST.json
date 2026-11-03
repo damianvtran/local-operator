@@ -17,12 +17,12 @@
       "sha256": "6bfb4d7e6984ec430bc4396b2a1241c666134a200a356b814827a38ddb896281"
     },
     "RUNNER_V2.md": {
-      "bytes": 9207,
-      "sha256": "86741c3b884bb4e51ff69f178dae54b1ad2cff53418dc58732f73d29c40adf7a"
+      "bytes": 9662,
+      "sha256": "0486384bea386d663b50067bae8f0210e188742979b263053bce80303717b723"
     },
     "SOURCE-AUDIT.json": {
-      "bytes": 28462,
-      "sha256": "4c1bb66310789ead45499fe9d29f90b39f9314862bef11cae1147e3b37fd6941"
+      "bytes": 28710,
+      "sha256": "c60dc6fff1c9e25632aa3da4cfc13fa875bbf47c16e98217f7066828c00c4799"
     },
     "TASKS.md": {
       "bytes": 10352,
@@ -37,8 +37,8 @@
       "sha256": "097d35cda53ae8c1fca585a1c8f120baee8c362d0263fa5de4e79fbb78a75d47"
     },
     "VERIFICATION.md": {
-      "bytes": 12231,
-      "sha256": "b988869a2c7553013df170c49cafc4456317186748a28d6938a19a028ad57ad8"
+      "bytes": 13583,
+      "sha256": "aabc3efd738ea89f70edc15a9fa6f914206cbd71991666e1d91fd7ff832a2597"
     },
     "cache_forwarder.py": {
       "bytes": 3491,
@@ -189,8 +189,8 @@
       "sha256": "098ce294c1a194053ccc390d66730b65b6509744238586ee4ef79b1c094e5834"
     },
     "runner_v2.py": {
-      "bytes": 70437,
-      "sha256": "d8e4a5cc468fd16b5a69e6bb12e67d4b1600779c22a38e692b74a182b8af9b76"
+      "bytes": 78657,
+      "sha256": "7434dd9b8e3c9b3d0522d0af826a95fe8661df6f0aaad4653e538e669ab01a9e"
     },
     "sse_stream.py": {
       "bytes": 2190,
@@ -216,9 +216,13 @@
       "bytes": 3953,
       "sha256": "935d1c950ebbfe4a95744b56b28e462ac04fbe47e44575dfd66b68d84a730241"
     },
+    "test_clone_path.py": {
+      "bytes": 10991,
+      "sha256": "af17c73026d09587bc59d042ea3c919c29590c2e594b598397c065ee51f976f4"
+    },
     "test_runner_v2.py": {
-      "bytes": 20503,
-      "sha256": "762335a758be09b520ce8fd2c1c081c81270eacf0ae888b3baacce0f3f59e451"
+      "bytes": 21116,
+      "sha256": "814de9b2e9f1878338baa5b1570017b71301f0900766dd62d6630d03d76c1995"
     },
     "translator_config.example.json": {
       "bytes": 394,
