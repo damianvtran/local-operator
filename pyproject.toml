@@ -75,6 +75,10 @@ dependencies = [
     "textual>=8.0.0",
     "rich>=13.7",
     "pygments>=2.13",
+    # Skill adoption relies on CommonMark physical source maps and the inspected
+    # 4.2 inline-backtick emission contract to protect raw authored payloads. This
+    # is our direct runtime API, not an incidental Rich transitive dependency.
+    "markdown-it-py>=4.2,<5",
     # The desktop UI's installer runs a BARE `pip install local-operator` and
     # then launches `local-operator serve`, so the default set must stay fully
     # functional (0.15.10 had these in base; splitting them into extras broke
