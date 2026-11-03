@@ -303,7 +303,9 @@ lop network ready --peer <device> --json     # every member, when --peer is omit
 
 For work in a particular repository, add `--repository-path <PEER_PATH>` and/or
 `--repository-url <CLONE_URL>`. The path belongs to the peer: `~/...` and relative
-paths resolve under that peer's home, never the viewer's cwd. A URL alone lets
+paths resolve under that peer's home, never the viewer's cwd. Quote `~/...` in
+the local shell so that shell does not expand it before the CLI receives it.
+A URL alone lets
 the existing peer probe derive its destination name. Omitting both preserves
 the installed-project default. This is a read-only check, not a clone or grant;
 when no relay answers, the existing fallback says the peer was not asked and
