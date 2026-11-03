@@ -147,6 +147,10 @@ def test_guide_listing_never_contains_guide_body() -> None:
             "check the review rounds and CI on this pull request",
             "code-requests",
         ),
+        # Team Bridge routes for teammate coordination as well as receiver setup
+        # (the one-channel rule lives in that guide).
+        ("coordinate with a teammate's chief of staff on Radient", "team-bridge"),
+        ("set up the team bridge receiver", "team-bridge"),
         (
             "how do skills work and how do I add one for a user",
             "skills",

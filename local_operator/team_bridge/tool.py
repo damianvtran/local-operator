@@ -2395,8 +2395,8 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
             "relay request means dm, not 'forward this'); channel_post: rooms; "
             "send/reply: only to answer a pair-inbox (bmsg_) delivery. "
             "shared_*: conversations your owner shared with you. Cannot approve "
-            "or deny. One channel: for teammates use this, not Slack/email/send, "
-            "and reply where it arrived. More: read tool://bridge."
+            "or deny. The one channel for teammates; reply where it arrived. "
+            "More: read tool://bridge."
         ),
         parameters=BridgeToolParams.model_json_schema(),
         approval_tier="write",

@@ -196,3 +196,53 @@ def test_the_bridge_tool_joins_the_classifier_roster_only_when_held(tmp_path: Pa
     rows = {row.name: row for row in _tool_roster_rows([tool])}
     assert rows["bridge"].resource_url == "tool://bridge"
     assert "bridge" not in {row.name for row in _tool_roster_rows([])}
+
+
+@pytest.mark.asyncio
+async def test_a_real_factory_session_attaches_the_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The REAL boot path: enrolled config dir -> create_session -> hooks -> block.
+
+    Guards the attach point (``Session._refresh_tool_roster``): a probe that
+    only the fake above exercises would be a feature nothing in a live session
+    ever turns on.
+    """
+    import argparse
+
+    from local_operator import settings_io
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.session_factory import create_session
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("LOP_RUNTIME_ADOPT_SESSION", raising=False)
+    monkeypatch.delenv("LOP_RUNTIME_DEFER_MATERIALISE", raising=False)
+    config_dir = tmp_path / ".local-operator"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(tmp_path)
+    config = ConfigManager(config_dir)
+    settings_io.write_setting(config, settings_io.BY_KEY["team_bridge.enabled"], True)
+    Store(config_dir).commit_enrollment(
+        OWNER, OwnerReceipt("bridge_consent_v1", "ref-1"), cos_session_id="s1"
+    )
+    args = argparse.Namespace(
+        hosting="test", model="test", agent_name=None, agent_id=None, yolo=True, train=False
+    )
+    session = await create_session(args, config, AgentRegistry(config_dir))
+    try:
+        assert session.bridge_runtime is not None
+        hooks = session._knowledge_hooks
+        assert hooks is not None and hooks.team_bridge_available is not None
+        assert hooks.team_bridge_available() is True
+        assert "bridge" in {row.name for row in hooks.tool_roster}
+        block = await _select_knowledge_block(hooks, INCIDENT, task_id="real")
+        # The real lexical index ALSO selects the guide for this prompt (its
+        # description routes for teammate coordination), so the advisory copy
+        # is deduped away by design and the guide is listed exactly once, in
+        # the skills block. Either way the model sees it once, never twice.
+        listed = block.count("- team-bridge:") + block.count("- guide://team-bridge")
+        assert listed == 1, block
+    finally:
+        await session.dispose()

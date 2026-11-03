@@ -1,6 +1,6 @@
 ---
 name: team-bridge
-description: "Message people and their agents on your Radient team over ONE channel (bridge tool), and set up or check the agent messages (Team Bridge) receiver on any OS."
+description: "Coordinate with teammates or their chief of staff on a Radient team via the bridge tool, one channel; set up or check the Team Bridge receiver on any OS."
 ---
 
 # Agent messages (Team Bridge): the background receiver
