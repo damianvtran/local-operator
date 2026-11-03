@@ -182,10 +182,34 @@
 		cursor: not-allowed;
 	}
 
+	/* THE DOCUMENT IS NOT A SCROLLER (the "two scroll bars" report). The phone
+	   is an app shell: a fixed header, one transcript list that scrolls, and a
+	   pinned composer. The window had no such rule, so a gesture that did not
+	   move a list moved the page instead — the operator's thumb on the composer
+	   made the whole screen slide a few pixels and bounce back, with a scroll
+	   indicator the scroll had no room to fill.
+
+	   Two things let the document be a scroller. `height: 100%` resolves to the
+	   LAYOUT viewport while the session column is `100dvh`, and on iOS the
+	   layout viewport is taller than the visual one while its bars are showing —
+	   the document ends up a few dozen px taller than what the thumb can see,
+	   all of it canvas. And the column's keyboard pin writes
+	   `top: <visualViewport offset>`, which shifts its painted box and grows
+	   the document's scrollable height by the same amount. Neither has anywhere
+	   to go: the page is the whole UI, so scrolling it only ever reveals blank
+	   space.
+
+	   `overflow: hidden` removes the document scroller; `overscroll-behavior:
+	   none` stops the rubber-band a touch drag still gets without one (iOS
+	   16+). Every screen already bounds its own scroller, and a `position:
+	   fixed` sheet is not clipped by this: its containing block is the
+	   viewport. */
 	html {
 		/* `100dvh` is the honest mobile viewport unit, but the base rule pins
 		   the fallback so older engines still fill the screen. */
 		height: 100%;
+		overflow: hidden;
+		overscroll-behavior: none;
 	}
 
 	body {
@@ -194,7 +218,11 @@
 		font-family: var(--font-sans);
 		font-size: var(--text-body);
 		line-height: 1.55;
-		min-height: 100%;
+		/* A BOUNDED BOX, not a floor. `min-height: 100%` let the body grow with
+		   the pinned column's offset; the shell is exactly the viewport. */
+		height: 100%;
+		overflow: hidden;
+		overscroll-behavior: none;
 		/* Touch ergonomics: kill the 300ms tap delay and the double-tap
 		   zoom gesture app-wide; controls that need zoom opt back in. */
 		touch-action: manipulation;
