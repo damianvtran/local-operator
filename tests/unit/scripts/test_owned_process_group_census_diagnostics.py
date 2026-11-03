@@ -91,7 +91,9 @@ def test_departure_of_a_parsed_pid_is_classified_and_completes(change):
     assert world.scans == 2
     assert detail["phase"] == "complete"
     relation = "same-group" if change == "owned-death" else "different-group"
-    assert detail["attempts"][0]["removed"] == [{"pid": 20, "relation": relation}]
+    attempts = detail["attempts"]
+    assert isinstance(attempts, list)
+    assert attempts[0]["removed"] == [{"pid": 20, "relation": relation}]
 
 
 @pytest.mark.parametrize("change", ["birth", "other-death", "owned-death"])

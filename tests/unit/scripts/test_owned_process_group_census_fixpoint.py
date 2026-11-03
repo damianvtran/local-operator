@@ -13,6 +13,7 @@ that CAN be classified completes, and anything that cannot stays Unknown.
 from __future__ import annotations
 
 import errno
+from typing import Any
 
 import pytest
 
@@ -78,7 +79,7 @@ class World:
 def test_foreign_arrival_between_listings_completes_and_is_excluded():
     # The PR3269 shape: an unrelated runner process forks mid-scan.
     world = World([[10, 11], [10, 11, 500]], {10: OURS, 11: OURS, 500: 77})
-    detail: dict[str, object] = {}
+    detail: dict[str, Any] = {}
     assert world.census(detail) == ([10, 11], True, True)
     assert detail["phase"] == "complete"
     assert detail["attempt_count"] == 1
@@ -90,7 +91,7 @@ def test_foreign_arrival_between_listings_completes_and_is_excluded():
 
 def test_arrival_in_our_group_joins_the_members():
     world = World([[10], [10, 12]], {10: OURS, 12: OURS})
-    detail: dict[str, object] = {}
+    detail: dict[str, Any] = {}
     assert world.census(detail) == ([10, 12], True, True)
     assert detail["attempts"][0]["reconciled"]["same_group"] == 1
 
@@ -104,7 +105,7 @@ def test_parsed_removals_are_already_classified():
 
 def test_arrival_proven_gone_with_enoent_is_harmless():
     world = World([[10], [10, 600], [10]], {10: OURS}, gone={600})
-    detail: dict[str, object] = {}
+    detail: dict[str, Any] = {}
     assert world.census(detail) == ([10], True, True)
     assert detail["attempts"][0]["reconciled"]["gone"] == 1
 
@@ -123,7 +124,7 @@ def test_unclassifiable_arrival_keeps_every_attempt_incomplete(row):
     # Odd listings omit 700, even listings add it, so every attempt's closing
     # list adds the unreadable PID.
     world = World([[10], [10, 700]] * 20, {10: OURS, 700: row})
-    detail: dict[str, object] = {}
+    detail: dict[str, Any] = {}
     with pytest.raises(owned.Unknown, match="^unstable /proc census$"):
         world.census(detail)
     assert detail["attempt_count"] == 6
@@ -143,7 +144,7 @@ def test_fixpoint_needing_several_relists_completes():
         [[10], [10, 501], [10, 501, 502], [10, 502, 12], [10, 502, 12]],
         {10: OURS, 501: 77, 502: 78, 12: OURS},
     )
-    detail: dict[str, object] = {}
+    detail: dict[str, Any] = {}
     assert world.census(detail) == ([10, 12], True, True)
     assert detail["attempt_count"] == 1
     assert detail["attempts"][0]["relist_count"] == 3
@@ -163,7 +164,7 @@ def test_churn_that_never_settles_is_unknown_within_six_attempts():
 
     world = Endless([[10]], {10: OURS})
     world.rows = {10: OURS, **{1000 + n: 77 for n in range(1, 500)}}
-    detail: dict[str, object] = {}
+    detail: dict[str, Any] = {}
     with pytest.raises(owned.Unknown, match="^unstable /proc census$"):
         world.census(detail)
     assert detail["attempt_count"] == 6
@@ -182,8 +183,10 @@ def test_churn_past_the_deadline_is_unknown_without_extra_attempts():
     world = Endless([[10]], {10: OURS})
     world.rows = {10: OURS, **{1000 + n: 77 for n in range(1, 500)}}
     ticks = iter(range(10_000))
-    detail: dict[str, object] = {}
+    detail: dict[str, Any] = {}
     with pytest.raises(owned.Unknown, match="deadline") as raised:
         world.census(detail, clock=lambda: next(ticks), deadline=6)
-    assert raised.value.census_failure["attempt_count"] == 1
+    failure = raised.value.census_failure
+    assert failure is not None
+    assert failure["attempt_count"] == 1
     assert world.lists <= 4
