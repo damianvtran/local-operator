@@ -138,7 +138,8 @@ work around it. A missing required independent round blocks; never invent one.
 
 ## Rolling out role policy
 
-Seeds never reach registered rows. Pilot with `agent op=show <role>` plus a fresh
-`task(agent=<role>)`, not `load_seed`/source: it must read this guide, keep scope
-and escalate a destructive/access step. Merge rules into each local prompt:
-back up, keep edits/tools/model/effort, `op=update`, read back; never force-sync.
+Seeds update only unedited, install-recorded rows. Pilot via `agent op=show
+<role>` plus a fresh `task(agent=<role>)`, not `load_seed`: it reads this guide,
+keeps scope, escalates a destructive step. Keep prompts, responses, served model
+in scratch. Merge into local prompts: back up, keep edits, security/approval
+policy, tools, model/effort; read back.

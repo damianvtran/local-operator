@@ -685,7 +685,7 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
 #: First-party engineering roles whose REGISTERED copies get the delivery
 #: pointer when a child is built from them (see :func:`with_delivery_pointer`). Names, not
 #: ``seed:`` provenance: most operator rows of these roles predate that tag
-#: (measured 2026-11-03 on the maintainer's registry: six of seven untagged),
+#: (one maintainer registry, 2026-11-03: six of seven untagged),
 #: so a provenance check would skip exactly the stale rows this exists for.
 DELIVERY_POINTER_ROLES = frozenset(
     {"manager", "coder", "reviewer", "qa-tester", "designer", "ux-reviewer", "architect"}
@@ -704,8 +704,9 @@ def with_delivery_pointer(profile: AgentProfile) -> AgentProfile:
     WHY: registry-first resolution means a row registered before a seed's
     review policy moved keeps running its old prompt forever — seed sync only
     offers updates to ``seed:``-tagged rows, and never merges into an edited
-    one. Measured 2026-11-03: five reviewer/QA children after a policy release
-    loaded October prompts and none read the delivery guide. Pointing at the
+    one. A 2026-11-03 audit of children launched after a review-policy release
+    found most ran pre-release registered prompts and did not read the delivery
+    guide (13 of 56 sampled did). Pointing at the
     guide (which ships with the runtime) lets new policy reach those children
     without touching the operator's text.
 
@@ -728,7 +729,9 @@ def with_delivery_pointer(profile: AgentProfile) -> AgentProfile:
     # A row that still embeds the WHOLE current seed (installed, possibly with
     # operator additions) already carries the current rules. A bare
     # ``guide://delivery`` mention is deliberately not enough: the stale rows
-    # measured above mostly mentioned it and still went unread.
+    # measured above mostly mentioned it and still went unread. Exact
+    # substring on purpose: a CRLF/re-wrapped seed copy gets one redundant line,
+    # which is cheaper than a fuzzy match deciding a row is current.
     seed = load_seed(profile.name.strip().lower())
     if seed is not None and seed.instructions.strip() in body:
         return profile

@@ -204,3 +204,15 @@ def test_delivery_pointer_skips_current_seed_rows_and_other_roles(tmp_path):
     registry.set_agent_system_prompt(row.id, "Own rules.")
     _, custom = _child_prompt(tmp_path, registry, "scout-custom")
     assert custom is not None and custom.instructions == "Own rules."
+
+
+@pytest.mark.parametrize(
+    "name", ["manager", "coder", "reviewer", "qa-tester", "designer", "ux-reviewer", "architect"]
+)
+def test_engineering_seeds_carry_batching_and_minor_rule(name):
+    # Every built-in engineering role states the one rule that most often
+    # caused extra waves: accepted minors never earn their own round.
+    profile = load_seed(name)
+    assert profile is not None
+    assert "guide://delivery" in profile.instructions
+    assert "MINOR/NIT never force another round" in profile.instructions
