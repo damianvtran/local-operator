@@ -20,6 +20,15 @@ MAX_FALLBACK_TEXT_CHARS = 400_000
 #: shed OTHER history, could never make the next request fit.
 DOCUMENT_WINDOW_SHARE = 4
 
+#: A document is blamed for a context-length refusal only when its rendered
+#: charge is at least ``1 / DOCUMENT_CULPRIT_SHARE`` of the window. A document at
+#: its render cap is ``1 / DOCUMENT_WINDOW_SHARE`` (a quarter), so every real
+#: culprit clears this easily; a 1 KB note does not, and stripping it would
+#: leave the actual cause (history, tool output) in place while telling the user
+#: an attachment was the problem. A share of the window rather than of the
+#: request: the estimate of the request is exactly what is unreliable here.
+DOCUMENT_CULPRIT_SHARE = 16
+
 #: Characters per token an ASCII character is budgeted at. Measured on
 #: o200k_base, in characters per token: English prose ~4.5, minified JSON ~2.3,
 #: hex ~1.8, base64 ~1.5, random printable ASCII ~1.4, control bytes ~1.0. The

@@ -32,6 +32,7 @@ from local_operator.harness.types import (
     CapturedFrame,
     ChatRequest,
     CompactionEndEvent,
+    DocumentContent,
     ImageContent,
     Message,
     ModelSpec,
@@ -1599,42 +1600,129 @@ async def test_the_degrade_is_live_only_and_announced_once(tmp_path):
     await session.dispose()
 
 
-@pytest.mark.asyncio
-async def test_two_documents_degrade_largest_first_one_per_refusal(tmp_path):
-    from local_operator.harness.types import DocumentContent
-
-    stream = ScriptedOk()
-    session = make_session(tmp_path, stream)
-    small = DocumentContent(
-        data=base64.b64encode(b"s" * 4000).decode(),
+def _text_document(name: str, size: int) -> DocumentContent:
+    return DocumentContent(
+        data=base64.b64encode(b"x" * size).decode(),
         mime_type="text/plain",
-        filename="small.txt",
-        bytes=4000,
+        filename=name,
+        bytes=size,
     )
-    big = DocumentContent(
-        data=base64.b64encode(b"b" * 400_000).decode(),
-        mime_type="text/plain",
-        filename="big.txt",
-        bytes=400_000,
-    )
-    await session.seed_history(
-        [Message(role="user", content=[small, big]), Message.assistant("ok")]
-    )
-    error = "invalid request (HTTP 400): maximum context length is 128000; requested 999999"
 
-    assert await session._recover_if_request_too_large(error) is True
-    left = [
+
+_CONTEXT_ERROR = "invalid request (HTTP 400): maximum context length is 128000; requested 999999"
+
+
+def _live_documents(session) -> list[str]:
+    return [
         b.filename
         for m in session._context.messages
         if isinstance(m, Message)
         for b in m.content
         if isinstance(b, DocumentContent)
     ]
-    assert left == ["small.txt"], "the larger document must go first"
-    assert await session._recover_if_request_too_large(error) is True
-    assert not _document_kinds(session)
+
+
+@pytest.mark.asyncio
+async def test_two_documents_degrade_largest_first_one_per_refusal(tmp_path):
+    session = _window_session(tmp_path, 128_000, ScriptedOk())
+    # Both are material (>= window // DOCUMENT_CULPRIT_SHARE = 8,000 tokens).
+    await session.seed_history(
+        [
+            Message(
+                role="user",
+                content=[_text_document("small.txt", 40_000), _text_document("big.txt", 400_000)],
+            ),
+            Message.assistant("ok"),
+        ]
+    )
+
+    assert await session._recover_if_request_too_large(_CONTEXT_ERROR) is True
+    assert _live_documents(session) == ["small.txt"], "the larger document must go first"
+    assert await session._recover_if_request_too_large(_CONTEXT_ERROR) is True
+    assert not _live_documents(session)
     # Nothing left to give: the error surfaces as before.
+    assert await session._recover_if_request_too_large(_CONTEXT_ERROR) is False
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_small_document_is_not_blamed_for_a_history_overflow(tmp_path):
+    """QA Q-R5-1: a 1.2 KB note beside an overflowing history was replaced by
+    its reference line while the real cause stayed, so the resend was refused
+    again and the notice blamed the attachment."""
+    session = _window_session(tmp_path, 128_000, ScriptedOk())
+    await session.seed_history(
+        [Message(role="user", content=[_text_document("tiny.txt", 1_200)]), Message.assistant("ok")]
+    )
+    assert await session._recover_if_request_too_large(_CONTEXT_ERROR) is False
+    assert _live_documents(session) == ["tiny.txt"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_only_the_material_document_is_degraded_beside_a_small_one(tmp_path):
+    session = _window_session(tmp_path, 128_000, ScriptedOk())
+    await session.seed_history(
+        [
+            Message(
+                role="user",
+                content=[_text_document("tiny.txt", 1_200), _text_document("big.txt", 400_000)],
+            ),
+            Message.assistant("ok"),
+        ]
+    )
+    assert await session._recover_if_request_too_large(_CONTEXT_ERROR) is True
+    assert _live_documents(session) == ["tiny.txt"]
+    # The small one is never blamed, even once it is all that is left.
+    assert await session._recover_if_request_too_large(_CONTEXT_ERROR) is False
+    assert _live_documents(session) == ["tiny.txt"]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_culprit_threshold_is_a_sixteenth_of_the_window_inclusive(tmp_path):
+    from local_operator.compaction.tokens import _document_token_estimate
+    from local_operator.harness.document_limits import DOCUMENT_CULPRIT_SHARE
+
+    window = 128_000
+    threshold = window // DOCUMENT_CULPRIT_SHARE
+    # Find the smallest size whose charge reaches the threshold rather than
+    # restating the text charge formula here.
+    size = 1_000
+    while _document_token_estimate(_text_document("p.txt", size)) < threshold:
+        size += 250
+    just_below = size - 250
+    assert _document_token_estimate(_text_document("p.txt", just_below)) < threshold
+
+    for name, document_size, expect in (("below", just_below, False), ("at", size, True)):
+        session = _window_session(tmp_path / name, window, ScriptedOk())
+        await session.seed_history(
+            [
+                Message(role="user", content=[_text_document(f"{name}.txt", document_size)]),
+                Message.assistant("ok"),
+            ]
+        )
+        assert await session._recover_if_request_too_large(_CONTEXT_ERROR) is expect, name
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_image_refusal_is_left_to_the_image_handler(tmp_path):
+    """ "Image exceeds the maximum size" matches the context markers too. The
+    document guard must decline it so the sticky image degrade runs."""
+    session = _window_session(tmp_path, 128_000, ScriptedOk())
+    await session.seed_history(
+        [
+            Message(role="user", content=[_text_document("big.txt", 400_000)]),
+            Message.assistant("ok"),
+        ]
+    )
+    error = "invalid request (HTTP 400): image exceeds the maximum size of 5 MB"
     assert await session._recover_if_request_too_large(error) is False
+    assert _live_documents(session) == ["big.txt"]
+    # ...and the handler the caller then runs does engage.
+    await session._degrade_if_image_rejected(error)
+    assert session._images_rejected is True
     await session.dispose()
 
 

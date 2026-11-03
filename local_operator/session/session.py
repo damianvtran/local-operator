@@ -6085,17 +6085,40 @@ class Session:
         skips a message id the transcript already holds, so the mutated message
         is never rewritten.
 
+        Only a document that is a material share of the window is touched
+        (``DOCUMENT_CULPRIT_SHARE``). Otherwise the cause is elsewhere (history,
+        tool output), degrading a small file would not fix it, and the notice
+        would blame the wrong thing: the error surfaces exactly as before.
+
+        The error filter is the context-length marker list, which is wider than
+        "the prompt is over the window": it also matches an attached-file size
+        cap, a tool-definition cap and an image size cap. An image refusal is
+        left to ``_degrade_if_image_rejected`` (it never reaches here); the other
+        two are bounded by the share gate, since neither is cured by a small
+        document and a large one is the thing a size cap names.
+
         Returns ``False`` when the error is not a context-length refusal or no
-        document is left, so the error surfaces exactly as it did before.
+        document is a material share, so the error surfaces exactly as it did
+        before.
         """
         from local_operator.compaction.tokens import (
             _document_token_estimate,
             invalidate_message_cache,
         )
+        from local_operator.harness.document_limits import DOCUMENT_CULPRIT_SHARE
         from local_operator.incidents import CONTEXT_LENGTH_MARKERS
         from local_operator.providers.documents import _reference_text
-        from local_operator.providers.failover import _KIND_LABELS, ProviderError
+        from local_operator.providers.failover import (
+            _KIND_LABELS,
+            ProviderError,
+            is_image_rejection,
+        )
 
+        if is_image_rejection(error):
+            # "Image exceeds the maximum size" also matches the context markers;
+            # it is a poisoned-block refusal with its own handler, which the
+            # caller runs when this declines.
+            return False
         if isinstance(error, ProviderError):
             if error.kind != "request":
                 return False
@@ -6107,6 +6130,8 @@ class Session:
         if not any(marker in haystack for marker in CONTEXT_LENGTH_MARKERS):
             return False
 
+        threshold = int(self.effective_model.context_window) // DOCUMENT_CULPRIT_SHARE
+
         largest: tuple[int, Message, int] | None = None
         for message in self._context.messages:
             if not isinstance(message, Message):
@@ -6115,7 +6140,7 @@ class Session:
                 if not isinstance(block, DocumentContent):
                     continue
                 cost = _document_token_estimate(block)
-                if largest is None or cost > largest[0]:
+                if cost >= threshold and (largest is None or cost > largest[0]):
                     largest = (cost, message, index)
         if largest is None:
             return False
