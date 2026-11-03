@@ -2621,6 +2621,25 @@
       },
       "status": "passed",
       "note": "Round 2 re-audit at this en hash: changed updated/reset ({when}, now pre-formatted by the phone) and throttled (cooldown, no 'limite'); new refresh_ready, unlimited_generic, accounts_order, row_a11y_bare, row_a11y_bare_reset. U+202F before ':' kept in updated, reset and both new row_a11y_bare keys; round-1 fix intact. throttled keeps one/many/other with #. No fixes needed. 0 blocker / 0 major. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.aida_cadence",
+      "source_sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic/mechanical audit passed 2/2 keys with zero findings. Translator session a58a48732351; independent auditor session 05c51f9b1aba; both actual openai/gpt-6.1-sol (provider-quota fallback). Byte-identical audit bundle: i18n/audits/evidence/fr/wire.aida_cadence/frca-05c51/{record.json,receipt.json,report.md,audit.log}. Preserves zero daily-local mode, inclusive whole elapsed-hour range 1–168, illustrative 4, and already-owed check-ins. No rendered proof or second independent pass: label 36 cells / help 206 cells; no declared maxCells budget. Narrow settings/editor wrapping remains unverified."
     }
   ]
 }
