@@ -53,6 +53,7 @@ consequences worth naming rather than discovering:
 
 from __future__ import annotations
 
+import sys
 import time
 from typing import Any, cast
 
@@ -5361,6 +5362,115 @@ def test_a_fence_marker_in_indented_code_reads_as_a_fence_on_purpose() -> None:
     assert 3 in covered, f"the indented code line lost its fence cover: {covered}"
 
 
+class _NearMissTrace:
+    """Test-only flight recorder for the near-miss pair's arming phase.
+
+    Why it exists: `test_a_double_click_that_drifts_one_cell_does_not_clear_the_draft`
+    fails intermittently on hosted Linux CI with "never armed the barren claim"
+    (PR #3343 heads 8b51981a and bbed5fd1; passing on main 8f2e28f at 3-4 s while
+    one failure took 14.36 s). That single observable conflates three different
+    causes, and the fix differs for each:
+
+    * NEVER ARMED — the second click reached `_on_click` more than
+      `_NEAR_MISS_WINDOW_S` (1.0 s) after the first, or measured outside the
+      drift band, or arrived as a chain >= 2;
+    * ARMED THEN EXPIRED — the claim was set, but the loop that polls
+      `barren_multi_click` was not scheduled again until its 1.5 s life
+      (`BARREN_CLICK_WINDOW_S`) had passed;
+    * RETIRED — some seam called `retire_barren_click` before the poll.
+
+    So it records, per click, the event-construction stamps against the
+    handler's own clock, and every retirement with its caller, and renders them
+    into the assertion message. The interesting divergence is between
+    `posted` / `click.time` (Textual's monotonic stamp when the app turned the
+    MouseUp into a Click) and `handler` (when `_on_click` actually ran): the
+    product measures the pair's elapsed time from HANDLER entry, so dispatch lag
+    under a starved runner moves the window even when the clicks were posted
+    back to back. `cpu` is the loop thread's `thread_time`, so a wall gap with
+    no CPU gap reads as OS starvation rather than the loop doing work (see
+    AGENTS.md "If you must measure, measure CPU, not wall time").
+
+    Observational only: it wraps the handlers and calls straight through, and it
+    changes no threshold, timing or product behaviour. Installed through
+    `monkeypatch` at CLASS level because Textual resolves `_on_click` from the
+    class `__dict__` (`MessagePump._get_dispatch_methods`), so an instance
+    attribute would never be called.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.origin = time.monotonic()
+        self.lines: list[str] = []
+        #: The last value `_barren_click_at` took, kept even after a retirement
+        #: clears the field, so the claim's age can still be reported.
+        self.last_armed_at: float | None = None
+        original_click = Editor._on_click
+        original_retire = Editor.retire_barren_click
+        trace = self
+
+        async def _traced_click(editor: Editor, event: events.Click) -> None:
+            entered, cpu = time.monotonic(), time.thread_time()
+            before = editor._single_click_at
+            await original_click(editor, event)
+            after = editor._barren_click_at
+            if after is not None:
+                trace.last_armed_at = after
+            elapsed = "n/a" if before is None else f"{entered - before[0]:.3f}s"
+            drift = (
+                "n/a"
+                if before is None
+                else str(
+                    max(
+                        abs(event.screen_offset.x - before[1].x),
+                        abs(event.screen_offset.y - before[1].y),
+                    )
+                )
+            )
+            trace.note(
+                f"click chain={event.chain} at={tuple(event.screen_offset)} "
+                f"click.time={trace.rel(event.time)} handler={trace.rel(entered)} "
+                f"dispatch_lag={entered - event.time:.3f}s cpu={cpu:.3f} "
+                f"elapsed_since_first={elapsed} drift={drift} "
+                f"barren_click_at={trace.rel(after)}"
+            )
+
+        def _traced_retire(editor: Editor) -> None:
+            caller = sys._getframe(1).f_code.co_qualname
+            held = editor._barren_click_at
+            if held is not None:
+                # A retirement inside the click handler would otherwise hide
+                # that the claim was ever armed.
+                trace.last_armed_at = held
+            trace.note(
+                f"retire by={caller} claim_was={trace.rel(held)} " f"claim_age={trace.age(held)}"
+            )
+            original_retire(editor)
+
+        monkeypatch.setattr(Editor, "_on_click", _traced_click)
+        monkeypatch.setattr(Editor, "retire_barren_click", _traced_retire)
+
+    def rel(self, stamp: float | None) -> str:
+        """A monotonic stamp as seconds since the trace began, or `None`."""
+        return "None" if stamp is None else f"+{stamp - self.origin:.3f}s"
+
+    def age(self, stamp: float | None) -> str:
+        return "n/a" if stamp is None else f"{time.monotonic() - stamp:.3f}s"
+
+    def note(self, line: str) -> None:
+        self.lines.append(f"[{self.rel(time.monotonic())} cpu={time.thread_time():.3f}] {line}")
+
+    def render(self, editor: Editor) -> str:
+        """The trace plus the claim's state at the moment of the assertion."""
+        pending = editor._single_click_at
+        tail = (
+            f"at assertion: barren_click_at={self.rel(editor._barren_click_at)} "
+            f"last_armed_at={self.rel(self.last_armed_at)} "
+            f"last_armed_age={self.age(self.last_armed_at)} "
+            f"(claim life {BARREN_CLICK_WINDOW_S}s) "
+            f"single_click_at={self.rel(pending[0] if pending is not None else None)}"
+        )
+        return "\n  ".join(["near-miss trace:", *self.lines, tail])
+
+
 async def _click_pair(
     app: OperatorApp,
     pilot: Any,
@@ -5369,6 +5479,7 @@ async def _click_pair(
     vertical: int = 0,
     base_row: int = 0,
     base_column: int = 18,
+    trace: _NearMissTrace | None = None,
 ) -> None:
     """Two SINGLE clicks `(drift, vertical)` cells apart, as a terminal sends them.
 
@@ -5386,6 +5497,10 @@ async def _click_pair(
         editor.gutter.left + base_column, editor.gutter.top + base_row
     )
     for index, offset in enumerate((base, base + Offset(drift, vertical))):
+        if trace is not None:
+            # When the TEST posted the pair, so a gap between this and the
+            # handler stamp is attributable to dispatch, not to the test.
+            trace.note(f"post click {index + 1} at={tuple(offset)}")
         for kind in (events.MouseDown, events.MouseUp):
             app.post_message(
                 kind(
@@ -5466,7 +5581,9 @@ async def test_a_barren_multi_click_on_the_last_row_does_not_clear_the_draft() -
 
 
 @pytest.mark.asyncio
-async def test_a_double_click_that_drifts_one_cell_does_not_clear_the_draft() -> None:
+async def test_a_double_click_that_drifts_one_cell_does_not_clear_the_draft(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A one-column drift is still one gesture, so the draft survives.
 
     Regression for design review round 2, D2-1. Widening the chain's TIME
@@ -5489,24 +5606,34 @@ async def test_a_double_click_that_drifts_one_cell_does_not_clear_the_draft() ->
                 await pilot.pause()
             draft = editor.text
 
-            await _click_pair(app, pilot, editor, drift)
+            # Installed per drift so each app's trace starts clean; monkeypatch
+            # undo restores the original handlers at teardown. Diagnostic only:
+            # it renders into the failure messages below and nowhere else.
+            trace = _NearMissTrace(monkeypatch)
+            await _click_pair(app, pilot, editor, drift, trace=trace)
             assert not editor.selected_text, "a near miss must not invent a range"
 
             # Wait on the arming FACT before the press, for the same reason
             # `_click_pair` waits on the first stamp: a residual failure here
             # must name the ARMING phase (the claim never landed inside its
             # windows) rather than surface one press later as a lost draft.
+            trace.note("poll for barren_multi_click begins")
             deadline = time.monotonic() + 10.0
+            polls = 0
             while not editor.barren_multi_click and time.monotonic() < deadline:
+                polls += 1
                 await pilot.pause(0.01)
+            trace.note(f"poll ends after {polls} pauses armed={editor.barren_multi_click}")
             assert editor.barren_multi_click, (
                 f"the {drift}-cell near-miss pair never armed the barren claim "
-                "(arming phase: inter-click window or claim dispatch)"
+                "(arming phase: inter-click window or claim dispatch)\n" + trace.render(editor)
             )
 
             await pilot.press("ctrl+c")
             await pilot.pause()
-            assert editor.text == draft, f"a {drift}-cell drift cleared the draft"
+            assert editor.text == draft, f"a {drift}-cell drift cleared the draft\n" + trace.render(
+                editor
+            )
 
 
 @pytest.mark.asyncio
