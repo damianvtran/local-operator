@@ -1,0 +1,112 @@
+{
+  "provenance_reference": "record.json:auditor",
+  "locale": "fr",
+  "namespace": "wire.console",
+  "key_count": 8,
+  "repo_validator_problems": [],
+  "messages": [
+    {
+      "key": "wire.console.title",
+      "arguments": [],
+      "cells": 22,
+      "maxCells": null,
+      "rendered_parser_sample": "Capacité de la console"
+    },
+    {
+      "key": "wire.console.description",
+      "arguments": [],
+      "cells": 207,
+      "maxCells": null,
+      "rendered_parser_sample": "Admission des terminaux actifs. L’historique des terminaux terminés n’occupe pas d’emplacements de processus. Les modifications s’appliquent aux prochains démarrages, sans jamais arrêter les tâches en cours."
+    },
+    {
+      "key": "wire.console.max_live.label",
+      "arguments": [],
+      "cells": 27,
+      "maxCells": null,
+      "rendered_parser_sample": "Plafond de terminaux actifs"
+    },
+    {
+      "key": "wire.console.max_live.help",
+      "arguments": [],
+      "cells": 210,
+      "maxCells": null,
+      "rendered_parser_sample": "32–256 ; 128 par défaut. La mémoire gérée, les cellules de terminal et les ressources natives disponibles peuvent réduire le nombre de terminaux admis. Ce réglage ne limite pas la mémoire des processus enfants."
+    },
+    {
+      "key": "wire.console.max_owner.label",
+      "arguments": [],
+      "cells": 35,
+      "maxCells": null,
+      "rendered_parser_sample": "Terminaux d’agents par conversation"
+    },
+    {
+      "key": "wire.console.max_owner.help",
+      "arguments": [],
+      "cells": 126,
+      "maxCells": null,
+      "rendered_parser_sample": "1–32 ; 8 par défaut. Chaque conversation partage le quota global de terminaux actifs ; les terminaux terminés ne comptent pas."
+    },
+    {
+      "key": "wire.console.user_reserved.label",
+      "arguments": [],
+      "cells": 47,
+      "maxCells": null,
+      "rendered_parser_sample": "Emplacements réservés aux terminaux utilisateur"
+    },
+    {
+      "key": "wire.console.user_reserved.help",
+      "arguments": [],
+      "cells": 186,
+      "maxCells": null,
+      "rendered_parser_sample": "4–32 ; 16 par défaut, au maximum un quart du plafond de terminaux actifs. Les démarrages d’agents ne peuvent pas utiliser ces emplacements. Les tâches existantes ne sont jamais arrêtées."
+    }
+  ],
+  "cf_count": 0,
+  "numeric_literal_parity": true,
+  "technical_tokens": {},
+  "plural_select_CLDR": "not applicable: zero plural/select in source or target",
+  "negative_controls": [
+    {
+      "name": "missing_key",
+      "rejected_by": "repo check_catalogues",
+      "actual_errors": [
+        "fr/wire.console: missing key 'wire.console.title'"
+      ]
+    },
+    {
+      "name": "unexpected_argument",
+      "rejected_by": "repo check_catalogues",
+      "actual_errors": [
+        "fr/wire.console: wire.console.title: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"
+      ]
+    },
+    {
+      "name": "number_mutation",
+      "rejected_by": "independent extra"
+    },
+    {
+      "name": "Cf_injection",
+      "rejected_by": "independent extra"
+    }
+  ],
+  "fixture_restored": true,
+  "execution_scope": "core ICU parser/formatter and namespace validator only; no SDK guards, live settings, app or native rendering",
+  "pseudo": "NOT RUN",
+  "RTL_native": "NOT RUN",
+  "native_fit": "NOT RUN",
+  "tool_inputs": [
+    {
+      "path": "/Users/damian/local-operator/scripts/i18n/check.py",
+      "sha256": "98dee7f1112848163c7a3365c39668118caa4bfe13e3afee4b137478d0bf39fb"
+    },
+    {
+      "path": "/Users/damian/local-operator/local_operator/i18n/runtime.py",
+      "sha256": "50b11f4266c77f0eb74b65c9feb308530e15b06152564a865f84abbb58c757d5"
+    },
+    {
+      "path": "/Users/damian/local-operator/local_operator/i18n/catalogues.py",
+      "sha256": "437179854ac210daeaf01bbecf8d89bfb9c1a901b63c55cbb623d4e4985d351e"
+    }
+  ]
+}

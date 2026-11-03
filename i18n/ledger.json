@@ -5433,6 +5433,25 @@
       "note": "Provenance-only correction superseding the prior delta row serving-model claims, not a new semantic audit or execution. Both translator a58a48732351 and independent auditor 05c51f9b1aba actually served openai/gpt-6.1-sol; earlier Sonnet/no-fallback claims inferred from runtime headers were wrong and are withdrawn. Source: manager/coordinator independently parsed all 21 usage-bearing records in auditor history (GPT only); translator verified own transcript usage/native_replay lines 63/66/68. These verification results are coordinator/translator-reported to this implementer, not independently re-executed here. Immutable auditor-authored correction i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-prov-05c51/{record.json,receipt.json,report.md}; its host-reported-only verification level describes the auditor child, while this wrapper records subsequent coordinator usage verification. No fallback sequence/cause inferred. French hash remains 42333772890dd59733f0bcff715c9d608ff1f7c069c8dbb025ee3b2f0548ed63; EN/context unchanged. Original semantic delta verdict 2/2 passed, zero findings retained; no new findings, audit, native execution or suite reset. Prior rows and both earlier immutable bundles preserved."
     },
     {
+      "locale": "fr",
+      "namespace": "wire.console",
+      "source_sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "8/8 initial ordinary French console settings metadata; translator7b2ba4ed501d plus two independent French readers c44e0f808e48 and 35aac0a677bc, actual openai/gpt-6.1-sol from retained completed-usage provenance, each passed zero findings. Readers bound source/context/target in i18n/audits/evidence/fr/wire.console/integration-binding.json; immutable originals retained. Semantics approved: live ceiling caps/defaults, one-quarter user-reserve cap, changes affect future starts only, no child-memory-limit promise. No native re-execution/pseudo/RTL claim."
+    },
+    {
       "locale": "hi",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",

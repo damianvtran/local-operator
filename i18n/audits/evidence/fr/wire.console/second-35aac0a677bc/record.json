@@ -1,0 +1,178 @@
+{
+  "record_kind": "original_independent_staged_core_namespace_audit",
+  "locale": "fr",
+  "namespace": "wire.console",
+  "audit_date": "2026-11-03T15:38:23.783812+00:00",
+  "key_count": 8,
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "source_sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b",
+  "target_sha256": "7f499e6ab9f8db5c9953e6782357d4da38554ac89250f6fc6616b77069d4c8b2",
+  "status": "passed",
+  "status_scope": "staged linguistic/mechanical namespace audit only; not native fit, integration or activation",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "reader": "fr-second",
+    "session": "35aac0a677bc",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-03",
+    "result": "passed",
+    "findings": 0,
+    "independent_from_translator_session": "7b2ba4ed501d",
+    "independent_from_coder_session": "eae0961e4e78",
+    "coder_identity_source": "Coordinator-provided actual session, not coder job 196c3a94b346; no claim of own historical execution",
+    "actual_model_source": {
+      "kind": "own_completed_persisted_usage",
+      "artifact": "provenance.json",
+      "entry_ids": [
+        "b14b884613c54d7493557c01b522c619",
+        "662dd31b34234466b14d2a958982ac78",
+        "d8615d65c3e4429cbed078a334409073"
+      ],
+      "fields": [
+        "payload.usage.provider",
+        "payload.usage.model_id"
+      ]
+    },
+    "fallback_disclosure": "Own route notices report requested/primary anthropic/claude-sonnet-5-5, then anthropic/claude-opus-5-5 and openai/gpt-6.1-sol fallback selections, each due to provider quota. Completed substantive probe-writing/execution and source-inventory usage here is openai/gpt-6.1-sol. Route selections are not asserted to be completed Opus usage.",
+    "independence_attestation": "This reader did not translate/code/edit source, target or context, and read no other new independent reader report before verdict."
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7b2ba4ed501d",
+    "model": "openai/gpt-6.1-sol",
+    "model_source": "Translator packet record/provenance; named source, not independent assertion from translator usage transcript",
+    "record_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-console-0e7cde33/record.json",
+    "record_sha256": "a00980f57d45ca93609450029a2ed7afba0dfae3dd6921f9da24abc377d81a76"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.console.json",
+      "retained_path": "catalogues/en/wire.console.json",
+      "sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.console.context.json",
+      "retained_path": "catalogues/en/wire.console.context.json",
+      "sha256": "453aadc8095e93122719cef9b8da2ed9f8b57170449804e6af716fe684ef2dd9"
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-console-0e7cde33/wire.console.json",
+      "retained_path": "catalogues/fr/wire.console.json",
+      "sha256": "7f499e6ab9f8db5c9953e6782357d4da38554ac89250f6fc6616b77069d4c8b2"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/fr.md",
+      "retained_path": "style-fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "retained_path": "glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "packet_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-console-0e7cde33",
+  "packet_manifest_sha256": "3e611a4f1ed6f2ed7d02a95d629c9027522d8e6adeca8e69234b35cf8d5d7993",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "findings": [],
+  "audit_report": {
+    "path": "audit-report.md",
+    "sha256": "29e01da0ea63fa9fea09193a367def28f6978f58fc5442c12f7c328d0a8271a7"
+  },
+  "audit_notes_not_execution_log": {
+    "native_assessment": "audit-report.md: Native assessment of every key",
+    "scope": "Per-key linguistic reasoning; source excerpts/AST are not application execution. Actual parser/validator output is mechanical.json."
+  },
+  "execution": {
+    "command": "Clear inherited CMUX_*; cd ~/local-operator; env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B <this-audit-root>/verify.py",
+    "exit_code": 0,
+    "tool_memory_ceiling_mb": 256,
+    "tool_timeout_seconds": 90,
+    "serial_call_shared_with_two_other_namespace_scoped_invocations": true,
+    "validator": "scripts.i18n.check.check_catalogues isolated to this namespace",
+    "validator_problem_count": 0,
+    "negative_controls_rejected": 4,
+    "CLDR": "not applicable: no plural/select; source/target ICU argument names and types checked",
+    "pseudo": "NOT RUN",
+    "RTL_visual": "not applicable to French; NOT RUN",
+    "no_Cf": "checked, zero",
+    "native_fit": "NOT RUN",
+    "runtime_settings_or_SDK_guards": "NOT RUN"
+  },
+  "note": "Staged second independent fr audit: 8/8 linguistic/mechanical pass, 0 blocker/major. Native/pseudo/integration NOT RUN; original report retained; no activation.",
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "retention": {
+    "state": "original scratch artifacts pending coordinator tracked retention",
+    "canonical_root": "i18n/audits/evidence/fr/wire.console/",
+    "ledger_written": false,
+    "original_translation_packet_unchanged": true
+  },
+  "artifacts": [
+    {
+      "path": "audit-report.md",
+      "sha256": "29e01da0ea63fa9fea09193a367def28f6978f58fc5442c12f7c328d0a8271a7",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "caller-source-proof.json",
+      "sha256": "66c25154ada0f0fa1a63c7d05f8d5ef1b66c636967e4fde6c2bb595031f39052",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "catalogues/en/wire.console.context.json",
+      "sha256": "453aadc8095e93122719cef9b8da2ed9f8b57170449804e6af716fe684ef2dd9",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "catalogues/en/wire.console.json",
+      "sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "catalogues/fr/wire.console.json",
+      "sha256": "7f499e6ab9f8db5c9953e6782357d4da38554ac89250f6fc6616b77069d4c8b2",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "input-verification.json",
+      "sha256": "b74d9295d6f6f07d914a3d188f6496f6a6f000494e05df6e53450a1db94a7d31",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "mechanical.json",
+      "sha256": "7ded28bee59efeb4db2011cbb6d3c1d533b61576de29d7dfa891cf83459c76c5",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "mechanical.stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "provenance.json",
+      "sha256": "2b4c2336d03449dab707845256622c66c452c9413064d2ca716a830a29203adc",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "style-fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "verify.py",
+      "sha256": "e80675b75a459da25a734b3685d90e4a896c0a0b5eb447d67ca614a18c50b582",
+      "provenance_reference": "record.json:auditor"
+    }
+  ]
+}

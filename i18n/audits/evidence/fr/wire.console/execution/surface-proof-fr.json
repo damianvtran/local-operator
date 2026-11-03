@@ -1,0 +1,86 @@
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+{
+  "source": "/Users/damian/local-operator/.worktrees/fr-console/local_operator/__init__.py",
+  "namespace": "wire.console",
+  "configured_language": "fr",
+  "active_locale_after_boot": "fr",
+  "http_status": 200,
+  "translated_keys": 8,
+  "registry": {
+    "french_fields": [
+      {
+        "key": "wire.console.description",
+        "field": "section:console:description"
+      },
+      {
+        "key": "wire.console.max_live.help",
+        "field": "console.max_live:help"
+      },
+      {
+        "key": "wire.console.max_live.label",
+        "field": "console.max_live:label"
+      },
+      {
+        "key": "wire.console.max_owner.help",
+        "field": "console.max_owner:help"
+      },
+      {
+        "key": "wire.console.max_owner.label",
+        "field": "console.max_owner:label"
+      },
+      {
+        "key": "wire.console.title",
+        "field": "section:console:title"
+      },
+      {
+        "key": "wire.console.user_reserved.help",
+        "field": "console.user_reserved:help"
+      },
+      {
+        "key": "wire.console.user_reserved.label",
+        "field": "console.user_reserved:label"
+      }
+    ],
+    "english_leaks": [],
+    "not_exposed": []
+  },
+  "http": {
+    "french_fields": [
+      {
+        "key": "wire.console.description",
+        "field": "section:console"
+      },
+      {
+        "key": "wire.console.max_live.help",
+        "field": "console.max_live"
+      },
+      {
+        "key": "wire.console.max_live.label",
+        "field": "console.max_live"
+      },
+      {
+        "key": "wire.console.max_owner.help",
+        "field": "console.max_owner"
+      },
+      {
+        "key": "wire.console.max_owner.label",
+        "field": "console.max_owner"
+      },
+      {
+        "key": "wire.console.title",
+        "field": "section:console"
+      },
+      {
+        "key": "wire.console.user_reserved.help",
+        "field": "console.user_reserved"
+      },
+      {
+        "key": "wire.console.user_reserved.label",
+        "field": "console.user_reserved"
+      }
+    ],
+    "english_leaks": [],
+    "not_exposed": []
+  }
+}
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=a8b0ce286d1f45039e9e4c535d4bd0d6 completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/a8b0ce286d1f45039e9e4c535d4bd0d6.completion.json

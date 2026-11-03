@@ -1,0 +1,324 @@
+{
+  "kind": "source_inspection_not_runtime_execution",
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "namespace": "wire.console",
+  "french_absence": {
+    "command": "git cat-file -e <ref>:<fr namespace>",
+    "exit_code": 128,
+    "stderr": "fatal: path 'local_operator/i18n/catalogues/fr/wire.console.json' does not exist in '0e7cde33ca8008d561e74f4aed774aa5f76ff7d5'"
+  },
+  "other_locale_census": [
+    {
+      "locale": "es",
+      "path": "local_operator/i18n/catalogues/es/wire.console.json",
+      "sha256": "dc48616e35230a56fe064693f8ce8db34e3710c25f51f3cb5eedee5ab369257a",
+      "key_count": 8,
+      "exact_key_set": true,
+      "nonidentical_to_English_count": 8
+    },
+    {
+      "locale": "hi",
+      "path": "local_operator/i18n/catalogues/hi/wire.console.json",
+      "sha256": "6f47a9862f25e733d39f8578db9f26720222dafbcdb7b9a7066fcf6a0e309fdc",
+      "key_count": 8,
+      "exact_key_set": true,
+      "nonidentical_to_English_count": 8
+    },
+    {
+      "locale": "ru",
+      "path": "local_operator/i18n/catalogues/ru/wire.console.json",
+      "sha256": "acfbc00800d0c6012b910f6f35286d1de7b7da98af668c18aed6dc957fe92815",
+      "key_count": 8,
+      "exact_key_set": true,
+      "nonidentical_to_English_count": 8
+    },
+    {
+      "locale": "ur",
+      "path": "local_operator/i18n/catalogues/ur/wire.console.json",
+      "sha256": "41ed944f716d9c15bba5822e19bced3eb6ef2661bbc5a2e4608de567acd37f26",
+      "key_count": 8,
+      "exact_key_set": true,
+      "nonidentical_to_English_count": 8
+    },
+    {
+      "locale": "vi",
+      "path": "local_operator/i18n/catalogues/vi/wire.console.json",
+      "sha256": "69db61697d6d52fc98ceb08718025372d74c8bdea37b1422122bd9ad3dc11bb2",
+      "key_count": 8,
+      "exact_key_set": true,
+      "nonidentical_to_English_count": 8
+    },
+    {
+      "locale": "zh-CN",
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.console.json",
+      "sha256": "3ce0028e16106b17b53750ead26a1d32845cb2218ec1ae46a52ad66d1586cb25",
+      "key_count": 8,
+      "exact_key_set": true,
+      "nonidentical_to_English_count": 8
+    }
+  ],
+  "callers": [
+    {
+      "path": "local_operator/settings_io.py",
+      "sha256": "c6462e6b01cfd9f12610aadf24cb890ca97f3405a38c69b1290ddbadbe9ea724",
+      "excerpts": [
+        {
+          "line": 122,
+          "text": "    \"wire.settings.hub_defaults\","
+        },
+        {
+          "line": 123,
+          "text": "    \"wire.aida_cadence\","
+        },
+        {
+          "line": 124,
+          "text": "    \"wire.host_speed\","
+        },
+        {
+          "line": 125,
+          "text": "    \"wire.console\","
+        },
+        {
+          "line": 126,
+          "text": "    \"wire.memory\","
+        },
+        {
+          "line": 127,
+          "text": "    \"wire.radient_saver\","
+        },
+        {
+          "line": 128,
+          "text": ")"
+        },
+        {
+          "line": 129,
+          "text": ""
+        },
+        {
+          "line": 847,
+          "text": "    # threaded through a running session, which is why this cannot be"
+        },
+        {
+          "line": 848,
+          "text": "    # NEW_SESSIONS like the knobs that gate a session's construction."
+        },
+        {
+          "line": 849,
+          "text": "    # Admission changes apply live in the desktop host without terminating work."
+        },
+        {
+          "line": 850,
+          "text": "    Section(\"console\", _t(_cs.title()), Scope.LIVE, _t(_cs.description())),"
+        },
+        {
+          "line": 851,
+          "text": "    Section("
+        },
+        {
+          "line": 852,
+          "text": "        \"desktop\","
+        },
+        {
+          "line": 853,
+          "text": "        _t(_ws.desktop_title()),"
+        },
+        {
+          "line": 854,
+          "text": "        Scope.LIVE,"
+        },
+        {
+          "line": 4936,
+          "text": "    ),"
+        },
+        {
+          "line": 4937,
+          "text": "    # -- console admission --------------------------------------------------"
+        },
+        {
+          "line": 4938,
+          "text": "    Setting("
+        },
+        {
+          "line": 4939,
+          "text": "        key=\"console.max_live\","
+        },
+        {
+          "line": 4940,
+          "text": "        path=(\"console\", \"max_live\"),"
+        },
+        {
+          "line": 4941,
+          "text": "        section=\"console\","
+        },
+        {
+          "line": 4942,
+          "text": "        label=_t(_cs.max_live_label()),"
+        },
+        {
+          "line": 4943,
+          "text": "        kind=Kind.INT,"
+        },
+        {
+          "line": 4944,
+          "text": "        default=DEFAULT_LIVE_LIMIT,"
+        },
+        {
+          "line": 4945,
+          "text": "        minimum=32,"
+        },
+        {
+          "line": 4946,
+          "text": "        maximum=256,"
+        },
+        {
+          "line": 4947,
+          "text": "        help=_t(_cs.max_live_help()),"
+        },
+        {
+          "line": 4948,
+          "text": "    ),"
+        },
+        {
+          "line": 4949,
+          "text": "    Setting("
+        },
+        {
+          "line": 4950,
+          "text": "        key=\"console.max_owner\","
+        },
+        {
+          "line": 4951,
+          "text": "        path=(\"console\", \"max_owner\"),"
+        },
+        {
+          "line": 4952,
+          "text": "        section=\"console\","
+        },
+        {
+          "line": 4953,
+          "text": "        label=_t(_cs.max_owner_label()),"
+        },
+        {
+          "line": 4954,
+          "text": "        kind=Kind.INT,"
+        },
+        {
+          "line": 4955,
+          "text": "        default=DEFAULT_OWNER_LIMIT,"
+        },
+        {
+          "line": 4956,
+          "text": "        minimum=1,"
+        },
+        {
+          "line": 4957,
+          "text": "        maximum=32,"
+        },
+        {
+          "line": 4958,
+          "text": "        help=_t(_cs.max_owner_help()),"
+        },
+        {
+          "line": 4959,
+          "text": "    ),"
+        },
+        {
+          "line": 4960,
+          "text": "    Setting("
+        },
+        {
+          "line": 4961,
+          "text": "        key=\"console.user_reserved\","
+        },
+        {
+          "line": 4962,
+          "text": "        path=(\"console\", \"user_reserved\"),"
+        },
+        {
+          "line": 4963,
+          "text": "        section=\"console\","
+        },
+        {
+          "line": 4964,
+          "text": "        label=_t(_cs.user_reserved_label()),"
+        },
+        {
+          "line": 4965,
+          "text": "        kind=Kind.INT,"
+        },
+        {
+          "line": 4966,
+          "text": "        default=DEFAULT_USER_RESERVED,"
+        },
+        {
+          "line": 4967,
+          "text": "        minimum=4,"
+        },
+        {
+          "line": 4968,
+          "text": "        maximum=32,"
+        },
+        {
+          "line": 4969,
+          "text": "        help=_t(_cs.user_reserved_help()),"
+        },
+        {
+          "line": 4970,
+          "text": "    ),"
+        },
+        {
+          "line": 4971,
+          "text": "    Setting("
+        },
+        {
+          "line": 4972,
+          "text": "        key=\"desktop.launch_command\","
+        },
+        {
+          "line": 4973,
+          "text": "        path=(\"desktop\", \"launch_command\"),"
+        }
+      ]
+    },
+    {
+      "path": "local_operator/i18n/catalogues.py",
+      "sha256": "506614a09f75cf6ccd58643975bbc012a059b92a85638d2c6b6a85aeb986edd5",
+      "excerpts": [
+        {
+          "line": 90,
+          "text": "    \"wire.settings.hub_defaults\": ("
+        },
+        {
+          "line": 91,
+          "text": "        \"hub settings keys rendered in-process by settings_io._t as plain strings\""
+        },
+        {
+          "line": 92,
+          "text": "    ),"
+        },
+        {
+          "line": 93,
+          "text": "    \"wire.console\": \"console section title/description and row labels rendered by settings_io._t\","
+        },
+        {
+          "line": 94,
+          "text": "    \"wire.memory\": \"memory section rows rendered by settings_io._t as plain label/help strings\","
+        },
+        {
+          "line": 95,
+          "text": "    \"wire.host_speed\": \"host-speed threshold label/help rendered by settings_io._t\","
+        },
+        {
+          "line": 96,
+          "text": "    \"wire.radient_saver\": ("
+        },
+        {
+          "line": 97,
+          "text": "        \"radient-saver section and mode choices rendered by settings_io._t; \""
+        }
+      ]
+    }
+  ],
+  "parser_contract": "No English sentence parsing found on the inspected registry path: labels/help/descriptions are _t-rendered strings; configuration paths, types, booleans, numeric bounds and IDs are separate. This is source proof, not whole-repository absence proof.",
+  "context_caveat": "English fallback until independently translated is a transitional note, not authorization to activate this scratch translation; all six sibling locales have complete non-English-value copies. No English-only parser contract was found in these metadata consumers."
+}
