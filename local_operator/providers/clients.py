@@ -4663,13 +4663,10 @@ def _anthropic_cache_marker_ttl_ms(body: dict[str, Any]) -> int:
 #:   drops ``native_replay`` from client frames; Saver never uploads it).
 #: - Sessions persisted before this field existed have no payload and render
 #:   exactly as before.
-#: - Context accounting is deliberately NOT routed through
-#:   ``bind_native_context``: that binding keys calibration on the latest user
-#:   message (an OpenAI Responses rule), which would discard Anthropic's
-#:   provider-measured hint on every user turn and with it the cache-TTL
-#:   decision. The provider's reported count already includes replayed thinking,
-#:   so only the newest turn's thinking (hundreds of tokens) is uncounted until
-#:   the next response re-calibrates.
+#: - Admission counts valid replayed thinking in the native-context binding,
+#:   both on cold histories and as an appended suffix to provider calibration.
+#:   Anthropic keeps that calibration across user turns; unlike Responses,
+#:   its thinking replay has no latest-user-turn invalidation boundary.
 _ANTHROPIC_NATIVE_PROTOCOL = "anthropic-messages"
 
 
@@ -5290,6 +5287,17 @@ class AnthropicClient:
             if message.id in epoch_ids:
                 epoch_block = _last_block(messages)
 
+        # Bind after credentials/replay gates are known, before output sizing.
+        # The tracker includes only the appended native suffix over its already
+        # provider-counted prefix; cold or edited history counts all retained
+        # thinking. Anthropic's binding deliberately survives new user turns.
+        request = bind_native_context(
+            request,
+            self._base_url,
+            _ANTHROPIC_NATIVE_PROTOCOL,
+            scope,
+            _estimate_slope(request.model),
+        )
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,

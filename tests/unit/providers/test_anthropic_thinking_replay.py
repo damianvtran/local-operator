@@ -285,3 +285,135 @@ async def test_trailing_thinking_block_is_never_replayed() -> None:
     assert "sig-AB" not in json.dumps(
         AnthropicClient()._build_body(request, scope=credential_scope(KEY))
     )
+
+
+async def test_thinking_admission_cold_warm_and_invalidated_histories(monkeypatch) -> None:
+    """F1: synthetic signed fixtures use real replay/admission, not a paid API.
+
+    Long thinking must reduce output reservation, including after restore,
+    prefix changes and pruning. A provider-counted prefix is counted ONCE;
+    only its appended native suffix is added on a warm continuation.
+    """
+    from local_operator.harness.types import Usage
+    from local_operator.providers import clients
+    from local_operator.providers.context import (
+        ContextBinding,
+        ContextTokenTracker,
+        measure_request,
+    )
+
+    model = SPEC.model_copy(update={"context_window": 250_000, "max_output_tokens": 128_000})
+    scope = credential_scope(KEY)
+    seen: list[ChatRequest] = []
+    effective = clients._effective_max_tokens
+
+    def capture(request: ChatRequest) -> int:
+        seen.append(request)
+        return effective(request)
+
+    monkeypatch.setattr(clients, "_effective_max_tokens", capture)
+
+    def assistant(chars: int, call_id: str) -> Message:
+        payload = clients._anthropic_native_payload(
+            model,
+            "https://api.anthropic.com",
+            {
+                0: {"type": "thinking", "thinking": "x" * chars, "signature": "fixture"},
+                1: {"type": "tool_use", "id": call_id, "name": "bash"},
+            },
+            {1: ['{"cmd":"ls"}']},
+            "",
+            scope,
+        )
+        return Message.assistant(
+            "",
+            tool_calls=[ToolCall(id=call_id, name="bash", arguments={"cmd": "ls"})],
+            stop_reason="toolUse",
+            provider_payload=payload,
+        )
+
+    def result(call_id: str, text: str = "done") -> Message:
+        return Message(role="tool", tool_call_id=call_id, content=[TextContent(text=text)])
+
+    client = AnthropicClient()
+    initial = ChatRequest(
+        model=model,
+        messages=[Message.user("work"), assistant(400_000, "first"), result("first")],
+        max_tokens=128_000,
+    )
+    # Cold/resumed histories carry no calibration; ALL replayed thinking counts.
+    body = client._build_body(initial, scope=scope)
+    assert seen[-1].native_context_tokens == 100_000
+    assert body["max_tokens"] == 128_000
+
+    tracker = ContextTokenTracker()
+    first_binding = ContextBinding(tracker, measure_request(initial))
+    client._build_body(initial.model_copy(update={"context_binding": first_binding}), scope=scope)
+    tracker.record(first_binding.measured, Usage(context_tokens=110_000))
+    continued = initial.model_copy(
+        update={
+            "messages": [*initial.messages, assistant(400_000, "second"), result("second")],
+        }
+    )
+    cold = client._build_body(continued, scope=scope)
+    assert seen[-1].native_context_tokens == 200_000
+    assert cold["max_tokens"] < 50_000
+    # Measure the exact message identities actually dispatched, not independently
+    # reconstructed rows (the calibration intentionally keys those identities).
+    continued.context_binding = ContextBinding(tracker, measure_request(continued))
+    warm = client._build_body(continued, scope=scope)
+    captured = seen[-1]
+    assert captured.native_context_tokens == 200_000
+    assert captured.context_tokens_hint is not None
+    assert 210_000 <= captured.context_tokens_hint < 211_000
+    assert warm["max_tokens"] < 40_000
+
+    # The new user boundary must not discard Anthropic's calibration. Unlike
+    # Responses, the signed thinking remains replayable across user turns.
+    tracker.record(continued.context_binding.measured, Usage(context_tokens=220_000))
+    next_turn = continued.model_copy(
+        update={"messages": [*continued.messages, Message.user("next")]}
+    )
+    next_turn.context_binding = ContextBinding(tracker, measure_request(next_turn))
+    client._build_body(next_turn, scope=scope)
+    next_hint = seen[-1].context_tokens_hint
+    assert next_hint is not None
+    assert 220_000 <= next_hint < 221_000
+
+    for updates in (
+        {"system_blocks": ["changed instructions"]},
+        {"messages": [*continued.messages[:2], result("first", "pruned"), *continued.messages[3:]]},
+    ):
+        invalidated = continued.model_copy(update=updates)
+        invalidated.context_binding = ContextBinding(tracker, measure_request(invalidated))
+        invalidated_body = client._build_body(invalidated, scope=scope)
+        assert seen[-1].context_tokens_hint_model is None
+        assert seen[-1].native_context_tokens == 200_000
+        assert invalidated_body["max_tokens"] < 50_000
+
+    # Foreign signatures are neither rendered nor admitted as native tokens.
+    for updates, changed_scope in (
+        ({"model": model.model_copy(update={"model_id": "different"})}, scope),
+        ({}, credential_scope("other-account")),
+    ):
+        switched = continued.model_copy(update=updates)
+        switched.context_binding = ContextBinding(tracker, measure_request(switched))
+        body = client._build_body(switched, scope=changed_scope)
+        assert seen[-1].native_context_tokens == 0
+        assert "fixture" not in json.dumps(body)
+
+
+async def test_redacted_thinking_is_counted_without_signature_bytes() -> None:
+    from local_operator.providers.context import bind_native_context
+
+    assistant = _persisted(await _stream(_thinking_turn()))
+    bound = bind_native_context(
+        _history(assistant),
+        "https://api.anthropic.com",
+        "anthropic-messages",
+        credential_scope(KEY),
+        1.0,
+    )
+    assert (
+        bound.native_context_tokens == len(THINKING["thinking"]) // 4 + len(REDACTED["data"]) // 4
+    )
