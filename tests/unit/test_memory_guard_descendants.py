@@ -530,6 +530,7 @@ def test_a_not_permitted_pid_ps_never_sizes_fails_closed_after_the_read_limit(mo
     NOT_PERMITTED_UNSIZED_READ_LIMIT consecutive failed reads it counts as
     unaccounted memory and the run fails closed."""
     monkeypatch.setattr(mg, "_NOT_PERMITTED_RSS_TTL_S", 0.0)  # every tick reads
+    monkeypatch.setattr(mg, "NOT_PERMITTED_UNSIZED_MIN_SECONDS", 0.0)  # m3 floor: own test
     guard = _guard(
         300,
         group=[100],
@@ -618,3 +619,75 @@ def test_the_live_parent_listing_verifies_a_setuid_child_the_self_read_refuses()
         top.kill()
         top.wait()
     assert resources.listed_ppid_pgid(top.pid, os.getpid()) is None  # gone
+
+
+# --- PR #3372 review round 1: m1/m2/m3 ----------------------------------------
+
+
+def test_a_pid_now_under_a_different_tree_member_is_skipped(monkeypatch):
+    """m1: the bar is equality with the RECORDED parent, not tree membership.
+    901 was recorded under 900; it now reads under 902, also in our tree. That
+    is not the process we recorded, so it is never signalled."""
+    guard = _breached(monkeypatch, lambda roots: {900: 100, 901: 900, 902: 100})
+    rows = {900: (100, 900), 901: (902, 901), 902: (100, 902)}
+    monkeypatch.setattr(mg, "direct_ppid_pgid", rows.get)
+    sent: list[int] = []
+    monkeypatch.setattr(mg.os, "kill", lambda pid, sig: sent.append(pid))
+    assert 901 not in guard.stop_escaped(9)
+    assert 901 not in sent and sorted(sent) == [900, 902]
+
+
+def test_a_pid_orphaned_mid_stop_is_named_not_signalled(monkeypatch):
+    """m2: 901's parent 900 exits on its own between verification and 901's
+    re-check, so 901 re-parents to pid 1. It was ours a tick ago: name it, but
+    never widen kill authority to a pid-1 child."""
+    guard = _breached(monkeypatch, lambda roots: {900: 100, 901: 900})
+    reads = {"n": 0}
+
+    def read(pid):
+        if pid == 901:
+            reads["n"] += 1
+            return (900, 901) if reads["n"] == 1 else (1, 901)
+        return (100, 900)
+
+    monkeypatch.setattr(mg, "direct_ppid_pgid", read)
+    sent: list[int] = []
+    monkeypatch.setattr(mg.os, "kill", lambda pid, sig: sent.append(pid))
+    assert guard.stop_escaped(9) == [900]
+    assert 901 not in sent and guard.unverified == [901]
+
+
+def test_an_already_orphaned_pid_is_named_at_verification(monkeypatch):
+    guard = _breached(monkeypatch, lambda roots: {900: 100})
+    monkeypatch.setattr(mg, "direct_ppid_pgid", lambda pid: (1, 900))
+    monkeypatch.setattr(mg.os, "kill", lambda pid, sig: pytest.fail("signalled"))
+    assert guard.stop_escaped(9) == [] and guard.unverified == [900]
+
+
+def test_unsized_reads_inside_the_time_floor_never_fail_closed(monkeypatch):
+    """m3: a burst of failed ``ps`` reads (a stalled ps on a busy host) must not
+    fail closed until the streak has also lasted
+    NOT_PERMITTED_UNSIZED_MIN_SECONDS. Here the clock moves 0.25 s per tick."""
+    monkeypatch.setattr(mg, "_NOT_PERMITTED_RSS_TTL_S", 0.0)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(mg.time, "monotonic", lambda: clock["t"])
+    guard = _guard(
+        300,
+        group=[100],
+        footprints={100: 5 * _MIB},
+        census=lambda roots: {900: 100},
+        monkeypatch=monkeypatch,
+        denied={900},
+        ps=lambda pid: (1, ""),
+    )
+    floor_ticks = int(mg.NOT_PERMITTED_UNSIZED_MIN_SECONDS / 0.25)
+    for _ in range(floor_ticks - 1):
+        sample = guard.sample_sync()
+        assert sample.unaccounted is None and guard.should_kill(sample) is False
+        clock["t"] += 0.25
+    killed = False
+    for _ in range(mg.UNACCOUNTED_TICK_LIMIT + 1):
+        clock["t"] += 0.25
+        sample = guard.sample_sync()
+        killed = killed or guard.should_kill(sample)
+    assert killed  # a sustained failure past the floor still fails closed

@@ -165,10 +165,21 @@ _NOT_PERMITTED_RSS_TTL_S = 2.0
 #: PR #3369). Counted per read because a read is cached for
 #: :data:`_NOT_PERMITTED_RSS_TTL_S`: one stalled ``ps`` must not become eight
 #: ticks of "unknown" and a kill, but a setuid helper ``ps`` never sizes again
-#: (~6 s of failed reads) is memory we know exists and cannot bound — the same
-#: case the fail-closed arm exists for. A credential boundary ``ps`` CAN see past
-#: stays charged by RSS and never fails closed, which is R1's line.
+#: (for at least :data:`NOT_PERMITTED_UNSIZED_MIN_SECONDS`) is memory we know
+#: exists and cannot bound — the case the fail-closed arm exists for. A
+#: credential boundary ``ps`` CAN see past stays charged by RSS and never fails
+#: closed, which is R1's line.
 NOT_PERMITTED_UNSIZED_READ_LIMIT = 3
+
+#: ...AND those failed reads must span at least this long (review m3, PR #3372).
+#: The read count alone could trip in ~4-6 s on a busy host. Measured
+#: 2026-11-03 at load average 37 on 14 cores: ``ps -o pid=,rss= -p <setuid top>``
+#: answered 300/300, mean 10 ms, p99 41 ms, max 139 ms, so a single targeted read
+#: is far inside its 1 s bound. But this module has seen fleet ``ps`` stall for
+#: 13.6 s (see ``_MEMBERSHIP_BUDGET_S``), and a stall that long must not kill a
+#: healthy run. So fail-closed needs a sustained failure that outlasts the worst
+#: stall measured, not just a burst of failed reads.
+NOT_PERMITTED_UNSIZED_MIN_SECONDS = 15.0
 
 
 def _run_probe(argv: list[str], timeout_s: float) -> tuple[int, str]:
@@ -776,6 +787,8 @@ class Guard:
         #: Per not-permitted pid, consecutive ``ps`` reads that could not size it
         #: (M1); reset by a sized read, dropped when the pid leaves the set.
         self._unsized_reads: dict[int, int] = {}
+        #: Per not-permitted pid, when its current unsized streak began (m3).
+        self._unsized_since: dict[int, float] = {}
         #: Verified escaped descendants the last stop could not signal (R3).
         self.unsignalled: list[int] = []
         #: Live escaped descendants the last stop could not verify by ANY parentage
@@ -888,13 +901,19 @@ class Guard:
                 value = read.get(pid)
                 self._rss_cache[pid] = (now, value)
                 result[pid] = value
-                self._unsized_reads[pid] = (
-                    0 if value is not None else (self._unsized_reads.get(pid, 0) + 1)
-                )
+                if value is not None:
+                    self._unsized_reads[pid] = 0
+                    self._unsized_since.pop(pid, None)
+                else:
+                    self._unsized_reads[pid] = self._unsized_reads.get(pid, 0) + 1
+                    self._unsized_since.setdefault(pid, now)
         # A pid no longer not-permitted (gone, or readable again) forgets its
         # streak, so a recycled number never inherits one.
         self._unsized_reads = {
             pid: count for pid, count in self._unsized_reads.items() if pid in result
+        }
+        self._unsized_since = {
+            pid: since for pid, since in self._unsized_since.items() if pid in result
         }
         return result
 
@@ -975,10 +994,12 @@ class Guard:
         # a row is no longer a credential boundary we can see past — it is
         # memory we cannot bound, so it joins the fail-closed set (still
         # disclosed once as not-permitted).
+        now = time.monotonic()
         unreadable.extend(
             pid
             for pid in denied
             if self._unsized_reads.get(pid, 0) >= NOT_PERMITTED_UNSIZED_READ_LIMIT
+            and now - self._unsized_since.get(pid, now) >= NOT_PERMITTED_UNSIZED_MIN_SECONDS
         )
         return escaped, unreadable, not_permitted
 
@@ -1017,14 +1038,25 @@ class Guard:
             own_group = -1
 
         def parentage(pid: int, parent: int) -> tuple[int, int] | str:
-            """The verified ``(ppid, pgid)``, or why not: ``"stranger"`` when a
-            source READ a different parent (recycled pid — proven not ours, so
-            silent), ``"unverified"`` when no source could answer."""
+            """The verified ``(ppid, pgid)``, or why not.
+
+            ``"unverified"``: no source could answer. ``"orphaned"``: it now
+            reads under pid 1 — its recorded parent exited (on its own, or
+            mid-stop) and it was re-parented, so it WAS ours a tick ago but can
+            no longer be told from a stranger (review m2, PR #3372): named,
+            never signalled, and authority is never widened to pid-1 children.
+            ``"stranger"``: a source read a different non-init parent — a
+            recycled pid, proven not ours, so silent. The equality with the
+            RECORDED parent is the bar, not mere tree membership: a pid reading
+            under some other tree member is not the process we recorded.
+            """
             row = direct_ppid_pgid(pid)
             if row is None:
                 row = listed_ppid_pgid(pid, parent)
                 if row is None:
                     return "unverified"
+            if row[0] == 1:
+                return "orphaned"
             if row[0] != parent or row[0] not in tree:
                 return "stranger"
             return row
@@ -1041,7 +1073,7 @@ class Guard:
             if pid in own or pid <= 1:
                 continue
             row = parentage(pid, parent)
-            if row == "unverified":
+            if row in ("unverified", "orphaned"):
                 note_unverified(pid)
             if isinstance(row, str):
                 continue
@@ -1070,7 +1102,7 @@ class Guard:
             # between verification and signal is then one read wide, and a pid
             # recycled in between (new parent) is skipped, never signalled.
             recheck = parentage(pid, parent)
-            if recheck == "unverified":
+            if recheck in ("unverified", "orphaned"):
                 note_unverified(pid)
             if isinstance(recheck, str):
                 continue

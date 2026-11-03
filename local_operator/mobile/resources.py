@@ -409,6 +409,11 @@ def listed_ppid_pgid(pid: int, parent: int) -> tuple[int, int] | None:
 
     ``None`` when either half cannot answer or ``pid`` is not listed: the caller
     must treat that as unverified, never as unchanged.
+
+    Linux scans ``/proc`` once per call. Left that way on purpose (review n1,
+    PR #3372): ``/proc/<pid>/stat`` already answers :func:`direct_ppid_pgid`
+    for setuid pids there, so this fallback is rare on Linux, and only a stop
+    calls it.
     """
     if pid <= 1 or parent <= 0:
         return None
