@@ -1,0 +1,23 @@
+daemon up {"port":61194,"pid":36796}
+pair: no extension connected {"rc":1,"out":"No Local Operator extension is connected yet, so there is no code to show. Open Chrome and check that the Local Operator extension is installed and turned on: https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof It connects within a minute. Then ask Local Operator to \"pair my browser\" again."}
+extension loaded {"id":"ijokelchmpajpdekmanpbhnnccbpoopl","chrome":"Chrome/156.0.8078.80"}
+extension connected unpaired {"pending":["ijokelchmpajpdekmanpbhnnccbpoopl"]}
+install opened pairing tab {"opened":true}
+cold state status {"out":["extension connected: yes","paired:              no","log:                 /var/folders/qd/1q2xkcls0tg60vh97jjngxc40000gn/T/lo-pair-e2e-T9iSjc/.local-operator/logs/browser-bridge.log","downloads:           /var/folders/qd/1q2xkcls0tg60vh97jjngxc40000gn/T/lo-pair-e2e-T9iSjc/.local-operator/browser/downloads","config root:         /var/folders/qd/1q2xkcls0tg60vh97jjngxc40000gn/T/lo-pair-e2e-
+pair from cold state {"rc":0,"ms":4272,"out":"Your Local Operator pairing code is 027935.\nSwitch to Chrome: a Local Operator tab is open there with a box for the code. Type the code and press Pair.\nNo tab? Click the Local Operator icon in Chrome's toolbar (it may be under the puzzle-piece icon) and type it there.\nThe code works for 15 minutes. After pairing, Local Operator asks you in Chrome to Allow each new websi
+pair run twice: same code {"same":true,"code1":"027935","code1b":"027935"}
+pairing tab opened by lop browser pair {"opened":true,"url":"chrome-extension://ijokelchmpajpdekmanpbhnnccbpoopl/pair/pair.html?from=cli"}
+wrong code #1 {"error":"That code didn’t match. Check it and type it again.","attempts":1,"rotated":false}
+wrong code #2 {"error":"That code didn’t match. Check it and type it again.","attempts":2,"rotated":false}
+wrong code #3 {"error":"That code didn’t match. Check it and type it again.","attempts":3,"rotated":false}
+wrong code #4 {"error":"That code didn’t match. Check it and type it again.","attempts":4,"rotated":false}
+wrong code #5 {"error":"Too many wrong tries. Ask Local Operator to “pair my browser” for a new code.","attempts":0,"rotated":true}
+old code after lockout {"error":"That code didn’t match. Check it and type it again."}
+pair after lockout {"code":"382337","differs_from_dead":true}
+expired code {"error":"That code expired. Ask Local Operator to “pair my browser” again."}
+focus loss keeps typed digits {"typedBefore":"277","valueAfter":"277"}
+correct code -> Paired {"ms":106,"title":"Paired."}
+status after pairing {"lines":["extension connected: yes","paired:              yes"]}
+pair when already paired {"rc":0,"out":"Your browser is already paired with Local Operator, so no code is needed. To pair another browser, install the Local Operator extension there, then ask Local Operator to \"pair my browser\" again."}
+popup first paint vs settled pairing card {"first":405,"settled":405.015625,"resize_px":0.02}
+
