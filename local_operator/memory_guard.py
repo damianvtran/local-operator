@@ -45,10 +45,16 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Iterable, Mapping
 
-from local_operator.mobile.resources import direct_footprint_bytes, direct_group_pids
+from local_operator import procstate
+from local_operator.mobile.resources import (
+    direct_descendant_pids,
+    direct_footprint_bytes,
+    direct_group_pids,
+    direct_ppid_pgid,
+)
 
 
 def _platform() -> str:
@@ -129,6 +135,21 @@ FootprintProbe = Callable[[int], "int | None"]
 #: test that fakes the other two MUST fake this one too: a fake pgid (``100``) is a
 #: real group on a live host, and the default reader would answer for it.
 GroupProbe = Callable[[int], "list[int] | None"]
+
+#: ``{descendant: parent}`` for every descendant of the given roots by a
+#: fork-free read, or ``None`` when the census could not answer for some node.
+#: Injectable like the others; the default is
+#: :func:`~local_operator.mobile.resources.direct_descendant_pids`.
+DescendantProbe = Callable[[set[int]], "dict[int, int] | None"]
+
+#: Consecutive ticks a descendant census may leave memory UNACCOUNTED (an
+#: escaped descendant whose footprint cannot be read, or a census that cannot
+#: answer) before :meth:`Guard.should_kill` treats the run as over budget. At
+#: the 250 ms tick that is ~1 s: long enough that a pid caught mid-exit (its
+#: footprint already unreadable, its corpse not yet visible) is not a kill,
+#: short enough that a permanently unmeasurable descendant cannot hold an
+#: unknown amount of memory for the rest of the run.
+UNACCOUNTED_TICK_LIMIT = 4
 
 
 def _run_probe(argv: list[str], timeout_s: float) -> tuple[int, str]:
@@ -646,6 +667,14 @@ class Sample:
     #: re-verified fork-free) or ``"leader"`` (only the group leader we spawned) —
     #: ``"none"`` when nothing could be read.
     membership: str = "none"
+    #: Descendants OUTSIDE the guarded group (they called ``setsid``/``setpgid``)
+    #: whose footprint this tick charged, ``{pid: parent}``. Empty when the
+    #: descendant census is off or found none.
+    escaped: Mapping[int, int] = field(default_factory=dict)
+    #: Why some memory in the tree could not be charged this tick, or ``None``.
+    unaccounted: str | None = None
+    #: Consecutive ticks (including this one) with ``unaccounted`` set.
+    unaccounted_streak: int = 0
 
 
 class Guard:
@@ -696,9 +725,18 @@ class Guard:
         runner: Runner | None = None,
         footprint_probe: FootprintProbe | None = None,
         group_probe: GroupProbe | None = None,
+        descendants: bool = False,
+        descendant_probe: DescendantProbe | None = None,
         tick_s: float = 0.25,
     ) -> None:
         self.pgid = pgid
+        #: Charge descendants that LEFT the group too (``scripts/run_bounded.py``
+        #: turns this on). Off by default so the bash tool's existing contract is
+        #: unchanged by this opt-in; see :meth:`_escaped_descendants`.
+        self.descendants = descendants or descendant_probe is not None
+        self.descendant_probe = descendant_probe
+        self._unaccounted_streak = 0
+        self._last_escaped: dict[int, int] = {}
         self.budget = budget
         self.runner = runner
         self.footprint_probe = footprint_probe
@@ -770,6 +808,92 @@ class Guard:
             return probe(self.pgid)
         except Exception:  # noqa: BLE001 — an unanswerable listing is not a kill
             return None
+
+    def _escaped_descendants(
+        self, members: set[int], footprint_of: Callable[[Iterable[int]], int]
+    ) -> tuple[dict[int, int], str | None]:
+        """Descendants that left the group, and why any of them went uncharged.
+
+        WHY. A process group is not a process tree: a descendant that calls
+        ``setsid()`` (Electron helpers, a daemonised ``lop serve``, a runtime)
+        leaves the group, the group listing stops naming it, and its memory was
+        charged to nobody — measured: a rendered-reattach rig peaked at 1,852 MB
+        under ``run_bounded --memory-mb 1536`` and was not stopped, and a 600 MB
+        ``setsid`` grandchild under ``--memory-mb 300`` ran to status 0. Parentage
+        survives ``setsid``, so the census walks ``ppid`` edges from the leader
+        and every group member.
+
+        FAIL CLOSED, unlike the group arm. The group arm's "unknown never kills"
+        is safe because the group listing itself is exact. Here an unreadable
+        live descendant is memory we KNOW exists and cannot size, so it is
+        reported as ``unaccounted`` — never as zero — and :meth:`should_kill`
+        counts a sustained streak as over budget. A descendant that is gone or a
+        zombie between census and read is not unaccounted: it holds nothing.
+        A descendant re-parented to pid 1 after its parent exited is no longer
+        reachable by ancestry at all; that limit is stated, not papered over.
+        """
+        probe = self.descendant_probe or direct_descendant_pids
+        try:
+            census = probe(set(members) | {self.pgid})
+        except Exception:  # noqa: BLE001 — a raising census is an unanswered one
+            census = None
+        if census is None:
+            return {}, "descendant census could not answer"
+        escaped = {pid: parent for pid, parent in census.items() if pid not in members}
+        unreadable: list[int] = []
+        for pid in escaped:
+            if footprint_of([pid]) > 0:
+                continue
+            if procstate.pid_liveness(pid) is False:
+                continue  # exited between census and read
+            sample = procstate.process_sample(pid)
+            if sample is not None and sample.zombie:
+                continue
+            unreadable.append(pid)
+        reason = None
+        if unreadable:
+            shown = ", ".join(str(pid) for pid in sorted(unreadable)[:5])
+            reason = f"footprint unreadable for escaped descendant(s) {shown}"
+        return escaped, reason
+
+    def stop_escaped(self, signum: int) -> list[int]:
+        """Signal the last tick's escaped descendants whose parent edge re-verifies.
+
+        Called on a memory stop BEFORE the group is killed, because the edge is
+        the ownership proof: once the leader dies an escaped child is re-parented
+        to pid 1 and can no longer be told from a stranger. Each pid is re-read
+        by syscall and signalled only if its parent is still one we recorded in
+        this tree and it is not in our own group or this process — so a pid
+        recycled since the census (new parent) is skipped, never signalled.
+        All pids are verified first and signalled after, so killing a parent
+        cannot invalidate its child's proof mid-loop. Check-then-send is not
+        atomic; the window is one syscall wide, the same trade the group path
+        documents. Returns the pids signalled.
+        """
+        tree = set(self._last_escaped) | set(self._last_escaped.values()) | {self.pgid}
+        own = {os.getpid()}
+        try:
+            own_group = os.getpgrp()
+        except OSError:  # pragma: no cover - getpgrp does not fail on POSIX
+            own_group = -1
+        verified: list[int] = []
+        for pid, parent in self._last_escaped.items():
+            if pid in own or pid <= 1:
+                continue
+            row = direct_ppid_pgid(pid)
+            if row is None or row[0] != parent or row[0] not in tree:
+                continue
+            if row[1] in (self.pgid, own_group):
+                continue  # the group signal covers it, or it is ours
+            verified.append(pid)
+        sent: list[int] = []
+        for pid in verified:
+            try:
+                os.kill(pid, signum)
+            except OSError:
+                continue
+            sent.append(pid)
+        return sent
 
     def _verified_members(self) -> set[int]:
         """Last-known members that are still in OUR group, plus the leader.
@@ -892,6 +1016,13 @@ class Guard:
                 footprints.clear()
 
         footprint_sum = footprint_of(known) if known else 0
+        escaped: dict[int, int] = {}
+        unaccounted: str | None = None
+        if self.descendants:
+            escaped, unaccounted = self._escaped_descendants(known, footprint_of)
+            footprint_sum += footprint_of(set(escaped) - known)
+        self._last_escaped = escaped
+        self._unaccounted_streak = self._unaccounted_streak + 1 if unaccounted else 0
         rss_sum = sum(table.values()) if table else None
         measured_fp = footprint_sum if footprint_sum > 0 else None
 
@@ -918,6 +1049,9 @@ class Guard:
             rss_bytes=rss_sum,
             footprint_bytes=measured_fp,
             membership=membership if used is not None else "none",
+            escaped=escaped,
+            unaccounted=unaccounted,
+            unaccounted_streak=self._unaccounted_streak,
         )
 
     def should_kill(self, sample: Sample) -> bool:
@@ -926,6 +1060,10 @@ class Guard:
         ``None`` usage is never a kill (F6). Pure, so the decision is a unit
         target with no process in sight.
         """
+        if sample.unaccounted and sample.unaccounted_streak >= UNACCOUNTED_TICK_LIMIT:
+            # Fail closed (descendant census only): memory we know exists and
+            # cannot size for ~1 s is treated as over budget, never as zero.
+            return True
         return sample.bytes_used is not None and sample.over_hard
 
     def soft_notice(self, sample: Sample) -> str | None:
@@ -997,6 +1135,14 @@ class Guard:
             f"size, or process the input in chunks. To allow a deliberately large "
             f"command, {escape}."
         )
+
+
+def unaccounted_line(sample: Sample) -> str:
+    """The one diagnostic line for a fail-closed stop on unaccounted memory."""
+    return (
+        f"memory charge incomplete for {sample.unaccounted_streak} tick(s): "
+        f"{sample.unaccounted} — treated as over budget (fail closed)"
+    )
 
 
 #: ``MemoryGuard`` is the name the design doc uses in prose (§2/§9); ``Guard`` is

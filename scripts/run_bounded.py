@@ -551,7 +551,8 @@ def _memory_budget(override_mb: int | None) -> tuple[memory_guard.Budget, str]:
 
     Missing means canonical auto policy; zero is an explicit, disclosed disable.
     Invalid metadata is an error, never a spelling of unlimited. This only
-    prices the owned child PG, not the wrapper+child aggregate or later setsid.
+    prices the owned child PG plus descendants that left it by setsid (charged by
+    ancestry), not the wrapper itself or a descendant re-parented to pid 1.
     """
     raw = os.environ.get(memory_guard.RESOLVED_MEMORY_MB_ENV)
     inherited: int | None = None
@@ -679,7 +680,7 @@ def _run_cleanup_required(
     if budget.ceiling_mb > 0:
         stream.write(
             f"[run_bounded] memory budget {budget.ceiling_mb} MiB ({budget_source}); "
-            "sampled owned child group only\n"
+            "sampled owned child group and escaped descendants\n"
         )
     else:
         stream.write(bounded_contract.disabled_budget_line(budget_source, budget) + "\n")
@@ -838,7 +839,12 @@ def _run_cleanup_required(
     unanswered = 0
     try:
         require(owner.last, "acquire")
-        guard = memory_guard.Guard(pgid, budget) if budget.ceiling_mb > 0 else None
+        # descendants=True: charge descendants that called setsid() and left the
+        # group too (see memory_guard.Guard._escaped_descendants for the measured
+        # 1,852 MB-under-1,536 MB miss this closes).
+        guard = (
+            memory_guard.Guard(pgid, budget, descendants=True) if budget.ceiling_mb > 0 else None
+        )
         next_sample = started
         next_probe = started + _AUTHORITY_REFRESH_SECONDS
         unmeasured_reported = False
@@ -931,12 +937,26 @@ def _run_cleanup_required(
                 sample = guard.sample_sync()
                 next_sample = now + guard.tick_s
                 if guard.should_kill(sample):
+                    # getattr: guard and sample are injectable seams; a
+                    # stand-in that predates descendant accounting has neither.
+                    if getattr(sample, "unaccounted", None):
+                        _report(stream, f"[run_bounded] {memory_guard.unaccounted_line(sample)}")
                     message = guard.over_budget_message(sample, unit="MiB", escape=_memory_escape())
                     _report(stream, f"[run_bounded] {message}")
                     rc = EXIT_MEMORY
                     if _outcome is not None:
                         _outcome.termination_cause = "memory-policy"
                         _outcome.wrapper_exit_code = rc
+                    # Escaped descendants FIRST: their parent edge is the only
+                    # ownership proof, and it is gone once the group dies.
+                    stop_escaped = getattr(guard, "stop_escaped", None)
+                    stopped = stop_escaped(signal.SIGKILL) if stop_escaped else []
+                    if stopped:
+                        _report(
+                            stream,
+                            "[run_bounded] SIGKILL to escaped descendant(s) "
+                            + ", ".join(str(pid) for pid in stopped),
+                        )
                     send(signal.SIGKILL, "memory", begin_cleanup(0.25))
                     break
                 notice = guard.soft_notice(sample)

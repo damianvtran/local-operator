@@ -608,8 +608,10 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
     )
     real_guard = mg.Guard
 
-    def guard(pgid, resolved):
-        instance = real_guard(pgid, resolved)
+    def guard(pgid, resolved, **kwargs):
+        # **kwargs: run_bounded now asks for descendants=True; the faked
+        # sample_sync below never runs the census either way.
+        instance = real_guard(pgid, resolved, **kwargs)
 
         def reading():
             if mode == "monitor-error":
@@ -685,3 +687,80 @@ def test_help_describes_memory_exit_status_and_budget_defaults(memory_wrapper, c
     assert "137 with MEMORY LIMIT EXCEEDED" in help_text
     assert "137 alone can also mean external SIGKILL" in help_text
     assert "124 on timeout" in help_text and "125 on start or budget refusal" in help_text
+
+
+#: The setsid'd grandchild writes its pid here so the test can reap it by exact
+#: pid whatever the wrapper did.
+_ESCAPE_CODE = """
+import os, sys, time
+pidfile = sys.argv[1]
+child = os.fork()
+if child == 0:
+    os.setsid()
+    # Off the captured pipes: a surviving grandchild holding them would turn a
+    # RED run into a pipe-EOF hang instead of a status assertion.
+    null = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(null, fd)
+    buf = bytearray(400 * 1024 * 1024)
+    for i in range(0, len(buf), 4096):
+        buf[i] = 1
+    open(pidfile, "w").write(str(os.getpid()))
+    time.sleep(60)
+    os._exit(0)
+time.sleep(60)
+"""
+
+
+@pytest.mark.skipif(not hasattr(os, "setsid"), reason="POSIX only")
+def test_negative_control_an_over_budget_setsid_descendant_is_stopped(tmp_path):
+    """The measured miss, as a real process tree: a grandchild that left the
+    group by setsid() holds 400 MB under a 200 MiB grant. Before the descendant
+    census this ran to its own exit with status 0 (repro: 600 MB under 300 MiB,
+    rc=0 after 12 s); it must now end 137 with the grandchild dead."""
+    pidfile = tmp_path / "escaped.pid"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_")}
+    env.pop("LOCAL_OPERATOR_RESOLVED_MEMORY_MB", None)
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(WRAPPER),
+                *CONTRACT_ARGS,
+                "--memory-mb",
+                "200",
+                "--timeout",
+                "20",
+                "--",
+                sys.executable,
+                "-c",
+                _ESCAPE_CODE,
+                str(pidfile),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+            check=False,
+        )
+        elapsed = time.monotonic() - started
+        assert result.returncode == 137, result.stderr
+        assert "MEMORY LIMIT EXCEEDED" in result.stderr
+        assert elapsed < 30, (elapsed, result.stderr)
+        escaped = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(escaped, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail(f"escaped descendant {escaped} survived the memory stop")
+    finally:
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
