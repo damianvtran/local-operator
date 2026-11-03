@@ -156,6 +156,7 @@ export function getSessions(): Promise<{
 	return request("/api/sessions");
 }
 
+export type PhoneUsageTone = "ok" | "warning" | "exhausted" | "unknown";
 export type PhoneUsageLimit = {
 	amount: { used: number | null; limit: number | null; remaining: number | null;
 		used_fraction: number | null; unit: string };
@@ -170,14 +171,47 @@ export type PhoneUsageLimit = {
 	resets_at_ms: number | null;
 	payable: boolean;
 	exhausted: boolean;
+	/* Added with POST /api/usage/refresh. Optional because an older daemon
+	   omits them; the sheet's model derives the same values from `amount`. */
+	remaining_fraction?: number | null;
+	tone?: PhoneUsageTone;
 };
 export type PhoneUsageReport = {
 	provider: string; limits: PhoneUsageLimit[]; unavailable: boolean; fetched_at: number;
+	/* Additive, optional for the same reason as the limit fields above. */
+	provider_name?: string;
+	account_index?: number;
+	account_count?: number;
+	state?: "available" | "partial" | "unavailable" | "reauth_required";
+	credential_invalid?: boolean;
+};
+export type PhoneUsageRefreshStatus = "ok" | "throttled" | "failed" | "timeout";
+export type PhoneUsageEnvelope = {
+	reports: PhoneUsageReport[];
+	source: "cached" | "live";
+	may_be_stale?: boolean;
+	cached_at?: number | null;
+	/* Present only on the refresh POST's answer. `refreshed_at` is the oldest
+	   report THIS refresh fetched (null when it fetched nothing); `as_of` the
+	   oldest report shown at all. `joined` marks a request that rode a refresh
+	   already in flight; `forced` then says whether THAT refresh was forced. */
+	refreshed_at?: number | null;
+	as_of?: number | null;
+	refresh?: { status: PhoneUsageRefreshStatus; forced: boolean; joined?: boolean; retry_after_ms: number | null };
 };
 /** The paired gate and persisted-account admission remain server-owned. */
-export function getUsage(): Promise<{ reports: PhoneUsageReport[]; source: "cached";
-	may_be_stale?: boolean; cached_at?: number | null }> {
+export function getUsage(): Promise<PhoneUsageEnvelope> {
 	return request("/api/usage");
+}
+/** Refresh stored logins' usage. `force` skips the 5-minute cache and is
+    floored server-side (15 s); a floored request answers `throttled` with
+    `retry_after_ms`. Timeouts/failures still answer 200 with cached data. */
+export function refreshUsage(force: boolean): Promise<PhoneUsageEnvelope> {
+	return request("/api/usage/refresh", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ force }),
+	});
 }
 
 export function getCommands(): Promise<{ commands: SlashCommand[] }> {

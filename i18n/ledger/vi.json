@@ -2735,6 +2735,44 @@
       },
       "status": "passed",
       "note": "Dual blind passes: i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/record.json; i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.shell",
+      "source_sha256": "388f23d29d082106ccb706ed041f48238eca32a6cfaf6cfa05517ee8dc773a01",
+      "translator": {
+        "agent": "coder subagent e8f92ac9fa94 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 92826ef0767b (lopdev team, independent i18n auditor)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "relay.shell 64 keys read in full at this en hash. Fixes: countdown_days used 'ng' and countdown_hours used 'ph' — neither is a standard Vietnamese unit abbreviation and both were inconsistent with the sibling countdown_day ('ngày') and countdown_minutes ('phút'); now the full words. Plural other-only and NFC verified. 0 blocker / 0 major unresolved. No rendered pass claimed."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.shell",
+      "source_sha256": "412c31bd9071bc06a886dd3144a350afa4c6cc0c89dedac696f7f38d5c30fc22",
+      "translator": {
+        "agent": "coder subagent 763f25259988 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 2926722c72a8 (lopdev team, independent i18n auditor, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). Fix: refresh_ready dropped the redundant 'Bạn' (vi guide: pronoun only at first contact/blocking decisions). Round-1 fix intact: countdown keys use full ngày/giờ/phút. throttled avoids 'giới hạn'; other-only plural. 0 blocker / 0 major unresolved. No rendered or native-speaker pass claimed."
     }
   ]
 }

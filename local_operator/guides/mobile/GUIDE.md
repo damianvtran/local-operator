@@ -202,6 +202,14 @@ lop mobile uninstall --purge # also delete the Keychain item
 missing from the list has not published — that is a bug, not a missing
 flag; check `lop mobile logs`.
 
+The phone's `/usage` sheet reads cached quota (`GET /api/usage`, no writes)
+and refreshes on open and on its refresh button via `POST /api/usage/refresh`.
+That POST is the only phone action that contacts providers: it probes the
+accounts the operator logged in with (never environment keys), writes the
+shared usage cache and any rotated OAuth tokens — the same writes the TUI's
+background refresh makes — and limits forced refreshes to one per 15 seconds.
+Details: `local_operator/mobile/web/PAID_USAGE.md`, "Refresh".
+
 ## Troubleshooting
 
 - **Radient sign-in fails on the phone.** Start again from the personal HTTPS
