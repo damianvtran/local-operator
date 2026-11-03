@@ -4146,6 +4146,13 @@ def subscribe_skill(
     # Same lease the install/apply paths take: creating the baseline is local
     # state a concurrent tick or install must not interleave with.
     with exclusive(ctx, wait_s=0.0):
+        # Subscription reserves a durable alias too. Another origin remains a
+        # conflict even when its directory is absent or between crash renames.
+        owner = prov.alias_owner(ctx.config_dir, "skill", alias)
+        if owner is not None and owner != local_id:
+            raise LinkError(
+                "origin-conflict", "managed alias belongs to another local skill origin"
+            )
         existing: prov.BaselineRecord | None = None
         for record in prov.iter_baselines(ctx.config_dir):
             if record.kind != "skill" or record.local_id != local_id:
@@ -4160,6 +4167,18 @@ def subscribe_skill(
                 )
             existing = record
             break
+
+        if existing is None or existing.content_state == "absent":
+            from local_operator.hub_sync.skill_adoption_service import _refusal
+            from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+
+            if ManagedSkillStorage(ctx.config_dir).path(alias).exists():
+                # An authored copy is not ABSENT. Minting an absent baseline
+                # here falsely reports subscription success while every runner
+                # pull later CAS-refuses that same folder. Offer the exact same
+                # reviewed adoption as Download, retaining Subscribe intent;
+                # refuse before any baseline, policy or content mutation.
+                raise _refusal("alias-occupied", "review the occupying local skill first")
 
         if existing is None:
             record = replace(
