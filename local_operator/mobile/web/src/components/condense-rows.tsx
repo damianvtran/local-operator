@@ -1,4 +1,5 @@
 /** One-line chrome for condensed turns and tool folds (design PR C §2). */
+import { contentDir } from "../lib/content-direction";
 import type { ReactNode } from "react";
 import { cn } from "../lib/cn";
 import { messageRuntime, useLocaleSnapshot } from "../store";
@@ -134,10 +135,10 @@ export function FoldBar({
 				<Header id={entry.key} open={open} onToggle={onToggle} failed={group.failedCount > 0} failedCount={group.failedCount} live>
 					<span className="flex min-w-0 flex-1 flex-col justify-center">
 						<span className="flex min-w-0 items-center gap-1.5 text-body-sm">
-							<span className="shrink truncate text-ink-muted">{liveRow.record.kind === "tool" ? liveRow.record.toolName : ""}</span>
-							<span className="min-w-0 flex-1 truncate font-mono text-ink-dim">{liveRow.record.kind === "tool" ? liveRow.record.summary : ""}</span>
+							<span dir={contentDir(liveRow.record.kind === "tool" ? liveRow.record.toolName : "")} className="shrink truncate text-ink-muted">{liveRow.record.kind === "tool" ? liveRow.record.toolName : ""}</span>
+							<span dir={contentDir(liveRow.record.kind === "tool" ? liveRow.record.summary ?? "" : "")} className="min-w-0 flex-1 truncate font-mono text-ink-dim">{liveRow.record.kind === "tool" ? liveRow.record.summary : ""}</span>
 						</span>
-						<span className="truncate text-meta text-ink-dim">{totalActions}</span>
+						<span dir={contentDir(totalActions)} className="truncate text-meta text-ink-dim">{totalActions}</span>
 					</span>
 				</Header>
 			</div>

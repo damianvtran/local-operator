@@ -85,6 +85,15 @@ _DECLARED_RAW_READS: dict[tuple[str, str, str], tuple[int, str]] = {
     # ``lop prune``'s sweep vocabulary: these ARE the sentences that line prints
     # (``superseded, unreferenced``), authored in ``update.py`` for a reader.
     ("local_operator/cli.py", "_cleanup_row", "reason"): (1, "the prune vocabulary's own prose"),
+    # `lop browser pair` printing why it could not reach THIS machine's browser
+    # bridge daemon on 127.0.0.1 (PR #3339). ``detail`` is built by
+    # ``browser_install.request_pairing_codes`` from a local urllib error
+    # (``HTTP <code>`` / the URLError text / "unexpected response") and is shown
+    # in brackets after a human sentence; no mesh peer or relay is involved.
+    ("local_operator/cli.py", "_browser_pair", "detail"): (
+        1,
+        "the local browser daemon's own transport error, in brackets after a sentence",
+    ),
     # The delegated content layer's per-pad row — the same class of prose as
     # ``_cleanup_row`` above: ``merged-clean clone past the window`` /
     # ``stale output past the window``, composed by

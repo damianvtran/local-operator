@@ -927,6 +927,39 @@ def test_over_budget_message_is_plain_text_and_names_the_numbers() -> None:
     )
 
 
+def _over_sample() -> mg.Sample:
+    return mg.Sample(
+        pgid=100,
+        bytes_used=71 * 1024 * 1024,
+        bytes_soft=51 * 1024 * 1024,
+        bytes_hard=64 * 1024 * 1024,
+        over_soft=True,
+        over_hard=True,
+    )
+
+
+def test_bash_tool_over_budget_message_is_byte_identical() -> None:
+    """run_bounded's MiB/--memory-mb wording (design D2.1) is an opt-in
+    parameter; the bash tool's default text must not move by one byte."""
+    assert _guard(64).over_budget_message(_over_sample()) == (
+        "MEMORY LIMIT EXCEEDED: this command's process group reached 0.1 GB, over "
+        "the 0.1 GB budget for one command (on a 16 GB host). The command was "
+        "killed; the session is fine. Reduce peak memory and retry: stream instead "
+        "of loading all rows, lower the batch size, or process the input in "
+        "chunks. To allow a deliberately large command, pass memory_mb on the bash "
+        "call or raise bash.memory.limit_mb in settings."
+    )
+
+
+def test_caller_unit_and_escape_render_mib_and_the_callers_knob() -> None:
+    message = _guard(64).over_budget_message(
+        _over_sample(), unit="MiB", escape="raise --memory-mb (up to the inherited 128 MiB)"
+    )
+    assert "reached 71 MiB, over the 64 MiB budget" in message
+    assert message.endswith("command, raise --memory-mb (up to the inherited 128 MiB).")
+    assert "bash.memory.limit_mb" not in message
+
+
 def test_the_over_budget_message_fits_the_card_at_large_device_sizes() -> None:
     """The message must not grow past the reason block as the HOST grows.
 

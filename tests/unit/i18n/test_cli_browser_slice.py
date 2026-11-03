@@ -82,7 +82,7 @@ def test_the_catalogue_is_the_golden_fixture() -> None:
         (REPO / "tests/unit/i18n/fixtures/cli_browser_en_golden.json").read_text(encoding="utf-8")
     )
     assert live == golden, "the shipped catalogue and the fixture golden drifted"
-    assert len(golden) == 64, len(golden)
+    assert len(golden) == 72, len(golden)
     sidecar = catalogues.context("en", "cli.browser")
     for key, entry in sidecar.items():
         assert all(entry.get(field) for field in ("role", "tone", "note")), key
@@ -275,33 +275,114 @@ CASES = [
         _bw(_b.revoked_browser()),
         "revoked the paired browser; any live connection is dropped within a few seconds.",
     ),  # revoked_browser
-    (_bw(_b.pairing_code(code="«code»")), "pairing code: «code»"),  # pairing_code
+    (
+        _bw(_b.pairing_code(code="«code»")),
+        "Your Local Operator pairing code is «code».",
+    ),  # pairing_code
     (
         _bw(_b.enter_code()),
-        "enter this 6-digit code in the Local Operator extension popup.",
+        (
+            "Switch to Chrome: a Local Operator tab is open there with a box for the code. Type "
+            "the code and press Pair."
+        ),
     ),  # enter_code
-    (_bw(_b.open_popup()), "open the extension popup to pair a browser again."),  # open_popup
     (
-        _bw(_b.pairing_code_labeled(code="«code»", label="«label»")),
-        "pairing code: «code»   «label»",
-    ),  # pairing_code_labeled
+        _bw(_b.enter_code_icon()),
+        (
+            "In Chrome, click the Local Operator icon in the toolbar (it may be under the "
+            "puzzle-piece icon). Have the code in front of you first: the box closes if you "
+            "click away. Type the code and press Pair."
+        ),
+    ),  # enter_code_icon
+    (
+        _bw(_b.pair_no_page_hint()),
+        (
+            "No tab? Click the Local Operator icon in Chrome's toolbar (it may be under the "
+            "puzzle-piece icon) and type it there."
+        ),
+    ),  # pair_no_page_hint
+    (
+        _bw(_b.pair_several_header()),
+        "More than one browser is waiting to pair. Each has its own code:",
+    ),  # pair_several_header
     (
         _bw(_b.enter_each_code()),
-        "enter each code in the matching Local Operator extension popup.",
+        (
+            "Each browser now has a Local Operator tab open. Type the first code there and press "
+            "Pair. If it says the code didn't match, type the other code instead."
+        ),
     ),  # enter_each_code
+    (
+        _bw(_b.enter_each_code_icon()),
+        (
+            "In each browser, click the Local Operator icon in the toolbar (it may be under "
+            "the puzzle-piece icon). Have the codes in front of you first: the box closes if "
+            "you click away. Type the first code and press Pair. If it says the code didn't "
+            "match, type the other code instead."
+        ),
+    ),  # enter_each_code_icon
     (
         _bw(_b.already_paired()),
         (
-            "a browser is already paired. To pair another, open ITS popup and enter the cod"
-            "e that appears here (the code appears once that install's extension connects)."
-            " 'lop browser pair --list' lists every authorised install; '--reset' revokes t"
-            "hem all."
+            "Your browser is already paired with Local Operator, so no code is needed. To pair "
+            "another browser, install the Local Operator extension there, then ask Local "
+            'Operator to "pair my browser" again.'
         ),
     ),  # already_paired
     (
         _bw(_b.no_extension_waiting()),
-        "no extension is waiting to pair. Open the extension popup, then retry.",
+        (
+            "No Local Operator extension is connected yet, so there is no code to show. Open "
+            "Chrome and check that the Local Operator extension is installed and turned on: "
+            "https://chromewebstore.google.com/detail/local-operator/"
+            "omibaecbjdhgbbcedbnnnmjpmopfheof "
+            'It connects within a minute. Then ask Local Operator to "pair my browser" again.'
+        ),
     ),  # no_extension_waiting
+    (
+        _bw(_b.pair_no_daemon()),
+        (
+            "Local Operator can't talk to your browser right now. Run 'lop browser install' to "
+            "fix that, then 'lop browser pair' again."
+        ),
+    ),  # pair_no_daemon
+    (
+        _bw(_b.pair_after_reset()),
+        "Browsers unpaired. In a few seconds, run 'lop browser pair' to get a new code.",
+    ),  # pair_after_reset
+    (
+        _bw(_b.pairing_code_labeled(code="«code»", label="«label»")),
+        "  «code»   «label»",
+    ),  # pairing_code_labeled
+    (
+        _bw(_b.pair_unreachable(detail="«detail»")),
+        (
+            "Local Operator couldn't reach your browser. Run 'lop browser restart', then 'lop "
+            "browser pair' again. (Details: «detail»)"
+        ),
+    ),  # pair_unreachable
+    (
+        _bw(_b.pair_outdated(label="«label»", want="«want»")),
+        (
+            "The browser marked «label» has an older Local Operator extension. It can still "
+            "pair, but some features need version «want». To update it, type chrome://extensions "
+            "in Chrome's address bar, turn on Developer mode (top right), then click Update."
+        ),
+    ),  # pair_outdated
+    (
+        _bw(_b.pair_code_lifetime(minutes=15)),
+        (
+            "The code works for 15 minutes. After pairing, Local Operator asks you in Chrome to "
+            "Allow each new website the first time it visits one."
+        ),
+    ),  # pair_code_lifetime
+    (
+        _bw(_b.pair_code_lifetime(minutes=1)),
+        (
+            "The code works for 1 minute. After pairing, Local Operator asks you in Chrome to "
+            "Allow each new website the first time it visits one."
+        ),
+    ),  # pair_code_lifetime (one)
     (_bw(_b.authorised_installs()), "authorised installs:"),  # authorised_installs
     (_bw(_b.now_driving(id="«id»")), "now driving: «id»"),  # now_driving
     (_bw(_b.service_ok(command="«command»")), "browser bridge «command» ok"),  # service_ok

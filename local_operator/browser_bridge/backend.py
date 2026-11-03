@@ -45,8 +45,10 @@ _EXTENSION_ERROR_MESSAGES = {
         "or check the extension is enabled."
     ),
     ErrorCode.NOT_PAIRED: (
-        "browser bridge not paired: run 'lop browser pair' and enter the code in the "
-        "extension popup, then retry."
+        "browser bridge not paired: run 'lop browser pair' now, then write the 6-digit code "
+        "it prints into your reply (bold, before any other tool call) and tell the user to "
+        "type it in the Local Operator tab or extension in their browser. Do not ask them to "
+        "open the popup first. Retry once they say it is paired."
     ),
     ErrorCode.DEBUGGER_CONFLICT: (
         "cannot drive the tab: DevTools (or another debugger) is attached to it. Ask the "
