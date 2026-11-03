@@ -32,6 +32,10 @@ callers differ; the tool also reuses bounded, confirmed same-turn receipts
 > process. The shell command below is documented for the human at a terminal,
 > not as an agent recipe.
 
+> **Not for people.** `send` reaches this account's own local sessions. To
+> message a teammate or their agent on a Radient team, use the `bridge` tool as
+> the one channel (guide://team-bridge).
+
 **Trust boundary is the account.** The discovery record is mode `0600` under a
 `0700` directory, so anything that can read a session's control key is already
 the owning user. Delivery is loopback only. There is no cross-account path; the

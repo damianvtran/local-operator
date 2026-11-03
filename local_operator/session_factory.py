@@ -1950,6 +1950,13 @@ class _KnowledgeHooks:
     #: deterministic trigger's vocabulary arm simply never fires, which is the
     #: layer's pre-code-requests behaviour rather than a degraded one.
     code_requests_ledger: Callable[[], bool] | None = None
+    #: Whether THIS session can message Radient teammates over Team Bridge right
+    #: now, from persisted, network-free facts only (see
+    #: :func:`_team_bridge_recommendation`). A CALLABLE for the same reason as
+    #: ``code_requests_ledger``: admission settles to ``signin``/``disabled``/
+    #: ``paused`` during the session. WRITTEN BY THE SESSION
+    #: (``_refresh_tool_roster``); ``None`` means the trigger never fires.
+    team_bridge_available: Callable[[], bool] | None = None
     #: The classification seam (docs/design/classification-layer.md §7): an
     #: object exposing ``async recommend_resources(request) -> Recommendation``.
     #: ONE method — the seam used to publish ``notice(recommendation)`` as well, and
@@ -2765,6 +2772,11 @@ _TOOL_ROSTER_NAMES: tuple[str, ...] = (
     "generate_sound_effect",
     "code_requests",
     "secret",
+    # Team Bridge: createIf-gated on the session's bridge runtime (signed in to
+    # Radient, enrolled in a Team org, consented), so membership is again the
+    # availability signal; the row lets the classifier offer it for "message
+    # X's agent" turns instead of Slack/email fan-out.
+    "bridge",
 )
 
 #: One tool row's description bound — the same scannable-row precedent the
@@ -3194,7 +3206,7 @@ async def _classification_recommendation(
     return recommendation
 
 
-def _recommendation_line(resource: Any) -> str:
+def _recommendation_line(resource: Any, *, inline_description: bool = False) -> str:
     """One body line of the advisory block: the URL, plus a project's own state.
 
     Every kind but one renders as its URL — the URL is what the model reads
@@ -3210,7 +3222,7 @@ def _recommendation_line(resource: Any) -> str:
     outputs line for line.
     """
     url = str(getattr(resource, "resource_url", "") or "")
-    if str(getattr(resource, "kind", "") or "") == "project":
+    if inline_description or str(getattr(resource, "kind", "") or "") == "project":
         description = str(getattr(resource, "description", "") or "")
         if description:
             return f"- {url} — {description}"
@@ -3228,6 +3240,11 @@ class _DeterministicRecommendation:
     """
 
     resources: tuple[Any, ...] = ()
+    #: Render each resource's description beside its URL. Off for every vendor
+    #: answer (the package's renderer prints URL-only lines, pinned by
+    #: ``test_block_parity.py``); ON only for a trigger whose whole point is a
+    #: one-line RULE the model must see without a second read (Team Bridge).
+    inline_description: bool = False
 
 
 #: Review/CI vocabulary for the ledger-gated arm of the trigger. Deliberately
@@ -3341,6 +3358,94 @@ def _memory_recommendation(query: str) -> _ClassificationCandidate | None:
     )
 
 
+#: Coordination with a PERSON or their agent. Deliberately COMPOUND: a
+#: messaging verb alone fires on "send a message to the queue", "ask the API" or
+#: "notify via webhook"; a person noun alone on "tell me about the chief of
+#: staff role". The verb must sit within ~80 characters of a person-shaped
+#: target: someone's agent / chief of staff, a teammate/colleague/manager, or
+#: a capitalised name directly after the verb ("ask Ben", "ping Aida's agent").
+_TEAM_BRIDGE_VERB = (
+    r"(?:message|dm|ping|tell|ask|notify|reach\s+out(?:\s+to)?|follow\s+up(?:\s+with)?|"
+    r"coordinate(?:\s+with)?|loop\s+in|check\s+with|get\s+(?:sign-?off|approval)\s+from)"
+)
+_TEAM_BRIDGE_PERSON = (
+    r"(?:\w+'s\s+(?:agent|chief\s+of\s+staff|cos)\b|(?:their|his|her)\s+"
+    r"(?:agent|chief\s+of\s+staff)\b|chiefs?\s+of\s+staff\b|teammates?\b|"
+    r"colleagues?\b|co-?workers?\b|(?:my|our)\s+(?:manager|boss|lead|team)\b|"
+    r"the\s+(?:qa|design|reviewer)\s+(?:person|lead|owner)\b)"
+)
+_TEAM_BRIDGE_INTENT = re.compile(
+    # "tell me about…"/"ask you…" address the assistant, not a teammate.
+    rf"\b{_TEAM_BRIDGE_VERB}\b(?!\s+(?:me|us|you)\b).{{0,80}}?{_TEAM_BRIDGE_PERSON}",
+    re.I | re.S,
+)
+#: "ask Ben to …", "ping Aida", "coordinate with Damian": the verb followed by a
+#: capitalised word. Case-SENSITIVE on the name on purpose ("ask the API",
+#: "tell me about" stay quiet); the stop-list drops capitalised non-people.
+_TEAM_BRIDGE_NAMED = re.compile(
+    rf"(?i:\b{_TEAM_BRIDGE_VERB})\s+(?P<name>[A-Z][a-z]+)\b(?!\.\w)"
+)
+_TEAM_BRIDGE_NOT_A_NAME = frozenset(
+    {"Slack", "Claude", "Gemini", "Google", "GitHub", "GitLab", "The", "It", "This",
+     "That", "Them", "Me", "Us", "Him", "Her", "Codex", "OpenAI", "Linear", "Notion"}
+)  # fmt: skip
+#: Technical messaging that mentions an agent/team in passing. Checked on the
+#: WHOLE bounded text: one of these makes the turn about code, not a person.
+_TEAM_BRIDGE_TECHNICAL = re.compile(
+    r"(?i)\b(?:message\s+(?:queue|broker|bus)|webhooks?|api\s+(?:endpoint|call)|"
+    r"http\s+request|kafka|rabbitmq|sqs|pub/?sub|unit\s+tests?|implement(?:ation)?|"
+    r"refactor|function|endpoint)\b"
+)
+
+#: The rendered rule (candidate description). One line, kept tiny because it is
+#: harness-owned prompt text paid on every matching turn; pinned by a budget test.
+_TEAM_BRIDGE_RULE = (
+    "Team member messaging: bridge directory → dm as the ONE channel; "
+    "no Slack/email/send fan-out; reply in-thread."
+)
+
+
+def _team_bridge_recommendation(
+    query: str, hooks: _KnowledgeHooks
+) -> _ClassificationCandidate | None:
+    """Recommend ``guide://team-bridge`` when the user wants to reach a teammate.
+
+    WHY (the incident): an agent asked to coordinate with a colleague's chief of
+    staff sent the SAME request over Slack DM, Team Bridge and other channels at
+    once — duplicate, conflicting threads and no single place whose provenance
+    could be verified. When this session can use Team Bridge, the guide's
+    one-channel rule is what should reach the model on such a turn.
+
+    GATE, fail-closed and NETWORK-FREE: ``hooks.team_bridge_available`` is the
+    session's own probe over the bridge runtime it already holds — built only
+    from persisted facts (bridge enabled, committed Radient owner, live Team-org
+    enrollment, consent receipt; ``team_bridge.host.bridge_runtime_for_session``)
+    — plus the cached admission state. A missing probe, an unknown answer or a
+    raising probe all mean "no recommendation"; a trigger never pays a fetch.
+
+    Intent is matched first (cheap regex over a bounded prefix, the
+    ``_memory_recommendation`` precedent) so the probe only runs on turns that
+    already look like person-to-person coordination.
+    """
+    text = query[:2048]
+    if _TEAM_BRIDGE_TECHNICAL.search(text):
+        return None
+    if not _TEAM_BRIDGE_INTENT.search(text) and not any(
+        match.group("name") not in _TEAM_BRIDGE_NOT_A_NAME
+        for match in _TEAM_BRIDGE_NAMED.finditer(text)
+    ):
+        return None
+    probe = hooks.team_bridge_available
+    if probe is None:
+        return None
+    try:
+        if not probe():
+            return None
+    except Exception:  # noqa: BLE001 - a probe never breaks a prompt build
+        return None
+    return _ClassificationCandidate("guide", "team-bridge", _TEAM_BRIDGE_RULE, "guide://team-bridge")
+
+
 def _classification_block(
     hooks: _KnowledgeHooks,
     recommendation: Any,
@@ -3400,7 +3505,12 @@ def _classification_block(
         if catalogue and url in catalogue:
             continue
         urls.append(url)
-        body.append(_recommendation_line(resource))
+        body.append(
+            _recommendation_line(
+                resource,
+                inline_description=bool(getattr(recommendation, "inline_description", False)),
+            )
+        )
         if len(urls) >= budget:
             break
     if not urls:
@@ -3646,6 +3756,15 @@ async def _select_knowledge_block(
         answers.append(_DeterministicRecommendation(resources=(deterministic_memory,)))
     if deterministic_code_requests is not None:
         answers.append(_DeterministicRecommendation(resources=(deterministic_code_requests,)))
+    # Teammate coordination on a bridge-capable session: steer to ONE channel
+    # (Team Bridge) before the model fans the same ask across Slack/email/send.
+    deterministic_team_bridge = _team_bridge_recommendation(query, hooks) if query else None
+    if deterministic_team_bridge is not None:
+        answers.append(
+            _DeterministicRecommendation(
+                resources=(deterministic_team_bridge,), inline_description=True
+            )
+        )
     answers.extend(pending)
     if recommendation is not None:
         answers.append(recommendation)

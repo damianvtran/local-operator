@@ -13595,6 +13595,32 @@ class Session:
         # during the session flips it, and the trigger must see that on the next
         # message rather than on the next session.
         hooks.code_requests_ledger = self._code_requests_ledger_nonempty
+        # Team Bridge recommendation probe: same attach point, same reason
+        # (session-owned state; the answer moves as admission settles).
+        hooks.team_bridge_available = self._team_bridge_available
+
+    def _team_bridge_available(self) -> bool:
+        """Whether this session can message teammates over Team Bridge — no network.
+
+        True only when the session holds BOTH the ``bridge`` tool (createIf on
+        the runtime) and a runtime whose cached admission is ``pending`` or
+        ``admitted``. ``pending`` counts because the runtime itself exists only
+        when persisted, network-free facts hold (enabled, committed Radient
+        owner, live Team-org enrollment, consent) — that IS "signed in and on a
+        team"; only the eligibility re-check is outstanding, and the tool
+        returns a typed refusal if it fails. A KNOWN negative (``signin``,
+        ``disabled`` incl. ``read_only``, ``paused``) means the bridge cannot
+        carry the message, so recommending it would be wrong. Never raises.
+        """
+        try:
+            runtime = getattr(self, "bridge_runtime", None)
+            if runtime is None:
+                return False
+            if not any(getattr(tool, "name", "") == "bridge" for tool in self._tools):
+                return False
+            return str(getattr(runtime, "admission", "") or "") in ("pending", "admitted")
+        except Exception:  # noqa: BLE001 - a probe never breaks a prompt build
+            return False
 
     def _code_requests_ledger_nonempty(self) -> bool:
         """Whether this session's derived code-request index has any rows.
