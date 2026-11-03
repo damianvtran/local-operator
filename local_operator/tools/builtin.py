@@ -21663,10 +21663,9 @@ class BrowserParams(BaseModel):
     backend: str = Field(
         default="",
         description=(
-            "'open' fresh surface: '' (default order), 'ui', 'extension' "
-            "(the user's real profile) or 'cmux'. A held handle or adoption "
-            "outranks it. Also on request_access/await_access/cancel_access "
-            "('ui' or 'extension'): the host whose site approval it is."
+            "'open' fresh surface or *_access host: '' (default order), 'ui', "
+            "'extension' (the user's real profile) or 'cmux'. A held handle or "
+            "adoption outranks it."
         ),
     )
     path: str = Field(
