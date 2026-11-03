@@ -60,7 +60,7 @@ import json
 import logging
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Mapping, Sequence, TypeVar
 
@@ -680,6 +680,60 @@ def agent_listing_rows(registry: Any | None) -> list[tuple[str, str, str, str]]:
         seeds.append((profile.name, profile.label, seed_facts, summary))
     rows.extend(sorted(seeds, key=lambda row: row[0].lower()))
     return rows
+
+
+#: First-party engineering roles whose REGISTERED copies get the delivery
+#: pointer when a child is built from them (see :func:`with_delivery_pointer`). Names, not
+#: ``seed:`` provenance: most operator rows of these roles predate that tag
+#: (measured 2026-11-03 on the maintainer's registry: six of seven untagged),
+#: so a provenance check would skip exactly the stale rows this exists for.
+DELIVERY_POINTER_ROLES = frozenset(
+    {"manager", "coder", "reviewer", "qa-tester", "designer", "ux-reviewer", "architect"}
+)
+
+#: One line, appended verbatim; its presence is also the idempotence check.
+DELIVERY_POINTER = (
+    "Read guide://delivery before engineering work or review: it carries the "
+    "current scope, batched-remediation and review-economy rules."
+)
+
+
+def with_delivery_pointer(profile: AgentProfile) -> AgentProfile:
+    """Append :data:`DELIVERY_POINTER` to a stale registered engineering role.
+
+    WHY: registry-first resolution means a row registered before a seed's
+    review policy moved keeps running its old prompt forever — seed sync only
+    offers updates to ``seed:``-tagged rows, and never merges into an edited
+    one. Measured 2026-11-03: five reviewer/QA children after a policy release
+    loaded October prompts and none read the delivery guide. Pointing at the
+    guide (which ships with the runtime) lets new policy reach those children
+    without touching the operator's text.
+
+    Constraints: applied only where a CHILD is built (``harness.subagent``),
+    never in :func:`resolve_profile`, because ``agent op=show``, the desktop
+    profile routes and ``op='update'`` read that function and must show and
+    round-trip the operator's exact stored text — an edit form seeded with the
+    pointer would save it into the row. The row is never written; tools,
+    model, effort and every other field are kept; a row containing its current
+    packaged seed, or already carrying the pointer, is returned unchanged so
+    nothing is duplicated. Everything else in the operator's prompt stays
+    authoritative — this adds a reference, it does not rewrite their rules.
+    """
+
+    if profile.agent_id is None or profile.name.strip().lower() not in DELIVERY_POINTER_ROLES:
+        return profile
+    body = profile.instructions or ""
+    if DELIVERY_POINTER in body:
+        return profile
+    # A row that still embeds the WHOLE current seed (installed, possibly with
+    # operator additions) already carries the current rules. A bare
+    # ``guide://delivery`` mention is deliberately not enough: the stale rows
+    # measured above mostly mentioned it and still went unread.
+    seed = load_seed(profile.name.strip().lower())
+    if seed is not None and seed.instructions.strip() in body:
+        return profile
+    joined = f"{body.rstrip()}\n\n{DELIVERY_POINTER}" if body.strip() else DELIVERY_POINTER
+    return replace(profile, instructions=joined)
 
 
 def resolve_profile(

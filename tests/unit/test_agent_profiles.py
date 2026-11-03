@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from local_operator.agent_profiles import (
+    DELIVERY_POINTER,
     MAX_INSTRUCTIONS_CHARS,
     READ_ONLY_NETWORK_TOOLS,
     READ_ONLY_TOOLS,
@@ -387,7 +388,10 @@ def test_convergence_cues_reach_delegated_prompt(tmp_path, role, cue) -> None:
     registry.set_agent_system_prompt(installed_profile.agent_id, "Override control")
     control, _ = _effective_prompt(brief, role, parent)
     assert "Override control" in control
-    assert cue not in control and "guide://delivery" not in control
+    # The override stays authoritative (no seed cue leaks in); a stale
+    # engineering override gains only the one-line delivery pointer.
+    assert cue not in control and control.count("guide://delivery") == 1
+    assert DELIVERY_POINTER in control
     assert control != loaded, "a seed-only probe must not masquerade as rollout"
 
 

@@ -136,9 +136,9 @@ Use supported fallback and disclose the actual served model, including changes.
 Preference is not an approval gate; never rewrite role/default pins or tools to
 work around it. A missing required independent round blocks; never invent one.
 
-## Evidence and pilots
+## Rolling out role policy
 
-Before shipping policy, run fresh-agent pilots at the loaded role/team boundary,
-including a genuine destructive/access escalation. Keep prompts, actual responses
-and model provenance in scratch. Preserve custom security/release/roster/approval
-policy in live overrides: back up and read back; never force-sync away additions.
+Seeds never reach registered rows. Pilot with `agent op=show <role>` plus a fresh
+`task(agent=<role>)`, not `load_seed`/source: it must read this guide, keep scope
+and escalate a destructive/access step. Merge rules into each local prompt:
+back up, keep edits/tools/model/effort, `op=update`, read back; never force-sync.
