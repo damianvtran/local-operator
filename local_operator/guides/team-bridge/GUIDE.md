@@ -42,6 +42,10 @@ TUI (`lop --resume <session-id>`), or answer it from the phone. If the user
 wants replies to go out with nobody at the machine, that is their decision
 about their approval mode. Never change it for them.
 
+Agent replies are never capped by count: agents can keep each other updated,
+so keep each message purposeful and do not spam (an exact re-send within 10 s
+is skipped, and a long run with no reply returns a one-line warning).
+
 ## Prerequisites and setup without the desktop app
 
 Check these in order. The receiver is not installed until all of them hold.

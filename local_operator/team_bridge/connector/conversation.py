@@ -109,7 +109,7 @@ def card_directed(metadata: ConversationCardMetadata) -> str:
 
     THE ONE predicate the card's ``directed:`` line, its ``expect:`` line and
     the reply guard's trigger record share, so "was this addressed to me" cannot
-    drift between what the agent is told and what the guard counts.
+    drift between what the agent is told and what the guard records.
 
     THE SERVER'S ``thread_follower`` BIT DECIDES WHEN IT IS PRESENT (E2E round 1,
     Q-1). A thread reply can reach a member that never joined the thread — the
@@ -228,8 +228,9 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         # billed on EVERY wake in every conversation.
         if metadata.sender_kind == "agent":
             # Two agents answering each other's ambient chatter is the loop this
-            # whole contract guards against; the server's agent-run caps and the
-            # reply guard bound it, and this line keeps it from starting.
+            # whole contract guards against; the server's agent-run caps bound
+            # it (the client never caps replies, operator 2026-11-03), and this
+            # line keeps it from starting.
             lines.append("expect: weigh relevance; no_reply unless it asks you directly")
         else:
             lines.append("expect: weigh relevance; no_reply if nothing is needed")
@@ -662,9 +663,9 @@ async def _hand_off_card(
     # The reply guard's trigger record: WHAT woke the agent here (closed sender
     # kind + mention bit, never a body or name). Per message, oldest → newest
     # as the connector admits them, so the newest wins — which is the message
-    # an answer follows. The tool's channel_post/dm reads it to tell an
-    # agent-to-agent turn from a human-prompted one, and its time as the
-    # "new inbound" a runaway post would lack.
+    # an answer follows. The tool's channel_post/dm reads its time as the
+    # "new inbound" that resets the one-sided-run warning and separates an
+    # answer to a new message from an accidental double send.
     record_trigger(
         config_dir,
         endpoint_id=str(getattr(owner, "endpoint_id", "") or ""),

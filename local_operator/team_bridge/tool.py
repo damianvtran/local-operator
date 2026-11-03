@@ -1061,14 +1061,13 @@ async def _direct_message(
     conversation_id = str(view.get("id") or "")
     if _CONVERSATION_ID.fullmatch(conversation_id) is None:
         return _error("the hub opened no usable DM id", code="dm_failed")
-    # LOOP/COST GUARD, DM HALF (review round 1, m1). A DM is an ordinary
-    # conversation with both agents as members, so under the wake contract each
-    # `dm` wakes the other agent exactly like a channel post — two agents trading
-    # DMs is the same runaway the guard exists for, and an older hub enforces no
-    # cap at all. Same limits, same structured refusal as `channel_post`, keyed
-    # on the DM's own conversation id; reserved AFTER every local refusal (a
-    # malformed or unreachable target never spends budget) and BEFORE the write
-    # (a concurrent post of this endpoint sees the slot).
+    # REPLY GUARD, DM HALF (review round 1, m1). A DM is an ordinary
+    # conversation, so it gets the same bookkeeping as `channel_post`, keyed on
+    # the DM's own conversation id: never a count refusal (operator, 2026-11-03),
+    # only an exact double send skipped and a one-line warning on a long
+    # one-sided run. Reserved AFTER every local refusal (a malformed or
+    # unreachable target records nothing) and BEFORE the write (a concurrent
+    # post of this endpoint sees the slot).
     try:
         slot = reply_guard.reserve_post(
             runtime.config_dir,
@@ -1076,10 +1075,10 @@ async def _direct_message(
             conversation_id=conversation_id,
             body=text,
         )
-    except reply_guard.ReplyGuardUnavailable:
-        return reply_guard.unavailable_result()
-    if isinstance(slot, reply_guard.Refusal):
-        return slot.as_result()
+    except reply_guard.ReplyGuardUnavailable as failure:
+        return reply_guard.unavailable_result(failure)
+    if isinstance(slot, reply_guard.Skipped):
+        return slot.as_result(conversation_id)
     try:
         result = await runtime.client.conversation_send(
             conversation_id,
@@ -1126,7 +1125,8 @@ async def _direct_message(
                 receipt[
                     "content"
                 ] += f"; recipient agent is {state} (its owner must accept before it is woken)"
-    return receipt
+    # Last, so the warning line follows the whole receipt sentence.
+    return _with_run_warning(receipt, slot)
 
 
 # -- owner-shared conversations (the chief-of-staff read grant) --------------
@@ -1323,6 +1323,23 @@ def _post_receipt(
     }
     if mention_account_id:
         receipt["resolved_account_id"] = mention_account_id
+    return receipt
+
+
+def _with_run_warning(
+    receipt: dict[str, Any], slot: reply_guard.Reservation | None
+) -> dict[str, Any]:
+    """Attach the reply guard's one-sided-run warning to a successful receipt.
+
+    One optional ``warning`` line, absent on all but the threshold posts: the
+    token-cheap nudge that replaced the count refusals (operator, 2026-11-03).
+    Also appended to ``content``, because that string is what the tool result
+    renders to the model; ``details`` alone would never be read.
+    """
+
+    if slot is not None and slot.warning:
+        receipt["warning"] = slot.warning
+        receipt["content"] = f"{receipt['content']}\nwarning: {slot.warning}"
     return receipt
 
 
@@ -1865,12 +1882,13 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         refused = _validate_reply_destination(runtime, args)
         if refused is not None:
             return refused
-        # LOOP/COST GUARD (wake contract): every conversation message now wakes
-        # its agent members, so two agents answering every wake would trade
-        # posts for ever. Reserved LAST among the local checks (a malformed or
-        # unresolvable call never spends budget) and BEFORE the wire write (a
-        # concurrent post of the same endpoint sees the slot). Fail closed: a
-        # guard that cannot read its state refuses rather than going silent.
+        # REPLY GUARD (wake contract): never a count refusal (operator,
+        # 2026-11-03) — the post is delivered, an exact double send within 10 s
+        # is skipped, and a long one-sided run adds a one-line ``warning``.
+        # Reserved LAST among the local checks (a malformed or unresolvable call
+        # records nothing) and BEFORE the wire write (a concurrent post of the
+        # same endpoint sees the slot). Fail closed only when the guard's state
+        # is unreadable: a broken install, not a limit.
         slot = None
 
         class DispatchRefused(Exception):
@@ -1898,10 +1916,12 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                         conversation_id=channel_id,
                         body=params.body,
                     )
-                except reply_guard.ReplyGuardUnavailable:
-                    raise DispatchRefused(reply_guard.unavailable_result()) from None
-                if isinstance(reserved, reply_guard.Refusal):
-                    raise DispatchRefused(reserved.as_result())
+                except reply_guard.ReplyGuardUnavailable as failure:
+                    raise DispatchRefused(reply_guard.unavailable_result(failure)) from None
+                if isinstance(reserved, reply_guard.Skipped):
+                    # Not a failure: the identical message is already posted.
+                    # Raised only to stop the wire write; the result is ``ok``.
+                    raise DispatchRefused(reserved.as_result(channel_id))
                 slot = reserved
 
         # ONE ref per CALL, minted before dispatch: the client's own 401 refresh
@@ -1938,12 +1958,13 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # rebuilt here: a second construction site is how the two lanes drift.
         # ``mention_account_id`` is the id the post was actually directed at, so
         # the confirmation names a fact instead of restating the caller's ask.
-        return _post_receipt(
+        receipt = _post_receipt(
             channel_id,
             result,
             thread_root_id=thread_root_id,
             mention_account_id=recipient_account_id,
         )
+        return _with_run_warning(receipt, slot)
 
     if params.op == "react":
         channel_id = params.channel_id.strip()
