@@ -1,0 +1,714 @@
+{
+  "steps": [
+    {
+      "t_s": 0.85,
+      "name": "daemon up",
+      "port": 49847,
+      "pid": 79501
+    },
+    {
+      "t_s": 3.63,
+      "name": "pair: no extension connected",
+      "rc": 1,
+      "out": "No Local Operator extension is connected yet, so there is no code to show. Open Chrome and check that the Local Operator extension is installed and turned on: https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof It connects within a minute. Then ask Local Operator to \"pair my browser\" again."
+    },
+    {
+      "t_s": 10.37,
+      "name": "extension loaded",
+      "id": "mchnkekbhpoehakjekcmjcjcepalmofe",
+      "chrome": "Chrome/156.0.8078.80"
+    },
+    {
+      "t_s": 10.58,
+      "name": "extension connected unpaired",
+      "pending": [
+        "mchnkekbhpoehakjekcmjcjcepalmofe"
+      ]
+    },
+    {
+      "t_s": 10.58,
+      "name": "install opened pairing tab",
+      "opened": true
+    },
+    {
+      "t_s": 13.66,
+      "name": "cold state status",
+      "out": [
+        "extension connected: yes",
+        "paired:              no",
+        "log:                 /var/folders/qd/1q2xkcls0tg60vh97jjngxc40000gn/T/lo-pair-e2e-oaDfqn/.local-operator/logs/browser-bridge.log",
+        "downloads:           /var/folders/qd/1q2xkcls0tg60vh97jjngxc40000gn/T/lo-pair-e2e-oaDfqn/.local-operator/browser/downloads",
+        "config root:         /var/folders/qd/1q2xkcls0tg60vh97jjngxc40000gn/T/lo-pair-e2e-oaDfqn/.local-operator"
+      ]
+    },
+    {
+      "t_s": 17.02,
+      "name": "pair from cold state",
+      "rc": 0,
+      "ms": 3359,
+      "out": "Your Local Operator pairing code is 862701.\nSwitch to Chrome: a Local Operator tab is open there with a box for the code. Type the code and press Pair.\nNo tab? Click the Local Operator icon in Chrome's toolbar (it may be under the puzzle-piece icon) and type it there.\nThe code works for 15 minutes. After pairing, Local Operator asks you in Chrome to Allow each new website the first time it visits one.",
+      "code": "862701"
+    },
+    {
+      "t_s": 19.75,
+      "name": "pair run twice: same code",
+      "same": true,
+      "code1": "862701",
+      "code1b": "862701"
+    },
+    {
+      "t_s": 19.76,
+      "name": "pairing tab opened by lop browser pair",
+      "opened": true,
+      "url": "chrome-extension://mchnkekbhpoehakjekcmjcjcepalmofe/pair/pair.html?from=cli"
+    },
+    {
+      "t_s": 21.4,
+      "name": "wrong code #1",
+      "error": "That code didn't match. Check it and type it again.",
+      "attempts": 1,
+      "rotated": false
+    },
+    {
+      "t_s": 22.07,
+      "name": "wrong code #2",
+      "error": "That code didn't match. Check it and type it again.",
+      "attempts": 2,
+      "rotated": false
+    },
+    {
+      "t_s": 22.68,
+      "name": "wrong code #3",
+      "error": "That code didn't match. Check it and type it again.",
+      "attempts": 3,
+      "rotated": false
+    },
+    {
+      "t_s": 23.29,
+      "name": "wrong code #4",
+      "error": "That code didn't match. Check it and type it again.",
+      "attempts": 4,
+      "rotated": false
+    },
+    {
+      "t_s": 23.89,
+      "name": "wrong code #5",
+      "error": "Too many wrong tries. Ask Local Operator to \"pair my browser\" for a new code.",
+      "attempts": 0,
+      "rotated": true
+    },
+    {
+      "t_s": 24.69,
+      "name": "old code after lockout",
+      "error": "That code didn't match. Check it and type it again."
+    },
+    {
+      "t_s": 27.84,
+      "name": "pair after lockout",
+      "code": "675789",
+      "differs_from_dead": true
+    },
+    {
+      "t_s": 28.46,
+      "name": "expired code",
+      "error": "That code expired. Ask Local Operator to \"pair my browser\" again."
+    },
+    {
+      "t_s": 32.24,
+      "name": "focus loss keeps typed digits",
+      "typedBefore": "168",
+      "valueAfter": "168"
+    },
+    {
+      "t_s": 32.34,
+      "name": "correct code -> Paired",
+      "ms": 103,
+      "title": "Paired."
+    },
+    {
+      "t_s": 34.79,
+      "name": "status after pairing",
+      "lines": [
+        "extension connected: yes",
+        "paired:              yes"
+      ]
+    },
+    {
+      "t_s": 37.3,
+      "name": "pair when already paired",
+      "rc": 0,
+      "out": "Your browser is already paired with Local Operator, so no code is needed. To pair another browser, install the Local Operator extension there, then ask Local Operator to \"pair my browser\" again."
+    },
+    {
+      "t_s": 43.85,
+      "name": "popup first paint vs settled pairing card",
+      "first": 405,
+      "settled": 405.015625,
+      "resize_px": 0.02
+    }
+  ],
+  "frames": {
+    "tab-opened-empty": {
+      "viewport": [
+        1000,
+        760
+      ],
+      "docHeight": 760,
+      "scrollbar": false,
+      "visible": [
+        "form-state"
+      ],
+      "card": {
+        "x": 280,
+        "y": 72,
+        "w": 440,
+        "h": 493.7
+      },
+      "input": {
+        "x": 305,
+        "y": 225.6,
+        "w": 390,
+        "h": 59.6
+      },
+      "button": {
+        "x": 305,
+        "y": 341.2,
+        "w": 390,
+        "h": 37
+      },
+      "error": {
+        "x": 305,
+        "y": 295.2,
+        "w": 390,
+        "h": 42,
+        "text": "",
+        "hidden": true
+      },
+      "focused": "pair-code",
+      "pairingSection": null,
+      "pendingMin": null
+    },
+    "tab-typing": {
+      "viewport": [
+        1000,
+        760
+      ],
+      "docHeight": 760,
+      "scrollbar": false,
+      "visible": [
+        "form-state"
+      ],
+      "card": {
+        "x": 280,
+        "y": 72,
+        "w": 440,
+        "h": 493.7
+      },
+      "input": {
+        "x": 305,
+        "y": 225.6,
+        "w": 390,
+        "h": 59.6
+      },
+      "button": {
+        "x": 305,
+        "y": 341.2,
+        "w": 390,
+        "h": 37
+      },
+      "error": {
+        "x": 305,
+        "y": 295.2,
+        "w": 390,
+        "h": 42,
+        "text": "",
+        "hidden": true
+      },
+      "focused": "pair-code",
+      "pairingSection": null,
+      "pendingMin": null
+    },
+    "tab-wrong-code": {
+      "viewport": [
+        1000,
+        760
+      ],
+      "docHeight": 760,
+      "scrollbar": false,
+      "visible": [
+        "form-state"
+      ],
+      "card": {
+        "x": 280,
+        "y": 72,
+        "w": 440,
+        "h": 493.7
+      },
+      "input": {
+        "x": 305,
+        "y": 225.6,
+        "w": 390,
+        "h": 59.6
+      },
+      "button": {
+        "x": 305,
+        "y": 341.2,
+        "w": 390,
+        "h": 37
+      },
+      "error": {
+        "x": 305,
+        "y": 295.2,
+        "w": 390,
+        "h": 42,
+        "text": "That code didn't match. Check it and type it again.",
+        "hidden": false
+      },
+      "focused": "pair-code",
+      "pairingSection": null,
+      "pendingMin": null
+    },
+    "tab-locked": {
+      "viewport": [
+        1000,
+        760
+      ],
+      "docHeight": 760,
+      "scrollbar": false,
+      "visible": [
+        "form-state"
+      ],
+      "card": {
+        "x": 280,
+        "y": 72,
+        "w": 440,
+        "h": 493.7
+      },
+      "input": {
+        "x": 305,
+        "y": 225.6,
+        "w": 390,
+        "h": 59.6
+      },
+      "button": {
+        "x": 305,
+        "y": 341.2,
+        "w": 390,
+        "h": 37
+      },
+      "error": {
+        "x": 305,
+        "y": 295.2,
+        "w": 390,
+        "h": 42,
+        "text": "Too many wrong tries. Ask Local Operator to \"pair my browser\" for a new code.",
+        "hidden": false
+      },
+      "focused": "pair-code",
+      "pairingSection": null,
+      "pendingMin": null
+    },
+    "tab-expired": {
+      "viewport": [
+        1000,
+        760
+      ],
+      "docHeight": 760,
+      "scrollbar": false,
+      "visible": [
+        "form-state"
+      ],
+      "card": {
+        "x": 280,
+        "y": 72,
+        "w": 440,
+        "h": 493.7
+      },
+      "input": {
+        "x": 305,
+        "y": 225.6,
+        "w": 390,
+        "h": 59.6
+      },
+      "button": {
+        "x": 305,
+        "y": 341.2,
+        "w": 390,
+        "h": 37
+      },
+      "error": {
+        "x": 305,
+        "y": 295.2,
+        "w": 390,
+        "h": 42,
+        "text": "That code expired. Ask Local Operator to \"pair my browser\" again.",
+        "hidden": false
+      },
+      "focused": "pair-code",
+      "pairingSection": null,
+      "pendingMin": null
+    },
+    "tab-paired": {
+      "viewport": [
+        1000,
+        760
+      ],
+      "docHeight": 760,
+      "scrollbar": false,
+      "visible": [
+        "paired-state"
+      ],
+      "card": {
+        "x": 280,
+        "y": 72,
+        "w": 440,
+        "h": 289
+      },
+      "input": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+      },
+      "button": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+      },
+      "error": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "text": "That code expired. Ask Local Operator to \"pair my browser\" again.",
+        "hidden": true
+      },
+      "focused": "BODY",
+      "pairingSection": null,
+      "pendingMin": null
+    },
+    "tab-loading": {
+      "viewport": [
+        1000,
+        760
+      ],
+      "docHeight": 760,
+      "scrollbar": false,
+      "visible": [
+        "checking"
+      ],
+      "card": {
+        "x": 280,
+        "y": 72,
+        "w": 440,
+        "h": 200.6
+      },
+      "input": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+      },
+      "button": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+      },
+      "error": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "text": "",
+        "hidden": true
+      },
+      "focused": "BODY",
+      "pairingSection": null,
+      "pendingMin": null
+    },
+    "tab-unreachable": {
+      "viewport": [
+        1000,
+        760
+      ],
+      "docHeight": 760,
+      "scrollbar": false,
+      "visible": [
+        "unreachable-state"
+      ],
+      "card": {
+        "x": 280,
+        "y": 72,
+        "w": 440,
+        "h": 263.3
+      },
+      "input": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+      },
+      "button": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+      },
+      "error": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "text": "",
+        "hidden": true
+      },
+      "focused": "BODY",
+      "pairingSection": null,
+      "pendingMin": null
+    },
+    "tab-form-nocode": {
+      "viewport": [
+        1000,
+        760
+      ],
+      "docHeight": 760,
+      "scrollbar": false,
+      "visible": [
+        "form-state"
+      ],
+      "card": {
+        "x": 280,
+        "y": 72,
+        "w": 440,
+        "h": 493.7
+      },
+      "input": {
+        "x": 305,
+        "y": 225.6,
+        "w": 390,
+        "h": 59.6
+      },
+      "button": {
+        "x": 305,
+        "y": 341.2,
+        "w": 390,
+        "h": 37
+      },
+      "error": {
+        "x": 305,
+        "y": 295.2,
+        "w": 390,
+        "h": 42,
+        "text": "",
+        "hidden": true
+      },
+      "focused": "pair-code",
+      "pairingSection": null,
+      "pendingMin": null
+    },
+    "tab-form-dark": {
+      "viewport": [
+        1000,
+        760
+      ],
+      "docHeight": 760,
+      "scrollbar": false,
+      "visible": [
+        "form-state"
+      ],
+      "card": {
+        "x": 280,
+        "y": 72,
+        "w": 440,
+        "h": 493.7
+      },
+      "input": {
+        "x": 305,
+        "y": 225.6,
+        "w": 390,
+        "h": 59.6
+      },
+      "button": {
+        "x": 305,
+        "y": 341.2,
+        "w": 390,
+        "h": 37
+      },
+      "error": {
+        "x": 305,
+        "y": 295.2,
+        "w": 390,
+        "h": 42,
+        "text": "",
+        "hidden": true
+      },
+      "focused": "pair-code",
+      "pairingSection": null,
+      "pendingMin": null
+    },
+    "tab-form-narrow-dark": {
+      "viewport": [
+        380,
+        760
+      ],
+      "docHeight": 760,
+      "scrollbar": false,
+      "visible": [
+        "form-state"
+      ],
+      "card": {
+        "x": 24,
+        "y": 72,
+        "w": 332,
+        "h": 533.9
+      },
+      "input": {
+        "x": 49,
+        "y": 225.6,
+        "w": 282,
+        "h": 59.6
+      },
+      "button": {
+        "x": 49,
+        "y": 341.2,
+        "w": 282,
+        "h": 37
+      },
+      "error": {
+        "x": 49,
+        "y": 295.2,
+        "w": 282,
+        "h": 42,
+        "text": "",
+        "hidden": true
+      },
+      "focused": "pair-code",
+      "pairingSection": null,
+      "pendingMin": null
+    },
+    "popup-first-paint": {
+      "viewport": [
+        300,
+        600
+      ],
+      "docHeight": 600,
+      "scrollbar": false,
+      "visible": [
+        "pending"
+      ],
+      "card": {
+        "x": 10,
+        "y": 10,
+        "w": 280,
+        "h": 405
+      },
+      "input": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+      },
+      "button": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0
+      },
+      "error": {
+        "x": 0,
+        "y": 0,
+        "w": 0,
+        "h": 0,
+        "text": "",
+        "hidden": true
+      },
+      "focused": "BODY",
+      "pairingSection": 0,
+      "pendingMin": "284px"
+    },
+    "popup-pairing": {
+      "viewport": [
+        300,
+        600
+      ],
+      "docHeight": 600,
+      "scrollbar": false,
+      "visible": [
+        "pairing"
+      ],
+      "card": {
+        "x": 10,
+        "y": 10,
+        "w": 280,
+        "h": 405
+      },
+      "input": {
+        "x": 27,
+        "y": 182,
+        "w": 246,
+        "h": 36
+      },
+      "button": {
+        "x": 27,
+        "y": 282,
+        "w": 246,
+        "h": 34
+      },
+      "error": {
+        "x": 27,
+        "y": 230,
+        "w": 246,
+        "h": 36,
+        "text": "",
+        "hidden": true
+      },
+      "focused": "pair-code",
+      "pairingSection": 284.02,
+      "pendingMin": "284px"
+    },
+    "popup-pairing-error": {
+      "viewport": [
+        300,
+        600
+      ],
+      "docHeight": 600,
+      "scrollbar": false,
+      "visible": [
+        "pairing"
+      ],
+      "card": {
+        "x": 10,
+        "y": 10,
+        "w": 280,
+        "h": 405
+      },
+      "input": {
+        "x": 27,
+        "y": 182,
+        "w": 246,
+        "h": 36
+      },
+      "button": {
+        "x": 27,
+        "y": 282,
+        "w": 246,
+        "h": 34
+      },
+      "error": {
+        "x": 27,
+        "y": 230,
+        "w": 246,
+        "h": 36,
+        "text": "Too many wrong tries. Ask Local Operator to \"pair my browser\" for a new code.",
+        "hidden": false
+      },
+      "focused": "pair-code",
+      "pairingSection": 284.02,
+      "pendingMin": "284px"
+    }
+  },
+  "chrome": "Chrome/156.0.8078.80",
+  "extensionId": "mchnkekbhpoehakjekcmjcjcepalmofe"
+}
