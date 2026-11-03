@@ -1402,4 +1402,46 @@ test("the status workflow is structurally read-only", async () => {
   }
   // Its own concurrency group, so a poll never queues a release.
   assert.match(code, /group: chrome-web-store-status/);
+  // M1: no record must fail the upload step rather than warn past it.
+  assert.match(code, /if-no-files-found: error/);
+});
+
+// M1 (agent review round 1): the record is the poll's deliverable, so failing
+// to write it must fail the job. A green run with no artifact would read to a
+// monitor as "nothing changed" while the store's answer was simply dropped.
+test("status poll exits non-zero when the record cannot be written", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cws-status-"));
+  // A path under a directory that does not exist: the write must fail.
+  const output = join(dir, "missing-dir", "status.json");
+  try {
+    const error = await runRelease(["status"], [
+      fetchStatusOnly({ itemId: extensionId, submittedItemRevisionStatus: revision("STAGED", VERSION) }),
+    ], {
+      token: POLL_TOKEN,
+      expectFailure: true,
+      env: { CWS_READ_ONLY: "1", CWS_STATUS_OUTPUT: output },
+    });
+    assert.notEqual(error.code, 0);
+    assert.match(error.stderr, /status read failed: could not write the status record/);
+    assert.ok(!error.stderr.includes(POLL_TOKEN), error.stderr);
+    // Exactly one report: the EXIT trap must not retry the same write.
+    assert.equal(error.stderr.match(/could not write the status record/g).length, 1, error.stderr);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// Q1 (QA round 1): a failed read is not a failed publish. The status mode says
+// so; stage/promote keep the prefix that past logs and the release record grep.
+test("status failures say 'status read failed', writing modes keep 'publish failed'", async () => {
+  const { result } = await runPoll([
+    fetchStatusOnly({ itemId: "someone-else" }),
+  ], { expectFailure: true });
+  assert.match(result.stderr, /^Chrome Web Store status read failed: status response identified a different extension$/m);
+  assert.ok(!result.stderr.includes("publish failed"), result.stderr);
+
+  const promote = await runRelease(["promote", VERSION], [
+    () => ({ itemId: extensionId, submittedItemRevisionStatus: revision("PENDING_REVIEW", VERSION) }),
+  ], { expectFailure: true });
+  assert.match(promote.stderr, /^Chrome Web Store publish failed: only an approved STAGED revision can be promoted/m);
 });

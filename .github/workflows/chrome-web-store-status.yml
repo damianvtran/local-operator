@@ -153,5 +153,6 @@ jobs:
         with:
           name: chrome-web-store-status
           path: ${{ runner.temp }}/chrome-web-store-status.json
-          if-no-files-found: warn
+          # A missing record is a failed poll, never an empty success.
+          if-no-files-found: error
           retention-days: 14

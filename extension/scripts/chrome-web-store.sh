@@ -93,7 +93,15 @@ EXPECTED_EXTENSION_ID=omibaecbjdhgbbcedbnnnmjpmopfheof
 fail() {
   # Kept for the status record's EXIT trap, which reports why a read failed.
   failure_message="$*"
-  printf 'Chrome Web Store publish failed: %s\n' "$*" >&2
+  # `status` reads and never publishes, so its failures must not say "publish
+  # failed": a monitor or operator reading the poll log would take a failed read
+  # for a failed release. stage/promote keep the old prefix verbatim, because
+  # docs/store/release-record.md and past run logs are grepped for it.
+  if [[ "$MODE" == "status" ]]; then
+    printf 'Chrome Web Store status read failed: %s\n' "$*" >&2
+  else
+    printf 'Chrome Web Store publish failed: %s\n' "$*" >&2
+  fi
   exit 1
 }
 failure_message=""
@@ -204,8 +212,17 @@ write_status_record() {
           summary: (env.CWS_RECORD_SUMMARY | if . == "" then null else text(.; 4 * $value_limit * 8) end),
           error: (env.CWS_RECORD_ERROR | if . == "" then null else text(.; $error_limit) end)
         }
-    ' >"$CWS_STATUS_OUTPUT" 2>/dev/null \
-    || printf 'could not write the status record to %s\n' "$CWS_STATUS_OUTPUT" >&2
+    ' >"$CWS_STATUS_OUTPUT.partial" 2>/dev/null \
+    && mv -f "$CWS_STATUS_OUTPUT.partial" "$CWS_STATUS_OUTPUT" && return 0
+  # Fail closed. The record IS this mode's deliverable: a poll that read the
+  # store but left no record (or a truncated one) would let a monitor treat the
+  # missing artifact as "nothing new" while the job shows green. Writing to a
+  # sibling then renaming means a failed write never leaves a half-written
+  # file at PATH for the upload step to publish as if it were the answer.
+  rm -f "$CWS_STATUS_OUTPUT.partial" 2>/dev/null || true
+  printf 'Chrome Web Store status read failed: could not write the status record to %s\n' \
+    "$CWS_STATUS_OUTPUT" >&2
+  return 1
 }
 
 status_record_written=""
@@ -215,7 +232,9 @@ on_exit() {
   # from a missing artifact. report_api_error writes its own (it has the body);
   # this covers transport failures, non-JSON answers and the itemId check.
   if [[ "$MODE" == "status" && -n "${CWS_STATUS_OUTPUT:-}" && -z "$status_record_written" ]]; then
-    write_status_record "" "" "${failure_message:-status read exited with code $rc}"
+    # rc is already non-zero on this path; a write failure here is reported by
+    # the writer, and the shell's exit status stays the original failure.
+    write_status_record "" "" "${failure_message:-status read exited with code $rc}" || true
   fi
   rm -rf "$tmp_dir"
 }
@@ -291,8 +310,10 @@ report_api_error() {
   fi
   if [[ "$MODE" == "status" && -n "${CWS_STATUS_OUTPUT:-}" ]]; then
     # $body is already redacted and bounded above; the writer bounds it again.
-    write_status_record "" "" "$label call returned HTTP $status: $body"
+    # Marked written either way: a failed write is reported by the writer, and
+    # retrying it from the EXIT trap would only print the same error twice.
     status_record_written=1
+    write_status_record "" "" "$label call returned HTTP $status: $body" || true
   fi
   printf 'Chrome Web Store %s call returned HTTP %s for extension %s v%s.\n' \
     "$label" "$status" "$CWS_EXTENSION_ID" "${EXPECTED_VERSION:-<unknown>}" >&2
@@ -619,7 +640,10 @@ else
   printf 'Chrome Web Store status for extension %s: %s\n' \
     "$CWS_EXTENSION_ID" "$status_summary"
   if [[ -n "${CWS_STATUS_OUTPUT:-}" ]]; then
-    write_status_record "$tmp_dir/status.json" "$status_summary" ""
     status_record_written=1
+    # The read succeeded but its record could not be kept: exit non-zero so the
+    # job is red, never green with no artifact (exit, not fail(), so the error
+    # is printed once, by the writer).
+    write_status_record "$tmp_dir/status.json" "$status_summary" "" || exit 1
   fi
 fi
