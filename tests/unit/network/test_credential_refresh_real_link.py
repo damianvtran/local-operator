@@ -55,9 +55,7 @@ def _refresh(rig: Any, home: Path) -> tuple[int, dict[str, Any]]:
     assert "refresh-" not in result.stdout + result.stderr
     assert result.stdout.strip(), (result.returncode, result.stderr)
     body = json.loads(result.stdout)
-    print(
-        f"CLI network credential refresh {STUB_PROVIDER} --json: rc={result.returncode} {body}"
-    )
+    print(f"CLI network credential refresh {STUB_PROVIDER} --json: rc={result.returncode} {body}")
     return result.returncode, body
 
 
