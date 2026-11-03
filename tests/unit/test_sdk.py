@@ -26,6 +26,7 @@ launchd episode does, so the cache check passes the honest way.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import inspect
 import json
@@ -1635,15 +1636,16 @@ async def test_sdk4_owned_hosting_cause_renders_in_the_selected_locale(
     must still pass through verbatim.
     """
     from local_operator.i18n import catalogues
-    from local_operator.session_factory import HostingNotConfiguredError, HostingUnknownError
+    from local_operator.session_factory import (
+        HostingNotConfiguredError,
+        HostingUnknownError,
+    )
 
     root = tmp_path / "sdk4-hosting-catalogues"
     (root / "en").mkdir(parents=True)
     (root / "fr").mkdir()
     for name in ("wire.errors.hosting.json", "wire.errors.sdk_startup.json"):
-        (root / "en" / name).write_bytes(
-            (catalogues.catalogue_root() / "en" / name).read_bytes()
-        )
+        (root / "en" / name).write_bytes((catalogues.catalogue_root() / "en" / name).read_bytes())
     marker = "FR-CAUSE-MARKER."
     (root / "fr" / "wire.errors.hosting.json").write_text(
         json.dumps({"wire.errors.hosting.not_configured": marker}), encoding="utf-8"
@@ -1675,17 +1677,20 @@ def test_sdk4_hosting_cause_english_source_is_the_exceptions_own_sentence() -> N
     ``resolve_hosting_model``'s literal moves, the SDK stops recognizing its own
     cause and silently goes back to English, which is the regression this pins.
     """
-    from types import SimpleNamespace
 
+    from local_operator.config import ConfigManager
     from local_operator.i18n import catalogues
-    from local_operator.session_factory import HostingNotConfiguredError, resolve_hosting_model
+    from local_operator.session_factory import (
+        HostingNotConfiguredError,
+        resolve_hosting_model,
+    )
 
     class Unconfigured:
         def get_config_value(self, name, default=None):
             return default
 
     with pytest.raises(HostingNotConfiguredError) as caught:
-        resolve_hosting_model(None, SimpleNamespace(), Unconfigured())
+        resolve_hosting_model(None, argparse.Namespace(), cast(ConfigManager, Unconfigured()))
     source = catalogues.load_catalogue("en", "wire.errors.hosting")[
         "wire.errors.hosting.not_configured"
     ]

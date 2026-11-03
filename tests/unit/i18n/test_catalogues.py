@@ -54,6 +54,8 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.errors.agents",
         "wire.errors.auth",
         "wire.errors.desktop",
+        # Receipt-bound skill adoption owns its preview/consent vocabulary.
+        "wire.skill_adoption",
         "wire.errors.files",
         # The owned "hosting is not configured" cause clause, composed INTO the
         # startup refusals above: without its own key a locale that translates
