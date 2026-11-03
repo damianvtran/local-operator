@@ -2738,6 +2738,26 @@
       "note": "New namespace wire.errors.hosting (1 key: the owned display cause the startup refusal splices into its {error} slot) authored at base 87ca846245b2 against frozen English sha256 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63. es 'La plataforma de alojamiento no está configurada.' keeps the condition only; the surrounding refusal carries the remedy. Two independent readers, neither the translator nor the code author, both PASSED on these bytes with 0 blocker/major/minor/nit (sessions f50d87966867, 425221b9b2c6). Source-only assembly: no rendered, native-speaker, width, RTL or validator proof, and no activation, shipped or release claim. Evidence: i18n/audits/evidence/es/wire.errors.hosting/ (bundles ['eshost1', 'eshost2'], frozen inputs under _inputs/)."
     },
     {
+      "locale": "es",
+      "namespace": "wire.errors.hosting",
+      "source_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two independent sessions: f50d87966867, 425221b9b2c6)",
+        "model": "reader 1: requested radient/auto (Radient Auto), served model UNKNOWN, session-level quota fallback observed; reader 2: radient/auto, served model unexposed",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Provenance-only correction superseding this namespace's prior auditor served-model claim; not a new audit, translation or execution. Reader 1: requested route radient/auto (Radient Auto) per the manager task and the session-spend last identity; the session header primary anthropic/claude-sonnet-5-5 is metadata only, per-contribution served identity is UNKNOWN, and the journal records provider failure: quota with active selectors anthropic/claude-opus-5-5 and openai/gpt-6.1-sol — session-level fallback observed, with no time/turn mapping to this contribution. Reader 2 reports radient/auto with the served model unexposed. The earlier claim that this reader was served anthropic/claude-sonnet-5-5, and that no failure event was observed, is withdrawn. Copy verdicts unchanged: target 8de6f07aa22bb654bc0e45390bc803ba28f37698e6e08ffe95399d895ff3c5cf, en 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63, context ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9; both readers passed with 0 blocker/major. Immutable auditor-authored companion i18n/audits/evidence/es/wire.errors.hosting/eshost1/metadata-corrections.json (sha256 e5ca51b1a6b78c3e029a06d5326d30a5a70b82b91024abbc1af94c0bb2c1e2a7); the original record/receipt/report/log are preserved byte-identically. No native, rendered, RTL or fit proof is created by this correction."
+    },
+    {
       "locale": "fr",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
