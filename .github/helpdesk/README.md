@@ -275,8 +275,16 @@ one place in `.github/helpdesk/reconcile.sh`):
 
 ## Maintenance
 
-- **Harness pin**: the workflow pins `local-operator==<version>` from PyPI.
-  Bump it deliberately by editing the pin in `.github/workflows/helpdesk.yml`.
+- **Harness pin**: the workflow pins `local-operator==<version>` from PyPI in
+  both jobs (one version; `tests/report_failure.test.sh` checks they match).
+  The pin must be a version STILL ON PyPI: old releases get pruned, and a
+  pruned pin (0.62.38, until 0.94.22) makes every run fail at install. Bump it
+  with releases by editing `.github/workflows/helpdesk.yml`; an install
+  failure is labelled as such in the failure notice.
+- **Failure notices**: `report_failure.sh` keeps ONE `— <mode> run failed`
+  notice per thread, PATCHing it with the latest run link, timestamp and
+  `Failures recorded: <n>` instead of posting a new comment per failed run.
+  Tests: `bash .github/helpdesk/tests/report_failure.test.sh`.
 - **Thresholds and decisions**: `REVIEW_DELAY_MINUTES`,
   `VERDICT_SETTLE_MINUTES` and `WINDOW_DAYS` live at the top of
   `.github/helpdesk/reconcile.sh`, which is also where the sweep's skips and

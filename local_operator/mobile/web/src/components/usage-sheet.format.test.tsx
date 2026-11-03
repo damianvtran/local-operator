@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { getUsage, type PhoneUsageLimit } from "../api";
 import { BUNDLED_OWNED } from "../i18n/bundled.gen";
@@ -14,7 +14,7 @@ vi.mock("../store", async () => {
 	const runtime = createMessageRuntime(() => context, () => undefined, Object.keys(BUNDLED_OWNED));
 	return { messageRuntime: runtime, useLanguage: () => context.backendLocale, useLocaleSnapshot: () => context };
 });
-vi.mock("../api", () => ({ getUsage: vi.fn() }));
+vi.mock("../api", () => ({ getUsage: vi.fn(), refreshUsage: vi.fn(() => new Promise(() => undefined)) }));
 import { messageRuntime } from "../store";
 
 function select(locale: "en" | "fr" | "es" | "ru" | "vi" | "hi", translated: boolean) {
@@ -49,9 +49,11 @@ afterEach(() => { cleanup(); vi.resetAllMocks(); context.uiLocale = "en"; });
 
 it("rounds .29/.07 through percent style without binary tails", async () => {
 	select("en", false);
+	// Fraction-only rows read as REMAINING, matching the bar (1 - .29, 1 - .07).
 	load([0.29, 0.07].map((used_fraction) => ({ ...base, amount: { ...base.amount, used_fraction } })));
-	expect(await screen.findByText(/29% used/)).toBeTruthy();
-	expect(screen.getByText(/7% used/)).toBeTruthy();
+	// findAll: the card header repeats the binding window's remaining percent.
+	expect((await screen.findAllByText("71% left")).length).toBeGreaterThan(0);
+	expect(screen.getAllByText("93% left").length).toBeGreaterThan(0);
 	expect(document.body.textContent).not.toContain("28.999999999999996");
 	expect(document.body.textContent).not.toContain("7.000000000000001");
 });
@@ -64,7 +66,8 @@ it("formats FR decimals and unit labels using the served catalogue locale", asyn
 	for (const unit of ["dollars US", "jetons", "requêtes"]) expect(screen.getByText(new RegExp(`123,5 ${unit} left`))).toBeTruthy();
 	expect(screen.getByText(/29\s% left/)).toBeTruthy();
 	expect(document.body.textContent).not.toMatch(/usd|tokens|requests|UNTRUSTED_UNIT/);
-	expect(screen.getAllByText(/5-hour: 123,5 left/)).toHaveLength(2);
+	// The amount column alone: the label sits in its own truncating span now.
+	expect(screen.getAllByText("123,5 left")).toHaveLength(2);
 });
 
 it("formats used decimals and percent-point amounts without guessing unknown units", async () => {
@@ -76,7 +79,7 @@ it("formats used decimals and percent-point amounts without guessing unknown uni
 	]);
 	expect(await screen.findByText(/12\s345,679 jetons used/)).toBeTruthy();
 	expect(screen.getByText(/7\s% used/)).toBeTruthy();
-	expect(screen.getByText(/5-hour: 12,5 used/)).toBeTruthy();
+	expect(screen.getByText("12,5 used")).toBeTruthy();
 	expect(document.body.textContent).not.toContain("NEW_UNIT");
 });
 
@@ -88,7 +91,7 @@ it("renders singular English units at one and plural units at other measured cou
 	for (const unit of ["credits", "tokens", "requests"]) {
 		for (const count of counts) {
 			const noun = Math.abs(count) === 1 ? unit.slice(0, -1) : unit;
-			expect(await screen.findByText(`Included allowance · 5-hour: ${new Intl.NumberFormat("en").format(count)} ${noun} left`)).toBeTruthy();
+			expect((await screen.findAllByText(`${new Intl.NumberFormat("en").format(count)} ${noun} left`)).length).toBeGreaterThan(0);
 		}
 	}
 });
@@ -117,7 +120,7 @@ it.each([
 		for (const [index, count] of counts.entries()) {
 			// Retain NBSP/narrow-NBSP grouping bytes instead of Testing Library's
 			// default whitespace collapse, which hides the locale's real output.
-			expect(await screen.findByText(`Included allowance · 5-hour: ${new Intl.NumberFormat(locale).format(count)} ${unit}_${categories[index]} left`, { normalizer: (text) => text })).toBeTruthy();
+			expect((await screen.findAllByText(`${new Intl.NumberFormat(locale).format(count)} ${unit}_${categories[index]} left`, { normalizer: (text) => text })).length).toBeGreaterThan(0);
 		}
 	}
 });
@@ -131,24 +134,32 @@ it("does not send nonfinite counts to unit plural selection or alter safe branch
 		{ ...base, amount: { ...base.amount, remaining: 1, unit: "percent" } },
 		{ ...base, amount: { ...base.amount, remaining: 1, unit: "usd" } },
 	]);
-	expect(await screen.findByText(/29% used/)).toBeTruthy();
-	expect(screen.getByText(/Amount not reported/)).toBeTruthy();
-	expect(screen.getByText(/5-hour: 1 left/)).toBeTruthy();
-	expect(screen.getByText(/5-hour: 1% left/)).toBeTruthy();
-	expect(screen.getByText(/5-hour: 1 USD left/)).toBeTruthy();
+	expect((await screen.findAllByText("71% left")).length).toBeGreaterThan(0);
+	expect(screen.getByText("Amount not reported")).toBeTruthy();
+	expect(screen.getByText("1 left")).toBeTruthy();
+	expect(screen.getByText("1% left")).toBeTruthy();
+	expect(screen.getByText("1 USD left")).toBeTruthy();
 	expect(document.body.textContent).not.toMatch(/NaN|Infinity|UNKNOWN_UNIT|relay\.shell\.usage\.unit/);
 });
 
 it("formats reset and snapshot dates consistently in the catalogue locale", async () => {
 	select("fr", true);
 	const stamp = Date.UTC(2026, 0, 2, 15, 4);
-	load([{ ...base, resets_at_ms: stamp }], stamp);
-	// TZ=UTC is pinned by `test.env` in vite.config.ts, never inferred from the
-	// host: without that pin these assertions describe the contributor's clock
-	// (2 of 13 fail on a UTC-5 machine, 13/13 on a UTC one).
-	expect(await screen.findByText(/Resets at 2 janv\. 2026, 15:04/)).toBeTruthy();
-	expect(screen.getByText(/As of 2 janv\. 2026, 15:04\./)).toBeTruthy();
-	expect(document.body.textContent).not.toContain("2026-01-02T15:04");
+	// "Now" one day later in the same year: the exact reset drops the year
+	// (UX round 1, U8) but keeps the date, and the footer keeps its full form.
+	vi.useFakeTimers({ shouldAdvanceTime: true, now: stamp + 86_400_000 });
+	try {
+		load([{ ...base, resets_at_ms: stamp }], stamp);
+		// TZ=UTC is pinned by `test.env` in vite.config.ts, never inferred from the
+		// host: without that pin these assertions describe the contributor's clock
+		// (2 of 13 fail on a UTC-5 machine, 13/13 on a UTC one).
+		const toggle = await screen.findByRole("button", { pressed: false });
+		fireEvent.click(toggle);
+		expect(toggle.getAttribute("aria-pressed")).toBe("true");
+		expect(toggle.textContent).toBe("Resets at 2 janv., 15:04");
+		expect(screen.getByText(/As of 2 janv\. 2026, 15:04\./)).toBeTruthy();
+		expect(document.body.textContent).not.toContain("2026-01-02T15:04");
+	} finally { vi.useRealTimers(); }
 });
 
 it("uses EN formatting when the backend preference has no complete owned bundle", async () => {

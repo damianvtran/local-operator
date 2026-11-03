@@ -429,9 +429,12 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # The pin must be a version STILL ON PyPI: 0.62.38 was pruned and every
+      # run failed here for weeks. Bump it with releases (README "Harness pin").
       - name: Install the pinned harness
+        id: install
         if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
-        run: python -m pip install --disable-pip-version-check "local-operator==0.62.38"
+        run: python -m pip install --disable-pip-version-check "local-operator==0.94.22"
       - name: Install the helpdesk team and roles into the runner's lop config
         if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true' && steps.engaged.outputs.skip != 'true'
         run: bash "$RUNNER_TEMP/surface/.github/helpdesk/setup.sh"
@@ -549,14 +552,22 @@ jobs:
           # (@actions/runner applies step env last), so the notice still posts
           # when the app token is what failed.
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
         run: |
-          # Heading + sentence, through a body file so the blank line is real
-          # (`--body` would collapse it).
-          printf '%s\n\n%s\n' \
+          # ONE notice per PR and mode, updated in place: report_failure.sh
+          # PATCHes an existing comment with the same heading instead of
+          # posting another (46 duplicates landed on #3109 while the pin was
+          # broken). Fetched from the ref this run was dispatched from, as the
+          # engaged check does, so it works even when the checkout failed.
+          gh api "repos/${GITHUB_REPOSITORY}/contents/.github/helpdesk/report_failure.sh?ref=${GITHUB_SHA}" --jq '.content' | tr -d '\n' | base64 -d > "$RUNNER_TEMP/report_failure.sh"
+          reason=""
+          if [ "$INSTALL_OUTCOME" = "failure" ]; then reason="install"; fi
+          bash "$RUNNER_TEMP/report_failure.sh" "${PR_NUMBER}" \
             "### Sir Knight Lop the Second — ${MODE} run failed" \
-            "Sir Knight Lop the Second's ${MODE} run failed on the bot side — the pull request is unaffected. Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            > "$RUNNER_TEMP/helpdesk-notice.md"
-          gh pr comment "${PR_NUMBER}" -R "${GITHUB_REPOSITORY}" --body-file "$RUNNER_TEMP/helpdesk-notice.md"
+            "Sir Knight Lop the Second's ${MODE} run failed on the bot side — the pull request is unaffected." \
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            "$reason"
 
   triage:
     name: Triage issue
@@ -687,9 +698,11 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # Same pin as the review job; keep them in step (README "Harness pin").
       - name: Install the pinned harness
+        id: install
         if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
-        run: python -m pip install --disable-pip-version-check "local-operator==0.62.38"
+        run: python -m pip install --disable-pip-version-check "local-operator==0.94.22"
       - name: Install the helpdesk team and roles into the runner's lop config
         if: steps.key.outputs.enabled == 'true' && steps.guard.outputs.skip != 'true'
         run: bash .github/helpdesk/setup.sh
@@ -720,12 +733,18 @@ jobs:
           # (@actions/runner applies step env last), so the notice still posts
           # when the app token is what failed.
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
         run: |
-          printf '%s\n\n%s\n' \
+          # One notice per issue, updated in place (see the review job).
+          gh api "repos/${GITHUB_REPOSITORY}/contents/.github/helpdesk/report_failure.sh?ref=${GITHUB_SHA}" --jq '.content' | tr -d '\n' | base64 -d > "$RUNNER_TEMP/report_failure.sh"
+          reason=""
+          if [ "$INSTALL_OUTCOME" = "failure" ]; then reason="install"; fi
+          bash "$RUNNER_TEMP/report_failure.sh" "${ISSUE_NUMBER}" \
             "### Sir Knight Lop the Second — triage run failed" \
-            "Sir Knight Lop the Second's triage run failed on the bot side — the issue is unaffected. Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            > "$RUNNER_TEMP/helpdesk-notice.md"
-          gh issue comment "${ISSUE_NUMBER}" -R "${GITHUB_REPOSITORY}" --body-file "$RUNNER_TEMP/helpdesk-notice.md"
+            "Sir Knight Lop the Second's triage run failed on the bot side — the issue is unaffected." \
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            "$reason"
 
   root-aggregator-fixture:
     name: Offline aggregator fixture — lint and three ordered passes
