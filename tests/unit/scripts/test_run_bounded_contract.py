@@ -417,6 +417,18 @@ def test_revoking_wait_that_raises_cannot_restore_direct_send(monkeypatch):
         child.observe()
 
 
+def test_try_reap_that_consumes_a_status_revokes_direct_send(monkeypatch):
+    """R3.1: once try_reap consumed the leader's status the group number is free
+    for reuse, so a later killpg could hit a stranger. Revocation must hold."""
+    child = contracts.ReservedLeader(Child(), observer="waitid-wnowait")
+    monkeypatch.setattr(contracts.os, "killpg", forbidden)
+    monkeypatch.setattr(contracts.os, "waitpid", lambda pid, options: (pid, 9))
+    assert child.try_reap() == -9
+    assert child.proc.returncode == -9
+    with pytest.raises(RuntimeError, match="revoked"):
+        child.send_group(signal.SIGKILL)
+
+
 def test_unseen_observation_does_not_reach_terminal_promotion():
     cap = object.__new__(groups.OwnedGroup)
     cap.leader = cap.pgid = 43210
@@ -1415,6 +1427,8 @@ def test_unreadable_observer_never_blocks_on_a_leader_that_will_not_die(monkeypa
     assert ("killpg", 43210, signal.SIGKILL) in kernel.log
     polls = [e for e in kernel.log if e[0] == "waitpid-nohang-empty"]
     assert polls and not [e for e in kernel.log if e[0] == "waitpid"]
+    # R3.2: giving up on the leader must also end signal authority over its group.
+    assert kernel.leader is not None and kernel.leader._revoked
     killed_at = kernel.signalled_at[-1][1]
     assert contracts.KILL_SETTLE_SECONDS <= kernel.now - killed_at < 3
     assert outcome.wrapper_exit_code == 126
