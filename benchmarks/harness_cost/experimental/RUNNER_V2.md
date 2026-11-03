@@ -126,10 +126,17 @@ inputs, task manifest, evaluator, model metadata/catalog, runtime fingerprints,
 arm and reviewed LOP head. No ready-to-sign authorization record is bundled.
 Meter caps, rates and maximum exposures must be independently qualified first.
 Classifier costs remain a separate blocker even if main-model tests are green.
+Billing aggregation includes every recorded Messages attempt, including billed
+HTTP errors. Missing/invalid billing makes `cost_complete` false and complete
+model/total amounts null; `measured_model_cost_usd` preserves the partial known
+sum. Status/unknown-attempt counts remain visible. Discovery/count-token rows
+are not model attempts and cannot by themselves establish a measured model run.
+This checks recorded rows, not attempts entirely absent from the meter ledger.
 
 ## Actually verified versus pending
 
-The adapted port passed **16 stdlib-only tests** including seven config paths,
+The round-2 remediated port passed **20 stdlib-only runner tests**, including
+mixed-success/missing/error billing negative controls and seven config paths,
 synthetic-skill filesystem cloning/instruction deduplication, external-preflight
 refusal, missing wire/freeze refusal, explicit LOP source-launch environment and
 paid-LOP refusal before auth/preparation. These tests launch no harness/model.

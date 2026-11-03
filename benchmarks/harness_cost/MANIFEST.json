@@ -49,8 +49,8 @@
     },
     {
       "path": "experimental/EXPERIMENTAL-MANIFEST.json",
-      "bytes": 7913,
-      "sha256": "ee1a76e3a6e17ec606e6164f642f8746a7410de81d6b74174c6f19c60e37de58"
+      "bytes": 8336,
+      "sha256": "de8bb941783113b14f28b18606399a57510dd558b3e165c53eea770d8c76c110"
     },
     {
       "path": "experimental/PREREGISTRATION.md",
@@ -59,18 +59,18 @@
     },
     {
       "path": "experimental/README.md",
-      "bytes": 9494,
-      "sha256": "f6d9e71630a80f69023a1b17f3498dffb6f4bb4301fb954489cf1c4fe0cc1763"
+      "bytes": 9765,
+      "sha256": "8f12479d373e6695c29abbed29f6fae63b6a764a86a8ee4fb9f7286cc412b0d0"
     },
     {
       "path": "experimental/RUNNER_V2.md",
-      "bytes": 8656,
-      "sha256": "c73835719b310cea1233f07807e1f418303e26bd27122924b09f2428d3f5467a"
+      "bytes": 9207,
+      "sha256": "86741c3b884bb4e51ff69f178dae54b1ad2cff53418dc58732f73d29c40adf7a"
     },
     {
       "path": "experimental/SOURCE-AUDIT.json",
-      "bytes": 19837,
-      "sha256": "56a29ae8a5e1d0fa7547005fd09b56c0d73c4c019d2f4dde69452cc7e48190c3"
+      "bytes": 22895,
+      "sha256": "81c1e113243afdb1393c76b3bd256c58bd74e9e05daa12bf2c72271407d1ec69"
     },
     {
       "path": "experimental/TASKS.md",
@@ -89,8 +89,8 @@
     },
     {
       "path": "experimental/VERIFICATION.md",
-      "bytes": 4910,
-      "sha256": "3123c905efef8fdf35962aa091e4bb14e22944dd944815416150f685ed723d22"
+      "bytes": 8340,
+      "sha256": "d219be781ded0f91e55f690aafa20e17ab4131cd0c0b0a92aca61d659fd8913a"
     },
     {
       "path": "experimental/cache_forwarder.py",
@@ -119,8 +119,8 @@
     },
     {
       "path": "experimental/codex_toolsearch_bridge.py",
-      "bytes": 9888,
-      "sha256": "e589373d09dc4668e26496f322369577dc877a39e2174127d38e21ea47de4d03"
+      "bytes": 9688,
+      "sha256": "a65acb12afdf74b68da36f7964f7d938adc00397e83c9a66644298e7dc174efb"
     },
     {
       "path": "experimental/coding/CODEX-LICENSE",
@@ -139,8 +139,8 @@
     },
     {
       "path": "experimental/coding/README.md",
-      "bytes": 9520,
-      "sha256": "9fc6080255da805ab4e605e285d2d7b1f451bd6fdab6f60e1624296ecc5e5f39"
+      "bytes": 10192,
+      "sha256": "ab1c1faa5cffae924b003e234d1840af5e788ed25efa39dee1fd1d1250357e91"
     },
     {
       "path": "experimental/coding/SOURCE_MAP.md",
@@ -174,13 +174,13 @@
     },
     {
       "path": "experimental/coding/codex_bridge.py",
-      "bytes": 10065,
-      "sha256": "0b6aaa2667c3a22a83daba140d4d6290de6bc2b63cdc94f9d3f2c2c5f9f5471b"
+      "bytes": 10009,
+      "sha256": "7b7983d40126dce71b9ef20ddc2e887136d0f5a71a17ef918ca37fac726fdd39"
     },
     {
       "path": "experimental/coding/driver.py",
-      "bytes": 19194,
-      "sha256": "a7602f9e146423eee4ec0b03ff097de8f79b2e51ce50d9d60ebae4aa25753672"
+      "bytes": 21892,
+      "sha256": "0d12015a7e91dafcbb5e6e5a5ae0f359fdfe761afdfa96a3fa731e37b89fde84"
     },
     {
       "path": "experimental/coding/lop_launch.py",
@@ -201,6 +201,11 @@
       "path": "experimental/coding/subset.json",
       "bytes": 8795,
       "sha256": "d240bd359aa8efd97fc03f563719cde6d55636f92fcb715cc195afcafdcfadee"
+    },
+    {
+      "path": "experimental/coding/test_driver_safety.py",
+      "bytes": 8527,
+      "sha256": "7b226c635ec94a29c2a764bad2412d25fef70f1e46bdef2fd73381f6292025af"
     },
     {
       "path": "experimental/coding/test_guard.py",
@@ -264,13 +269,23 @@
     },
     {
       "path": "experimental/runner_v2.py",
-      "bytes": 61830,
-      "sha256": "8d386d9c70b628fa98cb991b44f27e3ccf8de529758205a0ad583a49ffc33ef6"
+      "bytes": 62821,
+      "sha256": "e0f6ef5d30c7740943bbb822797ea98f413f3844e8be8cc1a8dc067f110a7ec8"
+    },
+    {
+      "path": "experimental/sse_stream.py",
+      "bytes": 2190,
+      "sha256": "6be4440a9d4d7f955d973f9ea13d6f2fe168b6702ef86bf538264145dd0ef8ac"
     },
     {
       "path": "experimental/test_adapters.py",
       "bytes": 11642,
       "sha256": "93d7ed0416f613b1587fe96a63ecaecabaeeb18fb5ee37272806ec4ce680f942"
+    },
+    {
+      "path": "experimental/test_bridge_sse.py",
+      "bytes": 7549,
+      "sha256": "ae79f9ca3073ef9628014365ff96971f13d7537fe98e3d3dcace168c08cf83b5"
     },
     {
       "path": "experimental/test_cache_bridge.py",
@@ -289,8 +304,8 @@
     },
     {
       "path": "experimental/test_runner_v2.py",
-      "bytes": 15564,
-      "sha256": "9ee5c166a8449e8a609952c02753c21a463127077d93590a5d5a8c4da3cfc2cb"
+      "bytes": 17702,
+      "sha256": "d0bdc86e7548dea768f4af5f0c31a14e755ea06097fd544ff3801fde69784d54"
     },
     {
       "path": "experimental/translator_config.example.json",

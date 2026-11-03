@@ -58,6 +58,11 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 from starlette.routing import Route
 
+if __package__:
+    from .sse_stream import iter_sse
+else:
+    from sse_stream import iter_sse
+
 UPSTREAM = os.environ.get("BRIDGE_UPSTREAM", "http://127.0.0.1:4000").rstrip("/")
 LOG = Path(os.environ.get("BRIDGE_LOG", "codex_bridge.jsonl"))
 NAME = "tool_search"
@@ -152,40 +157,36 @@ async def responses(request: Request) -> Response:
 
     async def gen():
         hidden: set[str] = set()  # item ids of tool_search function calls
-        buf = b""
         try:
-            async for chunk in resp.aiter_raw():
-                buf += chunk
-                while b"\n\n" in buf:
-                    event, buf = buf.split(b"\n\n", 1)
-                    data_lines = [l[5:].strip() for l in event.split(b"\n") if l.startswith(b"data:")]
-                    if not data_lines:
-                        yield event + b"\n\n"
-                        continue
-                    try:
-                        d = json.loads(b"\n".join(data_lines))
-                    except json.JSONDecodeError:
-                        yield event + b"\n\n"
-                        continue
-                    t = d.get("type", "")
-                    item = d.get("item")
-                    if t == "response.output_item.added" and _is_search_fc(item):
-                        hidden.add(item.get("id"))
-                        continue
-                    if t.startswith("response.function_call_arguments.") and d.get("item_id") in hidden:
-                        continue
-                    if t == "response.output_item.done" and _is_search_fc(item):
-                        d["item"] = _convert_item(item)
-                        row["search_calls_out"] += 1
-                    elif t in ("response.completed", "response.incomplete") and isinstance(d.get("response"), dict):
-                        d["response"]["output"] = [_convert_item(i) if _is_search_fc(i) else i
-                                                   for i in d["response"].get("output") or []]
-                    else:
-                        yield event + b"\n\n"
-                        continue
-                    yield f"event: {t}\ndata: {json.dumps(d)}\n\n".encode()
-            if buf:
-                yield buf
+            async for event, data in iter_sse(resp.aiter_raw()):
+                if data is None:
+                    yield event
+                    continue
+                try:
+                    d = json.loads(data)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    yield event
+                    continue
+                if not isinstance(d, dict):
+                    yield event
+                    continue
+                t = d.get("type", "")
+                item = d.get("item")
+                if t == "response.output_item.added" and _is_search_fc(item):
+                    hidden.add(item.get("id"))
+                    continue
+                if t.startswith("response.function_call_arguments.") and d.get("item_id") in hidden:
+                    continue
+                if t == "response.output_item.done" and _is_search_fc(item):
+                    d["item"] = _convert_item(item)
+                    row["search_calls_out"] += 1
+                elif t in ("response.completed", "response.incomplete") and isinstance(d.get("response"), dict):
+                    d["response"]["output"] = [_convert_item(i) if _is_search_fc(i) else i
+                                               for i in d["response"].get("output") or []]
+                else:
+                    yield event
+                    continue
+                yield f"event: {t}\ndata: {json.dumps(d)}\n\n".encode()
         finally:
             await resp.aclose()
             with LOG.open("a") as fh:

@@ -198,6 +198,45 @@ class V2Tests(unittest.TestCase):
         self.assertIsNone(r.money(rows, "", True)["total_cost_usd"])
         self.assertEqual(r.money(rows, "", False)["total_cost_usd"], .052)
 
+    def test_money_missing_attempt_never_reports_complete_total(self):
+        rows = [{"path": "v1/messages", "status": 200, "usage": {"cost": .20}},
+                {"path": "v1/messages", "status": 200, "usage": {}}]
+        cost = r.money(rows, "", False)
+        self.assertFalse(cost["cost_complete"])
+        self.assertIsNone(cost["model_cost_usd"])
+        self.assertIsNone(cost["total_cost_usd"])
+        self.assertEqual(cost["measured_model_cost_usd"], .20)
+        self.assertEqual(cost["unknown_billing_attempts"], 1)
+
+    def test_money_billed_error_is_included_with_status_flags(self):
+        rows = [{"path": "v1/messages", "status": 200, "usage": {"cost": .20}},
+                {"path": "v1/messages", "status": 500, "usage": {"cost": .30}}]
+        cost = r.money(rows, "", False)
+        self.assertTrue(cost["cost_complete"])
+        self.assertEqual(cost["total_cost_usd"], .50)
+        self.assertEqual(cost["message_attempts"], 2)
+        self.assertEqual(cost["non_200_message_attempts"], 1)
+
+    def test_money_discovery_is_not_a_model_attempt(self):
+        rows = [{"path": "mcp/tools/list", "status": 200},
+                {"path": "v1/messages/count_tokens", "status": 200}]
+        cost = r.money(rows, "", False)
+        self.assertFalse(cost["cost_complete"])
+        self.assertEqual(cost["message_attempts"], 0)
+        self.assertEqual(cost["non_model_rows"], 2)
+        self.assertIsNone(cost["total_cost_usd"])
+        cost = r.money(rows + [{"path": "v1/messages", "status": 429, "usage": {"cost": 0}}], "", False)
+        self.assertTrue(cost["cost_complete"])
+        self.assertEqual(cost["total_cost_usd"], 0)
+
+    def test_money_invalid_costs_are_unknown_not_zero(self):
+        for invalid in (None, -1, True, "NaN", "Infinity", "bad", {}, []):
+            with self.subTest(invalid=invalid):
+                cost = r.money([{"path": "v1/messages", "status": 500, "usage": {"cost": invalid}}], "", False)
+                self.assertFalse(cost["cost_complete"])
+                self.assertEqual(cost["unknown_billing_attempts"], 1)
+                self.assertIsNone(cost["total_cost_usd"])
+
     def test_deferred_summary_without_raw_exchanges_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Deferred capture lacks correlated"):
             r.validate_deferred_exchanges([{"model": r.MODEL, "tools": [{"name": "tool_search"}]}], [], [], False)
