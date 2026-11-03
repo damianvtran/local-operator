@@ -5398,11 +5398,7 @@ class _NearMissTrace:
     """
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self.origin = time.monotonic()
-        self.lines: list[str] = []
-        #: The last value `_barren_click_at` took, kept even after a retirement
-        #: clears the field, so the claim's age can still be reported.
-        self.last_armed_at: float | None = None
+        self.reset()
         original_click = Editor._on_click
         original_retire = Editor.retire_barren_click
         trace = self
@@ -5414,6 +5410,9 @@ class _NearMissTrace:
             after = editor._barren_click_at
             if after is not None:
                 trace.last_armed_at = after
+            # Timed from the wrapper's own entry stamp, not the product's
+            # `time.monotonic()` inside `_on_click`; the two are microseconds
+            # apart, far below the 1.0 s window this distinguishes.
             elapsed = "n/a" if before is None else f"{entered - before[0]:.3f}s"
             drift = (
                 "n/a"
@@ -5440,13 +5439,44 @@ class _NearMissTrace:
                 # A retirement inside the click handler would otherwise hide
                 # that the claim was ever armed.
                 trace.last_armed_at = held
+                trace.retired_armed_by = caller
             trace.note(
-                f"retire by={caller} claim_was={trace.rel(held)} " f"claim_age={trace.age(held)}"
+                f"retire by={caller} claim_was={trace.rel(held)} claim_age={trace.age(held)}"
             )
             original_retire(editor)
 
         monkeypatch.setattr(Editor, "_on_click", _traced_click)
         monkeypatch.setattr(Editor, "retire_barren_click", _traced_retire)
+
+    def reset(self) -> None:
+        """Start a clean trace without re-wrapping the handlers.
+
+        Called per drift instead of constructing a new trace, because a second
+        construction would wrap the FIRST trace's wrappers and every click
+        would be recorded twice, into two traces.
+        """
+        self.origin = time.monotonic()
+        self.lines: list[str] = []
+        #: The last value `_barren_click_at` took, kept even after a retirement
+        #: clears the field, so the claim's age can still be reported.
+        self.last_armed_at: float | None = None
+        #: Who retired a claim that WAS armed; `None` when nothing did.
+        self.retired_armed_by: str | None = None
+
+    def verdict(self) -> str:
+        """Which of the three conflated phases failed, from the recorded facts.
+
+        Ordered so the most specific explanation wins: a retirement of a live
+        claim explains a missing claim even if it later would have expired.
+        """
+        if self.retired_armed_by is not None:
+            return f"RETIRED (armed, then retired by {self.retired_armed_by})"
+        if self.last_armed_at is not None:
+            return (
+                f"EXPIRED (armed {self.age(self.last_armed_at)} ago, "
+                f"life {BARREN_CLICK_WINDOW_S}s)"
+            )
+        return "NEVER ARMED (no click handler set the claim)"
 
     def rel(self, stamp: float | None) -> str:
         """A monotonic stamp as seconds since the trace began, or `None`."""
@@ -5597,6 +5627,11 @@ async def test_a_double_click_that_drifts_one_cell_does_not_clear_the_draft(
     gesture Textual scored as two singles would paint a highlight the user did
     not ask for. It only declines the interrupt rung for one press.
     """
+    # Installed ONCE and reset per drift: constructing one per iteration would
+    # wrap the previous trace's wrappers. Diagnostic only: it renders into the
+    # failure messages below and nowhere else; monkeypatch undo restores the
+    # original handlers at teardown.
+    trace = _NearMissTrace(monkeypatch)
     for drift in (1, 2):
         app = _pilot_app()
         async with app.run_test(size=(80, 24)) as pilot:
@@ -5606,10 +5641,7 @@ async def test_a_double_click_that_drifts_one_cell_does_not_clear_the_draft(
                 await pilot.pause()
             draft = editor.text
 
-            # Installed per drift so each app's trace starts clean; monkeypatch
-            # undo restores the original handlers at teardown. Diagnostic only:
-            # it renders into the failure messages below and nowhere else.
-            trace = _NearMissTrace(monkeypatch)
+            trace.reset()
             await _click_pair(app, pilot, editor, drift, trace=trace)
             assert not editor.selected_text, "a near miss must not invent a range"
 
@@ -5625,6 +5657,7 @@ async def test_a_double_click_that_drifts_one_cell_does_not_clear_the_draft(
                 await pilot.pause(0.01)
             trace.note(f"poll ends after {polls} pauses armed={editor.barren_multi_click}")
             assert editor.barren_multi_click, (
+                f"[{trace.verdict()}] "
                 f"the {drift}-cell near-miss pair never armed the barren claim "
                 "(arming phase: inter-click window or claim dispatch)\n" + trace.render(editor)
             )
