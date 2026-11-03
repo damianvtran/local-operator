@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -43,6 +44,7 @@ def load(name):
 
 meter = load("meter_proxy")
 edge = load("lop_edge")
+adapters = load("test_adapters")
 
 FAKE_RADIENT = "fake-radient-token-for-offline-tests"
 FAKE_OPENROUTER = "fake-openrouter-key-for-offline-tests"
@@ -92,17 +94,10 @@ class EdgeTests(unittest.IsolatedAsyncioTestCase):
         self.env = patch.dict(
             os.environ,
             {
+                **adapters.meter_env(self.root),
                 "OPENROUTER_API_KEY": FAKE_OPENROUTER,
-                "BENCH_BUDGET_USD": "1",
                 "BENCH_TRIAL_BUDGET_USD": "1",
-                "BENCH_REQUEST_RESERVE_USD": "0.24",
-                "BENCH_INPUT_USD_PER_MILLION": "1",
-                "BENCH_OUTPUT_USD_PER_MILLION": "1",
-                "BENCH_MAX_INPUT_BYTES": "10000",
-                "BENCH_MAX_OUTPUT_TOKENS": "128000",
                 "BENCH_ADMISSION_WAIT_S": "0.2",
-                "BENCH_SERVICE_TIER": "default",
-                "BENCH_SPEND_FILE": str(self.root / "spend.json"),
             },
         )
         self.env.start()
@@ -129,9 +124,12 @@ class EdgeTests(unittest.IsolatedAsyncioTestCase):
         self.meter_upstream = httpx.AsyncClient(transport=httpx.MockTransport(model_fixture))
         self.clientpatch = patch.object(meter, "client", self.meter_upstream)
         self.clientpatch.start()
-        # Edge -> meter goes through the meter's REAL ASGI app (one pricing core).
+        # Edge -> meter goes through the meter's REAL ASGI app (one pricing core),
+        # sharing the ledger file through its own startup-built guard.
+        self.meter_guard = meter.BudgetGuard()
         self.to_meter = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=meter.app), base_url="http://meter"
+            transport=httpx.ASGITransport(app=meter.make_app(self.meter_guard)),
+            base_url="http://meter",
         )
         self.to_radient = httpx.AsyncClient(transport=httpx.MockTransport(decision_fixture))
         self.edge = edge.EdgeServer(
@@ -150,6 +148,7 @@ class EdgeTests(unittest.IsolatedAsyncioTestCase):
         for client in self.clients:
             await client.aclose()
         await self.edge.close()
+        self.meter_guard.close()
         await self.to_meter.aclose()
         await self.to_radient.aclose()
         await self.meter_upstream.aclose()
@@ -298,7 +297,8 @@ class EdgeTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client().get("https://example.invalid/metadata")
         self.assertEqual(response.status_code, 403)
         self.assertTrue(self.rows()[-1]["denied"])
-        self.assertFalse(self.ledger()["blocked"] if self.edge.spend_path.exists() else False)
+        spend = Path(os.environ["BENCH_SPEND_FILE"])
+        self.assertFalse(spend.exists() and self.ledger()["blocked"])
 
     async def test_diagnostics_400_without_billing_latches_and_native_retry_is_refused(self):
         # The native retry (clients.py:5316-5339) resends without diagnostics;
@@ -326,6 +326,58 @@ class EdgeTests(unittest.IsolatedAsyncioTestCase):
         text = "".join(p.read_text() for p in self.root.rglob("*") if p.is_file())
         for needle in (FAKE_RADIENT, FAKE_OPENROUTER, self.edge.nonce, "hdr-value", "x-secret"):
             self.assertNotIn(needle, text)
+
+    async def test_count_tokens_is_an_unlisted_post_that_latches(self):
+        # F4: LoP 500883ef never calls it; a request there is unexplained traffic.
+        response = await self.client().post(MESSAGES + "/count_tokens", json={"model": "x"})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.model_calls, [])
+        self.assertTrue(self.ledger()["blocked"])
+
+    async def test_decisions_admission_refusal_voids_the_run(self):
+        # F5: a refused classifier admission changes the run; it must say so.
+        self.meter_guard.latch("trial-elsewhere", "test-induced latch")
+        response = await self.client().post(DECISIONS, json=DECISION_BODY)
+        self.assertEqual(response.status_code, 402)
+        self.assertIn("admission refused", " ".join(self.ledger()["voids"]["trial"]))
+
+    async def test_edge_close_mid_decision_latches_the_reservation(self):
+        # F1 path 1 (reviewer probe 6): shutdown while a decision is in flight.
+        started = asyncio.Event()
+
+        async def slow(request: httpx.Request) -> httpx.Response:
+            self.decision_calls.append(request)
+            started.set()
+            await asyncio.sleep(30)
+            return httpx.Response(200, json=decisions_payload())
+
+        self.to_radient._transport = httpx.MockTransport(slow)
+        task = asyncio.create_task(self.client().post(DECISIONS, json=DECISION_BODY))
+        await asyncio.wait_for(started.wait(), 5)
+        await self.edge.close()
+        with contextlib.suppress(Exception):
+            await task
+        ledger = self.ledger()
+        self.assertTrue(ledger["blocked"])
+        self.assertIn("abandoned", " ".join(ledger["voids"]["trial"]))
+        # Kept as exposure (its bill is unknown), exactly like an unknown settle.
+        self.assertEqual(len(ledger["pending"]), 1)
+
+    async def test_edge_owned_clients_are_closed(self):
+        # N3: close() releases the clients the edge built for itself.
+        own = edge.EdgeServer(run_id="own", run_dir=self.root / "own",
+                              radient_token=FAKE_RADIENT, meter_base="http://meter")
+        await own.start()
+        await own.close()
+        self.assertTrue(own._meter.is_closed and own._decisions.is_closed)
+
+    def test_misconfigured_meter_environment_fails_at_construction(self):
+        # F6: one guard, built when the edge is, not per request.
+        with patch.dict(os.environ):
+            del os.environ["BENCH_ADMISSION_WAIT_S"]
+            with self.assertRaises((KeyError, ValueError)):
+                edge.EdgeServer(run_id="bad", run_dir=self.root / "bad",
+                                radient_token=FAKE_RADIENT, meter_base="http://meter")
 
     # --- proxy authorization ---------------------------------------------------
 
@@ -448,11 +500,22 @@ class EntrypointTests(unittest.TestCase):
     def test_stdin_entrypoint_announces_child_env_and_exits_on_close(self):
         """The host process shape: token on stdin, env out, stdin EOF finishes."""
         with tempfile.TemporaryDirectory(dir=os.environ["LOCAL_OPERATOR_SCRATCHPAD"]) as tmp:
+            # The full meter configuration: the edge builds its guard at startup
+            # (F6), so the entrypoint without it must refuse -- checked below.
             env = {
+                **adapters.meter_env(Path(tmp)),
                 "PATH": "/usr/bin:/bin",
                 "HOME": os.environ["HOME"],
-                "BENCH_SPEND_FILE": str(Path(tmp) / "spend.json"),
             }
+            bare = subprocess.run(
+                [sys.executable, str(ROOT / "lop_edge.py")],
+                input=json.dumps({"run_id": "bare", "run_dir": str(Path(tmp) / "bare"),
+                                  "meter_base": "http://127.0.0.1:9"}) + "\n",
+                capture_output=True, text=True, timeout=60, cwd=ROOT,
+                env={"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"]},
+            )
+            self.assertNotEqual(bare.returncode, 0)
+            self.assertEqual(bare.stdout, "")
             proc = subprocess.Popen(
                 [sys.executable, str(ROOT / "lop_edge.py")],
                 stdin=subprocess.PIPE,
@@ -555,6 +618,44 @@ class SandboxTests(unittest.TestCase):
         for bad in (["1; (allow default)"], [0], [70000], [True]):
             with self.assertRaises(ValueError):
                 edge.sandbox_profile(bad)  # type: ignore[arg-type]
+        for bad_path in ('/tmp/x")(allow default)("', "relative.sock", "/tmp/new\nline"):
+            with self.assertRaises(ValueError):
+                edge.sandbox_profile([9], unix_sockets=[bad_path])
+
+    def test_unix_sockets_are_denied_unless_explicitly_allowed(self):
+        # F3: a host daemon's socket must not be a path around the egress fence.
+        import socket
+
+        with tempfile.TemporaryDirectory(dir=os.environ["LOCAL_OPERATOR_SCRATCHPAD"]) as tmp:
+            allowed_path, other_path = str(Path(tmp) / "ok.sock"), str(Path(tmp) / "daemon.sock")
+            with socket.socket(socket.AF_UNIX) as a, socket.socket(socket.AF_UNIX) as o:
+                a.bind(allowed_path)
+                o.bind(other_path)
+                a.listen()
+                o.listen()
+                code = (
+                    "import socket,sys\n"
+                    "for path in sys.argv[1:]:\n"
+                    "    s=socket.socket(socket.AF_UNIX)\n"
+                    "    try:\n"
+                    "        s.connect(path); print('connected')\n"
+                    "    except OSError as e: print('errno', e.errno)\n"
+                )
+                profile = edge.sandbox_profile([9], unix_sockets=[allowed_path])
+                proc = subprocess.run(
+                    ["/usr/bin/sandbox-exec", "-p", profile, sys.executable, "-c", code,
+                     allowed_path, other_path],
+                    capture_output=True, text=True, timeout=60,
+                    env={"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"]},
+                )
+                default = subprocess.run(
+                    ["/usr/bin/sandbox-exec", "-p", edge.sandbox_profile([9]), sys.executable,
+                     "-c", code, allowed_path],
+                    capture_output=True, text=True, timeout=60,
+                    env={"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"]},
+                )
+        self.assertEqual(proc.stdout.split("\n")[:2], ["connected", "errno 1"], proc.stderr)
+        self.assertEqual(default.stdout.strip(), "errno 1", default.stderr)
 
     def test_only_allowed_loopback_port_connects(self):
         import socket

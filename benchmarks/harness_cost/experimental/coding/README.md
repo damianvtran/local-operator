@@ -50,10 +50,11 @@ restores it. Supply an independently built Linux/amd64 toolchain mounted read-on
 at `/opt/bench`, with the layout expected by `adapters.py` (node, claude, codex,
 opencode, lop, omp, dsh, hermes). All host paths are CLI/env configurable.
 
-Local Operator's required reviewed source revision is
-`07c324e9f613b378c437936ede1978c9fc0b49db`. Its source installation is **not**
-the existing `0.94.22` installed baseline. This port does not build either one;
-a matching source/runtime attestation is mandatory before dispatch.
+Local Operator is pinned to released v0.94.22,
+`500883ef56ca504325ffd80c5b90bf2435d00e3f`, run unmodified. It is metered only
+through the per-run TLS edge (`../lop_edge.py`), which this container path does
+not have, so `lop_launch.py` here refuses to start (fail closed) and no
+endpoint shim exists. A matching source/runtime attestation is still mandatory.
 
 A separately operated meter must accept `/r/<run_id>/v1/messages`, authenticate
 upstream using **`OPENROUTER_API_KEY` from its environment**, enforce the explicitly
@@ -98,7 +99,7 @@ hard hold; boolean assertions and arbitrary hashed text are insufficient:
   `frozen: true`; `runtimes` maps each selected harness to `version`,
   `linux_verified: true`, and a nonempty `files` mapping of toolchain-relative
   paths to SHA-256. Local Operator additionally requires the full
-  `source_revision` above and version `07c324e9-source`. All mapped files are
+  `source_revision` above and version `500883ef-v0.94.22`. All mapped files are
   hash-checked and may not escape the supplied toolchain root.
 * **Toolwire attestation** (`--toolwire-attestation`, `--toolwire-sha256`):
   `verified: true`, `preregistered_tools_observed: true`, `text_only: true`,

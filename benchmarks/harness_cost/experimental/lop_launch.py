@@ -34,7 +34,19 @@ NO_PROXY = "127.0.0.1,localhost,::1"
 
 
 def _require_edge_environment() -> None:
-    """Refuse unless every paid client will route through this run's edge."""
+    """Refuse unless every paid client will route through this run's edge.
+
+    urllib's ``getproxies()`` (which httpx and requests use) gives LOWERCASE
+    names precedence, even when empty, so each lowercase spelling must be
+    absent or identical to its uppercase one; ``ALL_PROXY`` (a SOCKS escape
+    hatch) is refused in either spelling.
+    """
+    for upper in ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"):
+        lower = upper.lower()
+        if lower in os.environ and os.environ[lower] != os.environ.get(upper):
+            raise SystemExit(f"{lower} conflicts with {upper}; the edge would be bypassed")
+    if "ALL_PROXY" in os.environ or "all_proxy" in os.environ:
+        raise SystemExit("ALL_PROXY must not be set for a metered run")
     proxy = urlparse(os.environ.get("HTTPS_PROXY", ""))
     if (
         proxy.scheme != "http"
@@ -44,6 +56,8 @@ def _require_edge_environment() -> None:
         or not proxy.password
     ):
         raise SystemExit("HTTPS_PROXY must name this run's loopback metering edge")
+    if "HTTP_PROXY" in os.environ and os.environ["HTTP_PROXY"] != os.environ["HTTPS_PROXY"]:
+        raise SystemExit("HTTP_PROXY must name the same edge as HTTPS_PROXY")
     bundle = os.environ.get("SSL_CERT_FILE", "")
     if not bundle or os.environ.get("REQUESTS_CA_BUNDLE") != bundle or not Path(bundle).is_file():
         raise SystemExit("SSL_CERT_FILE and REQUESTS_CA_BUNDLE must name the run CA bundle")

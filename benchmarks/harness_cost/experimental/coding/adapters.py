@@ -8,9 +8,9 @@ dependency tree per trial). Runtime configuration and sessions are fresh in ever
 container; none of the host user's instructions, skills, MCP or credentials are
 copied. The task's cwd and instruction are left unchanged.
 
-Local Operator uses a process-local endpoint shim; no private recommendation
-credential or host auth database is read. Source identity 07c324e9 is distinct
-from the installed 0.94.22 release and must be attested by the caller.
+Local Operator is pinned to released v0.94.22 (500883ef) and is metered only
+through the per-run edge (../lop_edge.py), which this container path lacks; its
+launcher therefore refuses (fail closed) and no endpoint shim is uploaded.
 
 Harbor 0.25.0 already supports Claude Code, Codex, OpenCode and Hermes. We reuse
 those adapters' run paths except OpenCode v2, whose Go-release CLI differs from
@@ -106,7 +106,7 @@ PUBLIC_LOADOUT = HERE / "../../public_loadout"
 MODEL = os.environ.get("CODING_MODEL", "claude-sonnet-5-5")
 NODE_PATH = "/opt/bench/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 VERSIONS = {
-    "local-operator": "07c324e9-source",
+    "local-operator": "500883ef-v0.94.22",
     "omp": "18.11.2",
     "dsh": "0.2.0-rc.2",
     "claude-code": "2.1.274",
@@ -252,7 +252,7 @@ class _Native(BaseInstalledAgent):
 
 
 class LocalOperator(_Native):
-    """First-party Anthropic provider + process-local base-URL shim."""
+    """Released v0.94.22; the uploaded launcher refuses until an edge exists here."""
 
     PIN = VERSIONS["local-operator"]
 
@@ -264,7 +264,7 @@ class LocalOperator(_Native):
         await self.exec_as_agent(
             environment, "/opt/bench/lop/bin/python -c 'import local_operator'", timeout_sec=120
         )
-        await self._upload_support(environment, ["lop_launch.py", "lop_shim.py"])
+        await self._upload_support(environment, ["lop_launch.py"])
 
     @with_prompt_template
     async def run(self, instruction, environment, context):

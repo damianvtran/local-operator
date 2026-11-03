@@ -8,13 +8,18 @@ These are source-only checks, not provider billing or native harness evidence.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import httpx
@@ -42,38 +47,71 @@ bridge = load("codex_toolsearch_bridge")
 catalog = load("codex_catalog")
 
 
+RATE = "0.000001"  # 1 USD per million tokens, per-token as OpenRouter states it
+
+
+def fake_listing(**overrides: dict[str, str]) -> bytes:
+    """A synthetic OpenRouter ``/api/v1/models`` body (per-token USD strings).
+
+    Opus is listed upstream but is NOT a natively requested benchmark model, so
+    the rate card built from this listing must leave it out.
+    """
+    rates = {"prompt": RATE, "completion": RATE, "input_cache_write": RATE, "input_cache_read": "0"}
+    rows: dict[str, dict[str, str]] = {
+        "anthropic/claude-sonnet-5.5": dict(rates),
+        "anthropic/claude-haiku-5.5": dict(rates),
+        "anthropic/claude-opus-5.5": dict(rates),
+    }
+    rows.update(overrides)
+    return json.dumps({"data": [{"id": k, "pricing": v} for k, v in rows.items()]}).encode()
+
+
+def write_rate_card(path: Path, listing: bytes | None = None, fetched_at: float | None = None):
+    card = meter.rate_card_from_models_listing(
+        fake_listing() if listing is None else listing,
+        source_url="https://openrouter.ai/api/v1/models",
+        fetched_at=time.time() if fetched_at is None else fetched_at,
+    )
+    path.write_text(json.dumps(card))
+    return card
+
+
+def meter_env(root: Path) -> dict[str, str]:
+    """Explicit meter configuration shared by every offline meter/edge test."""
+    card = root / "rate-card.json"
+    write_rate_card(card)
+    return {
+        "OPENROUTER_API_KEY": "offline-test-key-not-a-credential",
+        "BENCH_BUDGET_USD": "1",
+        # A native 128000-token main call reserves ~0.137 USD at 1 USD/M:
+        # one fits a 0.2 trial cap, a second after a 0.12 bill does not.
+        "BENCH_TRIAL_BUDGET_USD": "0.2",
+        "BENCH_RATE_CARD": str(card),
+        "BENCH_MAX_INPUT_BYTES": "10000",
+        "BENCH_MAX_OUTPUT_TOKENS": "128000",
+        "BENCH_ADMISSION_WAIT_S": "0.3",
+        "BENCH_MAX_REQUEST_S": "900",
+        "BENCH_SERVICE_TIER": "default",
+        "BENCH_SPEND_FILE": str(root / "spend.json"),
+    }
+
+
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir=os.environ["LOCAL_OPERATOR_SCRATCHPAD"])
         root = Path(self.tmp.name)
-        self.env = patch.dict(
-            os.environ,
-            {
-                "OPENROUTER_API_KEY": "offline-test-key-not-a-credential",
-                "BENCH_BUDGET_USD": "1",
-                "BENCH_TRIAL_BUDGET_USD": "0.3",
-                # 128000 output tokens at 1 USD/M plus the 10000-byte input
-                # bound reserve 0.2335 USD; 0.24 keeps one request per trial.
-                "BENCH_REQUEST_RESERVE_USD": "0.24",
-                "BENCH_INPUT_USD_PER_MILLION": "1",
-                "BENCH_OUTPUT_USD_PER_MILLION": "1",
-                "BENCH_MAX_INPUT_BYTES": "10000",
-                "BENCH_MAX_OUTPUT_TOKENS": "128000",
-                "BENCH_ADMISSION_WAIT_S": "0.3",
-                "BENCH_SERVICE_TIER": "default",
-                "BENCH_SPEND_FILE": str(root / "spend.json"),
-            },
-        )
+        self.env = patch.dict(os.environ, meter_env(root))
         self.env.start()
         self.logpatch = patch.object(meter, "LOG", root / "requests.jsonl")
         self.logpatch.start()
         self.calls = []
         self.response = {"model": "anthropic/claude-sonnet-5.5", "usage": {"cost": 0.12}}
+        self.status = 200
 
         def upstream(request):
             self.calls.append(request)
             return httpx.Response(
-                200,
+                self.status,
                 headers={"content-type": "application/json"},
                 stream=httpx.ByteStream(json.dumps(self.response).encode()),
             )
@@ -81,25 +119,42 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.upstream = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
         self.clientpatch = patch.object(meter, "client", self.upstream)
         self.clientpatch.start()
-        self.api = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=meter.app), base_url="http://offline"
-        )
+        self.guards: list[Any] = []
+        self.api = None
+        self.serve()
         self.body = {
             "model": meter.MODEL,
-            "max_tokens": 100,
+            "max_tokens": 128000,
             "messages": [{"role": "user", "content": "hello"}],
         }
 
+    def serve(self, **env: str):
+        """(Re)build the guard ONCE from the environment, as the meter's startup does."""
+        for name, value in env.items():
+            os.environ[name] = value
+        self.guard = meter.BudgetGuard()
+        self.guards.append(self.guard)
+        self.api = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=meter.make_app(self.guard)), base_url="http://offline"
+        )
+
     async def asyncTearDown(self):
-        await self.api.aclose()
+        if self.api is not None:
+            await self.api.aclose()
         await self.upstream.aclose()
+        for guard in self.guards:
+            guard.close()
         self.clientpatch.stop()
         self.logpatch.stop()
         self.env.stop()
         self.tmp.cleanup()
 
     async def post(self, run: str = "trial", /, **updates: object):
+        assert self.api is not None
         return await self.api.post(f"/r/{run}/v1/messages", json={**self.body, **updates})
+
+    def ledger(self):
+        return json.loads(Path(os.environ["BENCH_SPEND_FILE"]).read_text())
 
     async def test_real_asgi_route_settles_and_stops_trial(self):
         self.assertEqual((await self.post()).status_code, 200)
@@ -107,77 +162,228 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 1)
         forwarded = json.loads(self.calls[0].content)
         self.assertFalse(forwarded["provider"]["allow_fallbacks"])
-        self.assertEqual(forwarded["provider"]["max_price"], {"prompt": 1, "completion": 1})
+        self.assertEqual(forwarded["provider"]["max_price"], {"prompt": 1.0, "completion": 1.0})
         self.assertEqual(forwarded["service_tier"], "default")
-        ledger = json.loads(Path(os.environ["BENCH_SPEND_FILE"]).read_text())
+        ledger = self.ledger()
         self.assertEqual(ledger["usd"], 0.12)
         self.assertEqual(ledger["trials"]["trial"], 0.12)
+        self.assertEqual(ledger["models"], {"anthropic/claude-sonnet-5.5": 0.12})
+        # F5: the cap refusal changed the harness's run, so the run is void.
+        self.assertIn("admission refused", " ".join(ledger["voids"]["trial"]))
         self.assertNotIn(os.environ["OPENROUTER_API_KEY"], meter.LOG.read_text())
         self.assertNotIn("hello", meter.LOG.read_text())
 
     async def test_total_cap_independent_of_trial_ids(self):
-        with patch.dict(os.environ, {"BENCH_BUDGET_USD": "0.3"}):
-            self.assertEqual((await self.post("one")).status_code, 200)
-            self.assertEqual((await self.post("two")).status_code, 402)
+        self.serve(BENCH_BUDGET_USD="0.2", BENCH_TRIAL_BUDGET_USD="1")
+        self.assertEqual((await self.post("one")).status_code, 200)
+        self.assertEqual((await self.post("two")).status_code, 402)
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("two", self.ledger()["voids"])
+
+    async def test_reservation_is_per_request_not_a_flat_worst_case(self):
+        # D1: a 1024-token title errand reserves its own bound, far below a main call.
+        title = self.guard.reservation_usd(meter.or_model(meter.MODEL), b"x" * 500, 1024)
+        main = self.guard.reservation_usd(meter.or_model(meter.MODEL), b"x" * 64000, 128000)
+        self.assertAlmostEqual(title, (500 + meter.FRAMING_TOKENS + 1024) / 1e6)
+        self.assertAlmostEqual(main, (64000 + meter.FRAMING_TOKENS + 128000) / 1e6)
+        self.serve(BENCH_TRIAL_BUDGET_USD="0.05")
+        self.assertEqual((await self.post(max_tokens=1024)).status_code, 200)
+
+    async def test_haiku_is_priced_from_the_card_and_recorded_per_model(self):
+        self.response = {"model": "anthropic/claude-haiku-5.5", "usage": {"cost": 0.01}}
+        response = await self.post(model="claude-haiku-5-5", max_tokens=1024)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(self.calls[0].content)["model"], "anthropic/claude-haiku-5.5")
+        self.assertEqual(self.ledger()["models"], {"anthropic/claude-haiku-5.5": 0.01})
+
+    async def test_unpriced_model_is_refused_and_voids_the_run(self):
+        # D2/D3: a native failover target outside the card (opus) never dispatches.
+        response = await self.post(model="claude-opus-5-5")
+        self.assertEqual(response.status_code, 402)
+        self.assertEqual(self.calls, [])
+        reasons = " ".join(self.ledger()["voids"]["trial"])
+        self.assertIn("unpriced model anthropic/claude-opus-5.5", reasons)
+        # The void holds for the rest of the run, other trials unaffected.
+        self.assertEqual((await self.post()).status_code, 402)
+        self.assertEqual((await self.post("other")).status_code, 200)
+
+    async def test_upstream_overload_voids_the_run_even_when_billed(self):
+        self.status = 529
+        self.response = {
+            "type": "error", "error": {"type": "overloaded_error"}, "usage": {"cost": 0}
+        }
+        self.assertEqual((await self.post()).status_code, 529)
+        ledger = self.ledger()
+        self.assertIn("upstream status 529", " ".join(ledger["voids"]["trial"]))
+        self.assertFalse(ledger["blocked"])  # billed zero: spend is still bounded
+        self.assertEqual((await self.post()).status_code, 402)  # native retry refused
         self.assertEqual(len(self.calls), 1)
 
-    async def test_negative_controls_never_dispatch(self):
+    async def test_unbilled_overload_latches_with_reason(self):
+        self.status = 529
+        self.response = {"type": "error", "error": {"type": "overloaded_error"}}
+        await self.post()
+        ledger = self.ledger()
+        self.assertTrue(ledger["blocked"])
+        self.assertIn("unbilled", " ".join(ledger["voids"]["trial"]))
+
+    def test_configuration_errors_fail_at_startup(self):
+        # F6: one guard built at startup; a bad environment never serves a request.
+        root = Path(self.tmp.name)
+        stale = root / "stale-card.json"
+        write_rate_card(stale, fetched_at=time.time() - 2 * meter.RATE_CARD_MAX_AGE_S)
+        partial = root / "partial-card.json"
+        card = json.loads(Path(os.environ["BENCH_RATE_CARD"]).read_text())
+        partial.write_text(json.dumps({**card, "models": {}}))
+        for name, value in (
+            ("BENCH_BUDGET_USD", "nan"),
+            ("BENCH_SERVICE_TIER", ""),
+            ("BENCH_MAX_INPUT_BYTES", "0"),
+            ("BENCH_MAX_REQUEST_S", "-1"),
+            ("BENCH_RATE_CARD", str(stale)),
+            ("BENCH_RATE_CARD", str(partial)),
+        ):
+            with self.subTest(name=name, value=value), patch.dict(os.environ, {name: value}):
+                with self.assertRaises((ValueError, KeyError)):
+                    meter.BudgetGuard()
+        for name in ("BENCH_RATE_CARD", "BENCH_ADMISSION_WAIT_S", "BENCH_MAX_REQUEST_S"):
+            with self.subTest(missing=name), patch.dict(os.environ):
+                del os.environ[name]
+                with self.assertRaises((ValueError, KeyError)):
+                    meter.BudgetGuard()
+
+    def test_rate_card_is_the_exact_native_allowlist_with_provenance(self):
+        listing = fake_listing()
+        card = write_rate_card(Path(self.tmp.name) / "c.json", listing)
+        self.assertEqual(set(card["models"]), set(meter.NATIVE_MODELS))
+        self.assertEqual(card["response_sha256"], hashlib.sha256(listing).hexdigest())
+        self.assertEqual(card["source"], "https://openrouter.ai/api/v1/models")
+        self.assertEqual(card["models"]["anthropic/claude-sonnet-5.5"]["prompt"], 1.0)
+        for bad in (
+            {"anthropic/claude-haiku-5.5": {"prompt": "nan", "completion": RATE}},
+            {"anthropic/claude-haiku-5.5": {"prompt": "-1", "completion": RATE}},
+            {"anthropic/claude-haiku-5.5": {"completion": RATE}},
+        ):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                write_rate_card(Path(self.tmp.name) / "bad.json", fake_listing(**bad))
+        missing = json.dumps({"data": [{"id": "anthropic/claude-sonnet-5.5",
+                                        "pricing": {"prompt": RATE, "completion": RATE}}]})
+        with self.assertRaises(ValueError):
+            write_rate_card(Path(self.tmp.name) / "bad.json", missing.encode())
+
+    async def test_negative_controls_never_dispatch_and_void(self):
         for update in (
-            {"model": "unpriced"},
             {"max_tokens": 128001},
             {"service_tier": "priority"},
             {"plugins": []},
             {"tools": [{"type": "web_search_20250305"}]},
             {"messages": [{"role": "user", "content": [{"type": "image"}]}]},
         ):
-            self.assertEqual((await self.post(**update)).status_code, 402)
-        for name, value in (
-            ("OPENROUTER_API_KEY", ""),
-            ("BENCH_BUDGET_USD", "nan"),
-            ("BENCH_SERVICE_TIER", ""),
-            ("BENCH_REQUEST_RESERVE_USD", "0.001"),
-            ("BENCH_MAX_INPUT_BYTES", "1"),
-        ):
-            with patch.dict(os.environ, {name: value}):
-                self.assertEqual((await self.post()).status_code, 402)
-        with patch.dict(os.environ):
-            del os.environ["BENCH_REQUEST_RESERVE_USD"]
-            self.assertEqual((await self.post()).status_code, 402)
+            with self.subTest(update=update):
+                run = "neg-" + hashlib.sha256(repr(update).encode()).hexdigest()[:8]
+                self.assertEqual((await self.post(run, **update)).status_code, 402)
+                self.assertIn(run, self.ledger()["voids"])
         self.assertEqual(self.calls, [])
 
     async def test_missing_cost_retains_reservation_and_blocks_other_trials(self):
         self.response = {"usage": {"input_tokens": 10}}
         self.assertEqual((await self.post()).status_code, 200)
         self.assertEqual((await self.post("other")).status_code, 402)
-        ledger = json.loads(Path(os.environ["BENCH_SPEND_FILE"]).read_text())
+        ledger = self.ledger()
         self.assertTrue(ledger["blocked"])
         self.assertEqual(len(ledger["pending"]), 1)
         self.assertEqual(len(self.calls), 1)
 
-    async def test_malformed_ledger_and_inflight_reservation_fail_closed(self):
+    async def test_malformed_ledger_fails_closed(self):
         path = Path(os.environ["BENCH_SPEND_FILE"])
         path.write_text("{broken")
         self.assertEqual((await self.post()).status_code, 402)
         path.write_text(json.dumps({"usd": -1, "trials": {}, "pending": {}, "blocked": False}))
         self.assertEqual((await self.post()).status_code, 402)
-        path.write_text(
-            json.dumps(
-                {
-                    "usd": 0,
-                    "trials": {},
-                    "pending": {},
-                    "blocked": False,
-                    "channels": {"model": 0, "classifier": 0},
-                }
-            )
-        )
-        guard = meter.BudgetGuard()
-        # A reservation that never settles is exposure, not a refusal: the
-        # second request waits for it and is refused only at the deadline.
-        guard.trial = 1.0  # another trial's large in-flight worst case
-        self.assertIsNotNone(guard.try_acquire("pending", "model", 0.8))
-        self.assertEqual((await self.post()).status_code, 402)
         self.assertEqual(self.calls, [])
+
+    async def test_non_stream_body_reset_after_dispatch_latches(self):
+        # F1 path 2: upstream 200 JSON that resets mid-body must not leave an
+        # unlatched pending reservation behind.
+        class Reset(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                yield b'{"usage":'
+                raise httpx.ReadError("reset mid-body")
+
+        def reset(request):
+            self.calls.append(request)
+            return httpx.Response(200, headers={"content-type": "application/json"}, stream=Reset())
+
+        self.upstream._transport = httpx.MockTransport(reset)
+        with contextlib.suppress(Exception):
+            await self.post()
+        ledger = self.ledger()
+        self.assertTrue(ledger["blocked"])
+        self.assertIn("abandoned", " ".join(ledger["voids"]["trial"]))
+        self.assertEqual((await self.post("other")).status_code, 402)
+
+    async def test_cancelled_request_latches(self):
+        # F1 path 1: cancellation (shutdown) while the upstream is in flight.
+        started = asyncio.Event()
+
+        async def hang(request: httpx.Request) -> httpx.Response:
+            self.calls.append(request)
+            started.set()
+            await asyncio.sleep(30)
+            return httpx.Response(504)
+
+        self.upstream._transport = httpx.MockTransport(hang)
+        task = asyncio.create_task(self.post())
+        await asyncio.wait_for(started.wait(), 3)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+        await until(lambda: self.ledger()["blocked"])
+        self.assertIn("abandoned", " ".join(self.ledger()["voids"]["trial"]))
+
+    def test_orphaned_reservation_of_a_dead_process_refuses_the_next_request(self):
+        # F1 path 3: the base behaviour (orphan pending -> next request REFUSED)
+        # is restored by owner liveness, without refusing live concurrency.
+        code = (
+            "import os, sys; sys.path.insert(0, sys.argv[1])\n"
+            "import meter_proxy as m\n"
+            "g = m.BudgetGuard()\n"
+            "g.try_acquire('dead', 'model', 0.01, 'anthropic/claude-sonnet-5.5')\n"
+            "os._exit(0)\n"
+        )
+        proc = subprocess.run([sys.executable, "-c", code, str(ROOT)], env=dict(os.environ),
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with self.assertRaises(ValueError):
+            self.guard.try_acquire("next", "model", 0.01, "anthropic/claude-sonnet-5.5")
+        ledger = self.ledger()
+        self.assertTrue(ledger["blocked"])
+        self.assertIn("orphaned reservation", " ".join(ledger["voids"]["dead"]))
+
+    def test_live_concurrent_owner_is_not_an_orphan(self):
+        other = meter.BudgetGuard()
+        self.guards.append(other)
+        sonnet = "anthropic/claude-sonnet-5.5"
+        self.assertIsNotNone(other.try_acquire("a", "model", 0.01, sonnet))
+        self.assertIsNotNone(self.guard.try_acquire("b", "model", 0.01, sonnet))
+        self.assertFalse(self.ledger()["blocked"])
+
+    def test_stale_reservation_latches_and_teardown_latches_unsettled(self):
+        token = self.guard.try_acquire("slow", "model", 0.01, "anthropic/claude-sonnet-5.5")
+        self.assertIsNotNone(token)
+        data = self.ledger()
+        data["pending"][token]["ts"] -= 10_000
+        Path(os.environ["BENCH_SPEND_FILE"]).write_text(json.dumps(data))
+        with self.assertRaises(ValueError):
+            self.guard.try_acquire("next", "model", 0.01, "anthropic/claude-sonnet-5.5")
+        self.assertIn("stale reservation", " ".join(self.ledger()["voids"]["slow"]))
+        # Teardown backstop on a fresh ledger: an unsettled own token latches.
+        Path(os.environ["BENCH_SPEND_FILE"]).unlink()
+        g = meter.BudgetGuard()
+        g.try_acquire("open", "model", 0.01, "anthropic/claude-sonnet-5.5")
+        g.close()
+        self.assertTrue(self.ledger()["blocked"])
+        self.assertIn("teardown", " ".join(self.ledger()["voids"]["open"]))
 
     async def test_stream_usage_with_crlf_and_redacted_errors(self):
         chunks = (
@@ -192,9 +398,10 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         )
         response = await self.post(stream=True)
         self.assertEqual(response.content, chunks)
-        ledger = json.loads(Path(os.environ["BENCH_SPEND_FILE"]).read_text())
+        ledger = self.ledger()
         self.assertEqual(ledger["usd"], 0.1)
         self.assertFalse(ledger["blocked"])
+        self.assertEqual(ledger["pending"], {})
 
     async def test_transport_failure_keeps_budget_closed(self):
         def fail(request):
@@ -208,9 +415,10 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_over_reservation_charge_blocks_and_records_actual(self):
         self.response = {"usage": {"cost": 0.25}}
+        self.serve(BENCH_TRIAL_BUDGET_USD="1")
         self.assertEqual((await self.post()).status_code, 200)
         self.assertEqual((await self.post("retry")).status_code, 402)
-        ledger = json.loads(Path(os.environ["BENCH_SPEND_FILE"]).read_text())
+        ledger = self.ledger()
         self.assertEqual(ledger["usd"], 0.25)
         self.assertTrue(ledger["blocked"])
 
@@ -219,11 +427,10 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.post(diagnostics=diagnostics)).status_code, 200)
         self.assertEqual(json.loads(self.calls[0].content)["diagnostics"], diagnostics)
 
-    async def test_main_output_cap_below_native_128000_is_refused(self):
+    def test_main_output_cap_below_native_128000_is_refused_at_startup(self):
         with patch.dict(os.environ, {"BENCH_MAX_OUTPUT_TOKENS": "127999"}):
-            self.assertEqual((await self.post()).status_code, 402)
-        self.assertEqual((await self.post(max_tokens=128000)).status_code, 200)
-        self.assertEqual(len(self.calls), 1)
+            with self.assertRaises(ValueError):
+                meter.BudgetGuard()
 
     async def test_concurrent_admissions_queue_against_pending_exposure(self):
         release = asyncio.Event()
@@ -240,24 +447,27 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.upstream._transport = httpx.MockTransport(held)
-        with patch.dict(os.environ, {"BENCH_TRIAL_BUDGET_USD": "1", "BENCH_BUDGET_USD": "0.5"}):
-            first = asyncio.create_task(self.post())
-            second = asyncio.create_task(self.post())
-            await until(lambda: len(started) >= 2)
-            # Both are dispatched together: 0.48 pending fits a 0.5 cap.
-            third = await self.post()
-            self.assertEqual(third.status_code, 402)
-            self.assertEqual(len(self.calls), 2)
-            release.set()
-            self.assertEqual([(await t).status_code for t in (first, second)], [200, 200])
-        ledger = json.loads(Path(os.environ["BENCH_SPEND_FILE"]).read_text())
+        # Two ~0.137 reservations fit 0.3 together; a third does not.
+        self.serve(BENCH_TRIAL_BUDGET_USD="1", BENCH_BUDGET_USD="0.3")
+        first = asyncio.create_task(self.post())
+        second = asyncio.create_task(self.post())
+        await until(lambda: len(started) >= 2)
+        third = await self.post("third")
+        self.assertEqual(third.status_code, 402)
+        self.assertEqual(len(self.calls), 2)
+        release.set()
+        self.assertEqual([(await t).status_code for t in (first, second)], [200, 200])
+        ledger = self.ledger()
         self.assertEqual(ledger["pending"], {})
         self.assertAlmostEqual(ledger["usd"], 0.24)
         self.assertAlmostEqual(ledger["channels"]["model"], 0.24)
         self.assertFalse(ledger["blocked"])
+        self.assertIn("admission refused", " ".join(ledger["voids"]["third"]))
+        self.assertNotIn("trial", ledger["voids"])
 
     async def test_waiting_admission_dispatches_once_exposure_settles(self):
         release = asyncio.Event()
+        self.response = {"model": "anthropic/claude-sonnet-5.5", "usage": {"cost": 0.01}}
 
         async def held(request):
             self.calls.append(request)
@@ -270,21 +480,14 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.upstream._transport = httpx.MockTransport(held)
-        with patch.dict(
-            os.environ,
-            {
-                "BENCH_TRIAL_BUDGET_USD": "1",
-                "BENCH_BUDGET_USD": "0.4",
-                "BENCH_ADMISSION_WAIT_S": "5",
-            },
-        ):
-            first = asyncio.create_task(self.post())
-            await until(lambda: bool(self.calls))
-            second = asyncio.create_task(self.post())
-            await asyncio.sleep(0.1)
-            self.assertEqual(len(self.calls), 1)  # queued, not refused
-            release.set()
-            self.assertEqual([(await t).status_code for t in (first, second)], [200, 200])
+        self.serve(BENCH_TRIAL_BUDGET_USD="1", BENCH_BUDGET_USD="0.2", BENCH_ADMISSION_WAIT_S="5")
+        first = asyncio.create_task(self.post())
+        await until(lambda: bool(self.calls))
+        second = asyncio.create_task(self.post())
+        await asyncio.sleep(0.1)
+        self.assertEqual(len(self.calls), 1)  # queued, not refused
+        release.set()
+        self.assertEqual([(await t).status_code for t in (first, second)], [200, 200])
         self.assertEqual(len(self.calls), 2)
 
     async def test_unknown_costs_latch_the_ledger(self):
@@ -296,7 +499,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 self.response = {"usage": usage}
                 self.assertEqual((await self.post()).status_code, 200)
                 self.assertEqual((await self.post("other")).status_code, 402)
-                ledger = json.loads(Path(os.environ["BENCH_SPEND_FILE"]).read_text())
+                ledger = self.ledger()
                 self.assertTrue(ledger["blocked"])
                 self.assertEqual(len(self.calls), 1)
 
@@ -304,6 +507,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.post()).status_code, 200)
         row = json.loads(meter.LOG.read_text().splitlines()[-1])
         self.assertEqual(row["channel"], "model")
+        self.assertEqual(row["priced_model"], "anthropic/claude-sonnet-5.5")
+        self.assertGreater(row["reserve_usd"], 0.128)
 
     async def test_bridge_stream_rewrites_search_results(self):
         item = {
@@ -386,11 +591,31 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             {"SSL_CERT_FILE": ""},
             {"REQUESTS_CA_BUNDLE": "/elsewhere.pem"},
             {"NO_PROXY": "localhost"},
+            # F2: urllib/httpx/requests give lowercase names precedence, even empty.
+            {"https_proxy": ""},
+            {"https_proxy": "http://other:mismatch@127.0.0.1:9"},
+            {"http_proxy": "http://other:mismatch@127.0.0.1:9"},
+            {"no_proxy": "*"},
+            {"no_proxy": "127.0.0.1,localhost,::1,example.com"},
+            {"ALL_PROXY": "socks5://127.0.0.1:9"},
+            {"all_proxy": "socks5://127.0.0.1:9"},
+            {"HTTP_PROXY": "http://other:mismatch@127.0.0.1:9"},
         ):
             with self.subTest(updates=updates):
                 run, _, error = self.run_launcher(launcher, self.launcher_env(**updates))
                 self.assertIsNotNone(error)
                 run.assert_not_called()
+
+    def test_launcher_accepts_the_edge_child_environment_verbatim(self):
+        # Exactly what lop_edge.EdgeServer.child_env() exports (both spellings).
+        launcher = load("lop_launch")
+        proxy = "http://trial:nonce@127.0.0.1:18080"
+        env = self.launcher_env(
+            https_proxy=proxy, HTTP_PROXY=proxy, http_proxy=proxy,
+            no_proxy="127.0.0.1,localhost,::1",
+        )
+        with patch.dict(os.environ, env, clear=True):
+            launcher._require_edge_environment()
 
     def test_launcher_refuses_unreleased_head_by_full_sha(self):
         launcher = load("lop_launch")

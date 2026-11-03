@@ -29,12 +29,12 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PUBLIC_LOADOUT = (HERE / "../../public_loadout").resolve()
-SOURCE_REVISION = "07c324e9f613b378c437936ede1978c9fc0b49db"
+SOURCE_REVISION = "500883ef56ca504325ffd80c5b90bf2435d00e3f"  # released v0.94.22
 HARNESS = {
     "claude-code": ("FrozenClaudeCode", "2.1.274"),
     "codex-best": ("FrozenCodex", "0.147.0"),
     "opencode": ("OpenCodeV2", "2.0.27"),
-    "local-operator": ("LocalOperator", "07c324e9-source"),
+    "local-operator": ("LocalOperator", "500883ef-v0.94.22"),
     "omp": ("Omp", "18.11.2"),
     "hermes": ("FrozenHermes", "0.22.6"),
     "dsh": ("Dsh", "0.2.0-rc.2"),
@@ -226,7 +226,7 @@ def preflight(args):
                 raise ValueError("runtime file hash mismatch")
         if harness == "local-operator" and record.get("source_revision") != SOURCE_REVISION:
             raise ValueError(
-                "Local Operator must be reviewed source 07c324e9, not installed 0.94.22"
+                "Local Operator must be released v0.94.22 source 500883ef"
             )
     if not args.request_log.is_file():
         raise ValueError("existing external metering log needed")

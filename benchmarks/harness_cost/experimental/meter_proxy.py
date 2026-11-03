@@ -1,10 +1,12 @@
 """Experimental text-only OpenRouter meter with explicit, fail-closed budgets.
 
 All credentials come from OPENROUTER_API_KEY and stay in memory. Total and
-per-trial caps reserve a conservative byte/token/rate bound before dispatch;
-unknown billing, disconnects, and malformed ledgers stop later traffic. Only a
-pinned, explicitly priced model and default service tier are accepted. This is
-not provider-side billing enforcement: configured rates must bound all charges.
+per-trial caps reserve each request's own byte/token upper bound at its model's
+live rate before dispatch; unknown billing, disconnects, cancellations and
+malformed ledgers stop later traffic. Only the natively requested, live-priced
+models (``NATIVE_MODELS``) and the default service tier are accepted; anything
+else is refused and voids the run. This is not provider-side billing
+enforcement: the rate card must bound all charges.
 Prompt capture is opt-in; logs contain usage/count metadata, never auth headers.
 
 One ledger serves every paid channel. ``channel`` is ``model`` for Messages
@@ -16,7 +18,9 @@ so total and per-trial caps bound the sum of both, not each separately.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -72,21 +76,140 @@ def positive(name: str) -> float:
     return value
 
 
+# Every model a benchmarked harness natively requests on the wire (captured in
+# logs/requests.jsonl: all seven send Sonnet 5.5 main turns; omp, OpenCode and
+# Claude Code also send Haiku 5.5 helpers, e.g. 425 omp Haiku calls over 25
+# runs). Pricing only the main model would refuse those helpers on paid runs
+# and silently change those harnesses, so the card is exactly this allowlist:
+# nothing less (a missing native model refuses startup) and nothing more (any
+# other model -- e.g. a failover target -- is refused AND voids the run).
+NATIVE_MODELS = ("anthropic/claude-sonnet-5.5", "anthropic/claude-haiku-5.5")
+# A card is fetched from the live price endpoint at run start; an old one may
+# not describe today's price, so it is refused rather than trusted.
+RATE_CARD_MAX_AGE_S = 6 * 3600
+# Tokens per request beyond the body bytes: role/tool framing, the system
+# prompt template and image-free provider overhead. Generous on purpose; any
+# bill above the reservation still latches at settle.
+FRAMING_TOKENS = 8192
+# The durable ledger file's exact schema (a pre-voids ledger reads as invalid).
+LEDGER_KEYS = ("usd", "trials", "pending", "blocked", "channels", "models", "voids")
+
+
+def _per_million(pricing: dict[str, Any], key: str, *, required: bool) -> float:
+    """OpenRouter states USD per token as a decimal string; return USD/M tokens."""
+    raw = pricing.get(key)
+    if raw is None and not required:
+        return 0.0
+    if not isinstance(raw, str):
+        raise ValueError(f"price {key} missing or not a decimal string")
+    value = float(raw) * 1_000_000
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"price {key} is not a finite nonnegative rate")
+    return value
+
+
+def rate_card_from_models_listing(
+    raw: bytes, *, source_url: str, fetched_at: float
+) -> dict[str, Any]:
+    """Build the run's rate card from the raw live ``/api/v1/models`` response.
+
+    The input rate used for reservations is the MAXIMUM of prompt and
+    cache-write rates, so a request whose whole prefix is a cache write is still
+    over-reserved. The response digest and fetch time are kept as provenance so
+    a published result names the exact price statement it was metered under.
+    """
+    listing = json.loads(raw)
+    rows = {row.get("id"): row.get("pricing") for row in listing.get("data", [])}
+    models: dict[str, dict[str, float]] = {}
+    for model in NATIVE_MODELS:
+        pricing = rows.get(model)
+        if not isinstance(pricing, dict):
+            raise ValueError(f"live price listing has no {model}")
+        prompt = _per_million(pricing, "prompt", required=True)
+        completion = _per_million(pricing, "completion", required=True)
+        write = _per_million(pricing, "input_cache_write", required=False)
+        models[model] = {
+            "prompt": prompt,
+            "completion": completion,
+            "input_cache_write": write,
+            "reserve_input": max(prompt, write),
+        }
+    return {
+        "source": source_url,
+        "fetched_at": fetched_at,
+        "response_sha256": hashlib.sha256(raw).hexdigest(),
+        "models": models,
+    }
+
+
+def _load_rate_card(path: Path) -> dict[str, dict[str, float]]:
+    card = json.loads(path.read_text())
+    models = card.get("models")
+    if not isinstance(models, dict) or set(models) != set(NATIVE_MODELS):
+        raise ValueError("rate card must price exactly the native benchmark models")
+    age = time.time() - float(card["fetched_at"])
+    if not 0 <= age <= RATE_CARD_MAX_AGE_S:
+        raise ValueError("rate card is stale; refetch the live price listing")
+    if not isinstance(card.get("response_sha256"), str) or not card.get("source"):
+        raise ValueError("rate card lacks price provenance")
+    for rates in models.values():
+        for key in ("prompt", "completion", "reserve_input"):
+            value = rates.get(key)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError("rate card holds a non-finite or negative rate")
+    return models
+
+
+def _pid_alive(pid: object) -> bool:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 class BudgetGuard:
     """Durable, serialized reservations prevent retries/concurrency overspending.
 
+    Built ONCE when a meter or edge starts: a missing or invalid setting fails
+    startup instead of failing open on some later request.
+
     Unknown billing keeps the reservation and blocks ALL later requests. Recovery
     requires operator reconciliation, never a reset on malformed/missing usage.
-    Rate ceilings must include cache-write premiums and every enabled surcharge;
-    only text/custom tools and the explicitly selected default tier are supported.
+    Only text/custom tools and the explicitly selected default tier are supported.
+
+    Each reservation is that request's OWN upper bound: (body bytes + framing)
+    input tokens at the model's highest input rate plus its own ``max_tokens``
+    at the output rate. UTF-8 bytes overbound text tokens. A bill above it
+    latches at settle. The per-trial cap is a planning/abort control, not a
+    price: set it above the expected per-trial spend so refusals are rare.
+
+    A reservation that never settles must not fail open (the base rule was:
+    any pending entry refuses everything). Three backstops restore that:
+    the owning process settles-or-latches on every exit path, including
+    cancellation; ``close()`` latches its own unsettled tokens at teardown; and
+    admission latches when a pending entry's owner process is dead or the entry
+    is older than ``BENCH_MAX_REQUEST_S``.
+
+    ``voids`` records, per run, why it can no longer be published as measured:
+    any refusal of a request the harness natively sent changes its behaviour.
+    A void is per run and does not block other runs; ``blocked`` is global and
+    means spend may be unaccounted for.
     """
 
     def __init__(self):
         self.total = positive("BENCH_BUDGET_USD")
         self.trial = positive("BENCH_TRIAL_BUDGET_USD")
-        self.reserve = positive("BENCH_REQUEST_RESERVE_USD")
-        self.input_rate = positive("BENCH_INPUT_USD_PER_MILLION")
-        self.output_rate = positive("BENCH_OUTPUT_USD_PER_MILLION")
+        self.rates = _load_rate_card(Path(os.environ["BENCH_RATE_CARD"]))
         self.max_bytes = int(os.environ["BENCH_MAX_INPUT_BYTES"])
         self.max_tokens = int(os.environ["BENCH_MAX_OUTPUT_TOKENS"])
         if self.max_bytes <= 0 or self.max_tokens <= 0:
@@ -98,10 +221,23 @@ class BudgetGuard:
         # issues concurrent helpers). Refusing them turns a priced call into a
         # native fallback (e.g. a placeholder title) and changes behaviour.
         self.admission_wait = positive("BENCH_ADMISSION_WAIT_S")
+        self.max_request_s = positive("BENCH_MAX_REQUEST_S")
         if os.environ.get("BENCH_SERVICE_TIER") != "default":
             raise ValueError("explicit BENCH_SERVICE_TIER=default required")
         self.path = Path(os.environ["BENCH_SPEND_FILE"])
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._mine: set[str] = set()
+
+    def rates_for(self, model: str | None) -> dict[str, float]:
+        rates = self.rates.get(model or "")
+        if rates is None:
+            raise ValueError(f"unpriced model {model}")
+        return rates
+
+    def reservation_usd(self, model: str | None, raw: bytes, max_tokens: int) -> float:
+        rates = self.rates_for(model)
+        input_tokens = len(raw) + FRAMING_TOKENS
+        return (input_tokens * rates["reserve_input"] + max_tokens * rates["completion"]) / 1e6
 
     @contextmanager
     def ledger(self):
@@ -111,11 +247,10 @@ class BudgetGuard:
             if self.path.exists():
                 data = json.loads(self.path.read_text())
                 if (
-                    set(data) != {"usd", "trials", "pending", "blocked", "channels"}
+                    set(data) != set(LEDGER_KEYS)
                     or not isinstance(data["blocked"], bool)
-                    or not isinstance(data["pending"], dict)
-                    or not isinstance(data["trials"], dict)
-                    or not isinstance(data["channels"], dict)
+                    or not all(isinstance(data[k], dict) for k in LEDGER_KEYS if k != "blocked"
+                               and k != "usd")
                     or set(data["channels"]) != set(CHANNELS)
                 ):
                     raise ValueError("invalid budget ledger")
@@ -127,6 +262,7 @@ class BudgetGuard:
                     data["usd"],
                     *data["trials"].values(),
                     *data["channels"].values(),
+                    *data["models"].values(),
                     *pending_usd,
                 ]:
                     if (
@@ -143,6 +279,8 @@ class BudgetGuard:
                     "pending": {},
                     "blocked": False,
                     "channels": {name: 0.0 for name in CHANNELS},
+                    "models": {},
+                    "voids": {},
                 }
             yield data
             tmp = self.path.with_suffix(self.path.suffix + ".new")
@@ -152,9 +290,30 @@ class BudgetGuard:
                 os.fsync(fh.fileno())
             tmp.replace(self.path)
 
+    @staticmethod
+    def _void(data: dict[str, Any], run_id: str, reason: str) -> None:
+        reasons = data["voids"].setdefault(run_id, [])
+        if reason not in reasons:
+            reasons.append(reason)
+
+    def void(self, run_id: str, reason: str) -> None:
+        """Mark one run invalid (rerun policy) without blocking other runs."""
+        with self.ledger() as data:
+            self._void(data, run_id, reason)
+
+    def latch(self, run_id: str, reason: str) -> None:
+        """Void the run AND block every later admission until reconciliation.
+
+        For traffic whose bill or intent is unknown (a denied POST, an
+        unclassifiable CONNECT, an abandoned reservation): spend can no longer
+        be shown to be fully measured.
+        """
+        with self.ledger() as data:
+            data["blocked"] = True
+            self._void(data, run_id, reason)
+
     def validate(self, body: WireObject, raw: bytes) -> None:
-        if or_model(body.get("model")) != or_model(MODEL):
-            raise ValueError("model is not explicitly priced")
+        self.rates_for(or_model(body.get("model")))
         tokens = body.get("max_tokens")
         if (
             isinstance(tokens, bool)
@@ -216,69 +375,120 @@ class BudgetGuard:
         for tool in body.get("tools", []):
             if tool.get("type", "custom") != "custom":
                 raise ValueError("unpriced server tool")
-        # UTF-8 bytes overbound text tokens; 4x plus framing slack deliberately
-        # over-reserves rather than estimating from a favorable tokenizer.
-        bound = (
-            (4 * self.max_bytes + 65536) * self.input_rate + self.max_tokens * self.output_rate
-        ) / 1_000_000
-        if bound > self.reserve:
-            raise ValueError("request reservation is below worst-case token/rate bound")
 
-    def try_acquire(self, run_id: str, channel: str, usd: float) -> str | None:
+    def _reap(self, data: dict[str, Any]) -> None:
+        """Latch on any reservation nobody can settle any more (F1 backstop)."""
+        now = time.time()
+        for entry in data["pending"].values():
+            if entry.get("abandoned"):
+                continue
+            if not _pid_alive(entry.get("pid")):
+                reason = "orphaned reservation: owner process exited without settling"
+            elif now - float(entry.get("ts", 0)) > self.max_request_s:
+                reason = "stale reservation older than BENCH_MAX_REQUEST_S"
+            else:
+                continue
+            entry["abandoned"] = True
+            data["blocked"] = True
+            self._void(data, entry["run_id"], reason)
+
+    def try_acquire(self, run_id: str, channel: str, usd: float, model: str) -> str | None:
         """Reserve ``usd`` against settled spend PLUS every pending reservation.
 
         Returns a token when the reservation fits now, ``None`` when it would fit
         once in-flight reservations settle (the caller may wait), and raises when
-        it can never fit or the ledger is latched. Summing pending exposure is
-        what makes concurrent dispatch safe: two in-flight worst cases must both
-        fit under the caps, exactly as one did before.
+        it can never fit, the run is void, or the ledger is latched. Summing
+        pending exposure is what makes concurrent dispatch safe.
         """
         if channel not in CHANNELS:
             raise ValueError("unknown ledger channel")
         token = uuid.uuid4().hex
+        refusal = None
+        token_or_wait: str | None = None
         with self.ledger() as data:
-            if data["blocked"]:
-                raise ValueError("unreconciled request; budget fails closed")
+            # A reaped orphan must be PERSISTED even though this admission is
+            # refused, so the refusal is returned out of the ledger block
+            # (raising inside it would skip the write-back).
+            self._reap(data)
             trial = data["trials"].get(run_id, 0.0)
-            if data["usd"] + usd > self.total or trial + usd > self.trial:
-                raise ValueError("total or per-trial budget exhausted")
-            pending = list(data["pending"].values())
-            exposure = sum(p["usd"] for p in pending)
-            trial_exposure = sum(p["usd"] for p in pending if p["run_id"] == run_id)
-            if (
-                data["usd"] + exposure + usd > self.total
-                or trial + trial_exposure + usd > self.trial
-            ):
-                return None
-            data["pending"][token] = {"run_id": run_id, "usd": usd, "channel": channel}
+            if data["blocked"]:
+                refusal = "unreconciled request; budget fails closed"
+            elif run_id in data["voids"]:
+                refusal = "run is void; no further admissions"
+            elif data["usd"] + usd > self.total or trial + usd > self.trial:
+                refusal = "total or per-trial budget exhausted"
+            if refusal is None:
+                token_or_wait = self._reserve(data, token, run_id, channel, usd, model, trial)
+        if refusal is not None:
+            raise ValueError(refusal)
+        if token_or_wait is not None:
+            self._mine.add(token_or_wait)
+        return token_or_wait
+
+    def _reserve(
+        self,
+        data: dict[str, Any],
+        token: str,
+        run_id: str,
+        channel: str,
+        usd: float,
+        model: str,
+        trial: float,
+    ) -> str | None:
+        """Add the reservation if it fits beside every pending one, else ``None``."""
+        pending = list(data["pending"].values())
+        exposure = sum(p["usd"] for p in pending)
+        trial_exposure = sum(p["usd"] for p in pending if p["run_id"] == run_id)
+        if (
+            data["usd"] + exposure + usd > self.total
+            or trial + trial_exposure + usd > self.trial
+        ):
+            return None
+        data["pending"][token] = {
+            "run_id": run_id,
+            "usd": usd,
+            "channel": channel,
+            "model": model,
+            "pid": os.getpid(),
+            "ts": time.time(),
+        }
         return token
 
-    async def acquire(self, run_id: str, channel: str = "model", usd: float | None = None) -> str:
+    async def acquire(self, run_id: str, channel: str, usd: float, model: str) -> str:
         """Wait (bounded by BENCH_ADMISSION_WAIT_S) for room, then reserve.
 
-        Exhaustion and a latched ledger still refuse immediately; only
-        contention with in-flight exposure waits. At the deadline the request
-        is refused, so a reservation that never settles cannot stall a run.
+        Any refusal -- exhaustion, deadline, latched ledger -- changes what the
+        harness natively does next, so it voids the run with its reason (F5).
         """
-        amount = self.reserve if usd is None else usd
         deadline = time.monotonic() + self.admission_wait
-        while True:
-            token = self.try_acquire(run_id, channel, amount)
-            if token is not None:
-                return token
-            if time.monotonic() >= deadline:
-                raise ValueError("admission wait expired with exposure still pending")
-            await asyncio.sleep(0.02)
+        try:
+            while True:
+                token = self.try_acquire(run_id, channel, usd, model)
+                if token is not None:
+                    return token
+                if time.monotonic() >= deadline:
+                    raise ValueError("admission wait expired with exposure still pending")
+                await asyncio.sleep(0.02)
+        except ValueError as exc:
+            with contextlib.suppress(ValueError, OSError):
+                self.void(run_id, f"admission refused: {exc}")
+            raise
 
-    def latch(self) -> None:
-        """Void the run: block every later admission until operator reconciliation.
-
-        Used by the edge for traffic it refused without a bill (a denied POST,
-        an unclassifiable CONNECT): the request's intent is unknown, so the
-        run can no longer be shown to have measured all of its spend.
-        """
+    def abandon(self, token: str, reason: str) -> None:
+        """Settle-or-latch fallback: dispatched, never settled -> latch, keep exposure."""
         with self.ledger() as data:
-            data["blocked"] = True
+            entry = data["pending"].get(token)
+            if entry is not None and not entry.get("abandoned"):
+                entry["abandoned"] = True
+                data["blocked"] = True
+                self._void(data, entry["run_id"], f"abandoned reservation: {reason}")
+        self._mine.discard(token)
+
+    def close(self) -> None:
+        """Teardown backstop: any reservation this guard still owns latches."""
+        for token in list(self._mine):
+            with contextlib.suppress(ValueError, OSError):
+                self.abandon(token, "teardown with request in flight")
 
     def settle(self, token: str, cost, qualified: bool = True) -> None:
         """Settle a reservation from a billed amount; anything unknown latches.
@@ -288,6 +498,7 @@ class BudgetGuard:
         (it was charged) but still latches: the bill's contract was not the
         reviewed one, so later spend cannot be bounded.
         """
+        self._mine.discard(token)
         with self.ledger() as data:
             pending = data["pending"][token]
             if (
@@ -296,15 +507,20 @@ class BudgetGuard:
                 or not math.isfinite(cost)
                 or cost < 0
             ):
+                pending["abandoned"] = True
                 data["blocked"] = True
+                self._void(data, pending["run_id"], "unbilled or unknown charge")
                 return
             data["usd"] += cost
             run_id = pending["run_id"]
             data["trials"][run_id] = data["trials"].get(run_id, 0.0) + cost
             channel = pending.get("channel", "model")
             data["channels"][channel] = data["channels"][channel] + cost
+            model = pending.get("model") or "unknown"
+            data["models"][model] = data["models"].get(model, 0.0) + cost
             if cost > pending["usd"] or not qualified:
                 data["blocked"] = True
+                self._void(data, run_id, "charge above reservation or unqualified bill")
             del data["pending"][token]
 
 
@@ -373,7 +589,7 @@ def _merge_usage(acc: WireObject, usage: WireObject | None) -> None:
             acc["server_tool_use"] = v
 
 
-async def proxy(request: Request) -> Response:
+async def proxy(guard: BudgetGuard, request: Request) -> Response:
     run_id = request.path_params["run_id"]
     if run_id == "@current":
         # Codex reaches us through a LiteLLM translator with one fixed
@@ -402,16 +618,18 @@ async def proxy(request: Request) -> Response:
     if path != "v1/messages" or request.method != "POST":
         return JSONResponse({"error": "only priced message requests are allowed"}, status_code=400)
     try:
-        guard = BudgetGuard()
         body = json.loads(raw)
         # Validate before mutation so model pinning cannot conceal an unpriced call.
         guard.validate(body, raw)
         key = await upstream_key()
-    except (KeyError, ValueError, TypeError, AttributeError, OSError):
-        return JSONResponse(
-            {"error": "invalid request or missing explicit budget/auth configuration"},
-            status_code=402,
-        )
+    except (KeyError, ValueError, TypeError, AttributeError, OSError) as exc:
+        # The harness asked for something the benchmark cannot price; refusing
+        # it changes the run, so the run is void with the reason (D3).
+        reason = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+        with contextlib.suppress(ValueError, OSError):
+            guard.void(run_id, f"refused request: {reason}")
+        return JSONResponse({"error": "request refused by the meter", "reason": reason},
+                            status_code=402)
     headers["authorization"] = f"Bearer {key}"
     beta = [
         b.strip()
@@ -458,12 +676,15 @@ async def proxy(request: Request) -> Response:
         body["provider"] = {
             "order": ["anthropic"],
             "allow_fallbacks": False,
-            "max_price": {"prompt": guard.input_rate, "completion": guard.output_rate},
+            "max_price": {"prompt": guard.rates_for(body["model"])["prompt"],
+                          "completion": guard.rates_for(body["model"])["completion"]},
         }
         raw = json.dumps(body).encode()
         try:
             guard.validate(body, raw)
-        except (ValueError, TypeError, AttributeError):
+        except (ValueError, TypeError, AttributeError) as exc:
+            with contextlib.suppress(ValueError, OSError):
+                guard.void(run_id, f"refused final wire body: {exc}")
             return JSONResponse(
                 {"error": "final wire body exceeds explicit bounds"}, status_code=402
             )
@@ -471,121 +692,165 @@ async def proxy(request: Request) -> Response:
     url = f"{UPSTREAM}/{path}"
     if request.url.query:
         url += "?" + request.url.query
+    priced_model = body["model"]
+    reserve = guard.reservation_usd(priced_model, raw, body["max_tokens"])
     try:
-        reservation = await guard.acquire(run_id)
+        reservation = await guard.acquire(run_id, "model", reserve, priced_model)
     except (ValueError, KeyError, OSError, TypeError):
         return JSONResponse(
             {"error": "budget ledger unavailable, exhausted, or unreconciled"}, status_code=402
         )
     started = time.time()
     upstream_req = client.build_request(request.method, url, headers=headers, content=raw)
+    # Settle-or-latch (F1): from here until a settle, ANY exit -- an exception,
+    # a cancellation at shutdown, a mid-body reset -- abandons the reservation,
+    # which latches the ledger and voids the run. ``owned`` is handed to the
+    # streaming generator once it takes over settlement.
+    owned = True
     try:
-        resp = await client.send(upstream_req, stream=True)
-    except Exception:
-        # The upstream may have billed before a disconnect: leave it unresolved.
-        guard.settle(reservation, None)
-        return JSONResponse(
-            {"error": "upstream transport failed; reconcile reservation"}, status_code=502
-        )
-    ctype = resp.headers.get("content-type", "")
-    row = {
-        "ts": started,
-        "run_id": run_id,
-        "channel": "model",
-        "path": path,
-        "status": resp.status_code,
-        **meta,
-    }
-    passthrough_headers = {
-        k: v
-        for k, v in resp.headers.items()
-        if k.lower()
-        not in {"content-length", "content-encoding", "transfer-encoding", "connection"}
-    }
+        try:
+            resp = await client.send(upstream_req, stream=True)
+        except Exception:
+            # The upstream may have billed before a disconnect: leave it unresolved.
+            owned = False
+            guard.settle(reservation, None)
+            return JSONResponse(
+                {"error": "upstream transport failed; reconcile reservation"}, status_code=502
+            )
+        ctype = resp.headers.get("content-type", "")
+        row = {
+            "ts": started,
+            "run_id": run_id,
+            "channel": "model",
+            "priced_model": priced_model,
+            "reserve_usd": reserve,
+            "path": path,
+            "status": resp.status_code,
+            **meta,
+        }
+        passthrough_headers = {
+            k: v
+            for k, v in resp.headers.items()
+            if k.lower()
+            not in {"content-length", "content-encoding", "transfer-encoding", "connection"}
+        }
+        status = resp.status_code
 
-    def write_row(usage: WireObject, extra: dict[str, object] | None = None) -> None:
-        # OpenRouter returns the billed amount in usage.cost: it feeds the
-        # hard budget stop and is reported beside our list-price computation.
-        guard.settle(reservation, usage.get("cost"))
-        row["latency_s"] = round(time.time() - started, 3)
-        row["usage"] = usage
-        if extra:
-            row.update(extra)
-        with LOG.open("a") as fh:
-            fh.write(json.dumps(row) + "\n")
+        def write_row(usage: WireObject, extra: dict[str, object] | None = None) -> None:
+            # OpenRouter returns the billed amount in usage.cost: it feeds the
+            # hard budget stop and is reported beside our list-price computation.
+            guard.settle(reservation, usage.get("cost"))
+            if status != 200:
+                # An upstream error (529 overload, 5xx, 4xx) is a run the harness
+                # did not complete natively: void it so it is rerun, never
+                # counted as a measured success (crash = invalid + rerun policy).
+                guard.void(run_id, f"upstream status {status}")
+            row["latency_s"] = round(time.time() - started, 3)
+            row["usage"] = usage
+            if extra:
+                row.update(extra)
+            with LOG.open("a") as fh:
+                fh.write(json.dumps(row) + "\n")
 
-    if "text/event-stream" in ctype:
+        if "text/event-stream" in ctype:
 
-        async def gen():
-            usage: WireObject = {}
-            buf = b""
-            stop = None
-            err = None
-            try:
-                async for chunk in resp.aiter_raw():
-                    yield chunk
-                    buf = (buf + chunk).replace(b"\r\n", b"\n")
-                    while b"\n\n" in buf:
-                        event, buf = buf.split(b"\n\n", 1)
-                        for line in event.split(b"\n"):
-                            if line.startswith(b"data:"):
-                                try:
-                                    d = json.loads(line[5:].strip())
-                                except Exception:
-                                    continue
-                                t = d.get("type")
-                                if t == "message_start":
-                                    row["served_model"] = d.get("message", {}).get("model")
-                                    _merge_usage(usage, d.get("message", {}).get("usage"))
-                                elif t == "message_delta":
-                                    _merge_usage(usage, d.get("usage"))
-                                    stop = d.get("delta", {}).get("stop_reason") or stop
-                                elif t == "error":
-                                    err = "upstream_error"
-            finally:
-                await resp.aclose()
-                write_row(usage, {"stream": True, "stop_reason": stop, "error": err})
+            async def gen():
+                usage: WireObject = {}
+                buf = b""
+                stop = None
+                err = None
+                settled = False
+                try:
+                    async for chunk in resp.aiter_raw():
+                        yield chunk
+                        buf = (buf + chunk).replace(b"\r\n", b"\n")
+                        while b"\n\n" in buf:
+                            event, buf = buf.split(b"\n\n", 1)
+                            for line in event.split(b"\n"):
+                                if line.startswith(b"data:"):
+                                    try:
+                                        d = json.loads(line[5:].strip())
+                                    except Exception:
+                                        continue
+                                    t = d.get("type")
+                                    if t == "message_start":
+                                        row["served_model"] = d.get("message", {}).get("model")
+                                        _merge_usage(usage, d.get("message", {}).get("usage"))
+                                    elif t == "message_delta":
+                                        _merge_usage(usage, d.get("usage"))
+                                        stop = d.get("delta", {}).get("stop_reason") or stop
+                                    elif t == "error":
+                                        err = "upstream_error"
+                    write_row(usage, {"stream": True, "stop_reason": stop, "error": err})
+                    settled = True
+                finally:
+                    await resp.aclose()
+                    if not settled:
+                        # Client disconnect or cancellation mid-stream: the
+                        # partial usage is not a complete bill (unknown -> latch).
+                        write_row(usage, {"stream": True, "stop_reason": stop, "error": err,
+                                          "incomplete": True})
+                        guard.abandon(reservation, "stream ended before completion")
 
-        return StreamingResponse(gen(), status_code=resp.status_code, headers=passthrough_headers)
+            owned = False  # the generator's finally now settles or latches
+            return StreamingResponse(gen(), status_code=status, headers=passthrough_headers)
 
-    content = await resp.aread()
-    await resp.aclose()
-    usage: WireObject = {}
-    extra: dict[str, object] = {"stream": False}
-    try:
-        d = json.loads(content)
-        if is_messages:
-            usage = d.get("usage") or {}
-            row["served_model"] = d.get("model")
-            extra["stop_reason"] = d.get("stop_reason")
-        if is_count:
-            extra["count_input_tokens"] = d.get("input_tokens")
-        if resp.status_code >= 400:
-            extra["error"] = "upstream_error"
-    except Exception:
-        pass
-    write_row(usage, extra)
-    return Response(content, status_code=resp.status_code, headers=passthrough_headers)
+        try:
+            content = await resp.aread()
+        finally:
+            await resp.aclose()
+        usage: WireObject = {}
+        extra: dict[str, object] = {"stream": False}
+        try:
+            d = json.loads(content)
+            if is_messages:
+                usage = d.get("usage") or {}
+                row["served_model"] = d.get("model")
+                extra["stop_reason"] = d.get("stop_reason")
+            if status >= 400:
+                extra["error"] = "upstream_error"
+        except Exception:
+            pass
+        owned = False
+        write_row(usage, extra)
+        return Response(content, status_code=status, headers=passthrough_headers)
+    finally:
+        if owned:
+            guard.abandon(reservation, "request ended before settlement")
 
 
-async def health(_: Request) -> Response:
-    return JSONResponse({"ok": True, "model": MODEL})
+def make_app(guard: BudgetGuard) -> Starlette:
+    """The meter app around ONE guard built at startup (F6)."""
 
+    async def health(_: Request) -> Response:
+        return JSONResponse({"ok": True, "models": sorted(guard.rates)})
 
-app = Starlette(
-    routes=[
-        Route("/health", health),
-        Route(
-            "/r/{run_id}/{path:path}",
-            proxy,
-            methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"],
-        ),
-    ]
-)
+    async def route(request: Request) -> Response:
+        return await proxy(guard, request)
+
+    return Starlette(
+        routes=[
+            Route("/health", health),
+            Route(
+                "/r/{run_id}/{path:path}",
+                route,
+                methods=["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"],
+            ),
+        ]
+    )
+
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(
-        app, host="127.0.0.1", port=int(os.environ.get("BENCH_PORT", "8787")), log_level="warning"
-    )
+    # Built before the socket opens: a misconfigured meter never serves.
+    _guard = BudgetGuard()
+    try:
+        uvicorn.run(
+            make_app(_guard),
+            host="127.0.0.1",
+            port=int(os.environ.get("BENCH_PORT", "8787")),
+            log_level="warning",
+        )
+    finally:
+        _guard.close()

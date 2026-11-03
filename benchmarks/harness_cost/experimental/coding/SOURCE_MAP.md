@@ -12,8 +12,7 @@ no absolute home path is embedded in runtime code.
 | budget_guard.py | budget_guard.py | Reworked durable conservative trial + total reservations |
 | test_guard.py | test_guard.py | Reworked stdlib offline guard/CLI negative controls |
 | codex_bridge.py | codex_bridge.py | Preserved translation; removed private YAML auth coupling |
-| lop_launch.py | lop_launch.py | Process-local endpoint launch, no recommendation credential/auth DB |
-| lop_shim.py | lop_shim.py | Source shim preserved |
+| lop_launch.py | lop_launch.py | Fail-closed refusal: LoP 500883ef is metered only via lop_edge |
 | oracle_sweep.py | oracle_sweep.py | Portable disk/external paths; explicit execution gate |
 | subset.json | subset.json | Sanitized public selection metadata; removed oracle rewards, disk measurements and host Python version |
 | codex-model-catalog.json | codex-model-catalog.json | Byte-identical source catalog; external Codex template attributed |

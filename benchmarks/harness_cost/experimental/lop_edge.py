@@ -13,7 +13,7 @@ proxy environment fail with EPERM instead of escaping the meter.
 
 Routing is an exact ``(method, host, path)`` map:
 
-* ``POST api.anthropic.com/v1/messages`` (and ``/count_tokens``) → the SAME
+* ``POST api.anthropic.com/v1/messages`` → the SAME
   pricing core the other six harnesses use (``meter_proxy`` at
   ``/r/<run_id>/v1/...``), which injects the OpenRouter key.
 * ``POST api.radienthq.com/v1/decisions`` → a priced decisions route that
@@ -57,7 +57,7 @@ import secrets
 import ssl
 import sys
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from decimal import Decimal
 from http import HTTPStatus
 from pathlib import Path
@@ -69,16 +69,19 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 import meter_proxy
-from radient_meter.classifier import RATE, qualify_classifier, validate_classifier_request
+from radient_meter.classifier import (
+    MODEL as CLASSIFIER_MODEL,
+    RATE,
+    qualify_classifier,
+    validate_classifier_request,
+)
 from radient_meter.json_types import parse_json
 
 DECISIONS_URL = "https://api.radienthq.com/v1/decisions"
-MODEL_ROUTES = frozenset(
-    {
-        ("POST", "api.anthropic.com", "/v1/messages"),
-        ("POST", "api.anthropic.com", "/v1/messages/count_tokens"),
-    }
-)
+# ``/v1/messages/count_tokens`` is deliberately absent: LoP 500883ef never calls
+# it and the meter does not price it, so a request there is an unlisted POST
+# (403 + latch) rather than a refused-but-unlatched "model" row.
+MODEL_ROUTES = frozenset({("POST", "api.anthropic.com", "/v1/messages")})
 DECISIONS_ROUTE = ("POST", "api.radienthq.com", "/v1/decisions")
 
 # The child authenticates to Radient with a value that is worthless outside
@@ -233,15 +236,26 @@ class RunCA:
         return context
 
 
-def sandbox_profile(ports: Iterable[int]) -> str:
+def sandbox_profile(ports: Iterable[int], unix_sockets: Iterable[str] = ()) -> str:
     """A ``sandbox-exec`` profile allowing outbound TCP only to loopback ``ports``.
 
-    Unix-domain sockets stay allowed: Local Operator uses them for local IPC,
-    and they cannot reach a remote host on their own. Ports are validated as
-    integers because they are interpolated into the profile text.
+    Outbound Unix-domain connections are denied except to the exact absolute
+    socket paths listed: a host daemon's socket (the operator's own lop
+    gateway, Docker, a local proxy) would otherwise be a way around the egress
+    fence, since that daemon makes its requests from outside the sandbox. The
+    zero-paid S4 run needed none for ``lop exec`` (its own IPC listens inside
+    the run HOME and is reached by binding, not by outbound connect). Ports
+    and paths are validated because they are interpolated into the profile.
     """
     rules = ["(version 1)", "(allow default)", "(deny network-outbound)"]
-    rules.append('(allow network-outbound (remote unix-socket))')
+    for path in unix_sockets:
+        if (
+            not isinstance(path, str)
+            or not path.startswith("/")
+            or any(ch in path for ch in '"\\()\n\r\0')
+        ):
+            raise ValueError("unix socket allowlist entries must be plain absolute paths")
+        rules.append(f'(allow network-outbound (remote unix-socket (path-literal "{path}")))')
     for port in ports:
         if isinstance(port, bool) or not isinstance(port, int) or not 0 < port < 65536:
             raise ValueError("sandbox ports must be integers in 1..65535")
@@ -313,7 +327,11 @@ class EdgeServer:
         self.ca = RunCA()
         self.ca_path = self.run_dir / "edge-ca.pem"
         self.log_path = self.run_dir / "edge-requests.jsonl"
-        self.spend_path = Path(os.environ["BENCH_SPEND_FILE"])
+        # One guard per edge, built now (F6): a misconfigured meter environment
+        # refuses to construct the edge instead of failing open per request.
+        self._guard = meter_proxy.BudgetGuard()
+        self._owns_clients = (meter_client is None, decisions_client is None)
+        self._tasks: set[asyncio.Task[None]] = set()
         self.port = 0
         self._finished = False
         self._server: asyncio.Server | None = None
@@ -331,13 +349,28 @@ class EdgeServer:
         self._finished = True
 
     async def close(self) -> None:
+        """Stop serving; any in-flight request settles or latches before return.
+
+        Handler tasks are cancelled HERE, not left to ``asyncio.run``'s final
+        cancellation, so their settle-or-latch ``finally`` blocks run while the
+        ledger and clients are still available (F1/N3).
+        """
         self.finish()
         if self._server is not None:
             self._server.close()
+        for task in list(self._tasks):
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
         for writer in list(self._writers):
             writer.close()
         if self._server is not None:
             await self._server.wait_closed()
+        if self._owns_clients[0]:
+            await self._meter.aclose()
+        if self._owns_clients[1]:
+            await self._decisions.aclose()
+        self._guard.close()
 
     def child_env(self) -> dict[str, str]:
         """Environment for the metered child; holds no real credential."""
@@ -362,8 +395,8 @@ class EdgeServer:
         with self.log_path.open("a") as fh:
             fh.write(json.dumps(row, allow_nan=False) + "\n")
 
-    def _latch(self) -> None:
-        meter_proxy.BudgetGuard().latch()
+    def _latch(self, reason: str) -> None:
+        self._guard.latch(self.run_id, reason)
 
     def _authorized(self, headers: dict[str, str]) -> bool:
         if self._finished:
@@ -381,6 +414,9 @@ class EdgeServer:
     # --- connection handling -------------------------------------------------------
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._tasks.add(task)
         self._writers.add(writer)
         try:
             head = await _read_head(reader)
@@ -419,13 +455,15 @@ class EdgeServer:
             await self._tunnel(reader, writer, host)
         except _Reject as exc:
             if exc.latch:
-                self._latch()
+                self._latch(f"edge refused: {exc.reason}")
             with contextlib.suppress(Exception):
                 reason = json.dumps({"error": exc.reason}).encode()
                 await self._send(writer, exc.status, reason, close=True)
         except (ConnectionError, ssl.SSLError, asyncio.IncompleteReadError):
             pass
         finally:
+            if task is not None:
+                self._tasks.discard(task)
             self._writers.discard(writer)
             with contextlib.suppress(Exception):
                 writer.close()
@@ -480,9 +518,9 @@ class EdgeServer:
         latch: bool,
         body: bytes = b"",
     ) -> None:
-        if latch:
-            self._latch()
         path, _, query = target.partition("?")
+        if latch:
+            self._latch(f"denied {method} {host}{path}")
         self._row(
             denied=True,
             method=method,
@@ -547,11 +585,10 @@ class EdgeServer:
             validate_classifier_request(
                 request, max_questions=MAX_QUESTIONS, max_criteria=MAX_CRITERIA
             )
-            guard = meter_proxy.BudgetGuard()
         except (ValueError, KeyError, OSError):
             # An unpriceable request the product expected to send: refusing it
             # changes the run, so the run is void as well as refused.
-            self._latch()
+            self._latch("unpriced classifier request")
             self._row(**base, status=402, refused="unpriced classifier request")
             await self._send(writer, 402, b'{"error":"unpriced classifier request"}')
             return
@@ -559,12 +596,35 @@ class EdgeServer:
         # same deliberate over-reservation the model meter uses; the reviewed
         # contract prices output at zero.
         reserve = float((Decimal(4 * len(body) + 65536) * RATE))
+        guard = self._guard
         try:
-            token = await guard.acquire(self.run_id, "classifier", reserve)
+            # ``acquire`` voids the run on any refusal (F5): a refused
+            # classifier call changes what the product does next.
+            token = await guard.acquire(self.run_id, "classifier", reserve, CLASSIFIER_MODEL)
         except (ValueError, KeyError, OSError):
             self._row(**base, status=402, refused="ledger exhausted, latched or busy")
             await self._send(writer, 402, LEDGER_REFUSED_BODY)
             return
+        # Settle-or-latch (F1): from here to the settle below, any exit --
+        # including CancelledError at shutdown -- abandons the reservation.
+        settled = False
+        try:
+            await self._decide(writer, guard, token, base, headers, body)
+            settled = True
+        finally:
+            if not settled:
+                guard.abandon(token, "decisions request ended before settlement")
+
+    async def _decide(
+        self,
+        writer: asyncio.StreamWriter,
+        guard: meter_proxy.BudgetGuard,
+        token: str,
+        base: Mapping[str, object],
+        headers: dict[str, str],
+        body: bytes,
+    ) -> None:
+        """Dispatch one admitted decision and settle it (every return path settles)."""
         forward = self._forward_headers(headers)
         forward["authorization"] = f"Bearer {self._token}"
         forward["accept-encoding"] = "identity"

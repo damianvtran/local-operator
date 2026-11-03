@@ -118,7 +118,19 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(len(subset["tasks"]), 21)
         self.assertEqual(subset["target_count"], 30)
         self.assertTrue((driver.PUBLIC_LOADOUT / "public_mcp_schemas.json").is_file())
-        self.assertNotIn("0.94.22", driver.HARNESS["local-operator"][1])
+        self.assertEqual(driver.HARNESS["local-operator"][1], "500883ef-v0.94.22")
+        self.assertEqual(driver.SOURCE_REVISION, "500883ef56ca504325ffd80c5b90bf2435d00e3f")
+
+    def test_coding_lop_path_has_no_endpoint_shim_and_refuses_the_candidate(self):
+        # The Harbor path must not keep a second, rebinding launcher for 07c324e9.
+        self.assertFalse((driver.HERE / "lop_shim.py").exists())
+        launcher = (driver.HERE / "lop_launch.py").read_text()
+        self.assertNotIn("lop_shim", launcher)
+        self.assertNotIn("BENCH_ANTHROPIC_URL", launcher)
+        self.assertIn("500883ef56ca504325ffd80c5b90bf2435d00e3f", launcher)
+        adapters = (driver.HERE / "adapters.py").read_text()
+        self.assertNotIn("lop_shim.py", adapters)
+        self.assertNotIn("07c324e9", adapters + launcher + (driver.HERE / "driver.py").read_text())
 
     def test_paid_lop_rejected_even_with_claimed_attestations(self):
         task_root = self.root / "tasks"

@@ -9,26 +9,66 @@ resolved. No Docker, no browsers, no auth-store reads.
 
 ## What is NOT verified here (read this first)
 
-* **S4 (zero-paid full-path `lop exec` gate): NOT RUN — blocked on disk.**
-  `df -m /System/Volumes/Data` showed 13,782 MB free at start (17,220 MB at the
-  end), below the coordinator's 15 GiB hard floor and the brief's 17 GiB
-  build floor, so no clean v0.94.22 checkout/venv
-  (`<repo>/.worktrees/lop-v0.94.22`) was built. None of the S4 acceptance
-  items (oracle-vs-edge 1:1 parity, title/fit/resource decision rows,
-  `max_tokens` 1024/128000 rows, `ps -E` hygiene, failover/fork/title-demote
-  variants) has evidence yet.
-* **S1 child probe** (`local_operator.__file__` under the pinned root;
-  `clients.ANTHROPIC_API_URL == "https://api.anthropic.com"` with no
-  `sitecustomize`) needs that same environment: not run.
-* **S5 real-path half** (each control through a real `lop exec` under the
-  sandbox, with fixture hit counts) is S4-dependent: not run. The S5 controls
-  below are exercised against the real edge over real loopback sockets, TLS
-  and `sandbox-exec`, with in-memory upstream fixtures — they prove the edge
-  and sandbox fail closed, not that the product reaches them on every path.
-* The unpriced `GET` metadata allowlist is intentionally empty (every read is
-  a non-latching 403) until the S4 capture lists the reviewed set.
-* S6 (runner integration) is out of scope: `execute()` still refuses paid
-  LoP, and the edge is not wired into `runner_v2.execute`.
+* **No paid run and no real upstream.** S4/S5 below ran the real released
+  product (`lop exec`, clean detached `v0.94.22` checkout, own `.venv`) through
+  the real edge and meter, but every upstream was a loopback fixture with
+  synthetic billing. Live pricing (`/api/v1/models` rate card) and real
+  Radient/OpenRouter billing are first exercised by the paid pilot.
+* **S6 (runner integration) is out of scope**: `execute()` still refuses paid
+  LoP, and the edge is not wired into `runner_v2.execute`. S6 TODO (D4): the
+  runner must enforce a wall-clock limit on the sandboxed `lop exec` and reap
+  its process group by exact pid — with egress blocked, `lop exec` keeps
+  retrying (observed > 600 s) instead of exiting.
+* The unpriced `GET` metadata allowlist stays **empty**: the only reads seen
+  (10× each across S4 runs) were `GET api.anthropic.com/v1/models?limit=1000`
+  and the tiktoken encodings fetch; both are denied without latching and LoP
+  degrades natively (chars/4 estimate, built-in model metadata).
+* The Harbor coding path (`coding/`) has no edge, so its LoP launcher refuses.
+
+## S4/S5 real-path summary (2026-11-03)
+
+Full commands, outputs and the S1 child probe are in the scratch evidence file
+`LOP-EDGE-S4-EVIDENCE.md` (kept out of the repo so the reviewed head stayed
+fixed): sha256 `e0f5f532…c55e0ac` (`e0f5f53201d2ca43fea53d0d0490ba50b6a9b37a6e0eb3398e0d8a160c55e0ac`).
+Rig hashes: `rig.py` (round 0) `a946dde1…`, `oracle_child.py` `6d6a86dc…`,
+`check.py` `9b813885…`. S1 child probe: `local_operator.__file__` under
+`~/workspace/repos/lo-harness-cost/.worktrees/lop-v0.94.22`, HEAD `500883ef…`
+clean, `ANTHROPIC_API_URL == "https://api.anthropic.com"`, no `sitecustomize`.
+
+| run | rc | oracle | edge rows | oracle∖edge | edge∖oracle | fixture hits | sandbox denials | ledger blocked | replay after finish |
+|---|---|---|---|---|---|---|---|---|---|
+| native | 0 | 7 | 7 | 0 | 0 | 5 | 0 | no | 407 |
+| failover (round 0) | 1 | 8 | 8 | 0 | 0 | 4 | 0 | yes | 407 |
+| failover-billed | 1 | 17 | 17 | 0 | 0 | 14 | 0 | no | 407 |
+| title-demote | 0 | 8 | 8 | 0 | 0 | 5 | 0 | no | 407 |
+| fork | 0 | 8 | 8 | 0 | 0 | 6 | 0 | no | 407 |
+| tool-bypass (curl `--noproxy`, urllib) | 0 | 7 | 7 | 0 | 0 | 5 | 2 (EPERM) | no | 407 |
+| typesafe leg forced | 1 | 7 | 7 | 0 | 0 | 0 | 0 | yes | 407 |
+| diagnostics 400 | 1 | 7 | 7 | 0 | 0 | 4 | 0 | yes | 407 |
+| decisions without `cost` | 1 | 7 | 7 | 0 | 0 | 2 | 0 | yes | 407 |
+| decisions 401 | 1 | 8 | 8 | 0 | 0 | 2 | 0 | yes | 407 |
+| no proxy env (launcher) | 1 | 0 | 0 | 0 | 0 | 0 | 0 | — | 407 |
+| wrong nonce | 1 | 15 | 0 (407) | 15 | 0 | 0 | 0 | — | 407 |
+| no proxy env, launcher bypassed | killed | 29 | 0 | 29 | 0 | 0 | 21 (EPERM) | — | 407 |
+
+Direct TLS with the run-only CA bundle (LoP's httpx and `requests`, loopback
+host not signed by the run CA): `CERTIFICATE_VERIFY_FAILED` for both. Token
+hygiene: fake credentials and their hash prefixes in no artifact; `ps -E`
+shows only the dummy `RADIENT_API_KEY`.
+
+Defects found by S4 and fixed in remediation round 1: D1 flat worst-case
+reservation ($4.07/request) admitted nothing under a $1 trial cap; D2 a native
+failover to an unpriced model (Opus) and an unbilled 529 left the run looking
+valid; D3 refusing an unpriced model (Haiku 4.5 title tier) did not void the
+run. **Round 1 re-run** (rig `d47b7449…`, R1 meter contract, $5 trial cap):
+`native` rc 0, oracle 7 = edge 7, fixture 5/5, 0 denials, ledger clean, no
+voids, per-request reserves title $0.0325 / main $1.4675 / $1.4685;
+`failover` rc 1, oracle 9 = edge 9, Opus refused before dispatch, run voided
+with `upstream status 529`, `unbilled or unknown charge`, `refused request:
+unpriced model anthropic/claude-opus-5.5`. Reserve repro (`repro_reserve_r1.py`
+`2bf900aa…`, LoP's captured S4 bodies, Sonnet 5.5 list rates): trial cap $1 →
+title admitted, main ($1.4611) refused and the run voided; $1.50 (lowest tested
+cap that admits both) / $2 / $5 → title + main + a second main admitted.
 
 ## Commands
 
@@ -81,7 +121,7 @@ HTTPS_PROXY must name this run's loopback metering edge                         
 | S1 | refuses dirty tracked AND untracked files (stray `sitecustomize.py`) | `test_launcher_refuses_dirty_or_untracked_tree_in_a_real_repository` (real `git init` repo) | pass |
 | S1 | `lop_shim` + `BENCH_ANTHROPIC_URL` removed; CLI run without shim | `test_launcher_runs_the_unmodified_cli_without_any_shim`, `test_source_launch_environment_is_explicit` | pass |
 | S1 | launcher refuses without loopback edge proxy/CA/NO_PROXY env | `test_launcher_requires_the_edge_proxy_environment` | pass |
-| S1 | clean v0.94.22 env; child-probe `__file__`/`ANTHROPIC_API_URL` | — | **blocked (disk)** |
+| S1 | clean v0.94.22 env; child-probe `__file__`/`ANTHROPIC_API_URL` | S4 evidence file | pass |
 | S2a | `diagnostics` forwarded unchanged, price-neutral | `test_diagnostics_is_price_neutral_and_forwarded_unchanged`, edge `test_model_route_…` | pass |
 | S2b | two concurrent admissions both dispatch & settle; third waits → 402 at deadline | `test_concurrent_admissions_queue_against_pending_exposure` | pass |
 | S2b | a waiting admission dispatches once exposure settles | `test_waiting_admission_dispatches_once_exposure_settles` | pass |
@@ -109,7 +149,26 @@ HTTPS_PROXY must name this run's loopback metering edge                         
 | S5 | decisions 401 → latch; re-resolve retry reaches edge and is refused, 1 upstream hit | `test_classifier_401_latches_and_reresolve_retry_is_refused` | pass |
 | S5 | plain-HTTP proxying / CONNECT to non-443 → 403 + latch | `test_plain_http_proxying_is_denied_and_post_latches`, `test_connect_to_non_tls_port_is_denied_and_latches` | pass |
 | S5 | sandbox allows only the listed loopback port | `test_only_allowed_loopback_port_connects` | pass |
-| S4 | full-path `lop exec` gate, all §4 S4 items | — | **blocked (disk)** |
+| S4 | full-path `lop exec` gate, all §4 S4 items | S4/S5 summary above | pass (failover completes only to its void, by design) |
+
+## Remediation round 1 (review `LOP-EDGE-REVIEW-R1.md`)
+
+Each fix observed RED first (68 errors/failures before implementation: missing
+rate card, `make_app`, unix-socket allowlist, launcher/coding pins), then:
+experimental `Ran 114 tests — OK`; coding `Ran 23 tests — OK`; core `test_kit`
+`Ran 16 tests — OK`; `flake8` exit 0; `pyright` `0 errors` on all changed files.
+
+| Finding | Behaviour | Test |
+|---|---|---|
+| F1 | settle-or-latch on every exit incl. cancellation (meter and edge); stale/orphan backstop; teardown latch | `test_cancelled_request_latches`, `test_non_stream_body_reset_after_dispatch_latches`, `test_orphaned_reservation_of_a_dead_process_refuses_the_next_request`, `test_live_concurrent_owner_is_not_an_orphan`, `test_stale_reservation_latches_and_teardown_latches_unsettled`, `test_edge_close_mid_decision_latches_the_reservation` |
+| F2 | lowercase/`ALL_PROXY`/`HTTP_PROXY` conflicts refused; edge env accepted verbatim | `test_launcher_requires_the_edge_proxy_environment`, `test_launcher_accepts_the_edge_child_environment_verbatim` |
+| F3 | unix sockets denied unless an exact path is listed | `test_unix_sockets_are_denied_unless_explicitly_allowed` (real `sandbox-exec`: listed → connected, other → errno 1, default → errno 1) |
+| F4 | `count_tokens` is an unlisted POST: 403 + latch | `test_count_tokens_is_an_unlisted_post_that_latches` |
+| F5 | any admission refusal voids the run with its reason | `test_decisions_admission_refusal_voids_the_run`, `test_concurrent_admissions_queue_against_pending_exposure`, `test_total_cap_independent_of_trial_ids` |
+| F6 | one guard built at startup; bad env fails construction/startup | `test_configuration_errors_fail_at_startup`, `test_misconfigured_meter_environment_fails_at_construction`, entrypoint test |
+| D1 | per-request reservation from the request's own bytes and `max_tokens` | `test_reservation_is_per_request_not_a_flat_worst_case` + reserve repro above |
+| D2/D3 | rate card = exact native allowlist with provenance; other models refused + void; non-200 upstream voids; unbilled latches | `test_rate_card_is_the_exact_native_allowlist_with_provenance`, `test_haiku_is_priced_from_the_card_and_recorded_per_model`, `test_unpriced_model_is_refused_and_voids_the_run`, `test_upstream_overload_voids_the_run_even_when_billed`, `test_unbilled_overload_latches_with_reason` |
+| coding | Harbor LoP path repinned to `500883ef`; shim deleted; launcher refuses | `test_coding_lop_path_has_no_endpoint_shim_and_refuses_the_candidate` |
 
 ## Provenance of vendored code
 

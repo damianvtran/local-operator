@@ -10,8 +10,9 @@ only public selection/image/checksum metadata, not oracle rewards, measured
 host disk figures or host Python version. External frozen oracle evidence is
 mandatory before dispatch; the public task list does not establish passes.
 
-The installed Local Operator 0.94.22 baseline is not the reviewed
-`07c324e9f613b378c437936ede1978c9fc0b49db` source installation. No source rebuild,
+Local Operator is pinned to released v0.94.22
+(`500883ef56ca504325ffd80c5b90bf2435d00e3f`); on this container path its launcher
+refuses until a per-run metering edge exists here. No source rebuild,
 paid task-container pilot, finalized preregistration or final toolwire validation
 was completed by this port.
 
