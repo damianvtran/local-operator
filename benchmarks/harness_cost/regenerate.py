@@ -288,80 +288,236 @@ def derive(snapshot):
     return results,figure,components,sequences,reconciliation
 
 
-def figures(out, results, components):
-    """Observed and counterfactual values are distinct; no promotional ratios.
 
-    DejaVu Sans ships with matplotlib. Tight bounds plus a rendered text-bound
-    check prevent clipping; platform/font variation is not pixel parity.
+def cost_table_rows(results):
+    """One row per explicitly matched population; never mix Codex's 4 with 24.
+
+    Why: the readable graphic and accessible text need one authoritative set of
+    values, not independently rounded/ad-hoc chart labels. Costs use observed
+    model dollars and named counterfactuals; historical Codex sensitivity and
+    comparative rankings are deliberately excluded. Counts are descriptive.
+    """
+    groups=[('clean','Clean — 16 short tasks',H),
+            ('full','Full — 24 tasks (excluding Codex)',H[:4]),
+            ('codex-full','Codex full — 4 selected long tasks',H[4:])]
+    rows=[]
+    for group,label,harnesses in groups:
+        arm='clean' if group=='clean' else 'full'
+        for harness in harnesses:
+            runs=[r for r in results['rows'] if r['arm']==arm and r['harness']==harness]
+            n=len(runs)
+            check(n==(16 if arm=='clean' else 4 if harness=='codex' else 24),'Table population')
+            rows.append(dict(population=group,population_label=label,harness=harness,n=n,
+                passed=sum(r['score']>=1 for r in runs),
+                observed_usd_per_task=st.mean(r['cost_usd'] for r in runs),
+                historical_cold_usd_per_task=st.mean(r['cold_cost'] for r in runs),
+                cross_run_cold_usd_per_task=st.mean(r['cold_cross_run_estimate_usd'] for r in runs)))
+    return rows
+
+
+DISPLAY_NAMES={'local-operator':'Local Operator','omp':'omp','opencode':'OpenCode',
+               'claude-code':'Claude Code','codex':'Codex'}
+
+
+def plot_labels(harnesses,runs):
+    """Codex labels use the actual panel population, never a global n=4."""
+    return [DISPLAY_NAMES[h]+(f" (n={sum(r['harness']==h for r in runs)})" if h=='codex' else '') for h in harnesses]
+
+
+def color_contrast(a,b):
+    """WCAG relative-luminance ratio; boundaries carry non-text distinctions."""
+    def luminance(color):
+        rgb=[int(color[i:i+2],16)/255 for i in (1,3,5)]
+        linear=[v/12.92 if v<=.04045 else ((v+.055)/1.055)**2.4 for v in rgb]
+        return sum(v*w for v,w in zip(linear,[.2126,.7152,.0722]))
+    x,y=sorted([luminance(a),luminance(b)])
+    return (y+.05)/(x+.05)
+
+
+def cost_table_markdown(rows):
+    """Accessible, selectable equivalent of the table graphic; fixed USD units."""
+    lines=['# EXPLORATORY v1 — cost per task','',
+        'Materially confounded; one run per cell. No current ranking or quality-parity claim.',
+        'All costs are mean **USD per task** (six decimal places). Passed / n are logged counts.',
+        '**Cold columns are counterfactual estimates, not measured cold executions.**',
+        'Classifier absent in v1; total equals observed model cost. See [corrections](../CORRECTIONS.md).','']
+    last=None
+    for row in rows:
+        if row['population']!=last:
+            lines+=['## '+row['population_label'],'',
+                '| Harness | Passed / n | Observed USD/task | Historical cold estimate USD/task | Cross-run cold estimate USD/task |',
+                '|---|---:|---:|---:|---:|']
+            last=row['population']
+        values=[DISPLAY_NAMES[row['harness']],f"{row['passed']} / {row['n']}"]
+        values += [f"{row[k]:.6f}" for k in ['observed_usd_per_task','historical_cold_usd_per_task','cross_run_cold_usd_per_task']]
+        lines.append('| '+' | '.join(values)+' |')
+        if row is rows[-1] or rows[rows.index(row)+1]['population']!=last:
+            lines.append('')
+    lines+=['Codex full is a separate n=4 population with a metadata/compaction confound.',
+            'No historical cache-adjusted Codex cost or ratio is shown. Pass counts do not establish quality parity.','']
+    return '\n'.join(lines)
+
+
+def check_table_markdown(markdown,rows):
+    """Parse the published numeric cells and compare them against derived JSON.
+
+    This is intentionally not just a renderer-string equality check: incorrect
+    population/count/cost cells fail even if formatting changes innocently.
+    Six-place USD formatting is checked at its half-unit rounding tolerance.
+    """
+    check([line[3:] for line in markdown.splitlines() if line.startswith('## ')]==list(dict.fromkeys(row['population_label'] for row in rows)),'Markdown population headings')
+    parsed=[line for line in markdown.splitlines() if line.startswith('| ') and not line.startswith('| Harness')]
+    check(len(parsed)==len(rows),'Markdown table row population')
+    for line,row in zip(parsed,rows):
+        cells=[c.strip() for c in line.strip('|').split('|')]
+        check(len(cells)==5,'Markdown table columns')
+        check(cells[0]==DISPLAY_NAMES[row['harness']],'Markdown harness label')
+        check(cells[1]==f"{row['passed']} / {row['n']}",'Markdown pass/sample count')
+        for cell,key in zip(cells[2:],['observed_usd_per_task','historical_cold_usd_per_task','cross_run_cold_usd_per_task']):
+            check(abs(float(cell)-row[key])<=.000000500001,'Markdown/table JSON numeric mismatch')
+
+
+def figures(out, results, components):
+    """Readable paired graphs/table with redundant, non-color-only encoding.
+
+    Why: a wide three-panel chart made numeric glyphs unreadable at README
+    widths. Stack panels vertically, publish numbers in a companion graphic
+    and Markdown, and distinguish estimates/components with hatching and dark
+    boundaries. Constraints: USD, explicit populations, observed vs estimated,
+    no comparative rank or historical Codex sensitivity. Geometry gates measure
+    clipping, table text overlap and font sizes at an 861 CSS-pixel embed width.
     """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
     from matplotlib.text import Text
-    plt.rcParams.update({'font.family':'DejaVu Sans','font.size':10,'text.parse_math':False})
-    names=['Local Operator','omp','OpenCode','Claude Code','Codex (4 tasks)']
+    plt.rcParams.update({'font.family':'DejaVu Sans','font.size':14,
+                         'text.parse_math':False,'hatch.linewidth':1.2})
     geometry=[]
-    def save(fig, name):
+
+    def save(fig,name,table=False,encoding=None):
         fig.canvas.draw()
         renderer=fig.canvas.get_renderer()
         box=fig.bbox
+        width_inches=fig.get_tightbbox(renderer).width+.4
         bounds=[]
+        boxes=[]
         for text in fig.findobj(Text):
             if text.get_visible() and text.get_text():
                 b=text.get_window_extent(renderer)
-                check(b.x0>=-1 and b.y0>=-1 and b.x1<=box.x1+1 and b.y1<=box.y1+1, f'Clipped text {text.get_text()}')
-                bounds.append(dict(text=text.get_text(),bbox_pixels=list(b.extents)))
+                check(b.x0>=-1 and b.y0>=-1 and b.x1<=box.x1+1 and b.y1<=box.y1+1,
+                      f'Clipped text {text.get_text()}')
+                css_px=text.get_fontsize()/72*861/width_inches
+                check(css_px>=12,f'Text below 12 CSS px at 861 px width: {text.get_text()}')
+                bounds.append(dict(text=text.get_text(),bbox_pixels=list(b.extents),css_font_px_at_861=css_px))
+                boxes.append(b)
         for legend in fig.legends:
-            lb=legend.get_window_extent(renderer)
             for ax in fig.axes:
                 for tick in ax.get_xticklabels():
-                    check(not tick.get_window_extent(renderer).overlaps(lb),'Legend overlaps tick label')
-        geometry.append(dict(figure=name,canvas_pixels=list(box.extents),measurement_dpi=fig.dpi,export_dpi=150,all_text_within_canvas=True,legend_tick_overlap=False,text_bounds=bounds))
+                    check(not tick.get_window_extent(renderer).overlaps(legend.get_window_extent(renderer)),
+                          'Legend overlaps tick label')
+        if table:
+            for i,b in enumerate(boxes):
+                check(not any(b.overlaps(other) for other in boxes[i+1:]),'Table text overlaps')
+        geometry.append(dict(figure=name,canvas_pixels=list(box.extents),measurement_dpi=fig.dpi,
+            export_dpi=150,all_text_within_canvas=True,legend_tick_overlap=False,
+            table_text_overlap=False if table else None,embed_width_css_px=861,
+            min_css_font_px_at_861=min(b['css_font_px_at_861'] for b in bounds),encoding=encoding,text_bounds=bounds))
         fig.savefig(out/name,dpi=150,facecolor='white',bbox_inches='tight',pad_inches=.2)
         plt.close(fig)
-    fig,axs=plt.subplots(1,3,figsize=(15,7))
-    fig.subplots_adjust(top=.78,bottom=.32,wspace=.43,left=.07,right=.98)
-    fig.suptitle('EXPLORATORY v1: observed model costs and cold-cache estimates',fontsize=16,y=.97)
-    fig.text(.5,.88,'Confounded private loadouts; one run per cell. No causal ranking. USD/task. See CORRECTIONS.md / review R1–R9.',ha='center')
-    for ax,arm,title,hs in [(axs[0],'clean','Clean: 16 short tasks',H),(axs[1],'full','Full: 24 tasks (excluding Codex)',H[:4]),(axs[2],'full','Codex full: selected 4 long tasks',H[4:])]:
+
+    # The companion table is the authoritative readable numeric view. Avoid
+    # 30 tiny rotated value labels: graphs communicate shape, tables numbers.
+    fig,axs=plt.subplots(3,1,figsize=(10.8,11.8))
+    fig.subplots_adjust(top=.85,bottom=.16,hspace=.66,left=.12,right=.97)
+    fig.suptitle('EXPLORATORY v1: model cost per task',fontsize=20,y=.975)
+    fig.text(.5,.925,'Observed versus counterfactual cold estimates · mean USD/task',ha='center',fontsize=14)
+    fig.text(.5,.89,'Confounded; one run per cell. Numbers: cost-per-task-table.md / .png',ha='center',fontsize=12)
+    panels=[('clean','Clean: 16 short tasks per harness',H),
+            ('full','Full: 24 tasks per harness (excluding Codex)',H[:4]),
+            ('full','Codex full: 4 selected long tasks; separate scale',H[4:])]
+    encodings=[('cost_usd','Observed','#164e63',None,-.25),
+               ('cold_cost','Historical cold estimate','#64748b','///',0),
+               ('cold_cross_run_estimate_usd','Cross-run cold estimate','#b45309','...',.25)]
+    for ax,(arm,title,hs) in zip(axs,panels):
         rs=[r for r in results['rows'] if r['arm']==arm]
-        for j,(field,label,col,offset) in enumerate([('cost_usd','Observed rate-card cost','#2563eb',-.24),('cold_cost','Historical cold estimate','#94a3b8',0),('cold_cross_run_estimate_usd','Cross-run cold estimate','#f59e0b',.24)]):
+        for field,label,color,hatch,offset in encodings:
             vals=[st.mean(r[field] for r in rs if r['harness']==h) for h in hs]
-            bars=ax.bar([i+offset for i in range(len(hs))],vals,width=.23,label=label,color=col)
-            ax.bar_label(bars,fmt='%.3f',fontsize=7,padding=3,rotation=90)
-        ax.set_xticks(range(len(hs)),[names[H.index(h)] for h in hs],rotation=25,ha='right')
-        ax.set_title(title,fontsize=11)
-        ax.set_ylabel('Mean USD / task')
-        ax.set_ylim(0,ax.get_ylim()[1]*1.32)
-        ax.grid(axis='y',alpha=.15)
+            ax.bar([i+offset for i in range(len(hs))],vals,width=.23,label=label,
+                   color=color,hatch=hatch,edgecolor='#111827',linewidth=1.3,zorder=3)
+        # Population is contextual, not embedded in a globally reused Codex name.
+        ax.set_xticks(range(len(hs)),plot_labels(hs,rs),fontsize=13)
+        ax.tick_params(axis='y',labelsize=13)
+        ax.set_title(title,fontsize=14,pad=12)
+        ax.set_ylabel('USD / task',fontsize=13)
+        ax.set_ylim(0,ax.get_ylim()[1]*1.13)
+        ax.grid(axis='y',alpha=.2,zorder=0)
     handles,labels=axs[0].get_legend_handles_labels()
-    fig.legend(handles,labels,loc='lower center',bbox_to_anchor=(.5,.09),ncol=3,frameon=False)
-    fig.text(.5,.035,'Cold columns are counterfactuals, not measured cold runs. Classifier absent. Codex: metadata/compaction confound; sensitivity not plotted.',ha='center',fontsize=9)
-    save(fig,'fig1-cost-per-task.png')
-    fig,axs=plt.subplots(1,2,figsize=(14,6),gridspec_kw={'width_ratios':[3,1]})
-    fig.subplots_adjust(top=.78,bottom=.24,wspace=.35,left=.075,right=.98)
-    fig.suptitle('EXPLORATORY v1: all measured model-cost components',fontsize=16,y=.97)
-    fig.text(.5,.88,'Full arm, long tasks only; separate scale for Codex. Components reconcile to observed costs. See CORRECTIONS.md.',ha='center')
-    specs=[('uncached','Uncached input','#111827'),('cache_write_5m','5m cache writes','#60a5fa'),('cache_write_1h','1h cache writes','#1d4ed8'),('read','Cache reads','#a78bfa'),('output','Output (incl. thinking)','#34d399')]
+    fig.legend(handles,labels,loc='lower center',bbox_to_anchor=(.5,.075),ncol=3,frameon=False,fontsize=12)
+    fig.text(.5,.035,'Cold = estimates, not measured cold runs. Classifier absent. See CORRECTIONS.md.',ha='center',fontsize=12)
+    grouped_encoding=[dict(label=label,fill=color,hatch=hatch or 'solid',outline='#111827',fill_background_contrast=color_contrast(color,'#ffffff')) for _,label,color,hatch,_ in encodings]
+    check(all(e['fill_background_contrast']>=3 for e in grouped_encoding),'Grouped bar/background contrast')
+    save(fig,'fig1-cost-per-task.png',encoding=grouped_encoding)
+
+    fig,axs=plt.subplots(2,1,figsize=(10.8,9.6),gridspec_kw={'height_ratios':[1.15,1]})
+    fig.subplots_adjust(top=.83,bottom=.25,hspace=.6,left=.12,right=.97)
+    fig.suptitle('EXPLORATORY v1: all observed cost components',fontsize=18,y=.975)
+    fig.text(.5,.925,'Full arm, long tasks only · mean observed USD/task',ha='center',fontsize=14)
+    fig.text(.5,.875,'Includes uncached input and side calls. See CORRECTIONS.md.',ha='center',fontsize=12)
+    # Adjacent pale fills are separated by dark outlines and distinct patterns;
+    # readers need not infer boundaries or identities from hue differences.
+    specs=[('uncached','Uncached input','#e5e7eb','xx'),
+           ('cache_write_5m','5m cache writes','#bfdbfe','///'),
+           ('cache_write_1h','1h cache writes','#ffedd5','\\\\'),
+           ('read','Cache reads','#ddd6fe','...'),
+           ('output','Output incl. thinking','#bbf7d0','oo')]
     for ax,hs in [(axs[0],H[:4]),(axs[1],H[4:])]:
         bottom=[0.]*len(hs)
-        for key,label,color in specs:
+        for key,label,color,hatch in specs:
             vals=[components[h][key] for h in hs]
-            ax.bar(range(len(hs)),vals,bottom=bottom,label=label,color=color,width=.6)
+            ax.bar(range(len(hs)),vals,bottom=bottom,label=label,color=color,hatch=hatch,
+                   edgecolor='#111827',linewidth=1.3,width=.55,zorder=3)
             bottom=[a+b for a,b in zip(bottom,vals)]
         for i,h in enumerate(hs):
             close(bottom[i],components[h]['total'],'Figure stack')
-            ax.text(i,bottom[i]*1.025,f"${bottom[i]:.4f}\nn={components[h]['n']}",ha='center',fontsize=10)
-        ax.set_xticks(range(len(hs)),[names[H.index(h)] for h in hs])
+            ax.text(i,bottom[i]*1.035,f"USD {bottom[i]:.4f}; n={components[h]['n']}",ha='center',fontsize=13)
+        ax.set_xticks(range(len(hs)),[DISPLAY_NAMES[h] for h in hs],fontsize=13)
+        ax.tick_params(axis='y',labelsize=13)
         ax.set_ylim(0,max(bottom)*1.25)
-        ax.set_ylabel('Mean observed USD / long task')
-        ax.grid(axis='y',alpha=.15)
+        ax.set_ylabel('USD / long task',fontsize=13)
+        ax.set_title('8 long tasks per harness' if len(hs)>1 else 'Codex: 4 selected long tasks; separate scale',fontsize=14,pad=12)
+        ax.grid(axis='y',alpha=.2,zorder=0)
     handles,labels=axs[0].get_legend_handles_labels()
-    fig.legend(handles,labels,loc='lower center',bbox_to_anchor=(.5,.09),ncol=5,frameon=False,fontsize=9)
-    fig.text(.5,.035,'Includes ALL uncached input. Side calls are included in each component, not added twice. Radient classifier absent in v1. No adjusted Codex costs.',ha='center',fontsize=9)
-    save(fig,'fig2-why-costs-differ.png')
-    (out/'figure_geometry.json').write_text(json.dumps(geometry,indent=2)+'\n')
+    fig.legend(handles,labels,loc='lower center',bbox_to_anchor=(.5,.085),ncol=3,frameon=False,fontsize=12)
+    fig.text(.5,.04,'Side calls are subsets, not added twice. Classifier absent. No adjusted Codex costs.',ha='center',fontsize=12)
+    stacked_encoding=[dict(label=label,fill=color,hatch=hatch,outline='#111827',boundary_contrast=color_contrast(color,'#111827')) for _,label,color,hatch in specs]
+    check(all(e['boundary_contrast']>=3 for e in stacked_encoding),'Stacked fill/boundary contrast')
+    save(fig,'fig2-why-costs-differ.png',encoding=stacked_encoding)
 
+    rows=cost_table_rows(results)
+    fig=plt.figure(figsize=(10.8,9.6))
+    fig.suptitle('EXPLORATORY v1 — cost per task',fontsize=20,y=.975)
+    fig.text(.05,.925,'Observed costs and counterfactual estimates · mean USD per task',fontsize=14)
+    fig.text(.05,.885,'One run per cell; materially confounded. No current ranking or quality-parity claim.',fontsize=12)
+    xs=[.05,.345,.515,.705,.89]
+    groups=[('clean',.82,.785,.735),('full',.49,.455,.405),('codex-full',.205,.17,.12)]
+    for group,title_y,header_y,first_y in groups:
+        subset=[r for r in rows if r['population']==group]
+        fig.text(.05,title_y,subset[0]['population_label'],fontsize=15,weight='bold')
+        for i,(x,label) in enumerate(zip(xs,['Harness','Passed / n','Observed\nUSD/task','Historical cold\nUSD/task','Cross-run cold\nUSD/task'])):
+            fig.text(x,header_y,label,fontsize=13,ha='left' if i==0 else 'center',va='center',weight='bold')
+        for i,row in enumerate(subset):
+            y=first_y-i*.045
+            cells=[DISPLAY_NAMES[row['harness']],f"{row['passed']} / {row['n']}"]
+            cells += [f"{row[k]:.6f}" for k in ['observed_usd_per_task','historical_cold_usd_per_task','cross_run_cold_usd_per_task']]
+            for j,(x,cell) in enumerate(zip(xs,cells)):
+                fig.text(x,y,cell,fontsize=14,ha='left' if j==0 else 'center',va='center')
+            fig.add_artist(Line2D([.05,.97],[y-.020,y-.020],transform=fig.transFigure,color='#9ca3af',linewidth=.6))
+    fig.text(.05,.065,'Cold columns are counterfactuals, not measured cold runs. Classifier absent in v1.',fontsize=12)
+    fig.text(.05,.03,'No cache-adjusted Codex values. Accessible text: cost-per-task-table.md · CORRECTIONS.md',fontsize=12)
+    save(fig,'cost-per-task-table.png',table=True)
+    (out/'figure_geometry.json').write_text(json.dumps(geometry,indent=2)+'\n')
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -380,6 +536,11 @@ def main():
     export(args.out,'cost_components_long',components,[dict(harness=h,**v) for h,v in components.items()])
     export(args.out,'call_sequences',sequences,[dict(run_id=rid,sequence=kind,call_index=i+1,value=v,unit='tokens' if kind=='ctx' else 'USD') for kind in ['ctx','cost'] for rid,values in sequences[kind].items() for i,v in enumerate(values)])
     export(args.out,'reconciliation',reconciliation,reconciliation['runs'])
+    table_rows=cost_table_rows(result)
+    export(args.out,'cost-per-task-table',dict(label=LABEL,currency='USD',rows=table_rows),table_rows)
+    table_path=args.out/'cost-per-task-table.md'
+    table_path.write_text(cost_table_markdown(table_rows))
+    check_table_markdown(table_path.read_text(),read_json(args.out/'cost-per-task-table.json')['rows'])
     figures(args.out,result,components)
     print(json.dumps(dict(status='PASS', historical_numeric_parity=True, **{k:v for k,v in reconciliation.items() if k!='runs'}),indent=2))
 

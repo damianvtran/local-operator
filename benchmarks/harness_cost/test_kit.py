@@ -73,6 +73,63 @@ class KitTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(payload).hexdigest(),server['sha256'])
         self.assertEqual(sum(len(v['tools']) for v in snap['servers'].values()),493)
 
+    def test_recursive_metering_projection_refused(self):
+        original=r.jsonl(self.snapshot/'requests.jsonl')
+        cases=[lambda q:q['usage']['cache_creation'].update(private_note='nonpublic metadata'),
+               lambda q:q['usage']['cache_creation'].update(ephemeral_5m_input_tokens={'private_note':'nonpublic metadata'}),
+               lambda q:q['usage']['cache_creation'].update(ephemeral_5m_input_tokens=['nonpublic metadata']),
+               lambda q:q['usage'].update(cache_creation=['nonpublic metadata']),
+               lambda q:q['usage'].update(cache_creation=None),
+               lambda q:q['usage'].update(input_tokens={'private_note':'nonpublic metadata'}),
+               lambda q:q['usage']['cache_creation'].update(ephemeral_5m_input_tokens=True),
+               lambda q:q.update(n_tools={'private_note':'nonpublic metadata'})]
+        self.assertEqual(set(p.REQUEST_SCHEMA),p.REQUEST_FIELDS)
+        self.assertEqual(set(p.USAGE_SCHEMA),p.USAGE_FIELDS)
+        p.scan(self.root,['v1-snapshot/requests.jsonl'])
+        for index,mutation in enumerate(cases):
+            with self.subTest(nested_case=index):
+                rows=copy.deepcopy(original)
+                mutation(next(q for q in rows if q.get('usage')))
+                (self.snapshot/'requests.jsonl').write_text(''.join(json.dumps(q)+'\n' for q in rows))
+                with self.assertRaisesRegex(ValueError,'Metering projection'):
+                    p.scan(self.root,['v1-snapshot/requests.jsonl'])
+
+    def test_cost_table_numeric_cells_and_populations(self):
+        rows=r.cost_table_rows(r.derive(self.snapshot)[0])
+        self.assertEqual(len(rows),10)
+        self.assertEqual([(x['population'],x['n']) for x in rows], [('clean',16)]*5+[('full',24)]*4+[('codex-full',4)])
+        r.export(self.root,'table_numeric',{'rows':rows},rows)
+        serialized=r.read_json(self.root/'table_numeric.json')['rows']
+        markdown=r.cost_table_markdown(rows)
+        r.check_table_markdown(markdown,serialized)
+        changed=markdown.replace(f"{rows[0]['observed_usd_per_task']:.6f}",'9.999999',1)
+        with self.assertRaisesRegex(ValueError,'numeric mismatch'):
+            r.check_table_markdown(changed,serialized)
+        changed=markdown.replace(f"{rows[0]['passed']} / {rows[0]['n']}",'0 / 4',1)
+        with self.assertRaisesRegex(ValueError,'pass/sample'):
+            r.check_table_markdown(changed,serialized)
+        with self.assertRaisesRegex(ValueError,'population headings'):
+            r.check_table_markdown(markdown.replace('16 short tasks','4 short tasks'),serialized)
+
+    def test_contextual_codex_labels(self):
+        rows=r.derive(self.snapshot)[0]['rows']
+        self.assertEqual(r.plot_labels(['codex'],[x for x in rows if x['arm']=='clean']),['Codex (n=16)'])
+        self.assertEqual(r.plot_labels(['codex'],[x for x in rows if x['arm']=='full']),['Codex (n=4)'])
+
+    def test_readable_figure_geometry_and_redundant_encodings(self):
+        frames=r.read_json(r.ROOT/'generated/figure_geometry.json')
+        self.assertEqual({f['figure'] for f in frames},{'fig1-cost-per-task.png','fig2-why-costs-differ.png','cost-per-task-table.png'})
+        for frame in frames:
+            self.assertTrue(frame['all_text_within_canvas'])
+            self.assertGreaterEqual(frame['min_css_font_px_at_861'],12)
+            if frame['figure']=='cost-per-task-table.png':
+                self.assertFalse(frame['table_text_overlap'])
+            else:
+                encoding=frame['encoding']
+                self.assertEqual(len({e['hatch'] for e in encoding}),len(encoding))
+                key='fill_background_contrast' if frame['figure'].startswith('fig1') else 'boundary_contrast'
+                self.assertTrue(all(e[key]>=3 for e in encoding))
+
     def test_duplicate_run_refused(self):
         self.mutate('runs.jsonl',lambda x:x.append(copy.deepcopy(x[0])))
         with self.assertRaisesRegex(ValueError,'duplicates/count'):

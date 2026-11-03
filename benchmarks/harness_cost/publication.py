@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -35,6 +36,36 @@ PATTERNS={
 }
 REQUEST_FIELDS={'ts','run_id','path','status','latency_s','stream','requested_model','served_model','n_tools','n_messages','tools_bytes','system_bytes','auto_cache','usage'}
 USAGE_FIELDS={'input_tokens','output_tokens','cache_creation_input_tokens','cache_read_input_tokens','cache_creation','cost'}
+# A top-level key allowlist alone can hide private objects inside allowed
+# metadata. Each container and leaf is therefore closed recursively; arbitrary
+# dictionaries/lists/strings cannot masquerade as token counters. Null usage
+# is the one documented exception for discovery/incomplete responses.
+USAGE_SCHEMA={k:int for k in USAGE_FIELDS-{'cache_creation','cost'}}
+USAGE_SCHEMA.update(cost=(int,float),cache_creation={
+    'ephemeral_5m_input_tokens':int,'ephemeral_1h_input_tokens':int})
+REQUEST_SCHEMA={k:str for k in ['run_id','path','requested_model','served_model']}
+REQUEST_SCHEMA.update({k:int for k in ['status','n_tools','n_messages','tools_bytes','system_bytes']})
+REQUEST_SCHEMA.update(ts=(int,float),latency_s=(int,float),stream=bool,auto_cache=bool,usage=USAGE_SCHEMA)
+
+
+def validate_projection(value,schema,path='request'):
+    """Reject unknown nested fields and non-scalar leaves without echoing data.
+
+    Why: metadata is public only within the exact metering contract. A private
+    subtree is unsafe even when its text does not match a secret/PII regex.
+    Constraints: no coercion or stringification; booleans are not token counts.
+    """
+    if value is None and path=='request.usage':
+        return
+    if isinstance(schema,dict):
+        if type(value) is not dict or not set(value)<=set(schema):
+            fail(f'Metering projection contains unexpected fields or container at {path}')
+        for key,item in value.items():
+            validate_projection(item,schema[key],path+'.'+key)
+    else:
+        types=schema if isinstance(schema,tuple) else (schema,)
+        if type(value) not in types or (type(value) in (int,float) and (not math.isfinite(value) or value<0)):
+            fail(f'Metering projection contains invalid leaf at {path}')
 
 
 def fail(message):
@@ -76,8 +107,7 @@ def scan(root,files):
                     fail(f'{name} indicator in {rel}; inspect locally, value withheld')
     for line in (root/'v1-snapshot/requests.jsonl').read_text().splitlines():
         q=json.loads(line)
-        if not set(q)<=REQUEST_FIELDS or (q.get('usage') and not set(q['usage'])<=USAGE_FIELDS):
-            fail('Metering projection contains unexpected fields')
+        validate_projection(q,REQUEST_SCHEMA)
     for t in json.loads((root/'v1-snapshot/tasks.json').read_text()):
         if set(t)!={'id','_domain','_tier'}:
             fail('Task manifest must contain only identity/domain/tier, not private fixtures')
