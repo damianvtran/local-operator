@@ -78,7 +78,9 @@ async def test_send_carries_files_in_order_beside_images() -> None:
     client = _make_client(handler)
     await client.conversation_send(CID, client_ref="r", text="", files=[AID2, AID])
     assert json.loads(seen[-1].content) == {"client_ref": "r", "body": "", "files": [AID2, AID]}
-    await client.conversation_send(CID, client_ref="r", text="x", attachment_ids=[AID], files=[AID2])
+    await client.conversation_send(
+        CID, client_ref="r", text="x", attachment_ids=[AID], files=[AID2]
+    )
     body = json.loads(seen[-1].content)
     assert body["attachment_ids"] == [AID] and body["files"] == [AID2]
 
@@ -182,7 +184,9 @@ async def test_wrong_account_file_upload_is_refused_before_any_bytes() -> None:
     assert refused.value.code == tb_client.ACCOUNT_MISMATCH_CODE
     assert seen == []
     # Positive control: the store's own account goes through.
-    await client.upload_attachment(CID, b"%PDF", mode="file", name=NAME, expected_account_id="acc_1")
+    await client.upload_attachment(
+        CID, b"%PDF", mode="file", name=NAME, expected_account_id="acc_1"
+    )
     assert len(seen) == 1
 
 
@@ -254,8 +258,18 @@ def test_files_capability_reads_the_hub_block() -> None:
         {**HUB_BLOCK, "classes": [{"class": "exe", "max_bytes": 1}]},
         {**HUB_BLOCK, "classes": [{"class": "pdf", "max_bytes": 26214401}]},
     ],
-    ids=["absent", "scalar", "disabled", "v2", "bool-version", "str-version",
-         "not-download-only", "no-classes", "unknown-class", "cap-over-transport"],
+    ids=[
+        "absent",
+        "scalar",
+        "disabled",
+        "v2",
+        "bool-version",
+        "str-version",
+        "not-download-only",
+        "no-classes",
+        "unknown-class",
+        "cap-over-transport",
+    ],
 )
 def test_files_capability_off_unless_usable_v1(block) -> None:
     payload = {} if block is None else {"files": block}
@@ -284,7 +298,9 @@ def test_files_capability_drops_junk_rows_and_fields() -> None:
 
 
 def test_status_files_block_is_normalized_or_dropped() -> None:
-    from local_operator.server.routes.desktop_team_bridge import _status_with_attachments
+    from local_operator.server.routes.desktop_team_bridge import (
+        _status_with_attachments,
+    )
 
     raw = {"api_version": "1", "files": {**HUB_BLOCK, "extra": "x"}}
     out = _status_with_attachments(raw, tb_client.attachments_capability, files_capability)
@@ -303,4 +319,6 @@ def test_status_files_block_is_normalized_or_dropped() -> None:
     assert "files" not in v2
     # Pre-files hub: nothing to normalize, payload returned as is.
     plain = {"api_version": "1"}
-    assert _status_with_attachments(plain, tb_client.attachments_capability, files_capability) is plain
+    assert (
+        _status_with_attachments(plain, tb_client.attachments_capability, files_capability) is plain
+    )

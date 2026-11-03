@@ -781,9 +781,7 @@ async def status(
         # ``attachment_ids``), so it passes through the client's ONE capability
         # reading (review R1-06) — malformed/disabled/no usable type is
         # removed, never forwarded for the UI to second-guess. Absent = off.
-        "status": _status_with_attachments(
-            check.payload, attachments_capability, files_capability
-        ),
+        "status": _status_with_attachments(check.payload, attachments_capability, files_capability),
         "consent": (
             {"version": consent[0], "text": consent[1], "source": consent[2]}
             if consent is not None
@@ -2905,9 +2903,7 @@ async def _bounded_upload(
             raise HTTPException(413, too_large)
         chunks.append(chunk)
     if not size:
-        raise HTTPException(
-            422, {"code": "attachment_invalid", "message": f"The {noun} is empty."}
-        )
+        raise HTTPException(422, {"code": "attachment_invalid", "message": f"The {noun} is empty."})
     return b"".join(chunks)
 
 

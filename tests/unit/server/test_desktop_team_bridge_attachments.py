@@ -719,7 +719,10 @@ def test_file_upload_negotiates_file_mode_with_the_exact_headers(proxy):
     method, path, body, _, ctype = calls[-1]
     # ``mode`` and ``expected_account_id`` are desktop-side only: the hub path
     # carries just the tenant, exactly as an image upload does.
-    assert (method, path) == ("POST", f"/v1/messaging/conversations/{CID}/attachments?tenant_id=org-a")
+    assert (method, path) == (
+        "POST",
+        f"/v1/messaging/conversations/{CID}/attachments?tenant_id=org-a",
+    )
     assert body == b"%PDF-1.7 fixture" and ctype == "application/octet-stream"
     sent = {k.lower(): v for k, v in state["headers"][-1].items()}
     assert sent["x-bridge-attachment-mode"] == "file"
@@ -733,7 +736,11 @@ def test_image_upload_wire_carries_no_file_headers(proxy):
     for url in (f"{BASE}/attachments", f"{BASE}/attachments?mode=image"):
         assert client.post(_owner(url), content=PNG).status_code == 201
         sent = {k.lower() for k in state["headers"][-1]}
-        assert not sent & {"x-bridge-attachment-mode", "x-bridge-files-version", "x-bridge-file-name"}
+        assert not sent & {
+            "x-bridge-attachment-mode",
+            "x-bridge-files-version",
+            "x-bridge-file-name",
+        }
 
 
 def test_file_upload_without_a_name_sends_no_name_header(proxy):
@@ -785,7 +792,9 @@ def test_file_mode_streams_to_25_mib_and_refuses_one_byte_more_before_the_hub(pr
     assert chunked.status_code == 413, chunked.text
     assert calls == []
     # The image cap is unchanged by the file path.
-    image = client.post(_owner(f"{BASE}/attachments"), content=b"\0" * (bridge.ATTACHMENT_MAX_BYTES + 1))
+    image = client.post(
+        _owner(f"{BASE}/attachments"), content=b"\0" * (bridge.ATTACHMENT_MAX_BYTES + 1)
+    )
     assert image.status_code == 413 and calls == []
 
     # Exactly at the bound is accepted and forwarded whole.
@@ -808,7 +817,9 @@ def test_file_upload_wrong_account_is_refused_before_any_bytes_move(proxy):
 
 def test_send_forwards_files_and_allows_file_only(proxy):
     client, calls, _ = proxy
-    file_only = client.post(f"{BASE}/messages", json={"client_ref": "f1", "body": "", "files": [AID]})
+    file_only = client.post(
+        f"{BASE}/messages", json={"client_ref": "f1", "body": "", "files": [AID]}
+    )
     assert file_only.status_code == 200, file_only.text
     assert calls[-1][2] == {"client_ref": "f1", "body": "", "files": [AID]}
     mixed = client.post(
@@ -885,7 +896,9 @@ def test_file_display_name_never_reaches_a_log(proxy, caplog):
             headers={"x-bridge-file-name": FILE_NAME_WIRE},
         )
     assert response.status_code == 201
-    assert {k.lower(): v for k, v in state["headers"][-1].items()}["x-bridge-file-name"] == FILE_NAME_WIRE
+    assert {k.lower(): v for k, v in state["headers"][-1].items()}[
+        "x-bridge-file-name"
+    ] == FILE_NAME_WIRE
     assert caplog.records, "control: the capture saw the request at all"
     assert FILE_NAME not in caplog.text and FILE_NAME_WIRE not in caplog.text
     assert "rëport" not in caplog.text
