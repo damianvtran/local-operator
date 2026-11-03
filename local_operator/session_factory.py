@@ -3821,32 +3821,51 @@ def _make_system_blocks_provider(
     # cache key) are exactly what they were before the feature.
     from local_operator.resume import RULES_SIDECAR_NAME
     from local_operator.session.rules import (
-        load_rules,
+        load_rules_with_reason,
         render_rules_section,
         rules_enabled,
     )
 
+    rules_on = rules_enabled()
     rules_dir: Path | None = None
-    if rules_enabled():
+    if rules_on:
         directory = getattr(transcript, "directory", None)
         rules_dir = Path(directory) if directory is not None else None
     rules_stamp: tuple[int, int] | None = None
     rules_text = ""
 
+    def render_rules_at(rules_dir: Path, stamp: tuple[int, int] | None) -> str:
+        # A record the validator REFUSES renders no section and says why, once per
+        # stamp: the operator's next edit is a new stamp, so the retry is bounded
+        # by edits rather than by provider steps, and the warning still names a
+        # file that is silently not binding anything.
+        if stamp is None:
+            return ""
+        rules, reason = load_rules_with_reason(rules_dir)
+        if reason is not None:
+            logger.warning(
+                "session rules: %s cannot be used (%s); no rules are in force this turn",
+                rules_dir / RULES_SIDECAR_NAME,
+                reason,
+            )
+        return render_rules_section(rules)
+
     def current_rules(rules_dir: Path) -> str:
         # Re-read every step, so an operator edit through the dev CLI reaches
         # the very next request; the (mtime, size) stamp skips the parse when
-        # nothing moved. A missing or unreadable file renders no section.
+        # nothing moved. A missing file renders no section.
         nonlocal rules_stamp, rules_text
         try:
             stat = (rules_dir / RULES_SIDECAR_NAME).stat()
             stamp: tuple[int, int] | None = (stat.st_mtime_ns, stat.st_size)
         except OSError:
             stamp = None
-        if stamp is None:
-            rules_stamp, rules_text = None, ""
-        elif stamp != rules_stamp:
-            rules_stamp, rules_text = stamp, render_rules_section(load_rules(rules_dir))
+        if stamp != rules_stamp:
+            # Both recorded BEFORE the parse: a file whose read raises would
+            # otherwise be re-parsed (and re-warned) on every step, and the old
+            # render would keep binding text the file no longer says.
+            rules_stamp, rules_text = stamp, ""
+            rules_text = render_rules_at(rules_dir, stamp)
         return rules_text
 
     async def provider(model_label: str = "") -> list[str]:
@@ -3933,7 +3952,31 @@ def _make_system_blocks_provider(
         # (unknown must not ship as a removal), because only that layer can see the
         # section the model is already reading (QA round 1, Q2).
         open_asks = goal_state.open_asks() if goal_state is not None else None
-        session_rules = current_rules(rules_dir) if rules_dir is not None else None
+        # THREE outcomes, and the last two differ in what they render: off is
+        # None (byte-identical to the pre-feature tree); on is a str. A read that
+        # raises must never break the turn, and block 0's precedence sentence
+        # must survive it, so every failure arm answers "" rather than None.
+        session_rules: str | None
+        if rules_dir is not None:
+            try:
+                session_rules = current_rules(rules_dir)
+            except Exception:  # noqa: BLE001 — a rules read must never break a turn
+                # RecursionError on a deeply nested file is the case that reaches
+                # here; anything else would be a defect. Neither is worth
+                # refusing the operator's message over.
+                logger.warning(
+                    "session rules: reading %s failed; no rules are rendered this step",
+                    rules_dir / RULES_SIDECAR_NAME,
+                    exc_info=True,
+                )
+                session_rules = ""
+        elif rules_on:
+            # Flag on with no directory to read (a transcript that has none):
+            # "" not None, so block 0 still carries the precedence sentence and
+            # the session's first rule never moves the cached head.
+            session_rules = ""
+        else:
+            session_rules = None
         key = (
             knowledge_block,
             date_str,

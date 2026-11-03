@@ -113,74 +113,108 @@ def _tail_markers() -> tuple[str, ...]:
     return tuple(marker for _, marker in _TAIL_SECTION_MARKERS)
 
 
-def _parse(raw: str) -> tuple[int, list[Rule]] | None:
-    """``(next, rules)`` from the file's text, or ``None`` when it is not a valid v1 record.
+def _parse(raw: str) -> tuple[tuple[int, list[Rule]] | None, str | None]:
+    """``((next, rules), None)`` for a valid v1 record, else ``(None, why it was refused)``.
 
     All-or-nothing: one bad entry voids the record rather than being skipped,
     because a partly-trusted rule set is worse than none — a dropped entry would
-    silently stop binding a constraint the operator believes is in force.
+    silently stop binding a constraint the operator believes is in force. The
+    refusal is RETURNED rather than only signalled, so the per-step reader can
+    tell the operator which file it is ignoring and why: a rule set that quietly
+    stops applying is the failure this record exists to prevent.
+
+    ``RecursionError`` is deliberately NOT caught here. ``json.loads`` raises it
+    on deeply nested input, and the caller that runs per provider step wraps the
+    whole read for exactly that case (``session_factory``); catching it here
+    would put the recovery inside the module whose job is to report.
     """
     try:
         payload = json.loads(raw)
-    except ValueError:
-        return None
-    if not isinstance(payload, dict) or payload.get("v") != _SCHEMA_VERSION:
-        return None
+    except ValueError as exc:
+        return None, f"not valid JSON ({exc})"
+    if not isinstance(payload, dict):
+        return None, "not a JSON object"
+    if payload.get("v") != _SCHEMA_VERSION:
+        return None, f"unsupported schema version {payload.get('v')!r}"
     entries = payload.get("rules")
     counter = payload.get("next")
-    if not isinstance(entries, list) or type(counter) is not int or counter < 1:
-        return None
+    if not isinstance(entries, list):
+        return None, "'rules' is not a list"
+    if type(counter) is not int or counter < 1:
+        return None, f"'next' is not a positive integer ({counter!r})"
     if len(entries) > MAX_RULES:
-        return None
+        return None, f"{len(entries)} rules exceeds the {MAX_RULES}-rule limit"
     rules: list[Rule] = []
-    for entry in entries:
+    for position, entry in enumerate(entries, 1):
         if not isinstance(entry, dict):
-            return None
+            return None, f"rule {position} is not an object"
         fields = [entry.get(name) for name in ("id", "text", "created", "updated")]
         strings = [value for value in fields if isinstance(value, str)]
         if len(strings) != len(fields):
-            return None
+            return None, f"rule {position} has a field that is not a string"
         rule_id, text, created, updated = strings
         number = rule_id[1:] if rule_id.startswith("r") else ""
         # ``next`` must stay ahead of every id on file, or an add would reuse one.
         if not number.isdigit() or int(number) >= counter:
-            return None
+            return None, f"rule {position} id {rule_id!r} is not an unused r<N> below 'next'"
         try:
             if _validate_text(text) != text:
-                return None
-        except RuleError:
-            return None
+                return None, f"rule {position} ({rule_id}) text is not in canonical form"
+        except RuleError as exc:
+            return None, f"rule {position} ({rule_id}) text is refused: {exc}"
         rules.append(Rule(id=rule_id, text=text, created=created, updated=updated))
     if len({rule.id for rule in rules}) != len(rules):
-        return None
-    return counter, rules
+        return None, "two rules share an id"
+    return (counter, rules), None
 
 
-def _read(session_dir: Path) -> tuple[int, list[Rule]] | None:
-    """The record, ``(1, [])`` when absent, ``None`` when present but unusable."""
+def _read(session_dir: Path) -> tuple[tuple[int, list[Rule]] | None, str | None]:
+    """``((next, rules), None)``; ``((1, []), None)`` when absent; ``(None, why)`` when unusable.
+
+    The reason never repeats the path: the caller names the file it read, so the
+    two cannot disagree about which one was refused.
+    """
     path = Path(session_dir) / RULES_SIDECAR_NAME
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
-        return 1, []
-    except OSError:
-        return None
+        return (1, []), None
+    except OSError as exc:
+        return None, f"unreadable ({exc})"
     return _parse(raw)
 
 
 def load_rules(session_dir: Path) -> list[Rule]:
-    """The session's rules in order; ``[]`` for a missing or unusable file. Never raises."""
-    record = _read(session_dir)
+    """The session's rules in order; ``[]`` for a missing or unusable file.
+
+    ``RecursionError`` from a pathologically nested file is the one exception
+    that escapes: it is the case the per-step reader wraps for.
+    """
+    record, _ = _read(session_dir)
     return [] if record is None else record[1]
+
+
+def load_rules_with_reason(session_dir: Path) -> tuple[list[Rule], str | None]:
+    """``(rules, reason)``: why a PRESENT record was refused, or ``None`` when it was usable.
+
+    :func:`load_rules` is the silent form, for callers with no one to tell. The
+    per-step reader uses this one to warn once per file change about a record it
+    cannot honour — a hand edit or a schema mismatch would otherwise drop the
+    operator's constraints with no trace anywhere the operator looks.
+    """
+    record, reason = _read(session_dir)
+    return ([] if record is None else record[1]), reason
 
 
 def _load_for_write(session_dir: Path) -> tuple[int, list[Rule]]:
     # A mutation REFUSES an unusable file instead of treating it as empty: the
     # write would replace whatever the operator (or a hand edit) left there, and
     # a fresh ``next`` of 1 would reissue ids already used.
-    record = _read(session_dir)
+    record, reason = _read(session_dir)
     if record is None:
-        raise RuleError(f"{RULES_SIDECAR_NAME} is unreadable or malformed; fix or remove it")
+        raise RuleError(
+            f"{RULES_SIDECAR_NAME} is unreadable or malformed ({reason}); fix or remove it"
+        )
     return record
 
 
