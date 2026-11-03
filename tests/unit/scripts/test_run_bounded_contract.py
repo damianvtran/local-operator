@@ -1548,6 +1548,6 @@ def test_a_breach_names_escaped_descendants_the_guard_could_not_verify(monkeypat
     text = stream.getvalue()
     assert outcome.termination_cause == "memory-policy"
     assert (
-        "[run_bounded] could not verify parentage of escaped descendant(s), "
-        "not signalled: 77001, 77002"
+        "[run_bounded] could not verify parentage of escaped descendant(s) "
+        "(unreadable, or re-parented to pid 1), not signalled: 77001, 77002"
     ) in text, text

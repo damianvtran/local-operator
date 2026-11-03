@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -691,3 +692,19 @@ def test_unsized_reads_inside_the_time_floor_never_fail_closed(monkeypatch):
         sample = guard.sample_sync()
         killed = killed or guard.should_kill(sample)
     assert killed  # a sustained failure past the floor still fails closed
+
+
+def test_a_zombie_middle_is_not_named_as_an_unverified_survivor(monkeypatch):
+    """QA Q1, PR #3372 round 2: both parentage sources answer ``None`` for a
+    zombie, and a zombie holds no memory and cannot be signalled to any effect.
+    It must not be reported as a survivor the stop "could not verify"."""
+    guard = _breached(monkeypatch, lambda roots: {900: 100, 901: 100})
+    monkeypatch.setattr(mg, "direct_ppid_pgid", lambda pid: None)
+    monkeypatch.setattr(
+        mg.procstate,
+        "process_sample",
+        lambda pid: SimpleNamespace(zombie=pid == 900),
+    )
+    monkeypatch.setattr(mg.os, "kill", lambda pid, sig: pytest.fail("signalled"))
+    assert guard.stop_escaped(9) == []
+    assert guard.unverified == [901]  # the live one is still named

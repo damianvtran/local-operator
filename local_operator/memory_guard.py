@@ -1063,9 +1063,16 @@ class Guard:
 
         def note_unverified(pid: int) -> None:
             # Unverifiable is not "gone": a pid still alive here is a survivor
-            # we chose not to signal, and the stop must say so.
-            if procstate.pid_liveness(pid) is not False:
-                self.unverified.append(pid)
+            # we chose not to signal, and the stop must say so. A ZOMBIE is
+            # not a survivor (QA Q1, PR #3372): both parentage sources answer
+            # None for one, yet it holds no memory and no signal reaches it —
+            # the same test ``_escaped_descendants`` uses to skip charging it.
+            if procstate.pid_liveness(pid) is False:
+                return
+            sample = procstate.process_sample(pid)
+            if sample is not None and sample.zombie:
+                return
+            self.unverified.append(pid)
 
         verified: list[tuple[int, int]] = []
         self.unverified = []
@@ -1436,9 +1443,14 @@ def unsignalled_line(pids: Iterable[int]) -> str:
 
 
 def unverified_line(pids: Iterable[int]) -> str:
-    """Live escaped descendants a stop could not prove ours, so did not signal (Q2)."""
-    return "could not verify parentage of escaped descendant(s), not signalled: " + ", ".join(
-        str(pid) for pid in pids
+    """Live escaped descendants a stop could not prove ours, so did not signal (Q2).
+
+    Two causes share this line (review N2, PR #3372): no parentage source
+    answered, or the pid now reads under pid 1 because its parent exited.
+    """
+    return (
+        "could not verify parentage of escaped descendant(s) (unreadable, or "
+        "re-parented to pid 1), not signalled: " + ", ".join(str(pid) for pid in pids)
     )
 
 
