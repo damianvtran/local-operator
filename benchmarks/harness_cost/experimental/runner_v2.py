@@ -711,30 +711,68 @@ def clone_path(source: Path, destination: Path) -> None:
         raise ValueError("Clone source/destination must share a filesystem")
     binary = resolve_program("BENCH_CP_BIN", "cp")
     flags = ["-Rc"] if sys.platform == "darwin" else ["--reflink=always", "-a"]
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    destination_parent_fd = os.open(destination.parent, directory_flags)
+    destination_fd = -1
     owned: os.stat_result | None = None
 
-    def create_destination() -> None:
-        nonlocal owned
-        destination.mkdir(mode=0o700, exist_ok=False)
-        owned = destination.lstat()
+    def same_inode(left: os.stat_result, right: os.stat_result) -> bool:
+        return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+    def raise_walk_error(error: OSError) -> None:
+        # fwalk's default silently omits inaccessible subtrees. Both inventory
+        # and actual-copy passes must fail, never agree on an incomplete tree.
+        raise error
+
+    def assert_destination_identity() -> None:
+        try:
+            current = os.stat(destination.name, dir_fd=destination_parent_fd, follow_symlinks=False)
+            # Also detect replacement of an ancestor of the supplied pathname;
+            # this metadata-only check never opens content or changes modes.
+            path_current = destination.lstat()
+        except FileNotFoundError as error:
+            raise ValueError("Clone destination changed; refusing success") from error
+        if owned is None or not same_inode(current, owned) or not same_inode(path_current, owned):
+            raise ValueError("Clone destination changed; refusing cleanup of replacement")
+
+    def clear_directory(fd: int) -> None:
+        # Every operation is relative to an already-owned descriptor. A renamed
+        # root or cloned symlink cannot redirect cleanup or mode changes outside
+        # that inode. cp -a may have left read-only directories after failing.
+        os.fchmod(fd, 0o700)
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    os.chmod(entry.name, 0o700, dir_fd=fd, follow_symlinks=False)
+                    child_fd = os.open(entry.name, directory_flags, dir_fd=fd)
+                    try:
+                        if not same_inode(os.fstat(child_fd), info):
+                            raise ValueError("Partial clone directory changed; refusing cleanup")
+                        clear_directory(child_fd)
+                        if not same_inode(
+                            os.stat(entry.name, dir_fd=fd, follow_symlinks=False), info
+                        ):
+                            raise ValueError("Partial clone directory changed; refusing cleanup")
+                        os.rmdir(entry.name, dir_fd=fd)
+                    finally:
+                        os.close(child_fd)
+                else:
+                    os.unlink(entry.name, dir_fd=fd)
 
     def remove_partial() -> None:
-        # Only this invocation's freshly-created directory may be removed. Do
-        # not follow or delete a destination replaced by somebody else.
-        if owned is None:
+        if destination_fd < 0 or owned is None:
             return
-        current = destination.lstat()
-        if (current.st_dev, current.st_ino) != (owned.st_dev, owned.st_ino):
-            raise ValueError("Clone destination changed; refusing cleanup")
-        # cp -a may already have applied read-only source directory modes
-        # before a reflink failure. Restore traversal/removal permission only
-        # inside our partial root; never chmod through cloned symlinks.
-        destination.chmod(0o700, follow_symlinks=False)
-        for _, dirs, _, parent_fd in os.fwalk(destination, follow_symlinks=False):
-            for name in dirs:
-                if stat.S_ISDIR(os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode):
-                    os.chmod(name, 0o700, dir_fd=parent_fd, follow_symlinks=False)
-        shutil.rmtree(destination)
+        clear_directory(destination_fd)
+        # A concurrent rename may have moved our root aside. Find only its
+        # inode in the original parent; leave the replacement and link targets
+        # untouched. If moved elsewhere, the owned descriptor still lets us
+        # remove partial contents without guessing an unsafe pathname.
+        with os.scandir(destination_parent_fd) as entries:
+            for entry in entries:
+                if same_inode(entry.stat(follow_symlinks=False), owned):
+                    os.rmdir(entry.name, dir_fd=destination_parent_fd)
+                    break
 
     def bounded_profile_copy() -> None:
         limit = 8 * 1024 * 1024
@@ -784,7 +822,8 @@ def clone_path(source: Path, destination: Path) -> None:
         # root or file swapped for a link between preflight and the actual copy.
         if source.name.lower() in denied:
             raise ValueError(refusal)
-        root_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        root_fd = os.open(source, directory_flags)
+        destination_directories: dict[str, int] = {".": destination_fd}
         try:
             initial_root = os.fstat(root_fd)
             if (initial_root.st_dev, initial_root.st_ino) != (
@@ -793,15 +832,16 @@ def clone_path(source: Path, destination: Path) -> None:
             ):
                 raise ValueError("Profile source changed before copy")
 
-            directories: list[tuple[Path, int]] = []
+            directories: list[tuple[int, int]] = []
 
             def walk(copy: bool) -> dict[str, tuple[int, ...]]:
                 records: dict[str, tuple[int, ...]] = {}
                 total = entries = 0
                 read_bytes = written_bytes = 0
                 for rel, dirs, files, parent_fd in os.fwalk(
-                    ".", dir_fd=root_fd, follow_symlinks=False
+                    ".", dir_fd=root_fd, follow_symlinks=False, onerror=raise_walk_error
                 ):
+                    target_parent_fd = destination_directories[str(Path(rel))] if copy else -1
                     for name in dirs + files:
                         entries += 1
                         if entries > 4096 or name.lower() in denied:
@@ -816,11 +856,12 @@ def clone_path(source: Path, destination: Path) -> None:
                             info.st_mtime_ns,
                             info.st_ctime_ns,
                         )
-                        target = destination / key
                         if stat.S_ISDIR(info.st_mode):
                             if copy:
-                                target.mkdir(mode=0o700, exist_ok=False)
-                                directories.append((target, stat.S_IMODE(info.st_mode)))
+                                os.mkdir(name, mode=0o700, dir_fd=target_parent_fd)
+                                child_fd = os.open(name, directory_flags, dir_fd=target_parent_fd)
+                                destination_directories[key] = child_fd
+                                directories.append((child_fd, stat.S_IMODE(info.st_mode)))
                             continue
                         if not stat.S_ISREG(info.st_mode):
                             raise ValueError(refusal)
@@ -836,7 +877,13 @@ def clone_path(source: Path, destination: Path) -> None:
                             opened = os.fstat(fd)
                             if opened != info:
                                 raise ValueError("Profile file changed before copy")
-                            with target.open("xb") as output:
+                            output_fd = os.open(
+                                name,
+                                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                0o600,
+                                dir_fd=target_parent_fd,
+                            )
+                            with os.fdopen(output_fd, "wb") as output:
                                 remaining = info.st_size
                                 while remaining:
                                     block = os.read(fd, min(65536, remaining, limit - read_bytes))
@@ -865,33 +912,62 @@ def clone_path(source: Path, destination: Path) -> None:
                 return records
 
             expected = walk(False)
-            create_destination()
             if walk(True) != expected:
                 raise ValueError("Profile tree changed during copy")
-            for path, mode in reversed(directories):
-                path.chmod(mode)
-            destination.chmod(stat.S_IMODE(initial_root.st_mode))
+            for fd, mode in reversed(directories):
+                os.fchmod(fd, mode)
+            os.fchmod(destination_fd, stat.S_IMODE(initial_root.st_mode))
         finally:
+            for key, fd in destination_directories.items():
+                if key != ".":
+                    os.close(fd)
             os.close(root_fd)
 
-    create_destination()
     try:
-        # Copy CONTENTS into our reserved root, so cp cannot overwrite/merge a
-        # pre-existing user path or insert an extra source basename beneath it.
-        subprocess.run([binary, *flags, str(source) + "/.", str(destination)], check=True)
-    except subprocess.CalledProcessError:
-        remove_partial()
-        owned = None
-        if sys.platform != "linux":
-            raise
+        os.mkdir(destination.name, mode=0o700, dir_fd=destination_parent_fd)
+        owned = os.stat(destination.name, dir_fd=destination_parent_fd, follow_symlinks=False)
+        destination_fd = os.open(destination.name, directory_flags, dir_fd=destination_parent_fd)
+        if not same_inode(os.fstat(destination_fd), owned):
+            # The descriptor is not ours; never use it for writes or cleanup.
+            os.close(destination_fd)
+            destination_fd = -1
+            raise ValueError("Clone destination changed before opening owned root")
         try:
+            # Native cp must also write relative to the owned inode, not a
+            # replaceable pathname. A tiny isolated stdlib carrier fchdir/execs
+            # cp; preexec_fn is deliberately avoided (unsafe in threaded hosts).
+            # Source is absolute because the carrier changes its working dir.
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-c",
+                    "import os,sys; os.fchdir(int(sys.argv[1])); "
+                    "os.execv(sys.argv[2],sys.argv[2:])",
+                    str(destination_fd),
+                    binary,
+                    *flags,
+                    str(source.absolute()) + "/.",
+                    ".",
+                ],
+                check=True,
+                pass_fds=(destination_fd,),
+            )
+        except subprocess.CalledProcessError:
+            assert_destination_identity()
+            if sys.platform != "linux":
+                raise
+            clear_directory(destination_fd)
             bounded_profile_copy()
-        except BaseException:
-            remove_partial()
-            raise
+        assert_destination_identity()
     except BaseException:
         remove_partial()
         raise
+    finally:
+        if destination_fd >= 0:
+            os.close(destination_fd)
+        os.close(destination_parent_fd)
 
 
 def _prepare(run_id: str, task: PreparedTask, arm: str, harness: str) -> tuple[Path, Path]:

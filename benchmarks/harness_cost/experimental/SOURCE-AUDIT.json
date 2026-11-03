@@ -85,11 +85,11 @@
     },
     {
       "destination": "VERIFICATION.md",
-      "destination_sha256": "aabc3efd738ea89f70edc15a9fa6f914206cbd71991666e1d91fd7ff832a2597",
+      "destination_sha256": "530d6a9a54a90c166943851991332fd2add95dcbb7869dc80aadb654288b3ce4",
       "sources": [],
       "treatment": "new experimental documentation or offline guard/check",
-      "previous_destination_sha256": "b988869a2c7553013df170c49cafc4456317186748a28d6938a19a028ad57ad8",
-      "remediation": "Hosted non-CoW filesystem: bounded profile-data portability and safety tests"
+      "previous_destination_sha256": "aabc3efd738ea89f70edc15a9fa6f914206cbd71991666e1d91fd7ff832a2597",
+      "remediation": "Unified R6-F1 permission traversal and R6-F2 destination identity/descriptor safety fix"
     },
     {
       "destination": "cache_forwarder.py",
@@ -505,7 +505,7 @@
     },
     {
       "destination": "runner_v2.py",
-      "destination_sha256": "7434dd9b8e3c9b3d0522d0af826a95fe8661df6f0aaad4653e538e669ab01a9e",
+      "destination_sha256": "2d65f11553bb92e061644b57ecab505ddf7fda75f4ec71ecf376e063a9292949",
       "sources": [
         {
           "path": "harness-cost-bench/runner_v2.py",
@@ -513,8 +513,8 @@
         }
       ],
       "treatment": "sanitized/adapted derivative",
-      "previous_destination_sha256": "d8e4a5cc468fd16b5a69e6bb12e67d4b1600779c22a38e692b74a182b8af9b76",
-      "remediation": "Hosted non-CoW filesystem: bounded profile-data portability and safety tests"
+      "previous_destination_sha256": "7434dd9b8e3c9b3d0522d0af826a95fe8661df6f0aaad4653e538e669ab01a9e",
+      "remediation": "Unified R6-F1 permission traversal and R6-F2 destination identity/descriptor safety fix"
     },
     {
       "destination": "sse_stream.py",
@@ -616,9 +616,11 @@
     },
     {
       "destination": "test_clone_path.py",
-      "destination_sha256": "af17c73026d09587bc59d042ea3c919c29590c2e594b598397c065ee51f976f4",
+      "destination_sha256": "43edde0d35b83e19d6f830e4859b0199cec7e08be0f06fc07c67edc6fcfe52de",
       "sources": [],
-      "treatment": "new bounded profile-data clone portability regression controls"
+      "treatment": "new bounded profile-data clone portability regression controls",
+      "previous_destination_sha256": "af17c73026d09587bc59d042ea3c919c29590c2e594b598397c065ee51f976f4",
+      "remediation": "Unified R6-F1 permission traversal and R6-F2 destination identity/descriptor safety fix"
     }
   ],
   "remediation_review": {
