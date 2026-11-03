@@ -914,8 +914,11 @@ interactive sign-in for the owner. Owner refusal codes (including
 receipt contains no access or refresh material. Ordinary requests still resolve
 the owner automatically, so this is an explicit repair action, not something to
 run after every authentication failure. Readiness offers the command for an
-expired selected-model grant only to an admin observer; run it on the peer named
-by that remedy.
+expired selected-model grant only when the observer and the borrowing peer are
+both known admins. Run it on that borrowing peer: an observer's admin authority
+does not travel with the command or authorize a drive/read peer to force refresh.
+For other or unknown borrower roles, readiness retains the normal next-request
+recovery guidance and does not offer the explicit force-refresh command.
 
 A granted share is learned by PULLING, never pushed. The owner's document changes
 when `lop network credential share` runs there; this device reads it on its next

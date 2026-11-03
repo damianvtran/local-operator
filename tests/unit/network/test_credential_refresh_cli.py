@@ -12,12 +12,18 @@ from local_operator.network import cli, readiness
 
 
 @pytest.mark.parametrize("admin", [False, True])
+@pytest.mark.parametrize("borrower_role", ["admin", "drive", "read", "", None])
 @pytest.mark.parametrize("state", ["expired", "withdrawn", "owner_unavailable", "pending"])
-def test_explicit_refresh_remedy_is_only_for_admin_expired_grant(admin: bool, state: str) -> None:
+def test_explicit_refresh_remedy_is_only_for_admin_expired_grant(
+    admin: bool, borrower_role: str | None, state: str
+) -> None:
     from types import SimpleNamespace
 
+    member = SimpleNamespace(device_id="synthetic-peer")
+    if borrower_role is not None:
+        member.role = borrower_role
     row = readiness.selected_model_row(
-        SimpleNamespace(device_id="synthetic-peer"),
+        member,
         {"provider": "openai", "owner_device": "synthetic-owner", "state": state},
         selector="openai/gpt-test",
         session_id="synthetic-session",
@@ -25,7 +31,10 @@ def test_explicit_refresh_remedy_is_only_for_admin_expired_grant(admin: bool, st
         observer_is_admin=admin,
     )
     command = "lop network credential refresh openai --json"
-    assert any(command in remedy for remedy in row["remedies"]) is (admin and state == "expired")
+    offered = admin and borrower_role == "admin" and state == "expired"
+    assert any(command in remedy for remedy in row["remedies"]) is offered
+    if state == "expired":
+        assert "automatically" in row["remedies"][0]
 
 
 @pytest.mark.parametrize("flag", ["--with", "--owner", "--scope", "--url", "--path"])

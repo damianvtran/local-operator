@@ -1291,12 +1291,13 @@ def selected_model_row(
     if state not in readings:
         state = "pending"
     detail, remedies = readings[state]
-    if state == "expired" and observer_is_admin:
+    if state == "expired" and observer_is_admin and getattr(member, "role", "") == "admin":
         import shlex
 
-        # This is an explicit, optional action on the BORROWER, not a retry or
-        # new share. Only an admin observer sees it; the owner's independent
-        # ADMIN/holder checks still decide whether that borrower may force it.
+        # The command runs as the BORROWER, not the observer: observing admin
+        # authority cannot make a drive/read borrower eligible to force refresh.
+        # Require its known member role as well; missing role fails closed. The
+        # owner's independent ADMIN/holder checks remain the final authority.
         # Quote peer facts so a provider name cannot become shell syntax.
         remedies = (
             *remedies,
