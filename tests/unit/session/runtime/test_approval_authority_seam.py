@@ -199,9 +199,86 @@ async def _send(
         if not raw.strip():
             continue
         reply = json.loads(raw)
+        # This synthetic-runtime fixture has seen a scalar of unknown provenance.
+        # Diagnose it, do not cure it: fail before .get without retrying or changing
+        # the approval invariant. Never reuse this raw-byte diagnostic on a live
+        # channel. Slice BEFORE repr to bound work and escape terminal controls;
+        # raise explicitly so pytest cannot append an unbounded decoded repr.
+        if not isinstance(reply, dict):
+            raise AssertionError(
+                "fixture reply must be a JSON object; "
+                f"decoded_type={type(reply).__name__}; raw_bytes={len(raw)}; "
+                f"raw_prefix={raw[:48]!r}"
+            )
         if reply.get("req") == 1:
             return reply
     raise AssertionError("no reply to the request")
+
+
+async def _send_synthetic_reply(raw: bytes) -> dict[str, Any]:
+    """Exercise the fixture reader without a runtime, socket or real channel."""
+    reader = asyncio.StreamReader()
+    reader.feed_data(raw)
+    reader.feed_eof()
+
+    class _Writer:
+        def write(self, data: bytes) -> None:
+            assert json.loads(data) == {"req": 1, "op": "fixture_probe"}
+
+        async def drain(self) -> None:
+            return None
+
+    return await _send(reader, cast(Any, _Writer()), {"op": "fixture_probe"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", [b"", b"\n", b'{"req": 2, "op": "notice"}\n'])
+async def test_send_fixture_preserves_matching_object_reply(prefix: bytes) -> None:
+    assert await _send_synthetic_reply(prefix + b'{"req": 1, "op": "ack"}\n') == {
+        "req": 1,
+        "op": "ack",
+    }
+
+
+@pytest.mark.asyncio
+async def test_send_fixture_still_rejects_unmatched_object_replies() -> None:
+    with pytest.raises(AssertionError, match="^no reply to the request$"):
+        await _send_synthetic_reply(b'{"req": 2}\n' * 40)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw", "decoded_type"),
+    [
+        (b"1.5\n", "float"),
+        (b"1\n", "int"),
+        (b"[]\n", "list"),
+        (b'"fixture"\n', "str"),
+        (b"null\n", "NoneType"),
+        (b"true\n", "bool"),
+        (b"false\n", "bool"),
+    ],
+)
+async def test_send_fixture_asserts_non_object_reply(raw: bytes, decoded_type: str) -> None:
+    with pytest.raises(AssertionError) as caught:
+        await _send_synthetic_reply(raw + b'{"req": 1, "op": "ack"}\n')
+    assert str(caught.value) == (
+        "fixture reply must be a JSON object; "
+        f"decoded_type={decoded_type}; raw_bytes={len(raw)}; raw_prefix={raw[:48]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_fixture_diagnostic_bounds_and_escapes_synthetic_bytes() -> None:
+    raw = b'\t\r"' + b"\\u0000\\u001b" * 4096 + b'FIXTURE_TAIL"\n'
+    with pytest.raises(AssertionError) as caught:
+        await _send_synthetic_reply(raw)
+    message = str(caught.value)
+    assert f"decoded_type=str; raw_bytes={len(raw)};" in message
+    assert f"raw_prefix={raw[:48]!r}" in message
+    assert "FIXTURE_TAIL" not in message
+    assert not any(control in message for control in ("\t", "\r", "\n", "\x00", "\x1b"))
+    assert len(message) < 300
 
 
 async def _park_a_card(handle: ServingSessionHandle) -> asyncio.Task[Any]:
