@@ -2478,6 +2478,25 @@
       },
       "status": "passed",
       "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 064822d38ede40517e1c425b4c9af422b44874408b933715918e493c42fd9997. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/zh-CN/cli.browser/pair2/record.json"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.sdk_spec",
+      "source_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "21/21 initial catalogue-only contribution; translator7fce46e29bee and independent readers e55f54b6a26e /6433b7a5b3e9, actual openai/gpt-6.1-sol from retained completed usage provenance; both PASS zero findings. Both readers/source/context/target bound in i18n/audits/evidence/zh-CN/wire.errors.sdk_spec/integration-binding.json; originals retained unchanged. Legacy SDK exception contract is VALID: existing producers still explicitly English; factory args/str/attrs/defaults unchanged. No present UI path or native-fit cap claimed; no native/pseudo/RTL execution. This is namespace completeness, NOT SDK exception localization or whole-UI English-free proof."
     }
   ]
 }

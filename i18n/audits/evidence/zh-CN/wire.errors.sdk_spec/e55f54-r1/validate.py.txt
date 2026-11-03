@@ -1,0 +1,56 @@
+import ast,hashlib,json,pathlib,re,subprocess,sys,unicodedata
+sys.path.insert(0,'/Users/damian/local-operator')
+from local_operator.i18n import runtime
+from scripts.i18n import check
+P=pathlib.Path('/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33')
+R=pathlib.Path('/Users/damian/local-operator'); REF='0e7cde33ca8008d561e74f4aed774aa5f76ff7d5'
+def unique(pairs):
+ d={}
+ for k,v in pairs:
+  assert k not in d,('duplicate',k)
+  d[k]=v
+ return d
+load=lambda p:json.loads(p.read_text(),object_pairs_hook=unique)
+en=load(P/'en.json');target=load(P/'wire.errors.sdk_spec.json');context=load(P/'context.json')
+assert len(en)==len(target)==len(context)==21 and set(en)==set(target)==set(context)
+plural=json.loads((R/'local_operator/i18n/data/plural_rules.json').read_text());problems=[]
+for key,source in en.items():
+ text=target[key];args=runtime.message_arguments(source);got=runtime.message_arguments(text)
+ assert args==got,(key,args,got)
+ assert check.arguments_match(args,got,translated_source=text,locale='zh-CN',plural=plural)
+ check._check_plural_categories(problems,'zh-CN','wire.errors.sdk_spec',key,text,plural,'zh-CN')
+ assert runtime.plural_selectors(text)==()
+ assert not any(unicodedata.category(c)=='Cf' for c in text)
+ assert not any(c in text for c in '\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069')
+ assert 'maxCells' not in context[key] and 'maxChars' not in context[key]
+ # Preserve technical identifiers/method expressions and quoted mode literals.
+ tokens=set(re.findall(r'ApprovalPolicy\.[A-Za-z_]+(?:\(\))?|\b[a-z]+_[a-z_]+(?:\(\))?|spec\.resume|hosting/model|@latest|\bNone\b|\bdispose\b|\bresume\b|\byolo\b',source))
+ for tok in tokens:assert tok in text,(key,'missing token',tok)
+ for mode in ['own','attach','callback','declared']:
+  if "''"+mode+"''" in source:assert "''"+mode+"''" in text,(key,'mode quoting',mode)
+ for opaque in ["'future{opaque}'",'fields, --flag, x{n}', '模式值🙂']:
+  params={name:opaque for name,kind in args}
+  rendered=runtime.render_message(text,params,'zh-CN')
+  for name,kind in args:assert opaque in rendered,(key,name,'opaque value changed')
+  if args:assert "''" not in rendered,(key,'ICU quote escaping failed')
+ print('PASS',key,'args='+repr(args),'Cf=0; technical tokens='+repr(sorted(tokens)))
+assert not problems,problems
+# Verify ALL actual pinned spec namespace producers are English-forced.
+producers=[]
+for file in ['local_operator/session/spec.py','local_operator/sdk.py']:
+ source=subprocess.check_output(['git','-C',str(R),'show',REF+':'+file],text=True)
+ tree=ast.parse(source)
+ for n in ast.walk(tree):
+  if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='envelope' and isinstance(n.func.value,ast.Call):
+   inner=n.func.value
+   if isinstance(inner.func,ast.Attribute) and isinstance(inner.func.value,ast.Name) and inner.func.value.id=='wire_errors_sdk_spec':
+    assert any(k.arg=='locale' and isinstance(k.value,ast.Constant) and k.value.value=='en' for k in n.keywords)
+    producers.append((file,n.lineno,inner.func.attr))
+assert len(producers)==21,len(producers)
+print('PASS pinned producer AST: 21/21 force locale=en; source inspection, not live exception execution')
+try:runtime.message_arguments('bad {')
+except runtime.MessageSyntaxError:print('PASS negative control invalid ICU rejected')
+else:raise AssertionError('invalid ICU accepted')
+assert not check.arguments_match((),runtime.message_arguments('{injected}'),translated_source='{injected}',locale='zh-CN',plural=plural)
+print('PASS negative control added placeholder rejected')
+print('RESULT PASS 21/21 staged catalogue mechanical checks; no global scanner/build/native suite')

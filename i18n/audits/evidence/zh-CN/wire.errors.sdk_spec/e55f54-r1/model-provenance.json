@@ -1,0 +1,17 @@
+{
+  "session": "e55f54b6a26e",
+  "actual_model": "openai/gpt-6.1-sol",
+  "actual_model_source": "own completed assistant payload.usage in transcript.jsonl",
+  "usage": {
+    "billing_basis": "subscription_api_equivalent",
+    "input_tokens": 98245,
+    "output_tokens": 264,
+    "cache_read_tokens": 96256,
+    "context_tokens": 98245,
+    "reasoning_tokens": 97,
+    "at_ms": 1793719936469,
+    "provider": "openai",
+    "model_id": "gpt-6.1-sol"
+  },
+  "fallback": "Observed served model differs from initial Anthropic header; exact upstream fallback chain not inferred."
+}

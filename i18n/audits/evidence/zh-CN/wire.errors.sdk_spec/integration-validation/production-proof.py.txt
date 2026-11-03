@@ -1,0 +1,54 @@
+import hashlib
+import inspect
+import json
+from pathlib import Path
+import tempfile
+
+from local_operator.i18n import messages, text
+from local_operator.i18n.keys import wire_errors_sdk_spec as keys
+from tests.unit.i18n.test_sdk_spec_slice import _EXPECTED, _cases, _refuse
+
+root = Path.cwd()
+ns = 'wire.errors.sdk_spec'
+assert str(root) in str(__import__('local_operator').__file__)
+zh = json.loads((root / f'local_operator/i18n/catalogues/zh-CN/{ns}.json').read_text())
+opaque = "opaque-'Ω-{mode}-%(x)s-/tmp/synthetic/JSON"
+parameterized = 0
+formatted = []
+for name, factory in inspect.getmembers(keys, inspect.isfunction):
+    if factory.__module__ != keys.__name__:
+        continue
+    params = {key: opaque for key in inspect.signature(factory).parameters}
+    message = factory(**params)
+    rendered = messages.render_record(message.code, params, locale='zh-CN')
+    assert rendered.source_locale == 'zh-CN'
+    assert rendered.text != messages.render(message.code, params, locale='en')
+    if params:
+        parameterized += 1
+        assert opaque in rendered.text
+    envelope = message.envelope(locale='zh-CN')
+    assert envelope['code'] == message.code and envelope['params'] == params
+    assert envelope['text'] == rendered.text
+    control = messages.render_record(message.code, params, locale='unknown-sdk-proof')
+    assert control.source_locale == 'en'
+    formatted.append({'code': message.code, 'params_preserved': True,
+                      'actual_source_locale': rendered.source_locale})
+assert len(formatted) == 21 and parameterized == 8
+previous = text.active_locale()
+try:
+    text.set_active_locale('zh-CN')
+    with tempfile.TemporaryDirectory(dir=Path.home()) as directory:
+        for name, call in _cases(Path(directory)).items():
+            error = _refuse(call)
+            assert str(error).encode() == _EXPECTED[name].encode()
+            assert error.args == (_EXPECTED[name],)
+            assert not hasattr(error, 'code') and not hasattr(error, 'params')
+finally:
+    text.set_active_locale(previous)
+print(json.dumps({'source': str(__import__('local_operator').__file__),
+                  'formatter_records': len(formatted), 'parameterized_records': parameterized,
+                  'opaque_parameter_bytes': 'preserved', 'unknown_fallback': 'English source',
+                  'legacy_exception_controls': 21, 'ambient_locale_during_legacy_calls': 'zh-CN',
+                  'legacy_english_args_str_attrs': 'byte-identical to pre-extraction golden',
+                  'target_sha256': hashlib.sha256((root / f'local_operator/i18n/catalogues/zh-CN/{ns}.json').read_bytes()).hexdigest(),
+                  'no_native_or_UI_proof': True}, ensure_ascii=False, indent=2))

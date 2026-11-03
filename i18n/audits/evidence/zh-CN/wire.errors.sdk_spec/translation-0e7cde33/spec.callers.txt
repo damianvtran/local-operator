@@ -1,0 +1,121 @@
+Pinned commit: 0e7cde33ca8008d561e74f4aed774aa5f76ff7d5
+Source SHA256: 985b11c5755d5b663337c6f04df0a24f955e93350e54a40ff32eb1c70be99a78
+local_operator/session/spec.py:332:     def __post_init__(self) -> None:
+local_operator/session/spec.py:333:         if self.mode == "declared":
+local_operator/session/spec.py:334:             if not self.tools:
+local_operator/session/spec.py:335:                 from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/session/spec.py:336: 
+local_operator/session/spec.py:337:                 raise SessionSpecError(
+local_operator/session/spec.py:338:                     wire_errors_sdk_spec.approval_declared_tools_empty().envelope(locale="en")[
+local_operator/session/spec.py:339:                         "text"
+local_operator/session/spec.py:340:                     ]
+local_operator/session/spec.py:341:                 )
+local_operator/session/spec.py:342:         elif self.tools:
+local_operator/session/spec.py:343:             from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/session/spec.py:344: 
+local_operator/session/spec.py:345:             raise SessionSpecError(
+local_operator/session/spec.py:346:                 wire_errors_sdk_spec.approval_tools_wrong_mode(mode=repr(self.mode)).envelope(
+local_operator/session/spec.py:347:                     locale="en"
+local_operator/session/spec.py:348:                 )["text"]
+local_operator/session/spec.py:349:             )
+local_operator/session/spec.py:350:         if self.mode == "callback":
+local_operator/session/spec.py:351:             if not callable(self.handler):
+local_operator/session/spec.py:352:                 from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/session/spec.py:353: 
+local_operator/session/spec.py:354:                 raise SessionSpecError(
+local_operator/session/spec.py:355:                     wire_errors_sdk_spec.approval_callback_gate_required().envelope(locale="en")[
+local_operator/session/spec.py:356:                         "text"
+local_operator/session/spec.py:357:                     ]
+local_operator/session/spec.py:358:                 )
+local_operator/session/spec.py:359:         elif self.handler is not None:
+local_operator/session/spec.py:360:             from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/session/spec.py:361: 
+local_operator/session/spec.py:362:             raise SessionSpecError(
+local_operator/session/spec.py:363:                 wire_errors_sdk_spec.approval_handler_wrong_mode(mode=repr(self.mode)).envelope(
+local_operator/session/spec.py:364:                     locale="en"
+local_operator/session/spec.py:365:                 )["text"]
+local_operator/session/spec.py:500:     world_root: str | Path | None = None
+local_operator/session/spec.py:501: 
+local_operator/session/spec.py:502:     def __post_init__(self) -> None:
+local_operator/session/spec.py:503:         if self.agent_name and self.agent_id:
+local_operator/session/spec.py:504:             # exec refuses this pair at resolve_startup; refusing here too keeps
+local_operator/session/spec.py:505:             # the failure before any construction, with the same wording.
+local_operator/session/spec.py:506:             from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/session/spec.py:507: 
+local_operator/session/spec.py:508:             raise SessionSpecError(
+local_operator/session/spec.py:509:                 wire_errors_sdk_spec.agent_identity_conflict().envelope(locale="en")["text"]
+local_operator/session/spec.py:510:             )
+local_operator/session/spec.py:511:         if self.resume is not None and not str(self.resume):
+local_operator/session/spec.py:512:             from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/session/spec.py:513: 
+local_operator/session/spec.py:514:             raise SessionSpecError(
+local_operator/session/spec.py:515:                 wire_errors_sdk_spec.resume_empty().envelope(locale="en")["text"]
+local_operator/session/spec.py:516:             )
+local_operator/session/spec.py:517:         if self.tools is not None and not isinstance(self.tools, tuple):
+local_operator/session/spec.py:518:             # A list is the ergonomic spelling; frozen here so the spec is
+local_operator/session/spec.py:519:             # hashable and cannot be mutated between validation and use.
+local_operator/session/spec.py:520:             object.__setattr__(self, "tools", tuple(self.tools))
+local_operator/session/spec.py:521:         if self.tools is not None and not self.tools:
+local_operator/session/spec.py:522:             from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/session/spec.py:523: 
+local_operator/session/spec.py:524:             raise SessionSpecError(wire_errors_sdk_spec.tools_empty().envelope(locale="en")["text"])
+local_operator/session/spec.py:525:         if self.yolo and self.approvals.mode in ("refuse", "callback"):
+local_operator/session/spec.py:526:             # yolo short-circuits the gate object on the session side, so a
+local_operator/session/spec.py:527:             # refuse/callback gate installed here could never be consulted —
+local_operator/session/spec.py:528:             # silently ignored is exactly the failure shape this SDK refuses to
+local_operator/session/spec.py:529:             # have. `auto()` is the honest spelling of the same posture.
+local_operator/session/spec.py:530:             from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/session/spec.py:531: 
+local_operator/session/spec.py:532:             raise SessionSpecError(
+local_operator/session/spec.py:533:                 wire_errors_sdk_spec.yolo_approval_unreachable(
+local_operator/session/spec.py:534:                     approval_mode=self.approvals.mode
+local_operator/session/spec.py:535:                 ).envelope(locale="en")["text"]
+local_operator/session/spec.py:536:             )
+local_operator/session/spec.py:537:         # The output-contract fields are validated cheaply HERE (stdlib only —
+local_operator/session/spec.py:538:         # see ``_OUTPUT_FORMATS``) and fully by ``OutputContract.__post_init__``
+local_operator/session/spec.py:539:         # when the session is built, which both the SDK and exec run; these
+local_operator/session/spec.py:540:         # refusals exist so a spec that cannot possibly work fails where it is
+local_operator/session/spec.py:541:         # written, before anything is constructed.
+local_operator/session/spec.py:542:         if self.output_format is not None:
+local_operator/session/spec.py:543:             if self.output_format not in _OUTPUT_FORMATS:
+local_operator/session/spec.py:544:                 from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/session/spec.py:545: 
+local_operator/session/spec.py:546:                 raise SessionSpecError(
+local_operator/session/spec.py:547:                     wire_errors_sdk_spec.output_format_invalid(
+local_operator/session/spec.py:548:                         formats=", ".join(_OUTPUT_FORMATS)
+local_operator/session/spec.py:549:                     ).envelope(locale="en")["text"]
+local_operator/session/spec.py:550:                 )
+local_operator/session/spec.py:551:         if self.output_schema is not None and self.output_format is None:
+local_operator/session/spec.py:552:             from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/session/spec.py:553: 
+local_operator/session/spec.py:554:             raise SessionSpecError(
+local_operator/session/spec.py:555:                 wire_errors_sdk_spec.output_schema_requires_format().envelope(locale="en")["text"]
+local_operator/session/spec.py:556:             )
+local_operator/session/spec.py:557:         if self.output_retries is not None and self.output_format is None:
+local_operator/session/spec.py:558:             from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/session/spec.py:559: 
+local_operator/session/spec.py:560:             raise SessionSpecError(
+local_operator/session/spec.py:561:                 wire_errors_sdk_spec.output_retries_requires_format().envelope(locale="en")["text"]
+local_operator/session/spec.py:562:             )
+local_operator/session/spec.py:563:         if self.output_retries is not None and (
+local_operator/session/spec.py:564:             isinstance(self.output_retries, bool)
+local_operator/session/spec.py:565:             or not isinstance(self.output_retries, int)
+local_operator/session/spec.py:566:             or not 0 <= self.output_retries <= 5
+local_operator/session/spec.py:567:         ):
+local_operator/session/spec.py:568:             from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/session/spec.py:569: 
+local_operator/session/spec.py:570:             raise SessionSpecError(
+local_operator/session/spec.py:571:                 wire_errors_sdk_spec.output_retries_range().envelope(locale="en")["text"]
+local_operator/session/spec.py:572:             )
+local_operator/session/spec.py:573:         if self.world_root is not None and not str(self.world_root).strip():
+local_operator/session/spec.py:574:             # Cheap and stdlib-only, like the checks above; the CONTAINMENT
+local_operator/session/spec.py:575:             # checks need the roots and live in ``sdk.open_session``, where
+local_operator/session/spec.py:576:             # they run once before any construction.
+local_operator/session/spec.py:577:             from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/session/spec.py:578: 
+local_operator/session/spec.py:579:             raise SessionSpecError(
+local_operator/session/spec.py:580:                 wire_errors_sdk_spec.world_root_empty().envelope(locale="en")["text"]
+local_operator/session/spec.py:581:             )
+local_operator/session/spec.py:582: 
+local_operator/session/spec.py:583:     def to_namespace(self) -> argparse.Namespace:
+local_operator/session/spec.py:584:         """The narrow session-factory namespace, field-for-field as exec builds it.
