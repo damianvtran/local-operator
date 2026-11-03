@@ -6,26 +6,44 @@ Darwin authoritative constructor; observing a complete-looking PID list is not
 coverage. Linux keeps the strict `/proc` backend. This is a loss of Darwin strict
 gate availability, not a claim that those gates have been cleaned up.
 
-`--contract=command-status` explicitly requests the direct child's normalized
-outcome, not group or descendant supervision. It never certifies group cleanup.
-A positive inherited memory grant still admits only tightening: zero/widening
-refuse before spawn, and even a valid positive group grant refuses in direct-only
-mode because this mode cannot enforce it. Do not use `--memory-mb=0` to recover
-availability under an inherited positive grant.
+`--contract=command-status` requests the command's normalized status. It never
+certifies group cleanup (`cleanup_status` is always `unknown`, `admit_cleanup`
+rejects every command-status receipt), but it does **enforce** a positive memory
+grant, inherited or auto, with the same `memory_guard.Guard(pgid, budget)` the
+strict runner and the bash tool use. A grant still admits only tightening:
+zero/widening refuse before spawn (`memory-policy-refused`).
+
+## Reserved-leader signal authority (architect ruling, option B)
+
+The child runs with `start_new_session=True`, so its group id equals its pid.
+While that leader is **unreaped** the kernel cannot reuse the number, so
+`killpg(proc.pid)` reaches only our group. The supervisor therefore observes the
+leader without consuming it — `os.waitid(WNOWAIT)` where CPython exposes it
+(`terminal_observer=waitid-wnowait`), else Darwin's `sysctl(KERN_PROC_PID)`
+zombie flag (`darwin-sysctl-zombie`, which is how Python 3.12 on macOS runs) —
+and every signal (deadline TERM/KILL, forwarded signal, memory KILL, leader-exit
+sweep) precedes the single consuming `os.waitpid`. None follows it. `Popen.poll`
+is never used because it maps ECHILD to status 0. An unreadable observer is
+never terminal: after 2 s the group is SIGKILLed, reaped, and the run reports
+126 `supervision-failure`. The leader-exit sweep consults the fork-free group
+listing only to decide whether to signal (unknown means signal); it is never
+cleanup evidence. Darwin answers EPERM rather than ESRCH to `killpg` when the
+zombie leader is the group's only member; that reading is accepted only when the
+group listing agrees.
+
+Refusals that remain: `memory-policy-refused` and `unsupported-boundary` (no
+`os.killpg`, no non-consuming observer, or a non-default SIGCHLD disposition).
+Escaped (`setsid`) descendants, uninterruptible sleep and scheduler delay still
+rule out hard wall-time or RAM promises.
 
 ## Runtime capability and real-path coverage
 
-The package supports Python >=3.12, but CPython exposes `os.waitid` on macOS only
-from 3.13. Therefore command-status refuses on **Python 3.12 macOS**, with
-`termination_cause=unsupported-boundary` and a reason naming missing `os.waitid`.
-This is a Python/runtime capability limit, not a Darwin-wide limit. A non-default
-SIGCHLD disposition also refuses. There is no `poll`/numeric-PID fallback.
-
 `test_run_bounded_contract_cli.py` executes the CLI with isolated HOME/config,
 checks actual completion JSON and verifies pre-spawn side effects are absent.
-Child-outcome cells skip with the missing capability named on unsupported Python.
-On supported Python they check real 0, 7 and SIGTERM child outcomes plus actual
-budget, NODE_OPTIONS and notification-gate propagation. Existing CI's Ubuntu
+Child-outcome cells run on Python 3.12 and 3.13 (the observer differs) and
+check real 0, 7 and SIGTERM child outcomes plus actual budget, NODE_OPTIONS and
+notification-gate propagation, a real memory breach killing an allocating
+grandchild (137), and a leader-exit sweep of a left-behind sleeper. Existing CI's Ubuntu
 `test` matrix includes Python 3.13 on main (3.12 on pull requests); the normal
 unit-test shard selection includes these tests. The 3.12/3.13/3.14
 `packaging-smoke` matrix is **not** a unit-test/CLI execution claim.
@@ -83,11 +101,14 @@ paths, verdicts and wrapper invocation. Identified readers:
 | `tests/unit/scripts/test_run_bounded_contract.py` | completion receipt and `admit_cleanup` | Explicit positive/negative admission controls |
 | `tests/unit/scripts/test_run_bounded_contract_cli.py` | actual CLI completion JSON | Command/cleanup separation and grant refusal |
 
-Known status-only callers are Makefile's type-check gate,
-`scripts/ci_scope.py`, `scripts/bench_send_admission_ab.sh`, and CI's serial-control
-wrapper invocation. They remain strict by default; **none is silently opted in**.
-They do not become proof-dependent consumers merely because they inspect a return
-code. No production call to `admit_cleanup` was found outside the new module/tests.
+Known status-only callers — Makefile's type-check gate, `scripts/ci_scope.py`'s
+`JOB_COMMANDS["type-check"]`, the AGENTS.md gate spellings and
+`scripts/bench_send_admission_ab.sh` — explicitly pass `--contract=command-status`:
+they consume a return code, not a cleanup certificate, and the default refuses on
+Darwin before spawn. CI's serial-control wrapper (`ci.yml`) stays on the strict
+default because it runs on Linux, where the strict backend exists.
+`test_ci_hygiene.py` pins those spellings. They do not become proof-dependent
+consumers merely because they inspect a return code. No production call to `admit_cleanup` was found outside the new module/tests.
 
 **Unidentifiable:** the three organizational/downstream lanes claimed by the old
 `_ownership_record` comment are unnamed. Lane 1, lane 2 and lane 3 cannot be mapped

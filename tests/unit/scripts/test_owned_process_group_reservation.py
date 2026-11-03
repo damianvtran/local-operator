@@ -26,7 +26,7 @@ from local_operator.procstate import ProcessSample
 from tests.unit.scripts.test_run_bounded import memory_wrapper  # noqa: F401
 
 
-def _as_typed_census(view, raw):
+def _as_typed_census(view, raw, module=owned):
     """An EXPLICITLY optimistic census for a synthetic world.
 
     Optimism belongs in fixtures, never in the product: production readers state
@@ -42,9 +42,13 @@ def _as_typed_census(view, raw):
     cannot guess (review round 11, Q6).
     """
 
+    # ``module``: an exec'd mutant copy defines its OWN AuthoritativeCensus, and
+    # its `_members` isinstance check rejects the real module's type -- the
+    # mutant arm then refused for that reason instead of exercising the guard.
+
     def wrapped(pgid, deadline):
         pids = view(pgid, deadline)
-        return owned.AuthoritativeCensus(tuple(pids), True, pgid in set(raw()))
+        return module.AuthoritativeCensus(tuple(pids), True, pgid in set(raw()))
 
     return wrapped
 
@@ -370,7 +374,7 @@ def test_c3_removing_the_residency_re_check_lets_a_stranger_die():
     cap2 = mutant.OwnedGroup.capture(
         kernel2.leader,
         parent_pid=kernel2.parent,
-        census=_as_typed_census(kernel2.census, lambda: kernel2.rows),
+        census=_as_typed_census(kernel2.census, lambda: kernel2.rows, mutant),
         samples=kernel2.samples,
         identity=kernel2.identity,
         scheme=lambda: SCHEME,
@@ -607,7 +611,9 @@ def test_a_member_seen_by_one_census_and_gone_from_the_next_is_recorded():
             kernel.rows.pop(20, None)
         return original(pgid, deadline)
 
-    cap.census = two_scans
+    # Typed like every sibling fixture: a bare list states no coverage, so
+    # `_members` refused before the union this test is about ever ran.
+    cap.census = _as_typed_census(two_scans, lambda: kernel.rows)
     verdict = cap.signal(signal.SIGKILL, deadline=kernel.clock() + 5.0)
     # THE AMNESTY IS ABOUT THE UNION, NOT ABOUT SAMPLES. A pid seen by either scan
     # is recorded as a member of our number; if it then cannot be SAMPLED, the

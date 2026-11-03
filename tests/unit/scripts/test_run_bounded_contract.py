@@ -24,6 +24,7 @@ from local_operator import owned_process_group as groups
 def runner():
     path = Path(__file__).resolve().parents[3] / "scripts" / "run_bounded.py"
     spec = importlib.util.spec_from_file_location("bounded_contract_runner_test", path)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -101,26 +102,77 @@ def test_default_refuses_before_spawn_and_handlers(runner, monkeypatch, tmp_path
     assert not list(tmp_path.glob("*.spawn.json"))
 
 
+def leader_factory(log, *, status=0, terminal=lambda: True, hook=lambda point: None):
+    """A scripted reserved leader: every observe/signal/reap lands in ``log``.
+
+    ``send_group`` refuses after revocation exactly like the real boundary, so a
+    test that signals after the consuming reap fails instead of passing silently.
+    """
+
+    class Leader:
+        observer = "synthetic"
+
+        def __init__(self, proc):
+            self.proc = proc
+            self.revoked = False
+
+        def observe(self):
+            log.append("observe")
+            hook("observe")
+            return terminal()
+
+        def send_group(self, signum):
+            if self.revoked:
+                raise RuntimeError("reserved-leader authority irrevocably revoked")
+            log.append(("killpg", self.proc.pid, signum))
+            return True
+
+        def reap(self):
+            self.revoked = True
+            log.append("reap")
+            hook("reap")
+            return status
+
+        def revoke(self):
+            self.revoked = True
+            hook("revoke")
+
+    return Leader
+
+
+class Child:
+    pid = 43210
+    returncode = None
+
+    def poll(self):
+        pytest.fail("Popen.poll maps ECHILD to 0 and is forbidden on this path")
+
+    def wait(self, *args, **kwargs):
+        pytest.fail("Popen.wait is forbidden on this path")
+
+
+def direct_with(leader, **extra):
+    """A ``direct`` seam running the real supervisor over a scripted leader."""
+
+    def direct(argv, **kwargs):
+        kwargs.update(extra)
+        contracts.supervise_direct(
+            argv,
+            **kwargs,
+            spawn=lambda *a, **k: Child(),
+            boundary=leader,
+            group_pids=lambda pgid: [pgid],
+        )
+
+    return direct
+
+
 @pytest.mark.parametrize("child_rc", [0, 7, 124, 125, 126, 130, -signal.SIGTERM])
 def test_command_status_uses_direct_child_and_never_group_sender(monkeypatch, tmp_path, child_rc):
     monkeypatch.setattr(groups.OwnedGroup, "capture", forbidden)
     monkeypatch.setattr(contracts.os, "killpg", forbidden)
-
-    class Child:
-        pid = 43210
-
-        def wait(self, *, timeout):
-            assert timeout == 0
-            return child_rc
-
-    class Boundary(contracts.DirectChild):
-        def terminal(self):
-            return True
-
-    def direct(argv, **kwargs):
-        contracts.supervise_direct(argv, **kwargs, spawn=lambda *a, **k: Child(), boundary=Boundary)
-
-    rc, receipt, text = invoke(tmp_path, direct=direct)
+    log = []
+    rc, receipt, text = invoke(tmp_path, direct=direct_with(leader_factory(log, status=child_rc)))
     # Independent oracle: sharing shell_status here let its negative-status
     # mutation survive by changing both the implementation and expectation.
     assert rc == (128 + abs(child_rc) if child_rc < 0 else child_rc)
@@ -128,8 +180,11 @@ def test_command_status_uses_direct_child_and_never_group_sender(monkeypatch, tm
     assert row["command_exit_code"] == rc
     assert row["termination_cause"] == ("child-signal" if child_rc < 0 else "child-exit")
     assert row["cleanup_status"] == "unknown"
-    assert row["signal_scope"] == "direct-child"
+    assert row["signal_scope"] == "reserved-leader-group"
     assert "contract=command-status" in text and "cleanup=unknown" in text
+    assert "spawned=no" not in text
+    # A lone leader exit needs no group signal: the listing showed nobody else.
+    assert log == ["observe", "reap"]
     assert not contracts.admit_cleanup(
         receipt.path, expected_invocation_id=receipt.invocation_id, expected_directory=tmp_path
     )
@@ -138,36 +193,26 @@ def test_command_status_uses_direct_child_and_never_group_sender(monkeypatch, tm
 def test_deadline_is_policy_outcome_not_cleanup(monkeypatch, tmp_path):
     monkeypatch.setattr(contracts.os, "killpg", forbidden)
     now = [0.0]
-    sends = []
-    monkeypatch.setattr(contracts.os, "kill", lambda pid, sig: sends.append((pid, sig)))
-
-    class Child:
-        pid = 43210
-
-        def wait(self, **kwargs):
-            return 0  # Child itself succeeds after stop request; deadline wins.
-
-    class Boundary(contracts.DirectChild):
-        def terminal(self):
-            return bool(sends)
-
-    def direct(argv, **kwargs):
-        contracts.supervise_direct(
-            argv,
-            **kwargs,
-            spawn=lambda *a, **k: Child(),
-            boundary=Boundary,
+    log = []
+    # The child dies only once the group has actually been signalled.
+    leader = leader_factory(log, terminal=lambda: any(isinstance(e, tuple) for e in log))
+    rc, receipt, text = invoke(
+        tmp_path,
+        timeout=0.01,
+        direct=direct_with(
+            leader,
             clock=lambda: now[0],
             sleep=lambda dt: now.__setitem__(0, now[0] + dt),
-        )
-
-    rc, receipt, text = invoke(tmp_path, timeout=0.01, direct=direct)
+        ),
+    )
     row = receipt_row(receipt)
     assert rc == 124 and row["termination_cause"] == "deadline"
-    assert sends == [(43210, signal.SIGTERM)]
+    assert [e for e in log if isinstance(e, tuple)] == [("killpg", 43210, signal.SIGTERM)]
+    assert log[-1] == "reap"
     assert row["command_exit_code"] == 0 and row["cleanup_status"] == "unknown"
-    assert "no hard RAM bound" in row["memory_guarantee"]
+    assert row["memory_guarantee"].startswith("none:")
     assert row["deadline_guarantee"].startswith("none:")
+    assert "that is the BOUND" in text
 
 
 def test_positive_grant_cannot_be_disabled_or_widened(runner, monkeypatch, tmp_path):
@@ -175,6 +220,7 @@ def test_positive_grant_cannot_be_disabled_or_widened(runner, monkeypatch, tmp_p
     monkeypatch.setattr(runner, "_record_dir", lambda: tmp_path)
     monkeypatch.setattr(runner.subprocess, "Popen", forbidden)
     for requested in (0, 129):
+        stream = io.StringIO()
         assert (
             runner.run(
                 ["never-start"],
@@ -182,14 +228,28 @@ def test_positive_grant_cannot_be_disabled_or_widened(runner, monkeypatch, tmp_p
                 grace=0.1,
                 memory_mb=requested,
                 contract="command-status",
-                stream=io.StringIO(),
+                stream=stream,
             )
             == 125
         )
-    # A positive valid group grant is not falsely re-labelled direct-only RAM
-    # enforcement. Availability requires a separately authorized zero grant.
-    rc, receipt, text = invoke(tmp_path, budget=128)
-    assert rc == 125 and receipt_row(receipt)["termination_cause"] == "unsupported-policy"
+        text = stream.getvalue()
+        # R8: the refusal names its receipt like every other path, and D1/D4:
+        # a human reason line precedes a status line that says nothing ran.
+        assert "refused before spawn: memory budget refused" in text
+        assert "spawned=no" in text and "invocation_id=" in text and "completion=" in text
+    # A positive valid grant is ENFORCED by command-status, not refused: the
+    # supervisor receives the budget and builds the guard on its own group.
+    seen = {}
+
+    def direct(argv, **kwargs):
+        seen["ceiling"] = kwargs["budget"].ceiling_mb
+
+    rc, receipt, text = invoke(tmp_path, budget=128, direct=direct)
+    row = receipt_row(receipt)
+    assert seen == {"ceiling": 128}
+    assert row["memory_ceiling_mb"] == 128
+    assert row["memory_guarantee"].startswith("sampled owned-group policy")
+    assert "memory budget 128 MiB" in text
 
 
 def test_observation_complete_flag_is_not_authority():
@@ -340,21 +400,21 @@ def test_strict_child_success_requires_terminal_certificate(tmp_path):
 
 
 def test_revoking_wait_that_raises_cannot_restore_direct_send(monkeypatch):
-    class Child:
-        pid = 43210
+    def failing_waitpid(pid, options):
+        raise ChildProcessError("synthetic consuming-wait failure")
 
-        def wait(self, **kwargs):
-            raise RuntimeError("synthetic consuming-wait failure")
-
-    child = contracts.DirectChild(Child())
-    monkeypatch.setattr(contracts.os, "kill", forbidden)
-    with pytest.raises(RuntimeError):
+    child = contracts.ReservedLeader(Child(), observer="waitid-wnowait")
+    monkeypatch.setattr(contracts.os, "killpg", forbidden)
+    monkeypatch.setattr(contracts.os, "waitpid", failing_waitpid)
+    with pytest.raises(ChildProcessError):
         child.reap()
     with pytest.raises(RuntimeError, match="revoked"):
-        child.send(signal.SIGTERM)
+        child.send_group(signal.SIGTERM)
     child.revoke()
     with pytest.raises(RuntimeError, match="revoked"):
-        child.send(signal.SIGKILL)
+        child.send_group(signal.SIGKILL)
+    with pytest.raises(RuntimeError, match="revoked"):
+        child.observe()
 
 
 def test_unseen_observation_does_not_reach_terminal_promotion():
@@ -402,25 +462,18 @@ def test_established_nonzero_survives_supervision_and_publication_failure(tmp_pa
 
 
 def test_interruption_is_not_confused_with_child_returning_130(tmp_path):
+    log = []
+    inner = direct_with(leader_factory(log, status=0))
+
     def direct(argv, **kwargs):
         kwargs["stop"]["signum"] = signal.SIGINT
-
-        class Child:
-            pid = 43210
-
-            def wait(self, **kw):
-                return 0
-
-        class Boundary(contracts.DirectChild):
-            def terminal(self):
-                return True
-
-        contracts.supervise_direct(argv, **kwargs, spawn=lambda *a, **k: Child(), boundary=Boundary)
+        inner(argv, **kwargs)
 
     rc, receipt, text = invoke(tmp_path, direct=direct)
     row = receipt_row(receipt)
     assert rc == 130 and row["command_exit_code"] == 0
     assert row["termination_cause"] == "interruption" and row["cleanup_status"] == "unknown"
+    assert log.index(("killpg", 43210, signal.SIGINT)) < log.index("reap")
 
 
 def test_summary_names_default_contract(tmp_path):
@@ -488,30 +541,14 @@ def test_errant_direct_supervisor_cannot_promote_group_cleanup(tmp_path):
     assert row["descendant_cleanup"] == "unknown"
 
 
-@pytest.mark.parametrize("point", ["terminal", "reap", "revoke"])
+@pytest.mark.parametrize("point", ["observe", "reap", "revoke"])
 def test_direct_late_interruption_is_not_child_success(point):
     stop = {"signum": 0}
     outcome = contracts.Outcome()
 
-    class Child:
-        pid = 43210
-
-        def wait(self, *, timeout):
-            assert timeout == 0
-            if point == "reap":
-                stop["signum"] = signal.SIGINT
-            return 0
-
-    class Boundary(contracts.DirectChild):
-        def terminal(self):
-            if point == "terminal":
-                stop["signum"] = signal.SIGINT
-            return True
-
-        def revoke(self):
-            super().revoke()
-            if point == "revoke":
-                stop["signum"] = signal.SIGINT
+    def hook(where):
+        if where == point:
+            stop["signum"] = signal.SIGINT
 
     contracts.supervise_direct(
         ["synthetic"],
@@ -520,8 +557,10 @@ def test_direct_late_interruption_is_not_child_success(point):
         env={},
         outcome=outcome,
         stop=stop,
+        stream=io.StringIO(),
         spawn=lambda *a, **k: Child(),
-        boundary=Boundary,
+        boundary=leader_factory([], status=0, hook=hook),
+        group_pids=lambda pgid: [pgid],
     )
     assert outcome.command_exit_code == 0
     assert outcome.wrapper_exit_code == 130
@@ -569,6 +608,7 @@ def strict_boundary(runner, monkeypatch, tmp_path):
         "child_status": 0,
         "raise_at_point": False,
         "restore_attempts": [],
+        "refuse_nonterminal": False,
     }
     handlers = {}
     previous = object()
@@ -597,6 +637,10 @@ def strict_boundary(runner, monkeypatch, tmp_path):
             return True
 
         def refresh(self, *, deadline, terminal=False):
+            if not terminal and state["refuse_nonterminal"]:
+                # Linux fork churn: an unstable census refuses a non-terminal check.
+                self.last = groups.Verdict("REFUSED", "churn", refusal_class="unproven")
+                return self.last
             if terminal and state["point"] == "census":
                 interrupt()
                 if state["raise_at_point"]:
@@ -1028,3 +1072,230 @@ def test_broken_summary_preserves_original_supervision_error(tmp_path):
     assert row["supervision_error"] == "RuntimeError"
     assert row["wrapper_exit_code"] == 126
     assert row["cleanup_status"] == "unknown"
+
+
+class FakeKernel:
+    """The OS calls ReservedLeader makes, recorded in one ordered event log.
+
+    The leader turns into a zombie at ``dies_at`` ticks of ``waitid`` or when it
+    is SIGKILLed; ``stragglers`` stay in the group listing until signalled. The
+    log is the oracle for the architect's ordering invariant: every killpg
+    names pgid == proc.pid and precedes the single consuming waitpid.
+    """
+
+    def __init__(self, monkeypatch, *, dies_at=2, stragglers=(), observe_error=None):
+        self.log = []
+        self.ticks = 0
+        self.dies_at = dies_at
+        self.zombie = False
+        self.reaped = False
+        self.members = list(stragglers)
+        self.observe_error = observe_error
+        monkeypatch.setattr(contracts.os, "killpg", self.killpg)
+        monkeypatch.setattr(contracts.os, "waitpid", self.waitpid)
+        monkeypatch.setattr(contracts.os, "waitid", self.waitid, raising=False)
+        for name, value in (("P_PID", 1), ("WEXITED", 4), ("WNOHANG", 1), ("WNOWAIT", 32)):
+            monkeypatch.setattr(contracts.os, name, value, raising=False)
+
+    def killpg(self, pgid, signum):
+        assert not self.reaped, "signal after the consuming reap"
+        self.log.append(("killpg", pgid, signum))
+        self.members = []
+        if signum == signal.SIGKILL:
+            self.zombie = True
+
+    def waitid(self, idtype, pid, options):
+        assert options & 32, "observation must be non-consuming (WNOWAIT)"
+        self.log.append(("waitid", pid))
+        if self.observe_error is not None:
+            raise self.observe_error
+        self.ticks += 1
+        if self.ticks >= self.dies_at:
+            self.zombie = True
+        return SimpleNamespace(si_pid=pid) if self.zombie else None
+
+    def waitpid(self, pid, options):
+        assert options == 0
+        self.log.append(("waitpid", pid))
+        self.reaped = True
+        return pid, 0
+
+    def group(self, pgid):
+        return [pgid, *self.members]
+
+
+def run_supervised(kernel, *, timeout=None, grace=0.2, clock=None):
+    now = [0.0]
+    outcome = contracts.Outcome()
+    contracts.supervise_direct(
+        ["synthetic"],
+        timeout=timeout,
+        grace=grace,
+        env={},
+        outcome=outcome,
+        stop={"signum": 0},
+        stream=io.StringIO(),
+        spawn=lambda *a, **k: Child(),
+        clock=clock or (lambda: now[0]),
+        sleep=lambda dt: now.__setitem__(0, now[0] + dt),
+        boundary=lambda proc: contracts.ReservedLeader(proc, observer="waitid-wnowait"),
+        group_pids=kernel.group,
+    )
+    return outcome
+
+
+def test_every_group_signal_targets_the_leader_pgid_and_precedes_the_reap(monkeypatch):
+    # Leader exits with a straggler still in its group: the sweep must signal
+    # BEFORE the consuming wait releases the group number (mutant: reap above
+    # sweep fails here because killpg would follow waitpid).
+    kernel = FakeKernel(monkeypatch, dies_at=2, stragglers=[43299])
+    outcome = run_supervised(kernel)
+    kills = [i for i, e in enumerate(kernel.log) if e[0] == "killpg"]
+    reaps = [i for i, e in enumerate(kernel.log) if e[0] == "waitpid"]
+    assert kills, kernel.log
+    assert len(reaps) == 1 and all(i < reaps[0] for i in kills), kernel.log
+    assert {e[1] for e in kernel.log if e[0] in ("killpg", "waitpid", "waitid")} == {43210}
+    assert outcome.wrapper_exit_code == 0 and outcome.termination_cause == "child-exit"
+    assert outcome.cleanup_status == "unknown"
+
+
+def test_deadline_escalation_also_signals_only_before_the_reap(monkeypatch):
+    kernel = FakeKernel(monkeypatch, dies_at=10**9)  # ignores SIGTERM
+    outcome = run_supervised(kernel, timeout=0.1, grace=0.2)
+    sigs = [e[2] for e in kernel.log if e[0] == "killpg"]
+    assert sigs == [signal.SIGTERM, signal.SIGKILL]
+    assert kernel.log[-1] == ("waitpid", 43210)
+    assert outcome.wrapper_exit_code == 124 and outcome.termination_cause == "deadline"
+
+
+def test_unreadable_observer_kills_and_never_reports_success(monkeypatch):
+    kernel = FakeKernel(monkeypatch, observe_error=OSError("synthetic EINVAL"))
+    outcome = run_supervised(kernel)
+    assert ("killpg", 43210, signal.SIGKILL) in kernel.log
+    assert kernel.log[-1] == ("waitpid", 43210)
+    assert outcome.wrapper_exit_code == 126
+    assert outcome.termination_cause == "supervision-failure"
+    assert outcome.cleanup_status == "unknown"
+
+
+def test_foreign_reap_revokes_instead_of_fabricating_status(monkeypatch):
+    # ECHILD means someone else consumed the leader: the number may be reused,
+    # so no further signal is allowed and the outcome is a supervision failure.
+    kernel = FakeKernel(monkeypatch, observe_error=ChildProcessError("synthetic ECHILD"))
+    outcome = run_supervised(kernel)
+    assert not [e for e in kernel.log if e[0] in ("killpg", "waitpid")]
+    assert outcome.wrapper_exit_code == 126
+    assert outcome.command_exit_code is None
+
+
+def test_darwin_sysctl_observer_reads_zombie_without_consuming(monkeypatch):
+    from local_operator import procstate
+
+    samples = iter(
+        [
+            {43210: SimpleNamespace(zombie=False, birth="b1")},
+            None,  # unreadable tick is unknown, not terminal
+            {43210: SimpleNamespace(zombie=True, birth="b1")},
+            {43210: SimpleNamespace(zombie=True, birth="stranger")},
+        ]
+    )
+    monkeypatch.setattr(procstate, "_sysctl_samples", lambda pids: next(samples))
+    leader = contracts.ReservedLeader(Child(), observer="darwin-sysctl-zombie")
+    assert leader.observe() is False
+    assert leader.observe() is None
+    assert leader.observe() is True
+    with pytest.raises(ChildProcessError):
+        leader.observe()  # birth changed: reaped elsewhere and reused
+    with pytest.raises(RuntimeError, match="revoked"):
+        leader.send_group(signal.SIGTERM)
+
+
+def test_non_default_sigchld_still_refuses_before_spawn(monkeypatch, tmp_path):
+    monkeypatch.setattr(contracts.signal, "getsignal", lambda sig: (lambda *a: None))
+    assert "SIGCHLD is not default" in (contracts.ReservedLeader.unavailable_reason() or "")
+    receipt = contracts.Receipt(tmp_path, "sigchld")
+    stream = io.StringIO()
+    rc = contracts.execute(
+        ["synthetic"],
+        contract="command-status",
+        timeout=None,
+        grace=0,
+        budget=SimpleNamespace(ceiling_mb=0),
+        child_env={},
+        receipt=receipt,
+        stream=stream,
+        strict=forbidden,
+        direct=forbidden,
+    )
+    text = stream.getvalue()
+    assert rc == 125 and receipt_row(receipt)["termination_cause"] == "unsupported-boundary"
+    assert "refused before spawn:" in text and "spawned=no" in text
+
+
+def test_memory_breach_kills_group_before_reap_with_policy_cause(monkeypatch):
+    kernel = FakeKernel(monkeypatch, dies_at=10**9)
+
+    class Guard:
+        tick_s = 0.05
+
+        def __init__(self, pgid, budget):
+            assert pgid == 43210 and budget.ceiling_mb == 64
+
+        def sample_sync(self):
+            return "over"
+
+        def should_kill(self, sample):
+            return True
+
+        def over_budget_message(self, sample):
+            return "MEMORY LIMIT EXCEEDED: synthetic"
+
+    now = [0.0]
+    outcome = contracts.Outcome()
+    contracts.supervise_direct(
+        ["synthetic"],
+        timeout=None,
+        grace=10,
+        env={},
+        outcome=outcome,
+        stop={"signum": 0},
+        budget=SimpleNamespace(ceiling_mb=64),
+        stream=io.StringIO(),
+        spawn=lambda *a, **k: Child(),
+        clock=lambda: now[0],
+        sleep=lambda dt: now.__setitem__(0, now[0] + dt),
+        boundary=lambda proc: contracts.ReservedLeader(proc, observer="waitid-wnowait"),
+        guard_factory=Guard,
+        group_pids=kernel.group,
+    )
+    assert kernel.log[0] == ("killpg", 43210, signal.SIGKILL)
+    assert kernel.log[-1] == ("waitpid", 43210)
+    assert outcome.wrapper_exit_code == 137 and outcome.termination_cause == "memory-policy"
+    assert outcome.cleanup_status == "unknown"
+
+
+def test_windows_shaped_signal_module_still_imports(monkeypatch):
+    # R1: the cross-platform probe imports every module; Windows has no SIGHUP.
+    import importlib.util
+    import types
+
+    fake = types.ModuleType("signal")
+    for name in ("SIGINT", "SIGTERM", "SIG_DFL", "signal", "getsignal"):
+        setattr(fake, name, getattr(signal, name))
+    monkeypatch.setitem(__import__("sys").modules, "signal", fake)
+    spec = importlib.util.find_spec("local_operator.bounded_contract")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.FORWARDED == (signal.SIGINT, signal.SIGTERM)
+
+
+def test_accepted_terminal_certificate_outranks_an_earlier_transient_refusal(strict_boundary):
+    """CI run 41535590707 (Linux churn): the finally-loop refresh refused, then the
+    terminal census proved the group empty under the retained witness. The receipt
+    said proven-empty yet rc was 126. The accepted certificate IS the proof."""
+    state, run = strict_boundary
+    state["refuse_nonterminal"] = True
+    rc, row, admitted = run()
+    assert row["cleanup_status"] == "proven-empty"
+    assert rc == 0 and admitted

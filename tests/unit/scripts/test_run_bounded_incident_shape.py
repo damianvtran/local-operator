@@ -63,6 +63,72 @@ def _exit_record(tmp_path):
     return json.loads(records[-1].read_text())
 
 
+def _wait_gone(pid, deadline):
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)  # signal 0: delivers nothing, only asks
+        except ProcessLookupError:
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_the_incident_shape_is_reclaimed_under_command_status(tmp_path):
+    """The same shape through the REAL CLI's command-status contract.
+
+    Runs on every POSIX host, Darwin included: the leader exits at once, its
+    corpse still holds the group number, and the leader-exit sweep must signal
+    the group BEFORE the reap so the grandchild dies. Cleanup stays UNKNOWN --
+    command-status never certifies -- but the grandchild must actually be gone.
+    """
+    import subprocess
+
+    from local_operator import bounded_contract
+
+    if not bounded_contract.ReservedLeader.available():
+        pytest.skip(bounded_contract.ReservedLeader.unavailable_reason() or "unavailable")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CMUX_", "LOCAL_OPERATOR_"))}
+    env.update(HOME=str(tmp_path), LOCAL_OPERATOR_SCRATCHPAD=str(tmp_path))
+    runner = os.path.join(os.path.dirname(__file__), "..", "..", "..", "scripts", "run_bounded.py")
+    done = subprocess.run(
+        [
+            sys.executable,
+            runner,
+            "--contract=command-status",
+            "--memory-mb=0",
+            "--timeout=60",
+            "--grace=2",
+            "--",
+            sys.executable,
+            "-S",
+            "-c",
+            INCIDENT,
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
+    )
+    grandchild = int(done.stdout.split()[0])
+    try:
+        assert done.returncode == 0, done.stderr
+        assert "leader exited with members left" in done.stderr, done.stderr
+        assert "cleanup=unknown" in done.stderr
+        assert _wait_gone(grandchild, time.monotonic() + 10.0), "the grandchild survived"
+    finally:
+        try:
+            os.kill(grandchild, 9)  # exact pid; ESRCH on the passing path
+        except ProcessLookupError:
+            pass
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="the strict pin needs an authoritative census backend (Linux /proc); "
+    "elsewhere cleanup-required refuses before spawn and the command-status test "
+    "above exercises the same shape",
+)
 def test_the_incident_shape_is_reclaimed_and_the_record_shows_the_pin(wrapper, tmp_path):
     output = io.StringIO()
     rc = wrapper.run(

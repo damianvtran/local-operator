@@ -38,6 +38,16 @@ import pytest
 REPO = Path(__file__).resolve().parents[3]
 WRAPPER = REPO / "scripts" / "run_bounded.py"
 
+#: The contract these real-process cases exercise. Linux keeps the strict
+#: certified path (its /proc backend exists). Elsewhere cleanup-required refuses
+#: before spawn by design, so the same group-reaping behaviours -- bound, sweep,
+#: forwarded signal, external kill -- are asserted through command-status, which
+#: signals the owned group too (architect ruling on PR #3274). The safety
+#: assertions (`_wait_until_gone(token) == []`) are identical on both.
+CONTRACT_ARGS: tuple[str, ...] = (
+    () if sys.platform.startswith("linux") else ("--contract=command-status",)
+)
+
 #: These spawn real processes and wait on real signals; the suite marks that
 #: shape `slow` (see pyproject.toml's marker list).
 pytestmark = pytest.mark.slow
@@ -126,7 +136,7 @@ def _wrapper(args: Sequence[str], *, timeout_s: float = 60.0) -> subprocess.Comp
         err_path = Path(tmp) / "stderr"
         with out_path.open("w") as out, err_path.open("w") as err:
             result = subprocess.run(
-                [sys.executable, str(WRAPPER), *args],
+                [sys.executable, str(WRAPPER), *CONTRACT_ARGS, *args],
                 stdout=out,
                 stderr=err,
                 text=True,
@@ -188,11 +198,7 @@ def test_a_command_that_cannot_start_is_not_a_pass(reap_markers):
     result = _wrapper(["--timeout", "5", "--", "/nonexistent/interpreter-xyz"])
 
     assert result.returncode == 125
-    # Unsupported strict backends refuse even earlier than executable lookup.
-    # Both outcomes mean no command ran; neither can certify cleanup.
-    assert (
-        "could not start" if sys.platform.startswith("linux") else "unsupported-backend"
-    ) in result.stderr
+    assert "could not start" in result.stderr
 
 
 def test_a_bound_kills_the_whole_group_not_just_the_leader(reap_markers):
@@ -249,7 +255,13 @@ def test_a_signal_to_the_wrapper_reaches_the_group(reap_markers, forwarded):
         err_path = Path(tmp) / "stderr"
         with err_path.open("w") as err:
             wrapper = subprocess.Popen(
-                [sys.executable, str(WRAPPER), "--", *_spawning_inner(token, linger=True)],
+                [
+                    sys.executable,
+                    str(WRAPPER),
+                    *CONTRACT_ARGS,
+                    "--",
+                    *_spawning_inner(token, linger=True),
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=err,
                 text=True,
@@ -290,7 +302,13 @@ def test_a_child_killed_by_someone_else_reports_128_plus_the_signal(reap_markers
         err_path = Path(tmp) / "stderr"
         with err_path.open("w") as err:
             wrapper = subprocess.Popen(
-                [sys.executable, str(WRAPPER), "--", *_spawning_inner(token, linger=True)],
+                [
+                    sys.executable,
+                    str(WRAPPER),
+                    *CONTRACT_ARGS,
+                    "--",
+                    *_spawning_inner(token, linger=True),
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=err,
                 text=True,
@@ -513,6 +531,11 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
             self.waits += 1
             return self.status
 
+        @property
+        def returncode(self):
+            # The strict runner reads the reaped status here after its one wait.
+            return self.status if self.waits else None
+
     process = Process()
 
     def popen(argv, **kwargs):
@@ -535,20 +558,42 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
         pgid = process.pid
         receipts = {}
         last = opg.Verdict("VERIFIED", "fake acquisition")
+        # The capability surface the strict finalizer now calls: terminal census
+        # flag, revoke-before-wait, and exact-terminal acceptance. Missing these
+        # made finalization raise and soft/unknown spin forever (CI shard stall).
+        terminating_sends = [signal.SIGKILL]
+        revoked = False
 
-        def refresh(self, **kwargs):
-            return opg.Verdict(
+        def revoke(self):
+            self.revoked = True
+
+        terminal = None
+
+        def accepted_terminal(self, verdict):
+            # Exact-object acceptance before revocation, as the real owner does:
+            # strict rc 0 now requires this certificate, not merely child status.
+            return not self.revoked and verdict is self.terminal
+
+        def refresh(self, *, terminal=False, **kwargs):
+            verdict = opg.Verdict(
                 "OBSERVED_EMPTY" if process.status is not None else "VERIFIED", "fake"
             )
+            if terminal:
+                self.terminal = verdict
+            return verdict
 
         def leader_terminal(self, deadline):
-            # The seam that replaced Popen.poll(): the same mode gating, asked of
+            # The seam that replaced Popen.poll(): the same mode gating (the fake's
+            # poll counter drives soft/unknown exit and the interrupt), asked of
             # the capability instead of the child handle, so the loop never reaps.
-            return process.status is not None
+            return process.poll() is not None
 
         def signal(self, signum, **kwargs):
             group_calls.append((self.pgid, signum))
-            process.status = -int(signum)
+            # A signal cannot rewrite a corpse's status: once the leader has
+            # exited, the finalizer's group SIGKILL leaves its exit code alone.
+            if process.status is None:
+                process.status = -int(signum)
             return opg.Verdict("SIGNALED", "fake")
 
     monkeypatch.setattr(
@@ -581,9 +626,12 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
     monkeypatch.setattr(mg, "Guard", guard)
     output = io.StringIO()
     if mode == "monitor-error":
-        with pytest.raises(RuntimeError, match="controlled monitor failure"):
-            wrapper.run(["synthetic"], timeout=None, grace=0, stream=output)
+        # The contract dispatcher turns a monitor exception into a published
+        # failure receipt and 126 instead of letting it escape (the safety
+        # property -- never success, failure named -- is what is asserted).
+        assert wrapper.run(["synthetic"], timeout=None, grace=0, stream=output) == 126
         assert "owned-child monitor failed" in output.getvalue()
+        assert "cause=supervision-failure" in output.getvalue()
     else:
         assert (
             wrapper.run(
@@ -618,7 +666,12 @@ def test_help_describes_memory_exit_status_and_budget_defaults(memory_wrapper, c
     assert stopped.value.code == 0
     help_text = " ".join(capsys.readouterr().out.split())
     assert "default: bash tool's resolved budget, otherwise auto" in help_text
-    assert "child process-group ceiling in MiB" in help_text
+    assert "owned-group ceiling in MiB, enforced by both contracts" in help_text
+    # D2/D3/Q2: what command-status enforces and never certifies, and which
+    # record is authoritative, are stated in --help itself.
+    assert "NEVER certifies cleanup" in help_text
+    assert "<invocation_id>.completion.json" in help_text
+    assert "legacy <run_id>.spawn.json/.exit.json" in help_text
     assert "137 with MEMORY LIMIT EXCEEDED" in help_text
     assert "137 alone can also mean external SIGKILL" in help_text
     assert "124 on timeout" in help_text and "125 on start or budget refusal" in help_text

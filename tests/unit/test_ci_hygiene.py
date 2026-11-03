@@ -2363,6 +2363,34 @@ def test_the_local_typed_gate_is_bounded_and_reaped_by_the_wrapper() -> None:
     assert not any(token.endswith(".py") and "/" in token for token in inner), inner
 
 
+def test_status_only_gates_request_the_command_status_contract() -> None:
+    """The local status-only gates name `--contract=command-status` explicitly.
+
+    The default `cleanup-required` contract refuses before spawn wherever no
+    authoritative census backend exists (Darwin), which turned `make type-check`
+    and `make check-changed` into 125 on every Mac (PR #3274, review R3/Q1).
+    These gates consume pyright's status, not a cleanup certificate, so they opt
+    into command-status -- which still enforces the memory grant and sweeps the
+    group. CI's Linux serial-control wrapper deliberately stays strict.
+
+    Mutations that must fail this: drop the flag from the Makefile, from
+    JOB_COMMANDS, from either AGENTS.md gate spelling or from the bench script.
+    """
+    flag = "--contract=command-status"
+    scope = _scope()
+    assert flag in shlex.split(scope.JOB_COMMANDS["type-check"][0])
+    recipe = _makefile_recipe_blocks()["type-check"].replace("\\\n", " ")
+    assert flag in shlex.split(recipe), recipe
+    agents = (REPO / "AGENTS.md").read_text()
+    spellings = re.findall(r"scripts/run_bounded\.py[^\n`]*-m pyright", agents)
+    assert len(spellings) >= 2, spellings
+    assert all(flag in spelling for spelling in spellings), spellings
+    bench = (REPO / "scripts" / "bench_send_admission_ab.sh").read_text()
+    assert re.search(r"run_bounded\.py\" " + re.escape(flag), bench), "bench wrapper"
+    serial = (REPO / ".github" / "workflows" / "ci.yml").read_text()
+    assert "run_bounded.py --timeout 400" in serial, "CI serial wrapper stays strict"
+
+
 def test_the_makefile_typed_gate_is_the_same_command_as_the_job() -> None:
     """A17. The Makefile target is a SECOND copy of the command, so it is guarded.
 
@@ -2461,6 +2489,9 @@ def test_the_bounded_wrapper_raises_the_node_heap_only_when_needed(
         [
             sys.executable,
             str(REPO / "scripts/run_bounded.py"),
+            # command-status: both contracts build the child env through the one
+            # `_child_environment`, and the default refuses before spawn on Darwin.
+            "--contract=command-status",
             "--timeout",
             "15",
             "--",
@@ -2514,7 +2545,15 @@ def test_the_bounded_wrapper_preserves_real_node_heap_semantics(
     assert control.returncode == 0, control.stderr
     env["NODE_OPTIONS"] = node_options
     wrapped = subprocess.run(
-        [sys.executable, str(REPO / "scripts/run_bounded.py"), "--timeout", "15", "--", *probe],
+        [
+            sys.executable,
+            str(REPO / "scripts/run_bounded.py"),
+            "--contract=command-status",  # same env builder; strict refuses on Darwin
+            "--timeout",
+            "15",
+            "--",
+            *probe,
+        ],
         env=env,
         capture_output=True,
         text=True,

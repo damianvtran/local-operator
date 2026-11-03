@@ -10,6 +10,7 @@ absent by our own authorised act. The send path never gains that licence: it cal
 from __future__ import annotations
 
 import ctypes
+import os
 import signal
 import time
 
@@ -338,6 +339,19 @@ def test_a_concurrent_census_cannot_lend_its_certificate(monkeypatch):
             return ctypes.sizeof(ctypes.c_int) * 2
 
     monkeypatch.setattr(owned.resources, "_darwin_libproc", lambda: Lib())
+    # The synthetic pids 10 and 77 must not be asked of the REAL kernel: on a
+    # macOS host they are live system processes, getpgid raises EPERM, and the
+    # full census refused for that reason instead of exercising the ledger race.
+
+    class SyntheticOs:
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        @staticmethod
+        def getpgid(pid):
+            return 10 if pid == 10 else 1
+
+    monkeypatch.setattr(owned, "os", SyntheticOs())
 
     original_miss = owned._report_census_miss
     ran_full = []

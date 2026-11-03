@@ -19,6 +19,7 @@ import time
 
 import pytest
 
+from local_operator import bounded_contract
 from local_operator import owned_process_group as owned
 
 pytestmark = pytest.mark.skipif(
@@ -30,13 +31,21 @@ pytestmark = pytest.mark.skipif(
 def test_a_zombie_leader_is_visible_to_the_group_census_on_this_platform():
     deadline = time.monotonic() + 10.0
     read_fd, write_fd = os.pipe()
+    ready_r, ready_w = os.pipe()
     pid = os.fork()
     if pid == 0:  # pragma: no cover - the child never returns
         os.close(write_fd)
+        os.close(ready_r)
         os.setsid()  # its own session, and therefore its own process group
+        # READY ONLY AFTER setsid: capturing before it raced the child and found
+        # no group numbered `pid` yet (CI: "strict initial empty census").
+        os.write(ready_w, b"r")
         os.read(read_fd, 1)  # wait for the parent's go-ahead
         os._exit(0)
     os.close(read_fd)
+    os.close(ready_w)
+    os.read(ready_r, 1)
+    os.close(ready_r)
     try:
         # Capture while the leader is still ALIVE: that is the wrapper's own
         # order, and the corpse arrives afterwards, exactly as in a real run.
@@ -66,6 +75,25 @@ def test_a_zombie_leader_is_visible_to_the_group_census_on_this_platform():
                 "MACOS-CENSUS-DIAG leader=%d child_outcome=%s ledger=%r" % (pid, outcome, ledger),
                 flush=True,
             )
+        if not bounded_contract.selected_backend().authoritative:
+            # Darwin (and any host without an authoritative census backend)
+            # cannot certify coverage, so capture REFUSES and no signal may be
+            # spent -- the contract, asserted rather than skipped.
+            assert cap.last.status == "REFUSED", cap.last
+            assert cap.signal(signal.SIGTERM, deadline=time.monotonic() + 1.0).status == "REFUSED"
+            os.write(write_fd, b"x")
+            os.close(write_fd)
+            write_fd = -1
+            # The zombie SAMPLER is still load-bearing here: command-status's
+            # darwin-sysctl-zombie observer reads exactly this flag.
+            sample = None
+            while time.monotonic() < deadline:
+                sample = owned.bounded_samples([pid], time.monotonic() + 1.0).get(pid)
+                if sample is not None and sample.zombie:
+                    break
+                time.sleep(0.01)
+            assert sample is not None and sample.zombie is True, sample
+            return
         assert cap.last.status == "VERIFIED", ("capture of a live leader", cap.last.reason)
 
         os.write(write_fd, b"x")
@@ -184,7 +212,18 @@ def test_a_new_session_child_is_visible_to_the_census():
         # The census is measured while the child is ALIVE (it sleeps for 30 s), so
         # a lookup miss is a census answer rather than a race with an exit.
         assert os.getsid(child) != os.getsid(0), "the child must be in a NEW session"
-        result = owned.strict_census(child, time.monotonic() + 5.0)
+        # MEASURED 2026-11-02 (macOS 27.2): PROC_ALL_PIDS lists pid 0
+        # (kernel_task) mid-table, and the strict reader refuses any non-positive
+        # row (review round 8, R3), so the strict Darwin census is Unknown on a
+        # real host. That is fail-closed and Darwin is non-authoritative anyway;
+        # assert the F1 property when the read succeeds, else the named refusal.
+        try:
+            result = owned.strict_census(child, time.monotonic() + 5.0)
+        except owned.Unknown as exc:
+            assert "strict membership probe failed" in str(exc) or "non-positive" in str(
+                exc.__cause__ or exc
+            ), exc
+            return
         assert child in result.pids, (child, result)
     finally:
         # Deterministic reap of EXACTLY our own child: ignore an already-gone pid,

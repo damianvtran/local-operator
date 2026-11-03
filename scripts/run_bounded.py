@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Run an explicit cleanup-required (default) or command-status contract.
 
-The group lifecycle, signal and memory claims below describe cleanup-required
-ONLY. Explicit --contract=command-status supervises only the direct child and
-ALWAYS reports group/descendant cleanup UNKNOWN. Its deadlines request signals;
-it promises neither hard wall-time nor RAM bounds and refuses positive group
-memory grants rather than silently degrading their scope.
+The census/certification claims below describe cleanup-required ONLY.
+Explicit --contract=command-status runs the command as its own process group,
+signals that GROUP (deadline, forwarded signal, leader-exit sweep) only while
+the leader is still unreaped -- so the group number cannot have been reused --
+and ENFORCES the same positive memory grant with the same sampled guard. It
+reports the command's status and ALWAYS reports group/descendant cleanup
+UNKNOWN: it never certifies cleanup, and a deadline is a signal request, not a
+hard wall-time bound. Status-only gates (`make type-check`, `make
+check-changed`) use it; cleanup-required refuses before spawn on hosts with no
+authoritative census backend (Darwin today).
 
 WHY THIS EXISTS
 ---------------
@@ -125,8 +130,17 @@ distinguishable from "no record", which means no run was spawned. The record
 filesystem work is bounded by `_RECORD_BUDGET_SECONDS`, so a wedged home
 directory costs that budget rather than the gate.
 
-Each invocation also publishes a fresh ``run-bounded-completion/v1`` sibling,
-including unsupported-backend and policy refusals that never spawned a child.
+Those spawn/exit identity records are cleanup-required only. EVERY invocation,
+of either contract and including pre-spawn refusals, publishes
+``<invocation_id>.completion.json``: the authoritative outcome record, named on
+the final stderr line. ``invocation_id`` is a fresh random challenge per
+invocation; ``run_id`` is the caller's correlation token and may repeat. Read the
+``.completion.json``; the hard-linked ``.completion.pending`` beside it is a
+publication artifact (fsync-before-link), byte-identical and never admissible.
+Nothing prunes this directory: retention belongs to whoever owns the record
+directory (the session scratchpad's lifecycle, else the operator).
+Each invocation's ``run-bounded-completion/v1`` record is published even for
+unsupported-backend and policy refusals that never spawned a child.
 Identity records and integer status are not cleanup certificates; admission
 requires this invocation's expected challenge and directory, strict success, and
 an accepted authoritative owned-group terminal proof. Descendant cleanup is
@@ -654,6 +668,9 @@ def _run_cleanup_required(
     refused = False
     proof_failed = False
     cleanup_deadline = None
+    # Whether the owner accepted THIS run's exact terminal verdict before
+    # revocation -- the one certificate strict cleanup admits (see below).
+    certified = False
 
     class AuthorityRefused(Exception):
         """Local control transfer: refusal must not leave timeout=None polling."""
@@ -867,6 +884,7 @@ def _run_cleanup_required(
             # there is one source of truth and the call site cannot claim a kill
             # that never happened (round 9, R2).
             terminal = owner.refresh(deadline=until, terminal=bool(owner.terminating_sends))
+            certified = bool(owner.accepted_terminal(terminal))
             if _outcome is not None:
                 _outcome.accept_terminal(owner, terminal)
             if terminal.status != "OBSERVED_EMPTY":
@@ -895,6 +913,9 @@ def _run_cleanup_required(
             # Wrapper status is selected after handler restoration below.
             if not waited:
                 refused = True
+                # No reaped status means no child result: a certificate about the
+                # group cannot turn an unknown command status into a passing gate.
+                certified = False
                 result = owned_process_group.Verdict(
                     "REFUSED", "leader wait exceeded remaining cleanup allowance"
                 )
@@ -942,9 +963,16 @@ def _run_cleanup_required(
         # Nothing determined a terminal code: either the child ended on its own (0)
         # or the path could not say (cleanup unproven).
         rc = 0 if exited else EXIT_CLEANUP_UNPROVEN
-    if refused and rc == 0:
+    if refused and rc == 0 and not certified:
         # The gate ran and passed; what is missing is proof of cleanup. Say that,
         # rather than reusing 125, which callers read as "the gate did not run".
+        # An ACCEPTED terminal certificate is that proof: a transient refusal of
+        # an earlier, non-terminal refresh (Linux fork churn during the final
+        # sweep) must not override a census that then proved the group empty
+        # under a retained witness. Measured on CI run 41535590707: records
+        # `finally-refresh` (refused) then `cleanup=proven-empty`, rc 126. A
+        # failed bounded wait clears `certified` (no child status), and
+        # bounded_contract.execute independently demotes rc 0 without proof.
         rc = EXIT_CLEANUP_UNPROVEN
     if _outcome is not None:
         _outcome.wrapper_exit_code = rc
@@ -980,15 +1008,18 @@ def run(
     contract="cleanup-required",
     _backend=None,
 ):
-    # Resolve the inherited grant BEFORE contract dispatch. Opt-in never disables
-    # or widens a positive grant; direct-only mode refuses unenforceable policy.
+    # Resolve the inherited grant BEFORE contract dispatch. Neither contract can
+    # disable or widen a positive grant, and both ENFORCE the resolved ceiling.
     receipt = bounded_contract.Receipt(_record_dir(), _resolve_run_id(run_id))
     try:
         resolved = _memory_budget(memory_mb)
     except ValueError as exc:
         # The structured receipt supplements the old actionable refusal; hiding
         # the grant/override explanation made a correctly refused gate opaque.
-        _report(stream, f"[run_bounded] memory budget refused before spawn: {exc}")
+        # The refusal line names the reason and the next step (design D1); the
+        # status line then carries invocation_id/completion like every other
+        # path, so the caller can locate the receipt proving the refusal (R8).
+        _report(stream, f"[run_bounded] refused before spawn: memory budget refused: {exc}")
         outcome = bounded_contract.Outcome(
             wrapper_exit_code=125,
             termination_cause="memory-policy-refused",
@@ -1001,12 +1032,9 @@ def run(
                 stream,
                 f"[run_bounded] completion publication failed: {type(publication_error).__name__}",
             )
-        _report(
-            stream,
-            f"[run_bounded] contract={contract} rc=125 cause=memory-policy-refused cleanup=unknown",
-        )
+        _report(stream, bounded_contract.status_line(contract, outcome, receipt))
         return 125
-    budget, _ = resolved
+    budget, budget_source = resolved
 
     def strict(outcome):
         outcome.wrapper_exit_code = _run_cleanup_required(
@@ -1031,6 +1059,7 @@ def run(
         stream=stream,
         strict=strict,
         backend=_backend,
+        budget_source=budget_source,
     )
 
 
@@ -1039,23 +1068,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         prog="run_bounded.py",
         description=(
             "cleanup-required (default): command success plus certified owned-group"
-            " cleanup. Explicit command-status: direct child only; cleanup UNKNOWN,"
-            " no hard wall-time/RAM guarantee."
+            " cleanup (refuses before spawn where no authoritative backend exists,"
+            " e.g. Darwin). command-status: the command's own status; enforces the"
+            " memory grant and signals the owned group, but NEVER certifies cleanup."
         ),
         # The short description deliberately does not use the whole module doc;
         # callers consulting --help still need the diagnostic that distinguishes
         # our memory stop from another process delivering SIGKILL (same status).
         epilog=(
-            "Exit status: child status normally; 124 on timeout; 125 when the "
-            "command never started (or backend/policy refused before "
-            "spawn); 126 when the command ran but its owned group's cleanup "
-            "could not be proved under cleanup-required (command-status child "
-            "success remains 0 with cleanup UNKNOWN); 137 with MEMORY LIMIT "
+            "Exit status: child status normally; 124 on timeout; 125 on start or "
+            "budget refusal (also backend/policy refusals before spawn: the "
+            "command never ran); 126 when the command ran but its owned group's "
+            "cleanup could not be proved under cleanup-required, or command-status"
+            " supervision failed (command-status child success remains 0 with "
+            "cleanup UNKNOWN); 137 with MEMORY LIMIT "
             "EXCEEDED on a measured "
             "memory breach. Status 137 alone can also mean external SIGKILL; "
-            "inspect stderr. Every spawned run also writes "
-            "run-bounded-runs/<run_id>.spawn.json and .exit.json naming the "
-            "group it owned and the identities it believed."
+            "inspect stderr. Every invocation (either contract, refusals "
+            "included) writes the authoritative record "
+            "run-bounded-runs/<invocation_id>.completion.json, named on the final "
+            "stderr line; invocation_id is fresh per call, unlike the reusable "
+            "--run-id. Read .completion.json; the hard-linked .completion.pending "
+            "is a publication artifact. Spawned cleanup-required runs also write "
+            "legacy <run_id>.spawn.json/.exit.json identity records. Nothing "
+            "prunes run-bounded-runs/: its directory owner (the session "
+            "scratchpad, else you) retains or removes it."
         ),
     )
     parser.add_argument(
@@ -1064,8 +1101,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="cleanup-required",
         help=(
             "cleanup-required (default) needs certified group cleanup; "
-            "command-status explicitly supervises only the direct child, cleanup "
-            "always UNKNOWN, no hard wall-time or RAM guarantee"
+            "command-status reports the command's status, enforces the same "
+            "memory grant on its own process group and signals that group only "
+            "while its leader is unreaped; cleanup is always UNKNOWN (never "
+            "certified) and the deadline is not a hard wall-time bound"
         ),
     )
     parser.add_argument(
@@ -1073,9 +1112,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=float,
         default=None,
         help=(
-            "seconds before requesting a stop (group under cleanup-required; "
-            "direct child only under command-status, no hard wall-time promise;"
-            " default: no "
+            "seconds before requesting a stop of the owned group (SIGTERM, then "
+            "SIGKILL after --grace; not a hard wall-time promise; default: no "
             "bound). The local typed gate ships 1800 — twice ci.yml's 15-minute "
             "provision, because a whole-tree pyright measures 508-1170 s on a "
             "loaded host here and timing out a slow host is worse than waiting for "
@@ -1088,11 +1126,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=int,
         default=None,
         help=(
-            "sampled owned-group ceiling in MiB (cleanup-required only; "
-            "command-status refuses positive ceilings rather than weakening "
-            "them; default: bash tool's resolved budget, "
-            "otherwise auto); positive inherited budgets can only be tightened; "
-            "0 disables only without a positive inherited budget"
+            "sampled owned-group ceiling in MiB, enforced by both contracts "
+            "(default: bash tool's resolved budget, otherwise auto); positive "
+            "inherited budgets can only be tightened; 0 disables only without a "
+            "positive inherited budget. The first stderr line names the "
+            "effective ceiling and its source"
         ),
     )
     parser.add_argument(
@@ -1100,8 +1138,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=float,
         default=DEFAULT_GRACE_SECONDS,
         help=(
-            "seconds between SIGTERM and SIGKILL requests to the selected "
-            "contract's signal scope when it ignores "
+            "seconds between SIGTERM and SIGKILL requests to the owned "
+            "group when it ignores "
             f"SIGTERM (default {DEFAULT_GRACE_SECONDS:g})."
         ),
     )

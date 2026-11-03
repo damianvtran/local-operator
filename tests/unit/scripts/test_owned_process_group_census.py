@@ -38,9 +38,15 @@ def test_growth_beyond_slack_is_not_silently_truncated():
         return 70 * ctypes.sizeof(ctypes.c_int)
 
     pids, complete, leader_seen = o.strict_darwin(10, 5, listpids=call, clock=lambda: 0)
+    # The no-truncation property: every row of the grown group is returned and
+    # the buffer was enlarged rather than the read accepted short.
     assert len(pids) == 70
-    assert complete is True, (complete, leader_seen)
     assert len(sizes) == 2 and sizes[1] > sizes[0]
+    # Coverage is earned from the size query (`_libproc_coverage`): 70 rows read
+    # against a 1-row budget is a stale budget, so the read must NOT claim
+    # completeness. Fail-closed; this assertion predates that rule and asserted
+    # True, which would have certified a population the kernel never priced.
+    assert complete is False, (complete, leader_seen)
 
 
 def test_permanent_saturation_is_unknown_not_partial_or_empty():
@@ -83,12 +89,12 @@ def test_linux_disappeared_requires_directory_absence():
     def absent(_):
         raise FileNotFoundError("fake")
 
-    assert (
-        o.strict_linux(
-            10, 5, listdir=lambda _: next(snapshots), read=absent, stat=absent, clock=lambda: 0
-        )
-        == []
-    )
+    # strict_linux returns (members, complete, leader_seen) since the census
+    # tuple landed; the vanished leader is a complete EMPTY membership that was
+    # nonetheless seen in the raw namespace.
+    assert o.strict_linux(
+        10, 5, listdir=lambda _: next(snapshots), read=absent, stat=absent, clock=lambda: 0
+    ) == ([], True, True)
     with pytest.raises(o.Unknown, match="existing"):
         o.strict_linux(
             10, 5, listdir=lambda _: ["10"], read=absent, stat=lambda _: object(), clock=lambda: 0

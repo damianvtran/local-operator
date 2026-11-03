@@ -17,11 +17,31 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 SCHEMA = "run-bounded-completion/v1"
 CONTRACTS = ("cleanup-required", "command-status")
-FORWARDED = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
+# Windows has no SIGHUP/SIGQUIT. The module must still IMPORT there (the
+# cross-platform probe imports every package module); execution on such a host
+# refuses by name through ReservedLeader.unavailable_reason (no os.killpg).
+FORWARDED = tuple(
+    getattr(signal, name)
+    for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT")
+    if hasattr(signal, name)
+)
+#: Causes that mean no command process was ever created. The stderr status line
+#: says ``spawned=no`` for them, so a pre-spawn ``cleanup=unknown`` cannot be
+#: misread as "a run happened and may have leaked" (design review D4).
+PRE_SPAWN_CAUSES = frozenset(
+    {
+        "invalid-request",
+        "unsupported-backend",
+        "unsupported-boundary",
+        "memory-policy-refused",
+        "spawn-refused",
+        "spawn-failure",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +86,11 @@ class Outcome:
     # Finalization failures are published, not allowed to escape and erase the
     # receipt. Interruption retains precedence, with this independent diagnostic.
     finalization_errors: tuple[str, ...] = ()
+    # Policy disclosures copied into the receipt. ``terminal_observer`` names the
+    # instrument command-status used to see the leader die without reaping it.
+    memory_ceiling_mb: int | None = None
+    memory_budget_source: str | None = None
+    terminal_observer: str | None = None
 
     def finalization_failed(self, stage: str, exc: Exception) -> None:
         # A failed restore must not discard the structured outcome or hide behind
@@ -102,8 +127,8 @@ class Receipt:
         self.run_id = run_id
         self.path = base / f"{self.invocation_id}.completion.json"
 
-    def publish(self, contract: str, outcome: Outcome) -> dict:
-        record = {
+    def publish(self, contract: str, outcome: Outcome) -> dict[str, object]:
+        record: dict[str, object] = {
             "schema": SCHEMA,
             "invocation_id": self.invocation_id,
             "run_id": self.run_id,
@@ -116,18 +141,23 @@ class Receipt:
             "cleanup_scope": "owned-process-group",
             "cleanup_status": outcome.cleanup_status,
             "cleanup_reason": outcome.cleanup_reason,
+            # command-status signals its group by killpg only while the leader is
+            # unreaped (the reservation); strict signals through census authority.
             "signal_scope": (
-                "direct-child" if contract == "command-status" else "owned-process-group"
+                "reserved-leader-group" if contract == "command-status" else "owned-process-group"
             ),
             "record_phase": "complete",
             "supervision_error": outcome.supervision_error,
             # These are policy/guarantee disclosures, not timing measurements.
             "deadline_guarantee": "none: cooperative observation and signal attempts only",
             "memory_guarantee": (
-                "none: no hard RAM bound; descendants not bounded"
-                if contract == "command-status"
-                else "sampled owned-group policy, not a hard allocation bound"
+                "sampled owned-group policy, not a hard allocation bound"
+                if (outcome.memory_ceiling_mb or 0) > 0
+                else "none: no memory ceiling for this run"
             ),
+            "memory_ceiling_mb": outcome.memory_ceiling_mb,
+            "memory_budget_source": outcome.memory_budget_source,
+            "terminal_observer": outcome.terminal_observer,
             # An empty owned group says nothing about descendants that escaped
             # it. Neither contract has authority over that wider population.
             "descendant_cleanup": "unknown",
@@ -191,68 +221,180 @@ def admit_cleanup(path: Path, *, expected_invocation_id: str, expected_directory
     )
 
 
-class DirectChild:
-    """Exclusive reaper in one thread; handlers only latch intent.
+class ReservedLeader:
+    """The unreaped leader IS the owned group's reservation; one thread reaps it.
 
-    WNOWAIT observes our unreaped child without releasing its PID. Every
-    consuming wait revokes future sends BEFORE attempting it, even on error.
-    No threads, Popen.poll/send_signal, unrelated waiter, SIGCHLD=SIG_IGN,
-    numeric group sender, or census is permitted inside this boundary.
+    ``start_new_session=True`` makes the child lead a fresh group whose number is
+    its pid, and the kernel cannot hand that number to anyone else while the
+    leader is unreaped. So every ``killpg(proc.pid)`` issued BEFORE our single
+    consuming wait reaches only processes carrying our group number, and none is
+    ever issued after it. Observation is therefore non-consuming: ``waitid``
+    with ``WNOWAIT`` where CPython exposes it (macOS only from 3.13), else the
+    Darwin kernel's own zombie flag via ``sysctl(KERN_PROC_PID)``. An unreadable
+    observation is ``None``, never terminal. This is signal authority, not a
+    census: it can never certify that the group is empty.
+
+    Preconditions this class cannot enforce (embedding contract): default
+    SIGCHLD disposition and no other waiter for this pid. ``Popen.poll``/
+    ``wait`` are forbidden here because ``_try_wait`` maps ECHILD to status 0,
+    turning a foreign reap into a fabricated child success.
     """
 
-    def __init__(self, proc):
+    #: Primitives the WNOWAIT observer needs; their absence selects the fallback.
+    _WAITID = ("waitid", "P_PID", "WEXITED", "WNOHANG", "WNOWAIT")
+
+    def __init__(self, proc, *, observer: str | None = None):
         self.proc = proc
         self._revoked = False
+        self.observer = observer or self.select_observer()
+        # The leader's kernel birth, recorded on first sysctl read: a pid whose
+        # birth changes was reaped by someone else and reused by a stranger.
+        self._birth: str | None = None
 
-    @staticmethod
-    def unavailable_reason() -> str | None:
-        # CPython exposes waitid on macOS only from 3.13; platform alone cannot
-        # select this capability while the package still supports Python 3.12.
-        missing = [
-            f"os.{name}"
-            for name in ("waitid", "P_PID", "WEXITED", "WNOHANG", "WNOWAIT")
-            if not hasattr(os, name)
-        ]
-        if missing:
-            return "exclusive-reaper observation unavailable: missing " + ", ".join(missing)
+    @classmethod
+    def select_observer(cls) -> str | None:
+        if all(hasattr(os, name) for name in cls._WAITID):
+            return "waitid-wnowait"
+        if sys.platform == "darwin":
+            return "darwin-sysctl-zombie"
+        return None
+
+    @classmethod
+    def unavailable_reason(cls) -> str | None:
+        if not hasattr(os, "killpg"):
+            return (
+                "owned-group signalling unavailable: os.killpg is missing (POSIX process "
+                "groups are required)"
+            )
+        if cls.select_observer() is None:
+            missing = ", ".join(f"os.{name}" for name in cls._WAITID if not hasattr(os, name))
+            return (
+                "no non-consuming terminal observer: missing "
+                f"{missing}, and no Darwin sysctl fallback on {sys.platform}"
+            )
         # A custom SIGCHLD handler may be another reaper, not merely a notifier.
-        # Default disposition and no other waiter are embedding preconditions,
-        # not a kernel-enforced capability against concurrent consuming waits.
         if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
             return "exclusive-reaper observation unavailable: SIGCHLD is not default"
         return None
 
-    @staticmethod
-    def available() -> bool:
-        return DirectChild.unavailable_reason() is None
+    @classmethod
+    def available(cls) -> bool:
+        return cls.unavailable_reason() is None
 
-    def terminal(self) -> bool:
-        # ECHILD is not absence proof; it terminates supervision without send.
-        try:
-            return (
-                os.waitid(os.P_PID, self.proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
-            )
-        except BaseException:
-            self._revoked = True
-            raise
+    def observe(self) -> bool | None:
+        """True once the leader is a corpse; None when the observer cannot say.
 
-    def send(self, signum: int) -> None:
-        # Mutation-boundary revocation, not a cached verdict or census check.
-        # Our sole reaper cannot run between this guard and kill in this thread.
+        Never consumes the status. A pid that is no longer our child (ECHILD) or
+        whose identity changed means someone else reaped it: authority is
+        revoked and the error propagates, because the group number may already
+        belong to a stranger.
+        """
         if self._revoked:
-            raise RuntimeError("direct-child authority irrevocably revoked")
+            raise RuntimeError("reserved-leader authority irrevocably revoked")
+        pid = self.proc.pid
+        if self.observer == "waitid-wnowait":
+            waitid = getattr(os, "waitid")
+            flags = getattr(os, "WEXITED") | getattr(os, "WNOHANG") | getattr(os, "WNOWAIT")
+            try:
+                return waitid(getattr(os, "P_PID"), pid, flags) is not None
+            except ChildProcessError:
+                self._revoked = True
+                raise
+            except OSError:
+                return None
+        if self.observer == "darwin-sysctl-zombie":
+            from local_operator import procstate
+
+            samples = procstate._sysctl_samples([pid])
+            if samples is None:
+                return None
+            sample = samples.get(pid)
+            if sample is None or (
+                self._birth is not None and sample.birth is not None and sample.birth != self._birth
+            ):
+                self._revoked = True
+                raise ChildProcessError(f"leader {pid} was reaped outside this supervisor")
+            if self._birth is None:
+                self._birth = sample.birth
+            return sample.zombie
+        return None
+
+    def send_group(self, signum: int) -> bool:
+        """killpg the owned group; False when it has no signalable member.
+
+        ESRCH is not authority loss: the leader is still unreaped by us, so the
+        number is still ours and simply holds nobody live. Any other failure
+        revokes, so a later tick cannot retry into an unknown state.
+        """
+        if self._revoked:
+            raise RuntimeError("reserved-leader authority irrevocably revoked")
         try:
-            os.kill(self.proc.pid, signum)
+            os.killpg(self.proc.pid, signum)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # Darwin answers EPERM, not ESRCH, when the group's only member is
+            # our unreaped (zombie) leader (measured 2026-11-02, macOS 27.2).
+            # Accept that reading only when the kernel's own listing agrees the
+            # group holds nobody else; any other EPERM is real authority loss.
+            from local_operator.mobile.resources import direct_group_pids
+
+            members = direct_group_pids(self.proc.pid)
+            if members is not None and all(pid == self.proc.pid for pid in members):
+                return False
+            self._revoked = True
+            raise
         except BaseException:
             self._revoked = True
             raise
+        return True
 
     def reap(self) -> int:
+        """Revoke, then consume the leader's status directly (never Popen.poll)."""
         self._revoked = True
-        return self.proc.wait(timeout=0)
+        _, status = os.waitpid(self.proc.pid, 0)
+        code = os.waitstatus_to_exitcode(status)
+        self.proc.returncode = code
+        return code
 
     def revoke(self) -> None:
         self._revoked = True
+
+
+#: Silence from the terminal observer longer than this is a broken instrument,
+#: not a slow child: the leader is killed and the run reports 126.
+OBSERVER_UNREADABLE_SECONDS = 2.0
+#: How long a SIGKILLed leader may take to become observable as a corpse. A
+#: multi-GB heap takes real time to tear down; past this, we stop waiting.
+KILL_SETTLE_SECONDS = 2.0
+#: Upper bound on the leader-exit sweep's SIGTERM grace, whatever --grace says:
+#: the command has already finished, so only stragglers are being negotiated.
+SWEEP_GRACE_CAP_SECONDS = 2.0
+
+
+def _sweep(leader, *, grace, clock, sleep, group_pids, report) -> None:
+    """Leader is a corpse, still unreaped: clear stragglers BEFORE giving it up.
+
+    The group listing is advice about WHETHER to signal, never cleanup proof. An
+    unreadable listing (None) is treated as "maybe members", so we signal.
+    """
+    pgid = leader.proc.pid
+
+    def stragglers() -> bool:
+        members = group_pids(pgid)
+        return members is None or any(pid != pgid for pid in members)
+
+    if not stragglers():
+        return
+    report(f"[run_bounded] leader exited with members left in group {pgid} — SIGTERM")
+    leader.send_group(signal.SIGTERM)
+    until = clock() + min(grace, SWEEP_GRACE_CAP_SECONDS)
+    while clock() < until:
+        if not stragglers():
+            return
+        sleep(0.05)
+    report(f"[run_bounded] group {pgid} outlived the sweep's SIGTERM — SIGKILL")
+    leader.send_group(signal.SIGKILL)
 
 
 def supervise_direct(
@@ -263,18 +405,43 @@ def supervise_direct(
     env,
     outcome,
     stop,
-    spawn=subprocess.Popen,
-    clock=time.monotonic,
-    sleep=time.sleep,
-    boundary=DirectChild,
+    budget=None,
+    stream=None,
+    spawn: Callable[..., Any] = subprocess.Popen,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    boundary: Callable[[Any], Any] | None = None,
+    guard_factory: Callable[..., Any] | None = None,
+    group_pids: Callable[[int], list[int] | None] | None = None,
 ):
-    """No group authority is created, queried, or spent on this path.
+    """Command status plus an ENFORCED owned-group memory grant; no cleanup proof.
 
-    A deadline requests TERM then KILL of the direct child only. Uninterruptible
-    kernel sleep, scheduler delay, filesystem stalls and surviving descendants
-    prevent any honest hard wall-time/RAM promise. We return after a finite
-    observation allowance even if the child cannot be reaped; cleanup is UNKNOWN.
+    One loop, one thread, one consuming wait. Per tick: latch interruption or
+    deadline (requested to the owned group, SIGKILL after ``grace``), sample the
+    memory guard while the leader is unreaped, then observe without consuming.
+    A terminal leader is swept and only then reaped; no signal follows the reap.
+    Uninterruptible sleep, scheduler delay and escaped (setsid) descendants still
+    prevent any honest hard wall-time/RAM promise, so cleanup stays UNKNOWN.
     """
+    write = stream.write if stream is not None else sys.stderr.write
+    boundary = ReservedLeader if boundary is None else boundary
+    if group_pids is None:
+        from local_operator.mobile.resources import direct_group_pids as group_pids
+    make_guard: Callable[..., Any]
+    if guard_factory is None:
+        from local_operator.memory_guard import Guard
+
+        make_guard = Guard
+    else:
+        make_guard = guard_factory
+
+    def report(text: str) -> None:
+        # A broken diagnostic sink must not cost the group its signals.
+        try:
+            write(text + "\n")
+        except (OSError, ValueError):
+            pass
+
     started = clock()
     try:
         proc = spawn(list(argv), start_new_session=True, env=env)
@@ -282,13 +449,28 @@ def supervise_direct(
         outcome.wrapper_exit_code = 125
         outcome.termination_cause = "spawn-refused"
         outcome.supervision_error = type(exc).__name__
+        report(f"[run_bounded] could not start {argv[0]!r}: {exc.strerror or exc}")
         return
-    child = boundary(proc)
+    leader = boundary(proc)
+    outcome.terminal_observer = getattr(leader, "observer", None)
+    pgid = proc.pid
+    ceiling = getattr(budget, "ceiling_mb", 0) or 0
+    guard = make_guard(pgid, budget) if budget is not None and ceiling > 0 else None
+    next_sample = started
     deadline = math.inf if timeout is None else started + timeout
     escalating = None
-    kill_at = finish_at = math.inf
-    killed = False
-    forwarded = False
+    kill_at = settle_until = math.inf
+    termed = killed = False
+    unreadable_since = None
+    raw_status: int | None = None
+    forced_failure = False
+
+    def kill_group(now: float) -> None:
+        nonlocal killed, settle_until
+        leader.send_group(signal.SIGKILL)
+        killed = True
+        settle_until = now + KILL_SETTLE_SECONDS
+
     try:
         while True:
             now = clock()
@@ -299,45 +481,150 @@ def supervise_direct(
                     escalating = stop["signum"]
                     outcome.wrapper_exit_code = 128 + escalating
                     outcome.termination_cause = "interruption"
+                    report(f"[run_bounded] signal {escalating} received — signalling group {pgid}")
                 elif now >= deadline:
                     escalating = signal.SIGTERM
                     outcome.wrapper_exit_code = 124
                     outcome.termination_cause = "deadline"
+                    report(f"[run_bounded] timeout after {timeout:g}s — SIGTERM to group {pgid}")
+                    report(
+                        f"[run_bounded] that is the BOUND ({timeout:g}s) firing, not the gate "
+                        "failing — re-run it, or raise it (--timeout, or "
+                        "`make type-check BOUND_TIMEOUT=<seconds>`)"
+                    )
                 if escalating is not None:
-                    kill_at, finish_at = now + grace, now + grace + 0.25
-            if child.terminal():
-                raw_status = child.reap()
-                outcome.command_exit_code = shell_status(raw_status)
-                # Select the wrapper result only after final revocation below;
-                # both consuming wait and finalization can latch interruption.
-                return
-            if escalating is not None:
-                if not killed and now >= kill_at:
-                    child.send(signal.SIGKILL)
-                    killed = True
-                elif not forwarded and now < kill_at:
-                    child.send(escalating)
-                    # One forwarding attempt, not one send per tick.
-                    forwarded = True
-                if now >= finish_at:
-                    outcome.supervision_error = "direct-child termination not established"
+                    kill_at = now + grace
+            if escalating is not None and not killed:
+                if not termed:
+                    leader.send_group(escalating)
+                    termed = True  # One forwarding attempt, not one per tick.
+                elif now >= kill_at:
+                    report(f"[run_bounded] group {pgid} outlived {grace:g}s grace — SIGKILL")
+                    kill_group(now)
+            # The grant stays enforced through a deadline/interrupt grace too: a
+            # SIGTERM-ignoring group must not balloon while we wait to SIGKILL it.
+            if guard is not None and not killed and now >= next_sample:
+                sample = guard.sample_sync()
+                next_sample = now + guard.tick_s
+                if guard.should_kill(sample):
+                    report(f"[run_bounded] {guard.over_budget_message(sample)}")
+                    if escalating is None:
+                        outcome.wrapper_exit_code = 128 + signal.SIGKILL
+                        outcome.termination_cause = "memory-policy"
+                        escalating = signal.SIGKILL
+                    termed = True
+                    kill_group(now)
+            terminal = leader.observe()
+            if terminal is None:
+                unreadable_since = now if unreadable_since is None else unreadable_since
+                if now - unreadable_since >= OBSERVER_UNREADABLE_SECONDS:
+                    # Unknown is never terminal and never success: stop the run.
+                    report("[run_bounded] terminal observer unreadable for 2s — SIGKILL")
+                    forced_failure = True
+                    outcome.supervision_error = "terminal observer unreadable"
+                    outcome.wrapper_exit_code = 126
+                    outcome.termination_cause = "supervision-failure"
+                    if not killed:
+                        kill_group(now)
+                    reaped: int = leader.reap()
+                    raw_status = reaped
+                    outcome.command_exit_code = shell_status(reaped)
                     return
+            else:
+                unreadable_since = None
+            if terminal:
+                _sweep(
+                    leader,
+                    grace=grace,
+                    clock=clock,
+                    sleep=sleep,
+                    group_pids=group_pids,
+                    report=report,
+                )
+                status: int = leader.reap()
+                raw_status = status
+                outcome.command_exit_code = shell_status(status)
+                if status < 0 and escalating is None:
+                    report(f"[run_bounded] child killed by signal {-status}")
+                return
+            if killed and now >= settle_until:
+                outcome.supervision_error = "leader termination not established"
+                return
             sleep(0.05)
     except Exception as exc:
-        # Preserve established deadline/interruption outcomes, never convert a
-        # failed wait/send into successful command status or group cleanliness.
+        # Preserve established deadline/interruption/memory outcomes; never
+        # convert a failed wait/send into command success or group cleanliness.
         outcome.supervision_error = type(exc).__name__
-        if outcome.termination_cause not in {"deadline", "interruption"}:
+        if outcome.termination_cause not in {"deadline", "interruption", "memory-policy"}:
             outcome.wrapper_exit_code = 126
             outcome.termination_cause = "supervision-failure"
     finally:
-        child.revoke()
+        leader.revoke()
         if stop["signum"]:
             outcome.wrapper_exit_code = 128 + stop["signum"]
             outcome.termination_cause = "interruption"
-        elif outcome.command_exit_code is not None and escalating is None:
+        elif (
+            raw_status is not None
+            and outcome.command_exit_code is not None
+            and escalating is None
+            and not forced_failure
+        ):
             outcome.wrapper_exit_code = outcome.command_exit_code
             outcome.termination_cause = "child-signal" if raw_status < 0 else "child-exit"
+
+
+def _report_budget(stream, ceiling: int, source: str | None, budget) -> None:
+    # The effective ceiling and its provenance, the line AGENTS.md tells readers
+    # to check; printed for command-status here and by the strict runner there.
+    try:
+        if ceiling > 0:
+            stream.write(
+                f"[run_bounded] memory budget {ceiling} MiB ({source or 'unknown'}); "
+                "sampled owned child group only\n"
+            )
+        else:
+            reason = getattr(budget, "reason", "") or "no ceiling"
+            stream.write(f"[run_bounded] memory guard disabled ({source or 'unknown'}): {reason}\n")
+    except (OSError, ValueError):
+        pass
+
+
+def status_line(contract: str, outcome: Outcome, receipt) -> str:
+    """The one machine-greppable summary every path ends with."""
+    spawned = " spawned=no" if outcome.termination_cause in PRE_SPAWN_CAUSES else ""
+    return (
+        f"[run_bounded] contract={contract} rc={outcome.wrapper_exit_code} "
+        f"cause={outcome.termination_cause} cleanup={outcome.cleanup_status}{spawned} "
+        f"invocation_id={receipt.invocation_id} completion={receipt.path}"
+    )
+
+
+def refusal_advice(outcome: Outcome, contract: str, *, argv, backend) -> str | None:
+    """One human sentence per pre-spawn refusal: the reason AND the next step.
+
+    The receipt keeps the structured cause; this is for the person reading a
+    failed ``make`` line, who otherwise sees only a token (design review D1).
+    Advice never points back at the option that just refused (D2).
+    """
+    cause = outcome.termination_cause
+    if cause == "invalid-request":
+        if not argv:
+            return "no command was given; pass it after a `--` separator"
+        return "--timeout and --grace must be finite, nonnegative seconds"
+    if cause == "unsupported-backend":
+        return (
+            f"cleanup-required cannot certify owned-group cleanup on {backend.name} "
+            f"({backend.reason}). Run this gate on Linux/CI, or pass "
+            "--contract=command-status if the command's own status is enough (it "
+            "enforces the memory grant but never certifies cleanup)"
+        )
+    if cause == "unsupported-boundary":
+        return (
+            f"command-status cannot supervise here: {outcome.cleanup_reason}. It needs "
+            "POSIX process groups, a non-consuming terminal observer and the default "
+            "SIGCHLD disposition; use a POSIX host and do not install a SIGCHLD handler"
+        )
+    return None
 
 
 def execute(
@@ -350,17 +637,19 @@ def execute(
     child_env,
     receipt,
     stream,
-    strict: Callable,
+    strict: Callable[[Outcome], None],
     backend=None,
-    direct=supervise_direct,
-    boundary=DirectChild,
+    direct: Callable[..., None] = supervise_direct,
+    boundary: Any = ReservedLeader,
+    budget_source: str | None = None,
 ) -> int:
     """Called after canonical _memory_budget, before any handler or Popen.
 
     Supported strict gates retain their existing monitor and sampled memory
-    policy. Command-status cannot enforce that GROUP grant; refusing a positive
-    grant is intentional, not an invitation to disable an inherited ceiling.
-    The canonical resolver has already rejected disabling/widening that grant.
+    policy. Command-status ENFORCES the same positive group grant with the same
+    memory guard on its own unreaped-leader group (architect ruling, option B):
+    a grant is never silently dropped by choosing the weaker contract. The
+    canonical resolver has already rejected disabling/widening that grant.
     Finalization exceptions (Exception, not process-level BaseException) produce
     a failure receipt and integer status, subject to publication/stream I/O. All
     handler restores are attempted; failure is recorded even when interruption
@@ -368,7 +657,8 @@ def execute(
     leave our handler installed: this diagnostic is not a restoration guarantee.
     """
     backend = selected_backend() if backend is None else backend
-    outcome = Outcome()
+    ceiling = getattr(budget, "ceiling_mb", 0) or 0
+    outcome = Outcome(memory_ceiling_mb=ceiling, memory_budget_source=budget_source)
     supervision_exception = None
     previous = {}
     stop = {"signum": 0}
@@ -387,11 +677,7 @@ def execute(
             # Known inability refuses BEFORE handler mutation and before spawn.
             outcome.wrapper_exit_code, outcome.termination_cause = 125, "unsupported-backend"
             outcome.cleanup_reason = backend.reason
-        elif contract == "command-status" and budget.ceiling_mb > 0:
-            outcome.wrapper_exit_code, outcome.termination_cause = 125, "unsupported-policy"
-            outcome.cleanup_reason = (
-                "direct-child contract cannot enforce a positive group memory grant"
-            )
+            _report_budget(stream, ceiling, budget_source, budget)
         elif contract == "command-status" and not boundary.available():
             outcome.wrapper_exit_code, outcome.termination_cause = 125, "unsupported-boundary"
             explain = getattr(boundary, "unavailable_reason", None)
@@ -405,12 +691,22 @@ def execute(
             def latch(signum, frame):
                 stop["signum"] = signum
 
+            _report_budget(stream, ceiling, budget_source, budget)
             for sig in FORWARDED:
                 previous[sig] = signal.signal(sig, latch)
             outcome.cleanup_reason = (
                 "command-status never certifies descendant or owned-group cleanup"
             )
-            direct(argv, timeout=timeout, grace=grace, env=child_env, outcome=outcome, stop=stop)
+            direct(
+                argv,
+                timeout=timeout,
+                grace=grace,
+                env=child_env,
+                outcome=outcome,
+                stop=stop,
+                budget=budget,
+                stream=stream,
+            )
     except Exception as exc:
         supervision_exception = exc
         outcome.supervision_error = type(exc).__name__
@@ -451,11 +747,10 @@ def execute(
             stream.write(f"[run_bounded] completion publication failed: {type(exc).__name__}\n")
             if outcome.wrapper_exit_code == 0:
                 outcome.wrapper_exit_code = 126
-        stream.write(
-            f"[run_bounded] contract={contract} rc={outcome.wrapper_exit_code} "
-            f"cause={outcome.termination_cause} cleanup={outcome.cleanup_status} "
-            f"invocation_id={receipt.invocation_id} completion={receipt.path}\n"
-        )
+        advice = refusal_advice(outcome, contract, argv=argv, backend=backend)
+        if advice:
+            stream.write(f"[run_bounded] refused before spawn: {advice}\n")
+        stream.write(status_line(contract, outcome, receipt) + "\n")
         stream.flush()
     except (OSError, ValueError) as reporting_error:
         if supervision_exception is not None:

@@ -272,6 +272,13 @@ def _foreign_birth_run(wrapper, monkeypatch, module):
         world.rows[world.pgid] = (world.parent, world.pgid, world.pgid, "FOREIGN")
         return 0
 
+    # The wrapper no longer reaps through Popen.poll() (that is the point of the
+    # reservation), so the reap-and-reuse must be a KERNEL fact the leader
+    # sampler sees: from the first post-capture sample the pid carries a foreign
+    # birth. Modelling it only in poll() left the leader forever "live" and the
+    # timeout-less run spinning (CI shard stall, R5 on PR #3274).
+    reaped()
+
     monkeypatch.setattr(
         wrapper,
         "owned_process_group",
@@ -289,7 +296,8 @@ def _foreign_birth_run(wrapper, monkeypatch, module):
         wrapper, "_memory_budget", lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture")
     )
     output = io.StringIO()
-    rc = wrapper.run(["synthetic"], timeout=None, grace=0.05, stream=output)
+    # Finite bound: a regression must FAIL here (rc 124 != 126), never hang.
+    rc = wrapper.run(["synthetic"], timeout=10.0, grace=0.05, stream=output)
     return rc, len(world.calls), output.getvalue()
 
 
@@ -411,11 +419,17 @@ def test_importing_without_the_signal_primitive_succeeds_and_refuses():
     """
     namespace = _load_without_killpg()
     world = World()
+    # The exec'd copy defines its OWN AuthoritativeCensus class; the real
+    # module's type fails its isinstance coverage check, so build the census
+    # with the copy's type (otherwise capture refuses for an unrelated reason).
+    typed = namespace["AuthoritativeCensus"]
     cap = namespace["OwnedGroup"].capture(
         world.pgid,
         deadline=world.clock() + 5.0,
         parent_pid=world.parent,
-        census=_as_typed_census(world.census),
+        census=lambda pgid, deadline: typed(
+            tuple(world.census(pgid, deadline)), True, pgid in world.census(pgid, deadline)
+        ),
         samples=world.samples,
         identity=world.identity,
         scheme=lambda: "fixture",
@@ -493,3 +507,31 @@ def test_a_no_timeout_run_decides_ownership_within_a_phase_bound(wrapper, monkey
     assert elapsed < 15.0, (elapsed, output.getvalue())
     # A run whose ownership could never be decided is UNPROVEN, never green.
     assert rc == 126, (rc, output.getvalue())
+
+
+@pytest.mark.parametrize("revoked", [False, True])
+def test_no_refresh_restores_authority_after_revocation(revoked):
+    """R6: revoke, then a census that WOULD prove the group empty -> still refused.
+
+    The positive arm (not revoked) proves the same world reaches OBSERVED_EMPTY
+    with an accepted terminal result, so the revoked arm's refusal is the guard
+    at the top of ``refresh`` and not an unrelated failure of the fixture.
+    Mutant M11 (delete that guard) turns the revoked arm into OBSERVED_EMPTY.
+    """
+    world = World()
+    cap = world.capture(send=lambda pgid, signum: world.calls.append((pgid, signum)))
+    assert cap.last.status == "VERIFIED", cap.last.reason
+    cap.terminating_sends.append(signal.SIGKILL)
+    world.forget(keep_leader=True)  # every member gone; the corpse still pins
+    if revoked:
+        cap.revoke()
+    verdict = cap.refresh(deadline=world.clock() + 5.0, terminal=True)
+    if not revoked:
+        assert verdict.status == "OBSERVED_EMPTY", verdict.reason
+        assert cap.accepted_terminal(verdict)
+        return
+    assert verdict.status == "REFUSED"
+    assert verdict.refusal_class == "pin_lost"
+    assert cap._terminal_result is None
+    assert not cap.accepted_terminal(verdict)
+    assert world.calls == []
