@@ -3302,3 +3302,15 @@ def test_agents_doc_states_the_check_count_a_release_bump_pr_runs() -> None:
             f"AGENTS.md says a release-bump PR runs {word!r} checks; the workflows "
             f"give {expected}: ci.yml {sorted(ci_rows)} + {gate_rows} release-gate rows"
         )
+
+
+def test_shard_plugin_bootstrap_does_not_export_a_cwd_pythonpath():
+    """Child -P isolation must survive loading the checkout's ordering plugin.
+
+    Exporting PYTHONPATH=. makes every spawned interpreter search its own cwd,
+    including children deliberately protected with -P. Module launch resolves
+    the early plugin without changing the environment inherited by user code.
+    """
+    run = _run_step("test")
+    assert "python -m pytest -p tests.ci_order_owned_first" in run
+    assert "PYTHONPATH=" not in run

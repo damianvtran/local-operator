@@ -471,6 +471,7 @@ def test_child_memory_unsupported_positive_refuses_before_spawn(memory_wrapper, 
         ("unknown", 0),
         ("timeout", 124),
         ("interrupt", 130),
+        ("child-signal", 137),
         ("monitor-error", None),
         ("spawn-error", 125),
     ],
@@ -523,6 +524,8 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
             self.polls += 1
             if mode == "interrupt" and self.polls == 1:
                 handlers[signal.SIGINT](signal.SIGINT, None)
+            if self.status is None and mode == "child-signal":
+                self.status = -signal.SIGKILL
             if self.status is None and self.polls >= 12 and mode in ("soft", "unknown"):
                 self.status = 0
             return self.status
@@ -649,6 +652,13 @@ def test_child_memory_loop_preserves_owned_cleanup_contract(
     if mode == "hard":
         assert "MEMORY LIMIT EXCEEDED" in output.getvalue()
         assert "BOUND" not in output.getvalue()
+    if mode == "interrupt":
+        assert "signal 2 received" in output.getvalue()
+    if mode == "child-signal":
+        assert "child killed by signal 9" in output.getvalue()
+    if mode == "timeout":
+        assert "that is the BOUND" in output.getvalue()
+        assert "raise it" in output.getvalue()
     if mode == "soft":
         assert output.getvalue().count("advisory only") == 1
     if mode == "unknown":

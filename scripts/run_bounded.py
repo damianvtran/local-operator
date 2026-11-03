@@ -696,6 +696,9 @@ def _run_cleanup_required(
     def fail_proof(result, phase):
         nonlocal refused, proof_failed
         refused = proof_failed = True
+        # CI retains stderr, not the per-run scratch JSON. Keep the actual
+        # acquisition/refusal cause visible rather than just its record path.
+        _report(stream, f"[run_bounded] {phase} refused: {result.reason}")
         _record_run(
             owner,
             stream,
@@ -800,8 +803,9 @@ def _run_cleanup_required(
                 )
                 _report(
                     stream,
-                    f"[run_bounded] BOUND ({timeout:g}s) fired, not the gate failing; "
-                    "--timeout sets the bound",
+                    f"[run_bounded] that is the BOUND ({timeout:g}s) firing, not the gate "
+                    "failing — re-run it, or raise it (--timeout, or "
+                    "`make type-check BOUND_TIMEOUT=<seconds>`)",
                 )
                 break
             # EACH ITERATION BOUNDS ITS OWN WAIT, and a probe that cannot ANSWER
@@ -993,6 +997,12 @@ def _run_cleanup_required(
         # failed bounded wait clears `certified` (no child status), and
         # bounded_contract.execute independently demotes rc 0 without proof.
         rc = EXIT_CLEANUP_UNPROVEN
+    # Report the selected cause even when capture or a later authority check
+    # refused before forwarding: a wrapper interruption is not a child failure.
+    if stop["signum"]:
+        _report(stream, f"[run_bounded] signal {stop['signum']} received (rc={rc})")
+    elif waited and proc.returncode is not None and proc.returncode < 0:
+        _report(stream, f"[run_bounded] child killed by signal {-proc.returncode} (rc={rc})")
     if _outcome is not None:
         _outcome.wrapper_exit_code = rc
     # The record a SUCCESSFUL run must leave behind: callers bind admission to it,

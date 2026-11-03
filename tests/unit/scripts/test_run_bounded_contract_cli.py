@@ -162,9 +162,14 @@ def test_real_leader_exit_sweeps_left_behind_sleeper(tmp_path):
                 "--contract=command-status",
                 "--memory-mb=0",
                 "--",
-                "/bin/sh",
+                sys.executable,
                 "-c",
-                f"exec 1>&- 2>&-; (exec -a {token} /bin/sleep 300) & exit 0",
+                # Ubuntu's /bin/sh is dash: `exec -a` fails there, leaving no
+                # sleeper to sweep. Popen's exec handshake plants a real child
+                # before the leader exits; DEVNULL keeps it off invoke's pipes.
+                "import subprocess,sys; subprocess.Popen("
+                "[sys.executable, '-c', 'import time; time.sleep(300)', "
+                f"{token!r}], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)",
             ],
         )
         assert done.returncode == 0, done.stderr

@@ -1076,18 +1076,15 @@ jobs:
         # earlier one.
         env:
           LOCAL_OPERATOR_SHARD_MEMORY_DIR: ${{ runner.temp }}/lo-shard-memory/${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
-        # PYTHONPATH=. because `-p` resolves the plugin BEFORE pytest inserts the
-        # rootdir on sys.path: a console-script pytest does not put the CWD there,
-        # so `-p tests.ci_order_owned_first` died with ModuleNotFoundError on the
-        # runner while passing in a venv that already had the repo importable.
-        # Scoped to this one step: no global `pythonpath` setting, which would
-        # change every invocation on every machine to solve a CI-only problem.
+        # Module invocation makes the checkout importable before -p resolves the
+        # ordering plugin without exporting PYTHONPATH=. to spawned interpreters.
+        # That relative entry would defeat their -P cwd-import isolation.
         # The six serial controls are deselected here (see SERIAL_CONTROLS above).
         # The `.coverage` rename is NOT done here any more: shard 0 appends the
         # serial run's data to this file first, so the rename moved to the
         # finalisation step below, after every pytest step of this job.
         run: |
-          PYTHONPATH=. pytest -p tests.ci_order_owned_first \
+          python -m pytest -p tests.ci_order_owned_first \
             $(cat shard_tests.txt | tr '\n' ' ') $(printf -- '--deselect %s ' $SERIAL_CONTROLS) \
             --cov --cov-fail-under=0 --cov-report= \
             --junit-xml=junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
