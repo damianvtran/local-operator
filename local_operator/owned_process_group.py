@@ -506,7 +506,10 @@ def strict_linux(
                                 unclassified = len(work) - index
                                 phase = "reconcile-contradiction"
                                 break
-                            result.remove(int(entry))
+                            # A filter, not list.remove: the session-deletion
+                            # guard flags every `.remove` call shape. Same
+                            # effect -- result holds each PID once.
+                            result = [pid for pid in result if pid != int(entry)]
                             parsed.discard(entry)
                             disappeared.add(entry)
                             gone_members.add(entry)
