@@ -405,8 +405,9 @@ def strict_linux(
             attempt_count = attempt + 1
             first, last = None, None
             result, disappeared, parsed = [], set(), set()
-            relists, reconciled = 0, {"different_group": 0, "same_group": 0, "gone": 0}
-            unclassified = None
+            relists = 0
+            reconciled = {"different_group": 0, "same_group": 0, "gone": 0, "departed": 0}
+            unclassified, listed, gone_members = None, set(), set()
             phase = "opening-scan"
             try:
                 first = {n for n in listdir("/proc") if n.isdigit()}
@@ -446,12 +447,31 @@ def strict_linux(
                 #   checks the deadline, so the six attempts and the caller's
                 #   deadline still bound the whole census; an unsettled delta
                 #   is Unknown, never the last partial attempt.
+                #
+                # - an OUR-group PID that a listing no longer contains is NOT
+                #   "already classified" (review round 1, R1): keeping it would
+                #   hand refresh()/_terminal_absence a corpse and refuse exactly
+                #   the post-SIGKILL census this change exists to complete, and
+                #   would defeat #3360's in-census-1-not-in-census-2 rule. It is
+                #   re-read: ENOENT on row AND directory drops it (departed);
+                #   a positive read while absent from the listing is a
+                #   contradiction, and any other outcome is unknown -- both
+                #   leave the attempt incomplete. A departure also forces one
+                #   more listing, so a child it forked before exiting is seen.
+                #   Foreign removals need no re-read: they never enter result.
+                # - PID-reuse blind spot (review round 1, m1): a PID parsed as
+                #   foreign is not re-read if a later listing still shows it, so
+                #   a reuse of that PID by our group between relists is missed.
+                #   The old zero-delta rule had the same blind spot within one
+                #   attempt; relists widen the window by at most
+                #   _LINUX_CENSUS_RELISTS listings inside the same deadline.
                 while True:
                     phase = "closing-scan"
                     last = {n for n in listdir("/proc") if n.isdigit()}
                     listed |= last
+                    departed = sorted({str(pid) for pid in result} - last, key=int)
                     pending = sorted(last - parsed, key=int)
-                    if not pending:
+                    if not pending and not departed:
                         # RAW NAMESPACE, before the group filter, for the same reason as Darwin.
                         leader_seen = str(pgid) in listed
                         phase = "complete"
@@ -459,22 +479,39 @@ def strict_linux(
                     if clock() >= deadline:
                         phase = "row-deadline"
                         raise Unknown("strict /proc row deadline")
+                    work = [(entry, True) for entry in departed]
+                    work += [(entry, False) for entry in pending]
                     if relists >= _LINUX_CENSUS_RELISTS:
-                        unclassified = len(pending)
+                        # unclassified_count: PIDs this attempt still had to
+                        # classify when it stopped (m2: one meaning everywhere).
+                        unclassified = len(work)
                         phase = "namespace-changed"
                         break
                     relists += 1
                     phase = "reconcile"
-                    for entry in pending:
+                    for index, (entry, was_ours) in enumerate(work):
                         if clock() >= deadline:
                             phase = "row-deadline"
                             raise Unknown("strict /proc row deadline")
                         try:
                             group = classify(entry)
                         except Unknown:
-                            unclassified = 1
+                            unclassified = len(work) - index
                             phase = "reconcile-unclassified"
                             break
+                        if was_ours:
+                            if group is not None:
+                                # Readable while the listing omits it: the two
+                                # facts contradict, so nothing here is proven.
+                                unclassified = len(work) - index
+                                phase = "reconcile-contradiction"
+                                break
+                            result.remove(int(entry))
+                            parsed.discard(entry)
+                            disappeared.add(entry)
+                            gone_members.add(entry)
+                            reconciled["departed"] += 1
+                            continue
                         if group is None:
                             disappeared.add(entry)
                             reconciled["gone"] += 1
@@ -502,15 +539,25 @@ def strict_linux(
                             {
                                 "pid": int(pid),
                                 "relation": (
-                                    "unobserved"
-                                    if pid not in parsed
-                                    else "same-group" if int(pid) in result else "different-group"
+                                    "departed-same-group"
+                                    if pid in gone_members
+                                    else (
+                                        "unobserved"
+                                        if pid not in parsed
+                                        else (
+                                            "same-group"
+                                            if int(pid) in result
+                                            else "different-group"
+                                        )
+                                    )
                                 ),
                             }
                             for pid in selected
                         ]
 
-                    added = closing - opening if last is not None else set()
+                    # m3: arrivals accumulate across every relist of the
+                    # attempt; removals compare the opening and final listings.
+                    added = listed - opening if last is not None else set()
                     removed = opening - closing if last is not None else set()
                     attempts.append(
                         {

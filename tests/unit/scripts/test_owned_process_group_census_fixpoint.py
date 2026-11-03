@@ -85,7 +85,12 @@ def test_foreign_arrival_between_listings_completes_and_is_excluded():
     assert detail["attempt_count"] == 1
     attempt = detail["attempts"][0]
     assert attempt["relist_count"] == 1
-    assert attempt["reconciled"] == {"different_group": 1, "same_group": 0, "gone": 0}
+    assert attempt["reconciled"] == {
+        "different_group": 1,
+        "same_group": 0,
+        "gone": 0,
+        "departed": 0,
+    }
     assert attempt["unclassified_count"] is None
 
 
@@ -96,11 +101,60 @@ def test_arrival_in_our_group_joins_the_members():
     assert detail["attempts"][0]["reconciled"]["same_group"] == 1
 
 
-def test_parsed_removals_are_already_classified():
-    # 11 (ours) and 20 (foreign) were read, then exited before the closing list.
-    world = World([[10, 11, 20], [10]], {10: OURS, 11: OURS, 20: 90})
-    members, complete, _ = world.census()
-    assert (members, complete) == ([10, 11], True)
+def test_foreign_removal_needs_no_reread():
+    world = World([[10, 20], [10]], {10: OURS, 20: 90})
+    assert world.census() == ([10], True, True)
+    assert sorted(world.reads) == ["10", "20"]
+
+
+def test_own_member_that_exits_mid_census_is_excluded_and_complete():
+    # Review round 1, R1 repro shape: PID 20 in our pgid is read, then gone
+    # (row and directory ENOENT) at the closing listing and every later one.
+    # The leader 10 is not listed, so the census must end ([], True, False):
+    # a corpse returned as a member would make _terminal_absence refuse.
+    class Exits(World):
+        def read(self, path):
+            if self.lists > 1:
+                self.gone.add("20")
+            return super().read(path)
+
+        def stat(self, path):
+            if self.lists > 1:
+                self.gone.add("20")
+            return super().stat(path)
+
+    world = Exits([[20], []], {20: OURS})
+    detail: dict[str, Any] = {}
+    assert world.census(detail) == ([], True, False)
+    attempt = detail["attempts"][0]
+    assert attempt["reconciled"]["departed"] == 1
+    assert attempt["relist_count"] == 1
+    assert world.lists == 3
+
+
+def test_own_member_readable_while_unlisted_is_a_contradiction():
+    # 20 reads as ours but the listings keep omitting it: not proven gone.
+    # Every attempt opens on [10, 20] and closes on [10].
+    world = World([[10, 20], [10]] * 40, {10: OURS, 20: OURS})
+    detail: dict[str, Any] = {}
+    with pytest.raises(owned.Unknown, match="^unstable /proc census$"):
+        world.census(detail)
+    assert detail["attempt_count"] == 6
+    assert all(a["phase"] == "reconcile-contradiction" for a in detail["attempts"])
+
+
+def test_own_member_unreadable_after_leaving_is_incomplete():
+    class Denied(World):
+        def read(self, path):
+            # Closing listings are the even-numbered ones; only there is 20
+            # unlisted and its re-read denied.
+            if self.lists % 2 == 0 and path == "/proc/20/stat":
+                raise PermissionError(errno.EACCES, "hidepid")
+            return super().read(path)
+
+    world = Denied([[10, 20], [10]] * 40, {10: OURS, 20: OURS})
+    with pytest.raises(owned.Unknown, match="^unstable /proc census$"):
+        world.census()
 
 
 def test_arrival_proven_gone_with_enoent_is_harmless():
@@ -148,10 +202,13 @@ def test_fixpoint_needing_several_relists_completes():
     assert world.census(detail) == ([10, 12], True, True)
     assert detail["attempt_count"] == 1
     assert detail["attempts"][0]["relist_count"] == 3
+    # m3: 501 arrived in an intermediate relist and left; it still counts.
+    assert detail["attempts"][0]["added_count"] == 3
     assert detail["attempts"][0]["reconciled"] == {
         "different_group": 2,
         "same_group": 1,
         "gone": 0,
+        "departed": 0,
     }
 
 

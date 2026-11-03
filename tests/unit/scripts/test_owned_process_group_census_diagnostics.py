@@ -27,7 +27,8 @@ class ProcWorld:
         self.scans += 1
         if self.change == "birth":
             return ["10", "20"] + ([str(100 + self.scans)] if self.scans % 2 == 0 else [])
-        return ["10", "20"] if self.scans % 2 else ["10"]
+        # A death is permanent: PID 20 is listed once, then gone for good.
+        return ["10", "20"] if self.scans == 1 else ["10"]
 
     def read(self, path):
         self.calls.append(("read", path))
@@ -38,11 +39,17 @@ class ProcWorld:
             # that still refuses must be one nobody can classify: a hidepid-style
             # EACCES row, which stays unknown on every attempt.
             raise PermissionError(13, "synthetic hidepid")
+        if pid == 20 and self.scans > 1 and self.change != "birth":
+            raise FileNotFoundError(2, "synthetic exit")
         group = 10 if pid == 10 or self.change == "owned-death" else 90
         return f"{pid} (synthetic-secret-must-not-leak) R 1 {group}"
 
     def stat(self, path):
-        pytest.fail("these synthetic rows were read; no extra stat probe is justified")
+        self.calls.append(("stat", path))
+        # Only the re-read of a departed OWN member justifies a gone-proof.
+        if path != "/proc/20" or self.change != "owned-death":
+            pytest.fail("these synthetic rows were read; no extra stat probe is justified")
+        raise FileNotFoundError(2, "synthetic exit")
 
     def census(self, diagnostics=None):
         return owned.strict_linux(
@@ -81,16 +88,16 @@ def test_six_existing_scans_refuse_with_distinct_observations(change):
 
 @pytest.mark.parametrize("change", ["other-death", "owned-death"])
 def test_departure_of_a_parsed_pid_is_classified_and_completes(change):
-    # A PID read in the opening scan and gone by the closing list was already
-    # classified by that read, so this churn no longer exhausts the attempts.
-    # An owned departure stays in the members for refresh() to sample.
+    # A foreign PID read in the opening scan and gone by the closing list was
+    # classified by that read. An OWN member that leaves is re-read, proven gone
+    # (row and directory ENOENT) and dropped -- never returned as a corpse
+    # (review round 1, R1) -- then one more listing confirms the fixpoint.
     world = ProcWorld(change)
     detail: dict[str, object] = {}
-    members = [10, 20] if change == "owned-death" else [10]
-    assert world.census(detail) == (members, True, True)
-    assert world.scans == 2
+    assert world.census(detail) == ([10], True, True)
+    assert world.scans == (3 if change == "owned-death" else 2)
     assert detail["phase"] == "complete"
-    relation = "same-group" if change == "owned-death" else "different-group"
+    relation = "departed-same-group" if change == "owned-death" else "different-group"
     attempts = detail["attempts"]
     assert isinstance(attempts, list)
     assert attempts[0]["removed"] == [{"pid": 20, "relation": relation}]
@@ -98,16 +105,18 @@ def test_departure_of_a_parsed_pid_is_classified_and_completes(change):
 
 @pytest.mark.parametrize("change", ["birth", "other-death", "owned-death"])
 def test_diagnostics_do_not_add_probes_or_change_refusal(change):
-    traces = []
+    traces, verdicts = [], []
     for sink in (None, {}):
         world = ProcWorld(change)
         if change == "birth":
             with pytest.raises(owned.Unknown, match="^unstable /proc census$"):
                 world.census(sink)
         else:
-            world.census(sink)
+            verdicts.append(world.census(sink))
         traces.append(world.calls)
     assert traces[0] == traces[1]
+    if change != "birth":
+        assert verdicts == [([10], True, True)] * 2
 
 
 def test_broken_sink_does_not_replace_original_unknown():
