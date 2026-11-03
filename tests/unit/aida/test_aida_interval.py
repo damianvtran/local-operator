@@ -72,30 +72,46 @@ def test_registry_and_hand_edited_policy_share_bounds(isolated_root: Path, inval
 
 
 def test_registry_copy_reaches_tui_rows_and_english_fallback(isolated_root: Path) -> None:
-    from local_operator.i18n import messages
+    from local_operator.i18n import catalogues, messages, text
     from local_operator.i18n.keys import wire_aida_cadence
     from local_operator.tui.widgets.settings_view import SettingsView
 
-    setting = settings_io.BY_KEY[KEY]
-    view = SettingsView(ConfigManager(config_dir=isolated_root))
-    actual = next(
-        item.setting
-        for item in view._build_rows()
-        if item.setting is not None and item.setting.key == KEY
-    )
-    assert actual is setting
-    assert settings_io._t(wire_aida_cadence.interval_hours_label()) == setting.label
-    for locale in ("en", "fr", "unknown"):
-        assert (
-            messages.render(
-                "wire.aida_cadence.interval_hours.label",
-                {},
-                locale=locale,
-            )
-            == setting.label
+    previous_locale = text.active_locale()
+    try:
+        # Registry strings refresh with the active locale; pin the control and
+        # restore it even on failure so this test cannot leak French into peers.
+        text.set_active_locale("en")
+        setting = settings_io.BY_KEY[KEY]
+        view = SettingsView(ConfigManager(config_dir=isolated_root))
+        actual = next(
+            item.setting
+            for item in view._build_rows()
+            if item.setting is not None and item.setting.key == KEY
         )
-    section = next(section for section in settings_io.SECTIONS if section.name == "aida")
-    assert section.scope is settings_io.Scope.LIVE
+        assert actual is setting
+        assert settings_io._t(wire_aida_cadence.interval_hours_label()) == setting.label
+        french = catalogues.load_catalogue("fr", "wire.aida_cadence")
+        for message, english in (
+            (wire_aida_cadence.interval_hours_label(), setting.label),
+            (wire_aida_cadence.interval_hours_help(), setting.help),
+        ):
+            # French now carries this namespace: only unsupported locales still
+            # exercise English fallback. Source provenance guards that distinction.
+            for locale in ("en", "unknown"):
+                rendered = messages.render_record(message.code, {}, locale=locale)
+                assert rendered.text == english
+                assert rendered.source_locale == "en"
+            rendered = messages.render_record(message.code, {}, locale="fr")
+            assert rendered.text == french[message.code]
+            assert rendered.text != english
+            assert rendered.source_locale == "fr"
+            text.set_active_locale("fr")
+            assert settings_io._t(message) == french[message.code]
+            text.set_active_locale("en")
+        section = next(section for section in settings_io.SECTIONS if section.name == "aida")
+        assert section.scope is settings_io.Scope.LIVE
+    finally:
+        text.set_active_locale(previous_locale)
 
 
 @pytest.mark.asyncio
