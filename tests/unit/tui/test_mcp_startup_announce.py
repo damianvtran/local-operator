@@ -1398,6 +1398,7 @@ async def test_notice_readiness_waits_for_real_layout_not_the_expected_width(mon
     def gated_publish(screen):
         nonlocal attempted
         if held and screen._layout_required:
+            # The timer keeps firing while held; real_publish restores its normal pause on release.
             attempted = True
             return  # Leave the pending flag intact for the original consumer.
         return real_publish(screen)
