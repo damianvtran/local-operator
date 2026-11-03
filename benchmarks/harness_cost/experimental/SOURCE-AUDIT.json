@@ -85,11 +85,11 @@
     },
     {
       "destination": "VERIFICATION.md",
-      "destination_sha256": "d219be781ded0f91e55f690aafa20e17ab4131cd0c0b0a92aca61d659fd8913a",
+      "destination_sha256": "57a9a9346cd1b770c48d9b52f7d4de247d45a686d0c228452910054d6bb9680e",
       "sources": [],
       "treatment": "new experimental documentation or offline guard/check",
-      "previous_destination_sha256": "3123c905efef8fdf35962aa091e4bb14e22944dd944815416150f685ed723d22",
-      "remediation": "PR3345 round2 experimental-only bounded R2-F1..F4 batch"
+      "previous_destination_sha256": "d219be781ded0f91e55f690aafa20e17ab4131cd0c0b0a92aca61d659fd8913a",
+      "remediation": "Actual Starlette 1.10 lifecycle startup reproduction and lifespan compatibility fix"
     },
     {
       "destination": "cache_forwarder.py",
@@ -241,14 +241,16 @@
     },
     {
       "destination": "coding/budget_guard.py",
-      "destination_sha256": "36eaa1897435229a275f6d19fbbf44b33afadbff5044153ad2d7796312ed8d17",
+      "destination_sha256": "8155383fa0d51b0fdab9f4adfb6f407481919ad33c74b07b73c946e8fab08579",
       "sources": [
         {
           "path": "harness-cost-bench/coding/budget_guard.py",
           "sha256": "db5888eb2e88fdb1b4f7cef9c009ccba9aa3ab32f3086e6301eb47c1ebd19268"
         }
       ],
-      "treatment": "sanitized/adapted derivative"
+      "treatment": "sanitized/adapted derivative",
+      "previous_destination_sha256": "36eaa1897435229a275f6d19fbbf44b33afadbff5044153ad2d7796312ed8d17",
+      "remediation": "Actual Starlette 1.10 lifecycle startup reproduction and lifespan compatibility fix"
     },
     {
       "destination": "coding/codex-model-catalog.json",
@@ -557,6 +559,12 @@
       "destination_sha256": "387866a212f24662f176f9b06fd93527e9198df59cf91ed784ddf89fba7fc9cf",
       "sources": [],
       "treatment": "new experimental documentation or offline guard/check"
+    },
+    {
+      "destination": "coding/test_guard_asgi.py",
+      "destination_sha256": "8caa433e276e7652493bf0edf676b66ff37c834ee6258060734295abe05b9e8c",
+      "sources": [],
+      "treatment": "new real in-process ASGI lifecycle and refusal regression controls; no paid dispatch"
     }
   ],
   "remediation_review": {

@@ -112,6 +112,26 @@ coordinator review should scope to billing, shared framing, owned lifecycle and
 hard-hold deltas plus their direct regression surfaces—not unchanged analysis.
 No reviewed fix or green test is claimed to complete pending native experiments.
 
+## Follow-up: actual ASGI lifecycle compatibility
+
+A development integration probe found that Starlette 1.10.0 rejects the legacy
+`on_shutdown` constructor argument. The coordinator reproduced the public
+coding guard's startup failure with the installed optional dependencies:
+`TypeError: Starlette.__init__() got an unexpected keyword argument 'on_shutdown'`.
+
+The guard now uses an async lifespan context manager. Two real in-process
+`TestClient` tests construct and start the actual app, exercise HTTP 200 health,
+HTTP 403 unpriced-route rejection and HTTP 400 invalid-input rejection, then
+verify that shutdown releases the ledger lock and a second app can acquire it.
+No upstream request, socket, credential or model charge is involved. The same
+command runs the prior reservation and owned-process controls: **18 coding
+tests pass** (16 prior plus 2 lifecycle tests). Combined with the unchanged 42
+experimental and 16 core tests, the local total is **76 passing tests**.
+
+This is source compatibility/lifecycle evidence, not a coding pilot or permission
+to lift either paid-dispatch hold. Verified optional dependency versions were
+Starlette **1.10.0** and httpx **0.28.1**; no new environment was installed.
+
 ## Remaining gates — not ready
 
 - Frozen/amended preregistration and feasible source selection; original 60-task

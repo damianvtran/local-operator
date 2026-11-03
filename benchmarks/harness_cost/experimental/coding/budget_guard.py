@@ -16,6 +16,7 @@ import json
 import math
 import os
 import re
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 RUN = re.compile(r"coding__[a-z0-9-]+__[a-zA-Z0-9_-]+__r[0-9]+\Z")
@@ -149,12 +150,26 @@ def create_app():
     async def health(request):
         return JSONResponse({"ok": True, "reserved_usd": sum(budget.used.values())})
 
-    async def close():
-        await client.aclose()
-        owner.close()
+    @asynccontextmanager
+    async def lifespan(app):
+        """Release only this guard's client and ledger lock on every ASGI exit.
+
+        Starlette 1.x removed the legacy on_shutdown constructor argument.
+        Lifespan works on the supported modern ASGI surface and makes real
+        startup/shutdown testable without dispatching a paid upstream call.
+        The finally nesting also releases the exclusive ledger lock if HTTP
+        client shutdown itself fails; a dead guard must not retain ownership.
+        """
+        try:
+            yield
+        finally:
+            try:
+                await client.aclose()
+            finally:
+                owner.close()
 
     app = Starlette(routes=[Route("/health", health), Route("/{path:path}", forward, methods=["POST"])],
-                    on_shutdown=[close])
+                    lifespan=lifespan)
     app.state.ledger_owner = owner
     return app
 
