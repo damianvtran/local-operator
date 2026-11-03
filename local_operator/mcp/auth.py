@@ -2483,7 +2483,12 @@ def _token_is_fresh(tokens: Any, expiry: float | None) -> bool:
     """
     if tokens is None or not getattr(tokens, "access_token", None):
         return False
-    return expiry is None or time.time() < expiry - REFRESH_SKEW_S
+    # A fixed lead longer than a short-lived grant would refresh on every
+    # request. Reserve at least half its advertised lifetime for normal use;
+    # startup and connected sessions must make this identical decision.
+    lifetime = getattr(tokens, "expires_in", None)
+    lead = min(REFRESH_SKEW_S, lifetime / 2) if lifetime is not None else REFRESH_SKEW_S
+    return expiry is None or time.time() < expiry - lead
 
 
 def _stored_token_is_fresh(storage: "McpTokenStorage", tokens: Any) -> bool:
@@ -5390,10 +5395,10 @@ def _make_refresh_coordinating_provider(
     The subclass additionally intercepts the FIRST 401 the resource server
     returns for the original request. The coordination step above only fires
     when the loaded token is within the refresh lead, but a rotating provider
-    (Notion) revokes every previously issued access token when a sibling refreshes — so a
-    session can hold a locally-valid, server-side-revoked token that sails
-    past coordination and gets a 401. Before that 401 reaches the SDK's full
-    browser-authorization branch, the flow re-reads the store under the lock
+    (Notion) revokes every previously issued access token when a sibling
+    refreshes — so a session can hold a locally-valid, server-side-revoked token
+    that sails past coordination and gets a 401. Before that 401 reaches the
+    SDK's full browser-authorization branch, the flow re-reads under the lock
     and, if a peer's different token is already there, adopts it and re-sends
     the request once. See ``async_auth_flow`` for the bound and the pass-through
     rule for genuinely dead grants.
@@ -5487,6 +5492,29 @@ def _make_refresh_coordinating_provider(
                 or not ctx.can_refresh_token()
             ):
                 return
+            # Capture before ANY await: another request shares this context and
+            # can adopt a rotation while we wait for the cross-process lock.
+            previous_access = getattr(ctx.current_tokens, "access_token", None)
+            if ctx.is_token_valid() and ctx.token_expiry_time is not None:
+                # Early refresh must not consume the remaining access validity.
+                # Bound ALL waits (including exception-path lock reacquisition)
+                # to 250ms or half the remaining validity, whichever is less.
+                # Cancellation already detaches an on-wire exchange, retaining
+                # its lock until persistence; only this request stops waiting.
+                remaining = ctx.token_expiry_time - time.time()
+                if remaining <= 0:
+                    return
+                try:
+                    async with asyncio.timeout(min(0.25, remaining / 2)):
+                        await self._coordinate_refresh_attempt(previous_access)
+                except TimeoutError:
+                    return
+            else:
+                await self._coordinate_refresh_attempt(previous_access)
+
+        async def _coordinate_refresh_attempt(self, previous_access: str | None) -> None:
+            """Coordinate under the caller's early-validity budget, if any."""
+            ctx = self.context
             if self._is_leaving():
                 # THE TEARDOWN GATE, and the reason the credential store can now
                 # outlive the MCP teardown. The SDK runs this same auth flow for
@@ -5554,7 +5582,6 @@ def _make_refresh_coordinating_provider(
                     # Re-read under the lock: a sibling process may have rotated
                     # the token while we waited. Adopting its result is what
                     # turns a double-spend into a no-op.
-                    previous_access = getattr(ctx.current_tokens, "access_token", None)
                     await self._resync_from_store(ctx)
                     if _token_is_fresh(ctx.current_tokens, ctx.token_expiry_time) or (
                         ctx.is_token_valid()
@@ -5796,13 +5823,15 @@ def _make_refresh_coordinating_provider(
             failure, but falling through here could replay a marked grant.
             """
             ctx = self.context
-            tokens = ctx.current_tokens
-            if tokens is not None and tokens.refresh_token:
-                if self._refresh_coord_storage.send_unconfirmed(tokens.refresh_token):
-                    self._refuse_unconfirmed_exchange(ctx)
+            # Never inspect a marker here: memory can be stale, and a peer's
+            # write-ahead marker can describe an exchange STILL IN FLIGHT.
+            # Only a locked re-read on reconnect can classify it as unconfirmed;
+            # the fence is always transient and must never clear durable proof.
             self._strip_in_memory_refresh_token(ctx)
             REFRESH_CONTENTION.record(self._refresh_coord_server_url, REFRESH_REFUSAL_UNATTRIBUTED)
-            raise McpRefreshContendedError(self._refresh_coord_server_url)
+            raise McpRefreshContendedError(
+                self._refresh_coord_server_url, reason_code=REFRESH_REFUSAL_UNATTRIBUTED
+            )
 
         async def _adopt_freshest_stored_token(self, ctx: Any) -> None:
             """Final under-lock re-read on the exception fall-through path.
@@ -5904,11 +5933,10 @@ def _make_refresh_coordinating_provider(
                     ):
                         # Coordination only fires inside the refresh lead, but
                         # Notion revokes every previously issued access token
-                        # the moment any sibling process
-                        # rotates the grant. Every other live session then holds
-                        # a locally-VALID, server-side-REVOKED token: it skips
-                        # coordination, sends the corpse, and this 401 is what
-                        # comes back. The SDK's answer to a 401 is the FULL
+                        # the moment a sibling rotates the grant. Other live
+                        # sessions then hold a locally-VALID, server-side-REVOKED
+                        # token: coordination is skipped, the corpse is sent,
+                        # and this 401 is what comes back. The SDK's answer to a 401 is the FULL
                         # browser authorization (non-interactive connects turn
                         # that into McpAuthRequiredError and suspend
                         # auto-reconnect), even though the shared store may

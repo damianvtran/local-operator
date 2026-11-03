@@ -190,8 +190,8 @@ async def test_outside_lead_does_not_lock_or_reread(monkeypatch: pytest.MonkeyPa
             pytest.fail("fresh connected tokens must not lock or re-read the store")
 
         monkeypatch.setattr(auth_mod, "_oauth_refresh_lock", unexpected)
-        monkeypatch.setattr(storage, "get_tokens", unexpected)
-        monkeypatch.setattr(storage, "stored_token_expiry", unexpected)
+        monkeypatch.setattr(provider.context.storage, "get_tokens", unexpected)
+        monkeypatch.setattr(provider._refresh_coord_storage, "stored_token_expiry", unexpected)
         assert await _resource_request(provider) == ["Bearer access-0"]
         assert endpoint.requests == []
 
@@ -205,6 +205,8 @@ async def test_contended_lock_never_spends_a_grant(
 
     @asynccontextmanager
     async def contended(*args: Any, **kwargs: Any) -> AsyncIterator[bool]:
+        # Exercise a real cancellable WAIT rather than an instantaneous refusal.
+        await asyncio.sleep(1.5)
         yield False
 
     async with FakeTokenEndpoint() as endpoint:
@@ -302,8 +304,7 @@ async def test_expiry_between_coordination_and_sdk_never_posts_unlocked(
             provider.context.token_expiry_time = time.time() - 1
 
         monkeypatch.setattr(provider, "_coordinate_inflight_refresh", expiry_before_sdk)
-        error = auth_mod.McpRefreshUnconfirmedError if marked else auth_mod.McpRefreshContendedError
-        with pytest.raises(error):
+        with pytest.raises(auth_mod.McpRefreshContendedError):
             await _resource_request(provider)
         assert endpoint.requests == []
         assert storage.send_unconfirmed("refresh-0") is marked
