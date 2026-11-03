@@ -5,6 +5,7 @@ coverage. Runtime complete/asides feed this writer through serving.on_usage.
 """
 
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -123,7 +124,9 @@ def test_record_only_root_controls_money_cell(micro, calls, priced, knowledge, e
         _spend_channels_state=root, _spend_total=lambda: root.total_micro / 1_000_000
     )
     host._spend_text = MethodType(OperatorApp._spend_text, host)
-    assert OperatorApp._band_cost_cell(host, None, 0.0, False) == expected
+    # This deliberately reduced receiver implements only the consumer's reads;
+    # the cast documents that boundary without constructing a live Textual App.
+    assert OperatorApp._band_cost_cell(cast(OperatorApp, host), None, 0.0, False) == expected
 
 
 @pytest.mark.parametrize("counters", UNKNOWN_RECEIPTS)
@@ -131,6 +134,6 @@ def test_legacy_unknown_receipt_activity_uses_shared_predicate(counters):
     from local_operator.tui.app import OperatorApp
 
     receipt = Usage(openai_service_tier="unknown", **counters)
-    host = SimpleNamespace(_spend_channels_state=None)
+    host = cast(OperatorApp, SimpleNamespace(_spend_channels_state=None))
     assert OperatorApp._band_cost_cell(host, None, 0.0, has_reported_tokens(receipt)) == "$—"
     assert OperatorApp._band_cost_cell(host, None, 0.0, has_reported_tokens(Usage())) is None
