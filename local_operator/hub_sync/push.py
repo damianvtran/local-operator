@@ -42,6 +42,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+import httpx
+
 from local_operator.hub_sync.budget import OperationBudget, OperationDeadlineExceeded
 from local_operator.hub_sync.identity import Kind, LinkError
 from local_operator.hub_sync.merge import MergeOptions
@@ -123,6 +125,19 @@ class PushTransport(Protocol):
 #: ``PUT /{family}/{hub_id}/publish`` and its ``/preview`` twin. First
 #: publication is a deliberate manual action on the client, not this path.
 _FAMILY_ROUTES = {"agent": "agents", "team": "teams", "skill": "skills"}
+
+
+#: Transport errors that prove a COMMIT request never reached the Hub (see the
+#: classification in ``HttpPushTransport._send``). Everything else httpx raises
+#: while a request is in flight is an UNCERTAIN commit outcome.
+_PROVABLY_UNSENT: tuple[type[httpx.RequestError], ...] = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.ProxyError,
+    httpx.UnsupportedProtocol,
+    httpx.LocalProtocolError,
+)
 
 
 class HttpPushTransport:
@@ -241,6 +256,49 @@ class HttpPushTransport:
             )
         except OperationDeadlineExceeded:
             raise
+        except httpx.RequestError as exc:
+            # CLASSIFY BY ONE QUESTION: may the request have been fully sent and
+            # processed? Production saw a commit APPLIED while the client gave up
+            # mid-moderation; settling that ``failed``/``hub-error`` erased the
+            # intent and invited a blind re-publish. Only a COMMIT can be in that
+            # state -- a preview writes nothing, so every preview-stage error stays
+            # a retryable outage.
+            #
+            # On the commit stage the request is PROVABLY UNSENT only for the errors
+            # below: a connection that never opened (``ConnectError``/
+            # ``ConnectTimeout``, which also covers DNS and TLS-handshake failure),
+            # no pooled connection to use (``PoolTimeout``), a proxy tunnel that was
+            # not established (``ProxyError``), a URL the transport refuses to dial
+            # (``UnsupportedProtocol``), and a request the HTTP encoder refused to
+            # serialize locally (``LocalProtocolError``). Those are a plain outage.
+            #
+            # EVERYTHING ELSE is uncertain, deliberately by exclusion so a future
+            # httpx error class defaults to the safe side (preserved intent, read
+            # before any replay) instead of the unsafe one:
+            # * ``ReadTimeout``/``ReadError``/``RemoteProtocolError``: the request
+            #   went out and the answer never (fully) came -- the Hub applying the
+            #   write and then dropping the connection without a response (e.g. a
+            #   proxy idle cutoff during ~19s moderation, now MORE likely because
+            #   the commit read limit was widened to the budget) is exactly this.
+            # * ``WriteTimeout``/``WriteError``: the body may have been fully
+            #   delivered before the failure surfaced; the server cannot be assumed
+            #   to have discarded it.
+            # * ``CloseError``: the failure surfaced while the exchange was
+            #   finishing, i.e. after the request was sent.
+            # * ``DecodingError``: a response ARRIVED (so the server processed the
+            #   request) but could not be read; its status is unknown.
+            # Uncertain is cheap and safe: pending-reconciliation keeps the verbatim
+            # intent, the next attempt reads the Hub first, and any resend is still
+            # conditional on the stored ``If-Match`` (a stale replay is a 412).
+            if envelope or isinstance(exc, _PROVABLY_UNSENT):
+                raise PushRefused(
+                    "hub-error",
+                    f"the hub request failed ({type(exc).__name__})",
+                    outage=True,
+                ) from exc
+            raise OperationDeadlineExceeded(
+                f"commit outcome unknown: {type(exc).__name__} before the hub answered"
+            ) from exc
         except Exception as exc:  # noqa: BLE001 - any transport failure is a named refusal
             raise PushRefused(
                 "hub-error", f"the hub request failed ({type(exc).__name__})", outage=True
@@ -474,6 +532,9 @@ async def _push_item_inner(
             budget=budget,
             kind=kind,
             org_skill=org_skill,
+            current_local=current_local,
+            remote_latest=remote_latest,
+            remote_revision=str(expected_revision or "").strip() or None,
         )
 
     try:
@@ -682,6 +743,47 @@ async def _push_item_inner(
     )
 
 
+def _already_landed(
+    kind: Kind,
+    *,
+    intent_document: Mapping[str, Any],
+    intent_expected: str,
+    current_local: Mapping[str, Any],
+    remote_latest: Mapping[str, Any],
+    remote_revision: str | None,
+) -> bool:
+    """True only when an uncertain commit PROVABLY landed.
+
+    Three facts must all hold, each one blocking a different false "landed":
+
+    * the hub's revision MOVED past the one the stored commit was conditioned on
+      (an unmoved revision means the write cannot have applied);
+    * the hub now serves exactly the stored commit's content (a later edit by
+      someone else is not our commit);
+    * today's local skill equals that content as well, because the receipt the
+      caller advances records the local bytes as "sent" -- advancing it over a newer
+      unsent local edit would hide that edit. In that case the verbatim replay is
+      left to refuse with ``remote-revision-changed`` (CAS keeps it harmless) and
+      the person pulls.
+
+    Anything unprovable (a non-mapping, an unfingerprintable side) is False, so
+    the existing replay path decides.
+    """
+
+    if kind != "skill" or not remote_revision or remote_revision == intent_expected:
+        return False
+    # The ONE skill-content comparator the manual-confirm reconciliation already
+    # uses (its docstring says what it tolerates and why that is safe here: it
+    # normalizes the spelling the server canonicalizes away); a second, stricter
+    # comparator here would call a clean landing "different".
+    # Imported lazily: service imports this module at load time.
+    from local_operator.hub_sync.service import _same_content
+
+    return _same_content(intent_document, remote_latest) and _same_content(
+        current_local, remote_latest
+    )
+
+
 async def _replay_verbatim(
     *,
     transport: PushTransport,
@@ -692,6 +794,9 @@ async def _replay_verbatim(
     budget: OperationBudget,
     kind: Kind,
     org_skill: bool,
+    current_local: Mapping[str, Any],
+    remote_latest: Mapping[str, Any],
+    remote_revision: str | None,
 ) -> PushOutcome:
     """Resend one UNCERTAIN commit with exactly the stored bytes.
 
@@ -724,6 +829,39 @@ async def _replay_verbatim(
     ):
         return PushOutcome(
             "skipped", operation_id=operation_id, reason="reconciliation-intent-invalid"
+        )
+    if _already_landed(
+        kind,
+        intent_document=document,
+        intent_expected=expected,
+        current_local=current_local,
+        remote_latest=remote_latest,
+        remote_revision=remote_revision,
+    ):
+        # READ-THEN-COMPARE: the caller just read the hub. If it already serves the
+        # stored commit's content at a NEWER revision, the uncertain commit landed;
+        # resending would only 412. Settle it as accepted instead of leaving a
+        # phantom conflict, and let the caller advance the outbound receipt.
+        #
+        # The settle result is IGNORED on purpose, and that is harmless: ``settle``
+        # returns False when a newer generation superseded this attempt (or the
+        # outbox lock is busy). The "landed" verdict is a fact about the HUB that
+        # was just read, not about this record, so it stays true; the superseding
+        # attempt owns the record and re-reads the Hub itself, and a still-
+        # ``pending-reconciliation`` record just re-derives the same verdict (and
+        # settles) on its next tick. Nothing is sent here, so there is no double
+        # publish to fence; overwriting the newer record is exactly what the fence
+        # prevents, and it did.
+        outbox.settle(
+            operation_id,
+            generation=generation,
+            result={"revision": remote_revision, "reconciled": True},
+        )
+        return PushOutcome(
+            "pushed",
+            operation_id=operation_id,
+            accepted={"accepted_document": dict(remote_latest), "operation_id": operation_id},
+            revision=remote_revision,
         )
     try:
         result = await transport.commit(

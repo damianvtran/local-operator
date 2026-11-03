@@ -331,7 +331,14 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ),
             ToolDocOp(
                 op="press",
-                blurb="Keyboard input to the owned page; requires desktop app support.",
+                blurb=(
+                    "One key chord (Control+K, e, Shift+Tab) to the owned page; "
+                    "selector= focuses first. Desktop app only."
+                ),
+            ),
+            ToolDocOp(
+                op="hover",
+                blurb="Move the pointer onto selector= XOR x+y; desktop app only.",
             ),
             ToolDocOp(op="scroll", blurb="Move the viewport."),
             ToolDocOp(op="logs", blurb="Console + errors."),
