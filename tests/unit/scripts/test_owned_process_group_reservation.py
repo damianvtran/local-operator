@@ -281,6 +281,9 @@ def test_c4_pid_one_and_our_own_group_are_never_signalled(monkeypatch):
     # (`excluded`) was never reached, and the row passed for that reason.
     kernel = Kernel(leader=4242, parent=os.getpid())
     cap = kernel.cap()
+    # Linux live creation is not proof. Establish a strict positive control
+    # before mutating the exclusions; the actual send must still recheck them.
+    cap.refresh(deadline=kernel.clock() + 5.0)
     assert cap.last.status == "VERIFIED", cap.last.reason
     monkeypatch.setattr(owned.os, "getpgrp", lambda: 4242)
     monkeypatch.setattr(owned.os, "getpid", lambda: 77)

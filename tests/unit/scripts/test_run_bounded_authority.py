@@ -319,7 +319,13 @@ def _reuse_world(monkeypatch):
         signal_group=lambda *a: fake.calls.append(a),
         deadline=5,
     )
-    assert cap.last.status == "VERIFIED", cap.last.reason
+    # The later reuse/unreadable-witness send tests, not this setup step, must
+    # establish/refuse fresh authority. Linux creation deliberately has none.
+    expected = "ACQUIRED_POSITIVE" if owned.sys.platform.startswith("linux") else "VERIFIED"
+    assert cap.last.status == expected, cap.last.reason
+    if expected == "ACQUIRED_POSITIVE":
+        assert cap.probe["proof"] == []
+        assert cap.last.population_coverage == "not-established"
     return fake, cap
 
 
