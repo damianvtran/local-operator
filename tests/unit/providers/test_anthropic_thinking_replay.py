@@ -169,7 +169,7 @@ async def test_stream_captures_thinking_signature_and_redacted_verbatim() -> Non
     # Thinking is never surfaced as visible text.
     assert "".join(e.delta for e in events if isinstance(e, StreamTextDelta)) == "Listing."
     end = next(e for e in events if isinstance(e, StreamEndEvent))
-    native = end.provider_payload["native_replay"]
+    native = (end.provider_payload or {})["native_replay"]
     assert native["protocol"] == "anthropic-messages"
     assert native["model"] == "claude-sonnet-5-5"
     assert native["credential_scope"] == credential_scope(KEY)
@@ -198,7 +198,7 @@ async def test_replay_puts_thinking_first_unchanged_and_survives_resume() -> Non
     # No cache marker may land on a thinking block, and rendering must not
     # mutate the stored payload (it is replayed on every later request).
     assert all("cache_control" not in block for block in content[:2])
-    stored = assistant.provider_payload["native_replay"]["items"]
+    stored = (assistant.provider_payload or {})["native_replay"]["items"]
     assert all("cache_control" not in item and "input" not in item for item in stored)
     assert client._build_body(request, scope=credential_scope(KEY))["messages"] == body["messages"]
 
