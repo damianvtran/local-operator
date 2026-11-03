@@ -2729,7 +2729,18 @@ merge gate needs a fresh round on the current head. "Everything else is green"
 is exactly when that lapses. The one narrow exception: changes since the
 review that are exclusively non-conflicting fixes from parallel approved
 streams — a docs or nit commit from another round — leave it fresh, as does a
-rebase whose posted `### Rebase proof` is MECHANICAL.
+rebase or merge of main whose posted `### Rebase proof` is MECHANICAL.
+
+**Review economy.** Across the last 100 merged PRs in each repo, median 6-7
+rounds per PR and roughly 45% of rounds followed an already-clean round of the
+same stream: clean-round chains, minors fixed then re-reviewed, merge-of-main
+convergence rounds, staggered streams, re-pin/addendum sub-rounds. The rules
+that stop that live in `guide://delivery` ("Review economy"): briefs carry the
+operator's request, acceptance criteria and non-goals; pre-existing defects
+never gate; all streams review one pushed head in waves (target <= 2); accepted
+MINOR/NIT fold into the remediation commit or are deferred; a MINOR/NIT-only,
+test/docs-only, or MECHANICAL rebase/merge-of-main commit keeps clean rounds
+fresh with a one-line delta note or the posted proof.
 
 ## Security advisories
 

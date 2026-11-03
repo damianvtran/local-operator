@@ -70,9 +70,8 @@ runs, not evidence. Review CI asynchronously; investigate even out-of-slice fail
 ## Converge, do not restart
 
 Complete every applicable initial stream (code, independent real-path QA,
-design, UX, security) across its full in-scope surface before remediation, not
-just the first finding. Early BLOCKER alerts must say incomplete. Review runs
-asynchronously with CI; merge still needs all gates.
+design, UX, security) across its full in-scope surface before remediation.
+Early BLOCKER alerts must say incomplete. Review runs asynchronously with CI.
 
 Manager collects all reports into ONE deduplicated severity/evidence ledger,
 triages conflicts and batches necessary clarifications before edits. Implementer
@@ -82,10 +81,8 @@ batched commit; separate commits need justified independently revertible safety
 or stream boundaries in the SAME round. No per-finding commit/review cycles.
 
 Follow up on `<previous_reviewed_head>..<new_head>` plus direct regression
-neighbors, never unchanged re-audits or MINOR/NIT loops. Late BLOCKER/MAJOR needs
-a concrete code path/reproducer and changed/direct-neighbor scope. Target delta
-and direct-regression tests; preserve independent QA/design/UX/security gates.
-Retain evidence only with byte/source compatibility proof; backend response-shape
+neighbors, never unchanged re-audits. Late BLOCKER/MAJOR needs a concrete code
+path/reproducer in changed/direct-neighbor scope. Retain evidence only with byte/source compatibility proof; backend response-shape
 changes may need rendered proof. Model-header/provenance-only addenda do not reset
 product/suites; executable/user-visible changes are not metadata.
 
@@ -94,15 +91,42 @@ authority matrix (failing state, intended transition, authoritative owner/source
 and exit criteria BEFORE more patches. An unknown persisting twice escalates to
 its owner. This checkpoint never waives unresolved BLOCKER/MAJOR or evidence gates.
 
-A moved base is NOT a blind re-pin: post `scripts/rebase_proof.py`'s
-`### Rebase proof` (range-diff `=`, byte-identical patch, no file overlap).
-MECHANICAL keeps the last clean code and QA rounds; CI on the new head guards
-cross-file breaks. Otherwise run one `old-head..new-head` round on the files
-it names: if that proof fails, review and test the affected content. A test-
-or docs-only commit after a clean round needs an independent
-`<prev-head>..<head>` delta review; no QA unless a QA'd surface moved. Follow
-`AGENTS.md`'s SHA-freshness rules and the standing PR comment format. Fix real BLOCKER/MAJOR before merge; delta scope never waives correctness,
-security or regression risk. MINOR/NIT do not force another round.
+A moved base (rebase OR merge of main) is NOT a blind re-pin: post
+`scripts/rebase_proof.py`'s `### Rebase proof` (range-diff `=`, byte-identical
+patch, no file overlap). MECHANICAL keeps the last clean code and QA rounds; CI
+on the new head guards cross-file breaks. Otherwise run one `old-head..new-head`
+round on the files it names. Follow `AGENTS.md`'s SHA-freshness rules and PR
+comment format. Fix real BLOCKER/MAJOR before merge; delta scope never waives
+correctness, security or regression risk. MINOR/NIT do not force another round.
+
+## Review economy
+
+- **Context contract.** Every review/QA/design/UX brief carries the operator's
+  request (verbatim or close paraphrase), intent, acceptance criteria, explicit
+  non-goals, base..head and, round 2+, the prior-round ledger. Missing request:
+  ask once via hub, or state the assumed scope atop the round.
+- **Scope.** Judge the diff against the stated request. Pre-existing defects not
+  introduced or worsened are listed `out of scope — pre-existing` and never gate.
+  No redesigns or extra features. No speculative findings: without a code path
+  or repro a "might" is a lead, never BLOCKER/MAJOR.
+- **Waves.** All applicable streams run round 1 on the SAME pushed head and
+  report before remediation; ONE ledger, ONE remediation commit, ONE follow-up
+  wave on that delta. Target <= 2 waves; a third needs a named open BLOCKER/MAJOR.
+- **Minors.** Fold accepted MINOR/NIT into the same commit as the majors, or
+  defer them in the remediation comment. Never a commit just for minors after
+  all streams are terminal: that re-stales the head.
+- **Freshness.** A commit that only answers MINOR/NIT, only touches tests/docs,
+  or is a MECHANICAL rebase/merge of main keeps clean rounds fresh with the
+  posted proof or a one-line `<prev-head>..<head>` delta note by an independent
+  reviewer: no full round, no QA rerun unless a QA'd surface moved.
+- **Hygiene.** Rounds only on pushed heads; one comment per stream per round; no
+  `re-pin`, `addendum` or `delta` sub-rounds. Amend your own comment (`gh api
+  -X PATCH`) or carry it into the next real round.
+- **Tone.** Collaborative: state the problem, evidence and a suggested fix; note
+  what works in a line. No retraction/correction theatre; disagree once, with
+  evidence, then settle.
+- **Stop.** Past 3 waves, or review-driven growth past ~2x the original diff,
+  the manager splits the follow-on into a separate PR.
 
 ## Model provenance
 

@@ -30,6 +30,11 @@ Review feedback is input, not instruction. Verify before implementing; answer pe
   Rebased content still needs convergence, and real majors still need fixes.
   See `guide://delivery` for the shared bounds.
 
+## Minors never get their own cycle
+
+- Fold accepted MINOR/NIT fixes into the SAME remediation commit as the accepted majors, or defer them in the remediation comment. Never push a commit just for minors after every stream is terminal: it re-stales the head and buys another round.
+- A pre-existing issue outside the request is answered `deferred — pre-existing, out of scope`, not fixed in this PR. Review-driven growth past ~2x the original diff goes to a follow-up PR.
+
 ## The reply format
 
 For each item, in the thread where the round was posted:
@@ -51,4 +56,5 @@ Never mark fixed without the commit; never leave an item unanswered. "Not addres
 - Arguing from preference with no check either way.
 - Marking items fixed in a summary while the code is unchanged.
 - One comment per finding instead of one batched response.
+- A minors-only commit after a terminal round.
 - A "fixed" whose commit does not contain the fix.
