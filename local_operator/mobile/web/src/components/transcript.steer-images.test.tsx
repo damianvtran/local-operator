@@ -38,10 +38,22 @@ describe("tap to enlarge", () => {
 	it("opens a full-screen viewer once loaded and closes on tap", () => {
 		render(<Transcript pid="s" entries={[steer({ images: [{ index: 0, mime_type: "image/png" }] })]} />);
 		fireEvent.load(screen.getByAltText("attachment"));
-		fireEvent.click(screen.getByRole("button", { name: "open attachment full screen" }));
+		fireEvent.click(screen.getByRole("button", { name: "open image attachment full screen" }));
 		expect(screen.getByRole("dialog")).toBeTruthy();
 		expect(screen.getByAltText("attachment full size")).toBeTruthy();
+		// Portaled to <body> (not clipped by the transcript scroller) and the app is inert behind it.
+		expect(document.body.querySelector("[data-attachment-viewer]")!.parentElement).toBe(document.body);
+		expect(document.activeElement?.getAttribute("aria-label")).toBe("close");
 		fireEvent.click(screen.getByRole("dialog"));
+		expect(screen.queryByRole("dialog")).toBeNull();
+	});
+	it("is not offered while loading, and Escape closes the viewer", () => {
+		render(<Transcript pid="s" entries={[steer({ images: [{ index: 0, mime_type: "image/png" }] })]} />);
+		expect(screen.queryByRole("button", { name: "open image attachment full screen" })).toBeNull();
+		fireEvent.load(screen.getByAltText("attachment"));
+		fireEvent.keyDown(screen.getByRole("button", { name: "open image attachment full screen" }), { key: "Enter" });
+		expect(screen.getByRole("dialog")).toBeTruthy();
+		fireEvent.keyDown(window, { key: "Escape" });
 		expect(screen.queryByRole("dialog")).toBeNull();
 	});
 });
