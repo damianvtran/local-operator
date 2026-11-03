@@ -115,6 +115,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
+from local_operator.harness.derived_ids import DERIVED_ID_SUFFIXES
 from local_operator.harness.document_limits import (
     DOCUMENT_CHARS_PER_TOKEN,
     DOCUMENT_WINDOW_SHARE,
@@ -1547,6 +1548,12 @@ def invalidate_message_cache(message: Message) -> None:
     MUST be called after any in-place mutation of a message (pruning blanks,
     streaming finalize). Idempotent; safe for never-cached messages.
 
+    Also evicts the estimates of the message's DERIVED copies
+    (``harness.derived_ids``): the request is built from those copies, and each
+    is memoized under ``"<id><suffix>"``. Evicting only the source id left the
+    copy's old estimate in place, so a document swapped for its reference line
+    kept being charged as the document and the client refused every turn.
+
     The pop is locked for the same reason the LRU sequences in
     :func:`estimate_tokens` are: a worker thread may be mid-eviction on the
     same OrderedDict. Subscriber callbacks run OUTSIDE the lock — they are
@@ -1555,13 +1562,16 @@ def invalidate_message_cache(message: Message) -> None:
     """
     with _CACHE_LOCK:
         _ESTIMATE_CACHE.pop(message.id, None)
+        derived_ids = {f"{message.id}{suffix}" for suffix in DERIVED_ID_SUFFIXES}
+        for derived_id in derived_ids:
+            _ESTIMATE_CACHE.pop(derived_id, None)
         # Flag even when nothing was cached: the entry this invalidation is
         # racing may not have been INSERTED yet (see _INFLIGHT_ESTIMATES).
         # Popping a miss and returning is exactly how the stale value used to
         # survive. Costs one pass over the in-flight computations, which are
         # bounded by concurrency rather than by history size.
         for inflight in _INFLIGHT_ESTIMATES.values():
-            if inflight.message_id == message.id:
+            if inflight.message_id == message.id or inflight.message_id in derived_ids:
                 inflight.invalidated = True
     for invalidator in list(_INVALIDATORS.values()):
         try:

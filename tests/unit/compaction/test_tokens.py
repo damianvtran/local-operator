@@ -1389,3 +1389,42 @@ def test_an_empty_text_block_does_not_poison_its_digests_cache_entry():
     )
     assert tokens_mod._text_units(empty) == 0
     assert tokens_mod._text_units(real) == 5000
+
+
+def test_invalidating_a_message_also_evicts_its_derived_copies():
+    """The request is built from ``<id>~ah`` / ``<id>~rb`` copies, memoized under
+    their own ids. Evicting only the source id left a degraded document charged
+    as the document through its copy (reviewer round 7 B1)."""
+    import base64
+
+    from local_operator.compaction.tokens import (
+        estimate_messages_tokens,
+        invalidate_message_cache,
+    )
+    from local_operator.harness.derived_ids import DERIVED_ID_SUFFIXES
+    from local_operator.harness.types import DocumentContent, Message, TextContent
+
+    block = DocumentContent(
+        data=base64.b64encode(b"x" * 300_000).decode(),
+        mime_type="text/plain",
+        filename="big.txt",
+        bytes=300_000,
+    )
+    source = Message(role="user", content=[block])
+    copies = []
+    for suffix in DERIVED_ID_SUFFIXES:
+        copy = source.model_copy(update={"id": f"{source.id}{suffix}"})
+        copies.append(copy)
+    before = [estimate_messages_tokens([copy]) for copy in copies]
+    assert all(figure > 50_000 for figure in before)
+
+    # The live message is mutated in place, then invalidated, as the guard does.
+    source.content[0] = TextContent(text="[Document reference: big.txt]")
+    for copy in copies:
+        copy.content[0] = TextContent(text="[Document reference: big.txt]")
+    invalidate_message_cache(source)
+
+    assert [estimate_messages_tokens([copy]) for copy in copies] == [
+        estimate_messages_tokens([source])
+    ] * len(copies)
+    assert estimate_messages_tokens([source]) < 1000

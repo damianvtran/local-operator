@@ -6086,15 +6086,16 @@ class Session:
         is never rewritten.
 
         Documents are touched only when they are a material share of the window
-        (``DOCUMENT_CULPRIT_SHARE``, capped at ``DOCUMENT_CULPRIT_CEILING``):
-        the largest one, OR all of them together, must reach the threshold. The
-        sum matters because the cause can be a collection (17 files of ~7.6k
-        tokens each, none individually over the gate). Otherwise the cause is
-        elsewhere (history, tool output), degrading a small file would not fix
-        it, and the notice would blame the wrong thing: the error surfaces
-        exactly as before. A window of 0 or unknown makes the threshold 0, so
-        every document qualifies: the cause-blind behaviour, accepted there
-        because nothing is known to judge by.
+        (``DOCUMENT_CULPRIT_SHARE`` for one document, or ``DOCUMENT_WINDOW_SHARE``
+        for all of them together; both capped at ``DOCUMENT_CULPRIT_CEILING``).
+        The sum covers a collection whose members are each under the first bar
+        (13 dense files). It has the higher bar on purpose: modest attachments
+        beside a history that is itself the cause are left alone, since
+        stripping them would not cure the overflow and the notice would blame
+        the wrong thing. The error then surfaces exactly as before. A window of
+        0 or unknown makes the thresholds 0, so every document qualifies: the
+        cause-blind behaviour, accepted there because nothing is known to judge
+        by.
 
         The error filter is the context-length marker list, which is wider than
         "the prompt is over the window": it also matches an attached-file size
@@ -6117,6 +6118,7 @@ class Session:
         from local_operator.harness.document_limits import (
             DOCUMENT_CULPRIT_CEILING,
             DOCUMENT_CULPRIT_SHARE,
+            DOCUMENT_WINDOW_SHARE,
         )
         from local_operator.incidents import CONTEXT_LENGTH_MARKERS
         from local_operator.providers.documents import _reference_text
@@ -6142,10 +6144,9 @@ class Session:
         if not any(marker in haystack for marker in CONTEXT_LENGTH_MARKERS):
             return False
 
-        threshold = min(
-            int(self.effective_model.context_window) // DOCUMENT_CULPRIT_SHARE,
-            DOCUMENT_CULPRIT_CEILING,
-        )
+        window = int(self.effective_model.context_window)
+        threshold = min(window // DOCUMENT_CULPRIT_SHARE, DOCUMENT_CULPRIT_CEILING)
+        total_threshold = min(window // DOCUMENT_WINDOW_SHARE, DOCUMENT_CULPRIT_CEILING)
 
         largest: tuple[int, Message, int] | None = None
         total = 0
@@ -6159,7 +6160,7 @@ class Session:
                 total += cost
                 if largest is None or cost > largest[0]:
                     largest = (cost, message, index)
-        if largest is None or (largest[0] < threshold and total < threshold):
+        if largest is None or (largest[0] < threshold and total < total_threshold):
             return False
 
         _, message, index = largest

@@ -1708,49 +1708,112 @@ async def test_the_culprit_threshold_is_a_sixteenth_of_the_window_inclusive(tmp_
 
 
 @pytest.mark.asyncio
-async def test_the_threshold_is_met_by_the_sum_of_documents_not_only_the_largest(tmp_path):
-    """Each file is below the gate; together they are not. The gate is on the
-    set, so the largest is degraded and the next refusal takes the next."""
+async def test_the_sum_of_documents_has_its_own_higher_bar(tmp_path):
+    """Each file is under the per-document bar (``window // 16``); a set is
+    blamed only when it reaches ``window // 4``, one render-cap document's worth.
+    Measured, not restated: find the file count whose total crosses the bar."""
     from local_operator.compaction.tokens import _document_token_estimate
-    from local_operator.harness.document_limits import DOCUMENT_CULPRIT_SHARE
+    from local_operator.harness.document_limits import (
+        DOCUMENT_CULPRIT_CEILING,
+        DOCUMENT_CULPRIT_SHARE,
+        DOCUMENT_WINDOW_SHARE,
+    )
 
     window = 128_000
-    threshold = window // DOCUMENT_CULPRIT_SHARE
+    each_bar = min(window // DOCUMENT_CULPRIT_SHARE, DOCUMENT_CULPRIT_CEILING)
+    sum_bar = min(window // DOCUMENT_WINDOW_SHARE, DOCUMENT_CULPRIT_CEILING)
     each = _document_token_estimate(_text_document("p.txt", 15_000))
-    assert each < threshold <= 2 * each, "the fixture must sit between one and two files"
+    assert each < each_bar < sum_bar
+    at = -(-sum_bar // each)  # fewest files whose total reaches the bar
+    assert (at - 1) * each < sum_bar <= at * each
 
-    def documents(count: int) -> list[Content]:
-        return [_text_document(f"part{index}.txt", 15_000) for index in range(count)]
-
-    for name, count, expect in (("one", 1, False), ("two", 2, True)):
+    for name, count, expect in (("below", at - 1, False), ("at", at, True)):
         session = _window_session(tmp_path / name, window, ScriptedOk())
-        await session.seed_history(
-            [Message(role="user", content=documents(count)), Message.assistant("ok")]
-        )
+        files: list[Content] = [
+            _text_document(f"part{index}.txt", 15_000) for index in range(count)
+        ]
+        await session.seed_history([Message(role="user", content=files), Message.assistant("ok")])
         assert await session._recover_if_request_too_large(_CONTEXT_ERROR) is expect, name
         assert len(_live_documents(session)) == (count - 1 if expect else count), name
         await session.dispose()
 
 
+def _off_session(tmp_path, window: int, stream):
+    """Compaction OFF: the guard is the only recovery, so a pass that would
+    otherwise clear the documents cannot mask whether the guard works."""
+    model = ModelSpec(
+        provider="openai", model_id="stub", context_window=window, max_output_tokens=8192
+    )
+    return make_session(
+        tmp_path, stream, model=model, compaction_settings=CompactionSettings(strategy="off")
+    )
+
+
 @pytest.mark.asyncio
-async def test_a_collection_of_mid_sized_documents_recovers(tmp_path):
-    """Reviewer round 6 B1: 17 files of 15,000 chars, each charged below the
-    per-document gate, were refused LOCALLY on every turn (5 in 5) with nothing
-    degraded and no compaction. Now the guard drops one document on the first
-    refusal; that lowers the estimate under the compaction trigger, whose pass
-    clears the rest, and the session answers from the next turn on."""
+async def test_a_collection_recovers_through_the_attachment_hint_copy(tmp_path):
+    """Reviewer round 7 B1. The request is built from a COPY of each message
+    (``<id>~ah``, the attachment-hint view) and the estimate is memoized under
+    that id, so invalidating only the live id left the copy charged as the
+    documents for ever: 17 x 15,000-char files, compaction off, were refused
+    locally on every turn although 8 of them had been degraded. The guard drops
+    one document per refused turn; once the copy's estimate follows, the session
+    answers."""
     window = 128_000
     stream = RefusesByRealTokenCount(window)
-    session = _window_session(tmp_path, window, stream)
+    session = _off_session(tmp_path, window, stream)
     documents = [_text_document(f"part{index}.txt", 15_000) for index in range(17)]
     await session.prompt("what is in these files?", documents=documents)
-    # The attach turn is the refused one: no request reached the stream.
-    assert stream.statuses == []
-    assert len(_live_documents(session)) == 16, "one document per refused turn, largest first"
-    for turn in range(4):
+    for turn in range(12):
         await session.prompt(f"follow-up {turn}")
-    assert stream.statuses and set(stream.statuses) == {200}, stream.statuses
-    assert len(_live_documents(session)) < 16
+    assert stream.statuses and stream.statuses[-1] == 200, stream.statuses
+    assert len(_live_documents(session)) < 17
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_dense_collection_the_estimator_admits_costs_one_refusal(tmp_path):
+    """QA Q-R7-1: 13 base64 files (estimate ~98,800, so local admission passes)
+    whose REAL token count is over the window were a dead end (5 refusals in 5
+    turns, nothing degraded). Compaction is off so only the guard can answer."""
+    pytest.importorskip("tiktoken")
+    import random
+
+    window = 128_000
+    stream = RefusesByRealTokenCount(window)
+    session = _off_session(tmp_path, window, stream)
+    documents = [
+        DocumentContent(
+            data=base64.b64encode(
+                base64.b64encode(random.Random(index).randbytes(11_250))[:15_000]
+            ).decode(),
+            mime_type="text/plain",
+            filename=f"part{index}.b64",
+            bytes=15_000,
+        )
+        for index in range(13)
+    ]
+    await session.prompt("what is in these files?", documents=documents)
+    for turn in range(6):
+        await session.prompt(f"follow-up {turn}")
+    # One document per refusal, so the number of refusals is the number of
+    # files it takes to get under the window (2 here), not "every turn".
+    assert 1 <= stream.statuses.count(400) <= 3, stream.statuses
+    assert stream.statuses[-1] == 200, stream.statuses
+    assert len(_live_documents(session)) < 13
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_modest_attachments_beside_a_history_overflow_are_left_alone(tmp_path):
+    """Reviewer round 7 M1 / QA Q-R7-2: the sum gate stripped small attachments
+    one per prompt when the HISTORY was the cause. Forty 1 KB notes total ~20k
+    tokens, under ``window // 4``, so the guard declines."""
+    window = 128_000
+    session = _off_session(tmp_path, window, ScriptedOk())
+    notes: list[Content] = [_text_document(f"note{index}.txt", 1_000) for index in range(40)]
+    await session.seed_history([Message(role="user", content=notes), Message.assistant("ok")])
+    assert await session._recover_if_request_too_large(_CONTEXT_ERROR) is False
+    assert len(_live_documents(session)) == 40
     await session.dispose()
 
 
