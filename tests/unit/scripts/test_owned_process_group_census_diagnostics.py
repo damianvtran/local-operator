@@ -32,6 +32,12 @@ class ProcWorld:
     def read(self, path):
         self.calls.append(("read", path))
         pid = int(path.split("/")[-2])
+        if pid > 100:
+            # Since strict_linux reconciles its closing delta to a fixpoint, a
+            # foreign arrival is classified and the census completes. A birth
+            # that still refuses must be one nobody can classify: a hidepid-style
+            # EACCES row, which stays unknown on every attempt.
+            raise PermissionError(13, "synthetic hidepid")
         group = 10 if pid == 10 or self.change == "owned-death" else 90
         return f"{pid} (synthetic-secret-must-not-leak) R 1 {group}"
 
@@ -50,7 +56,7 @@ class ProcWorld:
         )
 
 
-@pytest.mark.parametrize("change", ["birth", "other-death", "owned-death"])
+@pytest.mark.parametrize("change", ["birth"])
 def test_six_existing_scans_refuse_with_distinct_observations(change):
     world = ProcWorld(change)
     detail: dict[str, object] = {"stale": True}
@@ -65,16 +71,27 @@ def test_six_existing_scans_refuse_with_distinct_observations(change):
     assert isinstance(attempts, list)
     assert len(attempts) == 6
     assert all(row["opening_count"] == 2 for row in attempts)
-    if change == "birth":
-        assert all(row["closing_count"] == 3 and row["added_count"] == 1 for row in attempts)
-        assert attempts[0]["added"] == [{"pid": 102, "relation": "unobserved"}]
-    else:
-        relation = "same-group" if change == "owned-death" else "different-group"
-        assert all(row["closing_count"] == 1 and row["removed_count"] == 1 for row in attempts)
-        assert attempts[0]["removed"] == [{"pid": 20, "relation": relation}]
+    assert all(row["closing_count"] == 3 and row["added_count"] == 1 for row in attempts)
+    assert attempts[0]["added"] == [{"pid": 102, "relation": "unobserved"}]
+    assert all(row["unclassified_count"] == 1 for row in attempts)
     assert all(row["confirmed_disappeared_count"] == 0 for row in attempts)
     assert "synthetic-secret" not in json.dumps(detail)
     assert len(json.dumps(detail, separators=(",", ":")).encode()) <= 4096
+
+
+@pytest.mark.parametrize("change", ["other-death", "owned-death"])
+def test_departure_of_a_parsed_pid_is_classified_and_completes(change):
+    # A PID read in the opening scan and gone by the closing list was already
+    # classified by that read, so this churn no longer exhausts the attempts.
+    # An owned departure stays in the members for refresh() to sample.
+    world = ProcWorld(change)
+    detail: dict[str, object] = {}
+    members = [10, 20] if change == "owned-death" else [10]
+    assert world.census(detail) == (members, True, True)
+    assert world.scans == 2
+    assert detail["phase"] == "complete"
+    relation = "same-group" if change == "owned-death" else "different-group"
+    assert detail["attempts"][0]["removed"] == [{"pid": 20, "relation": relation}]
 
 
 @pytest.mark.parametrize("change", ["birth", "other-death", "owned-death"])
@@ -82,7 +99,10 @@ def test_diagnostics_do_not_add_probes_or_change_refusal(change):
     traces = []
     for sink in (None, {}):
         world = ProcWorld(change)
-        with pytest.raises(owned.Unknown, match="^unstable /proc census$"):
+        if change == "birth":
+            with pytest.raises(owned.Unknown, match="^unstable /proc census$"):
+                world.census(sink)
+        else:
             world.census(sink)
         traces.append(world.calls)
     assert traces[0] == traces[1]
@@ -172,8 +192,7 @@ def test_sink_and_subsequent_calls_cannot_rewrite_refusal_evidence():
     attempts = detail["attempts"]
     assert isinstance(attempts, list)
     attempts[0]["added"].clear()
-    with pytest.raises(owned.Unknown):
-        ProcWorld("owned-death").census(detail)
+    ProcWorld("owned-death").census(detail)
     assert json.dumps(raised.value.census_failure, sort_keys=True) == saved
 
 
