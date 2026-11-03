@@ -405,7 +405,9 @@ def test_cli_older_daemon_reads_the_file_and_states_the_real_lifetime(
     soon = time.time() + 100  # 1m40s left
     pairing = {
         "paired": False,
-        "pending": [{"code": "123456", "extension_id": STORE_ID, "label": "Chrome", "expires_at": soon}],
+        "pending": [
+            {"code": "123456", "extension_id": STORE_ID, "label": "Chrome", "expires_at": soon}
+        ],
     }
     rc, out = _run_pair(monkeypatch, capsys, {"ok": False, "reason": "old_daemon"}, pairing)
     assert rc == 0 and "123456" in out
@@ -415,9 +417,10 @@ def test_cli_older_daemon_reads_the_file_and_states_the_real_lifetime(
 
 def test_cli_several_codes_on_an_older_daemon_never_promise_tabs(monkeypatch, capsys) -> None:
     """R3b: the tab wording only when every install will really open its tab."""
+    later = time.time() + 30
     pending = [
-        {"code": "111111", "extension_id": STORE_ID, "label": "Chrome", "expires_at": time.time() + 30},
-        {"code": "222222", "extension_id": UNPACKED_ID, "label": "Chrome", "expires_at": time.time() + 30},
+        {"code": "111111", "extension_id": STORE_ID, "label": "Chrome", "expires_at": later},
+        {"code": "222222", "extension_id": UNPACKED_ID, "label": "Chrome", "expires_at": later},
     ]
     rc, out = _run_pair(
         monkeypatch, capsys, {"ok": False, "reason": "old_daemon"}, {"pending": pending}
