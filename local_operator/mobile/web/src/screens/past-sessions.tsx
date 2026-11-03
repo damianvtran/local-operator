@@ -72,7 +72,14 @@ export function PastSessionsScreen() {
 	};
 
 	return (
-		<div className="mx-auto flex min-h-full w-full max-w-[var(--lo-column-max,28rem)] flex-col">
+		// The column is BOUNDED and the list scrolls inside it: `#/past` used to
+		// rely on the document scrolling, which the shell no longer allows
+		// (`src/styles/index.css`, "the document is not a scroller"). A height
+		// FLOOR with no inner scroller left every row past the fold
+		// unreachable — 22 rows at 390x844 put the last one ~458px below the
+		// viewport. The `h-dvh` + inner `.lo-scroll` shape is the one every other
+		// bounded screen already uses (`screens/library.tsx`).
+		<div className="mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col overflow-hidden">
 			<header className="flex items-center gap-2 px-2 pt-[max(env(safe-area-inset-top),0.75rem)] pb-2">
 				<button
 					type="button"
@@ -97,7 +104,7 @@ export function PastSessionsScreen() {
 				/>
 			</div>
 
-			<main className="flex flex-1 flex-col gap-0.5 px-2 pb-3">
+			<main className="lo-scroll flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 pb-3">
 				{resumeError ? (
 					<p className="px-2 pb-1 text-body-sm text-danger">
 						{resumeError}
