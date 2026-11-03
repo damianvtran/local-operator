@@ -4,8 +4,9 @@ Status: **PROPOSED — POC for peer review, not for merge.** Base: `origin/main`
 (v0.95.2). Branch: `poc/session-rules-b`. Date: 2026-11-03.
 
 Everything here is behind `LOP_SESSION_RULES=1`. With the variable unset, the session reads and
-writes no `rules.json`, and every system block is byte-identical to `origin/main`. The single
-flag-off-visible change is listed in §9. The flag-off
+writes no `rules.json`, and every system block is byte-identical to `origin/main`. The one
+flag-off change to prompt handling is listed in §9. `rules.json` is also added to the fork and
+move copy sets, which is inert when the file is absent. The flag-off
 proof and every run log are in the PR comments, not in this tree (AGENTS.md "Evidence goes on
 the PR").
 
@@ -53,7 +54,8 @@ A standing instruction can be lost at three points. The data separates them:
 1. **Never captured.** 351 of the 363 matching sessions made no `memory store` call. The scan
    does not see other durable homes (an AGENTS.md edit, `/goal`, a todo, an external task), so
    this is an upper bound on loss, and the largest one the data can show.
-2. **Captured but not read back.** 7 of the 13 storing sessions never recall, and the median gap
+2. **Captured but not read back.** 7 of the 13 storing sessions never recalled after storing (5 never
+   recalled at all), and the median gap
    to the next recall where one happened is about 970 tool calls. The scan does not show that
    recalls cluster at compaction: only 3 of 33 recalls fall within 20 tool calls of one.
 3. **Read back but not obeyed.** The store cannot answer this: recalled text is labelled
@@ -131,8 +133,9 @@ showed flag-off byte identity. Both also passed the real-model evidence bar on o
 cross-judge (reviewer, claude-sonnet-5-5) scored them on six code criteria. **B won** because A
 has one major defect: an `add` over a malformed file overwrote it and reissued `r1`, losing
 every rule and breaking id uniqueness. B was hardened with three grafts and fixes: a flag-on
-session with no directory keeps the sentence; a catch-all around the per-step read covers a
-`RecursionError` from deeply nested JSON; and a voided file logs one warning per change. The
+session with no directory keeps the sentence; the parser refuses deeply nested JSON (a
+`RecursionError`) as a malformed file, with a catch-all backstop so a rules read never breaks
+a turn; and a voided file logs one warning per change. The
 scorecard is in the PR.
 
 ## 6. Evidence summary (detail in PR comments)
@@ -188,7 +191,7 @@ in the transcript state trail.
   - Block-0 alternative: median +108 (range −277..+342).
   - Both figures include the longer replies the rule itself causes. The tail figure also includes
     the accumulated `[session-state]` deltas.
-  - Median uncached delta: −5 (tail) and −14 (block 0), so caching absorbs almost all of it in
+  - Median uncached delta: −5 (tail) and −14.5 (block 0), so caching absorbs almost all of it in
     both arms.
   - One block-0 edit turn ran cold (repeat 1, t4: 2,560 of 19,540 tokens from cache). The other
     two repeats did not, and no tail turn did. One event is not evidence of a cache advantage.
