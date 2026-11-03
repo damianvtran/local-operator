@@ -153,6 +153,10 @@ class AdmissionJob:
     revision: str
     epoch: int
     turn: str
+    # Server-authenticated allocation identity, independent of message type or
+    # display labels. Empty values represent pre-contract/unknown provenance.
+    sender_account_id: str = ""
+    sender_kind: str = ""
 
     @property
     def digest(self) -> str:
@@ -180,6 +184,7 @@ class AdmissionJob:
                 self.revision,
                 self.epoch,
                 self.turn,
+                *([self.sender_account_id, self.sender_kind] if self.sender_account_id else []),
             ],
             separators=(",", ":"),
         )
@@ -644,8 +649,12 @@ def _scrub_wire_failure(failure: BaseException, *, sent: bool = True) -> BaseExc
     today's behaviour.
     """
 
-    from local_operator.providers.failover import ProviderError
+    from local_operator.providers.failover import ProviderError, is_input_refusal
 
+    # Inspect provider text ONLY before scrubbing, using production's narrow
+    # request-kind/input-filter predicate. Retain a boolean, never the body:
+    # a provider rejecting this submission does not mean the route is down.
+    input_refusal = isinstance(failure, ProviderError) and is_input_refusal(failure)
     if isinstance(failure, ProviderError):
         scrub = ProviderError(
             failure.status or 0,
@@ -673,6 +682,7 @@ def _scrub_wire_failure(failure: BaseException, *, sent: bool = True) -> BaseExc
     # "did anything leave the wire", not "did the error carry a status".
     advance = _sender_cannot_cause(failure) or _prewire_refusal_advances(failure, sent=sent)
     setattr(scrub, _ADVANCE_ATTR, advance)
+    setattr(scrub, "tb_input_refusal", input_refusal)
     return scrub
 
 

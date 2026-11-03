@@ -313,6 +313,10 @@ def _screening_item(
             "type": "note",
             "body": {"text": body},
             "body_hash": body_hash,
+            "sender": {
+                "account_id": str(sender.get("account_id") or ""),
+                "kind": str(sender.get("kind") or ""),
+            },
             "recipient": {
                 "account_id": owner.account_id,
                 "endpoint_id": owner.endpoint_id,
@@ -1084,6 +1088,20 @@ async def handle_conversation_available(
             # the hold rather than treating a weaker history read as authority.
             return await held("body_unavailable")
         body_text, body_hash, display = fetched.body, fetched.body_hash, fetched.display
+        # Only THIS gated classification read supplies allocation identity.
+        # Old servers omit it: keep unknown provenance (conservative budget),
+        # never recover it from a durable ref, label or a human history route.
+        account = display.get("sender_account_id", "")
+        kind = display.get("sender_kind", "")
+        if not isinstance(account, str) or len(account) > 256:
+            return await held("sender_malformed")
+        if kind not in ("", "human", "agent"):
+            return await held("sender_malformed")
+        sender = {
+            "account_id": account if kind in ("human", "agent") else "",
+            "kind": kind if account else "",
+            "display_label": display.get("sender_label", ""),
+        }
         if fetched.attachments is None:
             # Descriptors the hub sent but this build cannot validate: never
             # screen a guessed subset of the images; keep it retryable.

@@ -169,7 +169,7 @@ def _install_wire(
                         },
                     )
                     if response.status_code >= 400:
-                        raise ProviderError(response.status_code, VENDOR_CANARY)
+                        raise ProviderError(response.status_code, response.json()["error"])
                     after = (postwire or {}).get(mid)
                     if after is not None:
                         # AFTER the send: in-band provider text, status-less.

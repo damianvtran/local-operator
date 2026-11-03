@@ -376,6 +376,7 @@ class Envelope:
     #: envelope. Public (a hash, not content); the images themselves ride the
     #: private carrier read by :meth:`private_images`.
     attachments_hash: str | None = None
+    sender_kind: str = ""
 
     def private_images(self) -> ScreeningAttachments | None:
         """The image set for the single dispatch, or ``None`` (text-only)."""
@@ -488,6 +489,20 @@ def validate_envelope(
         sender_account = ""
     if not isinstance(sender_account, str) or len(sender_account) > _ENVELOPE_LABEL_MAX:
         return None, "envelope_malformed"
+    # The pair lane's stored participant includes an endpoint and is always
+    # an agent; conversations carry the stored human/agent kind additively.
+    # Neither client display names nor message type can choose an allocation.
+    participant = message.get("sender")
+    participant = participant if isinstance(participant, Mapping) else {}
+    sender_kind = participant.get("kind", "")
+    if not sender_kind and participant.get("endpoint_id"):
+        sender_kind = "agent"
+    if participant.get("account_id") != sender_account:
+        sender_kind = ""
+    if sender_kind not in ("", "human", "agent"):
+        return None, "envelope_malformed"
+    if not sender_account or not sender_kind:
+        sender_kind = ""
     sender_name = sender.get("name")
     if sender_name is None or sender_name == "":
         sender_display = sender_account
@@ -591,6 +606,7 @@ def validate_envelope(
         delivery_state=delivery_state,
         envelope_digest=hashlib.sha256(digest_payload.encode("utf-8")).hexdigest(),
         attachments_hash=attachments.attachments_hash if attachments is not None else None,
+        sender_kind=sender_kind,
     )
     # Private carrier: never a field, so repr/asdict/JSON stay content-free.
     object.__setattr__(envelope, "_private_body", body_text)
@@ -1327,6 +1343,8 @@ async def _screen_core(
         "message": message_id,
         "tenant": owner.tenant_id,
         "logical": fingerprint,
+        "sender_account_id": envelope.sender_account if envelope.sender_kind else "",
+        "sender_kind": envelope.sender_kind,
     }
 
     # 9. Durable LOGICAL reservation BEFORE inference I/O. Exhaustion/busy/
@@ -1372,6 +1390,8 @@ async def _screen_core(
         revision=snapshot.admission_revision,
         epoch=int(epoch),
         turn=turn,
+        sender_account_id=envelope.sender_account if envelope.sender_kind else "",
+        sender_kind=envelope.sender_kind,
     )
     fingerprint = job.digest
     try:
@@ -1523,7 +1543,17 @@ async def _screen_core(
             return ScreenResult("hold", hold_code=answered)
 
         failure_class = screening_failure_class(failure)
-        retry_at = _record_failure(store, owner, failure_class=failure_class)
+        # A typed provider INPUT rejection proves neither an outage nor a
+        # recovery. Keep it uncached/retryable without advancing or resetting
+        # the route breaker. Raw text was classified before wire sanitization.
+        from local_operator.providers.failover import ProviderError, is_input_refusal
+
+        input_refusal = getattr(failure, "tb_input_refusal", False) is True or (
+            isinstance(failure, ProviderError) and is_input_refusal(failure)
+        )
+        retry_at = (
+            None if input_refusal else _record_failure(store, owner, failure_class=failure_class)
+        )
 
         _commit_hold(
             store,

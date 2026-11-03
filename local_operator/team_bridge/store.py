@@ -732,6 +732,11 @@ def _canonical_proof_digest(registered: Any, attempt_id: Any, turn: Any) -> str 
             registered.get("revision"),
             registered.get("epoch"),
             turn,
+            *(
+                [registered["sender_account_id"], registered.get("sender_kind", "")]
+                if registered.get("sender_account_id")
+                else []
+            ),
         ]
     )
 
@@ -769,6 +774,11 @@ def _canonical_job_digest(job: Any) -> str:
             getattr(job, "revision", None),
             getattr(job, "epoch", None),
             getattr(job, "turn", None),
+            *(
+                [job.sender_account_id, job.sender_kind]
+                if getattr(job, "sender_account_id", "")
+                else []
+            ),
         ]
     )
 
@@ -798,8 +808,20 @@ def _decode_bound_proof(raw: Any) -> tuple[str, dict[str, Any]]:
         raise StoreRefused("proof_corrupt", "registered input proof is unreadable") from error
     if not isinstance(registered, dict):
         raise StoreRefused("proof_corrupt", "registered input proof is not a mapping")
-    if set(registered) != set(_PROOF_FIELDS):
+    fields = set(registered)
+    if fields not in (
+        set(_PROOF_FIELDS),
+        set(_PROOF_FIELDS) | {"sender_account_id", "sender_kind"},
+    ):
         raise StoreRefused("proof_corrupt", "registered input proof has an unexpected field set")
+    account = registered.get("sender_account_id", "")
+    kind = registered.get("sender_kind", "")
+    if (
+        not isinstance(account, str)
+        or not isinstance(kind, str)
+        or bool(account) != (kind in ("human", "agent"))
+    ):
+        raise StoreRefused("proof_corrupt", "registered sender provenance is invalid")
     for field in _PROOF_FIELDS:
         value = registered[field]
         if field == "approved":
@@ -834,6 +856,9 @@ def _input_proof_mismatch(registered: Any, fingerprint: str, job: Any) -> str | 
         # registered record exists to be compared against a real job, and a
         # legacy no-job bind is exactly the bypass that dispatched before.
         return "a dispatch job is required to certify registered input"
+    for field in ("sender_account_id", "sender_kind"):
+        if registered.get(field, "") != getattr(job, field, ""):
+            return "dispatch sender attribution changed after registration"
     owner_expected = registered.get("owner")
     owner_actual = (
         f"{getattr(job, 'credential_id', None)}|{getattr(job, 'account_id', None)}|"
@@ -4252,6 +4277,50 @@ class Store:
     #: up to three wire attempts (auth re-resolve + fast-mode resend), and
     #: the physical cap must count those even when the logical one allows it.
     SCREENING_BUDGET_PER_HOUR = 40
+    SCREENING_SENDER_BUDGET_PER_HOUR = 20
+
+    @staticmethod
+    def _ensure_attempt_sender_columns(conn: sqlite3.Connection) -> None:
+        """Add provenance without reassigning or dropping pre-contract spend.
+
+        Old/unknown rows remain NULL and count against EVERY sender's allowance.
+        Unknown work itself counts all spend, so switching an envelope's type or
+        losing its identity can never create another 20-request bucket.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_attempts)")}
+        for column in ("sender_account_id", "sender_kind"):
+            if column not in columns:
+                conn.execute(f"ALTER TABLE screening_attempts ADD COLUMN {column} TEXT")
+
+    def _check_sender_budget(
+        self,
+        conn: sqlite3.Connection,
+        scope: str,
+        kind: str,
+        now: float,
+        sender_account_id: str,
+        sender_kind: str,
+    ) -> None:
+        # Both ceilings are checked under the SAME IMMEDIATE write transaction
+        # as the insert: parallel workers cannot each spend the last allowance.
+        known = bool(sender_account_id) and sender_kind in ("human", "agent")
+        rows = conn.execute(
+            "SELECT sender_account_id, sender_kind FROM screening_attempts "
+            "WHERE account_scope = ? AND kind = ? AND at > ?",
+            (scope, kind, now - 3600.0),
+        ).fetchall()
+        if len(rows) >= self.SCREENING_BUDGET_PER_HOUR:
+            raise StoreRefused("budget_exhausted", "account hourly allowance exhausted")
+        charged = sum(
+            not known
+            or not row["sender_account_id"]
+            or row["sender_kind"] not in ("human", "agent")
+            or row["sender_account_id"] == sender_account_id
+            for row in rows
+        )
+        if charged >= self.SCREENING_SENDER_BUDGET_PER_HOUR:
+            raise StoreRefused("budget_exhausted", "sender hourly allowance exhausted")
 
     #: Floor for an account turn lease: the screening wall deadline is 45 s,
     #: so a lease SHORTER than this could expire under a live dispatch and
@@ -4272,6 +4341,8 @@ class Store:
         kind: str,
         message_id: str | None,
         fingerprint: str | None,
+        sender_account_id: str = "",
+        sender_kind: str = "",
     ) -> str:
         """Durably charge ONE attempt of ``kind`` BEFORE its I/O.
 
@@ -4290,18 +4361,23 @@ class Store:
             self._begin_write(conn)
             self._require_live(conn, owner)
             scope = self._account_scope(owner)
-            spent = conn.execute(
-                "SELECT COUNT(*) FROM screening_attempts "
-                "WHERE account_scope = ? AND kind = ? AND at > ?",
-                (scope, kind, now - 3600.0),
-            ).fetchone()[0]
-            if int(spent) >= self.SCREENING_BUDGET_PER_HOUR:
-                raise StoreRefused("budget_exhausted", f"{kind} attempts/hour/account exhausted")
+            self._ensure_attempt_sender_columns(conn)
+            self._check_sender_budget(conn, scope, kind, now, sender_account_id, sender_kind)
             conn.execute(
                 "INSERT INTO screening_attempts "
-                "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (attempt_id, kind, scope, _owner_key(owner), message_id, fingerprint, now),
+                "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, at, "
+                "sender_account_id, sender_kind) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    attempt_id,
+                    kind,
+                    scope,
+                    _owner_key(owner),
+                    message_id,
+                    fingerprint,
+                    now,
+                    sender_account_id or None,
+                    sender_kind or None,
+                ),
             )
             return attempt_id
 
@@ -4332,8 +4408,20 @@ class Store:
             stored = _PROOF_PREFIX + json.dumps(
                 dict(input_proof), sort_keys=True, separators=(",", ":")
             )
+        sender = input_proof or {}
+        account = sender.get("sender_account_id", "")
+        kind = sender.get("sender_kind", "")
+        if not isinstance(account, str) or not isinstance(kind, str):
+            raise StoreRefused("proof_corrupt", "sender provenance has invalid types")
+        if bool(account) != (kind in ("human", "agent")):
+            raise StoreRefused("proof_corrupt", "sender provenance is incomplete")
         return self._reserve_bucket(
-            owner, kind="logical", message_id=message_id, fingerprint=stored
+            owner,
+            kind="logical",
+            message_id=message_id,
+            fingerprint=stored,
+            sender_account_id=account,
+            sender_kind=kind,
         )
 
     def reserve_http_attempt(
@@ -5158,8 +5246,10 @@ class Store:
                 or int(policy["epoch"]) != int(job.epoch)
             ):
                 raise StoreRefused("policy_stale", "published policy moved after job mint")
+            self._ensure_attempt_sender_columns(conn)
             logical = conn.execute(
-                "SELECT fingerprint, message_id FROM screening_attempts "
+                "SELECT fingerprint, message_id, sender_account_id, sender_kind "
+                "FROM screening_attempts "
                 "WHERE attempt_id = ? AND owner_key = ? AND kind = 'logical'",
                 (job.attempt_id, _owner_key(owner)),
             ).fetchone()
@@ -5181,6 +5271,9 @@ class Store:
                 raise StoreRefused("attempt_mismatch", mismatched)
             if logical["message_id"] != message_id:
                 raise StoreRefused("attempt_mismatch", "job message mismatch")
+            for field in ("sender_account_id", "sender_kind"):
+                if (logical[field] or "") != getattr(job, field, ""):
+                    raise StoreRefused("attempt_mismatch", "ledger sender attribution changed")
             schedule = conn.execute(
                 "SELECT lease_holder, lease_expires FROM screening_schedule WHERE owner_key = ?",
                 (self._account_scope(owner),),
@@ -5192,18 +5285,24 @@ class Store:
             ):
                 raise StoreRefused("retry_later", "account turn not held by this job")
             scope = self._account_scope(owner)
-            spent = conn.execute(
-                "SELECT COUNT(*) FROM screening_attempts "
-                "WHERE account_scope = ? AND kind = 'http' AND at > ?",
-                (scope, now - 3600.0),
-            ).fetchone()[0]
-            if int(spent) >= self.SCREENING_BUDGET_PER_HOUR:
-                raise StoreRefused("budget_exhausted", "http attempts/hour/account exhausted")
+            sender_account = getattr(job, "sender_account_id", "")
+            sender_kind = getattr(job, "sender_kind", "")
+            self._check_sender_budget(conn, scope, "http", now, sender_account, sender_kind)
             conn.execute(
                 "INSERT INTO screening_attempts "
-                "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (attempt_id, "http", scope, _owner_key(owner), message_id, job.digest, now),
+                "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, at, "
+                "sender_account_id, sender_kind) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    attempt_id,
+                    "http",
+                    scope,
+                    _owner_key(owner),
+                    message_id,
+                    job.digest,
+                    now,
+                    sender_account or None,
+                    sender_kind or None,
+                ),
             )
             return attempt_id
 
