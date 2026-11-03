@@ -402,7 +402,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(op="network_clear", blurb="Drop the buffer."),
             ToolDocOp(
                 op="record_start",
-                blurb="Record THIS tab's video to an .mp4 (desktop host only; see notes).",
+                blurb=(
+                    "Record THIS tab's video to an .mp4, optionally at width=/height= "
+                    "(see notes)."
+                ),
             ),
             ToolDocOp(
                 op="record_stop",
@@ -435,8 +438,11 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "this transcript.\n"
             "- 'record_start'/'record_stop' make an MP4 of this tab (AV1: plays "
             "in QuickTime; not expected in Chrome's <video>); path= is approved before "
-            "capture and never overwritten, timeout_s= caps the length. Desktop "
-            "host only.\n"
+            "capture and never overwritten, timeout_s= caps the length, width=/height= "
+            "size the viewport (both or neither, even, 240-3840, area at most "
+            "3840x2160). A clip over 64 MiB is discarded (32 MiB in a scratchpad): "
+            "at 4K about 150 s worst case, 75 s there, so size timeout_s to suit. "
+            "Desktop host only.\n"
             "- Hosts, setup, approvals, error meanings: ``guide://browser``."
         ),
     ),

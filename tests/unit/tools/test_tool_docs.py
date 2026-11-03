@@ -392,9 +392,22 @@ MEASURED_TOKENS: dict[str, int] = {
     # this test's own print.
     # 1863 -> 1908 (+45, issue #3248): the `hover` op and the chord/selector
     # wording on `press`. Measured by this test's own print.
-    # Select adds the native/ARIA operation and its host scope; deliberately
-    # measured by this test after adding the one-line BrowserParams.options.
-    "browser": 1968,
+    # 1908 -> 1968 (+60, issue #3333): the `select` op, its native/ARIA
+    # operation and its host scope, after adding the one-line
+    # BrowserParams.options. Measured by this test's own print.
+    # 1968 -> 2094 (+126, agent-chosen recording size, RS1-RS5): the
+    # width=/height= bounds and the 4K cap arithmetic (about 150 s at 64 MiB,
+    # 75 s in a scratchpad) must be discoverable from the op the model calls;
+    # the measured cost table and the viewport-reflow caveat stay in
+    # `guide://browser`, which is where the reference detail belongs. The cap
+    # figures are a WORST CASE, not a typical rate, so that qualifier rides
+    # beside them (review round 1, m4). Both branches moved this one doc, and
+    # together they pushed it past the 8 KiB soft cap, so the op row and the
+    # note drop the host-only clause they each duplicated from the other
+    # (-5 tokens against the branch's own +131); the number below is measured
+    # on the rebased tree by this test's own print, not a sum of branch deltas.
+    # No other tool's entry moved.
+    "browser": 2094,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the

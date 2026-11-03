@@ -1778,21 +1778,30 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
         from local_operator import browser_files as _files
 
         raw_path = str(args.get("path") or "")
+        # RS7: the size rides in the SAME row as the destination — the question
+        # the user answers is one fact, "write a 3840x2160 clip to HERE", not two
+        # they would have to join themselves. Parsed through `BrowserParams`, the
+        # SAME coercion the executor uses, so a string or integral float in the
+        # raw arguments names the size the clip will really have; a malformed
+        # value returns None and must not crash a description the renderer treats
+        # as unavailability (the executor refuses it properly afterwards).
+        pair = _record_size_from_args(args)
+        size = "" if pair is None else f" at {pair[0]}x{pair[1]}"
         if not raw_path.strip():
             root = str(_files.recordings_root())
             home = str(Path.home())
             shown = root.replace(home, "~", 1) if root.startswith(home) else root
-            return f"record \u2192 {_display_target(shown)}/"
+            return f"record \u2192 {_display_target(shown)}/{size}"
         if _SCHEME_SHAPED_RE.match(raw_path.strip()):
             # This tool resolves no scheme, so the call will be refused: naming
             # the invented relative path would describe a write that never
             # happens (the same reason the screenshot branch refuses to).
-            return f"record: {_display_target(raw_path.strip())}"
+            return f"record: {_display_target(raw_path.strip())}{size}"
         try:
             path, inside, resolvable = _resolve_workspace_path(raw_path, cwd or ".")
         except (OSError, ValueError):
-            return f"record: {_display_target(raw_path)}"
-        return _approval_description(path, inside, "record", resolvable)
+            return f"record: {_display_target(raw_path)}{size}"
+        return f"{_approval_description(path, inside, 'record', resolvable)}{size}"
     if action == "download":
         # The consent question is "may this page write files to your disk", and the
         # DIRECTORY is the answer — the file names are the page's to choose, and a
@@ -21476,6 +21485,10 @@ _RECORD_ABSENT_REASONS = frozenset(
         "record_unsupported",
         "record_av1_unavailable",
         "record_failed",
+        # A refused SIZE starts nothing, so the approval must not survive
+        # it — and it is listed here rather than inferred from the reason's
+        # prefix, because this set is the whitelist that PROVES absence.
+        "record_size",
     }
 )
 
@@ -21773,6 +21786,14 @@ class BrowserParams(BaseModel):
         "(default 120, max 600); 'record_start' max recording seconds "
         "(default 120, max 600; the host auto-stops and saves at it).",
     )
+    width: int | None = Field(
+        default=None,
+        description="'record_start' viewport width in pixels (240-3840, even; needs height).",
+    )
+    height: int | None = Field(
+        default=None,
+        description="'record_start' viewport height in pixels (240-3840, even; needs width).",
+    )
 
     @field_validator("x", "y", mode="before")
     @classmethod
@@ -21788,6 +21809,30 @@ class BrowserParams(BaseModel):
         """
         if isinstance(value, bool):
             raise ValueError("must be a number, not a boolean")
+        return value
+
+    @field_validator("width", "height", mode="before")
+    @classmethod
+    def _refuse_uncoercible_size(cls, value: Any) -> Any:
+        """Refuse a size that is not a whole number of pixels, in every spelling.
+
+        Pydantic's lax mode coerces ``"3840"`` and ``3840.0`` to 3840, and the
+        executor records at the coerced value — so the APPROVAL row must read the
+        same coercion or it describes a different clip from the one that starts
+        (review M3: a string size rendered a row with no size at all). A bool is
+        refused for the same reason ``x``/``y`` refuse one: ``True`` would
+        otherwise become a 1-pixel side. The fractional cases raise the field's
+        own error rather than a silent truncation to 3840.
+        """
+        if isinstance(value, bool):
+            raise ValueError("must be a whole number of pixels, not a boolean")
+        if isinstance(value, (str, float)):
+            try:
+                number = float(value)
+            except ValueError:
+                return value  # let the int field name the malformed shape
+            if not number.is_integer():
+                raise ValueError("must be a whole number of pixels")
         return value
 
 
@@ -22538,6 +22583,220 @@ def _validate_locator_target(action: str, params: BrowserParams) -> str:
     )
 
 
+def _record_size_problem(params: BrowserParams) -> tuple[str, str, str]:
+    """``(param, why, sentence)`` for an unusable width/height, or three empty strings.
+
+    One function for the sentence and the two codes, because the harness answers
+    this fault on TWO paths: the pre-dispatch argument check (which can only
+    return text) and the recording lane's typed result (which carries
+    ``reason``/``param``/``why`` the way the host's own refusal does). Two
+    spellings of the same refusal is the defect the shared-reason tables exist
+    to prevent, so the wording lives here and both paths call it.
+
+    The bounds are the host's (mirrored in ``browser_files``): both sides
+    or neither, each even, 240..3840, area at most 3840x2160. Area rather than
+    side is what makes 2160x3840 portrait legal and 3840x3840 illegal — the
+    encoder's price tracks pixels, not the longer edge.
+    """
+    from local_operator import browser_files as _files
+
+    width, height = params.width, params.height
+    if width is None and height is None:
+        return "", "", ""
+    if width is None or height is None:
+        given = "width" if width is not None else "height"
+        missing = "height" if width is not None else "width"
+        return (
+            "size",
+            "incomplete",
+            f"'width' and 'height' must be given together (got {given} only): a clip is "
+            f"sized in both dimensions, and one side alone would record at the default "
+            f"1280x720. Add {missing} or drop {given} for a 1280x720 clip. Nothing was "
+            "started.",
+        )
+    for name, side in (("width", width), ("height", height)):
+        if not _files.RECORD_MIN_SIDE <= side <= _files.RECORD_MAX_SIDE:
+            return (
+                name,
+                "range",
+                f"'{name}' for 'record_start' must be {_files.RECORD_MIN_SIDE} to "
+                f"{_files.RECORD_MAX_SIDE} pixels (got {side}). Nothing was started.",
+            )
+        if side % 2:
+            return (
+                name,
+                "odd",
+                f"'{name}' must be even (got {side}): a sized recording takes even sides, so "
+                "the clip is coded at exactly the viewport you asked for. Nothing was "
+                "started.",
+            )
+    area = width * height
+    if area > _files.RECORD_MAX_PIXELS:
+        return (
+            "size",
+            "area",
+            f"{width}x{height} is {area:,} pixels, over the {_files.RECORD_MAX_PIXELS:,}-pixel "
+            "limit (3840x2160): a recording may be portrait or any aspect inside that "
+            "area, but not larger. Nothing was started.",
+        )
+    return "", "", ""
+
+
+#: Longest caller value quoted back in a size refusal, in characters. The value
+#: is the caller's own argument, but a model can emit a page of digits and the
+#: answer has to stay a sentence the transcript can hold.
+_SIZE_ECHO_CHARS = 24
+
+
+def _shown_size_value(value: Any) -> str:
+    """The caller's own value, quoted for a refusal and bounded."""
+    text = repr(value)
+    if len(text) <= _SIZE_ECHO_CHARS:
+        return text
+    return text[: _SIZE_ECHO_CHARS - 1] + "\u2026"
+
+
+def _record_size_type_problem(exc: ValidationError, action: Any) -> tuple[str, str, str]:
+    """``(param, why, sentence)`` for a size ``BrowserParams`` REJECTED, or empty strings.
+
+    A size is type-checked HERE because nothing else does it: the params schema
+    spells ``width``/``height`` as ``anyOf: [integer, null]``, which the loop's
+    pre-dispatch schema pass reads as "not mine to check", so ``True``, ``3840.5``
+    and ``'abc'`` used to reach the approval prompt and only then be refused —
+    untyped — by ``execute``. The operator approved a clip that could never start.
+
+    Answers only a fault that is confined to width/height on a ``record_start``:
+    any other malformed field belongs to the executor's validation error, which
+    names the field the caller actually got wrong.
+    """
+    from local_operator import browser_files as _files
+
+    locations = {str(err["loc"][0]) for err in exc.errors() if err["loc"]}
+    if not locations or not locations <= {"width", "height"}:
+        return "", "", ""
+    if any(not err["loc"] for err in exc.errors()):
+        # A fault with no field on it is not the size's: answering it here would
+        # hide the field the caller really got wrong.
+        return "", "", ""
+    if str(action or "").strip().lower() != "record_start":
+        return "", "", ""
+    # One side, or both. ``size`` is the param the cross-field bounds already
+    # use, so a consumer grouping these refusals learns no second spelling.
+    faulted = exc.errors()
+    if len(locations) == 1:
+        param = next(iter(locations))
+        side = f"'{param}'"
+        shown = _shown_size_value(faulted[0].get("input"))
+    else:
+        # Each side is quoted against its own name: one value against "width and
+        # height" would describe a fault the caller cannot find.
+        param = "size"
+        side = "'width' and 'height'"
+        shown = " and ".join(
+            f"{_shown_size_value(err.get('input'))} for '{err['loc'][0]}'" for err in faulted
+        )
+    return (
+        param,
+        "type",
+        f"{side} for 'record_start' must be a whole number of pixels, "
+        f"{_files.RECORD_MIN_SIDE} to {_files.RECORD_MAX_SIDE} and even (got {shown}): a clip "
+        "is sized in whole pixels so the viewport is exactly the one approved. "
+        "Nothing was started.",
+    )
+
+
+def _record_size_from_args(args: dict[str, Any]) -> tuple[int, int] | None:
+    """The ``(width, height)`` the executor will record at, from RAW arguments.
+
+    ``BrowserParams`` is the one coercion both halves use: the approval describer
+    sees the arguments before pydantic does, so a string ``"3840"`` (a spelling
+    models emit) used to render a row with no size while the executor recorded at
+    3840x2160 (review M3). A pair that cannot be parsed returns ``None`` — the
+    description must not raise for a call the executor is about to refuse.
+    """
+    try:
+        params = BrowserParams(**args)
+    except ValidationError:
+        return None
+    if params.width is None or params.height is None:
+        return None
+    return params.width, params.height
+
+
+def _record_size_result(tool_call_id: str, problem: tuple[str, str, str]) -> ToolResult | None:
+    """The TYPED refusal for a size the host could not honour, or ``None``.
+
+    ``reason`` is the same spelling the host uses (``record_size``), so one
+    consumer — a transcript reader, the absent-reason whitelist, a later stop —
+    reads both producers the same way.
+    """
+    param, why, sentence = problem
+    if not sentence:
+        return None
+    return _error(
+        tool_call_id,
+        "browser",
+        sentence,
+        details={"error_code": "record_size", "reason": "record_size", "param": param, "why": why},
+    )
+
+
+def _record_size_refusal(tool_call_id: str, params: BrowserParams) -> ToolResult | None:
+    """The typed refusal for the size an already-parsed call asks for, or ``None``."""
+    return _record_size_result(tool_call_id, _record_size_problem(params))
+
+
+def _browser_args_problem(
+    tool_call_id: str, action: str, params: BrowserParams
+) -> ToolResult | None:
+    """The argument refusal for one call, TYPED where a typed code exists.
+
+    Every check but the size has no host counterpart and stays the historical
+    plain message. The size does: the host reports the same ``record_size`` /
+    ``param`` / ``why`` triple over the wire, so the harness's own refusal must
+    carry it too — a transcript reader and the absent-reason whitelist treat both
+    producers alike. Called from BOTH dispatcher entries (`execute_browser`, the
+    real path, and `_execute_browser`, which tests and the dispatch bridge reach
+    directly), so neither spelling can reach the lane without the typed result
+    (review M1).
+    """
+    invalid = _validate_browser_args(action, params)
+    if invalid:
+        return _error(tool_call_id, "browser", invalid)
+    if action != "record_start":
+        # `record_stop` and every other action carrying width/height is already
+        # refused above by `_validate_record_fields`; a size on them is never a
+        # `record_size` fault.
+        return None
+    return _record_size_refusal(tool_call_id, params)
+
+
+def _browser_record_size_refusal(args: dict[str, Any], offered: frozenset[str]) -> str | None:
+    """The PLAN-TIME half of the size check, run by the loop before approval.
+
+    The approval prompt is painted before a tool body runs, so a refusal that
+    lived only in `execute` made the operator approve a clip that could never
+    start (review M2, the same defect class as Q-2 on #1546). This hook answers
+    with the same sentence the typed result carries, ending "Nothing was
+    started."; it is text only because ``AgentTool.refuse_args`` returns text,
+    so the codes (`record_size`/`param`/`why`) ride the execute-time result.
+
+    Never raises: the loop skips a hook that throws, and a skipped hook means the
+    prompt comes back. A shape ``BrowserParams`` rejects is refused here too when
+    the fault is confined to width/height; any other malformed field is left to
+    `execute_browser`'s validation error, which names it.
+    """
+    try:
+        params = BrowserParams(**args)
+    except ValidationError as exc:
+        _param, _why, sentence = _record_size_type_problem(exc, args.get("action"))
+        return sentence or None
+    if params.action.strip().lower() != "record_start":
+        return None
+    _param, _why, sentence = _record_size_problem(params)
+    return sentence or None
+
+
 def _validate_record_fields(action: str, params: BrowserParams) -> str:
     """Validate the two fields recording REUSES, without adding a third (D13).
 
@@ -22554,6 +22813,15 @@ def _validate_record_fields(action: str, params: BrowserParams) -> str:
     from local_operator import browser_files as _files
 
     if action not in _RECORD_ACTIONS:
+        if params.width is not None or params.height is not None:
+            # The same house rule `timeout_s`/`path` follow: a field an action
+            # ignores is refused rather than dropped, because a caller that sent
+            # a size to `screenshot` would otherwise believe it had chosen the
+            # capture's dimensions.
+            return (
+                "'width'/'height' are only valid for 'record_start' (got them on "
+                f"'{action}'): they resize the viewport of the tab being RECORDED"
+            )
         return ""
     if action == "record_stop":
         if params.path.strip():
@@ -22565,6 +22833,11 @@ def _validate_record_fields(action: str, params: BrowserParams) -> str:
             return (
                 "'timeout_s' is only valid for 'record_start' (got it on 'record_stop'): "
                 "it is the recording LENGTH, fixed before the capture begins"
+            )
+        if params.width is not None or params.height is not None:
+            return (
+                "'width'/'height' are only valid for 'record_start' (got them on "
+                "'record_stop'): the clip's size is fixed when the recording starts"
             )
         return ""
     raw_path = params.path.strip()
@@ -22604,6 +22877,10 @@ def _validate_record_fields(action: str, params: BrowserParams) -> str:
                 f"({_files.RECORD_MIN_DURATION_S:g} to {_files.RECORD_MAX_DURATION_S:g}; "
                 f"default {_files.RECORD_DEFAULT_DURATION_S:g}); got {params.timeout_s:g}"
             )
+    # The SIZE is checked by `_browser_args_problem`, the typed entry both
+    # dispatchers call: `record_size` carries the host's own codes, and this
+    # function can only return text, so leaving the check here shadowed the
+    # typed refusal on the real path (review M1).
     return ""
 
 
@@ -26121,6 +26398,22 @@ def _recording_landed(
     )
 
 
+def _record_echo_side(result: dict[str, Any], key: str) -> int | None:
+    """One side of the size a host ECHOED in its start result, or ``None``.
+
+    Strict on purpose: ``True`` is not 1 px and a float is not a viewport, and
+    a comparison that coerced them would certify a clip nobody asked for. The
+    echo is the harness's only evidence that the recording is the size the
+    approval named, so "unreadable" must never read as "matches".
+    """
+    value = result.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if float(value) != int(value):
+        return None
+    return int(value)
+
+
 async def _browser_record(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -26140,12 +26433,27 @@ async def _browser_record(
     """
     from local_operator import browser_files as files
 
+    # No size check here: both dispatcher entries (`execute_browser`, and the
+    # direct `_execute_browser`) refuse a bad size before this lane runs, so a
+    # second spelling of the same refusal would be unreachable (review M1).
+    # The capability gate and the echo check below stay POST-approval because
+    # they need the selected client, which does not exist at plan time.
     problem = _capability_problem(tool_call_id, action, client, surface=state.surface_id)
     if problem is not None:
         # The capability gate the other stateful actions use, before any path is
         # resolved or any wire call is made: a pre-feature app must produce the
         # typed refusal, not a dial that times out on an unknown method.
         return problem
+    sized = params.width is not None and params.height is not None
+    if sized:
+        # `record_size` is a CAPABILITY, not a wire method: a host that
+        # does not advertise it would record at its default size and report
+        # success, so the harness asks its own record first and refuses with
+        # copy that names the working fallback instead of a version story about
+        # an action that does exist.
+        problem = _capability_problem(tool_call_id, "record_size", client, surface=state.surface_id)
+        if problem is not None:
+            return problem
     wire: dict[str, Any] = {
         "tab": state.surface_id,
         # Identity and display label are trusted host metadata, exactly as every
@@ -26156,10 +26464,11 @@ async def _browser_record(
         target, refusal = _recording_destination(tool_call_id, params.path, context)
         if refusal is not None or target is None:
             return refusal or _error(tool_call_id, "browser", "no recording destination")
-        # Fixed capture parameters (D14): up to 1280x720 (a ceiling; the clip is
-        # scaled to fit) at 10 fps with audio off, the same viewport the agent's
-        # hidden tab already paints. Not tunable in v1
-        # and not sent as fields the host might read as requests to change.
+        # Capture parameters: 10 fps with audio off, the
+        # same viewport the agent's hidden tab already paints, UNLESS the caller
+        # named a size — then the host resizes the tab's viewport to it and
+        # records exactly there. Absent, the fields are not sent at all, so an
+        # unsized start is byte-identical to the pre-feature wire.
         # WHOLE seconds: the validator refuses a fraction, and the host's
         # `durationOf` would too (R1-2). `int()` here is a lossless narrow of a
         # value already proven integral, not a round.
@@ -26172,6 +26481,8 @@ async def _browser_record(
         duration = max(files.RECORD_MIN_DURATION_S, min(duration, files.RECORD_MAX_DURATION_S))
         cap = _recording_cap_bytes(target, context)
         wire.update(path=str(target), max_duration_s=duration, max_bytes=cap)
+        if sized:
+            wire.update(width=params.width, height=params.height)
         result, problem = await _bridge_call(
             tool_call_id, action, wire, surface=state.surface_id, client=client
         )
@@ -26201,11 +26512,52 @@ async def _browser_record(
         # which is correct: the host replaces a different owner's recording, and
         # a same-owner second start is refused before this line.
         _APPROVED_RECORDINGS[state.surface_id] = str(target)
+        if sized:
+            # The capability file can be one app-swap stale, and an old host
+            # answers a SIZED start by silently recording at its default size
+            # and reporting success. The echo is the only evidence the clip is
+            # the size the user approved, so a missing or different pair is a
+            # FAILED start — but the encoder is running, so the approval is kept
+            # and the caller is told how to save what is actually recording.
+            echoed = (_record_echo_side(result, "width"), _record_echo_side(result, "height"))
+            if echoed != (params.width, params.height):
+                running = f"{echoed[0]}x{echoed[1]}" if None not in echoed else "an unreported size"
+                return _error(
+                    tool_call_id,
+                    "browser",
+                    f"the clip is NOT at the {params.width}x{params.height} asked for: the "
+                    f"desktop app started it at {running}. A build without sized recording "
+                    "records at its default 1280x720 and still reports success. The "
+                    f"approved destination {target} is kept, so 'record_stop' saves this "
+                    "clip; stop it and update Local Operator before retrying for a sized one.",
+                    details={
+                        "target": str(target),
+                        # A size DISTINCT from `record_size`: that reason is in
+                        # `_RECORD_ABSENT_REASONS` (a refused start proves no
+                        # encoder is running), while this one proves the OPPOSITE
+                        # — a clip IS recording, at the wrong size, and must
+                        # remain stoppable (review m3).
+                        "error_code": "record_size_mismatch",
+                        "reason": "record_size_mismatch",
+                        "param": "size",
+                        "why": "not_applied",
+                        "requested_width": params.width,
+                        "requested_height": params.height,
+                    },
+                )
+        at_size = f" at {params.width}x{params.height}" if sized else ""
+        details: dict[str, Any] = {
+            "target": str(target),
+            "max_duration_s": duration,
+            "max_bytes": cap,
+        }
+        if sized:
+            details.update(width=params.width, height=params.height)
         return _text(
             tool_call_id,
             "browser",
             f"Recording started: {target} (max {duration:g} s, up to "
-            f"{cap // (1024 * 1024)} MiB). Stop it with 'record_stop' to save the file. "
+            f"{cap // (1024 * 1024)} MiB{at_size}). Stop it with 'record_stop' to save the file. "
             "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; it is not "
             "expected to play in Chrome's <video> (not tested).",
             # `target`, not `path`: a started recording has not written anything
@@ -26213,7 +26565,7 @@ async def _browser_record(
             # produced file (session_files.scan records it as an artifact). A
             # phantom row pointing at a file that does not exist until the stop
             # would be worse than no row at all.
-            details={"target": str(target), "max_duration_s": duration, "max_bytes": cap},
+            details=details,
         )
     result, problem = await _bridge_call(
         tool_call_id, action, wire, surface=state.surface_id, client=client
@@ -27576,6 +27928,28 @@ async def execute_browser(
         invalid = _validate_browser_args(preflight_action, keyboard)
         if invalid:
             return _error(tool_call_id, "browser", invalid)
+    # The recording SIZE is refused here, before ownership or host selection:
+    # the typed result carries the error code the generic validation path
+    # cannot, and a bad size must not depend on a host being reachable to be
+    # answered (review M1). Every OTHER argument check keeps its established
+    # ordering, later in this function, after the lane is chosen.
+    try:
+        early = BrowserParams(**args)
+    except ValidationError as exc:
+        # A size shaped wrong (`True`, `3840.5`, `'abc'`) is typed here for the
+        # same reason the semantic refusal above is: the generic validation error
+        # names the field but carries no `record_size` code, so a reader could
+        # not tell "nothing started" from any other bad argument.
+        size_refusal = _record_size_result(
+            tool_call_id, _record_size_type_problem(exc, args.get("action"))
+        )
+        if size_refusal is not None:
+            return size_refusal
+        early = None  # the established path below names the malformed field
+    if early is not None and early.action.strip().lower() == "record_start":
+        size_refusal = _record_size_refusal(tool_call_id, early)
+        if size_refusal is not None:
+            return size_refusal
     state = _browser_state(context)
     resource = getattr(state, "resource", None)
     if resource is None or state.surface_id.startswith("surface:"):
@@ -27644,9 +28018,9 @@ async def execute_browser(
             "browser",
             f"unknown action: {action} (expected one of {', '.join(BROWSER_ACTIONS)})",
         )
-    invalid = _validate_browser_args(action, validated)
-    if invalid:
-        return _error(tool_call_id, "browser", invalid)
+    refusal = _browser_args_problem(tool_call_id, action, validated)
+    if refusal is not None:
+        return refusal
     from local_operator.browser_bridge.backend import BridgeError, BridgeUnreachable
     from local_operator.browser_bridge.resources import BrowserOwnershipError
 
@@ -28232,10 +28606,12 @@ async def _execute_browser(
             "logins.",
         )
     # Before the state lookup and before every subprocess, including the
-    # liveness probe below: see _validate_browser_args.
-    problem = _validate_browser_args(action, params)
-    if problem:
-        return _error(tool_call_id, "browser", problem)
+    # liveness probe below: a direct caller (the dispatch bridge, tests) can
+    # reach this function without `execute_browser`, so the check repeats here —
+    # carrying the same typed record-size refusal as the outer entry.
+    problem = _browser_args_problem(tool_call_id, action, params)
+    if problem is not None:
+        return problem
     if action == "type" and params.secret_ref.strip():
         # Resolve the ref into `params.text` BEFORE any lane sees the call, so
         # both dispatch lanes (the bridge wire and cmux) carry the value in the
@@ -28750,6 +29126,12 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         name="browser",
         label="Browser",
         describe_approval=_describe_browser_approval,
+        # The size is refused at PLAN time, before the gate paints a consent row
+        # for a clip that cannot start (review M2). Everything that needs the
+        # client — the `record_size` capability check and the echo comparison —
+        # stays after approval, because neither can be answered until a host is
+        # selected.
+        refuse_args=_browser_record_size_refusal,
         description=(
             # Footprint: this description rides in EVERY session's cache prefix, so
             # the per-action detail lives in `guide://browser` (the playbook the
