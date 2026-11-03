@@ -407,7 +407,7 @@ MEASURED_TOKENS: dict[str, int] = {
     # (-5 tokens against the branch's own +131); the number below is measured
     # on the rebased tree by this test's own print, not a sum of branch deltas.
     # No other tool's entry moved.
-    "browser": 2094,
+    "browser": 2097,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the

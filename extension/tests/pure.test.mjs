@@ -1021,7 +1021,9 @@ test("no hello send site carries a numeric proto literal", async () => {
   // Every file that sends a `hello`. Named individually, not globbed: a new
   // sender added in a new file must be added here deliberately, and a rename of
   // one of these must fail this test rather than silently dropping its coverage.
-  const senders = ["../src/worker.ts", "../src/popup/popup.ts", "../src/options/options.ts"];
+  // The popup's and the pairing tab's hello live in ONE shared module
+  // (pair/submit.ts), so both surfaces submit a code identically.
+  const senders = ["../src/worker.ts", "../src/pair/submit.ts", "../src/options/options.ts"];
   for (const file of senders) {
     const source = await readFile(new URL(file, import.meta.url), "utf8");
     const hellos = [...source.matchAll(/event:\s*"hello"[\s\S]{0,400}?\}/g)].map((m) => m[0]);
@@ -1083,7 +1085,7 @@ test("no FOURTH hello sender can appear without failing this suite", async () =>
   }
   assert.deepEqual(
     senders.sort(),
-    ["options/options.ts", "popup/popup.ts", "worker.ts"],
+    ["options/options.ts", "pair/submit.ts", "worker.ts"],
     "every file that sends a hello must be listed in the source scan above",
   );
 });

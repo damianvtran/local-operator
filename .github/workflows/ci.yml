@@ -1208,6 +1208,8 @@ jobs:
           # Keep the timing XML and real-App proof contracts intact. Quiet-turn
           # proof JSON is schema-filtered and capped at 96 KiB per file: no
           # prompt/transcript bodies, secrets, or arbitrary fixture scratch.
+          # Native churn failure JSON is diagnostic-field-only and capped at
+          # 96 KiB; preserve it even when the original pytest tmp_path is gone.
           # Never upload an entire test-artifact directory or working tree.
           path: |
             junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
@@ -1216,6 +1218,7 @@ jobs:
             test-artifacts/tui-proof/**/*.geometry.json
             test-artifacts/tui-proof/manifest.json
             test-artifacts/quiet-proof/*.json
+            test-artifacts/process-proof/*.json
           # 7 days, not 1: post-hoc flake/review evidence reads must survive past
           # the next day (PR #2470: XML expired at ~24.5 h, forced a re-run).
           retention-days: 7

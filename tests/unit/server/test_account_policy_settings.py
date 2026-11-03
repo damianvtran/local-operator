@@ -124,3 +124,45 @@ async def test_invalid_and_unauthorized_save_leave_persisted_config_unchanged(ap
     assert response.status_code == 401
     assert all(path.read_bytes() == before for path, before in files.items())
     assert (await rows(client))[KEY]["value"] == "fair"
+
+
+@pytest.mark.parametrize("language", ["fr", "zh-CN", "en", "unknown"])
+async def test_write_refusals_follow_injected_backend_config(api, monkeypatch, language):
+    """PATCH and reset share localized copy, never the raw storage exception."""
+    from local_operator import settings_io
+    from local_operator.config import CONFIG_FILE_NAME
+    from local_operator.i18n import messages
+    from local_operator.i18n.resolve import resolve_language
+
+    monkeypatch.setenv("LOP_LANG", "en")
+    client, manager = api
+    manager.set_config_value("language", language)
+    locale = resolve_language(language)
+    path = manager.config_dir / CONFIG_FILE_NAME
+    before = path.read_bytes()
+    denied = await client.patch(
+        f"/v1/settings/{KEY}",
+        json={"value": "fair"},
+        headers={"Authorization": "Bearer synthetic-wrong-token"},
+    )
+    assert denied.status_code == 401
+    assert path.read_bytes() == before
+
+    def refuse(*args, **kwargs):
+        raise OSError("synthetic-private-path-must-not-leak")
+
+    monkeypatch.setattr(settings_io, "write_setting", refuse)
+    monkeypatch.setattr(settings_io, "reset_setting", refuse)
+    for response in (
+        await client.patch(f"/v1/settings/{KEY}", json={"value": "fair"}),
+        await client.post(f"/v1/settings/{KEY}/reset"),
+    ):
+        assert response.status_code == 503
+        detail = response.json()["detail"]
+        assert detail["code"] == "setting_write_failed"
+        assert detail["params"] == {}
+        assert detail["text"] == messages.render(
+            "wire.settings.account_policy.error.write_failed", {}, locale=locale
+        )
+        assert path.read_bytes() == before
+        assert "synthetic-private-path" not in response.text

@@ -1,0 +1,47 @@
+{"gate": "generator", "command": ["/Users/damian/local-operator/.venv/bin/python", "scripts/run_bounded.py", "--contract=command-status", "--memory-mb", "512", "--timeout", "90", "--", "/Users/damian/local-operator/.venv/bin/python", "scripts/i18n/generate.py", "--check"], "outer_pid": 16120, "outer_pgid": 16120, "rc": 0, "group_rows_after_exit": [], "group_rows_after_supervisor": [], "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"}
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+generate.py --check: 123 artifact(s) byte-identical
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=710fd950ebac4d1c8e541c1404243b82 completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/710fd950ebac4d1c8e541c1404243b82.completion.json
+
+{"gate": "catalogues", "command": ["/Users/damian/local-operator/.venv/bin/python", "scripts/run_bounded.py", "--contract=command-status", "--memory-mb", "512", "--timeout", "90", "--", "/Users/damian/local-operator/.venv/bin/python", "scripts/i18n/check.py", "--catalogues-only"], "outer_pid": 16347, "outer_pgid": 16347, "rc": 0, "group_rows_after_exit": [], "group_rows_after_supervisor": [], "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"}
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+check.py: catalogue checks: 0 problem(s)
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=c16144ef093c4e2ab51200656bc7fe87 completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/c16144ef093c4e2ab51200656bc7fe87.completion.json
+
+{"gate": "affected-pytest", "command": ["/Users/damian/local-operator/.venv/bin/python", "scripts/run_bounded.py", "--contract=command-status", "--memory-mb", "512", "--timeout", "90", "--", "/Users/damian/local-operator/.venv/bin/python", "-m", "pytest", "tests/unit/i18n/test_language_manifest.py", "tests/unit/i18n/test_ledger_shards.py", "tests/unit/i18n/test_generate.py", "tests/unit/i18n/test_eligibility.py", "-q", "-n0"], "outer_pid": 16518, "outer_pgid": 16518, "rc": 0, "group_rows_after_exit": [], "group_rows_after_supervisor": [], "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"}
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
+........................................................................ [ 77%]
+.....................                                                    [100%]
+93 passed in 27.32s
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=a028f9cc92084488a73cfa4b6f3a4561 completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/a028f9cc92084488a73cfa4b6f3a4561.completion.json
+
+{"gate": "registered-routes", "command": ["/Users/damian/local-operator/.venv/bin/python", "scripts/run_bounded.py", "--contract=command-status", "--memory-mb", "512", "--timeout", "90", "--", "/Users/damian/local-operator/.venv/bin/python", "-m", "pytest", "tests/unit/mobile/test_account_routing_routes.py", "tests/unit/server/test_account_policy_settings.py", "-q", "-n0"], "outer_pid": 17188, "outer_pgid": 17188, "rc": 0, "group_rows_after_exit": [], "group_rows_after_supervisor": [], "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"}
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
+...............                                                          [100%]
+=============================== warnings summary ===============================
+local_operator/types.py:426
+  /Users/damian/local-operator/.worktrees/account-policy-context-backfill/local_operator/types.py:426: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    @validator(
+
+local_operator/types.py:446
+  /Users/damian/local-operator/.worktrees/account-policy-context-backfill/local_operator/types.py:446: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    @validator("end_time_utc")
+
+local_operator/server/models/schemas.py:732
+  /Users/damian/local-operator/.worktrees/account-policy-context-backfill/local_operator/server/models/schemas.py:732: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    class ModelEntry(BaseModel):
+
+local_operator/server/models/schemas.py:767
+  /Users/damian/local-operator/.worktrees/account-policy-context-backfill/local_operator/server/models/schemas.py:767: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    class ModelListResponse(BaseModel):
+
+local_operator/server/models/schemas.py:814
+  /Users/damian/local-operator/.worktrees/account-policy-context-backfill/local_operator/server/models/schemas.py:814: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    class ProviderListResponse(BaseModel):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+15 passed, 5 warnings in 1.46s
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=0f56a236476041848449463519ff86ef completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/0f56a236476041848449463519ff86ef.completion.json
+
