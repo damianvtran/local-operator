@@ -1,0 +1,73 @@
+{
+  "kind": "original_separate_namespace_audit_manifest",
+  "locale": "fr",
+  "namespace": "wire.settings.hub_defaults",
+  "auditor_session": "35aac0a677bc",
+  "files": [
+    {
+      "path": "audit-report.md",
+      "sha256": "28c89a10a03c0b172aaf2aa87cdf6f0bf6658465f30e96f17a5f65467c372b60",
+      "bytes": 6597
+    },
+    {
+      "path": "caller-source-proof.json",
+      "sha256": "8f44e245886c87c58601a075685b5e80d387ed53317683cf4bff8dc75545ee63",
+      "bytes": 3716
+    },
+    {
+      "path": "catalogues/en/wire.settings.hub_defaults.context.json",
+      "sha256": "a337e7394f3856476044f9accdb8daeb7a864a9a8ecfe0c579ec97ec646712ba",
+      "bytes": 6161
+    },
+    {
+      "path": "catalogues/en/wire.settings.hub_defaults.json",
+      "sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
+      "bytes": 895
+    },
+    {
+      "path": "catalogues/fr/wire.settings.hub_defaults.json",
+      "sha256": "9733a2653109b4e5b30964d0bbc9fb5974fe799bb086ce8d21354517d1936940",
+      "bytes": 1086
+    },
+    {
+      "path": "glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "bytes": 13399
+    },
+    {
+      "path": "input-verification.json",
+      "sha256": "5e8c419c22c7679a3d3ee8ecbf36b2a43c1f7576e5e40f946fcde74fa70a3f95",
+      "bytes": 2239
+    },
+    {
+      "path": "mechanical.json",
+      "sha256": "791d003560b21c858c5f36898db507bb5bdb4c111d80a480c5a3151d8d3bc0ba",
+      "bytes": 3917
+    },
+    {
+      "path": "mechanical.stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "provenance.json",
+      "sha256": "9acb896f281a86ed097477ca495f59dab4cd450f66945f379a4c0b17189aa398",
+      "bytes": 2885
+    },
+    {
+      "path": "record.json",
+      "sha256": "64efeb7676df47fdf7dc20e8a4968c8c242db89eef9d96e56f252a2dbff8059e",
+      "bytes": 8012
+    },
+    {
+      "path": "style-fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "bytes": 4196
+    },
+    {
+      "path": "verify.py",
+      "sha256": "e80675b75a459da25a734b3685d90e4a896c0a0b5eb447d67ca614a18c50b582",
+      "bytes": 6708
+    }
+  ]
+}

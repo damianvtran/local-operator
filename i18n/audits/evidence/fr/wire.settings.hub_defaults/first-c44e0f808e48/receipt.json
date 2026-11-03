@@ -1,0 +1,63 @@
+{
+  "locale": "fr",
+  "namespace": "wire.settings.hub_defaults",
+  "audit_date": "2026-11-03",
+  "key_count": 9,
+  "source_sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
+  "target_sha256": "9733a2653109b4e5b30964d0bbc9fb5974fe799bb086ce8d21354517d1936940",
+  "input_hashes": {
+    "en": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:local_operator/i18n/catalogues/en/wire.settings.hub_defaults.json",
+      "snapshot": "en.json",
+      "sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c"
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-hub-defaults-0e7cde33/wire.settings.hub_defaults.json",
+      "snapshot": "fr.json",
+      "sha256": "9733a2653109b4e5b30964d0bbc9fb5974fe799bb086ce8d21354517d1936940"
+    },
+    "context": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:local_operator/i18n/catalogues/en/wire.settings.hub_defaults.context.json",
+      "snapshot": "context.json",
+      "sha256": "a337e7394f3856476044f9accdb8daeb7a864a9a8ecfe0c579ec97ec646712ba"
+    },
+    "style_guide": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:i18n/style-guides/fr.md",
+      "snapshot": "fr-style.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    "translator_style_guide": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-hub-defaults-0e7cde33/inputs/fr.md",
+      "snapshot": "translator-fr-style.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226"
+    },
+    "glossary": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:i18n/glossary.md",
+      "snapshot": "glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "c44e0f808e48",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "7b2ba4ed501d",
+    "independent_from_coder_session": "eae0961e4e78",
+    "actual_model_source": {
+      "kind": "own_completed_assistant_usage",
+      "artifact": "served-model-evidence.json",
+      "message_id": "fa8c3f7a5e8943c38c20693a0bbf019f",
+      "provider": "openai",
+      "model_id": "gpt-6.1-sol",
+      "fallback_disclosure": "Earlier run disclosed temporary quota fallback. Current served identity is derived from own completed usage, not header; no no-fallback claim."
+    },
+    "result": "passed",
+    "findings": 0,
+    "date": "2026-11-03"
+  },
+  "status": "passed",
+  "finding_details": [],
+  "record_reference": "record.json",
+  "report": "report.md",
+  "scope": "Staged catalogue linguistic/mechanical audit only; no activation or localized caller contract claim."
+}
