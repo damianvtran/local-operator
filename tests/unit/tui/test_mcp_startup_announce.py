@@ -953,7 +953,7 @@ async def test_the_announce_keeps_its_semantic_lamp() -> None:
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         toast = app.query_one(Toast)
-        assert await _until(pilot, lambda: toast.display)
+        assert await _until(pilot, lambda: _painted_boxes_ready([toast]))
         # The PAINTED cells, which is the only place the lamp is observable:
         # `Toast` stores the renderable through Textual's internal content
         # accessor, so the frame is what a caller is entitled to inspect.
@@ -1277,7 +1277,7 @@ def _network_fleet() -> McpStartupOutcome:
     )
 
 
-def _notice_layout_ready(blocks) -> bool:  # type: ignore[no-untyped-def]
+def _painted_boxes_ready(blocks) -> bool:  # type: ignore[no-untyped-def]
     """DOM membership precedes Screen's layout publication, even after mount.
 
     Require a real painted box, not the EXPECTED column: a wrong nonzero width
@@ -1374,7 +1374,7 @@ async def test_the_notice_budget_is_the_column_the_block_is_painted_in(
         blocks = [block for block in app.query(".notice-block") if isinstance(block, NoticeBlock)]
         assert blocks, "no notice painted"
         assert await _until(
-            pilot, lambda: _notice_layout_ready(blocks)
+            pilot, lambda: _painted_boxes_ready(blocks)
         ), "no notice layout published"
         _assert_notice_budget(app, blocks, columns, sidebar)
 
@@ -1424,13 +1424,13 @@ async def test_notice_readiness_waits_for_real_layout_not_the_expected_width(mon
             assert attempted and screen._layout_required
             assert all(block.is_mounted and block.display and block.visible for block in blocks)
             assert all(block.size.width == 0 and block.size.height == 0 for block in blocks)
-            assert not _notice_layout_ready(blocks)
+            assert not _painted_boxes_ready(blocks)
             with pytest.raises(AssertionError, match="lane painted 0"):
                 _assert_notice_budget(app, blocks, 84, False)
 
             held = False
             screen._on_timer_update()
-            assert await _until(pilot, lambda: published and _notice_layout_ready(blocks))
+            assert await _until(pilot, lambda: published and _painted_boxes_ready(blocks))
             assert list(app.query(".notice-block")) == blocks
             assert all(block.size.width == 80 and block.size.height == 1 for block in blocks)
             _assert_notice_budget(app, blocks, 84, False)
@@ -1441,7 +1441,7 @@ async def test_notice_readiness_waits_for_real_layout_not_the_expected_width(mon
             old_width = blocks[0].styles.width
             try:
                 blocks[0].styles.width = 79
-                assert await _until(pilot, lambda: published and _notice_layout_ready(blocks))
+                assert await _until(pilot, lambda: published and _painted_boxes_ready(blocks))
                 assert blocks[0].size.width == 79
                 with pytest.raises(AssertionError, match="layout pinned 79"):
                     _assert_notice_budget(app, blocks, 84, False)
