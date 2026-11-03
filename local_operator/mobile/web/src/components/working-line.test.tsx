@@ -22,15 +22,17 @@
 // band's slot is the before/after browser frames recorded on the PR (`320x568`,
 // `360x780`, `390x844`) with the slot box and the label's clip point in
 // characters read back from the live DOM.
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { act } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as api from "../api";
 import { WorkingLine } from "./working-line";
 import { resetTurnStopForTests } from "../lib/turn-stop";
 
 afterEach(() => {
 	cleanup();
 	resetTurnStopForTests();
+	vi.clearAllMocks();
 	vi.useRealTimers();
 });
 
@@ -100,5 +102,47 @@ describe("WorkingLine Stop", () => {
 		expect(stop.parentElement?.className).toContain("min-h-11");
 		rerender(<WorkingLine activity="" startedS={null} stopPid="s1" />);
 		expect(document.querySelector("[data-working-stop]")).toBeTruthy();
+	});
+});
+
+vi.mock("../api", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../api")>()),
+	sendCommand: vi.fn(async () => ({ ok: true, detail: "" })),
+}));
+
+describe("WorkingLine Stop behaviour", () => {
+	const stopButton = () => document.querySelector("[data-working-stop]") as HTMLButtonElement;
+
+	it("one tap sends exactly one abort for the session", async () => {
+		render(<WorkingLine activity="responding" startedS={0} stopPid="s1" />);
+		await act(async () => { fireEvent.click(stopButton()); });
+		expect(api.sendCommand).toHaveBeenCalledTimes(1);
+		expect(api.sendCommand).toHaveBeenCalledWith("s1", { op: "abort" });
+	});
+
+	it("a second tap while the stop is pending is a no-op, and the button keeps focusability", async () => {
+		render(<WorkingLine activity="responding" startedS={0} stopPid="s1" />);
+		await act(async () => { fireEvent.click(stopButton()); });
+		expect(stopButton().getAttribute("aria-disabled")).toBe("true");
+		// aria-disabled, never `disabled`: a disabled button drops focus mid-press
+		expect(stopButton().disabled).toBe(false);
+		await act(async () => { fireEvent.click(stopButton()); });
+		expect(api.sendCommand).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps the Stop OUT of the aria-busy live region", () => {
+		render(<WorkingLine activity="responding" startedS={0} stopPid="s1" />);
+		expect(stopButton().closest("[aria-busy='true']")).toBeNull();
+	});
+
+	it("says a failed abort in the line itself, and clears it on the next tap", async () => {
+		vi.mocked(api.sendCommand).mockRejectedValueOnce(new Error("relay unreachable"));
+		render(<WorkingLine activity="responding" startedS={0} stopPid="s1" />);
+		await act(async () => { fireEvent.click(stopButton()); });
+		expect(screen.getByRole("alert").textContent).toContain("relay unreachable");
+		// the latch was released by the failure, so the retry goes out and clears the message
+		await act(async () => { fireEvent.click(stopButton()); });
+		expect(api.sendCommand).toHaveBeenCalledTimes(2);
+		expect(screen.queryByRole("alert")).toBeNull();
 	});
 });

@@ -10,6 +10,7 @@ import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "./api";
 import { Composer } from "./components/composer";
+import { WorkingLine } from "./components/working-line";
 import { GUARD_MS } from "./lib/composer-slots";
 import { resetTurnStopForTests } from "./lib/turn-stop";
 import type { Capabilities, SessionProjection } from "./types";
@@ -169,6 +170,67 @@ describe("the Stop guard", () => {
 		const busy = screen.getByRole("button", { name: "stopping" });
 		expect(busy.getAttribute("aria-busy")).toBe("true");
 		await act(async () => { fireEvent.click(busy, { detail: 1 }); });
+		expect(api.sendCommand).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("slot B is locked while a send is in flight", () => {
+	it("never becomes Stop between the box clearing and the request settling (double-tap race)", async () => {
+		let settle!: (v: { ok: boolean; detail: string }) => void;
+		vi.mocked(api.sendCommand).mockImplementationOnce(
+			() => new Promise((resolve) => { settle = resolve; }),
+		);
+		mount(true);
+		fireEvent.change(screen.getByPlaceholderText("Steer the agent…"), { target: { value: "redirect" } });
+		await act(async () => { fireEvent.click(screen.getByRole("button", { name: "steer" })); });
+		// The box has been cleared by the send, so alive && empty would read as Stop: the lock must hold.
+		await vi.waitFor(() => expect(roles()).toEqual(["connecting"]));
+		expect(screen.queryByRole("button", { name: "stop" })).toBeNull();
+		expect((screen.getByRole("button", { name: "Connecting" }) as HTMLButtonElement).disabled).toBe(true);
+		await act(async () => { settle({ ok: true, detail: "" }); });
+		await vi.waitFor(() => expect(roles()).toEqual(["stop"]));
+	});
+});
+
+describe("focus handoff when a focused role button unmounts", () => {
+	it("moves focus to the textarea instead of dropping it to <body>", async () => {
+		const { setStreaming } = mount(false);
+		const field = screen.getByPlaceholderText("Ask anything…") as HTMLTextAreaElement;
+		fireEvent.change(field, { target: { value: "hi" } });
+		const send = screen.getByRole("button", { name: "send" });
+		await act(async () => { send.focus(); });
+		expect(document.activeElement).toBe(send);
+		// the turn starts: role send -> steer, the focused element is replaced
+		await act(async () => { setStreaming(true); });
+		expect(document.activeElement).not.toBe(document.body);
+		expect(document.activeElement).toBe(field);
+	});
+
+	it("leaves focus alone when the unmounted button was not focused", async () => {
+		const { setStreaming } = mount(false);
+		const field = screen.getByPlaceholderText("Ask anything…") as HTMLTextAreaElement;
+		fireEvent.change(field, { target: { value: "hi" } });
+		(document.activeElement as HTMLElement | null)?.blur();
+		await act(async () => { setStreaming(true); });
+		expect(document.activeElement).toBe(document.body);
+	});
+});
+
+describe("the composer's Stop and the working line's Stop share one latch", () => {
+	it("a tap on the working-line Stop puts the composer's disc into its pressed state, and a second Stop is not a second abort", async () => {
+		const nowSpy = vi.spyOn(performance, "now");
+		nowSpy.mockReturnValue(0);
+		mount(true);
+		render(<WorkingLine activity="responding" startedS={0} stopPid="p1" />);
+		const lineStop = document.querySelector("[data-working-stop]") as HTMLButtonElement;
+		await act(async () => { fireEvent.click(lineStop); });
+		expect(api.sendCommand).toHaveBeenCalledTimes(1);
+		// BOTH controls show the pressed state: the disc by its role, the line by its label.
+		const disc = cluster().querySelector("[data-role='stopping']") as HTMLButtonElement;
+		expect(disc.getAttribute("aria-busy")).toBe("true");
+		expect(lineStop.getAttribute("aria-busy")).toBe("true");
+		nowSpy.mockReturnValue(10_000);
+		await act(async () => { fireEvent.click(disc, { detail: 1 }); });
 		expect(api.sendCommand).toHaveBeenCalledTimes(1);
 	});
 });

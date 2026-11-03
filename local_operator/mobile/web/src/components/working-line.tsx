@@ -20,6 +20,7 @@ import { contentDir } from "../lib/content-direction";
 import { useEffect, useState } from "react";
 import { formatElapsed } from "../lib/format";
 import { stopTurn, useTurnStopping } from "../lib/turn-stop";
+import { messageRuntime } from "../store";
 
 /* The exact tuple the TUI's WorkingBlock and status band cycle. */
 const SPINNER = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
@@ -31,23 +32,38 @@ const SPINNER = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
  * fixed 44 px height, so it neither moves nor appears with the draft. It is NOT
  * under the composer's arrival guard: it sits in a slot no other role ever
  * occupies, so no tap aimed elsewhere can land on it. A repeat tap while the
- * stop is pending is the shared latch's no-op (`lib/turn-stop`). */
-function WorkingStop({ pid }: { pid: string }) {
+ * stop is pending is the shared latch's no-op (`lib/turn-stop`).
+ *
+ * `aria-disabled` plus a no-op, never `disabled`, like the composer's disc: a
+ * disabled button drops focus mid-press. A failed abort is handed to `onFailed`
+ * so the line can SAY it (a tap that fails silently reads as a dead button). */
+function WorkingStop({ pid, onFailed }: { pid: string; onFailed: (message: string) => void }) {
 	const stopping = useTurnStopping(pid, true);
 	return (
 		<button
 			type="button"
 			data-working-stop
-			aria-label="stop the turn"
+			aria-label={messageRuntime.t(
+				stopping ? "relay.composer.action.stopping" : "relay.composer.action.stop_agent",
+			)}
 			aria-busy={stopping || undefined}
-			disabled={stopping}
-			onClick={() => void stopTurn(pid)}
-			className="-me-1 flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-sm px-2 text-body-sm text-danger active:bg-danger-wash disabled:opacity-60"
+			aria-disabled={stopping || undefined}
+			onClick={() => {
+				if (stopping) return;
+				onFailed("");
+				void stopTurn(pid).then((failure) => {
+					if (failure !== null) onFailed(failure);
+				});
+			}}
+			className={cn(
+				"-me-1 flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-sm px-2 text-body-sm text-danger active:bg-danger-wash",
+				stopping ? "opacity-60" : "",
+			)}
 		>
-			{/* The label never changes: a longer "stopping…" widened this control 44 -> 79
-			    px and pushed the clock (measured). The pressed state is aria-busy plus
-			    the dimmed face. */}
-			stop
+			{/* The visible word never changes: a longer "stopping…" widened this control
+			    44 -> 79 px and pushed the clock (measured). The pressed state is
+			    aria-busy, the accessible name and the dimmed face. */}
+			{messageRuntime.t("relay.composer.action.stop")}
 		</button>
 	);
 }
@@ -101,6 +117,10 @@ export function WorkingLine({
 		};
 	}, []);
 
+	/* The abort's failure, said in the label's place (role="alert") until the next
+	 * tap or the turn ends: the line is a fixed 44 px, so the message replaces the
+	 * activity text rather than adding a row. */
+	const [stopError, setStopError] = useState("");
 	/* With a Stop the line is drawn even before a label exists: "a turn is alive"
 	 * is the condition that must always have its Stop in reach. */
 	if (!activity && !stopPid) return null;
@@ -110,31 +130,41 @@ export function WorkingLine({
 				"flex items-center gap-2 px-3 text-body-sm",
 				stopPid ? "min-h-11" : "py-1.5",
 			)}
-			aria-live="polite"
-			aria-busy="true"
 		>
-			<span
-				className="shrink-0 font-mono text-mono text-accent"
-				aria-hidden
-			>
-				{SPINNER[frame % SPINNER.length]}
-			</span>
-			<span dir={contentDir(activity)} className="lo-shimmer min-w-0 flex-1 truncate text-ink-muted">
-				{activity}
-			</span>
-			{/* The clock's SLOT is reserved, not measured: ``w-[6ch]`` is the width of
-			 * the widest form the formatter can produce (``59m59s``/``41d16h``/
-			 * ``100d+``), end-aligned so the digits grow leftward into their own
-			 * space. The TUI reserves ``WorkingBlock._CLOCK_COL`` for exactly this
-			 * reason — an unreserved clock re-clips the label as the number changes
-			 * form, so at 320px the label read 38 characters at ``1h`` and 28 at
-			 * ``1000h 40m`` and jumped 5 characters in the single tick across the
-			 * ``59m 59s`` → ``1h`` crossing (design round 1 D2). Reserved cells also
-			 * make withholding free: an empty slot is the same width as a full one. */}
-			<span className="w-[6ch] shrink-0 text-end font-mono text-mono-sm text-ink-dim tabular-nums">
-				{hasClock ? formatElapsed(elapsed) : ""}
-			</span>
-			{stopPid ? <WorkingStop pid={stopPid} /> : null}
+			{/* THE LIVE REGION IS THE STATUS ONLY. The Stop button sits beside it, not
+			    inside it: an `aria-busy` ancestor tells assistive tech to hold back its
+			    descendants, which is the wrong thing to say about the control that ends
+			    the turn. */}
+			<div className="flex min-w-0 flex-1 items-center gap-2" aria-live="polite" aria-busy="true">
+				<span
+					className="shrink-0 font-mono text-mono text-accent"
+					aria-hidden
+				>
+					{SPINNER[frame % SPINNER.length]}
+				</span>
+				{stopError ? (
+					<span role="alert" dir={contentDir(stopError)} className="min-w-0 flex-1 truncate text-danger">
+						{stopError}
+					</span>
+				) : (
+					<span dir={contentDir(activity)} className="lo-shimmer min-w-0 flex-1 truncate text-ink-muted">
+						{activity}
+					</span>
+				)}
+				{/* The clock's SLOT is reserved, not measured: ``w-[6ch]`` is the width of
+				 * the widest form the formatter can produce (``59m59s``/``41d16h``/
+				 * ``100d+``), end-aligned so the digits grow leftward into their own
+				 * space. The TUI reserves ``WorkingBlock._CLOCK_COL`` for exactly this
+				 * reason — an unreserved clock re-clips the label as the number changes
+				 * form, so at 320px the label read 38 characters at ``1h`` and 28 at
+				 * ``1000h 40m`` and jumped 5 characters in the single tick across the
+				 * ``59m 59s`` → ``1h`` crossing (design round 1 D2). Reserved cells also
+				 * make withholding free: an empty slot is the same width as a full one. */}
+				<span className="w-[6ch] shrink-0 text-end font-mono text-mono-sm text-ink-dim tabular-nums">
+					{hasClock ? formatElapsed(elapsed) : ""}
+				</span>
+			</div>
+			{stopPid ? <WorkingStop pid={stopPid} onFailed={setStopError} /> : null}
 		</div>
 	);
 }

@@ -649,7 +649,7 @@ function PrimaryButton({
 			<button
 				type="button"
 				data-role={role}
-				aria-label={busy ? "stopping" : "stop"}
+				aria-label={messageRuntime.t(busy ? "relay.composer.action.stopping" : "relay.composer.action.stop")}
 				aria-busy={busy || undefined}
 				onClick={(event) => {
 					if (busy) return;
@@ -674,7 +674,9 @@ function PrimaryButton({
 			data-role={role}
 			onClick={onSend}
 			disabled={!canSend || connecting}
-			aria-label={connecting ? "Connecting" : role}
+			aria-label={messageRuntime.t(
+				connecting ? "relay.composer.action.connecting" : role === "steer" ? "relay.composer.action.steer" : "relay.composer.action.send",
+			)}
 			{...focus}
 			className={cn(
 				COMPOSER_ROUND,

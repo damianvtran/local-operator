@@ -30,15 +30,21 @@ from local_operator.mobile.types import (
 )
 from scripts.mobile_overflow_fixture import required_password
 
+LONG_ACTIVITY = (
+    "running the full mobile web unit suite and the bundle guard against the worktree build"
+)
 
-def _projection(session_id: str, pid: int, *, streaming: bool) -> SessionProjection:
-    return SessionProjection(
+
+def _projection(
+    session_id: str, pid: int, *, streaming: bool, rows: int = 0, activity: str = ""
+) -> SessionProjection:
+    projection = SessionProjection(
         session_id=session_id,
         pid=pid,
         kind="tui",
         conversation_name=f"Composer {session_id}",
         streaming=streaming,
-        activity="reading the composer" if streaming else "",
+        activity=(activity or "reading the composer") if streaming else "",
         activity_started_s=42 if streaming else None,
         model_label="Claude Opus 5.5",
         effort="high",
@@ -53,6 +59,17 @@ def _projection(session_id: str, pid: int, *, streaming: bool) -> SessionProject
         ],
         version=3,
     )
+    # A transcript long enough to scroll, so "scrolled up" is a real position.
+    for i in range(rows):
+        projection.transcript.append(
+            TranscriptEntry(
+                id=f"long-{i}",
+                kind="user" if i % 2 == 0 else "assistant",
+                text=f"Row {i}: "
+                + "the dictation slot and the stop slot never share a place. " * 3,
+            )
+        )
+    return projection
 
 
 async def main() -> None:
@@ -73,6 +90,7 @@ async def main() -> None:
     for projection in (
         _projection("slots-idle", 910001, streaming=False),
         _projection("slots-working", 910002, streaming=True),
+        _projection("slots-long", 910003, streaming=True, rows=40, activity=LONG_ACTIVITY),
     ):
         record = SessionRecord(
             pid=projection.pid,

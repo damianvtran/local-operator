@@ -80,6 +80,10 @@ GEOMETRY = """
     mic: r(byLabel('start voice input') || byLabel('stop and transcribe') || byLabel('transcribing')),
     shellBottom: r(q('.lo-composer')),
     workingStop: r(q('[data-working-stop]')),
+    workingStopVisible: (() => { const b = q('[data-working-stop]'); if (!b) return null;
+      const y = b.getBoundingClientRect(); return y.top >= 0 && y.bottom <= innerHeight; })(),
+    transcriptScrollTop: (() => { const s = [...document.querySelectorAll('.lo-scroll')]
+      .find((e) => e.scrollHeight > e.clientHeight + 50); return s ? Math.round(s.scrollTop) : null; })(),
     // Any two of these visible at once is the reported defect.
     sendAndStopTogether: labels.includes('stop') && (labels.includes('send') || labels.includes('steer')),
     docScrollW: document.documentElement.scrollWidth,
@@ -115,6 +119,42 @@ def login(page: Page, base: str) -> None:
         f" f.password.value = {fixture_password()!r}; f.submit(); return true; }})()"
     )
     time.sleep(2.0)
+
+
+def frames_beyond_the_matrix(page: Page, base: str, vp: str, frame: Any) -> None:
+    """The positions the state matrix does not reach (review round 1, m1).
+
+    - scrolled-up: a long transcript read from its top, so the working line's Stop must
+      still be on screen (it lives outside the scrolling tail);
+    - long-activity: an activity label far wider than the line, so the clock and Stop
+      must hold their boxes while the label truncates;
+    - keyboard-open: the short layout the soft keyboard produces (the visual viewport is
+      emulated at 430 px, under SHORT_COLUMN_PX = 480) with the field focused.
+    """
+    page.goto(f"{base}/#/s/slots-long")
+    time.sleep(1.8)
+    frame("8-long-activity", base, "slots-long")
+    # Real touch drags toward the top of the transcript, as a thumb would.
+    for _ in range(12):
+        page.swipe(200, 400, -600)
+    time.sleep(0.5)
+    page.js(
+        "(() => { const s = [...document.querySelectorAll('.lo-scroll')]"
+        ".find((e) => e.scrollHeight > e.clientHeight + 50); return s ? s.scrollTop : -1; })()"
+    )
+    frame("9-scrolled-up", base, "slots-long")
+    width = int(vp.split("x")[0])
+    page.send(
+        "Emulation.setDeviceMetricsOverride",
+        width=width,
+        height=430,
+        deviceScaleFactor=3,
+        mobile=True,
+    )
+    time.sleep(0.8)
+    page.js("(() => { document.querySelector('textarea').focus(); return true; })()")
+    time.sleep(0.8)
+    frame("10-keyboard-open", base, "slots-long")
 
 
 def main() -> None:
@@ -168,7 +208,7 @@ def main() -> None:
             frame("4-working-text", base, "slots-working")
             type_text(page, "")
             # stop: working-line Stop when the build has one, else the composer disc
-            stopped = click(page, "stop the turn") or click(page, "stop")
+            stopped = click(page, "stop the agent") or click(page, "stop")
             time.sleep(0.6)
             report[f"{label}-{vp}-5-stopping"] = {"pressed": stopped}
             frame("5-stopping", base, "slots-working")
@@ -179,6 +219,7 @@ def main() -> None:
                 page.goto(f"http://127.0.0.1:{port_off}/#/s/slots-idle")
                 time.sleep(1.5)
                 frame("7-mic-unavailable", base, "slots-idle")
+            frames_beyond_the_matrix(page, base, vp, frame)
         page.close()
     finally:
         chrome.close()
