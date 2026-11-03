@@ -283,8 +283,11 @@ def _text_units(block: DocumentContent) -> int:
     (``documents.document_text_cap``) in one unit: a byte count alone cannot
     tell a 1 MB ASCII log from 1 MB of Hangul, which cost three times as much.
     """
-    if block.digest and block.digest in _TEXT_UNITS_CACHE:
-        return _TEXT_UNITS_CACHE[block.digest]
+    digest = block.digest if block.data else None  # an empty block is not its digest's text
+    if digest:
+        cached = _TEXT_UNITS_CACHE.get(digest)
+        if cached is not None:
+            return cached
     try:
         head = base64.b64decode(block.data[:_TEXT_HEAD_B64], validate=False)
         text = head.decode("utf-8", errors="replace")[:MAX_FALLBACK_TEXT_CHARS]
@@ -292,10 +295,14 @@ def _text_units(block: DocumentContent) -> int:
     except (ValueError, TypeError):
         # Undecodable payload renders the reference sentence; charge bytes.
         units = min(block.bytes or len(block.data) * 3 // 4, MAX_FALLBACK_TEXT_CHARS)
-    if block.digest:
-        if len(_TEXT_UNITS_CACHE) >= _TEXT_UNITS_CACHE_MAX:
-            _TEXT_UNITS_CACHE.pop(next(iter(_TEXT_UNITS_CACHE)))
-        _TEXT_UNITS_CACHE[block.digest] = units
+    if digest:
+        # Estimates run on ``asyncio.to_thread`` workers (``Session._offloaded``),
+        # so evict-and-insert is one locked step; the lock-free ``.get`` above
+        # is atomic on its own.
+        with _CACHE_LOCK:
+            if len(_TEXT_UNITS_CACHE) >= _TEXT_UNITS_CACHE_MAX:
+                _TEXT_UNITS_CACHE.pop(next(iter(_TEXT_UNITS_CACHE)), None)
+            _TEXT_UNITS_CACHE[digest] = units
     return units
 
 

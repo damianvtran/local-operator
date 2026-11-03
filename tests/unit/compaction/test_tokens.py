@@ -1318,3 +1318,74 @@ def test_render_excess_removes_only_what_the_window_cap_would_cut():
     assert document_render_excess([message], 0) == 0
     reference = Message(role="user", content=[_document("video/mp4", "a.mp4", 5_000_000)])
     assert document_render_excess([reference], 32_000) == 0
+
+
+def test_the_text_units_cache_survives_concurrent_estimates():
+    """Estimates run on ``asyncio.to_thread`` workers. The cache evicts at 256
+    entries, so 8 threads each inserting distinct digests raced an evict against
+    an insert and raised ``KeyError`` / "dictionary changed size"."""
+    import base64
+    import sys
+    import threading
+
+    from local_operator.harness.types import DocumentContent
+
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(8)
+    # A tiny switch interval makes the check-then-act windows reachable in a
+    # short run; the cache is the only shared state the workers touch.
+    previous_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+
+    def work(worker: int) -> None:
+        try:
+            barrier.wait()
+            for index in range(3000):
+                # Re-asking a digest another worker may just have evicted is the
+                # ``in`` then ``[]`` window; distinct ones drive the evictions.
+                if index % 3 == 0:
+                    index = index % 50
+                block = DocumentContent(
+                    data=base64.b64encode(f"line {worker} {index}\n".encode() * 8).decode(),
+                    mime_type="text/plain",
+                    filename="t.txt",
+                    bytes=100,
+                    digest=f"{worker if index % 3 else 0:02d}{index:06d}",
+                )
+                tokens_mod._text_units(block)
+        except BaseException as exc:  # noqa: BLE001 - the assertion reports it
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work, args=(n,)) for n in range(8)]
+    for thread in threads:
+        thread.start()
+    try:
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(previous_interval)
+    assert not errors, errors[:2]
+    assert len(tokens_mod._TEXT_UNITS_CACHE) <= tokens_mod._TEXT_UNITS_CACHE_MAX
+
+
+def test_an_empty_text_block_does_not_poison_its_digests_cache_entry():
+    """A block whose bytes have not been resolved yet (``data == ""``) carries
+    its digest, and caching its 0 made a later real block with that digest
+    charge nothing."""
+    import base64
+
+    from local_operator.harness.types import DocumentContent
+
+    digest = "ab" * 16
+    empty = DocumentContent(
+        data="", mime_type="text/plain", filename="t.txt", bytes=0, digest=digest
+    )
+    real = DocumentContent(
+        data=base64.b64encode(b"x" * 5000).decode(),
+        mime_type="text/plain",
+        filename="t.txt",
+        bytes=5000,
+        digest=digest,
+    )
+    assert tokens_mod._text_units(empty) == 0
+    assert tokens_mod._text_units(real) == 5000

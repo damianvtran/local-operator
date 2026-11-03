@@ -1272,3 +1272,181 @@ async def test_a_legacy_oversized_block_in_the_transcript_recovers_without_migra
     assert stream.refusals == 0
     assert stream.requests, "the prompt never reached the provider"
     await session.dispose()
+
+
+def _first_message_document(kind: str, window: int):
+    from local_operator.harness.types import DocumentContent
+
+    if kind == "mp4":
+        return _mp4_document()
+    # An ASCII file whose window-blind charge exceeds the window: 2.4 bytes a
+    # window token is ~1.2 tokens a window token at the 2-per-token ratio.
+    raw = (b"line of log output 0123456789 abcdefghij\n" * 40_000)[: int(window * 2.4)]
+    return DocumentContent(
+        data=base64.b64encode(raw).decode("ascii"),
+        mime_type="text/plain",
+        filename="big.log",
+        bytes=len(raw),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", [128_000, 200_000])
+@pytest.mark.parametrize("kind", ["text", "mp4"])
+async def test_an_attachment_in_the_first_message_survives_compaction(tmp_path, kind, window):
+    """Pre-existing dead end (also on origin/main): compaction preserves the
+    FIRST user turn as text only, under the same message id, so the estimate
+    cache kept the attachment's old charge on a few-line message and every later
+    request was refused locally while ``Session.prompt`` returned normally.
+    Six turns, no filler turn in front of the attachment, none refused."""
+    model = ModelSpec(provider="test", model_id="m", context_window=window, max_output_tokens=8192)
+    stream = RefusesWhatTheProviderClientRefuses()
+    session = make_session(tmp_path, stream, model=model)
+
+    await session.prompt("what is in this?", documents=[_first_message_document(kind, window)])
+    for turn in range(1, 6):
+        await session.prompt(f"follow-up {turn}")
+
+    assert stream.refusals == 0, f"{stream.refusals} of {len(stream.requests)} requests refused"
+    assert len(stream.requests) >= 6
+    await session.dispose()
+
+
+def test_a_rebuilt_message_does_not_inherit_the_original_id_estimate():
+    """The mechanism under the test above, without a session: reusing a message
+    id for rebuilt text drops the figure cached for the old content."""
+    from local_operator.compaction.marker import replayed_user_message
+    from local_operator.compaction.tokens import clear_estimate_cache, estimate_tokens
+
+    clear_estimate_cache()
+    original = Message(role="user", content=[_first_message_document("mp4", 128_000)])
+    original.content.append(TextContent(text="x " * 50_000))
+    big = estimate_tokens(original)
+    rebuilt = replayed_user_message([TextContent(text="short")], original.id)
+    assert rebuilt.id == original.id
+    assert estimate_tokens(rebuilt) < big // 100
+    clear_estimate_cache()
+
+
+# ---------------------------------------------------------------------------
+# Dense ASCII is a heuristic, not a bound: prove the session RECOVERS
+# ---------------------------------------------------------------------------
+
+
+def _dense_document(kind: str):
+    import random
+
+    from local_operator.harness.types import DocumentContent
+
+    size = 2 * 1024 * 1024
+    if kind == "base64":
+        raw = base64.b64encode(random.Random(3).randbytes(size * 3 // 4))[:size]
+    else:
+        # A UTF-16 CSV read as UTF-8: a NUL between every ASCII character.
+        rows = "id,name,value\n" + "".join(f"{i},item{i},{i * 7 % 1000}\n" for i in range(200_000))
+        raw = rows.encode("utf-16le")[:size]
+    return DocumentContent(
+        data=base64.b64encode(raw).decode("ascii"),
+        mime_type="text/plain",
+        filename="data.txt",
+        bytes=len(raw),
+    )
+
+
+class RefusesByRealTokenCount:
+    """A provider that 400s on the REAL o200k token count of the body the real
+    chat client builds, not on this repo's estimate, so it catches exactly the
+    under-count the estimator cannot see in itself."""
+
+    def __init__(self, window: int) -> None:
+        import httpx
+        import tiktoken
+
+        from local_operator.providers.clients import OpenAICompatClient
+
+        self.window = window
+        self.encoding = tiktoken.get_encoding("o200k_base")
+        self.statuses: list[int] = []
+        self._client = OpenAICompatClient(
+            "https://api.stub.example/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(self._handle)),
+        )
+
+    def _handle(self, request):
+        import json
+
+        import httpx
+
+        body = json.loads(request.content)
+        text = []
+        images = 0
+        for message in body["messages"]:
+            content = message.get("content")
+            parts = content if isinstance(content, list) else [{"type": "text", "text": content}]
+            for part in parts:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text.append(part.get("text") or "")
+                elif isinstance(part, dict):
+                    images += 1  # billed flat, never by the base64
+        real = (
+            len(self.encoding.encode("\n".join(text), disallowed_special=()))
+            + 4 * len(body["messages"])
+            + 1200 * images
+        )
+        reply = body.get("max_tokens") or body.get("max_completion_tokens") or 0
+        if real + reply > self.window:
+            self.statuses.append(400)
+            return httpx.Response(
+                400, json={"error": {"code": "context_length_exceeded", "message": "too long"}}
+            )
+        self.statuses.append(200)
+        chunks = [
+            {"id": "c", "choices": [{"delta": {"content": "ok"}, "index": 0}]},
+            {"id": "c", "choices": [{"delta": {}, "finish_reason": "stop", "index": 0}]},
+            {"choices": [], "usage": {"prompt_tokens": real, "completion_tokens": 1}},
+        ]
+        sse = "".join("data: " + json.dumps(c) + "\n\n" for c in chunks) + "data: [DONE]\n\n"
+        return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
+
+    def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+        async def gen():
+            async for event in self._client.stream(request, "sk-stub"):
+                yield event
+
+        return gen()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", [128_000, 200_000])
+@pytest.mark.parametrize("kind", ["base64", "utf16_csv"])
+async def test_a_dense_ascii_attachment_is_recovered_from_not_a_dead_end(tmp_path, kind, window):
+    """Dense ASCII costs more than the 0.5 token a character it is charged, so
+    a provider can refuse a request the estimator admitted. That must be a
+    transient: with ~60k tokens of history and a 2 MB dense file, the session
+    sends an accepted request within two requests and every turn after it is
+    accepted. A refusal on the REAL token count is the oracle."""
+    pytest.importorskip("tiktoken")
+    import random
+
+    rng = random.Random(11)
+    model = ModelSpec(
+        provider="openai", model_id="stub", context_window=window, max_output_tokens=8192
+    )
+    stream = RefusesByRealTokenCount(window)
+    session = make_session(tmp_path, stream, model=model)
+    for index in range(6):
+        words = " ".join(
+            rng.choice(["alpha", "beta", "gamma", "omega"]) + str(rng.randrange(999))
+            for _ in range(5000)
+        )
+        await session.prompt(f"history {index} {words}")
+
+    before = len(stream.statuses)
+    await session.prompt("what is in this file?", documents=[_dense_document(kind)])
+    for turn in range(3):
+        await session.prompt(f"follow-up {turn}")
+
+    after = stream.statuses[before:]
+    assert 200 in after[:2], f"no accepted request within two: {after}"
+    assert after[-1] == 200 and after.count(400) <= 1, after
+    await session.dispose()

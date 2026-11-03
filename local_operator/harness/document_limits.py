@@ -21,11 +21,16 @@ MAX_FALLBACK_TEXT_CHARS = 400_000
 DOCUMENT_WINDOW_SHARE = 4
 
 #: Characters per token an ASCII character is budgeted at. Measured on
-#: o200k_base: English prose ~4.5, minified JSON ~2.3, hex ~1.8, base64 ~1.5.
-#: 2 covers all of them, so ASCII text is cut at ``window * 2 / 4`` characters.
-#: It is NOT the budget for non-ASCII text, which no ratio can bound: CJK runs
-#: 1.3 chars/token for common ideographs but ~2 for random full-range ones,
-#: Hangul and emoji ~2.3, and CJK Extension B ~4. See :func:`text_weight`.
+#: o200k_base, in characters per token: English prose ~4.5, minified JSON ~2.3,
+#: hex ~1.8, base64 ~1.5, random printable ASCII ~1.4, control bytes ~1.0. The
+#: ratio 2 covers prose, code and JSON; it does NOT cover hex, base64 or control
+#: bytes, which cost 0.57-1.0 tokens a character against the 0.5 charged. That
+#: is a deliberate heuristic, not a bound: changing it would shorten every
+#: prose and code render, and the damage is limited because one document is
+#: capped at a quarter of the window (measured worst case ~63% of the window,
+#: control bytes at 32k) and a history that large is shrinkable by compaction.
+#: Non-ASCII text is a different case, bounded by UTF-8 bytes: see
+#: :func:`text_weight`.
 DOCUMENT_CHARS_PER_TOKEN = 2
 
 
@@ -33,13 +38,18 @@ def text_weight(text: str) -> int:
     """Budget units ``text`` costs: ASCII is 1 unit a character, anything else
     ``DOCUMENT_CHARS_PER_TOKEN`` units per UTF-8 byte.
 
-    A unit is ``1 / DOCUMENT_CHARS_PER_TOKEN`` of a token, so non-ASCII text is
-    charged one token per UTF-8 byte. That is a hard ceiling rather than a
-    measurement: a tokenizer can always fall back to one token per byte, so
-    ``tokens <= len(text.encode("utf-8"))`` holds for every text and tokenizer
-    (the rule ``compaction.tokens`` already applies to its upper bound). A
-    cap in CHARACTERS cannot give that guarantee, which is how a 400k-character
-    file of Hangul or CJK Extension B filled (or overran) a 200k window.
+    A unit is ``1 / DOCUMENT_CHARS_PER_TOKEN`` of a token. Non-ASCII text is
+    therefore charged one token per UTF-8 byte, which IS an upper bound: a
+    byte-level tokenizer can always fall back to one token per byte, so
+    ``tokens <= utf8 bytes`` for the non-ASCII part (the rule
+    ``compaction.tokens`` applies to its upper bound). A cap in CHARACTERS gives
+    no such bound, which is how 400k characters of Hangul or CJK Extension B
+    filled (or overran) a 200k window.
+
+    The ASCII part is a heuristic, not a bound (see
+    :data:`DOCUMENT_CHARS_PER_TOKEN`): dense ASCII such as base64, hex or
+    control bytes costs more than 0.5 tokens a character. One document is still
+    bounded by the render cap, ``DOCUMENT_WINDOW_SHARE`` of the window.
     """
     encoded = len(text.encode("utf-8"))
     ascii_chars = len(text.encode("ascii", "ignore"))
