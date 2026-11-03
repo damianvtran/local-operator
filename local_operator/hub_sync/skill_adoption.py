@@ -19,6 +19,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, Sequence
 
+from markdown_it import MarkdownIt
+from markdown_it.rules_inline.backticks import backtick
+from markdown_it.rules_inline.state_inline import StateInline
+
 from local_operator.hub_sync import segment as seg
 from local_operator.hub_sync.merge import (
     FieldInput,
@@ -362,46 +366,136 @@ def _equivalent(source: str, local: str, target: str, remote: str, mode: int = 0
     return _norm(local) == _norm(remote)
 
 
-def _code_spans(text: str) -> tuple[tuple[int, int], ...]:
-    """Conservatively isolate raw Markdown code before any prose normalization.
+@dataclass(frozen=True)
+class _MarkdownSource:
+    exact: tuple[tuple[int, int], ...]
+    inline: tuple[tuple[int, int, int, int], ...]
 
-    Outer blocks own their entire raw slice, including delimiters/newlines. An
-    unclosed delimiter protects the remainder rather than guessing it is prose.
+
+def _markdown_source(text: str) -> _MarkdownSource:
+    """Default EXACT; CommonMark maps only grant supported top-level prose.
+
+    Container prefixes, HTML, code and unknown physical slices never come from
+    reconstructed token content. Inline offsets are usable only when the installed
+    parser's actual source equals the raw paragraph, apart from its terminal EOL.
     """
-    spans: list[tuple[int, int]] = []
+    md = MarkdownIt("commonmark").disable("inline")
+    blocks = md.parse(text)
+    lines = text.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    exact: list[tuple[int, int]] = []
+    inline: list[tuple[int, int, int, int]] = []
+    covered = [False] * len(lines)
+    captured: list[tuple[int, int, int, int]] = []
+    active: StateInline | None = None
+    ambiguous_inline = False
 
-    def add(start: int, end: int) -> None:
-        overlapping = [(begin, stop) for begin, stop in spans if start < stop and end > begin]
-        for begin, stop in overlapping:
-            spans.remove((begin, stop))
-            start, end = min(start, begin), max(end, stop)
-        spans.append((start, end))
+    def protect(first: int, last: int) -> None:
+        # CommonMark maps omit trailing blank lines from indented/container blocks.
+        # Those raw gaps belong to the exact block, not to a prose normalizer.
+        while last < len(lines) and not covered[last] and not lines[last].strip():
+            covered[last] = True
+            last += 1
+        exact.append((offsets[first], offsets[last]))
 
-    for opening in re.finditer(r"(?m)^ {0,3}(`{3,}|~{3,})[^\n]*(?:\n|$)", text):
-        if any(start <= opening.start() < end for start, end in spans):
+    def observe_backticks(state: StateInline, silent: bool) -> bool:
+        nonlocal ambiguous_inline
+        start, count = state.pos, len(state.tokens)
+        handled = backtick(state, silent)
+        # The installed rule returns True for unmatched delimiters too. Only a
+        # newly emitted code_inline proves that this is a raw code slice.
+        if not silent and any(token.type == "code_inline" for token in state.tokens[count:]):
+            if state is not active:
+                ambiguous_inline = True
+                return handled
+            width = 0
+            while start + width < state.pos and state.src[start + width] == "`":
+                width += 1
+            captured.append((start, state.pos, start + width, state.pos - width))
+        return handled
+
+    md.inline.ruler.at("backticks", observe_backticks)
+    for index, block in enumerate(blocks):
+        if block.level != 0 or block.map is None:
             continue
-        fence = opening[1]
-        closing = re.search(
-            r"(?m)^ {0,3}" + re.escape(fence[0]) + "{" + str(len(fence)) + r",}[ \t]*(?:\r?\n|$)",
-            text[opening.end() :],
+        first, last = block.map
+        if not (0 <= first < last <= len(lines)):
+            return _MarkdownSource(((0, len(text)),) if text else (), ())
+        if any(covered[first:last]):
+            continue
+        covered[first:last] = [True] * (last - first)
+        start, end = offsets[first], offsets[last]
+        raw = text[start:end]
+        candidate = blocks[index + 1] if index + 1 < len(blocks) else None
+        if (
+            block.type != "paragraph_open"
+            or candidate is None
+            or candidate.type != "inline"
+            or candidate.map != block.map
+        ):
+            protect(first, last)
+            continue
+        # token.content is merely a parser-input candidate, NEVER byte authority.
+        # No substring search can recover offsets after indentation/CRLF stripping.
+        state = StateInline(candidate.content, md, {}, [])
+        body = raw[:-2] if raw.endswith("\r\n") else raw[:-1] if raw.endswith("\n") else raw
+        if state.src != body:
+            protect(first, last)
+            continue
+        captured.clear()
+        active, ambiguous_inline = state, False
+        md.inline.tokenize(state)
+        unsupported = any(
+            token.type
+            not in {
+                "text",
+                "softbreak",
+                "code_inline",
+                "em_open",
+                "em_close",
+                "strong_open",
+                "strong_close",
+                "link_open",
+                "link_close",
+            }
+            for token in state.tokens
         )
-        add(opening.start(), opening.end() + closing.end() if closing else len(text))
-    for opening in re.finditer(r"<(pre|code|script|style|textarea)\b[^>]*>", text, re.I):
-        closing = re.search(r"</" + opening[1] + r"\s*>", text[opening.end() :], re.I)
-        add(opening.start(), opening.end() + closing.end() if closing else len(text))
-    for block in re.finditer(
-        r"(?m)^(?: {4}|\t)[^\n]*(?:\n(?:(?: {4}|\t)[^\n]*|[ \t]*(?=\n)))*(?:\n|$)",
-        text,
-    ):
-        add(block.start(), block.end())
-    cursor = 0
-    for opening in re.finditer(r"`+", text):
-        if opening.start() < cursor or any(a <= opening.start() < b for a, b in spans):
+        # Unmatched or escaped backticks are not positively identified code/prose.
+        unproved_ticks = any(
+            char == "`" and not any(a <= pos < b for a, b, _, _ in captured)
+            for pos, char in enumerate(body)
+        )
+        if unsupported or unproved_ticks or ambiguous_inline:
+            protect(first, last)
             continue
-        closing = re.search(r"(?<!`)" + re.escape(opening[0]) + r"(?!`)", text[opening.end() :])
-        cursor = opening.end() + closing.end() if closing else len(text)
-        add(opening.start(), cursor)
-    return tuple(sorted(spans))
+        for a, b, payload_start, payload_end in captured:
+            exact.append((start + a, start + b))
+            inline.append((start + a, start + b, start + payload_start, start + payload_end))
+    index = 0
+    while index < len(lines):
+        if covered[index]:
+            index += 1
+            continue
+        last = index + 1
+        while last < len(lines) and not covered[last]:
+            last += 1
+        # A whole unmapped gap is unknown unless it consists ONLY of plain LF
+        # separators. Definitions/unknown containers keep all their physical bytes.
+        if any(line != "\n" for line in lines[index:last]):
+            exact.append((offsets[index], offsets[last]))
+        index = last
+    return _MarkdownSource(tuple(sorted(exact)), tuple(sorted(inline)))
+
+
+def _code_spans(text: str) -> tuple[tuple[int, int], ...]:
+    """Raw exact islands, including every unproven/container slice, not just code."""
+    return _markdown_source(text).exact
+
+
+def _opaque_separator(raw: str) -> str:
+    return "\n\n" if raw.endswith(("\n\n", "\r\n\r\n")) else "\n" if raw.endswith("\n") else ""
 
 
 def _shield_code(text: str) -> tuple[str, dict[str, str]]:
@@ -415,7 +509,7 @@ def _shield_code(text: str) -> tuple[str, dict[str, str]]:
             raise AdoptionError("adoption-needs-choice", "protected code token is ambiguous")
         payloads[token] = raw
         # Keep block boundaries visible to the segmenter, without exposing code.
-        parts.extend((text[cursor:start], token + ("\n" if raw.endswith("\n") else "")))
+        parts.extend((text[cursor:start], token + _opaque_separator(raw)))
         cursor = end
     parts.append(text[cursor:])
     return "".join(parts), payloads
@@ -423,54 +517,16 @@ def _shield_code(text: str) -> tuple[str, dict[str, str]]:
 
 def _restore_code(text: str, payloads: Mapping[str, str]) -> str:
     for token, raw in payloads.items():
-        text = text.replace(token + ("\n" if raw.endswith("\n") else ""), raw)
+        text = text.replace(token + _opaque_separator(raw), raw)
         text = text.replace(token, raw)  # segmenters may strip the final prose newline
     return text
 
 
 def _norm(text: str) -> str:
-    """Comparison form: the engine's normalization plus soft line-wrap folding.
-
-    ``segment.norm`` already strips trailing whitespace and collapses blank runs;
-    rejoining the lines of a paragraph makes a re-wrapped paragraph compare equal
-    too (a common difference between a hand-edited copy and a published one),
-    while list items, tables, fences and headings keep their line structure.
-    """
+    """Normalize only source-proven prose; every other physical slice is opaque."""
 
     text, _ = _shield_code(text)
-    out: list[str] = []
-    paragraph: list[str] = []
-    in_fence = False
-
-    def flush() -> None:
-        if paragraph:
-            out.append(" ".join(part.strip() for part in paragraph))
-            paragraph.clear()
-
-    for line in seg.norm(text).split("\n"):
-        stripped = line.strip()
-        fence = stripped.startswith("```") or stripped.startswith("~~~")
-        if fence:
-            flush()
-            out.append(line)
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            out.append(line)
-            continue
-        structural = (
-            not stripped
-            or stripped.startswith(("#", "|", ">", "- ", "* ", "+ "))
-            or re.match(r"^\d+[.)]\s", stripped) is not None
-            or line.startswith(("    ", "\t"))
-        )
-        if structural:
-            flush()
-            out.append(line)
-        else:
-            paragraph.append(line)
-    flush()
-    return "\n".join(out)
+    return "\n".join(" ".join(paragraph.split()) for paragraph in seg.norm(text).split("\n\n"))
 
 
 def _rewrite_relocated_refs(
@@ -510,6 +566,27 @@ def _rewrite_relocated_refs(
             relative = "./" + relative
         return relative
 
+    if _prose_path(source_path):
+        replacements: list[tuple[int, int, str]] = []
+        for _, _, start, end in _markdown_source(text).inline:
+            literal = text[start:end]
+            # An entire raw literal path is the only allowed code rewrite. Code
+            # expressions, escapes, URIs, whitespace and absolute paths stay exact.
+            if not re.fullmatch(r"(?:[A-Za-z0-9_.@+-]+/)*[A-Za-z0-9_.@+-]+", literal):
+                continue
+            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(source_path), literal))
+            if resolved in moves and resolved in known:
+                relative = posixpath.relpath(
+                    moves[resolved], posixpath.dirname(destination_path) or "."
+                )
+                if literal.startswith("./") and not relative.startswith("."):
+                    relative = "./" + relative
+                replacements.append((start, end, relative))
+            elif posixpath.basename(literal) in {posixpath.basename(old) for old in moves}:
+                if resolved.startswith("../") or resolved not in known:
+                    raise AdoptionError("adoption-needs-choice", "ambiguous inline filepath")
+        for start, end, relative in reversed(replacements):
+            text = text[:start] + relative + text[end:]
     masked, payloads = _shield_code(text)
     return _restore_code(pattern.sub(rewrite, masked), payloads)
 
@@ -913,6 +990,10 @@ def build_proposal(
         if plan.result is not None:
             model = model or plan.result.engine.model
             failure = failure or plan.result.engine.failure_class
+        if source is not None and plan.local is not None:
+            # The frozen rewrite is part of the proposal, not the original tree.
+            # Review diffs must expose inline-path changes against captured bytes.
+            plan = replace(plan, local=local_by_path[source].text())
         plans.append(plan)
     plans.extend(set_aside)
 
