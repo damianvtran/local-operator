@@ -75,6 +75,8 @@ def proxy(tmp_path, monkeypatch):
             if ctype == "application/json" and raw:
                 body = json.loads(raw)
             calls.append((self.command, self.path, body, self.headers.get("authorization"), ctype))
+            # The S3a file-mode negotiation rides headers, so the hub records them.
+            state.setdefault("headers", []).append(dict(self.headers.items()))
             # Per-path refusal (endpoint-avatar tests): the hub answers by the
             # path it was asked for, so one endpoint's version can 404 while
             # another's serves.
@@ -86,6 +88,22 @@ def proxy(tmp_path, monkeypatch):
                 code, error = failure
                 out = json.dumps({"code": error, "error": "Fixture refusal"}).encode()
                 return self._reply(code, out, "application/json")
+            if (
+                self.command == "POST"
+                and self.path.split("?")[0].endswith("/attachments")
+                and self.headers.get("x-bridge-attachment-mode") == "file"
+            ):
+                file = {
+                    "id": AID,
+                    "class": "pdf",
+                    "mime": "application/octet-stream",
+                    "size": len(raw),
+                    "display_name": "fixture",
+                    "state": "staged",
+                    "download_only": True,
+                }
+                out = json.dumps({"msg": "File staged", "result": {"file": file}}).encode()
+                return self._reply(201, out, "application/json")
             if self.command == "POST" and self.path.split("?")[0].endswith("/attachments"):
                 result = {
                     "attachment": {
@@ -669,3 +687,205 @@ def test_e2e_access_log_of_real_upload_fetch_delete_has_no_ids_or_hashes(
     for needle in ("batt_", "bcmsg_", "bcv_", AID, MID, CID):
         assert needle not in log
     assert _re.search(r"[0-9a-f]{64}", log) is None
+
+
+# -- generic files (agent-server S3a/S3b file mode) ---------------------------
+#
+# The route half of human file upload/send. The hub is the same loopback
+# fixture; it records request headers so the negotiation is asserted on the
+# wire the hub actually received, not on what the client meant to send.
+
+AID3 = "batt_7c9e6679-7425-40de-944b-e07fc1f90ae7"
+#: A name exercising every encoding hazard the hub contract names: a space, a
+#: literal ``+`` (``QueryUnescape`` would read it as a space), ``%``, ``/``,
+#: non-ASCII and an emoji.
+FILE_NAME = "Q4 rëport+v2 100%/final 📄.pdf"
+FILE_NAME_WIRE = "Q4%20r%C3%ABport%2Bv2%20100%25%2Ffinal%20%F0%9F%93%84.pdf"
+
+
+def test_file_constants_match_the_client() -> None:
+    assert routes._FILE_MAX_BYTES == bridge.FILE_MAX_BYTES == 25 * 1024 * 1024
+
+
+def test_file_upload_negotiates_file_mode_with_the_exact_headers(proxy):
+    client, calls, state = proxy
+    response = client.post(
+        _owner(f"{BASE}/attachments?mode=file&tenant_id=org-a"),
+        content=b"%PDF-1.7 fixture",
+        headers={"x-bridge-file-name": FILE_NAME_WIRE},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["result"]["file"]["id"] == AID
+    method, path, body, _, ctype = calls[-1]
+    # ``mode`` and ``expected_account_id`` are desktop-side only: the hub path
+    # carries just the tenant, exactly as an image upload does.
+    assert (method, path) == ("POST", f"/v1/messaging/conversations/{CID}/attachments?tenant_id=org-a")
+    assert body == b"%PDF-1.7 fixture" and ctype == "application/octet-stream"
+    sent = {k.lower(): v for k, v in state["headers"][-1].items()}
+    assert sent["x-bridge-attachment-mode"] == "file"
+    assert sent["x-bridge-files-version"] == "1"
+    # Decoded at the route and re-encoded by the client: byte-identical.
+    assert sent["x-bridge-file-name"] == FILE_NAME_WIRE
+
+
+def test_image_upload_wire_carries_no_file_headers(proxy):
+    client, _, state = proxy
+    for url in (f"{BASE}/attachments", f"{BASE}/attachments?mode=image"):
+        assert client.post(_owner(url), content=PNG).status_code == 201
+        sent = {k.lower() for k in state["headers"][-1]}
+        assert not sent & {"x-bridge-attachment-mode", "x-bridge-files-version", "x-bridge-file-name"}
+
+
+def test_file_upload_without_a_name_sends_no_name_header(proxy):
+    client, _, state = proxy
+    response = client.post(_owner(f"{BASE}/attachments?mode=file"), content=b"plain")
+    assert response.status_code == 201, response.text
+    assert "x-bridge-file-name" not in {k.lower() for k in state["headers"][-1]}
+
+
+@pytest.mark.parametrize(
+    ("query", "headers"),
+    [
+        ("mode=files", {}),
+        ("mode=file&mode=image", {}),
+        ("mode=", {}),
+        ("mode=file", {"x-bridge-file-name": "bad%zzname"}),
+        ("mode=file", {"x-bridge-file-name": "trailing%"}),
+        ("mode=file", {"x-bridge-file-name": "%FF%FE"}),  # not UTF-8
+        ("mode=file", {"x-bridge-file-name": "a" * 1025}),
+    ],
+    ids=["unknown", "repeated", "blank", "bad-escape", "trailing-pct", "not-utf8", "too-long"],
+)
+def test_file_mode_query_and_name_refusals_happen_before_any_hub_call(proxy, query, headers):
+    client, calls, _ = proxy
+    response = client.post(_owner(f"{BASE}/attachments?{query}"), content=b"x", headers=headers)
+    assert response.status_code == 422, response.text
+    assert calls == []
+
+
+def test_file_mode_streams_to_25_mib_and_refuses_one_byte_more_before_the_hub(proxy):
+    client, calls, _ = proxy
+    limit = bridge.FILE_MAX_BYTES
+    # Declared length over the bound: refused from the header alone.
+    over = client.post(_owner(f"{BASE}/attachments?mode=file"), content=b"\0" * (limit + 1))
+    assert over.status_code == 413, over.text
+    assert over.json()["detail"]["code"] == "attachment_too_large"
+
+    # A CHUNKED sender (no Content-Length) is stopped by the running count,
+    # not by buffering the whole body first. 26 MiB offered in 1 MiB chunks;
+    # the generator records how much the route actually pulled.
+    pulled = {"bytes": 0}
+
+    def body():
+        for _ in range(26):
+            pulled["bytes"] += 1024 * 1024
+            yield b"\0" * (1024 * 1024)
+
+    chunked = client.post(_owner(f"{BASE}/attachments?mode=file"), content=body())
+    assert chunked.status_code == 413, chunked.text
+    assert calls == []
+    # The image cap is unchanged by the file path.
+    image = client.post(_owner(f"{BASE}/attachments"), content=b"\0" * (bridge.ATTACHMENT_MAX_BYTES + 1))
+    assert image.status_code == 413 and calls == []
+
+    # Exactly at the bound is accepted and forwarded whole.
+    at = client.post(_owner(f"{BASE}/attachments?mode=file"), content=b"\1" * limit)
+    assert at.status_code == 201, at.text
+    assert len(calls) == 1 and len(calls[-1][2]) == limit
+
+
+def test_file_upload_wrong_account_is_refused_before_any_bytes_move(proxy):
+    client, calls, _ = proxy
+    response = client.post(
+        f"{BASE}/attachments?mode=file&expected_account_id=acc_other",
+        content=b"%PDF-1.7",
+        headers={"x-bridge-file-name": FILE_NAME_WIRE},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == bridge.ACCOUNT_MISMATCH_CODE
+    assert calls == []
+
+
+def test_send_forwards_files_and_allows_file_only(proxy):
+    client, calls, _ = proxy
+    file_only = client.post(f"{BASE}/messages", json={"client_ref": "f1", "body": "", "files": [AID]})
+    assert file_only.status_code == 200, file_only.text
+    assert calls[-1][2] == {"client_ref": "f1", "body": "", "files": [AID]}
+    mixed = client.post(
+        f"{BASE}/messages",
+        json={"client_ref": "f2", "body": "see", "attachment_ids": [AID], "files": [AID3]},
+    )
+    assert mixed.status_code == 200, mixed.text
+    assert calls[-1][2] == {
+        "client_ref": "f2",
+        "body": "see",
+        "attachment_ids": [AID],
+        "files": [AID3],
+    }
+    # ``files: null`` is "no files", never a forwarded key.
+    nulled = client.post(f"{BASE}/messages", json={"client_ref": "f3", "body": "hi", "files": None})
+    assert nulled.status_code == 200
+    assert calls[-1][2] == {"client_ref": "f3", "body": "hi"}
+
+
+def _ids(n: int) -> list[str]:
+    return [f"batt_{i:08d}-0000-0000-0000-000000000000" for i in range(n)]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"client_ref": "r", "body": "x", "files": []},
+        {"client_ref": "r", "body": "x", "files": [AID, AID]},
+        {"client_ref": "r", "body": "x", "files": ["../../status"]},
+        {"client_ref": "r", "body": "x", "files": _ids(11)},
+        {"client_ref": "r", "body": "x", "attachment_ids": [AID], "files": [AID]},
+        {"client_ref": "r", "body": "x", "attachment_ids": _ids(4)[:1], "files": _ids(11)[1:11]},
+    ],
+    ids=["empty", "dup", "grammar", "eleven", "both-lists", "combined-eleven"],
+)
+def test_send_refuses_bad_file_shapes_before_io(proxy, payload):
+    client, calls, _ = proxy
+    assert client.post(f"{BASE}/messages", json=payload).status_code == 422
+    assert calls == []
+
+
+def test_scheduled_create_refuses_files_because_reserve_is_image_only(proxy):
+    client, calls, _ = proxy
+    create = {
+        "tenant_id": "org-a",
+        "conversation_id": CID,
+        "client_ref": "s1",
+        "body": "later",
+        "send_at": "2030-04-05T12:30:00Z",
+        "files": [AID],
+    }
+    assert client.post("/v1/desktop/team-bridge/scheduled", json=create).status_code == 422
+    sid = "bsch_" + "a" * 32
+    patch = client.patch(
+        f"/v1/desktop/team-bridge/scheduled/{sid}?tenant_id=org-a", json={"files": [AID]}
+    )
+    assert patch.status_code == 422
+    assert calls == []
+
+
+def test_file_display_name_never_reaches_a_log(proxy, caplog):
+    """The name is user content: it rides a header, and nothing logs it.
+
+    Captures every logger at DEBUG (httpx/httpcore included, which log request
+    lines) across an upload, and asserts neither the decoded nor the encoded
+    form appears. The control: the hub really received the name.
+    """
+
+    client, _, state = proxy
+    with caplog.at_level(logging.DEBUG):
+        response = client.post(
+            _owner(f"{BASE}/attachments?mode=file"),
+            content=b"%PDF-1.7",
+            headers={"x-bridge-file-name": FILE_NAME_WIRE},
+        )
+    assert response.status_code == 201
+    assert {k.lower(): v for k, v in state["headers"][-1].items()}["x-bridge-file-name"] == FILE_NAME_WIRE
+    assert caplog.records, "control: the capture saw the request at all"
+    assert FILE_NAME not in caplog.text and FILE_NAME_WIRE not in caplog.text
+    assert "rëport" not in caplog.text
