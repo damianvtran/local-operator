@@ -1353,6 +1353,27 @@
         "effort": null,
         "delegate": false,
         "class": null
+      },
+      {
+        "sha": "e9812b4f7ceb978ffe602f032807abf62130ce9f",
+        "version": "1.0.7",
+        "instructions_sha256": "ad00ec39d45743cbde7af7d104263b089654920d57f47e2dfe1903cfeda7b99d",
+        "description": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "web_search",
+          "web_fetch",
+          "browser"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
       }
     ],
     "reviewer": [
@@ -1687,6 +1708,27 @@
         "sha": "d0e744e487df709cff3522409713f798519705dd",
         "version": "1.3.11",
         "instructions_sha256": "2bdf02ad0ac042cfb3709e24ac6daf5443ef6c395075969a173af8be6d3c6bcc",
+        "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
+        "tools": [
+          "read",
+          "glob",
+          "grep",
+          "list_variables",
+          "read_variable",
+          "bash",
+          "todo",
+          "project",
+          "web_search",
+          "web_fetch"
+        ],
+        "effort": null,
+        "delegate": false,
+        "class": null
+      },
+      {
+        "sha": "e9812b4f7ceb978ffe602f032807abf62130ce9f",
+        "version": "1.3.12",
+        "instructions_sha256": "1ba24383270100ba89adbc455767cf4b68ebeda726a8fb365ebcdbf57edb9abd",
         "description": "Reviewing a pull request, merge request, diff, commit range or patch for defects and bugs; auditing or critiquing code someone else (or another agent) wrote.",
         "tools": [
           "read",
