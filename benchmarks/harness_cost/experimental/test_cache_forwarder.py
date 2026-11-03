@@ -4,17 +4,18 @@ Why: a cache helper test alone cannot show where a forwarding adapter mutates
 its request. Constraints: synthetic public text, fake upstream, scratch-only
 metadata, no model/server process, socket, auth lookup or dependency install.
 """
+
 import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-import httpx
-from starlette.testclient import TestClient
 import cache_forwarder as f
+import httpx
 from cache_namespace import namespace_tag
+from starlette.testclient import TestClient
 
 
 class FakeMeter:
@@ -23,7 +24,9 @@ class FakeMeter:
 
     async def post(self, url, **kwargs):
         self.calls.append((url, kwargs))
-        return httpx.Response(200, content=b'{"usage":{}}', headers={"content-type": "application/json"})
+        return httpx.Response(
+            200, content=b'{"usage":{}}', headers={"content-type": "application/json"}
+        )
 
 
 class ForwarderTests(unittest.TestCase):
@@ -46,8 +49,17 @@ class ForwarderTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_final_body_precedes_meter_and_log_is_metadata_only(self):
-        body = {"tools": [{"name": "echo", "description": "Echo public text", "input_schema": {"type": "object"}}],
-                "system": "Synthetic public rule", "messages": []}
+        body = {
+            "tools": [
+                {
+                    "name": "echo",
+                    "description": "Echo public text",
+                    "input_schema": {"type": "object"},
+                }
+            ],
+            "system": "Synthetic public rule",
+            "messages": [],
+        }
         response = self.client.post("/r/cachedev__unit_A/v1/messages", json=body)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(self.meter.calls), 1)
@@ -61,7 +73,10 @@ class ForwarderTests(unittest.TestCase):
         self.assertNotIn("Echo public text", self.log.read_text())
 
     def test_invalid_route_and_layout_never_dispatch(self):
-        for route, body in [("headline__bad", {}), ("cachedev__bad", {"tools": [{"name": "missing-description"}]})]:
+        for route, body in [
+            ("headline__bad", {}),
+            ("cachedev__bad", {"tools": [{"name": "missing-description"}]}),
+        ]:
             response = self.client.post(f"/r/{route}/v1/messages", json=body)
             self.assertEqual(response.status_code, 400)
         self.assertEqual(self.meter.calls, [])

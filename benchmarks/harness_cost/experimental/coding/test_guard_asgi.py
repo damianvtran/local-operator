@@ -6,12 +6,13 @@ application lifespan, inspect HTTP responses and prove ledger-lock release.
 Constraints: synthetic ledgers, no credentials, no sockets, no paid dispatch;
 httpx and Starlette are optional development dependencies, not core analysis.
 """
+
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import budget_guard

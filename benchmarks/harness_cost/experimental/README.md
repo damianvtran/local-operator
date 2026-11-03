@@ -140,7 +140,18 @@ folder. Downloaded skill bodies are not redistributed here; upstream licenses
 Run from this directory using an existing environment; no dependency installation,
 model API, harness process or Docker operation is necessary:
 
+Set `BENCH_PYTHON` to your chosen test-environment interpreter. The full ASGI
+controls additionally use `httpx==0.28.1`, `starlette==1.10.0` and
+`jsonschema==4.26.0`; install them explicitly in that environment if needed.
+A Local Operator session already supplies `LOCAL_OPERATOR_SCRATCHPAD`. In an
+ordinary terminal, create an isolated test directory first—no login is needed:
+
 ```sh
+if [ -z "${LOCAL_OPERATOR_SCRATCHPAD:-}" ]; then
+  mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"
+  export LOCAL_OPERATOR_SCRATCHPAD="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/harness-cost-offline.XXXXXX")"
+fi
+export TMPDIR="$LOCAL_OPERATOR_SCRATCHPAD"
 python3 -B -m unittest -v test_cache_namespace
 python3 -B verify_cache_evidence.py
 python3 -B -m unittest -v test_runner_v2

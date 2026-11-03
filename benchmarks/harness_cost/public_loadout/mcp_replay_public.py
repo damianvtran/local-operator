@@ -35,11 +35,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-SNAPSHOT = Path(os.environ.get("BENCH_MCP_SCHEMAS", Path(__file__).resolve().parent / "public_mcp_schemas.json"))
+SNAPSHOT = Path(
+    os.environ.get("BENCH_MCP_SCHEMAS", Path(__file__).resolve().parent / "public_mcp_schemas.json")
+)
 LOG = Path(os.environ.get("BENCH_MCP_LOG", "mcp_calls.jsonl"))
 
 
-def load_schemas() -> dict[str, list[dict]]:
+def load_schemas() -> dict[str, list[dict[str, object]]]:
     """Return {server: tools} for BENCH_MCP_SERVERS, refusing to start on a gap.
 
     Fails loudly rather than serving a partial surface: a missing server would
@@ -78,28 +80,61 @@ async def mcp(request: Request) -> Response:
             continue
         if method == "initialize":
             ver = (msg.get("params") or {}).get("protocolVersion", "2025-06-18")
-            replies.append(_ok(rid, {
-                "protocolVersion": ver,
-                "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": server, "version": "replay"},
-            }))
+            replies.append(
+                _ok(
+                    rid,
+                    {
+                        "protocolVersion": ver,
+                        "capabilities": {"tools": {"listChanged": False}},
+                        "serverInfo": {"name": server, "version": "replay"},
+                    },
+                )
+            )
         elif method == "tools/list":
             replies.append(_ok(rid, {"tools": SCHEMAS[server]}))
         elif method == "tools/call":
             name = (msg.get("params") or {}).get("name")
             with LOG.open("a") as fh:
-                fh.write(json.dumps({"ts": time.time(), "run_id": run_id, "server": server, "tool": name}) + "\n")
-            replies.append(_ok(rid, {
-                "isError": True,
-                "content": [{"type": "text", "text": f"{server} is unavailable in this environment (offline benchmark); complete the task without it."}],
-            }))
+                fh.write(
+                    json.dumps(
+                        {"ts": time.time(), "run_id": run_id, "server": server, "tool": name}
+                    )
+                    + "\n"
+                )
+            replies.append(
+                _ok(
+                    rid,
+                    {
+                        "isError": True,
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    f"{server} is unavailable in this environment "
+                                    "(offline benchmark); complete the task without it."
+                                ),
+                            }
+                        ],
+                    },
+                )
+            )
         elif method == "ping":
             replies.append(_ok(rid, {}))
         elif method in ("resources/list", "prompts/list", "resources/templates/list"):
-            key = {"resources/list": "resources", "prompts/list": "prompts", "resources/templates/list": "resourceTemplates"}[method]
+            key = {
+                "resources/list": "resources",
+                "prompts/list": "prompts",
+                "resources/templates/list": "resourceTemplates",
+            }[method]
             replies.append(_ok(rid, {key: []}))
         else:
-            replies.append({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": f"method not found: {method}"}})
+            replies.append(
+                {
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "error": {"code": -32601, "message": f"method not found: {method}"},
+                }
+            )
     if not replies:
         return Response(status_code=202)
     body = replies if isinstance(payload, list) else replies[0]
@@ -110,12 +145,19 @@ async def health(_: Request) -> Response:
     return JSONResponse({s: len(t) for s, t in SCHEMAS.items()})
 
 
-app = Starlette(routes=[
-    Route("/health", health),
-    Route("/{run_id}/{server}/mcp", mcp, methods=["GET", "POST", "DELETE"]),
-])
+app = Starlette(
+    routes=[
+        Route("/health", health),
+        Route("/{run_id}/{server}/mcp", mcp, methods=["GET", "POST", "DELETE"]),
+    ]
+)
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("BENCH_MCP_PORT", "8790")), log_level="warning")
+    uvicorn.run(
+        app,
+        host="127.0.0.1",
+        port=int(os.environ.get("BENCH_MCP_PORT", "8790")),
+        log_level="warning",
+    )

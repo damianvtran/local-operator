@@ -23,53 +23,128 @@ Usage through Harbor: -a adapters:LocalOperator (or Omp, Dsh, FrozenClaudeCode,
 FrozenCodex, OpenCodeV2, FrozenHermes). Run from this directory, or put it on the
 Harbor process's PYTHONPATH. Never put that PYTHONPATH on the agent environment.
 """
+
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import shlex
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Protocol, TypeVar, runtime_checkable
 
-from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_template
-from harbor.agents.installed.claude_code import ClaudeCode
-from harbor.agents.installed.codex import Codex
-from harbor.agents.installed.opencode import OpenCode
-from harbor.agents.installed.hermes import Hermes
-from harbor.environments.base import BaseEnvironment
-from harbor.models.agent.context import AgentContext
+
+@runtime_checkable
+class _InstalledAgent(Protocol):
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        # A concrete constructor contract permits super() delegation in _Native;
+        # runtime classes are still Harbor's, never this structural interface.
+        return None
+
+    async def exec_as_agent(
+        self,
+        environment: object,
+        command: str,
+        *,
+        env: dict[str, str | None] | None = None,
+        timeout_sec: int | None = None,
+    ) -> object: ...
+
+    async def exec_as_root(self, environment: object, command: str) -> object: ...
+
+    def _get_env(self, name: str) -> str | None: ...
+
+
+_Run = TypeVar("_Run", bound=Callable[..., Awaitable[object]])
+
+
+@runtime_checkable
+class _PromptTemplate(Protocol):
+    def __call__(self, function: _Run) -> _Run: ...
+
+
+def _agent_class(module: str, name: str) -> type[_InstalledAgent]:
+    # Harbor belongs to the standalone task kit, not core dependencies. Keep
+    # its concrete inheritance at runtime, validating the methods we rely on
+    # rather than shipping analyzer stubs that can drift from that installation.
+    candidate = getattr(importlib.import_module(module), name)
+    if (
+        not isinstance(candidate, type)
+        or not issubclass(candidate, _InstalledAgent)
+        or not all(
+            callable(getattr(candidate, method, None))
+            for method in (
+                "exec_as_agent",
+                "exec_as_root",
+                "_get_env",
+            )
+        )
+    ):
+        raise TypeError(f"{module}.{name} is not an installed Harbor agent")
+    return candidate
+
+
+def _prompt_template() -> _PromptTemplate:
+    candidate = getattr(
+        importlib.import_module("harbor.agents.installed.base"), "with_prompt_template"
+    )
+    if not isinstance(candidate, _PromptTemplate):
+        raise TypeError("Harbor with_prompt_template must be callable")
+    return candidate
+
+
+BaseInstalledAgent = _agent_class("harbor.agents.installed.base", "BaseInstalledAgent")
+ClaudeCode = _agent_class("harbor.agents.installed.claude_code", "ClaudeCode")
+Codex = _agent_class("harbor.agents.installed.codex", "Codex")
+Hermes = _agent_class("harbor.agents.installed.hermes", "Hermes")
+OpenCode = _agent_class("harbor.agents.installed.opencode", "OpenCode")
+with_prompt_template = _prompt_template()
 
 HERE = Path(__file__).resolve().parent
 PUBLIC_LOADOUT = HERE / "../../public_loadout"
 MODEL = os.environ.get("CODING_MODEL", "claude-sonnet-5-5")
 NODE_PATH = "/opt/bench/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-VERSIONS = {"local-operator": "07c324e9-source", "omp": "18.11.2", "dsh": "0.2.0-rc.2",
-            "claude-code": "2.1.274", "codex-best": "0.147.0", "opencode": "2.0.27", "hermes": "0.22.6"}
+VERSIONS = {
+    "local-operator": "07c324e9-source",
+    "omp": "18.11.2",
+    "dsh": "0.2.0-rc.2",
+    "claude-code": "2.1.274",
+    "codex-best": "0.147.0",
+    "opencode": "2.0.27",
+    "hermes": "0.22.6",
+}
 
 
 async def _link(agent, environment, binary: str, name: str) -> None:
     """Publish a pinned executable into the empty container user's local bin."""
-    await agent.exec_as_agent(environment,
+    await agent.exec_as_agent(
+        environment,
         f'mkdir -p "$HOME/.local/bin" && ln -s {shlex.quote(binary)} "$HOME/.local/bin/{name}" && '
         f'PATH={NODE_PATH} "$HOME/.local/bin/{name}" --version',
-        timeout_sec=120)
+        timeout_sec=120,
+    )
 
 
 class FrozenClaudeCode(ClaudeCode):
     """Harbor's built-in Claude Code run path, byte-pinned installer only."""
+
     async def install(self, environment):
         await _link(self, environment, "/opt/bench/claude/bin/claude", "claude")
 
 
 class FrozenCodex(Codex):
     """Harbor's built-in Codex run path plus the catalog/translator bridge."""
+
     async def install(self, environment):
         await _link(self, environment, "/opt/bench/codex/bin/codex", "codex")
         await self.exec_as_agent(environment, "mkdir -p /tmp/bench-support")
-        await environment.upload_file(HERE / "codex-model-catalog.json", "/tmp/bench-support/codex-model-catalog.json")
+        await environment.upload_file(
+            HERE / "codex-model-catalog.json", "/tmp/bench-support/codex-model-catalog.json"
+        )
         # Codex's built-in run command uses the bare binary; make it available
         # without borrowing the host PATH or changing any task Python binary.
-        await self.exec_as_root(environment,
-            'ln -s "$HOME/.local/bin/codex" /usr/local/bin/codex')
+        await self.exec_as_root(environment, 'ln -s "$HOME/.local/bin/codex" /usr/local/bin/codex')
 
 
 class FrozenHermes(Hermes):
@@ -80,12 +155,13 @@ class FrozenHermes(Hermes):
     A normal developer venv is an upstream-supported bootstrap contract and
     avoids PM's unrelated media/browser tool downloads. No source is patched.
     """
+
     async def install(self, environment):
         await _link(self, environment, "/opt/bench/hermes/hermes-agent/.venv/bin/hermes", "hermes")
 
     @with_prompt_template
     async def run(self, instruction, environment, context):
-        setup = '''import os,pathlib,yaml
+        setup = """import os,pathlib,yaml
 p=pathlib.Path('/tmp/bench-hermes');p.mkdir(exist_ok=True)
 src=pathlib.Path('/opt/bench/hermes/hermes-agent/cli-config.yaml.example')
 cfg=yaml.safe_load(src.read_text()) if src.exists() else {}
@@ -93,17 +169,38 @@ cfg['model']={'default':'claude-sonnet-5-5','provider':'bench','context_length':
 cfg['providers']={'bench':{'api':os.environ['BENCH_ANTHROPIC_URL'],'key_env':'ANTHROPIC_API_KEY','transport':'anthropic_messages','default_model':'claude-sonnet-5-5'}}
 cfg.setdefault('terminal',{})['backend']='local'
 (p/'config.yaml').write_text(yaml.safe_dump(cfg))
-'''
+"""
         await self.exec_as_agent(environment, "/opt/bench/lop/bin/python -c " + shlex.quote(setup))
-        await self.exec_as_agent(environment,
-            shlex.join(["/opt/bench/hermes/hermes-agent/.venv/bin/hermes", "--yolo", "chat", "-q", instruction,
-                        "-Q", "--model", MODEL, "--provider", "bench", "--reasoning", "high"])
+        await self.exec_as_agent(
+            environment,
+            shlex.join(
+                [
+                    "/opt/bench/hermes/hermes-agent/.venv/bin/hermes",
+                    "--yolo",
+                    "chat",
+                    "-q",
+                    instruction,
+                    "-Q",
+                    "--model",
+                    MODEL,
+                    "--provider",
+                    "bench",
+                    "--reasoning",
+                    "high",
+                ]
+            )
             + " 2>&1 | tee /logs/agent/hermes.txt",
-            env={"PATH": NODE_PATH, "HERMES_HOME": "/tmp/bench-hermes", "ANTHROPIC_API_KEY": "bench-dummy"})
+            env={
+                "PATH": NODE_PATH,
+                "HERMES_HOME": "/tmp/bench-hermes",
+                "ANTHROPIC_API_KEY": "bench-dummy",
+            },
+        )
 
 
 class OpenCodeV2(OpenCode):
     """Compatibility shim: Harbor targets npm 1.x, host arm is Go v2.0.27."""
+
     async def install(self, environment):
         await _link(self, environment, "/opt/bench/opencode/bin/opencode", "opencode")
 
@@ -112,16 +209,29 @@ class OpenCodeV2(OpenCode):
         url = self._get_env("BENCH_ANTHROPIC_URL")
         if not url:
             raise ValueError("BENCH_ANTHROPIC_URL required")
-        cfg = {"$schema": "https://opencode.ai/config.json", "autoupdate": False, "share": "disabled",
-               "provider": {"anthropic": {"options": {"baseURL": url + "/v1", "apiKey": "bench-dummy"}}}}
-        await self.exec_as_agent(environment,
+        cfg = {
+            "$schema": "https://opencode.ai/config.json",
+            "autoupdate": False,
+            "share": "disabled",
+            "provider": {
+                "anthropic": {"options": {"baseURL": url + "/v1", "apiKey": "bench-dummy"}}
+            },
+        }
+        await self.exec_as_agent(
+            environment,
             f'"$HOME/.local/bin/opencode" run --standalone --auto --format json '
-            f'-m anthropic/{MODEL} {shlex.quote(instruction)} 2>&1 | tee /logs/agent/opencode.txt',
-            env={"PATH": NODE_PATH, "OPENCODE_CONFIG_CONTENT": json.dumps(cfg), "OPENCODE_DISABLE_AUTOUPDATE": "1"})
+            f"-m anthropic/{MODEL} {shlex.quote(instruction)} 2>&1 | tee /logs/agent/opencode.txt",
+            env={
+                "PATH": NODE_PATH,
+                "OPENCODE_CONFIG_CONTENT": json.dumps(cfg),
+                "OPENCODE_DISABLE_AUTOUPDATE": "1",
+            },
+        )
 
 
 class _Native(BaseInstalledAgent):
     """Common task-side invocation without an extra harness system prompt."""
+
     PIN = ""
 
     def __init__(self, *args, **kwargs):
@@ -134,13 +244,16 @@ class _Native(BaseInstalledAgent):
             await environment.upload_file(HERE / name, "/tmp/bench-support/" + name)
 
     async def _run(self, environment, argv, env):
-        await self.exec_as_agent(environment,
+        await self.exec_as_agent(
+            environment,
             shlex.join(argv) + " 2>&1 | tee /logs/agent/native.jsonl",
-            env={"PATH": NODE_PATH, **env})
+            env={"PATH": NODE_PATH, **env},
+        )
 
 
 class LocalOperator(_Native):
     """First-party Anthropic provider + process-local base-URL shim."""
+
     PIN = VERSIONS["local-operator"]
 
     @staticmethod
@@ -148,21 +261,39 @@ class LocalOperator(_Native):
         return "local-operator"
 
     async def install(self, environment):
-        await self.exec_as_agent(environment,
-            "/opt/bench/lop/bin/python -c 'import local_operator'", timeout_sec=120)
+        await self.exec_as_agent(
+            environment, "/opt/bench/lop/bin/python -c 'import local_operator'", timeout_sec=120
+        )
         await self._upload_support(environment, ["lop_launch.py", "lop_shim.py"])
 
     @with_prompt_template
     async def run(self, instruction, environment, context):
-        await self._run(environment,
-            ["/opt/bench/lop/bin/python", "/tmp/bench-support/lop_launch.py", "exec", "--hosting", "anthropic",
-             "--model", MODEL, "--yolo", "--json", instruction],
-            {"ANTHROPIC_API_KEY": "bench-dummy", "LOCAL_OPERATOR_CONFIG_DIR": "/tmp/bench-lop",
-             "LOCAL_OPERATOR_NO_NOTIFICATIONS": "1", "LOCAL_OPERATOR_ALLOW_NESTED_SESSION": "1"})
+        await self._run(
+            environment,
+            [
+                "/opt/bench/lop/bin/python",
+                "/tmp/bench-support/lop_launch.py",
+                "exec",
+                "--hosting",
+                "anthropic",
+                "--model",
+                MODEL,
+                "--yolo",
+                "--json",
+                instruction,
+            ],
+            {
+                "ANTHROPIC_API_KEY": "bench-dummy",
+                "LOCAL_OPERATOR_CONFIG_DIR": "/tmp/bench-lop",
+                "LOCAL_OPERATOR_NO_NOTIFICATIONS": "1",
+                "LOCAL_OPERATOR_ALLOW_NESTED_SESSION": "1",
+            },
+        )
 
 
 class Omp(_Native):
     """Released Linux amd64 omp 18.11.2, not Harbor's upstream pi agent."""
+
     PIN = VERSIONS["omp"]
 
     @staticmethod
@@ -175,15 +306,31 @@ class Omp(_Native):
     @with_prompt_template
     async def run(self, instruction, environment, context):
         # cwd is Harbor's task cwd; omitting --cwd preserves it exactly.
-        await self._run(environment,
-            ["/opt/bench/omp/bin/omp", "-p", "--mode", "json", "--model", "anthropic/" + MODEL,
-             "--auto-approve", "--no-session", "--allow-home", instruction],
-            {"ANTHROPIC_BASE_URL": self._get_env("BENCH_ANTHROPIC_URL"),
-             "ANTHROPIC_API_KEY": "bench-dummy", "PI_CODING_AGENT_DIR": "/tmp/bench-omp"})
+        await self._run(
+            environment,
+            [
+                "/opt/bench/omp/bin/omp",
+                "-p",
+                "--mode",
+                "json",
+                "--model",
+                "anthropic/" + MODEL,
+                "--auto-approve",
+                "--no-session",
+                "--allow-home",
+                instruction,
+            ],
+            {
+                "ANTHROPIC_BASE_URL": self._get_env("BENCH_ANTHROPIC_URL"),
+                "ANTHROPIC_API_KEY": "bench-dummy",
+                "PI_CODING_AGENT_DIR": "/tmp/bench-omp",
+            },
+        )
 
 
 class Dsh(_Native):
     """Native headless profile with a declared Anthropic provider route."""
+
     PIN = VERSIONS["dsh"]
 
     @staticmethod
@@ -191,22 +338,75 @@ class Dsh(_Native):
         return "dsh"
 
     async def install(self, environment):
-        await self.exec_as_agent(environment,
-            "/opt/bench/node/bin/node /opt/bench/dsh/lib/node_modules/@deepseek-ai/dsh/lib/bin.js --version")
+        await self.exec_as_agent(
+            environment,
+            "/opt/bench/node/bin/node "
+            "/opt/bench/dsh/lib/node_modules/@deepseek-ai/dsh/lib/bin.js --version",
+        )
         url = self._get_env("BENCH_ANTHROPIC_URL")
         if not url:
             raise ValueError("BENCH_ANTHROPIC_URL required")
         # Generate only transport config, never copy a host's private profile.
         # Preserve the pinned release's JS URL binding and exact native model
         # metadata; a different config shape would silently select a fallback.
-        config = "# Native provider route: this release's catalog predates the measured model.\n# Declare the verified 1M context and output limit instead of a fallback, plus\n# the exposed high reasoning level. The wire probe must confirm its translation.\n# All keys are dummy; the shared metering proxy owns upstream authentication.\n- id: llm-pi-ai\n  config:\n    providers:\n      anthropic:\n        apiKeyEnv: ANTHROPIC_API_KEY\n        baseURL: !!js process.env.BENCH_ANTHROPIC_URL\n        models:\n          - id: claude-sonnet-5-5\n            contextWindow: 1000000\n            maxTokens: 128000\n            compat:\n              forceAdaptiveThinking: true\n              supportsStrictTools: true\n            reasoningEfforts:\n              low: low\n              medium: medium\n              high: high\n- id: agent-default-model\n  config:\n    provider: anthropic\n    model: claude-sonnet-5-5\n    reasoningEffort: high\n"
-        await self.exec_as_agent(environment, "mkdir -p /tmp/bench-support && printf %s "
-            + shlex.quote(config) + " > /tmp/bench-support/dsh-anthropic.yml")
+        config = (
+            "# Native provider route: this release's catalog predates the measured mo"
+            "del.\n"
+            "# Declare the verified 1M context and output limit instead of a fallback"
+            ", plus\n"
+            "# the exposed high reasoning level. The wire probe must confirm its tran"
+            "slation.\n"
+            "# All keys are dummy; the shared metering proxy owns upstream authentica"
+            "tion.\n"
+            "- id: llm-pi-ai\n"
+            "  config:\n"
+            "    providers:\n"
+            "      anthropic:\n"
+            "        apiKeyEnv: ANTHROPIC_API_KEY\n"
+            "        baseURL: !!js process.env.BENCH_ANTHROPIC_URL\n"
+            "        models:\n"
+            "          - id: claude-sonnet-5-5\n"
+            "            contextWindow: 1000000\n"
+            "            maxTokens: 128000\n"
+            "            compat:\n"
+            "              forceAdaptiveThinking: true\n"
+            "              supportsStrictTools: true\n"
+            "            reasoningEfforts:\n"
+            "              low: low\n"
+            "              medium: medium\n"
+            "              high: high\n"
+            "- id: agent-default-model\n"
+            "  config:\n"
+            "    provider: anthropic\n"
+            "    model: claude-sonnet-5-5\n"
+            "    reasoningEffort: high\n"
+        )
+        await self.exec_as_agent(
+            environment,
+            "mkdir -p /tmp/bench-support && printf %s "
+            + shlex.quote(config)
+            + " > /tmp/bench-support/dsh-anthropic.yml",
+        )
 
     @with_prompt_template
     async def run(self, instruction, environment, context):
-        await self._run(environment,
-            ["/opt/bench/node/bin/node", "/opt/bench/dsh/lib/node_modules/@deepseek-ai/dsh/lib/bin.js",
-             "--profile", "headless", "--patch", "/tmp/bench-support/dsh-anthropic.yml", "--json", instruction],
-            {"DSH_HOME": "/tmp/bench-dsh", "DSH_TELEMETRY_MODE": "DISABLED", "DSH_TELEMETRY_DISABLED": "1",
-             "DSH_PERMISSION_MODE": "danger-full-access", "ANTHROPIC_API_KEY": "bench-dummy"})
+        await self._run(
+            environment,
+            [
+                "/opt/bench/node/bin/node",
+                "/opt/bench/dsh/lib/node_modules/@deepseek-ai/dsh/lib/bin.js",
+                "--profile",
+                "headless",
+                "--patch",
+                "/tmp/bench-support/dsh-anthropic.yml",
+                "--json",
+                instruction,
+            ],
+            {
+                "DSH_HOME": "/tmp/bench-dsh",
+                "DSH_TELEMETRY_MODE": "DISABLED",
+                "DSH_TELEMETRY_DISABLED": "1",
+                "DSH_PERMISSION_MODE": "danger-full-access",
+                "ANTHROPIC_API_KEY": "bench-dummy",
+            },
+        )
