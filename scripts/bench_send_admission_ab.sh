@@ -44,7 +44,7 @@ run() { # arm tree label args...
   rc=0
   env -i HOME="$iso" LOCAL_OPERATOR_CONFIG_DIR="$iso/.local-operator" PATH="$PATH" \
     TERM=xterm-256color BENCH_SEND_TREE="$tree" \
-    "$python" "$here/scripts/run_bounded.py" --timeout "$bound" -- \
+    "$python" "$here/scripts/run_bounded.py" --contract=command-status --timeout "$bound" -- \
     "$python" "$here/scripts/bench_send_admission.py" "$@" --json "$json" \
     >"$out/$label-$arm.log" 2>&1 || rc=$?
   rm -rf "$iso"
