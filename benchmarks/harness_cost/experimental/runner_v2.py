@@ -25,6 +25,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -692,16 +693,205 @@ def runtime_fingerprint(runtime: RuntimeIdentity) -> str:
 
 
 def clone_path(source: Path, destination: Path) -> None:
-    """Clone on APFS or require Linux reflinks; never silently duplicate runtimes.
+    """Prefer CoW; permit only bounded, dependency-free Linux profile-data copies.
 
-    Linux copy support is an unverified portability path, not runtime wire proof.
-    Both filesystems must support the clone operation or the command fails closed.
+    Public/clean profiles are vetted by the caller. A Linux filesystem can lack
+    reflinks even on the same device; that must not prevent copying tiny public
+    skill/config fixtures. This exception is NOT a runtime-copy policy: reject
+    links, special files, dependency/cache directories, >4096 entries or >8 MiB.
+    Recheck the actual traversal and opened files, bounding reads AND writes if
+    a source changes after preflight. Never merge into an existing destination.
     """
-    if source.stat().st_dev != destination.parent.stat().st_dev:
+    source_info = source.lstat()
+    if not stat.S_ISDIR(source_info.st_mode):
+        raise ValueError("Clone source must be a directory, not a symlink or special file")
+    if destination.exists() or destination.is_symlink():
+        raise ValueError("Clone destination must not already exist")
+    if source_info.st_dev != destination.parent.stat().st_dev:
         raise ValueError("Clone source/destination must share a filesystem")
     binary = resolve_program("BENCH_CP_BIN", "cp")
     flags = ["-Rc"] if sys.platform == "darwin" else ["--reflink=always", "-a"]
-    subprocess.run([binary, *flags, str(source), str(destination)], check=True)
+    owned: os.stat_result | None = None
+
+    def create_destination() -> None:
+        nonlocal owned
+        destination.mkdir(mode=0o700, exist_ok=False)
+        owned = destination.lstat()
+
+    def remove_partial() -> None:
+        # Only this invocation's freshly-created directory may be removed. Do
+        # not follow or delete a destination replaced by somebody else.
+        if owned is None:
+            return
+        current = destination.lstat()
+        if (current.st_dev, current.st_ino) != (owned.st_dev, owned.st_ino):
+            raise ValueError("Clone destination changed; refusing cleanup")
+        # cp -a may already have applied read-only source directory modes
+        # before a reflink failure. Restore traversal/removal permission only
+        # inside our partial root; never chmod through cloned symlinks.
+        destination.chmod(0o700, follow_symlinks=False)
+        for _, dirs, _, parent_fd in os.fwalk(destination, follow_symlinks=False):
+            for name in dirs:
+                if stat.S_ISDIR(os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode):
+                    os.chmod(name, 0o700, dir_fd=parent_fd, follow_symlinks=False)
+        shutil.rmtree(destination)
+
+    def bounded_profile_copy() -> None:
+        limit = 8 * 1024 * 1024
+        denied = {
+            ".venv",
+            "venv",
+            "node_modules",
+            "site-packages",
+            "dist-packages",
+            "installs",
+            "environments",
+            "env",
+            "envs",
+            "virtualenv",
+            ".virtualenvs",
+            ".tox",
+            ".nox",
+            "__pycache__",
+            ".mypy_cache",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".cache",
+            "cache",
+            "caches",
+            ".npm",
+            ".yarn",
+            ".bun",
+            "vendor",
+            ".pnpm-store",
+            ".uv",
+            ".cargo",
+            ".rustup",
+            ".git",
+            ".hg",
+            ".svn",
+            ".conda",
+            "runtime",
+            "runtimes",
+            "bin",
+            "lib",
+            "lib64",
+        }
+        refusal = (
+            "CoW is necessary for runtime/large/unsafe profiles; use a clone-capable filesystem"
+        )
+        # Directory descriptors anchor traversal; O_NOFOLLOW also rejects a
+        # root or file swapped for a link between preflight and the actual copy.
+        if source.name.lower() in denied:
+            raise ValueError(refusal)
+        root_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            initial_root = os.fstat(root_fd)
+            if (initial_root.st_dev, initial_root.st_ino) != (
+                source_info.st_dev,
+                source_info.st_ino,
+            ):
+                raise ValueError("Profile source changed before copy")
+
+            directories: list[tuple[Path, int]] = []
+
+            def walk(copy: bool) -> dict[str, tuple[int, ...]]:
+                records: dict[str, tuple[int, ...]] = {}
+                total = entries = 0
+                read_bytes = written_bytes = 0
+                for rel, dirs, files, parent_fd in os.fwalk(
+                    ".", dir_fd=root_fd, follow_symlinks=False
+                ):
+                    for name in dirs + files:
+                        entries += 1
+                        if entries > 4096 or name.lower() in denied:
+                            raise ValueError(refusal)
+                        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                        key = str(Path(rel) / name)
+                        records[key] = (
+                            info.st_dev,
+                            info.st_ino,
+                            info.st_mode,
+                            info.st_size,
+                            info.st_mtime_ns,
+                            info.st_ctime_ns,
+                        )
+                        target = destination / key
+                        if stat.S_ISDIR(info.st_mode):
+                            if copy:
+                                target.mkdir(mode=0o700, exist_ok=False)
+                                directories.append((target, stat.S_IMODE(info.st_mode)))
+                            continue
+                        if not stat.S_ISREG(info.st_mode):
+                            raise ValueError(refusal)
+                        total += info.st_size
+                        if total > limit:
+                            raise ValueError(refusal)
+                        if not copy:
+                            continue
+                        fd = os.open(
+                            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd
+                        )
+                        try:
+                            opened = os.fstat(fd)
+                            if opened != info:
+                                raise ValueError("Profile file changed before copy")
+                            with target.open("xb") as output:
+                                remaining = info.st_size
+                                while remaining:
+                                    block = os.read(fd, min(65536, remaining, limit - read_bytes))
+                                    if not block:
+                                        raise ValueError("Profile file changed during copy")
+                                    read_bytes += len(block)
+                                    if read_bytes > limit or len(block) > remaining:
+                                        raise ValueError(refusal)
+                                    written = output.write(block)
+                                    written_bytes += written
+                                    if written != len(block) or written_bytes > limit:
+                                        raise ValueError(
+                                            "Profile copy did not write bounded content"
+                                        )
+                                    remaining -= len(block)
+                                os.fchmod(output.fileno(), stat.S_IMODE(info.st_mode))
+                            after = os.fstat(fd)
+                            if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (
+                                info.st_size,
+                                info.st_mtime_ns,
+                                info.st_ctime_ns,
+                            ):
+                                raise ValueError("Profile file changed during copy")
+                        finally:
+                            os.close(fd)
+                return records
+
+            expected = walk(False)
+            create_destination()
+            if walk(True) != expected:
+                raise ValueError("Profile tree changed during copy")
+            for path, mode in reversed(directories):
+                path.chmod(mode)
+            destination.chmod(stat.S_IMODE(initial_root.st_mode))
+        finally:
+            os.close(root_fd)
+
+    create_destination()
+    try:
+        # Copy CONTENTS into our reserved root, so cp cannot overwrite/merge a
+        # pre-existing user path or insert an extra source basename beneath it.
+        subprocess.run([binary, *flags, str(source) + "/.", str(destination)], check=True)
+    except subprocess.CalledProcessError:
+        remove_partial()
+        owned = None
+        if sys.platform != "linux":
+            raise
+        try:
+            bounded_profile_copy()
+        except BaseException:
+            remove_partial()
+            raise
+    except BaseException:
+        remove_partial()
+        raise
 
 
 def _prepare(run_id: str, task: PreparedTask, arm: str, harness: str) -> tuple[Path, Path]:

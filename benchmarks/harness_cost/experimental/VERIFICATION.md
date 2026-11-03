@@ -174,6 +174,29 @@ operations. Checkout credentials are not persisted in this read-only job.
 Real LiteLLM transformation and Harbor native integration remain unverified;
 no optional integration failure was converted to a passing skip.
 
+## Hosted Linux profile-copy follow-up
+
+Hosted Python 3.12 installed the compatible analysis packages and passed the
+whole-tree type check, then the new offline step exposed a genuine platform
+precondition: its filesystem rejects `cp --reflink=always` with `Operation not
+supported`. The tiny public-profile preparation fixture consequently failed.
+It was not skipped or moved to a privileged filesystem.
+
+CoW remains preferred. Linux now has an explicit, bounded fallback only for
+small dependency-free profile data: at most 8 MiB and 4,096 entries. Same-device
+checks remain; symlinks, special files, dependency/runtime/cache directories,
+oversized trees and pre-existing destinations are refused. Descriptor-anchored
+traversal, actual read/write limits and inode-owned partial cleanup prevent an
+unchecked full-home copy. Large/runtime profiles still need CoW.
+
+The original failure was reproduced before editing. Actual local APFS cloning
+and the real prepare/config path with a simulated unsupported Linux clone both
+pass. Fourteen new safety/preparation regressions bring the offline benchmark
+suite to **98 tests** (16 core, 60 experimental, 22 coding). All other runner
+sections, prompts and paid holds are AST-identical. Actual Linux fallback
+execution remains a separate hosted-CI result, not inferred from the local
+simulated failure test.
+
 ## Remaining gates — not ready
 
 - Frozen/amended preregistration and feasible source selection; original 60-task

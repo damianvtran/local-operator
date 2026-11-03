@@ -30,9 +30,15 @@ experimental manifest. The original development output/logs are not shipped.
   separate classifier service. Do not disable Radient or fabricate a boolean
   attestation to bypass this gate. The user's own `lop login radient` path may
   be used during separately authorized qualification, but no auth DB is copied.
-- APFS clones use `cp -Rc`; Linux uses `cp --reflink=always -a`, refusing cross-
-  filesystem copies and non-reflink destinations. `BENCH_CP_BIN` can select the
-  copy executable. No copying fallback silently duplicates dependency trees.
+- CoW is preferred: APFS uses `cp -Rc`; Linux first tries
+  `cp --reflink=always -a`. Cross-filesystem copies remain refused.
+  `BENCH_CP_BIN` can select the copy executable. If Linux CoW is unavailable,
+  only dependency-free profile data bounded to 8 MiB and 4,096 entries may use
+  ordinary copying. Symlinks, special files, runtime/dependency/cache directories
+  and oversized profiles are refused; actual reads/writes are bounded and partial
+  cleanup is limited to the destination this call created. Large/runtime profiles
+  (including prepared Hermes environments) still need CoW; dependencies are never
+  silently copied. This preparation fallback is not native runtime qualification.
   The Linux path is unverified. Hermes' non-Darwin lifecycle path is explicitly
   rejected rather than risking a detached, unmetered gateway.
 
