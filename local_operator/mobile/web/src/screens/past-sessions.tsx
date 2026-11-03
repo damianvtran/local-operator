@@ -14,6 +14,7 @@
  *   name is "untitled". Rows that matched only on their body are marked, or
  *   the hit would read as arbitrary.
  */
+import { contentDir } from "../lib/content-direction";
 import { useEffect, useRef, useState } from "react";
 import { resumeSession, searchSessions } from "../api";
 import { SessionTagLine } from "../components/session-tag-line";
@@ -127,7 +128,7 @@ export function PastSessionsScreen() {
 							className="flex items-center gap-2 rounded-sm px-2 py-1 active:bg-elevated"
 						>
 							<div className="min-w-0 flex-1">
-								<span className="block truncate text-body">
+								<span className="flex min-w-0 items-baseline text-body">
 									{/* A PREFIX, dim, ahead of the name — the same
 									   mark and the same position the TUI's /resume
 									   picker uses, because it is one fact on two
@@ -140,13 +141,17 @@ export function PastSessionsScreen() {
 									   title is kept beside it because it is the only
 									   thing saying what this branched from. */}
 									{s.forked ? (
-										<span className="me-1.5 text-meta text-ink-dim">
+										<span className="me-1.5 shrink-0 text-meta text-ink-dim">
 											[fork]
 										</span>
 									) : null}
-									{s.name || "untitled"}
+									{/* Generated markers stay in chrome direction; the name alone
+									   owns its script direction and truncation budget. */}
+									<span dir={contentDir(s.name || "untitled")} className="min-w-0 truncate">
+										{s.name || "untitled"}
+									</span>
 									{s.body_match ? (
-										<span className="ms-1.5 text-meta text-info">
+										<span className="ms-1.5 shrink-0 text-meta text-info">
 											in conversation
 										</span>
 									) : null}

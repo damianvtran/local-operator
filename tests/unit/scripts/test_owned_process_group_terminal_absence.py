@@ -38,6 +38,8 @@ def _live_owned_group():
     world = World()
     world.exits_at = 1e9  # the leader stays live until the kill
     cap = world.capture()
+    # Live creation is not proof; establish the strict baseline before mutation.
+    cap.refresh(deadline=world.clock() + 1.0)
     assert cap.last.status == "VERIFIED", cap.last.reason
     return world, cap
 

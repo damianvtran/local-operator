@@ -167,7 +167,11 @@ def test_default_linux_capture_reaches_verified_and_signals(monkeypatch):
         clock=lambda: 0.0,
         signal_group=lambda pgid, signum: signals.append((pgid, signum)),
     )
-    assert cap.last.status == "VERIFIED", cap.last.reason
+    # Live Linux capture establishes only creation. The send below must still
+    # execute the real default strict census and all final witness guards.
+    assert cap.last.status == "ACQUIRED_POSITIVE", cap.last.reason
+    assert cap.probe["proof"] == []
+    assert cap.last.population_coverage == "not-established"
     verdict = cap.signal(15, deadline=10**9)
     assert verdict.status == "SIGNALED", verdict.reason
     assert signals == [(10, 15)]

@@ -57,7 +57,8 @@ def test_a_zombie_leader_is_visible_to_the_group_census_on_this_platform():
             signal_group=lambda *args: None,
             deadline=time.monotonic() + 5.0,
         )
-        if cap.last.status != "VERIFIED":
+        capture_status = "ACQUIRED_POSITIVE" if sys.platform.startswith("linux") else "VERIFIED"
+        if cap.last.status != capture_status:
             # DIAGNOSTIC ONLY, macOS leg. The runner reports an empty census for a
             # LIVE leader and we cannot yet tell TRULY EMPTY from UNREADABLE. Print
             # the enumeration's own numbers so the runner answers with facts. Read
@@ -94,7 +95,13 @@ def test_a_zombie_leader_is_visible_to_the_group_census_on_this_platform():
                 time.sleep(0.01)
             assert sample is not None and sample.zombie is True, sample
             return
-        assert cap.last.status == "VERIFIED", ("capture of a live leader", cap.last.reason)
+        assert cap.last.status == capture_status, ("capture of a live leader", cap.last.reason)
+        if sys.platform.startswith("linux"):
+            # Creation is all this live phase establishes. The corpse census and
+            # subsequent strict refresh below still have to prove population.
+            assert cap.probe["proof"] == []
+            assert cap.last.members == ()
+            assert cap.last.population_coverage == "not-established"
 
         os.write(write_fd, b"x")
         os.close(write_fd)

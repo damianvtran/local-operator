@@ -254,6 +254,9 @@ def test_positive_grant_cannot_be_disabled_or_widened(runner, monkeypatch, tmp_p
 
 def test_observation_complete_flag_is_not_authority():
     cap = object.__new__(groups.OwnedGroup)
+    # __new__ bypasses the constructor's diagnostic ledger, which _members
+    # clears before each attempt; model that invariant without granting proof.
+    cap.probe = {}
     cap.clock = lambda: 0
     cap.pgid = 43210
     cap.terminating_sends = []

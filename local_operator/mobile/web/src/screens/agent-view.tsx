@@ -1,3 +1,4 @@
+import { contentDir } from "../lib/content-direction";
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { HttpError, getSubagentDetail, getSubagentHistory } from "../api";
 import { AgentsSheet } from "../components/agents-sheet";
@@ -316,8 +317,10 @@ function AgentHeader({
 				<span aria-hidden dir="ltr" className="lo-directional">‹</span>
 			</button>
 			<div className="min-w-0 flex-1">
-				<p className="truncate text-body-sm font-medium">{shown?.label || "Agent"}</p>
-				<p className="truncate text-meta text-ink-dim">
+				<p dir={contentDir(shown?.label || "Agent")} className="truncate text-body-sm font-medium">{shown?.label || "Agent"}</p>
+				<p dir={contentDir(shown
+						? `${shown.agent}${shown.effort ? ` · ${formatEffort(shown.effort)}` : ""}`
+						: fallbackSubtitle)} className="truncate text-meta text-ink-dim">
 					{shown
 						? `${shown.agent}${shown.effort ? ` · ${formatEffort(shown.effort)}` : ""}`
 						: fallbackSubtitle}

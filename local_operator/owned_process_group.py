@@ -36,12 +36,14 @@ claimed, and no keeper process is introduced.
 
 from __future__ import annotations
 
+import copy
 import ctypes
+import math
 import os
 import signal
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from local_operator import procstate
@@ -72,6 +74,8 @@ class Unknown(RuntimeError):
     never this process or its own process group, never a group whose members are
     not proven to sit in the recorded group AND session.
     """
+
+    census_failure: dict[str, object] | None = None
 
 
 class PinLost(Unknown):
@@ -320,65 +324,153 @@ def _pgid_outcome(pid):
 
 
 def strict_linux(
-    pgid, deadline, *, listdir=os.listdir, read=None, stat=os.stat, clock=time.monotonic
+    pgid,
+    deadline,
+    *,
+    listdir=os.listdir,
+    read=None,
+    stat=os.stat,
+    clock=time.monotonic,
+    diagnostics=None,
 ):
     """Refuse omitted /proc rows; only proved ENOENT can exclude a vanished PID.
 
-    Re-listing detects arrivals during the scan, not ownership or an atomic
-    snapshot. The accepted census-to-signal race still applies on Linux.
-    Existing lenient resource-monitor readers are intentionally unchanged.
+    Optional diagnostics describe existing reads, never authorise omission or
+    alter scan/retry/deadline policy. Changed-PID relation is known only from a
+    successful stat parse in the SAME attempt; a closing-only arrival is unknown.
     """
     read = read or (lambda p: Path(p).read_text(encoding="utf-8"))
-    # More attempts than the four that used to abort a healthy gate: each attempt
-    # is a fresh complete scan, so retrying cannot manufacture identity — it only
-    # stops ordinary fork churn from being read as lost authority. The deadline,
-    # not this count, bounds the work.
-    for _ in range(6):
-        if clock() >= deadline:
-            raise Unknown("strict /proc census deadline")
-        first = {n for n in listdir("/proc") if n.isdigit()}
-        result = []
-        disappeared = set()
-        for entry in first:
+    attempts, attempt_count, remaining_ids = [], 0, 16
+    phase = "opening-deadline"
+
+    def scan():
+        nonlocal phase, attempt_count
+        # Keep the existing six attempts and exact deadline/read cadence. These
+        # observations measure namespace churn; they do not excuse it, extend
+        # the allowance, or convert a partial group census into authority.
+        for attempt in range(6):
+            phase = "opening-deadline"
             if clock() >= deadline:
-                raise Unknown("strict /proc row deadline")
-            path = f"/proc/{entry}"
+                raise Unknown("strict /proc census deadline")
+            attempt_count = attempt + 1
+            first, last = None, None
+            result, disappeared, parsed = [], set(), set()
+            phase = "opening-scan"
             try:
-                raw = read(path + "/stat")
-            except FileNotFoundError:
+                first = {n for n in listdir("/proc") if n.isdigit()}
+                phase = "row-scan"
+                for entry in first:
+                    if clock() >= deadline:
+                        phase = "row-deadline"
+                        raise Unknown("strict /proc row deadline")
+                    path = f"/proc/{entry}"
+                    phase = "row-read"
+                    try:
+                        raw = read(path + "/stat")
+                    except FileNotFoundError:
+                        try:
+                            stat(path)
+                        except FileNotFoundError:
+                            disappeared.add(entry)
+                            continue
+                        # The directory exists but the row did not read: retry it once.
+                        # A transient miss during churn is not a malformed row, and only a
+                        # second miss is genuinely unreadable identity.
+                        try:
+                            raw = read(path + "/stat")
+                        except FileNotFoundError:
+                            raise Unknown("stat row missing for existing PID")
+                        except (OSError, UnicodeError) as exc:
+                            raise Unknown("unreadable /proc row") from exc
+                    except (OSError, UnicodeError) as exc:
+                        raise Unknown("unreadable /proc row") from exc
+                    phase = "row-parse"
+                    try:
+                        left, tail = (
+                            raw[: raw.index("(")].strip(),
+                            raw[raw.rindex(")") + 1 :].split(),
+                        )
+                        if int(left) != int(entry) or len(tail) < 3 or len(tail[0]) != 1:
+                            raise ValueError("invalid process stat")
+                        parent, group = int(tail[1]), int(tail[2])
+                        if parent < 0 or group < 0:
+                            raise ValueError("negative process identity")
+                    except (ValueError, IndexError) as exc:
+                        raise Unknown("malformed /proc row") from exc
+                    parsed.add(entry)
+                    if group == pgid:
+                        result.append(int(entry))
+                phase = "closing-scan"
+                last = {n for n in listdir("/proc") if n.isdigit()}
+                if first - disappeared == last:
+                    # RAW NAMESPACE, before the group filter, for the same reason as Darwin.
+                    leader_seen = str(pgid) in (first | last)
+                    phase = "complete"
+                    return sorted(result), True, leader_seen
+                phase = "namespace-changed"
+            finally:
+                # A diagnostic must not replace any original read/parse/deadline
+                # refusal. Record only facts already obtained in THIS attempt.
                 try:
-                    stat(path)
-                except FileNotFoundError:
-                    disappeared.add(entry)
-                    continue
-                # The directory exists but the row did not read: retry it once.
-                # A transient miss during churn is not a malformed row, and only a
-                # second miss is genuinely unreadable identity.
-                try:
-                    raw = read(path + "/stat")
-                except FileNotFoundError:
-                    raise Unknown("stat row missing for existing PID")
-                except (OSError, UnicodeError) as exc:
-                    raise Unknown("unreadable /proc row") from exc
-            except (OSError, UnicodeError) as exc:
-                raise Unknown("unreadable /proc row") from exc
+                    opening, closing = first or set(), last or set()
+
+                    def entries(pids):
+                        nonlocal remaining_ids
+                        selected = sorted(pids, key=int)[:remaining_ids]
+                        remaining_ids -= len(selected)
+                        return [
+                            {
+                                "pid": int(pid),
+                                "relation": (
+                                    "unobserved"
+                                    if pid not in parsed
+                                    else "same-group" if int(pid) in result else "different-group"
+                                ),
+                            }
+                            for pid in selected
+                        ]
+
+                    added = closing - opening if last is not None else set()
+                    removed = opening - closing if last is not None else set()
+                    attempts.append(
+                        {
+                            "attempt": attempt + 1,
+                            "phase": phase,
+                            "opening_count": len(first) if first is not None else None,
+                            "closing_count": len(last) if last is not None else None,
+                            "added_count": len(added),
+                            "removed_count": len(removed),
+                            "confirmed_disappeared_count": len(disappeared),
+                            "added": entries(added),
+                            "removed": entries(removed),
+                            "confirmed_disappeared": entries(disappeared),
+                        }
+                    )
+                except Exception:  # noqa: BLE001 - evidence is never an authority input
+                    attempts.append({"diagnostic_unavailable": True})
+        phase = "attempt-limit"
+        raise Unknown("unstable /proc census")
+
+    def snapshot():
+        return copy.deepcopy({"phase": phase, "attempt_count": attempt_count, "attempts": attempts})
+
+    try:
+        return scan()
+    except Exception as exc:
+        # Per-exception copy: a caller mutating its optional sink or a later
+        # census must not rewrite evidence already attached to this refusal.
+        try:
+            setattr(exc, "census_failure", snapshot())
+        except Exception:  # noqa: BLE001 - never replace the original refusal
+            pass
+        raise
+    finally:
+        if diagnostics is not None:
             try:
-                left, tail = raw[: raw.index("(")].strip(), raw[raw.rindex(")") + 1 :].split()
-                if int(left) != int(entry) or len(tail) < 3 or len(tail[0]) != 1:
-                    raise ValueError("invalid process stat")
-                parent, group = int(tail[1]), int(tail[2])
-                if parent < 0 or group < 0:
-                    raise ValueError("negative process identity")
-            except (ValueError, IndexError) as exc:
-                raise Unknown("malformed /proc row") from exc
-            if group == pgid:
-                result.append(int(entry))
-        last = {n for n in listdir("/proc") if n.isdigit()}
-        if first - disappeared == last:
-            # RAW NAMESPACE, before the group filter, for the same reason as Darwin.
-            leader_seen = str(pgid) in (first | last)
-            return sorted(result), True, leader_seen
-    raise Unknown("unstable /proc census")
+                diagnostics.clear()
+                diagnostics.update(snapshot())
+            except Exception:  # noqa: BLE001 - a broken sink cannot change the verdict
+                pass
 
 
 def strict_census(pgid, deadline):
@@ -414,10 +506,12 @@ def strict_census(pgid, deadline):
             "this instrument cannot certify coverage on this installed OS",
         )
     except (OSError, ValueError, TypeError) as exc:
-        raise Unknown("strict membership probe failed") from exc
+        refused = Unknown("strict membership probe failed")
+        refused.census_failure = copy.deepcopy(getattr(exc, "census_failure", None))
+        raise refused from exc
 
 
-def bounded_samples(pids, deadline, clock=time.monotonic):
+def bounded_samples(pids, deadline, clock=time.monotonic, *, diagnostics=None):
     """Use canonical native tokens first; budget only the fixed ps fallback.
 
     Native readers are fork-free. An unavailable native reader is NOT permission
@@ -434,7 +528,7 @@ def bounded_samples(pids, deadline, clock=time.monotonic):
                 raise Unknown("native birth sample exceeded deadline")
             return result
     elif sys.platform.startswith("linux"):
-        result = procstate._proc_samples(wanted)
+        result = procstate._proc_samples(wanted, diagnostics=diagnostics)
         if clock() >= deadline:
             raise Unknown("native birth sample exceeded deadline")
         return result
@@ -519,6 +613,11 @@ class Verdict:
     #: Why authority was refused, as a class the record can carry: "pin_lost" or
     #: "unproven". ``None`` on a VERIFIED/OBSERVED_EMPTY verdict.
     refusal_class: str | None = None
+    # Acquisition is deliberately not a proof verdict. Keep the positive
+    # creation observation typed and separate from any population/cleanup claim.
+    acquisition_kind: str | None = None
+    creation_receipt: Receipt | None = None
+    population_coverage: str | None = None
 
 
 _SEAL = object()
@@ -586,6 +685,7 @@ class OwnedGroup:
         self.initial_error = "unproven initial identity"
         self.last = Verdict("REFUSED", self.initial_error)
         self._revoked = False
+        self._sample_failures = []
         self._terminal_result = None
 
     def revoke(self):
@@ -651,6 +751,8 @@ class OwnedGroup:
         # itself raised, which is exactly the case a reader needs to see.
         members: list[int] = []
         try:
+            if sys.platform.startswith("linux") and cap._acquire_live_creation(parent, deadline):
+                return cap
             members = cap._members(deadline)
             cap.probe["members"] = list(members)
             if not members:
@@ -725,10 +827,123 @@ class OwnedGroup:
             )
         return cap
 
+    def _acquire_live_creation(self, parent, deadline):
+        """Observe only our live child's creation, never population or sends.
+
+        A machine-wide strict census can race ordinary fork/exit churn before
+        the owner even records its own child. Linux may retain that positive
+        creation receipt without claiming a complete population. Every later
+        signal still executes the unchanged strict refresh and final witness
+        guards; this status cannot certify cleanup or rescue a failed proof.
+
+        Exclusive wait/reap ownership remains the caller's explicit precondition:
+        SIG_DFL rules out a handler we can observe, not an unobservable rival
+        waiter. A corpse at the first sample uses the legacy strict path instead.
+        """
+
+        def prerequisites():
+            if self._revoked:
+                raise PinLost("signal authority irreversibly revoked during creation")
+            if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+                raise Unknown("live creation requires default SIGCHLD disposition")
+            if self.pgid <= 1 or self.pgid in (os.getpid(), os.getpgrp()):
+                raise Unknown("live creation excludes pid 1, this process and its own group")
+            if parent != os.getpid():
+                raise Unknown("live creation parent is not this process")
+
+        checked = self.clock()
+        if not math.isfinite(deadline) or not math.isfinite(checked) or checked >= deadline:
+            raise Unknown("live creation requires a finite unexpired deadline")
+        if parent != os.getpid():
+            # Preserve the existing named refusal when caller/observed parent
+            # cannot be our exclusive-reap chain. This is not an acquisition.
+            self.last = Verdict(
+                "REFUSED",
+                "leader is not our child: exclusive reap ownership absent",
+                refusal_class="not_exclusive_reaper",
+            )
+            self.probe["error"] = "not_exclusive_reaper"
+            return True
+        prerequisites()
+        before = self._samples([self.leader, parent], deadline)
+        self.probe["observed"] = _observed(before, None)
+        first = before.get(self.leader)
+        if first is None:
+            raise Unknown("live creation leader sample unavailable")
+        if first.zombie:
+            return False
+        expected = (parent, self.leader, self.leader)
+        view = self.identity(self.leader)
+        after = self._samples([self.leader, parent], deadline)
+        self.probe["observed"] = _observed(before, after)
+        stamp = self.scheme()
+        self.probe["scheme"] = stamp or None
+        if view != expected or self.identity(self.leader) != expected:
+            raise Unknown("live creation parent/PG/SID not pinned")
+        if not stamp or any(pid not in before or pid not in after for pid in (self.leader, parent)):
+            raise Unknown("live creation leader/parent sample unavailable")
+        for pid in (self.leader, parent):
+            if (
+                before[pid].zombie
+                or after[pid].zombie
+                or not before[pid].birth
+                or not after[pid].birth
+                or after[pid].is_birth(stamp, before[pid].birth) is not True
+            ):
+                raise Unknown("live creation requires two matching live births")
+        observed = self.clock()
+        if not math.isfinite(observed) or observed >= deadline:
+            raise Unknown("live creation deadline expired before publication")
+        birth, parent_birth = before[self.leader].birth, before[parent].birth
+        if birth is None or parent_birth is None:
+            raise Unknown("live creation birth unavailable")
+        receipt = Receipt(
+            self.leader,
+            stamp,
+            birth,
+            parent,
+            parent_birth,
+            self.pgid,
+            self.sid,
+            observed,
+        )
+        # Prepare the observational view before the last precondition/expiry
+        # checks; even local serialization work cannot spend the live deadline
+        # and then publish an expired (or meanwhile revoked) positive receipt.
+        creation_view = asdict(receipt)
+        prerequisites()
+        publishing = self.clock()
+        if not math.isfinite(publishing) or publishing >= deadline:
+            raise Unknown("live creation deadline expired before publication")
+        self.receipts[self.leader] = receipt
+        self.initial_error = ""
+        self.probe["acquisition_kind"] = "linux-live-creation"
+        # The ledger/verdict retain the frozen typed receipt; the legacy probe
+        # is a JSON-ready observational view and is never an authority source.
+        self.probe["creation_receipt"] = creation_view
+        self.probe["population_coverage"] = "not-established"
+        self.probe["exclusive_reap_precondition"] = "caller retains exclusive wait/reap ownership"
+        self.probe["anchor"] = "leader-live-creation"
+        self.last = Verdict(
+            "ACQUIRED_POSITIVE",
+            "live creation receipt only; population coverage not established",
+            anchor="leader-live-creation",
+            acquisition_kind="linux-live-creation",
+            creation_receipt=receipt,
+            population_coverage="not-established",
+        )
+        return True
+
     def _members(self, deadline):
+        self.probe.pop("census_failure", None)
         if self.clock() >= deadline:
             raise Unknown("ownership deadline exhausted")
-        seen = self.census(self.pgid, deadline)
+        try:
+            seen = self.census(self.pgid, deadline)
+        except Unknown as exc:
+            if exc.census_failure is not None:
+                self.probe["census_failure"] = copy.deepcopy(exc.census_failure)
+            raise
         if isinstance(seen, AuthoritativeCensus):
             if not seen.complete:
                 # INCOMPLETE VISIBILITY IS NOT EMPTINESS. This is the door R3 came
@@ -755,10 +970,17 @@ class OwnedGroup:
         return sorted(members)
 
     def _samples(self, pids, deadline):
+        # Never attach an earlier witness/census attempt's error to a later
+        # unresolved PID. Publish only this attempt's bounded diagnostic facts.
+        self._sample_failures = []
         if self.clock() >= deadline:
             raise Unknown("ownership sample deadline exhausted")
         if self.samples is None:
-            return bounded_samples(pids, deadline, self.clock)
+            current = []
+            try:
+                return bounded_samples(pids, deadline, self.clock, diagnostics=current)
+            finally:
+                self._sample_failures = current
         result = self.samples(sorted(set(pids)))
         if self.clock() >= deadline:
             raise Unknown("injected sample exceeded deadline")
@@ -905,6 +1127,10 @@ class OwnedGroup:
         # what a caller binds QA to, and the final refresh of a run normally returns
         # OBSERVED_EMPTY -- popping them there published `anchor: null` and
         # `proof: []` on every successful run.
+        # A new refusal (including irreversible revocation) must not relabel
+        # an earlier attempt's sample diagnostics as evidence gathered now.
+        for stale in ("sample_failure", "unresolved", "census_failure"):
+            self.probe.pop(stale, None)
         if self._revoked:
             self.last = Verdict(
                 "REFUSED", "signal authority irreversibly revoked", refusal_class="pin_lost"
@@ -999,6 +1225,21 @@ class OwnedGroup:
             absent = [pid for pid in members if pid not in samples]
             if absent:
                 self.probe["unresolved"] = absent
+                # These are observations from the existing reads, not a new
+                # authority predicate. In particular ENOENT is not amnesty for
+                # a PID seen by either complete census. Preserve the refusal.
+                failures = {row["pid"]: row for row in self._sample_failures}
+                self.probe["sample_failure"] = {
+                    "phase": "terminal-member-sample" if terminal else "member-sample",
+                    "witness": state,
+                    "censuses": [first[:16], second[:16]],
+                    "census_counts": [len(first), len(second)],
+                    "unresolved_count": len(absent),
+                    "unresolved": [
+                        failures.get(pid, {"pid": pid, "reason": "unavailable", "errno": None})
+                        for pid in absent[:16]
+                    ],
+                }
                 raise Unknown("census member sample unreadable")
             live = [pid for pid in members if not samples[pid].zombie]
             if not live:
