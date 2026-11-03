@@ -36,6 +36,7 @@ claimed, and no keeper process is introduced.
 
 from __future__ import annotations
 
+import copy
 import ctypes
 import os
 import signal
@@ -72,6 +73,8 @@ class Unknown(RuntimeError):
     never this process or its own process group, never a group whose members are
     not proven to sit in the recorded group AND session.
     """
+
+    census_failure: dict[str, object] | None = None
 
 
 class PinLost(Unknown):
@@ -320,65 +323,153 @@ def _pgid_outcome(pid):
 
 
 def strict_linux(
-    pgid, deadline, *, listdir=os.listdir, read=None, stat=os.stat, clock=time.monotonic
+    pgid,
+    deadline,
+    *,
+    listdir=os.listdir,
+    read=None,
+    stat=os.stat,
+    clock=time.monotonic,
+    diagnostics=None,
 ):
     """Refuse omitted /proc rows; only proved ENOENT can exclude a vanished PID.
 
-    Re-listing detects arrivals during the scan, not ownership or an atomic
-    snapshot. The accepted census-to-signal race still applies on Linux.
-    Existing lenient resource-monitor readers are intentionally unchanged.
+    Optional diagnostics describe existing reads, never authorise omission or
+    alter scan/retry/deadline policy. Changed-PID relation is known only from a
+    successful stat parse in the SAME attempt; a closing-only arrival is unknown.
     """
     read = read or (lambda p: Path(p).read_text(encoding="utf-8"))
-    # More attempts than the four that used to abort a healthy gate: each attempt
-    # is a fresh complete scan, so retrying cannot manufacture identity — it only
-    # stops ordinary fork churn from being read as lost authority. The deadline,
-    # not this count, bounds the work.
-    for _ in range(6):
-        if clock() >= deadline:
-            raise Unknown("strict /proc census deadline")
-        first = {n for n in listdir("/proc") if n.isdigit()}
-        result = []
-        disappeared = set()
-        for entry in first:
+    attempts, attempt_count, remaining_ids = [], 0, 16
+    phase = "opening-deadline"
+
+    def scan():
+        nonlocal phase, attempt_count
+        # Keep the existing six attempts and exact deadline/read cadence. These
+        # observations measure namespace churn; they do not excuse it, extend
+        # the allowance, or convert a partial group census into authority.
+        for attempt in range(6):
+            phase = "opening-deadline"
             if clock() >= deadline:
-                raise Unknown("strict /proc row deadline")
-            path = f"/proc/{entry}"
+                raise Unknown("strict /proc census deadline")
+            attempt_count = attempt + 1
+            first, last = None, None
+            result, disappeared, parsed = [], set(), set()
+            phase = "opening-scan"
             try:
-                raw = read(path + "/stat")
-            except FileNotFoundError:
+                first = {n for n in listdir("/proc") if n.isdigit()}
+                phase = "row-scan"
+                for entry in first:
+                    if clock() >= deadline:
+                        phase = "row-deadline"
+                        raise Unknown("strict /proc row deadline")
+                    path = f"/proc/{entry}"
+                    phase = "row-read"
+                    try:
+                        raw = read(path + "/stat")
+                    except FileNotFoundError:
+                        try:
+                            stat(path)
+                        except FileNotFoundError:
+                            disappeared.add(entry)
+                            continue
+                        # The directory exists but the row did not read: retry it once.
+                        # A transient miss during churn is not a malformed row, and only a
+                        # second miss is genuinely unreadable identity.
+                        try:
+                            raw = read(path + "/stat")
+                        except FileNotFoundError:
+                            raise Unknown("stat row missing for existing PID")
+                        except (OSError, UnicodeError) as exc:
+                            raise Unknown("unreadable /proc row") from exc
+                    except (OSError, UnicodeError) as exc:
+                        raise Unknown("unreadable /proc row") from exc
+                    phase = "row-parse"
+                    try:
+                        left, tail = (
+                            raw[: raw.index("(")].strip(),
+                            raw[raw.rindex(")") + 1 :].split(),
+                        )
+                        if int(left) != int(entry) or len(tail) < 3 or len(tail[0]) != 1:
+                            raise ValueError("invalid process stat")
+                        parent, group = int(tail[1]), int(tail[2])
+                        if parent < 0 or group < 0:
+                            raise ValueError("negative process identity")
+                    except (ValueError, IndexError) as exc:
+                        raise Unknown("malformed /proc row") from exc
+                    parsed.add(entry)
+                    if group == pgid:
+                        result.append(int(entry))
+                phase = "closing-scan"
+                last = {n for n in listdir("/proc") if n.isdigit()}
+                if first - disappeared == last:
+                    # RAW NAMESPACE, before the group filter, for the same reason as Darwin.
+                    leader_seen = str(pgid) in (first | last)
+                    phase = "complete"
+                    return sorted(result), True, leader_seen
+                phase = "namespace-changed"
+            finally:
+                # A diagnostic must not replace any original read/parse/deadline
+                # refusal. Record only facts already obtained in THIS attempt.
                 try:
-                    stat(path)
-                except FileNotFoundError:
-                    disappeared.add(entry)
-                    continue
-                # The directory exists but the row did not read: retry it once.
-                # A transient miss during churn is not a malformed row, and only a
-                # second miss is genuinely unreadable identity.
-                try:
-                    raw = read(path + "/stat")
-                except FileNotFoundError:
-                    raise Unknown("stat row missing for existing PID")
-                except (OSError, UnicodeError) as exc:
-                    raise Unknown("unreadable /proc row") from exc
-            except (OSError, UnicodeError) as exc:
-                raise Unknown("unreadable /proc row") from exc
+                    opening, closing = first or set(), last or set()
+
+                    def entries(pids):
+                        nonlocal remaining_ids
+                        selected = sorted(pids, key=int)[:remaining_ids]
+                        remaining_ids -= len(selected)
+                        return [
+                            {
+                                "pid": int(pid),
+                                "relation": (
+                                    "unobserved"
+                                    if pid not in parsed
+                                    else "same-group" if int(pid) in result else "different-group"
+                                ),
+                            }
+                            for pid in selected
+                        ]
+
+                    added = closing - opening if last is not None else set()
+                    removed = opening - closing if last is not None else set()
+                    attempts.append(
+                        {
+                            "attempt": attempt + 1,
+                            "phase": phase,
+                            "opening_count": len(first) if first is not None else None,
+                            "closing_count": len(last) if last is not None else None,
+                            "added_count": len(added),
+                            "removed_count": len(removed),
+                            "confirmed_disappeared_count": len(disappeared),
+                            "added": entries(added),
+                            "removed": entries(removed),
+                            "confirmed_disappeared": entries(disappeared),
+                        }
+                    )
+                except Exception:  # noqa: BLE001 - evidence is never an authority input
+                    attempts.append({"diagnostic_unavailable": True})
+        phase = "attempt-limit"
+        raise Unknown("unstable /proc census")
+
+    def snapshot():
+        return copy.deepcopy({"phase": phase, "attempt_count": attempt_count, "attempts": attempts})
+
+    try:
+        return scan()
+    except Exception as exc:
+        # Per-exception copy: a caller mutating its optional sink or a later
+        # census must not rewrite evidence already attached to this refusal.
+        try:
+            setattr(exc, "census_failure", snapshot())
+        except Exception:  # noqa: BLE001 - never replace the original refusal
+            pass
+        raise
+    finally:
+        if diagnostics is not None:
             try:
-                left, tail = raw[: raw.index("(")].strip(), raw[raw.rindex(")") + 1 :].split()
-                if int(left) != int(entry) or len(tail) < 3 or len(tail[0]) != 1:
-                    raise ValueError("invalid process stat")
-                parent, group = int(tail[1]), int(tail[2])
-                if parent < 0 or group < 0:
-                    raise ValueError("negative process identity")
-            except (ValueError, IndexError) as exc:
-                raise Unknown("malformed /proc row") from exc
-            if group == pgid:
-                result.append(int(entry))
-        last = {n for n in listdir("/proc") if n.isdigit()}
-        if first - disappeared == last:
-            # RAW NAMESPACE, before the group filter, for the same reason as Darwin.
-            leader_seen = str(pgid) in (first | last)
-            return sorted(result), True, leader_seen
-    raise Unknown("unstable /proc census")
+                diagnostics.clear()
+                diagnostics.update(snapshot())
+            except Exception:  # noqa: BLE001 - a broken sink cannot change the verdict
+                pass
 
 
 def strict_census(pgid, deadline):
@@ -414,7 +505,9 @@ def strict_census(pgid, deadline):
             "this instrument cannot certify coverage on this installed OS",
         )
     except (OSError, ValueError, TypeError) as exc:
-        raise Unknown("strict membership probe failed") from exc
+        refused = Unknown("strict membership probe failed")
+        refused.census_failure = copy.deepcopy(getattr(exc, "census_failure", None))
+        raise refused from exc
 
 
 def bounded_samples(pids, deadline, clock=time.monotonic, *, diagnostics=None):
@@ -727,9 +820,15 @@ class OwnedGroup:
         return cap
 
     def _members(self, deadline):
+        self.probe.pop("census_failure", None)
         if self.clock() >= deadline:
             raise Unknown("ownership deadline exhausted")
-        seen = self.census(self.pgid, deadline)
+        try:
+            seen = self.census(self.pgid, deadline)
+        except Unknown as exc:
+            if exc.census_failure is not None:
+                self.probe["census_failure"] = copy.deepcopy(exc.census_failure)
+            raise
         if isinstance(seen, AuthoritativeCensus):
             if not seen.complete:
                 # INCOMPLETE VISIBILITY IS NOT EMPTINESS. This is the door R3 came
@@ -915,7 +1014,7 @@ class OwnedGroup:
         # `proof: []` on every successful run.
         # A new refusal (including irreversible revocation) must not relabel
         # an earlier attempt's sample diagnostics as evidence gathered now.
-        for stale in ("sample_failure", "unresolved"):
+        for stale in ("sample_failure", "unresolved", "census_failure"):
             self.probe.pop(stale, None)
         if self._revoked:
             self.last = Verdict(

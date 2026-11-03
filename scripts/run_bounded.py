@@ -317,13 +317,13 @@ def _verdict_record(verdict):
     }
 
 
-def _sample_failure_detail(owner):
+def _probe_detail(owner, key):
     """Bound optional diagnostic JSON; it never participates in cleanup proof.
 
     CI often keeps stderr without scratch receipts. Both surfaces must carry
     the same current evidence, without unbounded PID lists or raw proc rows.
     """
-    detail = (getattr(owner, "probe", {}) or {}).get("sample_failure")
+    detail = (getattr(owner, "probe", {}) or {}).get(key)
     if detail is None:
         return None
     try:
@@ -333,6 +333,12 @@ def _sample_failure_detail(owner):
     except Exception:  # noqa: BLE001 - diagnostics must not hide the original refusal
         pass
     return {"diagnostic_truncated": True}
+
+
+def _sample_failure_detail(owner):
+    # Retain the existing helper seam while sharing its byte bound with census
+    # evidence, which can fail before capture has any witness or member receipt.
+    return _probe_detail(owner, "sample_failure")
 
 
 def _ownership_record(owner, verdict):
@@ -361,6 +367,7 @@ def _ownership_record(owner, verdict):
         ),
         "refusal_class": getattr(verdict, "refusal_class", None),
         "sample_failure": _sample_failure_detail(owner),
+        "census_failure": _probe_detail(owner, "census_failure"),
         "proof": probe.get("proof", []),
         "residuals": probe.get("residuals", []),
         # Members the census saw that had already exited by the sample: gone, not
@@ -719,13 +726,16 @@ def _run_cleanup_required(
         # CI retains stderr, not the per-run scratch JSON. Keep the actual
         # acquisition/refusal cause visible rather than just its record path.
         _report(stream, f"[run_bounded] {phase} refused: {result.reason}")
-        detail = _sample_failure_detail(owner)
-        if detail is not None:
-            _report(
-                stream,
-                "[run_bounded] sample_failure="
-                + json.dumps(detail, sort_keys=True, separators=(",", ":")),
-            )
+        for name in ("sample_failure", "census_failure"):
+            detail = _probe_detail(owner, name)
+            if detail is not None:
+                _report(
+                    stream,
+                    "[run_bounded] "
+                    + name
+                    + "="
+                    + json.dumps(detail, sort_keys=True, separators=(",", ":")),
+                )
         _record_run(
             owner,
             stream,
