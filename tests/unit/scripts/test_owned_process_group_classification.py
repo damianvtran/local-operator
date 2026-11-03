@@ -202,6 +202,8 @@ def test_real_killpg_esrch_is_observed_absent_not_a_refusal():
     # Deliberately NOT injecting signal_group: this is os.killpg itself, and the
     # group it is asked about provably does not exist, so the kernel answers ESRCH.
     cap = world.capture(send=os.killpg)
+    # Creation is not send proof; keep this ESRCH test's strict positive setup.
+    cap.refresh(deadline=time_budget())
     assert cap.last.status == "VERIFIED"
     verdict = cap.signal(signal.SIGKILL, deadline=time_budget())
     assert verdict.status == "OBSERVED_EMPTY", verdict.reason
@@ -358,6 +360,8 @@ def test_a_member_forked_after_capture_is_adopted_under_the_pin(wrapper, monkeyp
     """
     world = World()
     cap = world.capture(send=lambda pgid, signum: world.calls.append((pgid, signum)))
+    # Observe a strict baseline before the arrival; signal() must census again.
+    cap.refresh(deadline=time_budget())
     assert cap.last.status == "VERIFIED"
     world.rows[11] = (world.pgid, world.pgid, world.pgid, "late")
     verdict = cap.signal(signal.SIGTERM, deadline=time_budget())
@@ -520,6 +524,9 @@ def test_no_refresh_restores_authority_after_revocation(revoked):
     """
     world = World()
     cap = world.capture(send=lambda pgid, signum: world.calls.append((pgid, signum)))
+    # Keep a genuinely strict baseline so revocation, not missing acquisition
+    # coverage, remains the only difference between the two terminal arms.
+    cap.refresh(deadline=world.clock() + 5.0)
     assert cap.last.status == "VERIFIED", cap.last.reason
     cap.terminating_sends.append(signal.SIGKILL)
     world.forget(keep_leader=True)  # every member gone; the corpse still pins

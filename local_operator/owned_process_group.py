@@ -38,11 +38,12 @@ from __future__ import annotations
 
 import copy
 import ctypes
+import math
 import os
 import signal
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from local_operator import procstate
@@ -612,6 +613,11 @@ class Verdict:
     #: Why authority was refused, as a class the record can carry: "pin_lost" or
     #: "unproven". ``None`` on a VERIFIED/OBSERVED_EMPTY verdict.
     refusal_class: str | None = None
+    # Acquisition is deliberately not a proof verdict. Keep the positive
+    # creation observation typed and separate from any population/cleanup claim.
+    acquisition_kind: str | None = None
+    creation_receipt: Receipt | None = None
+    population_coverage: str | None = None
 
 
 _SEAL = object()
@@ -745,6 +751,8 @@ class OwnedGroup:
         # itself raised, which is exactly the case a reader needs to see.
         members: list[int] = []
         try:
+            if sys.platform.startswith("linux") and cap._acquire_live_creation(parent, deadline):
+                return cap
             members = cap._members(deadline)
             cap.probe["members"] = list(members)
             if not members:
@@ -818,6 +826,113 @@ class OwnedGroup:
                 tuple(members) if "members" in locals() else (),
             )
         return cap
+
+    def _acquire_live_creation(self, parent, deadline):
+        """Observe only our live child's creation, never population or sends.
+
+        A machine-wide strict census can race ordinary fork/exit churn before
+        the owner even records its own child. Linux may retain that positive
+        creation receipt without claiming a complete population. Every later
+        signal still executes the unchanged strict refresh and final witness
+        guards; this status cannot certify cleanup or rescue a failed proof.
+
+        Exclusive wait/reap ownership remains the caller's explicit precondition:
+        SIG_DFL rules out a handler we can observe, not an unobservable rival
+        waiter. A corpse at the first sample uses the legacy strict path instead.
+        """
+
+        def prerequisites():
+            if self._revoked:
+                raise PinLost("signal authority irreversibly revoked during creation")
+            if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+                raise Unknown("live creation requires default SIGCHLD disposition")
+            if self.pgid <= 1 or self.pgid in (os.getpid(), os.getpgrp()):
+                raise Unknown("live creation excludes pid 1, this process and its own group")
+            if parent != os.getpid():
+                raise Unknown("live creation parent is not this process")
+
+        checked = self.clock()
+        if not math.isfinite(deadline) or not math.isfinite(checked) or checked >= deadline:
+            raise Unknown("live creation requires a finite unexpired deadline")
+        if parent != os.getpid():
+            # Preserve the existing named refusal when caller/observed parent
+            # cannot be our exclusive-reap chain. This is not an acquisition.
+            self.last = Verdict(
+                "REFUSED",
+                "leader is not our child: exclusive reap ownership absent",
+                refusal_class="not_exclusive_reaper",
+            )
+            self.probe["error"] = "not_exclusive_reaper"
+            return True
+        prerequisites()
+        before = self._samples([self.leader, parent], deadline)
+        self.probe["observed"] = _observed(before, None)
+        first = before.get(self.leader)
+        if first is None:
+            raise Unknown("live creation leader sample unavailable")
+        if first.zombie:
+            return False
+        expected = (parent, self.leader, self.leader)
+        view = self.identity(self.leader)
+        after = self._samples([self.leader, parent], deadline)
+        self.probe["observed"] = _observed(before, after)
+        stamp = self.scheme()
+        self.probe["scheme"] = stamp or None
+        if view != expected or self.identity(self.leader) != expected:
+            raise Unknown("live creation parent/PG/SID not pinned")
+        if not stamp or any(pid not in before or pid not in after for pid in (self.leader, parent)):
+            raise Unknown("live creation leader/parent sample unavailable")
+        for pid in (self.leader, parent):
+            if (
+                before[pid].zombie
+                or after[pid].zombie
+                or not before[pid].birth
+                or not after[pid].birth
+                or after[pid].is_birth(stamp, before[pid].birth) is not True
+            ):
+                raise Unknown("live creation requires two matching live births")
+        observed = self.clock()
+        if not math.isfinite(observed) or observed >= deadline:
+            raise Unknown("live creation deadline expired before publication")
+        birth, parent_birth = before[self.leader].birth, before[parent].birth
+        if birth is None or parent_birth is None:
+            raise Unknown("live creation birth unavailable")
+        receipt = Receipt(
+            self.leader,
+            stamp,
+            birth,
+            parent,
+            parent_birth,
+            self.pgid,
+            self.sid,
+            observed,
+        )
+        # Prepare the observational view before the last precondition/expiry
+        # checks; even local serialization work cannot spend the live deadline
+        # and then publish an expired (or meanwhile revoked) positive receipt.
+        creation_view = asdict(receipt)
+        prerequisites()
+        publishing = self.clock()
+        if not math.isfinite(publishing) or publishing >= deadline:
+            raise Unknown("live creation deadline expired before publication")
+        self.receipts[self.leader] = receipt
+        self.initial_error = ""
+        self.probe["acquisition_kind"] = "linux-live-creation"
+        # The ledger/verdict retain the frozen typed receipt; the legacy probe
+        # is a JSON-ready observational view and is never an authority source.
+        self.probe["creation_receipt"] = creation_view
+        self.probe["population_coverage"] = "not-established"
+        self.probe["exclusive_reap_precondition"] = "caller retains exclusive wait/reap ownership"
+        self.probe["anchor"] = "leader-live-creation"
+        self.last = Verdict(
+            "ACQUIRED_POSITIVE",
+            "live creation receipt only; population coverage not established",
+            anchor="leader-live-creation",
+            acquisition_kind="linux-live-creation",
+            creation_receipt=receipt,
+            population_coverage="not-established",
+        )
+        return True
 
     def _members(self, deadline):
         self.probe.pop("census_failure", None)

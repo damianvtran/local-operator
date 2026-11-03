@@ -300,21 +300,45 @@ def _resolve_run_id(supplied: str | None) -> str:
     return "run-" + uuid.uuid4().hex[:12]
 
 
-def _verdict_record(verdict):
-    """The verdict exactly as it was: four fields, unchanged for existing readers.
+def _creation_receipt_record(receipt):
+    if receipt is None:
+        return None
+    return {
+        "pid": receipt.pid,
+        "scheme": receipt.scheme,
+        "birth": receipt.birth,
+        "parent": receipt.parent,
+        "parent_birth": receipt.parent_birth,
+        "pgid": receipt.pgid,
+        "sid": receipt.sid,
+        "observed": receipt.observed,
+    }
 
-    ``Verdict`` gained ``anchor`` and ``refusal_class``; serialising it with
-    ``asdict`` would silently change a published object, so the record spells the
-    old shape out and the new facts live in ``ownership``.
+
+def _verdict_record(verdict):
+    """Keep legacy verdicts stable; explicitly describe the new acquisition state.
+
+    ``asdict(Verdict)`` would silently extend every published verdict. Only the
+    distinct positive-creation status adds its receipt/coverage fields here;
+    legacy proof and refusal verdicts retain their four-field shape.
     """
     if verdict is None:
         return None
-    return {
+    result = {
         "status": verdict.status,
         "reason": verdict.reason,
         "members": list(verdict.members),
         "evidence_age_s": verdict.evidence_age_s,
     }
+    # Only the new acquisition status extends this legacy verdict object. It
+    # names the missing coverage explicitly rather than inferring it from [].
+    if getattr(verdict, "acquisition_kind", None) is not None:
+        result.update(
+            acquisition_kind=verdict.acquisition_kind,
+            creation_receipt=_creation_receipt_record(verdict.creation_receipt),
+            population_coverage=verdict.population_coverage,
+        )
+    return result
 
 
 def _probe_detail(owner, key):
@@ -361,8 +385,15 @@ def _ownership_record(owner, verdict):
     return {
         "schema": "run-bounded-ownership/v1",
         "anchor": anchor,
+        "acquisition_kind": probe.get("acquisition_kind"),
+        "creation_receipt": probe.get("creation_receipt"),
+        "population_coverage": getattr(verdict, "population_coverage", None)
+        or ("not-established" if anchor == "leader-live-creation" else None),
+        "exclusive_reap_precondition": probe.get("exclusive_reap_precondition"),
         "pin": (
-            "leader held unreaped: the group number stays reserved, so its "
+            "live creation observed; exclusive reap assumed; no population or cleanup proof"
+            if anchor == "leader-live-creation"
+            else "leader held unreaped: the group number stays reserved, so its "
             "members are ours by construction"
         ),
         "refusal_class": getattr(verdict, "refusal_class", None),
@@ -708,7 +739,13 @@ def _run_cleanup_required(
     # whose evidence matters most, and a record carrying only the believed
     # identity is still distinguishable from "no record at all".
     _record_run(
-        owner, stream, run_id, "spawn", command=os.path.basename(argv[0]), start_utc=run_started_utc
+        owner,
+        stream,
+        run_id,
+        "spawn",
+        command=os.path.basename(argv[0]),
+        start_utc=run_started_utc,
+        verdict=owner.last if owner.last.status == "ACQUIRED_POSITIVE" else None,
     )
     refused = False
     proof_failed = False
@@ -747,7 +784,22 @@ def _run_cleanup_required(
         )
 
     def require(result, phase):
-        if result.status == "REFUSED":
+        # Creation admits monitoring ONLY. No refresh/send/probe phase may
+        # borrow that receipt as proof, even if a faulty caller caches it.
+        if phase == "acquire":
+            allowed = {"ACQUIRED_POSITIVE", "VERIFIED", "OBSERVED_EMPTY"}
+        elif phase == "required-refresh":
+            allowed = {"VERIFIED", "OBSERVED_EMPTY"}
+        else:
+            allowed = {"SIGNALED", "OBSERVED_EMPTY"}
+        if result.status not in allowed:
+            if result.status != "REFUSED":
+                result = owned_process_group.Verdict(
+                    "REFUSED",
+                    "unexpected " + result.status + " in " + phase,
+                    result.members,
+                    refusal_class="unproven",
+                )
             fail_proof(result, phase)
             raise AuthorityRefused
         return result

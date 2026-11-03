@@ -9,6 +9,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 from local_operator import owned_process_group as owned
+from local_operator.procstate import ProcessSample
 from tests.unit.scripts.test_run_bounded import memory_wrapper  # noqa: F401
 from tests.unit.scripts.test_run_bounded_run_record import _install
 
@@ -121,7 +122,9 @@ def test_capture_before_witness_retains_acquire_detail_and_wrapper_status(
     cap = owned.OwnedGroup.capture(
         10,
         census=census,
-        samples=lambda pids: pytest.fail("no witness after failed census"),
+        # A retained corpse cannot take live-positive acquisition. Preserve the
+        # strict census-before-receipt failure this diagnostic test exercises.
+        samples=lambda pids: {10: ProcessSample(True, "corpse")},
         identity=lambda pid: pytest.fail("no identity after failed census"),
         clock=lambda: 0,
         deadline=5,
@@ -232,7 +235,11 @@ def test_confirmed_disappearance_is_not_classified_as_foreign():
 def test_next_members_attempt_does_not_reuse_failed_census_evidence():
     world = ProcWorld("birth")
     cap = owned.OwnedGroup.capture(
-        10, census=lambda pgid, deadline: world.census(), clock=lambda: 0, deadline=5
+        10,
+        census=lambda pgid, deadline: world.census(),
+        clock=lambda: 0,
+        deadline=5,
+        samples=lambda pids: {10: ProcessSample(True, "corpse")},
     )
     assert "census_failure" in cap.probe
     with pytest.raises(owned.Unknown, match="ownership deadline exhausted"):
@@ -307,7 +314,7 @@ def test_wrapped_enumeration_failure_reaches_capture_before_witness(monkeypatch)
         10,
         clock=lambda: 0,
         deadline=5,
-        samples=lambda pids: pytest.fail("no sample after failed namespace enumeration"),
+        samples=lambda pids: {10: ProcessSample(True, "corpse")},
     )
     assert cap.last.reason == "Unknown:strict membership probe failed"
     assert not cap.receipts
