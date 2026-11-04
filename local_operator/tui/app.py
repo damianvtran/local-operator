@@ -21187,6 +21187,13 @@ class OperatorApp(App[None]):
                 f"{verb} {choice.value}",
                 str(choice.description),
                 detail="← current" if choice.value == selected else "",
+                # Paint the id alone (design round 2, D10), the `display`
+                # contract `/new`'s device picker uses: the verb is the same on
+                # every row, and leaving it in the name column cost `remove `
+                # seven cells, so a hashed custom slug ellipsized there while
+                # `use ` showed it whole. The VALUE keeps the verb, because the
+                # matcher compares the whole argument.
+                display=str(choice.value),
             )
             for choice in choices
         ]
@@ -54735,20 +54742,23 @@ class OperatorApp(App[None]):
         self._system_notice("\n".join(lines))
 
     def _notice_text_width(self) -> int:
-        """Cells a notice line has before it wraps, measured from a PAINTED notice.
+        """Cells a ``/sound list`` line has before its notice wraps it.
 
-        Not the transcript's content width: the conversation column is clamped
-        (``max(75, 70%)`` in local_operator.tcss), so at 100 columns a notice is
-        75 cells wide inside a 96-cell transcript. The 2-cell gutter lead is
-        subtracted. Before any notice is painted, the transcript width stands
-        in; the worst case is a wrapped row, never a lost one.
+        Derived from the layout, not read off an already-painted notice (design
+        round 2, D8): the first ``/sound list`` of a session is usually typed on
+        the welcome screen, where no notice exists yet. A notice composed under
+        the boot card takes the card's clamp, ``max(75, 70%)`` of the lane
+        (``Screen.boot.boot-card`` in local_operator.tcss), so at 100 columns it
+        is 75 cells wide inside a 96-cell transcript. ``_boot_notice_box`` is the
+        one owner of that answer, shared with the boot-column layout pass, so
+        this cannot drift from where the block is actually drawn. Once the card
+        stands down a notice spans the transcript. The 2-cell gutter lead is
+        subtracted either way.
         """
-        from local_operator.tui.widgets.transcript import NoticeBlock
-
         try:
             view = self._transcript_view()
-            painted = [b for b in view.blocks() if isinstance(b, NoticeBlock) and b.region.width]
-            width = painted[-1].region.width if painted else view.scrollable_content_region.width
+            _box, card, card_up = self._boot_notice_box(self.size.width)
+            width = card if card_up else view.scrollable_content_region.width
         except Exception:  # noqa: BLE001 — unmounted transcript: no wrap guard
             return 1_000
         return max(20, width - 2)

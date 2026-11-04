@@ -299,7 +299,8 @@ async def test_sound_add_rename_remove_round_trip(tmp_path: Path) -> None:
         app._run_slash_command(f"/sound use {added}")
         app._run_slash_command(f"/sound rename {added} QA two")
         await pilot.pause()
-        assert custom_sounds.get(added).name == "QA two"
+        renamed = custom_sounds.get(added)
+        assert renamed is not None and renamed.name == "QA two"
 
         app._run_slash_command(f"/sound remove {added}")
         await pilot.pause()
@@ -349,7 +350,9 @@ async def test_an_open_page_reloads_on_an_external_change(tmp_path: Path) -> Non
         await pilot.pause()
         _external_write(tmp_path, 40)
         app._on_config_change(
-            ConfigChange(values={}, changed_keys=("notifications.sound.volume",), source="disk")
+            ConfigChange(
+                values={}, changed_keys=frozenset({"notifications.sound.volume"}), source="disk"
+            )
         )
         await pilot.pause()
         assert _row_value(view, "notifications.sound.volume") == 40
@@ -372,7 +375,9 @@ async def test_a_row_in_edit_is_not_clobbered_and_catches_up_after(tmp_path: Pat
         buffer = view._buffer
         _external_write(tmp_path, 40)
         app._on_config_change(
-            ConfigChange(values={}, changed_keys=("notifications.sound.volume",), source="disk")
+            ConfigChange(
+                values={}, changed_keys=frozenset({"notifications.sound.volume"}), source="disk"
+            )
         )
         await pilot.pause()
         # The editor and its buffer are untouched; the page still holds 70.
@@ -404,7 +409,9 @@ async def test_a_held_reload_never_moves_a_half_written_config_aside(tmp_path: P
         view.action_activate()
         await pilot.pause()
         app._on_config_change(
-            ConfigChange(values={}, changed_keys=("notifications.sound.volume",), source="disk")
+            ConfigChange(
+                values={}, changed_keys=frozenset({"notifications.sound.volume"}), source="disk"
+            )
         )
         assert view._reload_pending is True
         config = tmp_path / "config.yml"
@@ -533,3 +540,22 @@ async def test_sound_verbs_speak_tui_copy_and_select_on_add(tmp_path: Path) -> N
         app._run_slash_command("/sound doctor")
         await pilot.pause()
         assert not any(line.startswith("lop:") for t in _notices(app) for line in t.splitlines())
+
+
+@pytest.mark.asyncio
+async def test_the_first_sound_list_is_sized_for_the_notice_it_becomes() -> None:
+    """Design round 2, D8: the first `/sound list` of a session is typed on the
+    welcome screen, where no notice has been painted yet. Its wrap budget must
+    already be the boot-card clamp the notice is drawn in (75 at 100 columns),
+    not the 96-cell transcript, or the `system` row splits mid-description."""
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    app = _app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _settle(pilot, 0.4)
+        assert not [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, NoticeBlock)]
+        budget = app._notice_text_width()
+        app._run_slash_command("/sound list")
+        await _settle(pilot, 0.3)
+        painted = [b for b in app.query_one(TranscriptView).blocks() if isinstance(b, NoticeBlock)]
+        assert budget == painted[-1].region.width - 2

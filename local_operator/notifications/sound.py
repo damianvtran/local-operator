@@ -604,7 +604,12 @@ def stop_preview() -> bool:
             # its pid IS its group id. Signal the GROUP: on the afplay fallback
             # the sound comes from a grandchild that terminating the leader
             # alone would leave playing. `poll()` above just proved the leader
-            # unreaped, so the pid cannot have been recycled.
+            # unreaped, and a pid is not reused until it is reaped. The only
+            # reaper is `proc`'s off-thread `wait()`, which returns only after
+            # the leader exits, so the reuse window is the instant between that
+            # `poll()` and this signal. That invariant holds only while nothing
+            # else `wait()`s on this child: add a second reaper and the pid
+            # here can name a stranger's group.
             import signal
 
             os.killpg(child.pid, signal.SIGTERM)
