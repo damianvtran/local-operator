@@ -1,0 +1,5 @@
+{
+  "wire.tool_rows.bridge.skipped.expanded": "Not posted: an identical message had just been sent, so this copy was skipped.",
+  "wire.tool_rows.bridge.skipped.verb.channel_post": "Skipped post in",
+  "wire.tool_rows.bridge.skipped.verb.dm": "Skipped message to"
+}

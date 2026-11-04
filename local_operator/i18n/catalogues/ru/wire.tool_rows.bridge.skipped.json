@@ -1,0 +1,5 @@
+{
+  "wire.tool_rows.bridge.skipped.expanded": "Не опубликовано: такое же сообщение только что было отправлено, поэтому эта копия пропущена.",
+  "wire.tool_rows.bridge.skipped.verb.channel_post": "Пропустил публикацию в",
+  "wire.tool_rows.bridge.skipped.verb.dm": "Пропустил сообщение:"
+}

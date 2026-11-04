@@ -119,6 +119,7 @@ from . import (
     wire_slash_library,
     wire_slash_notifications_page,
     wire_tool_rows_bridge,
+    wire_tool_rows_bridge_skipped,
     wire_tunnel_setup,
 )
 
@@ -234,5 +235,6 @@ __all__ = [
     "wire_slash_library",
     "wire_slash_notifications_page",
     "wire_tool_rows_bridge",
+    "wire_tool_rows_bridge_skipped",
     "wire_tunnel_setup",
 ]
