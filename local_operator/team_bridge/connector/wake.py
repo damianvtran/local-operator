@@ -43,8 +43,8 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from local_operator.harness.message_types import (
-    BRIDGE_META_MAX_BYTES,
     BRIDGE_CONFIG_REQUEST_RULE,
+    BRIDGE_META_MAX_BYTES,
     BRIDGE_UNTRUSTED_CLAUSE,
     DISPLAY_CONTEXT_BOUNDS,
     TEAM_BRIDGE_MESSAGE_TYPE,
