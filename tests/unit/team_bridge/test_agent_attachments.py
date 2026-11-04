@@ -38,6 +38,7 @@ from PIL import Image
 from local_operator.team_bridge import agent_attachments as aa
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge import host as host_mod
+from local_operator.team_bridge import reply_guard
 from local_operator.team_bridge.client import (
     BridgeRefusal,
     TeamBridgeClient,
@@ -958,44 +959,219 @@ async def test_cancelled_dm_send_still_deletes_the_staged_ids(tmp_path: Path) ->
     assert [d["attachment_id"] for d in hub.named("delete_attachment")] == [AID1]
 
 
+_REAL_RESERVE_POST = reply_guard.reserve_post
+
+
+# -- the reply guard x attachments (merge of main's #3377 guard rewrite) -------
+#
+# The guard is now bookkeeping, never a refusal: a delivered post is recorded, an
+# exact double send within the window is SKIPPED (ok, not posted), a failed send
+# gives its slot back, and an unusable guard posts untracked with a warning. These
+# tests pin how that composes with images: every LOCAL refusal happens before the
+# guard is touched; an image send counts exactly like a text send; the staged ids
+# are released on every exit that does not land the send.
+
+
+def _guard_rows() -> int:
+    """Posts the reply guard has recorded under the runtime's config dir (``.``)."""
+
+    import sqlite3
+
+    path = reply_guard.guard_path(".")
+    if not path.exists():
+        return 0
+    with sqlite3.connect(path) as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0])
+
+
+def _guard_untouched() -> bool:
+    # Not even the sqlite file: a refused send must leave nothing behind.
+    return not reply_guard.guard_path(".").exists()
+
+
+def _forbid_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a: Any, **k: Any) -> Any:
+        raise AssertionError("a refused send reached the reply guard")
+
+    monkeypatch.setattr(reply_guard, "reserve_post", boom)
+
+
+def _allow_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo :func:`_forbid_guard` ONLY (``monkeypatch.undo`` would drop the autouse gates)."""
+
+    monkeypatch.setattr(reply_guard, "reserve_post", _REAL_RESERVE_POST)
+
+
+# Every LOCAL refusal, per op: (hub kwargs, extra args, expected code).
+_REFUSALS_BEFORE_THE_GUARD: dict[str, tuple[dict[str, Any], str]] = {
+    "inline image, uploads on": ({"status": CAP_ON}, "inline_image_data"),
+    "inline image, uploads off": ({"status": CAP_HUMAN_ONLY}, "inline_image_data"),
+    "attachments unavailable": ({"status": CAP_HUMAN_ONLY}, "attachments_unavailable"),
+    "attachment_* (missing file)": ({"status": CAP_ON}, "attachment_unreadable"),
+}
+
+
+def _refused_args(op: str, case: str, tmp_path: Path) -> dict[str, Any]:
+    build = _post if op == "channel_post" else _dm
+    if case.startswith("inline image"):
+        return build(body=_INLINE_PAYLOAD)
+    if case == "attachments unavailable":
+        return build(attachments=[_write(tmp_path, "a.png", _png_bytes())])
+    return build(attachments=[str(tmp_path / "missing.png")])
+
+
 @pytest.mark.asyncio
-async def test_dm_guard_refusal_and_guard_unavailable_discard_what_was_staged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("op", ["channel_post", "dm"])
+@pytest.mark.parametrize("case", sorted(_REFUSALS_BEFORE_THE_GUARD))
+async def test_local_refusals_happen_before_the_reply_guard_is_touched(
+    op: str, case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from local_operator.team_bridge import reply_guard
+    hub_kwargs, code = _REFUSALS_BEFORE_THE_GUARD[case]
+    _forbid_guard(monkeypatch)  # reserving would raise AssertionError, not refuse
+    hub = FakeHub(**hub_kwargs)
+    out = await execute_bridge(_runtime(hub), _refused_args(op, case, tmp_path))
+    assert out["ok"] is False and out["code"] == code, out
+    assert _guard_untouched()
+    for method in ("conversation_send", "upload_attachment", "create_conversation"):
+        assert hub.named(method) == [], method
+    # And nothing was left behind that blocks the next real send of the same text.
+    _allow_guard(monkeypatch)
+    follow_up = await execute_bridge(
+        _runtime(FakeHub()), (_post if op == "channel_post" else _dm)()
+    )
+    assert follow_up["ok"] is True and not follow_up.get("skipped")
+    assert _guard_rows() == 1
 
-    path = _write(tmp_path, "1.png", _png_bytes())
-    refusal = reply_guard.Refusal(code="reply_budget", retry_after_s=30, message="slow down")
-    monkeypatch.setattr(reply_guard, "reserve_post", lambda *a, **k: refusal)
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["channel_post", "dm"])
+async def test_a_failed_upload_never_reserves_a_guard_slot(
+    op: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _forbid_guard(monkeypatch)
+    hub = FakeHub(fail_upload_at=0)
+    build = _post if op == "channel_post" else _dm
+    out = await execute_bridge(
+        _runtime(hub), build(attachments=[_write(tmp_path, "a.png", _png_bytes())])
+    )
+    assert out["ok"] is False and out["code"] == "attachment_failed"
+    assert _guard_untouched() and hub.named("conversation_send") == []
+    _allow_guard(monkeypatch)
+    retry = await execute_bridge(_runtime(FakeHub()), build())
+    assert retry["ok"] is True and not retry.get("skipped")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["channel_post", "dm"])
+async def test_a_send_with_images_counts_for_the_guard_like_a_text_send(
+    op: str, tmp_path: Path
+) -> None:
+    build = _post if op == "channel_post" else _dm
+    first, other = _png_bytes((9, 9, 9)), _png_bytes((1, 2, 3), (32, 32))
+    a = _write(tmp_path, "a.png", first)
+    b = _write(tmp_path, "b.png", other)
     hub = FakeHub()
-    out = await execute_bridge(_runtime(hub), _dm(attachments=[path]))
-    assert out["code"] == "reply_budget"
-    assert [d["attachment_id"] for d in hub.named("delete_attachment")] == [AID1]
-    assert hub.named("conversation_send") == []
+    out = await execute_bridge(_runtime(hub), build(attachments=[a]))
+    assert out["ok"] is True and not out.get("skipped"), out
+    assert _guard_rows() == 1  # recorded exactly as a text post is
+    # The very same text + the very same image is a double send: skipped (ok, not
+    # posted), and the ids it staged for the skipped copy are released.
+    again = FakeHub()
+    dup = await execute_bridge(_runtime(again), build(attachments=[a]))
+    assert dup["ok"] is True and dup["skipped"] is True and "not posted" in dup["warning"]
+    assert again.named("conversation_send") == []
+    assert [d["attachment_id"] for d in again.named("delete_attachment")] == [AID1]
+    assert _guard_rows() == 1
+    # Same text, DIFFERENT image: a new message, not a double send.
+    different = FakeHub()
+    new = await execute_bridge(_runtime(different), build(attachments=[b]))
+    assert new["ok"] is True and not new.get("skipped"), new
+    assert len(different.named("conversation_send")) == 1
+    assert _guard_rows() == 2
+    # Same text, no image: also a different message.
+    text_only = FakeHub()
+    plain = await execute_bridge(_runtime(text_only), build())
+    assert plain["ok"] is True and not plain.get("skipped")
+    assert _guard_rows() == 3
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["channel_post", "dm"])
+async def test_a_failed_send_gives_its_slot_back_and_the_retry_is_not_a_duplicate(
+    op: str, tmp_path: Path
+) -> None:
+    build = _post if op == "channel_post" else _dm
+    path = _write(tmp_path, "a.png", _png_bytes())
+    failing = FakeHub(send_failure=RuntimeError("down"))
+    out = await execute_bridge(_runtime(failing), build(attachments=[path]))
+    assert out["ok"] is False and out["code"] == "post_failed"
+    assert _guard_rows() == 0  # the slot went back
+    assert [d["attachment_id"] for d in failing.named("delete_attachment")] == [AID1]
+    retry = FakeHub()
+    ok = await execute_bridge(_runtime(retry), build(attachments=[path]))
+    assert ok["ok"] is True and not ok.get("skipped"), ok
+    assert _guard_rows() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["channel_post", "dm"])
+async def test_an_unusable_guard_still_delivers_the_images_and_warns(
+    op: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def unavailable(*a: Any, **k: Any) -> Any:
         raise reply_guard.ReplyGuardUnavailable("down")
 
     monkeypatch.setattr(reply_guard, "reserve_post", unavailable)
     hub = FakeHub()
-    out = await execute_bridge(_runtime(hub), _dm(attachments=[path]))
-    assert out["code"] == reply_guard.CODE_UNAVAILABLE
-    assert [d["attachment_id"] for d in hub.named("delete_attachment")] == [AID1]
+    build = _post if op == "channel_post" else _dm
+    out = await execute_bridge(
+        _runtime(hub), build(attachments=[_write(tmp_path, "a.png", _png_bytes())])
+    )
+    assert out["ok"] is True, out  # never fail (or refuse) a post over the guard
+    assert "without" in out["warning"] and "tracking" in out["warning"]
+    (send,) = hub.named("conversation_send")
+    assert send["attachment_ids"] == [AID1]
+    assert hub.named("delete_attachment") == []  # landed: the bound ids stay
 
 
 @pytest.mark.asyncio
-async def test_channel_post_guard_refusal_discards_what_was_staged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("op", ["channel_post", "dm"])
+async def test_a_receipt_fault_after_delivery_is_a_warning_never_a_failure(
+    op: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from local_operator.team_bridge import reply_guard
+    def broken(*a: Any, **k: Any) -> None:
+        raise RuntimeError("receipt decoration blew up")
 
-    refusal = reply_guard.Refusal(code="reply_budget", retry_after_s=30, message="slow down")
-    monkeypatch.setattr(reply_guard, "reserve_post", lambda *a, **k: refusal)
+    monkeypatch.setattr(aa, "annotate_receipt", broken)
     hub = FakeHub()
+    build = _post if op == "channel_post" else _dm
     out = await execute_bridge(
-        _runtime(hub), _post(attachments=[_write(tmp_path, "1.png", _png_bytes())])
+        _runtime(hub), build(attachments=[_write(tmp_path, "a.png", _png_bytes())])
     )
-    assert out["code"] == "reply_budget"
+    assert out["ok"] is True, out  # the hub took it: a second copy must not be invited
+    assert "do not resend" in out["warning"]
+    assert len(hub.named("conversation_send")) == 1
+    assert hub.named("delete_attachment") == []  # the ids are bound; never discard
+    assert _guard_rows() == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_channel_post_send_still_deletes_the_staged_ids(tmp_path: Path) -> None:
+    hub = FakeHub()
+    started = asyncio.Event()
+
+    async def hang(conversation_id: str, **kwargs: Any) -> Any:
+        started.set()
+        await asyncio.sleep(60)
+
+    hub.conversation_send = hang  # type: ignore[method-assign]
+    task = asyncio.ensure_future(
+        execute_bridge(_runtime(hub), _post(attachments=[_write(tmp_path, "1.png", _png_bytes())]))
+    )
+    await asyncio.wait_for(started.wait(), timeout=10)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
     assert [d["attachment_id"] for d in hub.named("delete_attachment")] == [AID1]
 
 
