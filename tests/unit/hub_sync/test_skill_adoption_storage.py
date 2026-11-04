@@ -427,9 +427,10 @@ def test_source_relative_relocation_links_and_escape_refusal(tmp_path):
     (tree.root / "references/local.md").write_text("Read requirements.md.\n")
     kept = build_proposal(document.name, read_tree(tree.root), remote, resolver=None)
     assert kept.document is not None
-    assert "Read requirements.md." in {f.path: f.content for f in kept.document.files}[
-        "references/local.md"
-    ]
+    assert (
+        "Read requirements.md."
+        in {f.path: f.content for f in kept.document.files}["references/local.md"]
+    )
     for invalid in ("../../requirements.md", "sub/requirements.md"):
         (tree.root / "references/local.md").write_text(f"Read {invalid}.\n")
         with pytest.raises(AdoptionError) as failure:

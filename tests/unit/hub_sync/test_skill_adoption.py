@@ -396,7 +396,9 @@ def _municipal_with_sibling_refs(tmp_path: Path, *, changed: bool = True):
 
 
 @pytest.mark.parametrize("strategy", ["merge", "keep-local", "take-hub"])
-def test_sibling_refs_inside_references_never_dead_end(tmp_path: Path, strategy: str) -> None:
+def test_sibling_refs_inside_references_never_dead_end(
+    tmp_path: Path, strategy: Literal["merge", "keep-local", "take-hub"]
+) -> None:
     folder, remote, _local, _hub = _municipal_with_sibling_refs(tmp_path)
     before = _bytes(folder)
 

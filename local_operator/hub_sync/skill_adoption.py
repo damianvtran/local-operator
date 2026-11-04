@@ -574,6 +574,7 @@ def _rewrite_relocated_refs(
     def ambiguous(reason: str) -> None:
         if on_ambiguous == "refuse":
             raise AdoptionError("adoption-needs-choice", reason)
+
     pattern = re.compile(r"(?<![\w/.:~-])(?:[\w.@~+-]+/)*[\w@~+-]+\.[\w.~+-]*[\w~+-]")
 
     def rewrite(match: re.Match[str]) -> str:
