@@ -44498,6 +44498,12 @@ class OperatorApp(App[None]):
                 notice("context breakdown unavailable.")
         elif command == "/goal":
             self._cmd_goal(arg, notice, attachments)
+        elif command == "/rules":
+            # Beside `/goal`: both publish standing state that rides the
+            # prompt's volatile tail, and both route to the session's owner
+            # (`/rules` is not in `_FRONTEND_LOCAL_SLASHES`), so a follower's
+            # receipt is the owner's own sentence.
+            self._cmd_rules(arg, notice)
         elif command == "/loop":
             self._cmd_loop(prompt_arg, notice)
         elif command == "/btw":
@@ -48838,7 +48844,29 @@ class OperatorApp(App[None]):
         # dispatch here called the facade's raw setter before it had an owner.
         self._run_slash_command(f"/model {row.selector}")
 
-    # -- goal / loop --------------------------------------------------------
+    # -- goal / rules / loop ------------------------------------------------
+    def _cmd_rules(self, arg: str, notice: NoticeFn) -> None:
+        """``/rules`` — list, add, edit or remove this session's standing rules.
+
+        The record is ``session/rules.py``'s (``<session dir>/rules.json``), the
+        same file the system-blocks provider renders into the prompt's volatile
+        tail — so an edit here reaches the very next call, and no session API
+        call is needed to publish it. Everything the command does goes through
+        that module's public API; the receipt sentences come from
+        :func:`slash_commands.run_rules_slash_op`, the ONE runner the routed
+        hosts call too.
+
+        FLAG OFF (``LOP_SESSION_RULES`` unset) is the whole behaviour: the
+        runner refuses and reads nothing, which the POC's flag-off promise
+        requires of every surface, not just this one.
+        """
+        from local_operator.slash_commands import run_rules_slash_op
+
+        text, style = run_rules_slash_op(
+            arg, session_dir=self._session_directory_for(self._session)
+        )
+        notice(text, "warning" if style == "warning" else "info")
+
     def _cmd_goal(
         self, arg: str, notice: NoticeFn, attachments: Mapping[int, Marked] | None = None
     ) -> None:
@@ -57383,6 +57411,11 @@ class OperatorApp(App[None]):
             return self._context_slash_result(SlashResult)
         if command == "goal":
             return self._goal_slash_result(args, SlashResult)
+        if command == "rules":
+            # The record is a file in the OWNER's session directory, so a
+            # follower's typed `/rules` runs here and answers with the owner's
+            # own receipt — the `/goal` seam, one noun over.
+            return self._rules_slash_result(args, SlashResult)
         if command == "rename":
             return await self._rename_slash_result(args, SlashResult)
         if command == "effort":
@@ -57630,6 +57663,20 @@ class OperatorApp(App[None]):
                 "numbers": context_block_numbers(data, total),
             },
         )
+
+    def _rules_slash_result(self, arg: str, SlashResult: Any) -> Any:
+        """The routed ``/rules``: the same runner and the same sentences as local.
+
+        Both hosts read the record through ``session_dir`` and render through
+        :func:`slash_commands.run_rules_slash_op`, so a follower cannot meet a
+        different answer from the one the owner's own terminal prints.
+        """
+        from local_operator.slash_commands import run_rules_slash_op
+
+        text, style = run_rules_slash_op(
+            arg, session_dir=self._session_directory_for(self._session)
+        )
+        return SlashResult(kind="notice", text=text, style=style)
 
     def _goal_slash_result(self, arg: str, SlashResult: Any) -> Any:
         from local_operator.session.goal import (
@@ -62202,9 +62249,17 @@ class OperatorApp(App[None]):
         anything the session object exposes: an attached viewer's session knows
         its id, not the path its owner stores it at.
         """
+        return self._session_directory_for(source.session)
+
+    def _session_directory_for(self, session: Any) -> Any:
+        """The directory of ``session`` by id — the shared half above.
+
+        Split out for the commands whose argument path holds the SESSION but no
+        :class:`SessionInteraction` (``/rules``): one derivation, so the two
+        callers cannot disagree about where a session's files are.
+        """
         from local_operator.paths import config_dir
 
-        session = source.session
         session_id = getattr(session, "session_id", "") if session is not None else ""
         if not session_id:
             return None

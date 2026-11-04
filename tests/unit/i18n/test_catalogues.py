@@ -88,6 +88,13 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Radient Saver's settings row and fail-open notices (own namespace so the
         # audited wire.settings hash is untouched).
         "wire.radient_saver",
+        # Per-session rules (`/rules`, session-rules POC): the description and
+        # every receipt live here rather than in `wire.slash`, for the reason
+        # `wire.console` and `wire.radient_saver` do — an English edit to a
+        # namespace fr/hi/vi CARRY invalidates that locale's ledger row and
+        # unships the whole locale. English-only today; the POC's coverage debt
+        # is the `wire.rules` entry in `i18n/coverage-allowance.json`.
+        "wire.rules",
         # Populated by the console-capacity slice (this PR), the same way the
         # extraction slices added wire.settings/wire.errors.*/wire.exec.
         "wire.console",

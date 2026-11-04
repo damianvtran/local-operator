@@ -1,0 +1,58 @@
+{
+  "wire.rules.added": {
+    "role": "one-line receipt after /rules add, painted in the transcript as a notice",
+    "tone": "terse confirmation that names the record",
+    "note": "Placeholders: {id} is the rule's stable id (r1, r2, ...) and {text} is the rule text exactly as stored. {text} is operator-authored and may be any script; keep the receipt on one line around it, and do not rephrase or quote it. The text is repeated here on purpose: the receipt is the only place the accepted wording is shown back, and the record has no undo."
+  },
+  "wire.rules.command": {
+    "role": "command description line in /help and the command picker",
+    "tone": "terse imperative",
+    "maxCells": 54,
+    "note": "The /rules command lists, adds, edits and removes per-session standing rules. No ICU arguments. Width budget: the /help description column is W-26 cells (54 at an 80-column terminal), so a longer sentence truncates in /help and wraps the neighbouring rows."
+  },
+  "wire.rules.disabled": {
+    "role": "refusal when /rules runs with the LOP_SESSION_RULES flag off",
+    "tone": "plain statement of a switched-off feature",
+    "note": "Names the environment variable literally: LOP_SESSION_RULES=1. Keep the variable and its value verbatim; it is the only remedy the sentence offers. No ICU arguments."
+  },
+  "wire.rules.empty": {
+    "role": "answer to a bare /rules when the session has no rules",
+    "tone": "terse, instructive",
+    "note": "Contains the command spelling /rules add <text> verbatim — a technical command, never translated or reordered. The sentence after it is ordinary prose."
+  },
+  "wire.rules.line": {
+    "role": "one row of the rule listing printed by a bare /rules",
+    "tone": "neutral, no sentence punctuation",
+    "note": "Placeholders: {id} is a stable technical id (r1, r2, ...) and {text} is the operator's own rule text. Translate only the separator arrangement; keep the id and text verbatim and in that order where the locale's reading direction allows."
+  },
+  "wire.rules.no_session": {
+    "role": "refusal when the flag is on but the session has no directory to read",
+    "tone": "plain explanation, no blame",
+    "note": "Describes a session-lifecycle state (a session that never materialised a directory), not a user mistake. No ICU arguments."
+  },
+  "wire.rules.refused": {
+    "role": "refusal for a rejected /rules add, edit, rm or a bad record",
+    "tone": "plain refusal",
+    "note": "Placeholder {reason} is an untranslated technical detail produced by the rules record (for example 'rule text must be a single line' or 'no rule with id r9'). Keep the colon-then-detail shape and never re-capitalise or paraphrase {reason}."
+  },
+  "wire.rules.removed": {
+    "role": "one-line receipt after /rules rm",
+    "tone": "terse confirmation naming what went",
+    "note": "Placeholders: {id} and {text}. The text is repeated because removal has no undo — this receipt is the last place the removed rule is shown. Do not rephrase {text}."
+  },
+  "wire.rules.unreadable": {
+    "role": "answer to a bare /rules when rules.json exists but is unusable",
+    "tone": "plain warning",
+    "note": "Placeholder {reason} is an untranslated validator detail. The sentence states the consequence (no rules are in force) rather than only the failure; keep that clause."
+  },
+  "wire.rules.updated": {
+    "role": "one-line receipt after /rules edit",
+    "tone": "terse confirmation naming the new wording",
+    "note": "Placeholders: {id} and {text} (the new text). The previous wording is gone; do not keep it in the sentence."
+  },
+  "wire.rules.usage": {
+    "role": "usage line for an unknown /rules subcommand",
+    "tone": "terse instruction",
+    "note": "Every /rules spelling in this sentence is a technical command and stays verbatim: /rules, /rules add <text>, /rules edit <id> <text>, /rules rm <id>. Only the connective prose ('Use ... or ...') is translated, and the command tokens must not be reordered against each other."
+  }
+}

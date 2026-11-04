@@ -159,6 +159,14 @@ ECHO_POLICY = {
     # Nothing here reaches the model: every value is a fact about this install.
     "info": False,
     "goal": True,
+    # FALSE, unlike `/goal` beside it, and the difference is what the echo is
+    # FOR: `/goal <text>` also submits that text as an ordinary user message, so
+    # the transcript would otherwise have no record of what was asked. `/goal`'s
+    # standing half and `/rules` both ride the system prompt's tail, but `/rules`
+    # never starts a turn and every mutation receipt repeats the accepted RULE
+    # TEXT — so the row would restate a receipt, and the bare listing would log
+    # a keystroke.
+    "rules": False,
     "loop": False,
     # The aside's whole promise is that the exchange leaves no trace in the
     # ledger; a user row would be the one it left. See `SLASH_COMMANDS`.
@@ -302,6 +310,11 @@ PROMPT_POLICY = {
     # Free text the model is given (the objective / a loop instruction / a side
     # question), so an inline engage reassembles to the front.
     "goal": True,
+    # The argument is a rule the model is TOLD (it rides the prompt's tail), but
+    # it is never a message this conversation is given: an inline `/rules add …`
+    # is a command with an argument, not a prompt, so it splices-and-runs rather
+    # than reassembling the draft into itself.
+    "rules": False,
     "loop": True,
     "btw": True,
     "compact": False,

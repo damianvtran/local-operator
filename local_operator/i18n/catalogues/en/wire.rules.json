@@ -1,0 +1,13 @@
+{
+  "wire.rules.added": "Rule {id} added: {text}",
+  "wire.rules.command": "List, add, edit or remove this session's rules",
+  "wire.rules.disabled": "Per-session rules are off — set LOP_SESSION_RULES=1 to enable them.",
+  "wire.rules.empty": "No rules set. /rules add <text> adds one.",
+  "wire.rules.line": "{id}: {text}",
+  "wire.rules.no_session": "This session has no directory yet, so rules cannot be read.",
+  "wire.rules.refused": "Rule refused: {reason}",
+  "wire.rules.removed": "Rule {id} removed: {text}",
+  "wire.rules.unreadable": "The rules file cannot be used ({reason}); no rules are in force.",
+  "wire.rules.updated": "Rule {id} updated: {text}",
+  "wire.rules.usage": "Use /rules, /rules add <text>, /rules edit <id> <text> or /rules rm <id>."
+}

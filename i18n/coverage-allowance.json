@@ -211,6 +211,146 @@
         "wire.settings.account_policy.reset_soonest.description",
         "wire.settings.account_policy.reset_soonest.label"
       ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.rules",
+      "reason": "New English copy for the /rules slash command (session-rules POC). English source fallback is in effect until the translation wave lands (docs/I18N.md).",
+      "owner": "session-rules POC lane",
+      "payoff": "2026-12-18",
+      "missing": [
+        "wire.rules.added",
+        "wire.rules.command",
+        "wire.rules.disabled",
+        "wire.rules.empty",
+        "wire.rules.line",
+        "wire.rules.no_session",
+        "wire.rules.refused",
+        "wire.rules.removed",
+        "wire.rules.unreadable",
+        "wire.rules.updated",
+        "wire.rules.usage"
+      ]
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.rules",
+      "reason": "New English copy for the /rules slash command (session-rules POC). English source fallback is in effect until the translation wave lands (docs/I18N.md).",
+      "owner": "session-rules POC lane",
+      "payoff": "2026-12-18",
+      "missing": [
+        "wire.rules.added",
+        "wire.rules.command",
+        "wire.rules.disabled",
+        "wire.rules.empty",
+        "wire.rules.line",
+        "wire.rules.no_session",
+        "wire.rules.refused",
+        "wire.rules.removed",
+        "wire.rules.unreadable",
+        "wire.rules.updated",
+        "wire.rules.usage"
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.rules",
+      "reason": "New English copy for the /rules slash command (session-rules POC). English source fallback is in effect until the translation wave lands (docs/I18N.md).",
+      "owner": "session-rules POC lane",
+      "payoff": "2026-12-18",
+      "missing": [
+        "wire.rules.added",
+        "wire.rules.command",
+        "wire.rules.disabled",
+        "wire.rules.empty",
+        "wire.rules.line",
+        "wire.rules.no_session",
+        "wire.rules.refused",
+        "wire.rules.removed",
+        "wire.rules.unreadable",
+        "wire.rules.updated",
+        "wire.rules.usage"
+      ]
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.rules",
+      "reason": "New English copy for the /rules slash command (session-rules POC). English source fallback is in effect until the translation wave lands (docs/I18N.md).",
+      "owner": "session-rules POC lane",
+      "payoff": "2026-12-18",
+      "missing": [
+        "wire.rules.added",
+        "wire.rules.command",
+        "wire.rules.disabled",
+        "wire.rules.empty",
+        "wire.rules.line",
+        "wire.rules.no_session",
+        "wire.rules.refused",
+        "wire.rules.removed",
+        "wire.rules.unreadable",
+        "wire.rules.updated",
+        "wire.rules.usage"
+      ]
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.rules",
+      "reason": "New English copy for the /rules slash command (session-rules POC). English source fallback is in effect until the translation wave lands (docs/I18N.md).",
+      "owner": "session-rules POC lane",
+      "payoff": "2026-12-18",
+      "missing": [
+        "wire.rules.added",
+        "wire.rules.command",
+        "wire.rules.disabled",
+        "wire.rules.empty",
+        "wire.rules.line",
+        "wire.rules.no_session",
+        "wire.rules.refused",
+        "wire.rules.removed",
+        "wire.rules.unreadable",
+        "wire.rules.updated",
+        "wire.rules.usage"
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.rules",
+      "reason": "New English copy for the /rules slash command (session-rules POC). English source fallback is in effect until the translation wave lands (docs/I18N.md).",
+      "owner": "session-rules POC lane",
+      "payoff": "2026-12-18",
+      "missing": [
+        "wire.rules.added",
+        "wire.rules.command",
+        "wire.rules.disabled",
+        "wire.rules.empty",
+        "wire.rules.line",
+        "wire.rules.no_session",
+        "wire.rules.refused",
+        "wire.rules.removed",
+        "wire.rules.unreadable",
+        "wire.rules.updated",
+        "wire.rules.usage"
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.rules",
+      "reason": "New English copy for the /rules slash command (session-rules POC). English source fallback is in effect until the translation wave lands (docs/I18N.md).",
+      "owner": "session-rules POC lane",
+      "payoff": "2026-12-18",
+      "missing": [
+        "wire.rules.added",
+        "wire.rules.command",
+        "wire.rules.disabled",
+        "wire.rules.empty",
+        "wire.rules.line",
+        "wire.rules.no_session",
+        "wire.rules.refused",
+        "wire.rules.removed",
+        "wire.rules.unreadable",
+        "wire.rules.updated",
+        "wire.rules.usage"
+      ]
     }
   ]
 }

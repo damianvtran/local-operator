@@ -13,6 +13,7 @@ desktop at all (see ``/mobile``).
 
 from dataclasses import replace
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Mapping, Sequence, TypedDict
 
 from local_operator.i18n import catalogues
@@ -24,6 +25,7 @@ from local_operator.i18n.keys import (
     tui_viewer,
     wire_memory,
     wire_radient_saver,
+    wire_rules,
     wire_slash,
     wire_slash_library,
     wire_slash_notifications_page,
@@ -1026,6 +1028,99 @@ def run_project_slash_op(
     return (project_unknown_word_text(word), "warning")
 
 
+#: The subcommand vocabulary of ``/rules`` — the words its first token may name.
+#: ONE list beside the registry rather than a literal list inside each host's
+#: branch, so the handler and every routed mirror accept the same words (the
+#: rule ``NETWORK_SUBCOMMANDS`` and ``MCP_SUBCOMMANDS`` already follow).
+RULES_SUBCOMMANDS: tuple[str, ...] = ("list", "add", "edit", "rm")
+
+
+def _message_text(message: Msg) -> str:
+    """Render one notice message through the catalogue in the active language.
+
+    `_desc` does the same for the description field; notices were not covered by
+    a helper because until now the layer's operator-facing text lived in
+    `session/*` constants. A routed notice is rendered where the RULE lives (the
+    owner), so this follows ``active_locale`` there rather than a per-request
+    locale — the same resolution the registry's own ``description`` uses.
+    """
+    return render(message.code, message.params, locale=active_locale())
+
+
+def run_rules_slash_op(arg: str, *, session_dir: Path | None) -> tuple[str, str]:
+    """Run ONE ``/rules`` invocation against this session's record; ``(text, style)``.
+
+    THE one implementation every host calls — the TUI's local handler, its
+    routed ``_slash_result`` and the detached runtime's ``_rules_slash`` — the
+    same shape ``run_project_slash_op`` established for ``/project``, so the
+    owner and a follower cannot print two different answers for one command.
+
+    ``arg`` is the RAW trailing text, parsed HERE rather than in each host:
+    ``add``/``edit`` take free text that may contain spaces, so two hosts
+    splitting it themselves is how ``/rules add never push to main`` becomes
+    a one-word rule on one surface and four on another.
+
+    FLAG OFF returns before anything is read or written: the refusal is the
+    whole behaviour, and the record is not even looked at (the POC promises a
+    flag-off session never touches ``rules.json``). ``session_dir`` is therefore
+    allowed to be ``None`` — a session that has not materialised a directory has
+    nothing to read, and the sentence says so rather than reporting an empty set.
+
+    A refusal is a SENTENCE, never an exception: a slash command is a keystroke
+    path, and ``RuleError`` carries the reason the record refused the edit
+    (unknown id, over the cap, a newline, a forbidden section tag). The reason
+    is composed by :mod:`local_operator.session.rules` and quoted verbatim — it
+    is a technical detail, like a validator's message.
+    """
+    from local_operator.session import rules as rules_module
+    from local_operator.session.rules import RuleError
+
+    if not rules_module.rules_enabled():
+        return (_message_text(wire_rules.disabled()), "warning")
+    if session_dir is None:
+        return (_message_text(wire_rules.no_session()), "warning")
+    word, _, rest = (arg or "").strip().partition(" ")
+    word = word.casefold()
+    rest = rest.strip()
+    usage = (_message_text(wire_rules.usage()), "warning")
+    try:
+        if word in ("", "list"):
+            if rest:
+                # A bare listing takes no argument; a stray word is refused
+                # rather than silently dropped (the `/project board` rule).
+                return usage
+            rules, reason = rules_module.load_rules_with_reason(session_dir)
+            if reason is not None:
+                return (_message_text(wire_rules.unreadable(reason=reason)), "warning")
+            if not rules:
+                return (_message_text(wire_rules.empty()), "info")
+            return (
+                "\n".join(
+                    _message_text(wire_rules.line(id=rule.id, text=rule.text)) for rule in rules
+                ),
+                "info",
+            )
+        if word == "add":
+            rule = rules_module.add_rule(session_dir, rest)
+            return (_message_text(wire_rules.added(id=rule.id, text=rule.text)), "info")
+        if word == "rm":
+            if not rest:
+                return usage
+            removed = rules_module.remove_rule(session_dir, rest)
+            return (_message_text(wire_rules.removed(id=removed.id, text=removed.text)), "info")
+        if word == "edit":
+            rule_id, _, text = rest.partition(" ")
+            if not rule_id or not text.strip():
+                # Both halves are required; an empty one is the usage line's
+                # job, not a validator message about empty rule text.
+                return usage
+            edited = rules_module.edit_rule(session_dir, rule_id, text)
+            return (_message_text(wire_rules.updated(id=edited.id, text=edited.text)), "info")
+    except RuleError as error:
+        return (_message_text(wire_rules.refused(reason=str(error))), "warning")
+    return usage
+
+
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
 #:
@@ -1940,6 +2035,36 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # `name_argument` is left at its default.
         arguments=ArgumentMode.OPTIONAL,
         desktop_destination="session.goal",
+    ),
+    # Per-session RULES (`session/rules.py`, POC behind `LOP_SESSION_RULES=1`),
+    # beside `/goal` because they are the same kind of standing state: operator
+    # authored, authoritative, and carried in the prompt's volatile tail on
+    # every call. AUTHORITATIVE, like `/goal` and unlike `/project`: the record
+    # is a file in the SESSION OWNER's directory, so a follower must route the
+    # verb to the owner rather than write its own copy of the session.
+    #
+    # `echo=False`. The criterion is "would the receipt be missing something
+    # without it", and here it would not: every mutation receipt repeats the
+    # accepted RULE TEXT (`wire.rules.added`/`updated`/`removed`) and the bare
+    # form prints the whole record. `/goal` earns the row because its argument
+    # rides the tail too AND becomes a user turn, whose record the transcript
+    # owns; `/rules` never starts a turn, so an echo on the common bare listing
+    # would be a keystroke log — exactly the row this field exists to stop.
+    #
+    # `argument_shape=ANY`: the trailing text is this command's own argument
+    # (a verb plus free text), not a name drawn from a roster, so `name_argument`
+    # stays False and `/rules add never push to main` keeps its spaces.
+    #
+    # No `desktop_destination`: the desktop projection is graduation work the
+    # design doc's §9 checklist lists separately, and an entry without one is
+    # not offered there at all (`command_catalogue`).
+    SlashCommand(
+        "rules",
+        **_desc(wire_rules.command()),
+        argument_shape=ArgumentShape.ANY,
+        # OPTIONAL: a bare `/rules` IS the listing, and every mutation carries
+        # its own words, so the space may open nothing and still be valid.
+        arguments=ArgumentMode.OPTIONAL,
     ),
     # Not an exception: LOOP_PROMPT is app-authored, not the user's words, and
     # `_loop_worker` already labels every iteration it starts (`· loop 1/3`), so

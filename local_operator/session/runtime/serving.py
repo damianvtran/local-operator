@@ -8643,6 +8643,12 @@ class ServingSessionHandle(SessionHandle):
             return await self._model_slash(session, args, SlashResult)
         if command == "goal":
             return self._goal_slash(session, args, SlashResult)
+        if command == "rules":
+            # Per-session rules (`session/rules.py`, POC behind
+            # `LOP_SESSION_RULES=1`). The record lives in THIS session's
+            # directory, so the owner answers a follower's typed `/rules` — the
+            # same seam `/goal` uses, and the same runner the TUI calls.
+            return self._rules_slash(args, SlashResult)
         if command == "rename":
             return await self._rename_slash(session, args, SlashResult)
         if command == "effort":
@@ -8835,6 +8841,24 @@ class ServingSessionHandle(SessionHandle):
         if text is None:
             return None
         return SlashResult(kind="notice", text=text, style="warning")
+
+    def _rules_slash(self, arg: str, SlashResult: Any) -> Any:
+        """The routed ``/rules``: the shared runner over THIS session's directory.
+
+        ``_session_directory`` reads the transcript's own directory rather than
+        composing ``config_dir()/sessions/<id>``: a runtime handle may be
+        attached to a store whose config root is not this process's, and the
+        rules file must be the one the provider for THIS session reads.
+
+        A handle with no session answers with the runner's own no-directory
+        sentence (``wire.rules.no_session``) — the same refusal the TUI prints
+        for a session that has not materialised a directory, not a transport
+        error the caller has to interpret.
+        """
+        from local_operator.slash_commands import run_rules_slash_op
+
+        text, style = run_rules_slash_op(arg, session_dir=self._session_directory())
+        return SlashResult(kind="notice", text=text, style=style)
 
     def _goal_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         from local_operator.session.goal import (

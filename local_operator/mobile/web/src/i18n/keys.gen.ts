@@ -781,6 +781,17 @@ export type MessageParams = {
   "wire.remote_compute.unknown_run": undefined;
   "wire.remote_compute.unreachable": undefined;
   "wire.remote_compute.unreadable_envelope": undefined;
+  "wire.rules.added": { "id": string; "text": string };
+  "wire.rules.command": undefined;
+  "wire.rules.disabled": undefined;
+  "wire.rules.empty": undefined;
+  "wire.rules.line": { "id": string; "text": string };
+  "wire.rules.no_session": undefined;
+  "wire.rules.refused": { "reason": string };
+  "wire.rules.removed": { "id": string; "text": string };
+  "wire.rules.unreadable": { "reason": string };
+  "wire.rules.updated": { "id": string; "text": string };
+  "wire.rules.usage": undefined;
   "wire.sessions.approval_stop_local": { "address": string };
   "wire.sessions.approval_stop_peer": { "address": string; "peer": string };
   "wire.sessions.stop_pending": { "name": string; "seconds": string };
