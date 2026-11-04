@@ -544,3 +544,28 @@ def test_skills_push_without_a_link_reports_it(
 
     assert rc == 1
     assert "no linked skill named" in capsys.readouterr().out
+
+
+# --- #3394: receipts that start with '-' (secrets.token_urlsafe ~1 in 64) ---
+
+
+def test_space_separated_receipt_never_starts_with_dash() -> None:
+    """The printed `--adopt-receipt <receipt>` form must always parse.
+
+    argparse treats a separate value beginning with '-' as an option, so a
+    receipt minted as ``-BdA57...`` made the CLI's own instruction fail with
+    "expected one argument". New receipts must never begin with '-'.
+    """
+    from local_operator.hub_sync.skill_adoption_service import mint_adoption_receipt
+
+    receipts = [mint_adoption_receipt() for _ in range(4000)]
+    assert not any(r.startswith("-") for r in receipts)
+    assert len(set(receipts)) == len(receipts)
+    assert all(len(r) >= 32 for r in receipts)  # entropy unchanged: 24 random bytes
+
+
+def test_existing_dash_receipt_still_parses_with_equals_form(parser) -> None:
+    a = parser.parse_args(
+        ["skills", "pull", "sk-1", "--org", "org-1", "--adopt-receipt=-BdA57x", "--yes"]
+    )
+    assert a.adopt_receipt == "-BdA57x"
