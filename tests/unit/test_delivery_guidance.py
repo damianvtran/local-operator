@@ -265,3 +265,112 @@ def test_stale_copy_reviewer_gets_the_pointer_with_worktree_rule(tmp_path):
     assert profile is not None and profile.instructions.endswith(DELIVERY_POINTER)
     assert "no clone, install or new worktree" in DELIVERY_POINTER
     assert registry.get_agent_system_prompt(row.id) == "Old copy rules."
+
+
+def test_qa_round_two_retests_only_failed_and_reimpacted_rows():
+    # Measured: QA round 2+ re-ran a median 66% of round-1 rows. The seed
+    # states the delta rule, keeps real majors blocking, and reuses one tree.
+    body = " ".join(load_seed("qa-tester").instructions.split())
+    for required in (
+        "Round 1: the full in-scope QA matrix",
+        "re-test only prior FAIL/BLOCKED rows",
+        "`retained (<sha>)`",
+        "Real BLOCKER/MAJOR still block",
+        "git checkout --detach <new-head>",
+        "HEAD == briefed SHA",
+    ):
+        assert required in body
+
+
+def test_delivery_guide_carries_brief_field_line_and_clean_stream_retention():
+    policy = " ".join((ROOT / "local_operator/guides/delivery/GUIDE.md").read_text().split())
+    for required in (
+        "`Worktree: <abs path> @ <sha> · Round: <N> · Scope: <prev>..<head> · "
+        "Retest: <FAIL ids>|none`",
+        "A clean stream is NOT re-run when the delta misses its surface",
+        "no QA/design/UX round",
+        "never sleep-poll it mid-cycle",
+        "PYTHONPATH=<worktree>",
+    ):
+        assert required in policy
+
+
+@pytest.mark.parametrize("name", ["reviewer", "qa-tester", "designer", "ux-reviewer", "manager"])
+def test_roles_name_the_worktree_brief_field(name):
+    profile = load_seed(name)
+    assert profile is not None and "Worktree:" in profile.instructions
+
+
+def test_reader_launch_without_worktree_field_notices_the_parent_only(tmp_path):
+    from local_operator.harness.subagent import (
+        MISSING_WORKTREE_NOTICE,
+        missing_worktree_notice,
+    )
+
+    assert missing_worktree_notice("qa-tester", "Test PR #1") == MISSING_WORKTREE_NOTICE
+    # A named but nonexistent path is the same omission.
+    gone = tmp_path / "gone"
+    assert missing_worktree_notice("Reviewer", f"Worktree: {gone} @ abc") is not None
+    brief = f"Request: x\nWorktree: {tmp_path} @ abc1234 · Round: 2 · Scope: a..b"
+    assert missing_worktree_notice("reviewer", brief) is None
+    # Writers and plain tasks own their tree; no notice.
+    assert missing_worktree_notice("coder", "no field") is None
+    assert missing_worktree_notice("task", "no field") is None
+
+
+@pytest.mark.asyncio
+async def test_task_receipt_carries_worktree_notice_for_unbriefed_reader(tmp_path):
+    from local_operator.harness.jobs import AsyncJobManager
+    from local_operator.harness.subagent import MISSING_WORKTREE_NOTICE
+    from local_operator.harness.types import ToolContext
+    from local_operator.tools import builtin
+
+    prompts: list[str] = []
+
+    def launcher(label, prompt, *, agent="task", effort=None, model=None):
+        prompts.append(prompt)
+        return f"job-{len(prompts)}"
+
+    context = ToolContext(
+        cwd=str(tmp_path), session_id="s", subagent_launcher=launcher, jobs=AsyncJobManager()
+    )
+    result = await builtin.execute_task(
+        "t1",
+        {
+            "tasks": [
+                {"label": "QA", "prompt": "Test PR #9", "agent": "qa-tester"},
+                {"label": "Rev", "prompt": f"Worktree: {tmp_path} @ abc", "agent": "reviewer"},
+            ]
+        },
+        context=context,
+    )
+    assert result.is_error is False
+    assert result.text.count(MISSING_WORKTREE_NOTICE) == 1
+    # Advisory only: both launched, and the child never sees the notice.
+    assert len(prompts) == 2 and all(MISSING_WORKTREE_NOTICE not in p for p in prompts)
+
+
+def test_attached_stale_registered_role_and_team_manager_get_delivery_pointer(tmp_path):
+    """The child-launch pointer used to miss ``/agent`` attach and a team's
+    manager session; both resolve through the session's one resolver."""
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    registry = AgentRegistry(tmp_path / "config")
+    for name in ("reviewer", "manager"):
+        row = registry.create_agent(_fields(name=name, tags=["role"]))
+        registry.set_agent_system_prompt(row.id, f"Old {name} rules.")
+    session = make_session(tmp_path, ScriptedStream([]), agent_registry=registry)
+    assert session.attach_agent_profile("reviewer") == "reviewer"
+    assert DELIVERY_POINTER in session._goal_state.agent_brief
+    assert registry.get_agent_system_prompt(registry.get_agent_by_name("reviewer").id) == (
+        "Old reviewer rules."
+    )
+    team = Team(
+        id="12345678-1234-1234-1234-123456789013",
+        name="stale-team",
+        manager="manager",
+        created_date=datetime.now(timezone.utc),
+    )
+    session.attach_team(team)
+    brief = session._goal_state.team_brief
+    assert "Old manager rules." in brief and brief.count(DELIVERY_POINTER) == 1
