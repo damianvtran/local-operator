@@ -526,7 +526,10 @@ async def test_update_refresh_fail_still_exits_75() -> None:
                 "updated, but the mobile daemon did not restart — run lop mobile restart" in text
                 for text in notices
             )
-            assert any("updated to v0.28.0 — restarting…" in text for text in notices)
+            assert any(
+                "updated to v0.28.0; restarting this terminal. Your sessions keep running." in text
+                for text in notices
+            )
             assert app._update_in_progress is True
             assert editor.read_only is True
             kinds = {text: token for text, token in _notice_kinds(app)}
@@ -567,7 +570,10 @@ async def test_update_refresh_success_still_exits_75() -> None:
             assert isinstance(app._restart_plan, RestartPlan)
             notices = _notices(app)
             assert any("mobile daemon restarted — refresh the phone UI" in text for text in notices)
-            assert any("updated to v0.28.0 — restarting…" in text for text in notices)
+            assert any(
+                "updated to v0.28.0; restarting this terminal. Your sessions keep running." in text
+                for text in notices
+            )
             kinds = {text: token for text, token in _notice_kinds(app)}
             assert kinds["mobile daemon restarted — refresh the phone UI"] == "dim"
 

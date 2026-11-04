@@ -1,0 +1,6 @@
+{
+  "tui.update.checking": "đang kiểm tra bản cập nhật… các phiên đang chạy vẫn tiếp tục",
+  "tui.update.updating": "đang cập nhật lên v{version}… các phiên đang chạy vẫn tiếp tục",
+  "tui.update.restarting": "đã cập nhật lên v{version}; đang khởi động lại terminal này. Các phiên của bạn vẫn tiếp tục chạy.",
+  "tui.update.relaunch_when_idle": "đã cập nhật lên v{version}; hãy khởi động lại khi công việc cục bộ rảnh. Các phiên của bạn vẫn tiếp tục chạy."
+}

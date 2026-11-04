@@ -138,6 +138,7 @@ from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
+from local_operator.i18n.keys import tui_update as _upd
 from local_operator.i18n.keys import tui_setup_cues as _setup_keys
 from local_operator.i18n.keys import tui_status_command as _sc_keys
 from local_operator.i18n.keys import tui_tags as _tag_keys
@@ -605,6 +606,13 @@ from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 # Resolved once at import: `tr` reads the active locale per CALL, so this binding
 # follows a live language change without re-importing (see docs/I18N.md).
 _t = tr("tui.app")
+#: `/update`'s progress notices. Their own namespace because each one carries the
+#: reassurance the operator asked for (2026-11-03): an update never stops a
+#: running session. Session runtimes are detached processes
+#: (`session/runtime/launch.py`, `spawn_disclaimed`), and `/update` relaunches
+#: only this terminal viewer; `_relaunch_refusal` holds the relaunch whenever
+#: in-process work would be cut, which is the `relaunch_when_idle` arm.
+_t_update = tr("tui.update")
 #: `/tag` and `/tags` copy. TUI-owned, English-only: the surface describes THIS
 #: terminal's conversation labels and sidebar grouping, and it has no desktop
 #: counterpart to keep translated in step.
@@ -18262,7 +18270,7 @@ class OperatorApp(App[None]):
         # upgrade`` used to cancel the relaunch after the wheel was in.
         self._update_in_progress = True
         self._set_composer_read_only(True)
-        self._system_notice("checking for updates…")
+        self._system_notice(_t_update(_upd.checking()))
         # exclusive left false on purpose: Textual exclusivity CANCELS the
         # running worker, and cancelling the installer mid-write is worse
         # than a refused second ``/update``. The flag above is the mutex.
@@ -18331,7 +18339,9 @@ class OperatorApp(App[None]):
             # PyPI after one printed line. CLI already does this; the TUI
             # used to replace the snapshot silently.
             self.call_from_thread(self._system_notice, git_snapshot_notice())
-        self.call_from_thread(self._system_notice, f"updating to v{result.latest}…")
+        self.call_from_thread(
+            self._system_notice, _t_update(_upd.updating(version=str(result.latest)))
+        )
 
         def _report_prune(plan: PrunePlan) -> None:
             """Say what a prune removed, in the CLI's own sentence.
@@ -18421,9 +18431,9 @@ class OperatorApp(App[None]):
             if trigger.failure:
                 self._system_notice(trigger.failure, "warning")
             if self._relaunch_refusal():
-                self._system_notice(f"updated to v{installed}; relaunch when local work is idle")
+                self._system_notice(_t_update(_upd.relaunch_when_idle(version=str(installed))))
             else:
-                self._system_notice(f"updated to v{installed} — restarting…")
+                self._system_notice(_t_update(_upd.restarting(version=str(installed))))
             self._request_relaunch(force=True)
 
         self.call_from_thread(_relaunch_after_upgrade)

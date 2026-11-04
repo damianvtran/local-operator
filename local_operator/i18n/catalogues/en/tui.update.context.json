@@ -1,0 +1,22 @@
+{
+  "tui.update.checking": {
+    "role": "status",
+    "tone": "dim system notice",
+    "note": "First line of /update. 'Running sessions' are the user's agent runtimes, separate processes the update never stops; the reassurance is the point of the line. Lower-case start, terminal voice."
+  },
+  "tui.update.updating": {
+    "role": "status",
+    "tone": "dim system notice",
+    "note": "Shown while the installer runs. {version} is a version number like 0.98.1, keep verbatim. 'Running sessions' are the user's agent runtimes, which keep working."
+  },
+  "tui.update.restarting": {
+    "role": "status",
+    "tone": "dim system notice",
+    "note": "After a successful install, just before the terminal relaunches. Only the terminal viewer restarts; agent sessions run in their own processes and keep running. {version} verbatim."
+  },
+  "tui.update.relaunch_when_idle": {
+    "role": "status",
+    "tone": "dim system notice",
+    "note": "After a successful install when local in-terminal work prevents the relaunch. 'Local work' is work running inside this terminal (a shell command, an in-process session); 'sessions' are the detached agent runtimes, which keep running. {version} verbatim."
+  }
+}

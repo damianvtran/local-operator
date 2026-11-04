@@ -1,0 +1,6 @@
+{
+  "tui.update.checking": "checking for updates… running sessions keep working",
+  "tui.update.updating": "updating to v{version}… running sessions keep working",
+  "tui.update.restarting": "updated to v{version}; restarting this terminal. Your sessions keep running.",
+  "tui.update.relaunch_when_idle": "updated to v{version}; relaunch when local work is idle. Your sessions keep running."
+}
