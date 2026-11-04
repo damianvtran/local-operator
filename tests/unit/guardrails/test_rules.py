@@ -103,3 +103,25 @@ def test_broken_rule_warns_once_per_file_version(
     with caplog.at_level(logging.WARNING):
         load_rules(tmp_path)
     assert caplog.text.count("broken.md") == 2
+
+
+def test_r2_2_configured_rules_dir_adds_to_the_default(tmp_path: Path, monkeypatch) -> None:
+    """A configured folder is loaded IN ADDITION to <state>/rules, with no
+    authorisation needed, and can never hide the default folder's rules."""
+    from local_operator.guardrails import check
+
+    state = tmp_path / "state"
+    (state / "rules").mkdir(parents=True)
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    rule = "---\nname: {n}\nscope: tool:bash\naction: block\ncondition: ['{n}']\n---\nNo.\n"
+    (state / "rules" / "a.md").write_text(rule.format(n="alpha"))
+    (extra / "b.md").write_text(rule.format(n="bravo"))
+    (state / "config.yml").write_text(
+        f"version: 1\nvalues:\n  guardrails:\n    rules_dir: {extra}\n"
+    )
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(state))
+    settings = check.read_settings()
+    assert "guardrails.rules_dir" not in check.LOOSENING_KEYS
+    names = {r.name for r in load_rules(*settings.rules_dirs).user}
+    assert names == {"alpha", "bravo"}

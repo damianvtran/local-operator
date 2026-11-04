@@ -193,9 +193,13 @@ def _load_dir(directory: Path, *, shipped: bool) -> list[Rule]:
     return rules
 
 
-def load_rules(rules_dir: Path | None) -> RuleSet:
-    """Shipped defaults plus the user's rules directory (absent = none)."""
+def load_rules(*rules_dirs: Path | None) -> RuleSet:
+    """Shipped defaults plus every given user rules directory (absent = none)."""
     rules = RuleSet(builtin=_load_dir(DEFAULTS_DIR, shipped=True))
-    if rules_dir is not None and rules_dir.is_dir():
-        rules.user = _load_dir(rules_dir, shipped=False)
+    seen: set[Path] = set()
+    for rules_dir in rules_dirs:
+        if rules_dir is None or rules_dir in seen or not rules_dir.is_dir():
+            continue
+        seen.add(rules_dir)
+        rules.user.extend(_load_dir(rules_dir, shipped=False))
     return rules

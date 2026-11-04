@@ -97,29 +97,75 @@ def _spellings(path: str) -> set[str]:
     return out
 
 
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - Windows has no fcntl
+    _fcntl = None  # type: ignore[assignment]
+
+
 def _on_disk_case(path: str) -> str | None:
-    """``path`` with every EXISTING component in its on-disk case; None if moot."""
-    parts = [p for p in path.split("/") if p]
+    """``path`` with its EXISTING prefix in on-disk case; ``None`` if unchanged.
+
+    R2-4: walking the components with ``os.listdir`` cost 10-300 ms per call on
+    a real state root (``sessions/`` holds thousands of entries). macOS can
+    report a directory's canonical path from an open descriptor
+    (``F_GETPATH``) in one syscall; other platforms are case-sensitive in
+    practice and keep the listing walk, which runs only where a cased name
+    exists but is not spelled that way.
+    """
+    prefix = path
+    rest: list[str] = []
+    while prefix not in ("", "/") and not os.path.lexists(prefix):
+        prefix, tail = os.path.split(prefix)
+        rest.append(tail)
+    if prefix in ("", "/"):
+        return None
+    canonical = _canonical_dir(prefix if os.path.isdir(prefix) else os.path.dirname(prefix))
+    if canonical is None:
+        return None
+    if not os.path.isdir(prefix):
+        leaf = os.path.basename(prefix)
+        try:
+            names = os.listdir(canonical) if leaf not in os.listdir(canonical) else [leaf]
+        except OSError:
+            return None
+        leaf = next((n for n in names if n.casefold() == leaf.casefold()), leaf)
+        canonical = os.path.join(canonical, leaf)
+    out = os.path.join(canonical, *reversed(rest)) if rest else canonical
+    return out if out != path else None
+
+
+def _canonical_dir(directory: str) -> str | None:
+    flag = getattr(_fcntl, "F_GETPATH", None) if _fcntl is not None else None
+    if _fcntl is None or flag is None:
+        return _canonical_dir_by_listing(directory)
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        raw = _fcntl.fcntl(fd, flag, bytes(1024))
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return raw.split(b"\0", 1)[0].decode("utf-8", "surrogateescape")
+
+
+def _canonical_dir_by_listing(directory: str) -> str | None:
     current = "/"
-    changed = False
-    for k, part in enumerate(parts):
+    for part in [p for p in directory.split("/") if p]:
         candidate = os.path.join(current, part)
-        if os.path.lexists(candidate):
-            try:
-                names = os.listdir(current)
-            except OSError:
-                return None
-            if part not in names:
-                match = next((n for n in names if n.casefold() == part.casefold()), None)
-                if match is None:
-                    return None
-                part = match
-                changed = True
-            current = os.path.join(current, part)
-        else:
-            current = os.path.join(current, *parts[k:])
-            break
-    return current if changed else None
+        if not os.path.exists(candidate):
+            return None
+        try:
+            names = os.listdir(current)
+        except OSError:
+            return None
+        if part not in names:
+            part = next((n for n in names if n.casefold() == part.casefold()), part)
+        current = os.path.join(current, part)
+    return current
 
 
 def _under(path: str, root: str) -> bool:
@@ -130,7 +176,7 @@ def _is_ancestor_or_self(path: str, of: str) -> bool:
     return _under(of, path)
 
 
-@dataclass
+@dataclass(frozen=True)
 class _Protected:
     state_roots: set[str]
     config_files: set[str]
@@ -142,6 +188,30 @@ class _Protected:
 
 
 def _protected(env: Mapping[str, str], scratchpad: str | None, session_id: str) -> _Protected:
+    from local_operator.paths import config_dir
+
+    key = (
+        env.get("HOME"),
+        os.path.expanduser("~"),
+        env.get("LOCAL_OPERATOR_CONFIG_DIR"),
+        str(config_dir()),
+        scratchpad,
+        session_id,
+    )
+    cached = _PROTECTED_CACHE.get(key)
+    if cached is None:
+        if len(_PROTECTED_CACHE) > 64:
+            _PROTECTED_CACHE.clear()
+        cached = _PROTECTED_CACHE[key] = _build_protected(env, scratchpad, session_id)
+    return cached
+
+
+#: R2-4: the protected roots' spellings depend only on the inputs above, so
+#: they are computed once per process per distinct key, not per bash call.
+_PROTECTED_CACHE: dict[tuple[str | None, ...], _Protected] = {}
+
+
+def _build_protected(env: Mapping[str, str], scratchpad: str | None, session_id: str) -> _Protected:
     # Imported lazily: ``update`` is a large module and this runs per bash call
     # only when a command actually destroys something.
     from local_operator.paths import config_dir
@@ -272,14 +342,22 @@ def _high_reason(path: str, target: Target, prot: _Protected) -> str | None:
 def _rank(target: Target, prot: _Protected) -> RankedTarget:
     path = target.path
     notes: list[str] = list(target.empty)
-    if target.opaque:
+    if target.climbs:
+        # S2-5b: say where the ``..`` starts from, not that it is inside it.
+        notes.append(f"climbs out of {target.path} by an unknown amount (unresolved)")
+    elif target.opaque:
         notes.append("contains an unresolvable substitution or variable (opaque)")
     if target.unknown_cwd:
         notes.append("relative to a working directory that cannot be determined")
     if path is None:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes) or "unresolved target")
     for spelling in _spellings(path):
-        reason = _critical_reason(spelling, target, prot) or _critical_by_pattern(target, prot)
+        if target.glob_children and not target.glob_all and not target.opaque:
+            # R2-5: ``rm *.log`` at $HOME removes matching CHILDREN; it is
+            # CRITICAL only when the pattern itself can reach a protected name.
+            reason = _critical_by_pattern(target, prot)
+        else:
+            reason = _critical_reason(spelling, target, prot) or _critical_by_pattern(target, prot)
         if reason is not None and not target.opaque:
             return RankedTarget(target, Risk.CRITICAL, "; ".join([reason, *notes]))
         if reason is not None and target.opaque and path in prot.state_roots | prot.homes:
@@ -292,20 +370,36 @@ def _rank(target: Target, prot: _Protected) -> RankedTarget:
     in_own_pad = any(_under(path, pad) for pad in prot.own_scratchpad) and (
         not target.opaque or target.opaque_contained
     )
-    # R6: ``$(mktemp …)`` names a fresh temp entry, a find with a selecting
-    # predicate removes a subset — neither is "unknown" in the sense that
-    # matters once CRITICAL ancestry was ruled out above.
+    # R6: ``$(mktemp …)`` names a fresh temp entry — not "unknown" in the sense
+    # that matters once CRITICAL ancestry was ruled out above.
     if target.temp:
         return RankedTarget(target, Risk.LOW, "fresh temporary path ($(mktemp))")
-    if target.selected and not target.opaque and not target.unknown_cwd:
-        return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
     if notes and not in_own_pad:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes))
     for spelling in _spellings(path):
         reason = _high_reason(spelling, target, prot)
         if reason is not None:
+            in_state = any(_under(spelling, st) for st in prot.state_roots)
+            if target.selected and not in_state and _is_work_tree(spelling):
+                # S2-3: a find with a selecting predicate (``-name '*.pyc'``)
+                # removes a SUBSET of a working tree — the R6 cleanup shape. It
+                # overrides ONLY the working-tree reasons: a repo root, even one
+                # at $HOME's top level (``~/<project>``). State-root children,
+                # other sessions and non-repo home dirs (``~/Documents``) stay
+                # HIGH, because their contents are the data a confused
+                # predicate would destroy.
+                return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
             return RankedTarget(target, Risk.HIGH, "; ".join([reason, *notes]))
+    if target.selected:
+        return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
     return RankedTarget(target, Risk.LOW, "ordinary path")
+
+
+def _is_work_tree(path: str) -> bool:
+    try:
+        return os.path.isdir(path) and os.path.exists(os.path.join(path, ".git"))
+    except OSError:
+        return False
 
 
 def classify_targets(

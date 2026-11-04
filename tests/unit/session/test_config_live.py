@@ -770,12 +770,8 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
         lambda s, w: _guardrails(w).enabled if not s._guard_authorised_loosenings else "armed",
     ),
     "guardrails.judge_timeout_s": (7.5, lambda s, w: _guardrails(w).judge_timeout_s),
-    "guardrails.rules_dir": (
-        "/tmp/rules-probe",
-        lambda s, w: (
-            str(_guardrails(w).rules_dir) if not s._guard_authorised_loosenings else "armed"
-        ),
-    ),
+    # ``rules_dir`` is additive (R2-2), not a loosening: it applies live.
+    "guardrails.rules_dir": ("/tmp/rules-probe", lambda s, w: str(_guardrails(w).rules_dir)),
     "guardrails.critical_override": (
         True,
         lambda s, w: (
@@ -2220,7 +2216,7 @@ async def test_the_model_default_notice_is_change_based(tmp_path, monkeypatch) -
 
 @pytest.mark.asyncio
 async def test_guardrail_loosenings_need_an_operator_write_in_this_process(tmp_path) -> None:
-    """Every guardrail LOOSENING (critical override, rules off, rules folder) is
+    """Every guardrail LOOSENING (critical override, rules off) is
     authorised only by a ``source="local"`` write (the settings facade in this
     process); a file edit from anywhere else — including the agent's shell —
     never authorises it, and a later unattributed delivery disarms it (S5)."""
@@ -2229,10 +2225,8 @@ async def test_guardrail_loosenings_need_an_operator_write_in_this_process(tmp_p
     session = make_session(tmp_path, RebindableStream({}))
     try:
         assert session._guard_authorised_loosenings == set()
-        loose = {"guardrails": {"critical_override": True, "enabled": False, "rules_dir": "/x"}}
-        keys = frozenset(
-            {"guardrails.critical_override", "guardrails.enabled", "guardrails.rules_dir"}
-        )
+        loose = {"guardrails": {"critical_override": True, "enabled": False}}
+        keys = frozenset({"guardrails.critical_override", "guardrails.enabled"})
         session._apply_config_change(ConfigChange(values=loose, changed_keys=keys, source="disk"))
         assert session._guard_authorised_loosenings == set()
         session._apply_config_change(ConfigChange(values=loose, changed_keys=keys, source="local"))

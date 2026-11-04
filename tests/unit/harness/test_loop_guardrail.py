@@ -32,6 +32,14 @@ from local_operator.harness.types import (
 )
 from local_operator.model.configure import build_model_spec
 
+
+def _text(result: ToolResult) -> str:
+    """The result's first text block (a guardrail refusal is always one)."""
+    block = result.content[0]
+    assert isinstance(block, TextContent)
+    return block.text
+
+
 MODEL = build_model_spec("anthropic", "claude-sonnet-4-5")
 
 
@@ -95,7 +103,7 @@ async def _run(
     )
     config = LoopConfig(
         model=MODEL,
-        convert_to_llm=lambda m: m,
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
         stream_fn=lambda *_: None,
         guard_judge=judge,
         guard_override_authorised=(
@@ -124,7 +132,7 @@ async def test_critical_refused_and_never_executed(home: Path, approve: bool | N
     result, executed = await _run(home, INCIDENT, judge=judge, approve=approve)
     assert executed == []
     assert result.is_error
-    assert result.content[0].text.startswith("BLOCKED by guardrail dangerous-delete (critical)")
+    assert _text(result).startswith("BLOCKED by guardrail dangerous-delete (critical)")
     assert judge.calls == []  # CRITICAL never asks a model
 
 
@@ -135,7 +143,7 @@ async def test_override_from_unauthorised_write_is_ignored(home: Path) -> None:
     )
     judge = _Judge("ALLOW")
     result, executed = await _run(home, "rm -rf ~/.local-operator", judge=judge, authorised=False)
-    assert executed == [] and "(critical)" in result.content[0].text
+    assert executed == [] and "(critical)" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -146,7 +154,7 @@ async def test_authorised_override_downgrades_to_judge_only(home: Path) -> None:
     blocker = _Judge("BLOCK: the user never asked")
     result, executed = await _run(home, "rm -rf ~/.local-operator", judge=blocker, authorised=True)
     assert executed == [] and len(blocker.calls) == 1
-    assert "the user never asked" in result.content[0].text
+    assert "the user never asked" in _text(result)
     allower = _Judge("ALLOW")
     result, executed = await _run(home, "rm -rf ~/.local-operator", judge=allower, authorised=True)
     assert len(executed) == 1
@@ -157,8 +165,8 @@ async def test_high_runs_only_on_allow(home: Path) -> None:
     blocker = _Judge("BLOCK: not requested")
     result, executed = await _run(home, "rm -rf ~/projects-x", judge=blocker)
     assert executed == []
-    assert result.content[0].text.startswith("BLOCKED by guardrail dangerous-delete (review)")
-    assert "not requested" in result.content[0].text
+    assert _text(result).startswith("BLOCKED by guardrail dangerous-delete (review)")
+    assert "not requested" in _text(result)
     assert "please clean up" in blocker.calls[0][1]  # the user's own words reach the judge
     allower = _Judge("ALLOW")
     result, executed = await _run(home, "rm -rf ~/projects-x", judge=allower)
@@ -168,7 +176,7 @@ async def test_high_runs_only_on_allow(home: Path) -> None:
 @pytest.mark.asyncio
 async def test_high_without_judge_fails_closed(home: Path) -> None:
     result, executed = await _run(home, "rm -rf ~/projects-x", judge=None)
-    assert executed == [] and "judge unavailable" in result.content[0].text
+    assert executed == [] and "judge unavailable" in _text(result)
 
 
 @pytest.mark.asyncio
@@ -187,11 +195,14 @@ async def test_destructive_timeout_carries_verify_note(home: Path) -> None:
         "rm -rf /tmp/big-tree",
         tool_text="TIMEOUT after 120.0s (process killed)\nexit code: -9",
     )
-    assert result.content[-1].text == DESTRUCTIVE_TIMEOUT_NOTE
+    last = result.content[-1]
+    assert isinstance(last, TextContent) and last.text == DESTRUCTIVE_TIMEOUT_NOTE
     result, _ = await _run(
         home, "sleep 999", tool_text="TIMEOUT after 120.0s (process killed)\nexit code: -9"
     )
-    assert all(c.text != DESTRUCTIVE_TIMEOUT_NOTE for c in result.content)
+    assert all(
+        not isinstance(c, TextContent) or c.text != DESTRUCTIVE_TIMEOUT_NOTE for c in result.content
+    )
 
 
 @pytest.mark.asyncio
@@ -204,8 +215,8 @@ async def test_user_block_rule_applies(home: Path) -> None:
     )
     result, executed = await _run(home, "git push --force origin main")
     assert executed == []
-    assert result.content[0].text.startswith("BLOCKED by guardrail no-force-push (block)")
-    assert "Open a PR instead." in result.content[0].text
+    assert _text(result).startswith("BLOCKED by guardrail no-force-push (block)")
+    assert "Open a PR instead." in _text(result)
 
 
 @pytest.mark.asyncio
@@ -222,7 +233,7 @@ async def test_unauthorised_rules_disable_is_ignored(home: Path) -> None:
         "version: 1\nvalues:\n  guardrails:\n    enabled: false\n    rules_dir: /nonexistent\n"
     )
     result, executed = await _run(home, "git push --force origin main")
-    assert executed == [] and "no-force-push (block)" in result.content[0].text
+    assert executed == [] and "no-force-push (block)" in _text(result)
 
 
 @pytest.mark.asyncio

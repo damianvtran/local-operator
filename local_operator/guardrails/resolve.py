@@ -46,6 +46,7 @@ from local_operator.tools.search_guard import (
     _WRAPPER_VALUE_FLAGS,
     WRAPPER_WORDS,
     _split,
+    _unquote,
 )
 
 #: Programs whose output never contains ``/`` or ``..`` in normal use, so a
@@ -423,7 +424,7 @@ def _glob_escape(text: str) -> str:
 
 #: Upper bound on the words one brace expression may produce. Past it the word
 #: is opaque: ``{1..100000}`` is not something to enumerate per bash call.
-MAX_BRACE_RESULTS = 64
+MAX_BRACE_RESULTS = 1024
 _BRACE_RANGE_RE = re.compile(r"^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?$")
 
 
@@ -742,6 +743,10 @@ class Target:
     selected: bool = False
     #: The opaque part is a fresh ``$(mktemp …)`` entry (R6).
     temp: bool = False
+    #: A ``..`` follows an unknowable component: the real target is somewhere
+    #: ABOVE ``path`` by an unknown amount (S4/S2-5b), so ``path`` must not be
+    #: presented to the judge as where the deletion lands.
+    climbs: bool = False
 
 
 @dataclass
@@ -765,12 +770,14 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
     pattern = exp.pattern
     opaque = exp.opaque
     contained = opaque and exp.opaque_contained
+    climbs = False
     if opaque and OPAQUE_MARK in text:
         # S4: a ``..`` AFTER an unknowable component climbs by an unknown amount
         # from an unknown place; containment is void.
         tail = text[text.index(OPAQUE_MARK) :]
         if ".." in tail.split("/"):
             contained = False
+            climbs = True
     glob_children = False
     glob_all = False
     if pattern is not None and not opaque:
@@ -823,6 +830,7 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
         glob_children=glob_children,
         glob_all=glob_all,
         temp=is_temp,
+        climbs=climbs,
     )
 
 
@@ -996,11 +1004,27 @@ _INTERPRETER_CODE_FLAGS = {
     "node": ("-e", "--eval"),
     "osascript": ("-e",),
 }
+#: A pipe from one of these into a shell runs text fetched at run time.
+_NETWORK_FETCH_RE = re.compile(r"(?<![\w.-])(curl|wget|fetch|http|nc|ncat)(?![\w-])")
 _INTERPRETER_DELETE_RE = re.compile(
     r"\b(rmtree|os\.remove|os\.unlink|os\.rmdir|removedirs|\.unlink\(|\.rmdir\(|"
     r"unlinkSync|rmSync|rmdirSync|File\.delete|FileUtils\.rm|unlink\s*\(|"
     r"rm\s+-|do shell script)"
 )
+
+
+def _in_place_edit(name: str, args: list[Expanded]) -> bool:
+    """``sed -i``/``--in-place``, or perl with ``i`` in a short cluster (``-pi``)."""
+    for w in args:
+        t = w.text
+        if t.startswith("--in-place"):
+            return True
+        if t.startswith("-") and not t.startswith("--"):
+            if name == "perl" and "i" in t[1:]:
+                return True
+            if name != "perl" and t.startswith("-i"):
+                return True
+    return False
 
 
 def _fd_redirect_merge(pieces: list[tuple[str, bool, str]]) -> list[tuple[str, bool, str]]:
@@ -1061,7 +1085,10 @@ class _Walker:
             if _DELETE_WORD_RE.search(command):
                 self.result.opaque_reasons.append("nested shell too deep to resolve")
             return
-        heredocs = _heredoc_bodies(command)
+        # S2-4: each heredoc body belongs to the segment whose ``<<`` opened it.
+        # ``_split`` blanks the bodies but keeps the openers, in order, so the
+        # bodies are dealt out to segments by counting the openers in each.
+        pending_bodies = list(_heredoc_bodies(command))
         pieces = _fd_redirect_merge(_split(command))
         groups: list[_Snapshot] = []
         for index, (text, piped, op) in enumerate(pieces):
@@ -1081,19 +1108,36 @@ class _Walker:
                 tail = tail[:-1].rstrip()
             nxt_piped = index + 1 < len(pieces) and pieces[index + 1][1]
             isolated = piped or nxt_piped or op == "&"
+            openers = len(_HEREDOC_OPEN_RE.findall(text))
+            heredocs, pending_bodies = pending_bodies[:openers], pending_bodies[openers:]
+            # The whole pipeline's text, so a pipe-fed shell can ask whether
+            # anything upstream names a delete (S2-2).
+            start = index
+            while start > 0 and pieces[start][1]:
+                start -= 1
+            end = index
+            while end + 1 < len(pieces) and pieces[end + 1][1]:
+                end += 1
+            pipeline = " | ".join(p[0] for p in pieces[start : end + 1])
             if isolated:
                 snap = self._save()
-                self._segment(text, depth, heredocs, stdin_piped=piped)
+                self._segment(text, depth, heredocs, stdin_piped=piped, pipeline=pipeline)
                 self._restore(snap)
             else:
-                self._segment(text, depth, heredocs, stdin_piped=piped)
+                self._segment(text, depth, heredocs, stdin_piped=piped, pipeline=pipeline)
             for _ in range(closes):
                 if groups:
                     self._restore(groups.pop())
 
     # -- one segment ---------------------------------------------------------
     def _segment(
-        self, text: str, depth: int, heredocs: list[str] | None = None, *, stdin_piped: bool = False
+        self,
+        text: str,
+        depth: int,
+        heredocs: list[str] | None = None,
+        *,
+        stdin_piped: bool = False,
+        pipeline: str = "",
     ) -> None:
         text = _strip_grouping(text)
         if not text:
@@ -1165,7 +1209,15 @@ class _Walker:
         name = os.path.basename(words[0].text)
         args = words[1:]
         if name in _SHELL_C_WORDS:
-            self._shell(args, depth, text, heredocs or [], herestrings, stdin_piped)
+            self._shell(
+                args, depth, text, heredocs or [], herestrings, stdin_piped, pipeline or text
+            )
+            return
+        if name in ("source", "."):
+            self._source(args, depth, text, heredocs or [], herestrings, stdin_piped, pipeline)
+            return
+        if name == "perl" and _in_place_edit(name, args):
+            self._in_place(name, args)
             return
         if name in _INTERPRETER_CODE_FLAGS:
             self._interpreter(name, args)
@@ -1221,15 +1273,8 @@ class _Walker:
                 for w in operands:
                     self._add(w, "overwrite", name)
             return
-        if name in ("sed", "gsed", "perl") and any(
-            w.text.startswith("-i") or w.text.startswith("--in-place") or w.text == "-pi"
-            for w in args
-        ):
-            # S5: an in-place edit rewrites the file. The last operands are files;
-            # treat each non-flag operand after the script as an overwrite.
-            operands, _ = _operands(args, frozenset({"-e", "-f"}))
-            for w in operands[1:]:
-                self._add(w, "overwrite", name)
+        if name in ("sed", "gsed") and _in_place_edit(name, args):
+            self._in_place(name, args)
             return
         if name == "dd":
             for w in args:
@@ -1244,6 +1289,41 @@ class _Walker:
                     )
                     self._add(w2, "overwrite", name)
             return
+
+    def _in_place(self, name: str, args: list[Expanded]) -> None:
+        """In-place edit (``sed -i``, ``perl -pi``): its files are rewritten."""
+        # S5: an in-place edit rewrites its files. R2-3/S2-5a: when the
+        # script came through a flag (``-e``/``-f``, or a cluster ending in
+        # ``e`` such as ``-pe``), EVERY operand is a file; otherwise the
+        # first operand is the script.
+        files: list[Expanded] = []
+        script_by_flag = False
+        k = 0
+        while k < len(args):
+            t = args[k].text
+            if t == "--":
+                files.extend(args[k + 1 :])
+                break
+            if t.startswith("-") and len(t) > 1:
+                cluster = t.lstrip("-")
+                takes_script = t in ("-e", "-f", "--expression", "--file") or (
+                    not t.startswith("--") and cluster[-1:] in ("e", "E", "f")
+                )
+                if takes_script:
+                    script_by_flag = True
+                    k += 2
+                    continue
+                k += 1
+                continue
+            if t.startswith("--expression=") or t.startswith("--file="):
+                script_by_flag = True
+                k += 1
+                continue
+            files.append(args[k])
+            k += 1
+        for w in files if script_by_flag else files[1:]:
+            self._add(w, "overwrite", name)
+        return
 
     # -- program handlers ------------------------------------------------------
     def _assign(self, text: str) -> None:
@@ -1262,42 +1342,52 @@ class _Walker:
         heredocs: list[str],
         herestrings: list[str],
         stdin_piped: bool,
+        pipeline: str = "",
     ) -> None:
         """A shell word: walk its ``-c`` script, or whatever feeds its stdin.
 
-        R1/S2: ``-c`` may sit inside a short-flag cluster (``-lc``, ``-euc``),
-        ``-o``/``+o`` consume a value, and ``--`` may precede the script. A shell
-        with no ``-c`` reads its script from a file operand or from stdin
-        (R2/S6): a heredoc or herestring body is walked; a pipe or a script file
-        is not visible here, so a delete word anywhere in the segment makes the
-        call opaque (HIGH).
+        R1/S2: ``-c`` may sit inside a short-flag cluster (``-lc``, ``-euc``).
+        Option words may come before AND after it (S2-1: ``bash -c -x 'script'``
+        runs ``script``), so options are skipped until the first non-option
+        word. ``-o``/``+o``/``-O``/``+O`` and any cluster containing ``o``/``O``
+        (``-euo pipefail``) consume the next word as their value (S2-2).
+
+        Without ``-c`` the shell runs a script file or its stdin. A heredoc or
+        herestring body is walked (R2). A pipe or a file is invisible here, and
+        running a repo script through ``bash`` is everyday work, so it is opaque
+        ONLY when the segment (or, for a pipe, the whole pipeline) names a
+        delete, or when the pipe comes from a network fetch (S2-2/R2-1).
         """
         i = 0
         script: Expanded | None = None
         wants_c = False
         while i < len(args):
             t = args[i].text
-            if wants_c:
-                if t == "--":
-                    i += 1
-                    continue
-                script = args[i]
+            if t == "--":
+                i += 1
+                if wants_c and i < len(args):
+                    script = args[i]
                 break
-            if t in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
+            if t in ("--rcfile", "--init-file"):
                 i += 2
                 continue
             if t in ("-c", "--command"):
                 wants_c = True
                 i += 1
                 continue
-            if t.startswith("-") and len(t) > 1 and not t.startswith("--") and "c" in t[1:]:
-                wants_c = True
+            if (t.startswith("-") or t.startswith("+")) and len(t) > 1 and not t.startswith("--"):
+                cluster = t[1:]
+                if "c" in cluster:
+                    wants_c = True
+                # ``-o pipefail``/``-euo pipefail``: the option name is a value.
+                i += 2 if ("o" in cluster or "O" in cluster) else 1
+                continue
+            if t.startswith("--"):
                 i += 1
                 continue
-            if t.startswith("-") or t.startswith("+"):
-                i += 1
-                continue
-            break  # a script file operand
+            if wants_c:
+                script = args[i]
+            break  # the script (with -c) or a script file operand
         if script is not None:
             if script.opaque or not script.text.strip():
                 if _DELETE_WORD_RE.search(segment):
@@ -1309,16 +1399,52 @@ class _Walker:
             if _DELETE_WORD_RE.search(segment):
                 self.result.opaque_reasons.append("shell -c script could not be located")
             return
-        bodies = list(herestrings) + list(heredocs)
-        for body in bodies:
-            self._isolated_walk(body, depth + 1)
-        if bodies:
+        self._walk_stdin_bodies(heredocs, herestrings, depth)
+        if heredocs or herestrings:
             return
-        if stdin_piped or i < len(args):
-            # Script from a pipe or a file: its text is not in this command.
+        self._unseen_script(segment, stdin_piped, pipeline)
+
+    def _walk_stdin_bodies(self, heredocs: list[str], herestrings: list[str], depth: int) -> None:
+        for body in list(herestrings) + list(heredocs):
+            self._isolated_walk(body, depth + 1)
+
+    def _unseen_script(self, segment: str, stdin_piped: bool, pipeline: str) -> None:
+        """Record a shell running text this command does not contain — if it matters."""
+        haystack = pipeline if stdin_piped else segment
+        fetched = stdin_piped and _NETWORK_FETCH_RE.search(pipeline)
+        if _DELETE_WORD_RE.search(haystack) or fetched:
             self.result.opaque_reasons.append(
                 "shell reads a script from stdin or a file (not resolved)"
             )
+
+    def _source(
+        self,
+        args: list[Expanded],
+        depth: int,
+        segment: str,
+        heredocs: list[str],
+        herestrings: list[str],
+        stdin_piped: bool,
+        pipeline: str,
+    ) -> None:
+        """``source``/``.``: process substitutions were already walked as
+        commands; a ``/dev/stdin`` source reads its heredoc/herestring or pipe."""
+        if not args:
+            return
+        target = args[0].text
+        for body in args[0].substitutions:
+            # ``source <(producer)`` runs the producer's OUTPUT. An echo/printf
+            # producer's payload is visible text — walk it; any other producer
+            # is opaque when it names a delete.
+            words = body.split(None, 1)
+            if words and words[0] in ("echo", "printf") and len(words) > 1:
+                self._isolated_walk(_unquote(words[1].strip()), depth + 1)
+            elif _DELETE_WORD_RE.search(body):
+                self.result.opaque_reasons.append("source of generated text (not resolved)")
+        if target in ("/dev/stdin", "-", "/dev/fd/0"):
+            self._walk_stdin_bodies(heredocs, herestrings, depth)
+            if not (heredocs or herestrings):
+                self._unseen_script(segment, stdin_piped, pipeline or segment)
 
     def _interpreter(self, name: str, args: list[Expanded]) -> None:
         """Q3 (v1 hardening): an interpreter one-liner whose code calls a delete."""
@@ -1404,10 +1530,8 @@ class _Walker:
                 break
             if t in _FIND_SELECTING:
                 selected = True
-            if t == "-mindepth" and j + 1 < len(texts) and texts[j + 1].isdigit():
-                selected = selected or int(texts[j + 1]) >= 1
-            if t == "-type" and j + 1 < len(texts) and texts[j + 1] == "f":
-                selected = True
+            # ``-type f``/``-mindepth`` are NOT selecting (S2-3): they still
+            # empty the directory, just as ``rm -rf X/*`` would.
         if not roots:
             roots = [Expanded(text=".")]
         for w in roots:

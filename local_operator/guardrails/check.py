@@ -77,7 +77,13 @@ class GuardSettings:
     enabled: bool = GUARDRAILS_ENABLED_DEFAULT
     critical_override: bool = GUARDRAILS_CRITICAL_OVERRIDE_DEFAULT
     judge_timeout_s: float = GUARDRAILS_JUDGE_TIMEOUT_DEFAULT
-    rules_dir: Path | None = None
+    #: ``<state>/rules`` ALWAYS, then the configured ``rules_dir`` if any (R2-2).
+    rules_dirs: tuple[Path, ...] = ()
+
+    @property
+    def rules_dir(self) -> Path | None:
+        """The configured extra folder, or the default when none (back-compat)."""
+        return self.rules_dirs[-1] if self.rules_dirs else None
 
 
 @dataclass
@@ -99,9 +105,7 @@ class GuardOutcome:
 #: edit — wrote it in this process (``harness.approval.loosening_is_authorised``);
 #: otherwise the safe default stands. ``judge_timeout_s`` is not here: a
 #: shorter timeout blocks MORE (fail closed), and the bound caps a longer one.
-LOOSENING_KEYS = frozenset(
-    {"guardrails.critical_override", "guardrails.enabled", "guardrails.rules_dir"}
-)
+LOOSENING_KEYS = frozenset({"guardrails.critical_override", "guardrails.enabled"})
 
 
 def read_settings(
@@ -128,7 +132,7 @@ def read_settings(
     default_rules = config_dir() / "rules"
     try:
         if _config_file_is_unreadable(config_dir() / CONFIG_FILE_NAME):
-            return GuardSettings(rules_dir=default_rules)
+            return GuardSettings(rules_dirs=(default_rules,))
         config = ConfigManager(config_dir())
         enabled = config.get_nested_value(GUARDRAILS_ENABLED_PATH, GUARDRAILS_ENABLED_DEFAULT)
         override = config.get_nested_value(
@@ -139,16 +143,20 @@ def read_settings(
         )
         rules_raw = config.get_nested_value(GUARDRAILS_RULES_DIR_PATH, GUARDRAILS_RULES_DIR_DEFAULT)
     except Exception:  # noqa: BLE001 — config trouble must never weaken the guard
-        return GuardSettings(rules_dir=default_rules)
+        return GuardSettings(rules_dirs=(default_rules,))
     try:
         timeout = min(max(float(timeout_raw), _MIN_TIMEOUT_S), _MAX_TIMEOUT_S)
     except (TypeError, ValueError):
         timeout = GUARDRAILS_JUDGE_TIMEOUT_DEFAULT
-    rules_dir = (
-        Path(os.path.expanduser(rules_raw))
-        if isinstance(rules_raw, str) and rules_raw and "guardrails.rules_dir" in authorised
-        else default_rules
-    )
+    # R2-2: ``rules_dir`` ADDS a folder; ``<state>/rules`` is always loaded.
+    # Repointing can then never hide the operator's own rules, so the key needs
+    # no loosening gate (gating it made a configured folder vanish after every
+    # restart, since boot-time contents are never attributed).
+    rules_dirs: tuple[Path, ...] = (default_rules,)
+    if isinstance(rules_raw, str) and rules_raw:
+        extra = Path(os.path.expanduser(rules_raw))
+        if extra != default_rules:
+            rules_dirs = (default_rules, extra)
     return GuardSettings(
         # Only a literal ``false`` disables user rules, and only when authorised.
         enabled=enabled is not False or "guardrails.enabled" not in authorised,
@@ -156,7 +164,7 @@ def read_settings(
         # an operator (not the model) made that write.
         critical_override=(override is True) and "guardrails.critical_override" in authorised,
         judge_timeout_s=timeout,
-        rules_dir=rules_dir,
+        rules_dirs=rules_dirs,
     )
 
 
@@ -280,7 +288,7 @@ async def check_tool_call(
     settings: GuardSettings,
 ) -> GuardOutcome | None:
     """``None`` → run as-is; a non-blocking outcome may carry warnings."""
-    rules = load_rules(settings.rules_dir if settings.enabled else None)
+    rules = load_rules(*settings.rules_dirs) if settings.enabled else load_rules(None)
     builtin = next((r for r in rules.builtin if r.name == DANGEROUS_DELETE_RULE), None)
     outcome: GuardOutcome | None = None
     if tool_name == "bash":
