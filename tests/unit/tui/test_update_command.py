@@ -527,7 +527,7 @@ async def test_update_refresh_fail_still_exits_75() -> None:
                 for text in notices
             )
             assert any(
-                "updated to v0.28.0; restarting this terminal. Your sessions keep running." in text
+                "updated to v0.28.0; restarting this terminal. Sessions keep running." in text
                 for text in notices
             )
             assert app._update_in_progress is True
@@ -571,7 +571,7 @@ async def test_update_refresh_success_still_exits_75() -> None:
             notices = _notices(app)
             assert any("mobile daemon restarted — refresh the phone UI" in text for text in notices)
             assert any(
-                "updated to v0.28.0; restarting this terminal. Your sessions keep running." in text
+                "updated to v0.28.0; restarting this terminal. Sessions keep running." in text
                 for text in notices
             )
             kinds = {text: token for text, token in _notice_kinds(app)}
@@ -658,3 +658,50 @@ async def test_update_success_queues_the_mesh_roll_as_a_notice(tmp_path, monkeyp
     record = rollouts.latest_active(root=tmp_path)
     assert record is not None, "the TUI exit opened no record"
     assert record["authority"]["via"] == "tui", record["authority"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind_name", "posix"),
+    [("PIP", True), ("PIPX", True), ("UV_TOOL", False)],
+)
+async def test_update_in_place_install_never_reassures(kind_name: str, posix: bool) -> None:
+    """Review M1: pip, pipx and off-POSIX uv-tool rewrite site-packages in place
+    under the running fleet, so `/update` must caution there, never promise that
+    running sessions keep working. The generation-layout arm is pinned by the
+    two `*_still_exits_75` tests above."""
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    check = VersionCheck(installed="0.27.0", latest="0.28.0", behind=True)
+    with (
+        patch("local_operator.update.check_latest", return_value=check),
+        patch("local_operator.update.perform_upgrade", return_value="0.28.0"),
+        patch("local_operator.update.install_kind") as kind,
+        patch("local_operator.update.generation_layout_supported", return_value=posix),
+        patch("local_operator.update.is_git_snapshot", return_value=False),
+        patch(
+            "local_operator.update.refresh_mobile_after_upgrade",
+            return_value=MobileRefresh(kind="restarted"),
+        ),
+    ):
+        from local_operator.update import InstallKind
+
+        kind.return_value = InstallKind[kind_name]
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            editor = app.query_one(Editor)
+            editor.focus()
+            _set_editor_line(editor, "/update")
+            await pilot.press("enter")
+            for _ in range(60):
+                await pilot.pause()
+                if app.return_code == REEXEC_CODE:
+                    break
+            assert app.return_code == REEXEC_CODE
+            notices = _notices(app)
+            assert "checking for updates…" in notices
+            assert any(
+                "updating to v0.28.0 in place; running sessions may be interrupted" in text
+                for text in notices
+            )
+            assert any("updated to v0.28.0; restarting this terminal." == text for text in notices)
+            assert not any("keep running" in text or "keep working" in text for text in notices)

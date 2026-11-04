@@ -1,6 +1,9 @@
 {
-  "tui.update.checking": "اپ ڈیٹس دیکھی جا رہی ہیں… جاری سیشن کام کرتے رہیں گے",
+  "tui.update.checking": "اپ ڈیٹس دیکھی جا رہی ہیں…",
   "tui.update.updating": "v{version} پر اپ ڈیٹ ہو رہا ہے… جاری سیشن کام کرتے رہیں گے",
-  "tui.update.restarting": "v{version} پر اپ ڈیٹ ہو گیا؛ یہ ٹرمینل دوبارہ شروع ہو رہا ہے۔ آپ کے سیشن چلتے رہیں گے۔",
-  "tui.update.relaunch_when_idle": "v{version} پر اپ ڈیٹ ہو گیا؛ مقامی کام رکنے پر دوبارہ شروع کریں۔ آپ کے سیشن چلتے رہیں گے۔"
+  "tui.update.updating_in_place": "موجودہ انسٹال کے اوپر ہی v{version} پر اپ ڈیٹ ہو رہا ہے؛ جاری سیشن رک سکتے ہیں",
+  "tui.update.restarting": "v{version} پر اپ ڈیٹ ہو گیا؛ یہ ٹرمینل دوبارہ شروع ہو رہا ہے۔ سیشن چلتے رہیں گے۔",
+  "tui.update.restarting_in_place": "v{version} پر اپ ڈیٹ ہو گیا؛ یہ ٹرمینل دوبارہ شروع ہو رہا ہے۔",
+  "tui.update.relaunch_when_idle": "v{version} پر اپ ڈیٹ ہو گیا؛ مقامی کام رکنے پر دوبارہ شروع کریں۔ سیشن چلتے رہیں گے۔",
+  "tui.update.relaunch_when_idle_in_place": "v{version} پر اپ ڈیٹ ہو گیا؛ مقامی کام رکنے پر دوبارہ شروع کریں۔"
 }

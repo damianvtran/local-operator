@@ -2972,6 +2972,27 @@
       },
       "status": "passed",
       "note": "Independent audit, 4 new keys. Auditor fixed 1 minor/nit (see record); 0 unresolved blocker/major. Target SHA-256 7b384116d3a982b8744529db3515fc1429421a1995a9f5e7287ea0bd68d1f298. Evidence: i18n/audits/update-notice-tui-340352200f28.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.update",
+      "source_sha256": "123da7e1fce2892a4216e438f2d3470a47d7cf02d7eb890dcefa2835b949997b",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure round-1 remediation)",
+        "session": "d3534e994383",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "pending",
+        "session": "pending",
+        "model": "pending",
+        "date": "pending",
+        "result": "pending",
+        "findings": 0
+      },
+      "status": "pending",
+      "note": "Stale after review M1/D2/D4 remediation: checking neutralised; restarting/relaunch_when_idle shortened; 3 new keys (updating_in_place, restarting_in_place, relaunch_when_idle_in_place). Needs an independent re-audit. Target SHA-256 ddca1c7469c6c1cf6ea2379eb0f1e6b0ed2ca78a360c1a3cb85d15695928417c."
     }
   ]
 }

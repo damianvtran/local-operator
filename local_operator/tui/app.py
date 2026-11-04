@@ -138,10 +138,10 @@ from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
-from local_operator.i18n.keys import tui_update as _upd
 from local_operator.i18n.keys import tui_setup_cues as _setup_keys
 from local_operator.i18n.keys import tui_status_command as _sc_keys
 from local_operator.i18n.keys import tui_tags as _tag_keys
+from local_operator.i18n.keys import tui_update as _upd
 from local_operator.i18n.text import register_refresh, tr
 from local_operator.logger import current_log_file
 
@@ -606,12 +606,16 @@ from local_operator.tui.widgets.welcome import WelcomeView, session_welcome_info
 # Resolved once at import: `tr` reads the active locale per CALL, so this binding
 # follows a live language change without re-importing (see docs/I18N.md).
 _t = tr("tui.app")
-#: `/update`'s progress notices. Their own namespace because each one carries the
-#: reassurance the operator asked for (2026-11-03): an update never stops a
+#: `/update`'s progress notices. Their own namespace because they carry the
+#: reassurance the operator asked for (2026-11-03): an update does not stop a
 #: running session. Session runtimes are detached processes
 #: (`session/runtime/launch.py`, `spawn_disclaimed`), and `/update` relaunches
 #: only this terminal viewer; `_relaunch_refusal` holds the relaunch whenever
 #: in-process work would be cut, which is the `relaunch_when_idle` arm.
+#: The reassurance is TRUE ONLY ON THE GENERATION LAYOUT
+#: (`update.upgrade_runs_in_generation`): pip, pipx and off-POSIX uv-tool
+#: rewrite site-packages in place under the running fleet, so those installs get
+#: the `*_in_place` keys, which caution rather than reassure (review M1).
 _t_update = tr("tui.update")
 #: `/tag` and `/tags` copy. TUI-owned, English-only: the surface describes THIS
 #: terminal's conversation labels and sidebar grouping, and it has no desktop
@@ -18302,6 +18306,7 @@ class OperatorApp(App[None]):
             refresh_service_daemons_after_upgrade,
             tui_editable_refusal,
             tui_installer_failure,
+            upgrade_runs_in_generation,
         )
 
         try:
@@ -18339,9 +18344,16 @@ class OperatorApp(App[None]):
             # PyPI after one printed line. CLI already does this; the TUI
             # used to replace the snapshot silently.
             self.call_from_thread(self._system_notice, git_snapshot_notice())
-        self.call_from_thread(
-            self._system_notice, _t_update(_upd.updating(version=str(result.latest)))
+        # Decided ONCE, before the installer runs: `perform_upgrade` routes on the
+        # same predicate, so the sentence painted here and the closing one below
+        # describe the install that actually happens.
+        in_generation = upgrade_runs_in_generation(kind)
+        updating_msg = (
+            _upd.updating(version=str(result.latest))
+            if in_generation
+            else _upd.updating_in_place(version=str(result.latest))
         )
+        self.call_from_thread(self._system_notice, _t_update(updating_msg))
 
         def _report_prune(plan: PrunePlan) -> None:
             """Say what a prune removed, in the CLI's own sentence.
@@ -18430,10 +18442,20 @@ class OperatorApp(App[None]):
                 self._system_notice(line)
             if trigger.failure:
                 self._system_notice(trigger.failure, "warning")
+            version = str(installed)
             if self._relaunch_refusal():
-                self._system_notice(_t_update(_upd.relaunch_when_idle(version=str(installed))))
+                closing = (
+                    _upd.relaunch_when_idle(version=version)
+                    if in_generation
+                    else _upd.relaunch_when_idle_in_place(version=version)
+                )
             else:
-                self._system_notice(_t_update(_upd.restarting(version=str(installed))))
+                closing = (
+                    _upd.restarting(version=version)
+                    if in_generation
+                    else _upd.restarting_in_place(version=version)
+                )
+            self._system_notice(_t_update(closing))
             self._request_relaunch(force=True)
 
         self.call_from_thread(_relaunch_after_upgrade)

@@ -18,9 +18,21 @@ def relaunch_when_idle(*, version: str) -> Msg:
     return Msg("tui.update.relaunch_when_idle", {"version": version})
 
 
+def relaunch_when_idle_in_place(*, version: str) -> Msg:
+    return Msg("tui.update.relaunch_when_idle_in_place", {"version": version})
+
+
 def restarting(*, version: str) -> Msg:
     return Msg("tui.update.restarting", {"version": version})
 
 
+def restarting_in_place(*, version: str) -> Msg:
+    return Msg("tui.update.restarting_in_place", {"version": version})
+
+
 def updating(*, version: str) -> Msg:
     return Msg("tui.update.updating", {"version": version})
+
+
+def updating_in_place(*, version: str) -> Msg:
+    return Msg("tui.update.updating_in_place", {"version": version})
