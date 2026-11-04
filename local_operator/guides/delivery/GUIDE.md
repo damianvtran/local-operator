@@ -5,11 +5,9 @@ description: "Allocate bounded engineering delivery, brief so a child can land, 
 
 # Bounded delivery
 
-For allocation, costly evidence and review convergence. AGENTS.md remains the
-authority for isolation, commands, security, merge/release and approvals; this
-changes scope/allocation, not validation depth. Public notes follow
-`.github/RELEASE_NOTES_TEMPLATE.md` and AGENTS.md, including claim/bump PR and
-publication file. Keep internal gate evidence out of user-facing notes.
+AGENTS.md remains the authority for isolation, commands, security, merge/release,
+approvals and public notes; this changes scope/allocation, not validation depth.
+Keep internal gate evidence out of user-facing notes.
 
 ## Allocate once, inspect narrowly
 
@@ -20,9 +18,8 @@ publication file. Keep internal gate evidence out of user-facing notes.
   material scope changes. Authorization to fix is not authorization to delete.
 - Give each slice one owner identified by stable session ID, scope, acceptance
   criteria and a durable receipt (project record or linked task/PR). Address the
-  owner directly; do not broadcast a status hunt. One confirmed durable ACK
-  means no unchanged resend or repeated approval request. Update only material deltas;
-  verify completion from primary evidence, not an agent's assertion.
+  owner directly; no status hunts or unchanged resends after a durable ACK.
+  Update only material deltas; verify completion from primary evidence.
 - Prefer metadata/narrow indexes before logs. Verify surprising first reads one
   step further; cite relayed sources. Root recovery restores only prerequisites;
   cross-repository hardening is separate scope.
@@ -36,8 +33,7 @@ for a harness cut-off (cut children end named).
 
 ## Preflight before expensive dispatch
 
-Measure raw/loaded prompt budgets and source winners so clipping cannot fake
-compliance. Before native/browser/hardware dispatch, plan changed surfaces,
+Before native/browser/hardware dispatch, plan changed surfaces,
 commands, dependencies, source/binary identity, isolation, expected outputs and a
 negative control. Verify compiled source identity and success/failure detection;
 source-only checks are not native proof. Failed setup stops dispatch: report the
@@ -46,9 +42,14 @@ AGENTS.md's HOME/config, CMUX stripping and exact-process-group teardown rules.
 
 ## Worktrees
 
-Prefer `<repo>/.worktrees/<name>` sharing primary deps; sibling `../<repo>-<topic>` only with cloned deps.
-Never scratchpads, /tmp, `$HOME` top level. `git worktree remove` (clean only) once the PR merges or
-the lane closes; `scripts/worktree_janitor.py` lists stragglers.
+The manager (or lead coder) owns ONE PR worktree in `<repo>/.worktrees/` from
+latest origin/main, briefs its absolute path and SHA, and freezes the head while
+readers work. Reviewer/QA/UX/design/copy/i18n reuse it read-only (`git diff/show`,
+targeted tests, shared deps): no clone, install or new worktree, and no full-tree
+copies into scratch. Exception, with a manager lease: a conflicting commit author
+or an isolated mutable build collision gets a detached-SHA worktree on shared deps,
+bounded and creator-removed. Keep isolated HOME/config. Remove clean
+worktrees on merge/close; the manager verifies (`scripts/worktree_janitor.py`).
 
 ## Never use a live peer as the revoke test
 
@@ -62,8 +63,7 @@ peer, and record it. Authorization to test is not authorization to delete.
 
 Iterate with targeted tests/lints; heavy runs bounded/serial. Full coverage once
 at the terminal head: when CI runs the same suite, use it, not a duplicate local
-run. Run omitted required surfaces bounded locally/in QA and record them. Scoped
-is not full coverage. Merge requires actual checks and independent review/QA;
+run. Run omitted required surfaces bounded locally/in QA and record them. Merge requires actual checks and independent review/QA;
 CI never replaces independent real-path QA. Resource holds forbid hold-class
 runs, not evidence. Review CI asynchronously; investigate even out-of-slice fails.
 
@@ -136,9 +136,10 @@ Use supported fallback and disclose the actual served model, including changes.
 Preference is not an approval gate; never rewrite role/default pins or tools to
 work around it. A missing required independent round blocks; never invent one.
 
-## Evidence and pilots
+## Rolling out role policy
 
-Before shipping policy, run fresh-agent pilots at the loaded role/team boundary,
-including a genuine destructive/access escalation. Keep prompts, actual responses
-and model provenance in scratch. Preserve custom security/release/roster/approval
-policy in live overrides: back up and read back; never force-sync away additions.
+Seeds update only unedited, install-recorded rows. Pilot via `agent op=show
+<role>` plus a fresh `task(agent=<role>)`, not `load_seed`: it reads this guide,
+keeps scope, escalates a destructive step. Keep prompts, responses, served model
+in scratch. Merge into local prompts: back up, keep edits, security/approval
+policy, tools, model/effort; read back.

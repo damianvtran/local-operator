@@ -4651,14 +4651,131 @@ def _anthropic_cache_marker_ttl_ms(body: dict[str, Any]) -> int:
     return min(lifetimes, default=0)
 
 
+#: ``native_replay`` protocol tag for Anthropic thinking continuity.
+#:
+#: WHY THIS EXISTS. ``AnthropicClient`` sends ``thinking: {"type": "adaptive"}``
+#: on every effort-capable request, and the model answers with ``thinking`` (or
+#: ``redacted_thinking``) blocks ahead of its text and ``tool_use``. Anthropic's
+#: extended-thinking docs ("Preserving thinking blocks") REQUIRE those blocks be
+#: passed back "complete and unmodified" on the next request of a tool-use turn,
+#: so the model resumes each tool step with its own prior reasoning. The client
+#: used to parse only text and tool_use, so every later request in a turn
+#: replayed none of it: the API still answered 200, but the model re-derived its
+#: reasoning from scratch at each step. Measured on the harness-cost benchmark
+#: (v1 full arm, last request of each run): Claude Code carried 30 thinking
+#: blocks, omp 28, OpenCode 30, Local Operator 0.
+#:
+#: CONSTRAINTS, all enforced by the shared ``providers.replay`` gate:
+#:
+#: - A signature is bound to the model and credential that produced it; replayed
+#:   to another model, provider, endpoint or account it is an HTTP 400. So the
+#:   payload records all four and is replayed only on an exact match — a
+#:   ``/model`` switch, a failover hop to another account or model, or a relay
+#:   endpoint change falls back to the visible-only render (today's body).
+#: - The thinking text must not change. Blocks are stored verbatim (every field,
+#:   ``signature``/``data`` included) and copied, never mutated, at render.
+#: - The harness owns the visible message. The payload is fingerprinted against
+#:   the text and tool calls it was captured with, so a redaction, argument
+#:   repair, compaction rewrite or imported-history edit invalidates it rather
+#:   than replaying stale content around a changed call. Compaction summaries and
+#:   carried rows are new messages with no payload, so they never replay any.
+#: - Tool-call ``input`` is NOT duplicated into the payload (a file-writing call
+#:   can carry megabytes): the replay fills it from the message's own call by id,
+#:   which the fingerprint has just proved identical.
+#: - Thinking is protocol state, not prose: it is never surfaced in the
+#:   transcript (``provider_payload`` is not painted, and ``session.open_frame``
+#:   drops ``native_replay`` from client frames; Saver never uploads it).
+#: - Sessions persisted before this field existed have no payload and render
+#:   exactly as before.
+#: - Admission counts valid replayed thinking in the native-context binding,
+#:   both on cold histories and as an appended suffix to provider calibration.
+#:   Anthropic keeps that calibration across user turns; unlike Responses,
+#:   its thinking replay has no latest-user-turn invalidation boundary.
+_ANTHROPIC_NATIVE_PROTOCOL = "anthropic-messages"
+
+
+def _anthropic_native_payload(
+    model: ModelSpec,
+    endpoint: str,
+    blocks: dict[int, dict[str, Any]],
+    tool_json: dict[int, list[str]],
+    text: str,
+    scope: str | None,
+) -> dict[str, Any] | None:
+    """The ``native_replay`` payload for one streamed response, or ``None``.
+
+    ``None`` unless the response carried a thinking block, so a model without
+    thinking (or a turn the model chose not to think on) persists and replays
+    exactly the body it always did. Also ``None`` when a tool call's streamed
+    arguments are not JSON: the loop then stores repaired arguments the
+    fingerprint could never match, so the payload would be dead weight.
+    """
+    ordered = [blocks[index] for index in sorted(blocks)]
+    if not any(block.get("type") in ("thinking", "redacted_thinking") for block in ordered):
+        return None
+    items: list[dict[str, Any]] = []
+    calls: list[dict[str, Any]] = []
+    for index in sorted(blocks):
+        block = blocks[index]
+        kind = block.get("type")
+        if kind == "text":
+            # Blank text is dropped exactly as ``_message_blocks`` drops it:
+            # Anthropic refuses an empty text block on replay.
+            if str(block.get("text") or "").strip():
+                items.append(block)
+        elif kind == "tool_use":
+            raw = "".join(tool_json.get(index, [])).strip()
+            try:
+                arguments = json.loads(raw) if raw else {}
+            except ValueError:
+                return None
+            if not isinstance(arguments, dict):
+                return None
+            calls.append({"id": block["id"], "name": block["name"], "args": arguments})
+            items.append({"type": "tool_use", "id": block["id"], "name": block["name"]})
+        else:
+            items.append(block)
+    return native_payload(model, endpoint, _ANTHROPIC_NATIVE_PROTOCOL, items, text, calls, scope)
+
+
+def _anthropic_native_blocks(
+    message: Message, model: ModelSpec, endpoint: str, scope: str | None
+) -> list[dict[str, Any]] | None:
+    """The assistant content array to replay verbatim, or ``None`` to render.
+
+    ``None`` whenever ``replay_items`` refuses provenance or the visible
+    fingerprint, and also when the stored array would END on a thinking block:
+    Anthropic forbids ``cache_control`` on thinking, and the breakpoint pass
+    marks the last block of a message, so such a turn takes the visible render.
+    """
+    items = replay_items(message, model, endpoint, _ANTHROPIC_NATIVE_PROTOCOL, scope)
+    if not items or items[-1].get("type") in ("thinking", "redacted_thinking"):
+        return None
+    calls = {call.id: call for call in message.tool_calls}
+    rendered: list[dict[str, Any]] = []
+    for item in items:
+        if item.get("type") == "tool_use":
+            call = calls.get(str(item.get("id")))
+            if call is None:
+                return None
+            rendered.append({**item, "input": _replayable_tool_arguments(call)})
+        else:
+            rendered.append(item)
+    return rendered
+
+
 class AnthropicClient:
     """``POST {base}/v1/messages`` streaming.
 
     System blocks are sent as an array with ``cache_control: {type:
     "ephemeral"}`` on every block EXCEPT the last (the breakpoint policy:
     the volatile tail stays un-cached). Content arrives as
-    ``content_block_start/delta/stop`` events for ``text`` and ``tool_use``
-    blocks; tool arguments stream via ``input_json_delta``.
+    ``content_block_start/delta/stop`` events for ``text``, ``tool_use``,
+    ``thinking`` and ``redacted_thinking`` blocks; tool arguments stream via
+    ``input_json_delta``, thinking via ``thinking_delta`` + ``signature_delta``.
+
+    Thinking is captured verbatim and replayed, never displayed: see
+    ``_ANTHROPIC_NATIVE_PROTOCOL`` for why and for the provenance gate.
 
     Some requests switch every marker to the 1-hour cache TTL; see
     ``_cache_ttl_for`` for the policy and the wire constraint.
@@ -5107,7 +5224,12 @@ class AnthropicClient:
         return "anthropic:messages" if self._base_url == ANTHROPIC_API_URL else None
 
     def _build_body(
-        self, request: ChatRequest, *, oauth: bool = False, account: str = ""
+        self,
+        request: ChatRequest,
+        *,
+        oauth: bool = False,
+        account: str = "",
+        scope: str | None = None,
     ) -> dict[str, Any]:
         # Request-time document policy for THIS wire (contract amendment 6).
         # The row is the Anthropic document-input form; a model reached through
@@ -5136,7 +5258,15 @@ class AnthropicClient:
             # `_is_empty_assistant`.
             if _is_empty_assistant(message):
                 continue
-            if message.role == "assistant" and message.tool_calls:
+            native = _anthropic_native_blocks(message, request.model, self._base_url, scope)
+            if native is not None:
+                # The model's own content array, thinking first and in its
+                # original order. Per-block copies because the cache-breakpoint
+                # pass below writes ``cache_control`` into rendered blocks IN
+                # PLACE, and the stored payload must stay byte-identical for
+                # every later request (and on disk).
+                messages.append({"role": "assistant", "content": [dict(b) for b in native]})
+            elif message.role == "assistant" and message.tool_calls:
                 content = self._message_blocks(message, doc_form, doc_budget, doc_text_cap)
                 content.extend(
                     {
@@ -5190,6 +5320,17 @@ class AnthropicClient:
             if message.id in epoch_ids:
                 epoch_block = _last_block(messages)
 
+        # Bind after credentials/replay gates are known, before output sizing.
+        # The tracker includes only the appended native suffix over its already
+        # provider-counted prefix; cold or edited history counts all retained
+        # thinking. Anthropic's binding deliberately survives new user turns.
+        request = bind_native_context(
+            request,
+            self._base_url,
+            _ANTHROPIC_NATIVE_PROTOCOL,
+            scope,
+            _estimate_slope(request.model),
+        )
         body: dict[str, Any] = {
             "model": request.model.model_id,
             "stream": True,
@@ -5390,7 +5531,18 @@ class AnthropicClient:
         block_index_to_call: dict[int, tuple[str, str]] = {}
         oauth = self._is_oauth(oauth_access)
         overage_account = _overage_account(oauth_access) if oauth else ""
-        body = self._build_body(request, oauth=oauth, account=overage_account)
+        # Thinking signatures are bound to the credential that produced them;
+        # the scope is the opaque identity both the capture below and the
+        # replay gate in ``_build_body`` compare.
+        scope = credential_scope(api_key, oauth_access)
+        body = self._build_body(request, oauth=oauth, account=overage_account, scope=scope)
+        # The response's content array, by block index, for native replay (see
+        # ``_ANTHROPIC_NATIVE_PROTOCOL``). Text and tool_use are kept beside
+        # thinking so the replay preserves the provider's exact block order
+        # (interleaved thinking can sit between tool calls).
+        native_blocks: dict[int, dict[str, Any]] = {}
+        tool_json: dict[int, list[str]] = {}
+        visible_text: list[str] = []
 
         async with self._open_messages_stream(
             url,
@@ -5482,9 +5634,23 @@ class AnthropicClient:
                     ) or None
                 elif event_type == "content_block_start":
                     block = event.get("content_block") or {}
-                    if block.get("type") == "tool_use":
+                    block_type = block.get("type")
+                    if block_type in ("thinking", "redacted_thinking"):
+                        # Verbatim, every field kept: ``redacted_thinking``
+                        # arrives whole (``data``), ``thinking`` fills in from
+                        # its deltas. Neither is surfaced to the transcript.
+                        native_blocks[int(event.get("index", 0))] = dict(block)
+                    elif block_type == "text":
+                        native_blocks[int(event.get("index", 0))] = {"type": "text", "text": ""}
+                    if block_type == "tool_use":
                         index = int(event.get("index", 0))
                         block_index_to_call[index] = (block.get("id", ""), block.get("name", ""))
+                        native_blocks[index] = {
+                            "type": "tool_use",
+                            "id": block.get("id", ""),
+                            "name": block.get("name", ""),
+                        }
+                        tool_json[index] = []
                         yield StreamToolCallDelta(
                             index=index, id=block.get("id"), name=block.get("name")
                         )
@@ -5495,12 +5661,22 @@ class AnthropicClient:
                         text = delta.get("text")
                         if text:
                             streamed_text = True
+                            visible_text.append(text)
+                            target = native_blocks.get(int(event.get("index", 0)))
+                            if target is not None and target.get("type") == "text":
+                                target["text"] += text
                             yield StreamTextDelta(delta=text)
                     elif delta_type == "input_json_delta":
                         index = int(event.get("index", 0))
                         partial = delta.get("partial_json")
                         if partial:
+                            tool_json.setdefault(index, []).append(partial)
                             yield StreamToolCallDelta(index=index, argument_delta=partial)
+                    elif delta_type in ("thinking_delta", "signature_delta"):
+                        key = "thinking" if delta_type == "thinking_delta" else "signature"
+                        target = native_blocks.get(int(event.get("index", 0)))
+                        if target is not None and target.get("type") == "thinking":
+                            target[key] = str(target.get(key) or "") + str(delta.get(key) or "")
                 elif event_type == "message_delta":
                     delta = event.get("delta") or {}
                     if delta.get("stop_reason"):
@@ -5532,7 +5708,19 @@ class AnthropicClient:
             error = _refusal_error("stop_reason=refusal", "", streamed_text=streamed_text)
         usage._token_counts_reported = input_reported and output_reported
         yield StreamUsageEvent(usage=usage)
-        yield StreamEndEvent(stop_reason=mapped, usage=usage, error=error)
+        yield StreamEndEvent(
+            stop_reason=mapped,
+            usage=usage,
+            error=error,
+            provider_payload=_anthropic_native_payload(
+                request.model,
+                self._base_url,
+                native_blocks,
+                tool_json,
+                "".join(visible_text),
+                scope,
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------

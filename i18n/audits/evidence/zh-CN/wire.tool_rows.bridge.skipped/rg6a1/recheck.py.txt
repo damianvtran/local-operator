@@ -1,0 +1,44 @@
+"""RG6 i18n audit recheck (rg6a1): mechanical + composed-sentence proof for one locale.
+Usage: python recheck.py <locale>   (run from the repo root)"""
+import hashlib, json, sys, unicodedata
+sys.path.insert(0, ".")
+from rich.cells import cell_len
+from local_operator.i18n import runtime, text
+from local_operator.harness.rows import bridge_row
+from local_operator.harness.bridge_copy import bridge_row_line, bridge_expanded
+from local_operator.team_bridge.reply_guard import Skipped
+NS = "wire.tool_rows.bridge.skipped"; B = "local_operator/i18n/catalogues"
+BIDI = set("\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u061c")
+loc = sys.argv[1]
+ok = True
+def check(name, cond, detail=""):
+    global ok
+    ok &= bool(cond)
+    print(f"{'PASS' if cond else 'FAIL'} {name} {detail}".rstrip())
+paths = {"en": f"{B}/en/{NS}.json", "context": f"{B}/en/{NS}.context.json", loc: f"{B}/{loc}/{NS}.json"}
+for k, p in paths.items():
+    print("SHA256", k, p, hashlib.sha256(open(p, "rb").read()).hexdigest())
+en = json.load(open(paths["en"])); tg = json.load(open(paths[loc])); ctx = json.load(open(paths["context"]))
+check("key_parity", set(en) == set(tg) == set(ctx), f"{len(tg)} keys")
+for k in sorted(tg):
+    v = tg[k]
+    check(f"icu_parse {k}", runtime.parse_message(v) is not None)
+    check(f"arguments {k}", runtime.message_arguments(v) == runtime.message_arguments(en[k]), str(runtime.message_arguments(v)))
+    check(f"render_identity {k}", runtime.render_message(v, {}, loc) == v)
+    check(f"nfc {k}", unicodedata.normalize("NFC", v) == v)
+    check(f"no_bidi_or_cf {k}", not [c for c in v if c in BIDI or unicodedata.category(c) in ("Cc", "Cf")])
+    print(f"CELLS {k} {cell_len(v)} (en {cell_len(en[k])}; sidecar maxCells: {ctx[k].get('maxCells', 'none declared')})")
+CH = "bcv_abc123"
+text.set_active_locale(loc)
+for op, extra in (("channel_post", {"conversation_label": "general"}), ("channel_post", {}), ("dm", {"conversation_label": "Maya"}), ("dm", {})):
+    args = {"op": op, "channel_id": CH, "body": "Approved."}
+    d = {**Skipped(seconds_ago=2).as_result(CH), **extra}
+    row = bridge_row(args, d)
+    line = bridge_row_line(row, running=False)
+    print(f"ROW {op} {sorted(extra) or '[fallback target]'}: {line}")
+    check(f"row_uses_skip_verb {op}", line.startswith(tg[f"{NS}.verb.{op}"]))
+    exp = bridge_expanded(row, args, d)
+    print(f"EXPANDED {op} headline={exp['headline']!r} outcome={exp['outcome']!r}")
+    check(f"expanded_sentence {op}", exp["outcome"] == tg[f"{NS}.expanded"])
+print("SUMMARY", loc, "PASS" if ok else "FAIL")
+sys.exit(0 if ok else 1)

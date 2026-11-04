@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "audit_id": "rg6a1",
+  "record": "record.json",
+  "record_sha256": "aa769b4575ca3dbf6734c194c0924132ee389ef649c7c4979751bd7522d0a829",
+  "companions": {
+    "audit.log": "10b3553516b7bbf30199a377aeb2764ee44acd904533a6c7d4818c6be40d33b0",
+    "report.md": "cc5f3e519253ae9284b828bbc12a5f4fb5cb9f49191f596dbe5a48b989117e81",
+    "recheck.py.txt": "34577965921703dfb1cd74419842b9101687efaefbe538a76c20bd94fc486307"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (radientdev team)",
+    "session": "3dcc5dbc44d0",
+    "model": "anthropic/claude-opus-5-5"
+  }
+}
