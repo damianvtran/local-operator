@@ -914,15 +914,31 @@ async def test_settings_projection_carries_the_bounded_duration_contract(desktop
         command_interval["unit"],
     ) == ("int", 5, 3600, "seconds")
     assert command_interval["default"] == 30
+    # The notification-sound volume is the fifth (#3398): a bounded 0-100 INT
+    # whose stored value COUNTS percent, which is the registry's definition of
+    # a unit. It is not a duration, so no duration control picks it up (the
+    # desktop's `durationSpec` matches one key), and it renders as a plain
+    # bounded number with "percent" beside it. Pinned like the others so the
+    # set stays closed and a new unit is a reviewed addition.
+    volume = rows["notifications.sound.volume"]
+    assert (volume["kind"], volume["minimum"], volume["maximum"], volume["unit"]) == (
+        "int",
+        0,
+        100,
+        "percent",
+    )
+    assert volume["default"] == 70
+    assert volume["gated_by"] == "notifications.sound.enabled"
     unit_rows = {
         hours["key"],
         scratchpad["key"],
         compression_age["key"],
         command_interval["key"],
+        volume["key"],
     }
     assert all(
         row["unit"] == "" for key, row in rows.items() if key not in unit_rows
-    ), "only the hours, bytes, days and seconds rows declare a unit"
+    ), "only the hours, bytes, days, seconds and percent rows declare a unit"
 
 
 async def test_a_patch_of_a_desktop_hotkey_dispatches_to_the_desktop_rules(desktop):

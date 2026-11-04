@@ -44,6 +44,7 @@ from . import (
     cli_sessions_help,
     cli_stop_help,
     cli_team_bridge,
+    cli_team_bridge_alert,
     cli_teams_help,
     cli_update_help,
     cli_wake_help,
@@ -95,6 +96,7 @@ from . import (
     wire_errors_auth,
     wire_errors_desktop,
     wire_errors_files,
+    wire_errors_hosting,
     wire_errors_media,
     wire_errors_notifications,
     wire_errors_sdk_spec,
@@ -118,6 +120,7 @@ from . import (
     wire_slash_library,
     wire_slash_notifications_page,
     wire_tool_rows_bridge,
+    wire_tool_rows_bridge_skipped,
     wire_tunnel_setup,
 )
 
@@ -158,6 +161,7 @@ __all__ = [
     "cli_sessions_help",
     "cli_stop_help",
     "cli_team_bridge",
+    "cli_team_bridge_alert",
     "cli_teams_help",
     "cli_update_help",
     "cli_wake_help",
@@ -209,6 +213,7 @@ __all__ = [
     "wire_errors_auth",
     "wire_errors_desktop",
     "wire_errors_files",
+    "wire_errors_hosting",
     "wire_errors_media",
     "wire_errors_notifications",
     "wire_errors_sdk_spec",
@@ -232,5 +237,6 @@ __all__ = [
     "wire_slash_library",
     "wire_slash_notifications_page",
     "wire_tool_rows_bridge",
+    "wire_tool_rows_bridge_skipped",
     "wire_tunnel_setup",
 ]

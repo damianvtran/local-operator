@@ -27,7 +27,12 @@ import os
 import subprocess
 import sys
 
-import numpy as np
+# numpy is NOT a project dependency, and that is deliberate. This is a one-off,
+# dev-only mastering tool, run by hand with a system python that has numpy (and
+# the original MP3 takes) to re-master the sounds. The package never imports
+# it, and the wheel does not ship it. CI type-checks the whole tree without
+# numpy, so only this import is exempted.
+import numpy as np  # pyright: ignore[reportMissingImports]
 
 FF = "/opt/homebrew/bin/ffmpeg"
 SR = 44100

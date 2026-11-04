@@ -131,7 +131,10 @@ def _duration(src: Path) -> float:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    # `__doc__` is None under `python -OO`, which strips docstrings; fall back to
+    # a fixed line rather than crash before doing any work.
+    summary = __doc__.splitlines()[0] if __doc__ else "Export the shipped notification sounds."
+    parser = argparse.ArgumentParser(description=summary)
     parser.add_argument("--ffmpeg", default=None)
     args = parser.parse_args(argv)
     ffmpeg = _ffmpeg(args.ffmpeg)

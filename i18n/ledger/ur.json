@@ -2595,6 +2595,26 @@
     },
     {
       "locale": "ur",
+      "namespace": "wire.errors.hosting",
+      "source_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two independent sessions: 1b7a2a90c876, 25304c88781e)",
+        "model": "radient/auto (reader 1); anthropic/claude-sonnet-5-5 requested with served model unexposed (reader 2)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace wire.errors.hosting (1 key: the owned display cause the startup refusal splices into its {error} slot) authored at base 87ca846245b2 against frozen English sha256 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63. ur 'ہوسٹنگ پلیٹ فارم ترتیب نہیں دیا گیا۔' is a complete RTL sentence with a terminal full stop; no shaping, bidi-isolation or width claim is made here. Two independent readers, neither the translator nor the code author, both PASSED on these bytes with 0 blocker/major/minor/nit (sessions 1b7a2a90c876, 25304c88781e). Source-only assembly: no rendered, native-speaker, width, RTL or validator proof, and no activation, shipped or release claim. Evidence: i18n/audits/evidence/ur/wire.errors.hosting/ (bundles ['urhost1', 'urhost2'], frozen inputs under _inputs/)."
+    },
+    {
+      "locale": "ur",
       "namespace": "wire.skill_adoption",
       "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
       "translator": {
@@ -2724,6 +2744,68 @@
       },
       "status": "passed",
       "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 5fe45b9bb2f02e4639318d00d84a1f66603851fbf68b2e6c081ede475e7d444b; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 2 major, 1 minor (U1, U2, U3), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/ur/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor-r2b (task subagent, independent of translator)",
+        "session": "26723730f2f9",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Single independent audit at the current English bytes (not dual-blind; high-visibility copy may still need a second audit per docs/I18N.md). Re-verified the earlier plural-agreement major as fixed: long_hold.body now puts the verb in its own count plural ('1 پیغام ... روکا ہوا ہے' / '2, 5 پیغامات ... روکے ہوئے ہیں'); minutes arms are invariant (منٹ) by design. Checked: 4/4 keys present; ICU placeholder parity ({count},{minutes}); one/other CLDR arms rendered at counts 1, 2, 5 and minutes 60; backticked `lop team-bridge receiver status` byte-identical LTR island, no bidi control characters; NFC; آپ register; meaning preserved (held longer than N minutes, not reached the agent, cleared = none held longer than the threshold); 'روکا' consistent with cli.team_bridge ('روکا گیا'). 0 findings."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.tool_rows.bridge.skipped",
+      "source_sha256": "e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865",
+      "translator": {
+        "agent": "coder (PR #3417 implementer); retranslation i18n-translator (task subagent of this auditor) (c9f77e05a801)",
+        "session": "62d5b457bcf6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev team)",
+        "session": "3dcc5dbc44d0",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent current-byte audit: i18n/audits/evidence/ur/wire.tool_rows.bridge.skipped/rg6a1/record.json. 1M/1m/0n (UR-RG6-1,UR-RG6-2), 0 unresolved blocker/major; 2 key(s) retranslated. Composed row+expanded checked; no native/rendered claim."
     },
     {
       "locale": "ur",

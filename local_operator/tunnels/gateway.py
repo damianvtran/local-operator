@@ -380,6 +380,20 @@ _REQUEST_HEADERS = {
     "last-event-id",
     "origin",
 }
+# ADR 0006 §4 rule 2's per-device proof: ``X-Lop-Device`` names the phone's
+# install id and ``X-Lop-Device-Key`` carries the key the relay minted for that
+# device at registration. They are forwarded so the relay can attribute a
+# request to ONE device (the cookie this gateway injects is the computer's,
+# shared by every phone), which the credential report and the per-device
+# custom-sound readiness both need. Safe to forward because the relay is the
+# authority, not this hop: it compares the key in constant time against the one
+# it stored (``push_devices.device_key_matches``), so a forged value moves
+# nothing. Lowercase because the incoming ``Headers`` keys are (see
+# ``test_the_gateway_allowlist_matches_lowercase_and_only_lowercase``).
+# ONLY to the local-operator relay, never in ``_REQUEST_HEADERS``: the key is a
+# local-operator credential and another harness has no use for it, and that
+# allowlist's own rule is that a harness may log what it is handed.
+_LOCAL_OPERATOR_DEVICE_HEADERS = ("x-lop-device", "x-lop-device-key")
 _RESPONSE_HEADERS = {
     "content-type",
     "content-length",
@@ -608,6 +622,10 @@ class Gateway:
             if not self.mobile_password:
                 raise ValueError("Mobile relay is not installed.")
             headers["cookie"] = f"{COOKIE_NAME}={sign_cookie(self.mobile_password)}"
+            for name in _LOCAL_OPERATOR_DEVICE_HEADERS:
+                value = incoming.get(name)
+                if value:
+                    headers[name] = value
         elif self.opencode_basic:
             credential = self.opencode_basic["username"] + ":" + self.opencode_basic["password"]
             headers["authorization"] = "Basic " + base64.b64encode(credential.encode()).decode()

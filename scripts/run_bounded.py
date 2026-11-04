@@ -221,6 +221,28 @@ _POLL_SECONDS = 0.05
 #: between them.
 _AUTHORITY_REFRESH_SECONDS = 1.0
 
+#: Wall-time bound on ONE cleanup proof slice: the slice past any grace wait in
+#: which the kill, finally and terminal phases must re-prove authority and send,
+#: and, on the timeout/signal paths, a separate slice before the grace wait for
+#: the SIGTERM's own proof (see ``_reap``).
+#: 3.0 s because that is the bound the SAME census work already gets at capture
+#: and at the steady-state required refresh (the ``+ 3.0`` literals in
+#: ``_run_cleanup_required``, which this module defines below). It replaced a
+#: 0.25 s allowance inherited from the pre-#3274 five-sleep sweep, which was
+#: never sized for a census: a successful leader-exit sweep now runs ~10 full
+#: strict ``/proc`` scans (each refresh is two censuses, and ``signal()``
+#: refreshes again before its syscall). On a preempted CI worker 0.25 s ran out
+#: mid-scan, the SIGKILL was refused and the grandchild survived -- the
+#: 2026-10-30 incident shape (#3365, CI 41684135750).
+#:
+#: NOT a grace period: nothing waits for it, it only caps how long a proof may
+#: take before it refuses. It does not extend the census's six-attempt churn
+#: limit, and it buys no time for an unreadable or malformed row, which still
+#: refuses at once. Signal authority rests on the reservation witness (our
+#: unreaped zombie leader, re-checked immediately before every syscall), never
+#: on elapsed time, so a longer bound weakens no pin.
+_CLEANUP_PROOF_SECONDS = 3.0
+
 #: Wall-clock ceiling for one run record's filesystem work. Every other step of a
 #: refusal is deadline-bounded; a wedged home directory must not be the one
 #: unbounded operation on a path that is already refusing.
@@ -525,25 +547,43 @@ def _record_run(
         return None
 
 
-def _reap(owner, grace, stream, *, reason, send, require, deadline):
+def _reap(owner, grace, stream, *, reason, send, require, until):
     """TERM then KILL; the grace wait asks ONE cheap question per tick.
 
     A grace tick asks only "has the leader gone terminal?" through the pin seam —
     it costs one sample, not the two complete strict censuses the old per-tick
     ``refresh`` ran 40 times a second. Authority is re-proven where it is spent:
     inside ``send`` at the SIGTERM and again at the SIGKILL decision.
+
+    ``until`` is the run's one cleanup deadline (``begin_cleanup``), sized by the
+    caller as ``grace + 2 * _CLEANUP_PROOF_SECONDS``: one proof slice for the
+    SIGTERM, then ``grace``, then one slice shared by the kill, finally and
+    terminal phases. The SIGTERM proof is NOT carved out of ``grace``. It used to
+    be (deadline ``start + grace``), and the required refresh just before it
+    spent that window: at ``--grace 0.2`` a slow-but-finishing census refused
+    the TERM, and a refused proof forbids every later signal (the ``finally``
+    no-retry rule), so the SIGKILL never ran and the grandchild outlived an
+    rc 124 run (#3368 QA Q1). ``--grace`` keeps its documented meaning -- how
+    long the group gets to exit AFTER the SIGTERM -- and a group that exits on
+    TERM still ends the wait at once, so no healthy stop waits any longer.
     """
     _report(stream, f"[run_bounded] {reason} — requesting checked SIGTERM")
     # ``send`` is ``require(...)``: a refusal raises AuthorityRefused at this call
     # site, so this function never enters its wait with a lost capability. The
     # exception is the enforcement point; a returned-REFUSED branch here read like
     # one and could never run.
-    send(signal.SIGTERM, reason + ":term", deadline)
+    send(signal.SIGTERM, reason + ":term", min(time.monotonic() + _CLEANUP_PROOF_SECONDS, until))
+    # The grace clock starts when the TERM has been sent, not when cleanup began.
+    deadline = min(time.monotonic() + grace, until)
     while time.monotonic() < deadline:
         if owner.leader_terminal(deadline):
             return
         time.sleep(min(_POLL_SECONDS, max(0, deadline - time.monotonic())))
-    send(signal.SIGKILL, reason + ":kill", deadline + 0.25)
+    # What remains is one proof slice less the required refresh that ran just
+    # before this function on the same bound (two censuses, normally a small
+    # fraction of the slice): the TERM proof is capped at one slice past its
+    # own start, and the wait at ``grace`` past the send.
+    send(signal.SIGKILL, reason + ":kill", until)
 
 
 def _memory_budget(override_mb: int | None) -> tuple[memory_guard.Budget, str]:
@@ -867,12 +907,14 @@ def _run_cleanup_required(
             # cadence rather than once per poll: see _AUTHORITY_REFRESH_SECONDS.
             if signum or timed_out or now >= next_probe:
                 probe_until = (
-                    begin_cleanup(grace + 0.25) if signum or timed_out else min(deadline, now + 3.0)
+                    begin_cleanup(grace + 2 * _CLEANUP_PROOF_SECONDS)
+                    if signum or timed_out
+                    else min(deadline, now + 3.0)
                 )
                 require(owner.refresh(deadline=probe_until), "required-refresh")
                 next_probe = now + _AUTHORITY_REFRESH_SECONDS
             if signum:
-                until = begin_cleanup(grace + 0.25)
+                until = begin_cleanup(grace + 2 * _CLEANUP_PROOF_SECONDS)
                 send(signum, "forward", until)
                 _reap(
                     owner,
@@ -881,12 +923,12 @@ def _run_cleanup_required(
                     reason=f"signal {signum} received",
                     send=send,
                     require=require,
-                    deadline=until - 0.25,
+                    until=until,
                 )
                 rc = 128 + signum
                 break
             if timed_out:
-                until = begin_cleanup(grace + 0.25)
+                until = begin_cleanup(grace + 2 * _CLEANUP_PROOF_SECONDS)
                 _reap(
                     owner,
                     grace,
@@ -894,7 +936,7 @@ def _run_cleanup_required(
                     reason=f"timeout after {timeout:g}s",
                     send=send,
                     require=require,
-                    deadline=until - 0.25,
+                    until=until,
                 )
                 _report(
                     stream,
@@ -971,7 +1013,12 @@ def _run_cleanup_required(
                         _report(
                             stream, f"[run_bounded] {memory_guard.unsignalled_line(unsignalled)}"
                         )
-                    send(signal.SIGKILL, "memory", begin_cleanup(0.25))
+                    # QA Q2: a live escaped pid no parentage source could prove
+                    # ours was not signalled — named so it never survives silently.
+                    unverified = getattr(guard, "unverified", None)
+                    if unverified:
+                        _report(stream, f"[run_bounded] {memory_guard.unverified_line(unverified)}")
+                    send(signal.SIGKILL, "memory", begin_cleanup(_CLEANUP_PROOF_SECONDS))
                     break
                 notice = guard.soft_notice(sample)
                 if notice:
@@ -1002,9 +1049,9 @@ def _run_cleanup_required(
         raise
     finally:
         try:
-            # Retain the existing quarter-second final allowance, not a new
-            # grace period per pass. Never claim a requested signal means reaped.
-            until = begin_cleanup(0.25)
+            # One shared cleanup-proof bound (see _CLEANUP_PROOF_SECONDS), not a
+            # new grace period per pass. Never claim a requested signal means reaped.
+            until = begin_cleanup(_CLEANUP_PROOF_SECONDS)
             for attempt in range(5):
                 if proof_failed:
                     break  # no automatic signal retry after loss of authority

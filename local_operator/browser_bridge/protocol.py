@@ -227,6 +227,18 @@ CAPABILITY_GATED_METHODS: frozenset[str] = frozenset(
 #: request method); the tool checks it in ``_press_chord_problem``.
 PRESS_CHORD_CAPABILITY = "press_chord"
 
+#: The capability token a desktop host advertises when ``record_start`` accepts
+#: ``quality: "high"`` (H.264 in an MP4, a separate encoder from the default AV1
+#: path). A capability TOKEN and not a wire method, on the same terms as
+#: ``record_size``: the wire method stays ``record_start``, and a build without
+#: this token would IGNORE the field and record the default AV1 clip while
+#: reporting success. The harness therefore refuses ``quality="high"`` on its
+#: absence before any approval or path write, and still checks the echoed codec
+#: afterwards because the discovery record can be one app-swap stale. Not in
+#: ``CAPABILITY_GATED_METHODS`` (keyed by request method); the tool checks it in
+#: ``_browser_record``. No ``PROTO_VERSION`` bump.
+RECORD_QUALITY_CAPABILITY = "record_quality"
+
 #: The first extension TREE that carried the ``owner_*`` ownership lifecycle
 #: (PR #798, ``ee146fb73``), whose manifest reads ``0.1.9`` — verify with
 #: ``git show ee146fb73:extension/manifest.json``, and note that the same commit

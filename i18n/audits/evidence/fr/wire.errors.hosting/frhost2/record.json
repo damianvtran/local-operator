@@ -1,0 +1,140 @@
+{
+  "record_version": 1,
+  "kind": "independent_source_only_audit_not_activation",
+  "locale": "fr",
+  "namespace": "wire.errors.hosting",
+  "audit_date": "2026-11-03",
+  "key_count": 1,
+  "keys": [
+    "wire.errors.hosting.not_configured"
+  ],
+  "status": "passed",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "reader": "reader-2",
+    "session": "35aac0a677bc",
+    "requested_model": "radient/auto",
+    "model": "radient/auto",
+    "served_model_source": {
+      "kind": "own_completed_transcript_usage",
+      "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/transcript.jsonl",
+      "entries_for_task": 5,
+      "distinct": [
+        [
+          "radient",
+          "auto"
+        ]
+      ],
+      "route_notices_during_task": []
+    },
+    "underlying_model": "UNKNOWN",
+    "fallback_disclosure": "Only the opaque provider label radient/auto is exposed by my own completed usage; no underlying model and no fallback is inferred.",
+    "date": "2026-11-03",
+    "result": "passed",
+    "findings": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "independent_from_translator_session": "7b2ba4ed501d",
+    "independent_from_code_author": "94dcef624dec",
+    "independence_statement": "No source, context, target or caller authored or edited here; no other reader's verdict read before this one."
+  },
+  "source_state": {
+    "committed": false,
+    "base_commit": "87ca846245b2",
+    "note": "New English namespace, uncommitted and absent at the base commit; nothing shipped, activated or eligible."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "matches_bound_value": true
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9",
+      "matches_bound_value": true
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/hosting-fr/wire.errors.hosting.json",
+      "sha256": "83432e2af01eff5982e4d7a0fca57ebb2223626b0d5713c136d60bb6bec8aa69",
+      "matches_bound_value": true
+    }
+  },
+  "checks": {
+    "method": "stdlib json/hashlib/unicodedata only; no process, bash, subprocess, test, formatter, project import, native, build, install, CI or Git",
+    "json_valid": true,
+    "key_parity_and_order": true,
+    "icu_arguments": 0,
+    "placeholder_and_cldr": "NOT APPLICABLE: zero ICU arguments/plural/select on either side, so there is nothing to parse, match or select",
+    "nfc": true,
+    "combining_marks": [],
+    "cf_characters": [],
+    "bidi_controls": [],
+    "braces": false,
+    "edge_whitespace": false,
+    "terminal_period": true,
+    "initial_capital": true,
+    "apostrophes": "U+2019 only; no ASCII apostrophe",
+    "english_stub": false,
+    "remedy_or_frame_content_added": false,
+    "codepoints": 49
+  },
+  "linguistic_assessment": {
+    "value_en": "Hosting platform is not configured.",
+    "value_fr": "La plateforme d’hébergement n’est pas configurée.",
+    "meaning": "Names the owned condition (no hosting platform configured) as a complete statement; no remedy, path or dynamic detail added.",
+    "idiom": "Natural French: definite article, indicative state, feminine agreement with plateforme, terminal period.",
+    "terminology": "plateforme d’hébergement is the shipped corpus term (cli.global_help.hosting, cli.exec_worker_help.hosting, cli.credential_help.credential), judged on the French corpus rather than other locales' wording.",
+    "contract_boundary": "Display copy only. The legacy session_factory.HostingNotConfiguredError string remains English at session_factory.py:816; no caller, API error, envelope or ICU contract touched."
+  },
+  "advisories": [
+    {
+      "id": "A1",
+      "kind": "do not 'fix' later",
+      "text": "Capital after the splicing colon is deliberate and matches the English complete statement; French typography would normally lowercase after a colon, but the sidecar requires the capital and period."
+    },
+    {
+      "id": "A2",
+      "kind": "alternative, not requested",
+      "text": "'Aucune plateforme d’hébergement n’est configurée.' would stress that no provider was resolved; the shipped definite form mirrors the English."
+    },
+    {
+      "id": "A3",
+      "kind": "coverage boundary",
+      "text": "Two other unkeyed ValueError('Hosting platform is not configured.') sites remain (server/routes/speech.py:643, bootstrap.py:83). They are not consumers of this key; no coverage claim is made."
+    },
+    {
+      "id": "A4",
+      "kind": "fit boundary",
+      "text": "No maxCells declared; 49 codepoints, no terminal geometry measured. No fit claim."
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "native_holds": {
+    "pseudo_localization": "NOT RUN",
+    "rtl": "not applicable to French",
+    "rendered_frames": "NOT RUN",
+    "real_refusal_execution": "NOT RUN",
+    "consumer_wiring_of_display_key": "NOT RUN / not verified here",
+    "ledger_row_activation_release": "none"
+  },
+  "artifacts": [
+    {
+      "path": "report.md",
+      "sha256": "b6a745c75212a6b857d7d92db5e2dce3dad2cc07422f59cfb18631ebe5a3df91",
+      "provenance_reference": "record.json:auditor",
+      "bytes": 5052
+    }
+  ],
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "note": "fr reader-2, wire.errors.hosting: 1/1 key passes; 0 blocker/major/minor/nit. Hashes match bounds; zero ICU args; legacy exception untouched. Native/pseudo NOT RUN."
+}

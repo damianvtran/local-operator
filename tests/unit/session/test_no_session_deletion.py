@@ -156,6 +156,19 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Clears only that write's own .tmp FILE beside the counter; never a session path",
     ),
+    # The reply guard's per-install digest key (#3377, review round 1 S-3) is
+    # created atomically: random bytes go to a ``tempfile.mkstemp`` FILE in
+    # ``<config_dir>/team_bridge/`` (prefix ``.reply_guard.key.``), published with
+    # ``os.link`` onto ``reply_guard.key``, and the temp NAME is then unlinked
+    # whether or not this process won the publish race. The unlinked path is only
+    # ever the name mkstemp returned a few lines earlier — a regular file the call
+    # itself created, beside the guard's own state — never a directory, never a
+    # transcript, never under ``sessions/``, and never caller input.
+    (
+        "local_operator/team_bridge/reply_guard.py::_digest_key",
+        "os.unlink",
+        "Removes only the mkstemp temp FILE this call created in the config dir's team_bridge/",
+    ),
     # Dedicated credential-root cache, never a transcript path: path_for hashes
     # the opaque session id under account-affinity/<auth-db namespace>/*.json.
     # replace takes only a sibling mkstemp REGULAR FILE; cleanup unlinks only
@@ -2350,6 +2363,29 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "a *.json cache FILE whose session directory is gone; suffix-guarded",
     ),
+    # The incremental store (snapshot + delta beside the head) lives in the same
+    # cache directory. `_publish_store` renames its own staged snapshot temp onto
+    # a `<sid>.snap.<32-hex>.snapshot` FILE and unlinks that temp on failure;
+    # `_retire` unlinks only names matching `_STORE_FILE` (that exact snapshot or
+    # delta FILE shape) for the head it just superseded. None is a directory, and
+    # every path is the cache root + a fixed shape, never a `sessions/` path.
+    (
+        "local_operator/session/transcript_index.py::_publish_store",
+        "<path>.replace",
+        "staged temp FILE -> <sid>.snap.<hex>.snapshot store FILE under the cache root",
+    ),
+    (
+        "local_operator/session/transcript_index.py::_publish_store",
+        "<path>.unlink",
+        "only its own staged snapshot temp FILE when the rename did not land",
+    ),
+    (
+        "local_operator/session/transcript_index.py::_retire",
+        "<path>.unlink",
+        "superseded <sid>.snap/.delta store FILEs (_STORE_FILE) and this session's "
+        "orphaned staged-snapshot temp FILEs (_STAGED_FILE, dead pid or past grace)",
+        2,
+    ),
     (
         "local_operator/session/transcript.py::Transcript._write_entries",
         "<path>.unlink",
@@ -4235,6 +4271,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE
         "local_operator/session/search_index.py::_save",  # tmp -> index FILE
         "local_operator/session/transcript_index.py::write_index",  # tmp -> index FILE
+        "local_operator/session/transcript_index.py::_publish_store",  # tmp -> snapshot FILE
         "local_operator/session/archived.py::_write_archived",  # tmp -> archive index FILE
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
         # tmp -> runtime-stall-<pid>.deadline FILE. Both paths are log_dir() + an int

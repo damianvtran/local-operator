@@ -611,6 +611,7 @@ export type MessageParams = {
   "wire.errors.files.sign_route": { "routes": string };
   "wire.errors.files.sign_ttl": { "maximum": string };
   "wire.errors.files.video_type": { "mime_type": string };
+  "wire.errors.hosting.not_configured": undefined;
   "wire.errors.media.media_refusal": { "error": string };
   "wire.errors.media.provider_model_pair": undefined;
   "wire.errors.media.radient_key_missing": undefined;
@@ -1822,6 +1823,9 @@ export type MessageParams = {
   "wire.tool_rows.bridge.verb_settled.shared_history": undefined;
   "wire.tool_rows.bridge.verb_settled.take_up": undefined;
   "wire.tool_rows.bridge.verb_settled.unknown": undefined;
+  "wire.tool_rows.bridge.skipped.expanded": undefined;
+  "wire.tool_rows.bridge.skipped.verb.channel_post": undefined;
+  "wire.tool_rows.bridge.skipped.verb.dm": undefined;
   "wire.tunnel_setup.checking": undefined;
   "wire.tunnel_setup.corrupt_intent": undefined;
   "wire.tunnel_setup.deadline": undefined;

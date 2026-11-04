@@ -536,29 +536,58 @@ def _rewrite_relocated_refs(
     source_path: str = "SKILL.md",
     destination_path: str | None = None,
     known_paths: set[str] | None = None,
+    on_ambiguous: Literal["refuse", "verbatim"] = "refuse",
 ) -> str:
     """Resolve within the captured source tree, then relativize at the destination.
 
     Basename substitution cannot distinguish ../requirements.md from a different
     file beside the source. Unknown/traversing references to moved names refuse
     rather than leave a ready proposal with a silently broken link.
+
+    ONE case is not ambiguous and is accepted verbatim: a file that does not move
+    itself (``source_path == destination_path``) naming a path that resolves to a
+    relocation DESTINATION. The operator's real municipal tree is the witness:
+    ``references/record-contract.md`` says ``rubric.md`` while rubric.md sits at
+    the skill root. Dangling locally, that sibling name becomes correct the moment
+    relocation lands rubric.md at ``references/rubric.md``, so refusing it was a
+    dead end on exactly the case adoption exists for. Anything else that merely
+    shares a moved basename still refuses under merge.
+
+    ``on_ambiguous="verbatim"`` is for callers that must never dead-end on a
+    rewrite question they do not need answered. take-hub: the local text it
+    rewrites is never installed (shared paths install the Hub's text, local-only
+    and relocated files are set aside into the snapshot). keep-local projection:
+    the folder on disk is untouched, but the PROJECTED document (fingerprinted
+    and pushed) keeps an ambiguous reference exactly as authored instead of
+    refusing -- a link that was already broken locally stays broken in the
+    projection, unrewritten and unguessed, rather than bricking reads of the
+    managed skill. Only cases that previously raised change output; every
+    resolvable rewrite is unchanged.
     """
     if not moves:
         return text
     destination_path = destination_path or moves.get(source_path, source_path)
     known = known_paths if known_paths is not None else set(moves)
+    stationary = source_path == destination_path
+    destinations = set(moves.values())
+
+    def ambiguous(reason: str) -> None:
+        if on_ambiguous == "refuse":
+            raise AdoptionError("adoption-needs-choice", reason)
+
     pattern = re.compile(r"(?<![\w/.:~-])(?:[\w.@~+-]+/)*[\w@~+-]+\.[\w.~+-]*[\w~+-]")
 
     def rewrite(match: re.Match[str]) -> str:
         token = match.group()
         resolved = posixpath.normpath(posixpath.join(posixpath.dirname(source_path), token))
         if resolved == ".." or resolved.startswith("../"):
-            raise AdoptionError("adoption-needs-choice", "reference escapes captured skill root")
+            ambiguous("reference escapes captured skill root")
+            return token
         if resolved not in known:
+            if stationary and resolved in destinations:
+                return token  # valid once the relocation lands (see docstring)
             if posixpath.basename(token) in {posixpath.basename(old) for old in moves}:
-                raise AdoptionError(
-                    "adoption-needs-choice", "ambiguous reference to relocated file"
-                )
+                ambiguous("ambiguous reference to relocated file")
             return token
         target = moves.get(resolved, resolved)
         relative = posixpath.relpath(target, posixpath.dirname(destination_path) or ".")
@@ -582,9 +611,14 @@ def _rewrite_relocated_refs(
                 if literal.startswith("./") and not relative.startswith("."):
                     relative = "./" + relative
                 replacements.append((start, end, relative))
+            elif stationary and resolved in destinations and resolved not in known:
+                # ``resolved not in known`` is implied today (a destination that
+                # collides with a local file drops the move upstream) and kept as
+                # an explicit guard: an existing local file is never shadowed.
+                continue  # valid once the relocation lands (see docstring)
             elif posixpath.basename(literal) in {posixpath.basename(old) for old in moves}:
                 if resolved.startswith("../") or resolved not in known:
-                    raise AdoptionError("adoption-needs-choice", "ambiguous inline filepath")
+                    ambiguous("ambiguous inline filepath")
         for start, end, relative in reversed(replacements):
             text = text[:start] + relative + text[end:]
     masked, payloads = _shield_code(text)
@@ -821,6 +855,8 @@ def build_proposal(
                         source_path=src,
                         destination_path=target,
                         known_paths=set(local_by_path),
+                        # take-hub installs the Hub text; local text is display only.
+                        on_ambiguous="verbatim" if strategy == "take-hub" else "refuse",
                     )
                     if _prose_path(src, local_by_path[src].mode) and _prose_path(target)
                     else text
@@ -1156,6 +1192,12 @@ def _plan_skill_md(
     )
     if result.outcome in ("merged", "unchanged"):
         body = str(result.merged)
+        # The paragraph merger joins segments without the file's terminal
+        # newline. When BOTH authored sides end with one, keep it: otherwise the
+        # installed SKILL.md differs from both by a missing EOF newline and the
+        # next push shows a spurious diff (QA round 1, Q1 on PR 3390).
+        if local_body.endswith("\n") and remote_body.endswith("\n") and not body.endswith("\n"):
+            body += "\n"
         lead = "\n" if remote_body.startswith("\n") else ""
         proposed = remote_head + lead + body
         return FilePlan(
@@ -1260,6 +1302,8 @@ def local_projection(tree: LocalTree, *, carried_paths: Sequence[str] = ()) -> S
                 source_path=inverse.get(path, path),
                 destination_path=path,
                 known_paths=original,
+                # The projected folder is kept byte for byte; never refuse a read.
+                on_ambiguous="verbatim",
             )
             if (
                 _prose_path(inverse.get(path, path), modes[inverse.get(path, path)])

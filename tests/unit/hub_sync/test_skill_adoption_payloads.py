@@ -431,7 +431,9 @@ def test_inline_literal_ambiguous_and_traversing_paths_fail_closed():
         _rewrite_relocated_refs,
     )
 
-    for literal in ("../../requirements.md", "requirements.md"):
+    # Bare ``requirements.md`` from references/ IS the relocation destination
+    # and is accepted verbatim (see test below); these remain ambiguous.
+    for literal in ("../../requirements.md", "sub/requirements.md"):
         with pytest.raises(AdoptionError) as failure:
             _rewrite_relocated_refs(
                 f"Read `{literal}`.\n",
@@ -440,6 +442,38 @@ def test_inline_literal_ambiguous_and_traversing_paths_fail_closed():
                 known_paths={"requirements.md", "references/local.md"},
             )
         assert failure.value.code == "adoption-needs-choice"
+
+
+def test_inline_literal_naming_relocation_destination_is_kept_verbatim():
+    from local_operator.hub_sync.skill_adoption import _rewrite_relocated_refs
+
+    moves = {"requirements.md": "references/requirements.md"}
+    text = "Read `requirements.md` and [r](requirements.md).\n"
+    assert (
+        _rewrite_relocated_refs(
+            text,
+            moves,
+            source_path="references/local.md",
+            known_paths={"requirements.md", "references/local.md"},
+        )
+        == text
+    )
+
+
+def test_verbatim_mode_never_refuses_but_never_rewrites_a_guess():
+    from local_operator.hub_sync.skill_adoption import _rewrite_relocated_refs
+
+    text = "Read `sub/requirements.md` and ../../requirements.md.\n"
+    assert (
+        _rewrite_relocated_refs(
+            text,
+            {"requirements.md": "references/requirements.md"},
+            source_path="references/local.md",
+            known_paths={"requirements.md", "references/local.md"},
+            on_ambiguous="verbatim",
+        )
+        == text
+    )
 
 
 def test_unknown_reference_definition_physical_gap_remains_exact():

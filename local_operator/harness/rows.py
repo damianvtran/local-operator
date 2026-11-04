@@ -2236,6 +2236,12 @@ def _bridge_outcome(op: str, details: Mapping[str, Any]) -> tuple[str | None, st
     code = details.get("code")
     code = _bridge_clean(code) or None if isinstance(code, str) else None
     if details.get("ok") is True:
+        if details.get("skipped") is True:
+            # The reply guard's exact double send (review round 3, m-1): ok,
+            # because nothing failed, but NOT posted — the card must not read
+            # "Posted in" for a message that never left. ``duplicate`` is the
+            # code an operator searches for, like refused/failed codes.
+            return "skipped", "duplicate"
         if details.get("destination_type") == "peer_inbox":
             return "inbox_only", None
         state = details.get("recipient_state")

@@ -1,0 +1,342 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.errors.sdk_spec",
+  "key_count": 21,
+  "status": "passed",
+  "repository_check_catalogues": [],
+  "negative_control": [
+    "zh-CN/wire.errors.sdk_spec: wire.errors.sdk_spec.agent_identity_conflict: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"
+  ],
+  "restored_control": "passed",
+  "force_english_producer_count": 21,
+  "SessionSpecError_ValueError_source_check": true,
+  "rows": [
+    {
+      "key": "wire.errors.sdk_spec.agent_identity_conflict",
+      "source": "agent_name and agent_id are mutually exclusive",
+      "target": "agent_name和agent_id不能同时指定",
+      "arguments": [],
+      "preserved_technical_tokens": [
+        "agent_name",
+        "agent_id"
+      ],
+      "opaque_interpolation": "not_applicable",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.approval_callback_gate_required",
+      "source": "ApprovalPolicy.callback() requires a callable gate",
+      "target": "ApprovalPolicy.callback()需要可调用的审批函数",
+      "arguments": [],
+      "preserved_technical_tokens": [
+        "ApprovalPolicy.callback()"
+      ],
+      "opaque_interpolation": "not_applicable",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.approval_declared_tools_empty",
+      "source": "ApprovalPolicy.declared() must name at least one tool; use ApprovalPolicy.refuse() for an undeclared bound session",
+      "target": "ApprovalPolicy.declared()必须指定至少一个工具；对于未声明工具的绑定会话，使用ApprovalPolicy.refuse()",
+      "arguments": [],
+      "preserved_technical_tokens": [
+        "ApprovalPolicy.declared()",
+        "ApprovalPolicy.refuse()"
+      ],
+      "opaque_interpolation": "not_applicable",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.approval_handler_wrong_mode",
+      "source": "ApprovalPolicy.handler is only meaningful for mode ''callback'', not {mode}",
+      "target": "ApprovalPolicy.handler仅对''callback''模式有意义，不适用于{mode}",
+      "arguments": [
+        [
+          "mode",
+          "simple"
+        ]
+      ],
+      "preserved_technical_tokens": [
+        "ApprovalPolicy.handler",
+        "''callback''"
+      ],
+      "opaque_interpolation": "passed",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.approval_tools_wrong_mode",
+      "source": "ApprovalPolicy.tools is only meaningful for mode ''declared'', not {mode}",
+      "target": "ApprovalPolicy.tools仅对''declared''模式有意义，不适用于{mode}",
+      "arguments": [
+        [
+          "mode",
+          "simple"
+        ]
+      ],
+      "preserved_technical_tokens": [
+        "ApprovalPolicy.tools",
+        "''declared''"
+      ],
+      "opaque_interpolation": "passed",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.attach_fields_unsupported",
+      "source": "mode=''attach'' opens a viewer for spec.resume; it does not attach teams, profiles, tools, names, goals or approval policies — that is the owner''s side. Set only resume on this spec (or use mode=''own''). Offending fields: {fields}.",
+      "target": "mode=''attach''会打开spec.resume所指会话的查看器；不会附加团队、配置档案、工具、名称、目标或审批策略——这些由会话控制方负责。此spec中只能设置resume（或使用mode=''own''）。不支持的字段：{fields}。",
+      "arguments": [
+        [
+          "fields",
+          "simple"
+        ]
+      ],
+      "preserved_technical_tokens": [
+        "mode=''attach''",
+        "mode=''own''",
+        "spec.resume",
+        "resume",
+        "''own''",
+        "''attach''"
+      ],
+      "opaque_interpolation": "passed",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.attach_output_unsupported",
+      "source": "output enforcement cannot be set on an attached session; the owning runtime decides",
+      "target": "不能为附接的会话设置输出约束；这由控制该会话的运行时决定",
+      "arguments": [],
+      "preserved_technical_tokens": [],
+      "opaque_interpolation": "not_applicable",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.attach_resume_required",
+      "source": "mode=''attach'' needs spec.resume: a viewer attaches to an id",
+      "target": "mode=''attach''需要spec.resume：查看器通过会话ID附接到会话",
+      "arguments": [],
+      "preserved_technical_tokens": [
+        "mode=''attach''",
+        "spec.resume",
+        "resume",
+        "''attach''"
+      ],
+      "opaque_interpolation": "not_applicable",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.mode_invalid",
+      "source": "mode must be ''own'' or ''attach'', not {mode}",
+      "target": "mode必须为''own''或''attach''，不能为{mode}",
+      "arguments": [
+        [
+          "mode",
+          "simple"
+        ]
+      ],
+      "preserved_technical_tokens": [
+        "''own''",
+        "''attach''"
+      ],
+      "opaque_interpolation": "passed",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.output_format_invalid",
+      "source": "output_format must be one of {formats}",
+      "target": "output_format必须为以下值之一：{formats}",
+      "arguments": [
+        [
+          "formats",
+          "simple"
+        ]
+      ],
+      "preserved_technical_tokens": [
+        "output_format"
+      ],
+      "opaque_interpolation": "passed",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.output_retries_range",
+      "source": "output_retries must be between 0 and 5",
+      "target": "output_retries必须在0到5之间",
+      "arguments": [],
+      "preserved_technical_tokens": [
+        "output_retries"
+      ],
+      "opaque_interpolation": "not_applicable",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.output_retries_requires_format",
+      "source": "output_retries requires output_format",
+      "target": "设置output_retries需要同时设置output_format",
+      "arguments": [],
+      "preserved_technical_tokens": [
+        "output_format",
+        "output_retries"
+      ],
+      "opaque_interpolation": "not_applicable",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.output_schema_requires_format",
+      "source": "output_schema requires output_format",
+      "target": "设置output_schema需要同时设置output_format",
+      "arguments": [],
+      "preserved_technical_tokens": [
+        "output_format",
+        "output_schema"
+      ],
+      "opaque_interpolation": "not_applicable",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.resume_empty",
+      "source": "resume must be a session id or \"@latest\", not an empty string",
+      "target": "resume必须为会话ID或\"@latest\"，不能是空字符串",
+      "arguments": [],
+      "preserved_technical_tokens": [
+        "resume",
+        "@latest"
+      ],
+      "opaque_interpolation": "not_applicable",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.spawn_birth_effort_pair_required",
+      "source": "birth_effort for a new spawned session rides the birth sample and needs the hosting/model pair alongside it; state all three, or open the session in-process (open_session) to set a birth level without a model pair.",
+      "target": "新建子会话的birth_effort随创建时的参数快照传递，需要同时提供hosting/model参数对；同时指定这三个参数，或在当前进程中打开会话（open_session），以便不指定模型参数对也能设置初始推理强度。",
+      "arguments": [],
+      "preserved_technical_tokens": [
+        "birth_effort",
+        "hosting/model",
+        "open_session"
+      ],
+      "opaque_interpolation": "not_applicable",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.spawn_fields_unsupported",
+      "source": "spawn_session() cannot deliver post-open state to a new runtime child; unsupported fields on this spec: {fields}. Open the session in-process (open_session), attach what you need, dispose, then spawn_session() the same id — resume restores the attachment; or spawn without these fields.",
+      "target": "spawn_session()无法将会话打开后的状态传递给新建的运行时子进程；此spec中不支持的字段：{fields}。在当前进程中打开会话（open_session），附加所需内容，调用dispose释放会话，然后用spawn_session()启动同一会话ID——resume会恢复附加内容；或者不设置这些字段再启动子会话。",
+      "arguments": [
+        [
+          "fields",
+          "simple"
+        ]
+      ],
+      "preserved_technical_tokens": [
+        "resume",
+        "open_session",
+        "spawn_session()",
+        "dispose"
+      ],
+      "opaque_interpolation": "passed",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.spawn_model_pair_required",
+      "source": "spawn_session() routes hosting/model to a NEW runtime as one birth sample; state both, or neither (the child then resolves its model from the root''s config).",
+      "target": "spawn_session()会将hosting/model作为同一份创建时参数快照传递给新的运行时；同时指定这两个参数，或都不指定（子进程将从根配置中解析所用模型）。",
+      "arguments": [],
+      "preserved_technical_tokens": [
+        "hosting/model",
+        "spawn_session()"
+      ],
+      "opaque_interpolation": "not_applicable",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.spawn_output_unsupported",
+      "source": "spawn_session() cannot carry output enforcement ({fields}); open the session with open_session(..., mode=''own'') and engage it afterwards",
+      "target": "spawn_session()无法传递输出约束（{fields}）；先用open_session(..., mode=''own'')打开会话，再让它开始工作",
+      "arguments": [
+        [
+          "fields",
+          "simple"
+        ]
+      ],
+      "preserved_technical_tokens": [
+        "mode=''own''",
+        "''own''",
+        "open_session",
+        "spawn_session()"
+      ],
+      "opaque_interpolation": "passed",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.tools_empty",
+      "source": "tools must name at least one tool; leave it None to stay unrestricted",
+      "target": "tools必须指定至少一个工具；若不限制工具，将其保留为None",
+      "arguments": [],
+      "preserved_technical_tokens": [
+        "tools",
+        "None"
+      ],
+      "opaque_interpolation": "not_applicable",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.world_root_empty",
+      "source": "world_root must be a non-empty path when set",
+      "target": "设置world_root时，必须指定非空路径",
+      "arguments": [],
+      "preserved_technical_tokens": [
+        "world_root"
+      ],
+      "opaque_interpolation": "not_applicable",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    },
+    {
+      "key": "wire.errors.sdk_spec.yolo_approval_unreachable",
+      "source": "yolo=True makes an ApprovalPolicy.{approval_mode}() gate unreachable; use ApprovalPolicy.auto() (or drop yolo) instead",
+      "target": "yolo=True会使ApprovalPolicy.{approval_mode}()审批函数无法被调用；改用ApprovalPolicy.auto()（或移除yolo设置）",
+      "arguments": [
+        [
+          "approval_mode",
+          "simple"
+        ]
+      ],
+      "preserved_technical_tokens": [
+        "ApprovalPolicy.auto()",
+        "yolo"
+      ],
+      "opaque_interpolation": "passed",
+      "plural_categories": "not_applicable_no_plural",
+      "maxCells": null
+    }
+  ],
+  "limits": {
+    "process_ceiling_MiB": 256,
+    "timeout_seconds": 90,
+    "no_broad_scanner": true,
+    "production_SDK_execution": "NOT RUN",
+    "native_fit": "NOT RUN",
+    "pseudo": "NOT RUN",
+    "RTL_rendering": "NOT RUN/not applicable to zh-CN",
+    "width_caps": "none supplied"
+  }
+}

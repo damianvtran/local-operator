@@ -1,0 +1,45 @@
+AUDIT rg6a1 locale=vi date=2026-11-04T11:22:25Z checkout_head=287c53e0a267f85119c26f3eaa1f4245794fef1d (+ uncommitted remediation of this audit)
+COMMAND env -i HOME=<isolated> PATH=/usr/bin:/bin ~/local-operator/.venv/bin/python recheck.py.txt vi
+STDOUT:
+SHA256 en local_operator/i18n/catalogues/en/wire.tool_rows.bridge.skipped.json e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865
+SHA256 context local_operator/i18n/catalogues/en/wire.tool_rows.bridge.skipped.context.json c726ec8a9c1d0f5a9bc8d77096c24b16dc78ed6a9622ecb2edfaf44e2875ca51
+SHA256 vi local_operator/i18n/catalogues/vi/wire.tool_rows.bridge.skipped.json bff05750dcf4f37d1fde779e2b8e21171837a8799f9486bec866a24c69ffd300
+PASS key_parity 3 keys
+PASS icu_parse wire.tool_rows.bridge.skipped.expanded
+PASS arguments wire.tool_rows.bridge.skipped.expanded ()
+PASS render_identity wire.tool_rows.bridge.skipped.expanded
+PASS nfc wire.tool_rows.bridge.skipped.expanded
+PASS no_bidi_or_cf wire.tool_rows.bridge.skipped.expanded
+CELLS wire.tool_rows.bridge.skipped.expanded 76 (en 78; sidecar maxCells: none declared)
+PASS icu_parse wire.tool_rows.bridge.skipped.verb.channel_post
+PASS arguments wire.tool_rows.bridge.skipped.verb.channel_post ()
+PASS render_identity wire.tool_rows.bridge.skipped.verb.channel_post
+PASS nfc wire.tool_rows.bridge.skipped.verb.channel_post
+PASS no_bidi_or_cf wire.tool_rows.bridge.skipped.verb.channel_post
+CELLS wire.tool_rows.bridge.skipped.verb.channel_post 22 (en 15; sidecar maxCells: none declared)
+PASS icu_parse wire.tool_rows.bridge.skipped.verb.dm
+PASS arguments wire.tool_rows.bridge.skipped.verb.dm ()
+PASS render_identity wire.tool_rows.bridge.skipped.verb.dm
+PASS nfc wire.tool_rows.bridge.skipped.verb.dm
+PASS no_bidi_or_cf wire.tool_rows.bridge.skipped.verb.dm
+CELLS wire.tool_rows.bridge.skipped.verb.dm 22 (en 18; sidecar maxCells: none declared)
+ROW channel_post ['conversation_label']: Đã bỏ qua bài đăng vào #general · Approved. · không đăng · duplicate
+PASS row_uses_skip_verb channel_post
+EXPANDED channel_post headline='Đã bỏ qua bài đăng vào #general' outcome='Không đăng: một tin nhắn giống hệt vừa được gửi, nên bản này đã được bỏ qua.'
+PASS expanded_sentence channel_post
+ROW channel_post [fallback target]: Đã bỏ qua bài đăng vào một cuộc trò chuyện · Approved. · không đăng · duplicate
+PASS row_uses_skip_verb channel_post
+EXPANDED channel_post headline='Đã bỏ qua bài đăng vào một cuộc trò chuyện' outcome='Không đăng: một tin nhắn giống hệt vừa được gửi, nên bản này đã được bỏ qua.'
+PASS expanded_sentence channel_post
+ROW dm ['conversation_label']: Đã bỏ qua tin nhắn cho Maya · Approved. · không đăng · duplicate
+PASS row_uses_skip_verb dm
+EXPANDED dm headline='Tin nhắn trực tiếp tới Maya' outcome='Không đăng: một tin nhắn giống hệt vừa được gửi, nên bản này đã được bỏ qua.'
+PASS expanded_sentence dm
+ROW dm [fallback target]: Đã bỏ qua tin nhắn cho một người · Approved. · không đăng · duplicate
+PASS row_uses_skip_verb dm
+EXPANDED dm headline='Tin nhắn trực tiếp tới một đồng nghiệp' outcome='Không đăng: một tin nhắn giống hệt vừa được gửi, nên bản này đã được bỏ qua.'
+PASS expanded_sentence dm
+SUMMARY vi PASS
+
+STDERR:
+EXIT 0

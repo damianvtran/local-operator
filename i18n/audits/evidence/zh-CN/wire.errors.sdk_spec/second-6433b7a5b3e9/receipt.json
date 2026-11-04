@@ -1,0 +1,48 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.errors.sdk_spec",
+  "status": "passed",
+  "key_count": 21,
+  "source_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+  "target_sha256": "0ff78d9cecbb7c024a284abc694f1a3d9e21bc283c464cba5ae42b2a227c76ad",
+  "context_sha256": "8735964058f901e1d97527801eb88f5a36585f0d7713c1e21f7f98ebaa55418e",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "6433b7a5b3e9",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/transcript.jsonl",
+      "entry_id": "6c5a89ac8b564f078e3e54745ab2d770",
+      "usage": {
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol",
+        "at_ms": 1793719999434
+      }
+    },
+    "fallback": "Actual completed usage serves openai/gpt-6.1-sol, differing from initial anthropic header; known fallback disclosed, no upstream-chain inference.",
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_coder_session": "eae0961e4e78",
+    "not_other_reader_job": "196c3a94b346",
+    "other_reader_report_read": false
+  },
+  "findings": [],
+  "record": {
+    "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-spec-second-6433b7a5b3e9/record.json",
+    "sha256": "e3c466b4cc9a1b1d0d369899b7192f414daa9e2992d05ae83b3a9283c4e440ab"
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-spec-second-6433b7a5b3e9/report.md",
+      "sha256": "ee2333c890eeecad688adc9abb44a56367fb83f8abe78565d8b5ed65d7576c27"
+    },
+    "mechanical.json": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-spec-second-6433b7a5b3e9/mechanical.json",
+      "sha256": "dcbd96a9c0d9639c7cf8f962d678c4182f6053db72ff19939979e2120be468e0"
+    },
+    "audit.log": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-sdk-spec-second-6433b7a5b3e9/audit.log",
+      "sha256": "41bd56ee17809bb1512d1285303f0927420b0749cedc391e610e5d9d63d95c68"
+    }
+  }
+}

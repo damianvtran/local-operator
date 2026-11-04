@@ -1,0 +1,130 @@
+{
+  "kind": "provenance_metadata_correction",
+  "status": "correction_recorded_not_an_audit_round",
+  "scope": "es / wire.errors.hosting / eshost1 / hosting-es-r1",
+  "created": "2026-11-03",
+  "original_packet": "/Users/damian/.local-operator/sessions/f50d87966867/scratchpad/hosting-es-audit-reader1",
+  "canonical_packet": "/Users/damian/local-operator/.worktrees/startup-owned-copy/i18n/audits/evidence/es/wire.errors.hosting/eshost1",
+  "original_record_sha256": "99127823548557a6f45d50b4d0a90794d206b4380ae533197d30d8cef823b83c",
+  "original_receipt_sha256": "a847a0584a711239a5a97a66675fd9a4004dc7d3134544a511fd2f216d11ff38",
+  "canonical_record_sha256": "99127823548557a6f45d50b4d0a90794d206b4380ae533197d30d8cef823b83c",
+  "canonical_receipt_sha256": "a847a0584a711239a5a97a66675fd9a4004dc7d3134544a511fd2f216d11ff38",
+  "canonical_bytes_equal_original": true,
+  "original_bytes_preserved": true,
+  "backdated": false,
+  "old_record_rewritten": false,
+  "new_native_proof": false,
+  "withdrawn_claims": [
+    {
+      "field": "auditor.model_requested",
+      "old": "anthropic/claude-sonnet-5-5",
+      "reason": "This was the session header's primary model, not the requested route and not served proof. The requested route is Radient Auto (radient/auto), corroborated by the session-spend last identity.",
+      "new": "radient/auto",
+      "new_display": "Radient Auto"
+    },
+    {
+      "field": "auditor.model_served",
+      "old": "anthropic/claude-sonnet-5-5",
+      "new": "UNKNOWN",
+      "reason": "The header primary is not a served-model declaration. The session journal records provider failure: quota and multiple active selectors/usage identities; no per-contribution served identity is observable."
+    },
+    {
+      "field": "auditor.actual_model_source",
+      "old": "session model header (explicit): anthropic/claude-sonnet-5-5; no separate served model id is exposed and no fallback was observed",
+      "reason": "The header-only inference is withdrawn. It is contradicted as served proof by the journal's provider failure/quota trace and usage identities.",
+      "new": "Header primary is metadata only. Journal records provider failure: quota with active selectors anthropic/claude-opus-5-5 and openai/gpt-6.1-sol; session-level usage identities radient/auto and openai/gpt-6.1-sol; per-contribution served model UNKNOWN."
+    },
+    {
+      "field": "auditor.fallback",
+      "old": "NONE CLAIMED; no failure event observed",
+      "new": "Session-level provider failure/quota and fallback observed; per-contribution fallback identity UNKNOWN",
+      "reason": "The journal contains active_model_route events with reason 'provider failure: quota' and multiple active selectors; the old no-failure assertion is false."
+    }
+  ],
+  "corrected_provenance": {
+    "agent": "i18n-auditor",
+    "session": "f50d87966867",
+    "requested_route": "radient/auto",
+    "requested_route_display": "Radient Auto",
+    "requested_route_source": "Manager task; corroborated by session_spend.v1 last_identity radient/auto. This is not a served-model proof.",
+    "header_primary": "anthropic/claude-sonnet-5-5",
+    "header_claim_status": "PRIMARY-MODEL METADATA ONLY; WITHDRAWN AS SERVED IDENTITY",
+    "served_underlying_model": "UNKNOWN",
+    "per_contribution_served_model": "UNKNOWN",
+    "fallback_observed": true,
+    "fallback_scope": "SESSION-LEVEL ONLY; no timestamp-to-contribution mapping and no assertion that any fallback identity served this audit contribution",
+    "independence": "Independent of translator 804764f54d82 and code author 94dcef624dec; no self-translation; no MT service; no other reader's verdict read before the original verdict."
+  },
+  "session_journal_observations": {
+    "path": "/Users/damian/.local-operator/sessions/f50d87966867/transcript.jsonl",
+    "size_at_read_bytes": 2667086,
+    "size_limit_for_targeted_parse_bytes": 8388608,
+    "parse_mode": "TARGETED ONLY: JSONL payloads with custom_type active_model_route, usage fields, and session_spend.v1; no unrelated history walk",
+    "active_model_route_events": [
+      {
+        "ts": "1793693123.0256279",
+        "primary": "anthropic/claude-sonnet-5-5",
+        "active_selector": "anthropic/claude-opus-5-5",
+        "reason": "provider failure: quota"
+      },
+      {
+        "ts": "1793693123.544271",
+        "primary": "anthropic/claude-sonnet-5-5",
+        "active_selector": "openai/gpt-6.1-sol",
+        "reason": "provider failure: quota"
+      }
+    ],
+    "usage_identity_counts_observed": {
+      "radient/auto": 197,
+      "openai/gpt-6.1-sol": 20
+    },
+    "final_session_spend_snapshot": {
+      "calls": 218,
+      "last_identity": {
+        "provider": "radient",
+        "model_id": "auto"
+      },
+      "by_identity": {
+        "openai/gpt-6.1-sol": {
+          "calls": 20
+        },
+        "radient/auto": {
+          "calls": 198
+        }
+      }
+    },
+    "observed_session_level_fallback_identities": [
+      {
+        "identity": "openai/gpt-6.1-sol",
+        "evidence": "active_model_route active selector; 20 usage records; 20 session-spend calls",
+        "per_contribution_claim": false
+      },
+      {
+        "identity": "anthropic/claude-opus-5-5",
+        "evidence": "active_model_route active selector; no usage identity observed in this snapshot",
+        "per_contribution_claim": false
+      }
+    ],
+    "observed_requested_route_identity": {
+      "identity": "radient/auto",
+      "evidence": "session_spend.v1 last_identity; 197 usage records and 198 session-spend calls",
+      "per_contribution_claim": false
+    },
+    "correspondence_note": "NO TIME OR TURN CORRESPONDENCE IS ASSERTED. Counts are a read-time snapshot of a live journal and may advance; they do not prove which identity served the hosting audit contribution."
+  },
+  "copy_verdict": {
+    "status": "passed",
+    "unchanged": true,
+    "key_count": 1,
+    "input_hashes": {
+      "en": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "context": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9",
+      "target": "8de6f07aa22bb654bc0e45390bc803ba28f37698e6e08ffe95399d895ff3c5cf"
+    },
+    "reason": "The target, English and context hashes are unchanged from the original audit; no translation or audit content changed. The original passed copy verdict stands as a copy verdict."
+  },
+  "native_holds": "Unchanged: no native-speaker, rendered-frame, pseudo-localisation, RTL or runtime proof is claimed. This correction does not create native proof.",
+  "pr_context": "PR #3378 R1 — https://github.com/damianvtran/local-operator/pull/3378#issuecomment-6615508981 (verified)",
+  "handoff": "Coder to canonical-copy this companion and supersede the ledger in ONE remediation wave with PR body R4; no generation or translation change.",
+  "canonical_copy_status": "NOT PERFORMED HERE — coder action; original and canonical record/receipt bytes remain identical"
+}
