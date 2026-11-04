@@ -156,6 +156,19 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Clears only that write's own .tmp FILE beside the counter; never a session path",
     ),
+    # The reply guard's per-install digest key (#3377, review round 1 S-3) is
+    # created atomically: random bytes go to a ``tempfile.mkstemp`` FILE in
+    # ``<config_dir>/team_bridge/`` (prefix ``.reply_guard.key.``), published with
+    # ``os.link`` onto ``reply_guard.key``, and the temp NAME is then unlinked
+    # whether or not this process won the publish race. The unlinked path is only
+    # ever the name mkstemp returned a few lines earlier — a regular file the call
+    # itself created, beside the guard's own state — never a directory, never a
+    # transcript, never under ``sessions/``, and never caller input.
+    (
+        "local_operator/team_bridge/reply_guard.py::_digest_key",
+        "os.unlink",
+        "Removes only the mkstemp temp FILE this call created in the config dir's team_bridge/",
+    ),
     # Dedicated credential-root cache, never a transcript path: path_for hashes
     # the opaque session id under account-affinity/<auth-db namespace>/*.json.
     # replace takes only a sibling mkstemp REGULAR FILE; cleanup unlinks only
