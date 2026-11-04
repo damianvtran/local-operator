@@ -1,5 +1,5 @@
 {
- "_comment": "Per-file test durations in seconds, used ONLY as relative weights to balance the CI shards. Regenerate with scripts/gen_test_durations.py; see scripts/shard_tests.py for why a file missing from this manifest still runs. Relay cwd-move weight added from run 41336683897, junit-e2e-ubuntu-latest-0.xml: three passing cases total 14.958s; existing weights and fallback unchanged.",
+ "_comment": "Per-file test durations in seconds, used ONLY as relative weights to balance the CI shards. Regenerate with scripts/gen_test_durations.py; see scripts/shard_tests.py for why a file missing from this manifest still runs. Relay cwd-move weight added from run 41336683897, junit-e2e-ubuntu-latest-0.xml: three passing cases total 14.958s; existing weights and fallback unchanged. test_signal_drain_evidence_e2e.py weight 4.5 is a LOCAL measurement (7 passed; setup 4.12 + calls ~0.17 + teardowns, --durations=0 on macOS), not a CI junit sum: it spawns no runtime and exists so the fallback weight is not charged to it.",
  "durations": {
   "tests/e2e/test_ask_tool_e2e.py": 2.925,
   "tests/e2e/test_browser_ownership.py": 1.0,
@@ -43,6 +43,7 @@
   "tests/e2e/test_sidebar_reconnect_e2e.py": 33.245,
   "tests/e2e/test_sidebar_runtime_reap_e2e.py": 7.994,
   "tests/e2e/test_signal_drain_e2e.py": 369.05,
+ "tests/e2e/test_signal_drain_evidence_e2e.py": 4.5,
   "tests/e2e/test_spend_ledger_e2e.py": 1.0,
   "tests/e2e/test_subagent_accounting_e2e.py": 1.0,
   "tests/e2e/test_terminal_close_survives_e2e.py": 66.051,
