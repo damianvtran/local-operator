@@ -548,16 +548,21 @@ def _rewrite_relocated_refs(
     itself (``source_path == destination_path``) naming a path that resolves to a
     relocation DESTINATION. The operator's real municipal tree is the witness:
     ``references/record-contract.md`` says ``rubric.md`` while rubric.md sits at
-    the root. Dangling locally, that sibling name becomes correct the moment
+    the skill root. Dangling locally, that sibling name becomes correct the moment
     relocation lands rubric.md at ``references/rubric.md``, so refusing it was a
     dead end on exactly the case adoption exists for. Anything else that merely
     shares a moved basename still refuses under merge.
 
-    ``on_ambiguous="verbatim"`` is for callers whose output never installs a
-    rewritten guess: the take-hub proposal (local text is only shown in the
-    diff) and the keep-local projection (the folder itself is kept byte for
-    byte). Those explicit fallbacks must never dead-end on a rewrite question
-    they do not need answered; the text is left exactly as authored.
+    ``on_ambiguous="verbatim"`` is for callers that must never dead-end on a
+    rewrite question they do not need answered. take-hub: the local text it
+    rewrites is never installed (shared paths install the Hub's text, local-only
+    and relocated files are set aside into the snapshot). keep-local projection:
+    the folder on disk is untouched, but the PROJECTED document (fingerprinted
+    and pushed) keeps an ambiguous reference exactly as authored instead of
+    refusing -- a link that was already broken locally stays broken in the
+    projection, unrewritten and unguessed, rather than bricking reads of the
+    managed skill. Only cases that previously raised change output; every
+    resolvable rewrite is unchanged.
     """
     if not moves:
         return text
@@ -606,6 +611,9 @@ def _rewrite_relocated_refs(
                     relative = "./" + relative
                 replacements.append((start, end, relative))
             elif stationary and resolved in destinations and resolved not in known:
+                # ``resolved not in known`` is implied today (a destination that
+                # collides with a local file drops the move upstream) and kept as
+                # an explicit guard: an existing local file is never shadowed.
                 continue  # valid once the relocation lands (see docstring)
             elif posixpath.basename(literal) in {posixpath.basename(old) for old in moves}:
                 if resolved.startswith("../") or resolved not in known:
@@ -1183,6 +1191,12 @@ def _plan_skill_md(
     )
     if result.outcome in ("merged", "unchanged"):
         body = str(result.merged)
+        # The paragraph merger joins segments without the file's terminal
+        # newline. When BOTH authored sides end with one, keep it: otherwise the
+        # installed SKILL.md differs from both by a missing EOF newline and the
+        # next push shows a spurious diff (QA round 1, Q1 on PR 3390).
+        if local_body.endswith("\n") and remote_body.endswith("\n") and not body.endswith("\n"):
+            body += "\n"
         lead = "\n" if remote_body.startswith("\n") else ""
         proposed = remote_head + lead + body
         return FilePlan(

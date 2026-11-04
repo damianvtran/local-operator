@@ -351,16 +351,16 @@ def test_explicit_fallback_resolves_only_the_chosen_guidance(
     assert _bytes(folder) == before
 
 
-# --- Relocated siblings referenced from INSIDE references/ (operator's real case) ---
+# --- Relocated siblings referenced from INSIDE references/ ---
 #
-# The real ``pergamon-municipal-officials`` folder keeps requirements.md and
-# rubric.md at the root, while its references/ files mention them as bare inline
-# code paths (lines copied verbatim below). Read from references/, the bare name
-# resolves to references/<name> -- exactly where relocation puts the file. Those
-# links were dangling locally and become CORRECT after the move, so the merge
-# must accept them verbatim instead of refusing "ambiguous inline filepath".
-# The original fixtures only referenced the moved files from the root SKILL.md,
-# which is why the shipped 0.96.0 dead-ended on the operator's tree.
+# A real-world shape: requirements.md and rubric.md sit at the skill root while
+# files under references/ mention them as bare inline code paths (table rows
+# below mirror such a tree). Read from references/, the bare name resolves to
+# references/<name> -- exactly where relocation puts the file. Those links were
+# dangling locally and become CORRECT after the move, so the merge must accept
+# them verbatim instead of refusing "ambiguous inline filepath". The earlier
+# fixtures only referenced the moved files from the root SKILL.md, which is why
+# this shape dead-ended every strategy.
 
 _ENRICHMENT_LINE = (
     "| `dob_coverage` | The run-level floor is **99%** of rows carrying a `dob_value`, "
@@ -437,3 +437,16 @@ def test_inline_path_to_relocated_basename_elsewhere_still_refuses(tmp_path: Pat
     with pytest.raises(adoption.AdoptionError) as caught:
         adoption.build_proposal(ALIAS, adoption.read_tree(folder), remote, resolver=FaithfulModel())
     assert caught.value.code == "adoption-needs-choice"
+    assert str(caught.value) == "ambiguous inline filepath"
+
+
+def test_merged_skill_md_keeps_terminal_newline(tmp_path: Path) -> None:
+    folder, remote, _local, _hub = _municipal(tmp_path)
+
+    proposal = adoption.build_proposal(
+        ALIAS, adoption.read_tree(folder), remote, resolver=FaithfulModel()
+    )
+
+    assert proposal.document is not None
+    skill = {f.path: f.content for f in proposal.document.files}["SKILL.md"]
+    assert skill.endswith("\n") and not skill.endswith("\n\n\n")
