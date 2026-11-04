@@ -1326,10 +1326,15 @@ def _frame_is_exact(
       function of that identical prefix — equal by construction;
     * spans: the same journal inode and lineage (``journal_generation``, checked
       by the caller) means kept rows were read from the same bytes;
-    * a COUNT over the base's suffix ids catches the one shape the first point
-      does not: an id whose last occurrence was past the cut in ``base`` but
-      whose surviving occurrence lies below it in ``index``. ``_apply_frame``
-      would drop it, so the counts would disagree.
+    * ``_apply_frame`` deletes every id whose base ordinal is past the cut
+      ("dropped") and re-adds the tail. So the result is right exactly when each
+      dropped id either REAPPEARS at or past the cut in ``index`` (it is then in
+      the tail) or is gone from ``index`` altogether; a dropped id whose
+      surviving occurrence lies below the cut would be lost. That is checked
+      per id — not as a count, which two errors can balance (review round 2,
+      R2-m1: ``[a@0,b@1,a@2]`` -> ``[a@0,b@1,c@2,b@3]`` counted equal while
+      dropping ``a``). Kept ids are right by the shared
+      prefix because tail ids always override them. Cost: O(suffix + dropped).
     """
     rows_keep = frame["keep"]["rows"]
     if not (base.source_views.origins_complete and index.source_views.origins_complete):
@@ -1341,8 +1346,9 @@ def _frame_is_exact(
         for fact in base.source_projection_facts[rows_keep:]
         if fact["id"] and base.journal_rows.get(fact["id"], -1) >= rows_keep
     }
-    kept = len(base.journal_rows) - len(dropped)
-    return kept + len(frame["tail"]["journal_rows"]) == len(index.journal_rows)
+    # Absent from ``index`` is also right (the delete stands); only a survivor
+    # BELOW the cut — which the delete would lose — refuses the frame.
+    return all(index.journal_rows.get(id_, rows_keep) >= rows_keep for id_ in dropped)
 
 
 def _write_durable(path: Path, data: bytes) -> None:
@@ -1390,21 +1396,27 @@ def _retire(directory: Path, session_id: str, keep: dict[str, Any] | None) -> No
 def _staged_is_orphan(entry: Path, pid: int) -> bool:
     """A staged snapshot nobody can still be writing.
 
-    Called under the session's publish lock, so a staged file of THIS session
-    whose writer is alive would have to be a writer holding that lock — i.e. none
-    — except across processes that crashed mid-write. Our own pid's temp is
-    always ours to drop here (the write that made it has returned). A dead pid's
-    is an orphan; a live foreign pid's is one only past the grace period, because
-    pids are reused and a crashed writer's number may now name another process.
+    Called under the session's publish lock. OUR OWN PID'S temp is always ours to
+    drop: ``_publish_lock`` takes the in-process ``_PUBLISH_THREADS`` lock as well
+    as the cross-process flock, so no other thread of this process can be
+    mid-write on this session's snapshot while we hold it — the write that made
+    the temp has returned (and its ``finally`` failed to unlink it). A dead pid's
+    temp is an orphan. A live foreign pid's is one only past the grace period,
+    because pids are reused and a crashed writer's number may now name another
+    process.
+
+    LIVENESS GOES THROUGH ``procstate.pid_liveness``, NEVER ``os.kill(pid, 0)``
+    (review round 2, R2-M2): on Windows CPython's ``os.kill`` with signal 0 calls
+    ``TerminateProcess``, and the pid here is by construction a stale one that may
+    now name an unrelated process. Only a proven ``False`` is "dead"; ``None``
+    (unprovable) is treated as alive and falls through to the grace period.
     """
+    from local_operator.procstate import pid_liveness
+
     if pid == os.getpid():
         return True
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+    if pid_liveness(pid) is False:
         return True
-    except OSError:
-        pass  # exists but not ours to signal: treat as alive
     try:
         return time.time() - entry.stat().st_mtime > _STAGED_GRACE_S
     except OSError:
@@ -2054,7 +2066,13 @@ def patch_naming(config_dir: str | Path, session_id: str, items: dict[str, Any])
     lock and unions it with this write winning. An earlier version of this
     docstring claimed the whole function was under that lock; it never was.
     """
-    raw, index = _read_indexed(config_dir, session_id)
+    # ``remember=True`` because this read PUBLISHES (review round 2, R2-M1): the
+    # write below computes its delta against the memo's ``base``. A read that
+    # does not fill the memo leaves ``write_index`` with no base on a cold or
+    # foreign-published head, and a naming-only patch then re-serialised the
+    # whole snapshot — once per named turn. The memo is replaced by the
+    # publication straight after, so this retains nothing a probe would not.
+    raw, index = _read_indexed(config_dir, session_id, remember=True)
     if index is not None and raw is not None:
         naming = raw.get("naming")
         merged = dict(naming) if isinstance(naming, dict) else {}

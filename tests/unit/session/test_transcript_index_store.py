@@ -513,3 +513,33 @@ def test_frame_exactness_rejects_a_kept_id_that_moved_below_the_cut():
     frame = ti._delta_frame(dup, survivor)
     assert frame["keep"]["rows"] == 2
     assert not ti._frame_is_exact(dup, survivor, frame)
+    # Review round 2 (R2-m1): a kept id recurring in the tail must not balance a
+    # dropped one. ``a`` survives only below the cut, while ``b`` reappears.
+    base2 = index([fact("a", 0), fact("b", 1), fact("a", 2)])
+    new2 = index([fact("a", 0), fact("b", 1), fact("c", 2), fact("b", 3)])
+    frame = ti._delta_frame(base2, new2)
+    assert frame["keep"]["rows"] == 2
+    assert not ti._frame_is_exact(base2, new2, frame), "a count-cancelled frame was accepted"
+
+
+def test_a_cold_process_naming_patch_writes_only_the_head(tmp_path):
+    """Review round 2 (R2-M1): no memo (fresh process, or another process
+    published last) must not turn a naming patch into a whole snapshot write."""
+    _append(tmp_path, _rows(0, 30))
+    ti.refresh_index(tmp_path, SID)
+    _append(tmp_path, _rows(30, 1))
+    ti.refresh_index(tmp_path, SID)
+    before = _store_of(tmp_path)
+    assert before is not None and before["frames"] == 1
+    snapshot = ti._store_paths(ti._index_dir(tmp_path), SID, before)[0]
+    snapshot_inode = snapshot.stat().st_ino
+    ti._reset_for_tests()  # a cold process: nothing memoised
+    assert ti.read_index(tmp_path, SID) is not None  # a read-only look first
+    assert ti.patch_naming(tmp_path, SID, {"u00004": {"name": "Cold", "summary": "s"}})
+    after = _store_of(tmp_path)
+    assert after == before, "a cold naming patch rewrote the snapshot or delta"
+    assert snapshot.stat().st_ino == snapshot_inode
+    snapshots = [p for p in ti._index_dir(tmp_path).iterdir() if p.suffix == ".snapshot"]
+    assert snapshots == [snapshot]
+    cold = _cold(tmp_path)
+    assert cold is not None and cold.naming["items"]["u00004"]["name"] == "Cold"
