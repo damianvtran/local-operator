@@ -1,0 +1,12 @@
+{
+  "cli.hub_org.ineligible": "Les catalogues d’organisation sont une fonctionnalité Radient Team ; ce compte n’appartient à aucune organisation au forfait Team.",
+  "cli.hub_org.choose_org": "Vous appartenez à plusieurs organisations au forfait Team ; passez --org avec l’une d’elles :",
+  "cli.hub_org.resolved": "« {ref} » résolu → {hub_id}",
+  "cli.hub_org.ambiguous": "« {ref} » correspond à plusieurs éléments ; passez l’id de hub ou un nom plus long :",
+  "cli.hub_org.not_found": "Aucun élément de l’organisation « {org} » ne correspond à « {ref} ».",
+  "cli.hub_org.unlinked_copies": "copies locales non liées : {names} — lancez `lop hub org pull` pour les adopter",
+  "cli.hub_org.plan": "{count, plural, one {# élément} many {# d’éléments} other {# éléments}} à récupérer, {conflicts, plural, one {# copie locale non liée} many {# de copies locales non liées} other {# copies locales non liées}} ; relancez avec --yes pour appliquer.",
+  "cli.hub_org.adopted_heading": "Copies locales adoptées :",
+  "cli.hub_org.last_enrol": "Dernière synchronisation automatique : {at}, {pulled, plural, one {# élément récupéré} many {# d’éléments récupérés} other {# éléments récupérés}}",
+  "cli.hub_org.list_failed": "Impossible de lister les éléments {kind} de l’organisation : {cause}"
+}

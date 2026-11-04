@@ -1,0 +1,12 @@
+{
+  "cli.hub_org.ineligible": "Danh mục tổ chức là tính năng của Radient Team; tài khoản này không thuộc tổ chức nào dùng gói Team.",
+  "cli.hub_org.choose_org": "Bạn thuộc nhiều tổ chức dùng gói Team; truyền --org với một trong các tổ chức sau:",
+  "cli.hub_org.resolved": "đã phân giải “{ref}” → {hub_id}",
+  "cli.hub_org.ambiguous": "“{ref}” khớp với nhiều mục; truyền id hub hoặc tên dài hơn:",
+  "cli.hub_org.not_found": "Không có mục nào trong tổ chức “{org}” khớp với “{ref}”.",
+  "cli.hub_org.unlinked_copies": "bản cục bộ chưa liên kết: {names} — chạy `lop hub org pull` để đưa vào quản lý",
+  "cli.hub_org.plan": "{count, plural, other {# mục}} cần pull, {conflicts, plural, other {# bản cục bộ chưa liên kết}}; chạy lại với --yes để áp dụng.",
+  "cli.hub_org.adopted_heading": "Bản cục bộ đã đưa vào quản lý:",
+  "cli.hub_org.last_enrol": "Lần đồng bộ tự động gần nhất: {at}, {pulled, plural, other {đã pull # mục}}",
+  "cli.hub_org.list_failed": "Không thể liệt kê các mục {kind} của tổ chức: {cause}"
+}

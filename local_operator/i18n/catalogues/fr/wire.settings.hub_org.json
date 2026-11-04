@@ -1,0 +1,8 @@
+{
+  "wire.settings.hub_org.auto_enrol.help": "Récupérer les nouveaux agents, équipes et compétences et s’y abonner.",
+  "wire.settings.hub_org.auto_enrol.label": "Ajouter les nouveaux éléments",
+  "wire.settings.hub_org.auto_enrol.off.description": "seulement via lop hub org pull",
+  "wire.settings.hub_org.auto_enrol.on.description": "les ajouter automatiquement",
+  "wire.settings.hub_org.description": "Votre organisation partage des agents, des équipes et des compétences via son Agent Hub privé. Choisissez si les nouveaux sont ajoutés automatiquement à cette machine.",
+  "wire.settings.hub_org.title": "Agent Hub de l’organisation"
+}

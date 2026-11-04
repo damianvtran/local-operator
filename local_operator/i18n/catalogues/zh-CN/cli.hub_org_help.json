@@ -1,0 +1,14 @@
+{
+  "cli.hub_org_help.org": "你所在组织共享的智能体、团队和技能（Radient Team）",
+  "cli.hub_org_help.list": "列出组织目录及每项在本地的状态",
+  "cli.hub_org_help.pull": "pull组织目录并持续订阅其更新",
+  "cli.hub_org_help.org_flag": "组织租户ID（默认为你唯一符合条件的组织）",
+  "cli.hub_org_help.kind": "仅限此类型（可重复）",
+  "cli.hub_org_help.name": "仅限此项：hub ID、名称或唯一的名称前缀（可重复）",
+  "cli.hub_org_help.json": "输出机器可读的JSON",
+  "cli.hub_org_help.on_conflict": "对同名但未链接的本地副本：adopt-link保留你的内容并建立链接，adopt采用hub副本，reconcile进行merge，skip保持不变",
+  "cli.hub_org_help.no_subscribe": "pull但不订阅更新",
+  "cli.hub_org_help.auto_push": "同时自动发布你的本地修改（仅限组织所有者和管理员）",
+  "cli.hub_org_help.no_llm": "绝不调用模型来merge不同的副本",
+  "cli.hub_org_help.yes": "执行计划，而不只是打印出来"
+}

@@ -1,0 +1,12 @@
+{
+  "cli.hub_org.ineligible": "组织目录是Radient Team功能；此账号不属于任何Team套餐组织。",
+  "cli.hub_org.choose_org": "你属于多个Team套餐组织；用--org指定以下之一：",
+  "cli.hub_org.resolved": "已解析“{ref}”→ {hub_id}",
+  "cli.hub_org.ambiguous": "“{ref}”匹配到多项；改用hub ID或更长的名称：",
+  "cli.hub_org.not_found": "组织“{org}”中没有与“{ref}”匹配的项。",
+  "cli.hub_org.unlinked_copies": "未链接的本地副本：{names} — 运行`lop hub org pull`接管",
+  "cli.hub_org.plan": "待pull：{count, plural, other {#项}}，{conflicts, plural, other {#个未链接的本地副本}}；使用--yes重新运行以应用。",
+  "cli.hub_org.adopted_heading": "已接管的本地副本：",
+  "cli.hub_org.last_enrol": "上次自动同步：{at}，{pulled, plural, other {已pull #项}}",
+  "cli.hub_org.list_failed": "无法列出组织的{kind}项：{cause}"
+}
