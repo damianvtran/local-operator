@@ -137,31 +137,47 @@ async def test_person_arriving_during_host_settlement_is_consumed_once_before_ac
         await session.dispose()
 
 
-def timeout_state(session, events, steer_calls):
+# One constant feeds both the wait and its diagnostic so the message cannot drift.
+SETTLE_TIMEOUT_S = 8
+
+
+def timeout_state(session, events, steer_attempts, steer_returns):
     """Name which settle conjunct stayed true when a wait times out.
 
     A hosted run failed with a bare TimeoutError, leaving a product hang (the
     steer never produced the second turn) indistinguishable from a starved
-    runner. Read-only: no behaviour of the session is touched.
+    runner. Read-only: no behaviour of the session is touched. Every field is
+    read defensively (``n/a`` on failure) so this can never replace the
+    original timeout with an unrelated AttributeError.
     """
+
+    def field(read):
+        try:
+            return read()
+        except Exception:
+            return "n/a"
+
     ends = [event for event in events if isinstance(event, AgentEndEvent)]
     tail = ", ".join(
         f"{getattr(event, 'type', type(event).__name__)}"
         + (f"(quiet_accepted={event.quiet_accepted})" if isinstance(event, AgentEndEvent) else "")
         for event in events[-12:]
     )
-    tasks = [
-        f"{task.get_name()}:{'done' if task.done() else 'pending'}"
-        for task in sorted(asyncio.all_tasks(), key=lambda task: task.get_name())
-    ][:10]
-    queue = getattr(session, "_steering_queue", None)
+    tasks = field(
+        lambda: "; ".join(
+            f"{task.get_name()}:{'done' if task.done() else 'pending'}"
+            for task in sorted(asyncio.all_tasks(), key=lambda task: task.get_name())[:10]
+        )
+    )
     return (
-        "cause unknown, not a fix: new owner never settled in 8s; "
-        f"agent_end_count={len(ends)} (needs 2), is_streaming={session.is_streaming}, "
-        f"turn_lock_locked={session._turn_lock.locked()}, steer_calls={steer_calls[0]}, "
-        f"steering_queue_size={queue.qsize() if queue is not None else 'n/a'}, "
-        f"continuation_queue={len(getattr(session, '_continuation_queue', []))}, "
-        f"last_events=[{tail}], tasks=[{'; '.join(tasks)}]"
+        f"cause unknown, not a fix: new owner never settled in {SETTLE_TIMEOUT_S}s; "
+        f"agent_end_count={len(ends)} (needs 2), "
+        f"is_streaming={field(lambda: session.is_streaming)}, "
+        f"turn_lock_locked={field(lambda: session._turn_lock.locked())}, "
+        f"steer attempts={steer_attempts[0]} returns={steer_returns[0]}, "
+        f"steering_queue_size={field(lambda: session._steering_queue.qsize())}, "
+        f"continuation_queue={field(lambda: len(session._continuation_queue))}, "
+        f"last_events=[{tail}], tasks=[{tasks}]"
     )
 
 
@@ -170,15 +186,19 @@ async def test_input_after_accepted_end_gets_a_new_pipeline_and_generation(tmp_p
     stream = quiet_stream([StreamTextDelta(delta="new answer"), StreamEndEvent(stop_reason="stop")])
     session = make_session(tmp_path, stream)
     events = []
-    steer_calls = [0]
+    steer_attempts = [0]
+    steer_returns = [0]
 
     def observe(event):
         events.append(event)
         if isinstance(event, AgentEndEvent) and event.quiet_accepted:
             # The composer uses steer while this owner still holds its lock.
             # prompt() intentionally rejects that phase with TurnInFlight.
+            steer_attempts[0] += 1
             session.steer("new-person-next-owner", message_id="qa-next-owner-person")
-            steer_calls[0] += 1  # counted after steer returned, so a raise is visible
+            # attempts=1 returns=0 means steer raised (the dispatcher swallows handler
+            # exceptions); attempts=0 means this branch was never reached.
+            steer_returns[0] += 1
 
     session.subscribe(observe)
     try:
@@ -193,9 +213,11 @@ async def test_input_after_accepted_end_gets_a_new_pipeline_and_generation(tmp_p
                 await asyncio.sleep(0)
 
         try:
-            await asyncio.wait_for(new_owner_settled(), timeout=8)
-        except TimeoutError:
-            raise AssertionError(timeout_state(session, events, steer_calls)) from None
+            await asyncio.wait_for(new_owner_settled(), timeout=SETTLE_TIMEOUT_S)
+        except TimeoutError as exc:
+            raise AssertionError(
+                timeout_state(session, events, steer_attempts, steer_returns)
+            ) from exc
         ends = [event for event in events if isinstance(event, AgentEndEvent)]
         starts = [event for event in events if getattr(event, "type", "") == "agent_start"]
         assert len(stream.requests) == 2 and len(ends) == len(starts) == 2
