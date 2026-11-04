@@ -359,7 +359,7 @@ def test_sweep_missing_reclaims_store_files_of_deleted_sessions_only(tmp_path):
     _append(tmp_path, _rows(0, 10))
     ti.refresh_index(tmp_path, SID)
     directory = ti._index_dir(tmp_path)
-    orphan = directory / f"deadbeef0001.snap.{'0' * 32}.json"
+    orphan = directory / f"deadbeef0001.snap.{'0' * 32}.snapshot"
     orphan.write_text("{}")
     live = sorted(p.name for p in directory.iterdir() if p.name != orphan.name)
     ti._sweep_missing(tmp_path)
@@ -383,3 +383,133 @@ def test_a_shrunk_journal_rebuilds_into_a_fresh_snapshot(tmp_path):
     cold = _cold(tmp_path)
     assert cold is not None
     assert _comparable(cold) == _comparable(_full_scan(tmp_path))
+
+
+def _origin_main_sweep(config_dir: Path) -> None:
+    """VERBATIM predicate of ``_sweep_missing`` as shipped before the store
+    (origin/main 756d853a4bf, transcript_index.py): every older build that can
+    still be running beside this one sweeps the shared cache directory so."""
+    entries = list((config_dir / "cache" / "transcript_index").iterdir())
+    sessions = config_dir / "sessions"
+    for entry in entries:
+        if entry.suffix != ".json":
+            continue
+        try:
+            if not (sessions / entry.stem).is_dir():
+                entry.unlink()
+        except OSError:
+            continue
+
+
+def test_an_old_builds_sweep_leaves_store_files_alone(tmp_path):
+    """Review R2 / QA Q1: a pre-store build's full scan must not strip snapshots."""
+    _append(tmp_path, _rows(0, 20))
+    ti.refresh_index(tmp_path, SID)
+    _append(tmp_path, _rows(20, 1))
+    ti.refresh_index(tmp_path, SID)
+    store = _store_of(tmp_path)
+    assert store is not None and store["frames"] == 1
+    snapshot, delta = ti._store_paths(ti._index_dir(tmp_path), SID, store)
+    _origin_main_sweep(tmp_path)
+    assert snapshot.exists() and delta.exists(), "an old build's sweep deleted the store"
+    cold = _cold(tmp_path)
+    assert cold is not None
+    assert _comparable(cold) == _comparable(_full_scan(tmp_path))
+
+
+def test_a_read_only_probe_does_not_retain_a_parse(tmp_path):
+    """Review R1: probes/reads hit the memo but never fill it (memory)."""
+    _append(tmp_path, _rows(0, 20))
+    ti.refresh_index(tmp_path, SID)
+    with ti._PARSED_LOCK:
+        ti._PARSED.clear()
+    assert ti.probe_index(tmp_path, SID).state == "ready"
+    assert ti.read_index(tmp_path, SID) is not None
+    assert ti.patch_naming(tmp_path, SID, {"u00001": {"name": "n", "summary": "s"}})
+    with ti._PARSED_LOCK:
+        # patch_naming PUBLISHES, so its write is remembered; the reads are not.
+        assert len(ti._PARSED) <= 1
+        ti._PARSED.clear()
+    assert ti.probe_index(tmp_path, SID).state == "ready"
+    assert ti.read_index(tmp_path, SID) is not None
+    with ti._PARSED_LOCK:
+        assert not ti._PARSED, "a read-only probe retained a whole parsed index"
+
+
+def test_a_missing_delta_with_committed_bytes_resnapshots_instead_of_padding(tmp_path):
+    """Review R5: never append after zero padding to a vanished delta."""
+    _append(tmp_path, _rows(0, 20))
+    ti.refresh_index(tmp_path, SID)
+    _append(tmp_path, _rows(20, 1))
+    ti.refresh_index(tmp_path, SID)
+    store = _store_of(tmp_path)
+    assert store is not None and store["length"] > 0
+    ti._store_paths(ti._index_dir(tmp_path), SID, store)[1].unlink()
+    _append(tmp_path, _rows(21, 1))
+    assert ti.refresh_index(tmp_path, SID) is not None
+    fresh = _store_of(tmp_path)
+    assert fresh is not None and fresh["snapshot"] != store["snapshot"] and fresh["frames"] == 0
+    cold = _cold(tmp_path)
+    assert cold is not None
+    assert _comparable(cold) == _comparable(_full_scan(tmp_path))
+
+
+def test_an_orphaned_staged_snapshot_is_reclaimed(tmp_path):
+    """Review R4: a dead writer's staged snapshot does not leak forever."""
+    _append(tmp_path, _rows(0, 20))
+    ti.refresh_index(tmp_path, SID)
+    directory = ti._index_dir(tmp_path)
+    dead = directory / f"{SID}.snap.{'a' * 32}.snapshot.999999999.tmp"
+    dead.write_text("partial")
+    other = directory / f"deadbeef0002.snap.{'b' * 32}.snapshot.999999999.tmp"
+    other.write_text("partial")
+    # Force a moved publication (rebuild) so _retire runs for this session.
+    path = _journal(tmp_path)
+    temp = path.with_suffix(".rewrite")
+    temp.write_text(path.read_text())
+    os.replace(temp, path)
+    assert ti.refresh_index(tmp_path, SID) is not None
+    assert not dead.exists(), "a dead pid's staged snapshot survived"
+    assert other.exists(), "another session's staged file was touched"
+
+
+def test_frame_exactness_rejects_a_kept_id_that_moved_below_the_cut():
+    """Q3's O(suffix) check must still refuse what the O(history) one refused."""
+
+    def fact(id_: str, seq: int) -> dict[str, Any]:
+        return {"id": id_, "seq": seq, "source_class": "plain_message", "flags": []}
+
+    def index(facts: list[dict[str, Any]]) -> ti.TranscriptIndex:
+        rows = {f["id"]: f["seq"] for f in facts}
+        return ti.TranscriptIndex(
+            checkpoints=[],
+            messages=[],
+            sig={"size": 100, "mtime": 1.0, "inode": 7, "last_id": facts[-1]["id"]},
+            coverage={},
+            naming={},
+            scan=ti.ScanState(rows=len(facts), offset=100, window_offset=0, window_rows=0),
+            journal_rows=rows,
+            journal_ranges={k: (v, v + 1) for k, v in rows.items()},
+            source_projection_facts=facts,
+        )
+
+    base = index([fact("a", 0), fact("b", 1), fact("x", 2)])
+    grown = index([fact("a", 0), fact("b", 1), fact("x", 2), fact("c", 3)])
+    frame = ti._delta_frame(base, grown)
+    assert ti._frame_is_exact(base, grown, frame)
+    # A suffix rewrite that keeps the ordinals below the cut is exact too, and
+    # applying it reproduces the rewritten map.
+    rewritten = index([fact("a", 0), fact("b", 1), fact("c", 2)])
+    frame = ti._delta_frame(base, rewritten)
+    assert frame["keep"]["rows"] == 2 and ti._frame_is_exact(base, rewritten, frame)
+    applied = json.loads(json.dumps(ti._document(base)))
+    ti._apply_frame(applied, json.loads(json.dumps(frame)))
+    assert applied["journal_rows"] == rewritten.journal_rows
+    # The shape the count exists for: ``a`` recurs past the cut in ``base`` (its
+    # LAST ordinal is 2), and in ``index`` only its ordinal-0 row survives.
+    # Applying the frame would drop ``a`` entirely, so exactness must refuse.
+    dup = index([fact("a", 0), fact("b", 1), fact("a", 2)])
+    survivor = index([fact("a", 0), fact("b", 1), fact("c", 2)])
+    frame = ti._delta_frame(dup, survivor)
+    assert frame["keep"]["rows"] == 2
+    assert not ti._frame_is_exact(dup, survivor, frame)

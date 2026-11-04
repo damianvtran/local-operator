@@ -2333,14 +2333,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     ),
     # The incremental store (snapshot + delta beside the head) lives in the same
     # cache directory. `_publish_store` renames its own staged snapshot temp onto
-    # a `<sid>.snap.<32-hex>.json` FILE and unlinks that temp on failure;
+    # a `<sid>.snap.<32-hex>.snapshot` FILE and unlinks that temp on failure;
     # `_retire` unlinks only names matching `_STORE_FILE` (that exact snapshot or
     # delta FILE shape) for the head it just superseded. None is a directory, and
     # every path is the cache root + a fixed shape, never a `sessions/` path.
     (
         "local_operator/session/transcript_index.py::_publish_store",
         "<path>.replace",
-        "staged temp FILE -> <sid>.snap.<hex>.json store FILE under the cache root",
+        "staged temp FILE -> <sid>.snap.<hex>.snapshot store FILE under the cache root",
     ),
     (
         "local_operator/session/transcript_index.py::_publish_store",
@@ -2350,7 +2350,9 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/session/transcript_index.py::_retire",
         "<path>.unlink",
-        "superseded <sid>.snap/.delta store FILEs, matched by _STORE_FILE's fixed shape",
+        "superseded <sid>.snap/.delta store FILEs (_STORE_FILE) and this session's "
+        "orphaned staged-snapshot temp FILEs (_STAGED_FILE, dead pid or past grace)",
+        2,
     ),
     (
         "local_operator/session/transcript.py::Transcript._write_entries",

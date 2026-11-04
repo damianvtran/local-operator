@@ -1064,7 +1064,7 @@ def read_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | Non
 # it becomes a HEAD of a few KB that also carries ``coverage``, ``naming`` and a
 # ``store`` pointer:
 #
-#   ``<sid>.snap.<id>.json``  an IMMUTABLE whole document (base's format), written
+#   ``<sid>.snap.<id>.snapshot``  an IMMUTABLE whole document (base's JSON), written
 #                             once per compaction, never modified afterwards.
 #   ``<sid>.delta.<id>.log``  append-only frames, each one the re-derived suffix
 #                             of one publication, bound to that snapshot.
@@ -1120,9 +1120,26 @@ _LIST_SECTIONS = ("checkpoints", "messages", "runs", "source_projection_facts")
 _STORE_ID = re.compile(r"[0-9a-f]{32}\Z")
 #: The two store file shapes, and nothing else, are what ``_retire`` and
 #: ``_sweep_missing`` may reclaim; group 1 is the owning session id.
+#:
+#: NEITHER SHAPE MAY END IN ``.json``. Builds before this store sweep the cache
+#: directory with "unlink any ``*.json`` whose STEM is not a session directory"
+#: (``_sweep_missing`` as shipped through 0.96.1), and the stem of
+#: ``<sid>.snap.<hex>.json`` is ``<sid>.snap.<hex>`` — so one old process doing
+#: one full scan deleted every live snapshot (PR #3387 review R2 / QA Q1). Old
+#: running sessions keep that code in memory across ``lop-update``, so the
+#: mixed fleet is the normal state; a non-``.json`` suffix is what that sweep
+#: provably skips. ``test_an_old_builds_sweep_leaves_store_files_alone`` runs a
+#: copy of the old predicate against a store directory.
 _STORE_FILE = re.compile(
-    r"([A-Za-z0-9_-]{1,128})\.(?:snap\.[0-9a-f]{32}\.json|delta\.[0-9a-f]{32}\.log)\Z"
+    r"([A-Za-z0-9_-]{1,128})\.(?:snap\.[0-9a-f]{32}\.snapshot|delta\.[0-9a-f]{32}\.log)\Z"
 )
+#: A snapshot being staged: ``<snapshot name>.<pid>.tmp``. A writer that dies
+#: mid-write leaves one the size of the whole index; ``_retire`` reclaims it once
+#: its pid is gone (or it is older than ``_STAGED_GRACE_S`` — pids are reused).
+_STAGED_FILE = re.compile(
+    r"([A-Za-z0-9_-]{1,128})\.snap\.[0-9a-f]{32}\.snapshot\.([0-9]{1,10})\.tmp\Z"
+)
+_STAGED_GRACE_S = 3600.0
 
 #: Parse memo: head path -> (head identity, typed index, store, small raw fields).
 #: Bounded like the resident set. Worker threads read and write it (refreshes run
@@ -1171,7 +1188,7 @@ def _store_paths(directory: Path, session_id: str, store: dict[str, Any]) -> tup
     if not (_STORE_ID.fullmatch(str(snapshot)) and _STORE_ID.fullmatch(str(delta))):
         raise ValueError("unsafe store identity")
     return (
-        directory / f"{session_id}.snap.{snapshot}.json",
+        directory / f"{session_id}.snap.{snapshot}.snapshot",
         directory / f"{session_id}.delta.{delta}.log",
     )
 
@@ -1296,20 +1313,35 @@ def _frame_is_exact(
     """Would applying ``frame`` to ``base`` reproduce ``index``'s row maps?
 
     The list sections are exact by construction (prefix + tail). The two id maps
-    are reconstructed by ordinal, which is only right when every id ``base`` kept
-    below the cut has the same ordinal and span in ``index`` — true for every
-    append, and checked rather than assumed so a refresh shape this module does
-    not produce today falls back to a whole write instead of a wrong map.
+    are rebuilt by ordinal, which is right only when the ids kept below the cut
+    keep their ordinal and span — true for every append, and CHECKED so a
+    refresh shape this module does not produce falls back to a whole write.
+
+    O(SUFFIX), not O(history) (QA Q3: walking all 97k rows cost ~56 ms per
+    append). The checks, and why they suffice:
+
+    * both views are ``origins_complete`` (``__post_init__`` already proved
+      ``journal_rows`` == last-ordinal-per-id of the facts table), and the facts
+      prefix up to the cut is shared, so the kept ids and their ordinals are a
+      function of that identical prefix — equal by construction;
+    * spans: the same journal inode and lineage (``journal_generation``, checked
+      by the caller) means kept rows were read from the same bytes;
+    * a COUNT over the base's suffix ids catches the one shape the first point
+      does not: an id whose last occurrence was past the cut in ``base`` but
+      whose surviving occurrence lies below it in ``index``. ``_apply_frame``
+      would drop it, so the counts would disagree.
     """
     rows_keep = frame["keep"]["rows"]
-    kept = 0
-    for id_, seq in base.journal_rows.items():
-        if seq < rows_keep:
-            if index.journal_rows.get(id_) != seq:
-                return False
-            if tuple(index.journal_ranges.get(id_, ())) != tuple(base.journal_ranges[id_]):
-                return False
-            kept += 1
+    if not (base.source_views.origins_complete and index.source_views.origins_complete):
+        return False
+    if base.sig.get("inode") != index.sig.get("inode"):
+        return False
+    dropped = {
+        fact["id"]
+        for fact in base.source_projection_facts[rows_keep:]
+        if fact["id"] and base.journal_rows.get(fact["id"], -1) >= rows_keep
+    }
+    kept = len(base.journal_rows) - len(dropped)
     return kept + len(frame["tail"]["journal_rows"]) == len(index.journal_rows)
 
 
@@ -1324,7 +1356,7 @@ def _write_durable(path: Path, data: bytes) -> None:
 def _retire(directory: Path, session_id: str, keep: dict[str, Any] | None) -> None:
     """Drop this session's store files the live head no longer names.
 
-    Only files of the fixed ``<sid>.snap.<hex>.json`` / ``<sid>.delta.<hex>.log``
+    Only files of the fixed ``<sid>.snap.<hex>.snapshot`` / ``<sid>.delta.<hex>.log``
     shape are considered, so nothing else in the cache directory is touched; a
     reader that already opened a retired file holds its descriptor and keeps
     reading, and one that resolved a head and finds its file gone retries.
@@ -1338,6 +1370,14 @@ def _retire(directory: Path, session_id: str, keep: dict[str, Any] | None) -> No
     except OSError:
         return
     for entry in entries:
+        staged = _STAGED_FILE.fullmatch(entry.name)
+        if staged is not None:
+            if staged.group(1) == session_id and _staged_is_orphan(entry, int(staged.group(2))):
+                try:
+                    entry.unlink()
+                except OSError:
+                    pass
+            continue
         match = _STORE_FILE.fullmatch(entry.name)
         if match is None or match.group(1) != session_id or entry.name in names:
             continue
@@ -1347,15 +1387,41 @@ def _retire(directory: Path, session_id: str, keep: dict[str, Any] | None) -> No
             continue
 
 
+def _staged_is_orphan(entry: Path, pid: int) -> bool:
+    """A staged snapshot nobody can still be writing.
+
+    Called under the session's publish lock, so a staged file of THIS session
+    whose writer is alive would have to be a writer holding that lock — i.e. none
+    — except across processes that crashed mid-write. Our own pid's temp is
+    always ours to drop here (the write that made it has returned). A dead pid's
+    is an orphan; a live foreign pid's is one only past the grace period, because
+    pids are reused and a crashed writer's number may now name another process.
+    """
+    if pid == os.getpid():
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        pass  # exists but not ours to signal: treat as alive
+    try:
+        return time.time() - entry.stat().st_mtime > _STAGED_GRACE_S
+    except OSError:
+        return False
+
+
 def _publish_store(
     directory: Path, session_id: str, path: Path, index: "TranscriptIndex"
-) -> tuple[dict[str, Any], dict[str, Any] | None, bool]:
-    """Stage ``index`` (CALLER HOLDS THE PUBLISH LOCK): ``(head, store, moved)``.
+) -> tuple[dict[str, Any], dict[str, Any] | None, bool, bool]:
+    """Stage ``index`` (CALLER HOLDS THE PUBLISH LOCK): ``(head, store, moved, created)``.
 
     Writes whatever the commit needs BESIDE the head — a delta frame, a hard link
     or a new snapshot — durably, and returns the document the caller then
     publishes with the head replace (the one commit point). ``moved`` says the
-    store changed identity, so superseded files are reclaimable after the commit.
+    store changed identity, so superseded files are reclaimable after the commit;
+    ``created`` says a new directory entry (link, snapshot or delta) now exists
+    that the head is about to name, so the directory must be synced first.
 
     The delta path runs when the disk publication is the one this process last
     parsed or wrote (memo identity) and ``index`` extends it. Anything else is
@@ -1375,25 +1441,30 @@ def _publish_store(
         if _frame_is_empty(base, frame):
             # Nothing past the base changed (a naming patch, a re-publication):
             # the head alone carries naming/coverage, so no frame is appended.
-            return _head(index, store), store, False
+            return _head(index, store), store, False, False
+        _snapshot_path, delta_path = _store_paths(directory, session_id, store)
+        delta_present = delta_path.exists()
         if (
-            snapshot_bytes
+            # A delta the head says holds committed bytes but which is GONE was
+            # removed behind our back; appending to a fresh file would pad the
+            # committed range with zeros (review R5). Re-snapshot instead.
+            (delta_present or length == 0)
+            and snapshot_bytes
             and length <= snapshot_bytes * _DELTA_COMPACT_FRACTION
             and frames < _DELTA_COMPACT_FRAMES
         ):
-            _snapshot_path, delta_path = _store_paths(directory, session_id, store)
             record = _frame(frame)
             # Truncate to the COMMITTED length first: bytes past it are a torn
             # append from a writer that died before its head landed. No head
             # names them, and they must not end up between two committed frames.
-            with delta_path.open("r+b" if delta_path.exists() else "wb") as handle:
+            with delta_path.open("r+b" if delta_present else "wb") as handle:
                 handle.truncate(length)
                 handle.seek(length)
                 handle.write(record)
                 handle.flush()
                 os.fsync(handle.fileno())
             new_store = dict(store, frames=frames + 1, length=length + len(record))
-            return _head(index, new_store), new_store, False
+            return _head(index, new_store), new_store, False, not delta_present
     if frame is not None and store is None:
         # MIGRATION: the classic document on disk is exactly ``base`` (memo
         # identity, checked under this lock). Link it as the snapshot instead of
@@ -1414,11 +1485,11 @@ def _publish_store(
                 record = _frame(frame)
                 _write_durable(delta_path, record)
                 new_store.update(frames=1, length=len(record))
-                return _head(index, new_store), new_store, True
+                return _head(index, new_store), new_store, True, True
     document = _document(index)
     body = json.dumps(document, separators=(",", ":")).encode("utf-8")
     if len(body) < _STORE_MIN_BYTES:
-        return document, None, store is not None
+        return document, None, store is not None, False
     new_store = _new_store(len(body))
     snapshot_path, _delta_path = _store_paths(directory, session_id, new_store)
     staged = snapshot_path.with_name(f"{snapshot_path.name}.{os.getpid()}.tmp")
@@ -1427,7 +1498,7 @@ def _publish_store(
         staged.replace(snapshot_path)
     finally:
         staged.unlink(missing_ok=True)
-    return _head(index, new_store), new_store, True
+    return _head(index, new_store), new_store, True, True
 
 
 def _new_store(snapshot_bytes: int) -> dict[str, Any]:
@@ -1480,7 +1551,7 @@ def _hydration_bytes(head_bytes: int, store: Any) -> int:
 
 
 def _read_indexed(
-    config_dir: str | Path, session_id: str
+    config_dir: str | Path, session_id: str, *, remember: bool = False
 ) -> tuple[dict[str, Any] | None, "TranscriptIndex | None"]:
     """``(raw, index)`` for the publication on disk, reusing this process's parse.
 
@@ -1494,6 +1565,14 @@ def _read_indexed(
     naming, store) plus the receipt. Every caller of this pairing reads exactly
     those from it (``preserved_naming``, ``patch_naming``'s receipt); a consumer
     that needs the bulk sections calls ``_read_raw`` itself.
+
+    ``remember`` IS ONLY FOR THE PATHS THAT PUBLISH. A cold parse is memoised
+    only by ``refresh_index`` (its next step is the write that needs ``base``)
+    and by ``write_index`` itself after a commit. Read-only callers —
+    ``probe_index`` (boot prewarm probes up to 32 journals), ``read_index``,
+    ``patch_naming``'s look — still HIT the memo but never fill it: retaining
+    their parse kept a whole typed index alive per probed session (review R1:
+    379 MB vs 130 MB RSS after one probe of the 62.9 MB fixture).
     """
     path = index_path(config_dir, session_id)
     try:
@@ -1514,7 +1593,7 @@ def _read_indexed(
         return raw, _detached(memo[1], identity)
     raw = _read_raw(config_dir, session_id)
     index = _index_from_raw(raw)
-    if raw is not None and index is not None:
+    if remember and raw is not None and index is not None:
         receipt = raw.get("_publication_identity")
         if isinstance(receipt, tuple) and len(receipt) == 3:
             _remember_parse(path, receipt, index, raw)
@@ -1700,7 +1779,14 @@ def write_index(
                 # Everything BESIDE the head (a delta frame, a migration link or
                 # a new snapshot) is made durable first; the head replace below
                 # is the one commit point, exactly as base's whole document was.
-                head, store, moved = _publish_store(path.parent, session_id, path, index)
+                head, store, moved, created = _publish_store(path.parent, session_id, path, index)
+                if created:
+                    # The head is about to NAME a link/snapshot/delta that was
+                    # just created. Sync the directory first so a power loss
+                    # cannot persist the head's rename without that entry (the
+                    # read side copes — a missing file rescans — but that is a
+                    # rebuild this ordering avoids). Only paid when an entry is new.
+                    index_read_model._fsync_directory(path.parent)
                 with tmp.open("w", encoding="utf-8") as handle:
                     handle.write(json.dumps(head, separators=(",", ":")))
                     handle.flush()
@@ -1934,7 +2020,7 @@ def _sweep_missing(config_dir: str | Path) -> None:
         return
     sessions = Path(config_dir) / "sessions"
     for entry in entries:
-        # A store file is named ``<sid>.snap.<id>.json`` / ``<sid>.delta.<id>.log``:
+        # A store file is named ``<sid>.snap.<id>.snapshot`` / ``<sid>.delta.<id>.log``:
         # its owner is the leading id, never the stem (which would read every live
         # snapshot as an orphan and delete it).
         store = _STORE_FILE.fullmatch(entry.name)
@@ -3527,7 +3613,7 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
             st = path.stat()
         except OSError:
             return None
-        raw, previous = _read_indexed(config_dir, session_id)
+        raw, previous = _read_indexed(config_dir, session_id, remember=True)
         if previous is not None and previous.journal_generation and _sig_matches(previous.sig, st):
             from local_operator.session import index_read_model
 
