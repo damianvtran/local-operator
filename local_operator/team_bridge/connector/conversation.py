@@ -51,7 +51,12 @@ from ..attachments import (
 )
 from ..client import SCREENING_TEMPLATE_V3_SHA256, BridgeRefusal
 from ..types import ConversationFeedRef
-from .batch_screen import allocation_for, take_fetched, take_result
+from .batch_screen import (
+    allocation_for,
+    came_from_void_batch,
+    take_fetched,
+    take_result,
+)
 from .coalesce import CARD_COALESCED, card_is_buffered
 from .wake import (
     CLAIM_TTL_S,
@@ -1303,6 +1308,9 @@ async def handle_conversation_available(
             # The tier rides the durable hold so the bounded retry pass serves
             # a person's DM before an ambient backlog (#3400 m3).
             outcome["tier"] = allocation["tier"]
+            if came_from_void_batch(ref):
+                # Sticky retry-alone mark for the hold row (R2-M1 = S-7).
+                outcome["no_batch"] = True
             if code == "budget_exhausted":
                 # The durable retry fires when the budget refills, never on a
                 # poll; and the owner hears about it once per episode.

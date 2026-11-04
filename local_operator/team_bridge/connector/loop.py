@@ -416,9 +416,13 @@ async def retry_due_holds(
             # A parked stale claim may not be re-driven this pass at all, and
             # a hold the message's OWN content may have provoked is retried
             # alone: re-batching it with innocent neighbours would void their
-            # call again on every pass (#3400 M2 / S-6).
+            # call again on every pass (#3400 M2 / S-6). ``no_batch`` is the
+            # same fact made STICKY across a later re-code (R2-M1 = S-7: a
+            # single re-screen refused for budget re-codes the row
+            # ``budget_exhausted``, which the code filter alone would batch).
             if row["hold_code"] != HOLD_STALE_CLAIM
             and row["hold_code"] not in _RETRY_ALONE_HOLD_CODES
+            and not row.get("no_batch")
         )
         if ref is not None
     ]
@@ -605,6 +609,7 @@ async def retry_due_holds(
                     new_code or "hold",
                     retry_at=_hold_due(outcome.get("retry_at"), _time.time() + gap),
                     tier=outcome.get("tier"),
+                    no_batch=bool(outcome.get("no_batch")),
                 )
             except StoreRefused:
                 pass  # fenced owner: the next live pass owns the row
@@ -697,6 +702,7 @@ def _persist_hold_backoff(
     *,
     retry_at: Any = None,
     tier: Any = None,
+    no_batch: bool = False,
 ) -> None:
     """Write/advance a durable ``screening_holds`` row for a held outcome.
 
@@ -713,7 +719,9 @@ def _persist_hold_backoff(
     attempts = _RETRY_ATTEMPTS.get(message_id, 0)
     due = _hold_due(retry_at, _time.time() + min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S))
     try:
-        store.persist_hold(owner, message_id, str(code)[:64] or "hold", retry_at=due, tier=tier)
+        store.persist_hold(
+            owner, message_id, str(code)[:64] or "hold", retry_at=due, tier=tier, no_batch=no_batch
+        )
     except StoreRefused:
         pass  # fenced owner: the next live pass owns the row
     _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
@@ -885,7 +893,16 @@ async def _run_iteration_inner(
             # TB-04: a hold after consumption gets a DURABLE retry row — the
             # screening_holds schedule is the re-drive path now that refs are
             # consumed once-only, so a stuck delivery is never silently lost.
-            _persist_hold_backoff(store, owner, message_id, str(outcome.get("code") or "hold"))
+            # A pair message is addressed to this agent by construction (the
+            # no-hint tier of ``screening_allocation``), so its hold ranks
+            # there in the retry order, never behind ambient chatter (R2-m1).
+            _persist_hold_backoff(
+                store,
+                owner,
+                message_id,
+                str(outcome.get("code") or "hold"),
+                tier=Store.SCREENING_TIER_ADDRESSED,
+            )
         elif outcome.get("action") == "claimed_elsewhere":
             # R2-3: the ref is consumed below, so a claim left by a connector
             # that died mid-spine must leave a durable retry behind.
@@ -930,6 +947,7 @@ async def _run_iteration_inner(
                 str(outcome.get("code") or "hold"),
                 retry_at=outcome.get("retry_at"),
                 tier=outcome.get("tier"),
+                no_batch=bool(outcome.get("no_batch")),
             )
         elif outcome.get("action") == "claimed_elsewhere":
             # Same R2-3 park, keyed like every conversation hold (by ref).

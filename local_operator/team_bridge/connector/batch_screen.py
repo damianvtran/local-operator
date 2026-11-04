@@ -57,6 +57,9 @@ class _Prescreened:
     results: dict[tuple[str, str], tuple[str, Any]] = field(default_factory=dict)
     #: Model calls this pass made (observability and the measurement).
     calls: int = 0
+    #: Messages whose batch this pass VOIDED (``batch_unresolved``). The
+    #: handler reads it to mark the hold row ``no_batch`` (#3400 round 2).
+    voided: set[tuple[str, str]] = field(default_factory=set)
 
 
 _ACTIVE: contextvars.ContextVar["_Prescreened | None"] = contextvars.ContextVar(
@@ -102,12 +105,26 @@ def take_result(ref: ConversationFeedRef, body_hash: str) -> Any:
     from ..screening import HOLD_BATCH_UNRESOLVED
 
     if getattr(entry[1], "hold_code", None) == HOLD_BATCH_UNRESOLVED:
+        state.voided.add((ref.conversation_id, ref.message_id))
         # The batch could not conclude this message (a neighbour's non-deliver
         # verdict, or a refused / malformed call): its verdict must come from
         # a call that saw it ALONE (#3400 S-1, M2/S-6), so the handler screens
         # it singly now, never re-batched with the same group.
         return None
     return entry[1]
+
+
+def came_from_void_batch(ref: ConversationFeedRef) -> bool:
+    """Whether THIS pass voided a batch that carried ``ref``.
+
+    Such a message is screened alone from now on (#3400 round 2, R2-M1 =
+    S-7): the handler marks its hold row ``no_batch`` when that single screen
+    holds (most often refused for budget), so a refill can never put it back
+    in a batch with the message that voided the first one.
+    """
+
+    state = _ACTIVE.get()
+    return state is not None and (ref.conversation_id, ref.message_id) in state.voided
 
 
 def allocation_for(ref: ConversationFeedRef, display: Mapping[str, Any]) -> dict[str, Any]:

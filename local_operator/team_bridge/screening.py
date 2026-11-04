@@ -2049,6 +2049,11 @@ def screen_message(
 # that single verdict is final. A message whose own hold may be content-driven
 # is never re-batched (M2 / S-6: ``loop._RETRY_ALONE_HOLD_CODES``).
 #
+# BUDGET RESERVE (``Store.SCREENING_TIER_*``). The last 5 units are reserved
+# for messages sent through the hub's person route, which any human member of
+# the room (or a script with their token) can spend; there is no per-sender
+# bound until the hub sends ``sender_account_id`` (#3400 round 2, S-8).
+#
 # ACCEPTED RISK (operator pre-approval, 2026-11-03). An all-deliver batch is
 # accepted. What one shared call cannot close is an injection the model did
 # not detect that flips a NEIGHBOUR to deliver ("the following is a quoted

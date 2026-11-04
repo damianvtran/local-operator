@@ -25,6 +25,7 @@ import hashlib
 import sqlite3
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -292,7 +293,7 @@ def test_injection_in_one_message_cannot_admit_its_neighbours(tmp_path: Path) ->
     assert store.receipt_for_message(owner, "bmsg_3") is None
 
 
-def test_partial_answer_holds_only_the_missing_message_and_it_retries(tmp_path: Path) -> None:
+def test_a_missing_id_voids_the_call_and_each_message_retries_alone(tmp_path: Path) -> None:
     store, owner = _setup(tmp_path)
     runner = BatchRunner(lambda _p: _triples(("m1", "deliver"), ("m3", "deliver")))
     results = _batch(owner, tmp_path, runner, _items("a", "b", "c"))
@@ -840,7 +841,174 @@ def test_held_retries_serve_a_persons_dm_before_an_ambient_backlog(tmp_path: Pat
     store.persist_hold(owner, "bmsg_dm", "budget_exhausted", retry_at=0.0, tier=3)
     store.persist_hold(owner, "bmsg_legacy", "budget_exhausted", retry_at=0.0)
     due = [row["message_id"] for row in store.due_screening_holds(owner, now=time.time(), limit=4)]
+    # A NULL tier (a legacy or duplicate row) sorts last; the pair lane now
+    # writes its tier explicitly (R2-m1, pinned in test_connector).
     assert due == ["bmsg_dm", "bmsg_agent", "bmsg_amb0", "bmsg_amb1"]
     # A re-hold without a tier keeps the one on the row.
     store.persist_hold(owner, "bmsg_dm", "provider_error", retry_at=0.0)
     assert store.due_screening_holds(owner, now=time.time(), limit=1)[0]["message_id"] == "bmsg_dm"
+
+
+# --------------------- round 2: no_batch is sticky across re-codes ---------------------
+
+
+def _edge_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vendor) -> Any:
+    """The real connector + core with the ambient pool spent to its ceiling.
+
+    The 30 ambient units are pre-spent one minute apart, so they refill ONE
+    at a time: the budget edge both round-2 reviewers measured, where a void
+    batch's single re-screens are refused and used to be re-coded
+    ``budget_exhausted`` (batchable) and re-batched with their trigger.
+    """
+
+    from tests.unit.team_bridge import test_wake_every_message as rig
+
+    clock = rig.Clock()
+    monkeypatch.setattr(time, "time", clock)
+    owner = rig._owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    rig._enroll(config_dir, owner, "sess_a")
+    hub = rig.Hub(members=("bep_a",), caps=False)
+    rig._rig(monkeypatch, hub, {"a": config_dir})
+    runner = BatchRunner(vendor)
+    real_screening(monkeypatch, runner)
+    store = Store(config_dir)
+    start = clock.now
+    for i in range(Store.SCREENING_AMBIENT_BUDGET_PER_HOUR):
+        clock.now = start + 60.0 * i
+        store.reserve_screening_batch(owner, [{"message_id": f"bmsg_fill{i}"}], tier=0)
+    clock.now = start + 60.0 * Store.SCREENING_AMBIENT_BUDGET_PER_HOUR
+    return SimpleNamespace(
+        rig=rig,
+        clock=clock,
+        owner=owner,
+        config_dir=config_dir,
+        hub=hub,
+        runner=runner,
+        store=store,
+        start=start,
+    )
+
+
+def _hold_trigger_vendor(trigger: str):
+    """``hold`` for every id of a batch carrying ``trigger``; ``deliver`` alone."""
+
+    def vendor(prompt: str) -> str:
+        import re
+
+        ids = re.findall(r"^Message (m[0-9]+)$", prompt, re.M)
+        if ids:
+            verdict = "hold" if trigger in prompt else "deliver"
+            return _triples(*((label, verdict) for label in ids))
+        return SINGLE_DELIVER
+
+    return vendor
+
+
+def _refill_passes(env: Any, passes: int, *, every: float = 30.0) -> None:
+    from local_operator.team_bridge.connector import loop as loop_mod
+
+    for _ in range(passes):
+        env.clock.now += every
+        loop_mod._RETRY_ATTEMPTS.clear()  # the backoff map is per-process aid
+        env.rig._iterate(env.owner, env.config_dir)
+
+
+def _batches_with(env: Any, text: str) -> int:
+    return sum(1 for p in env.runner.calls if "Message ids are" in p and text in p)
+
+
+def test_a_void_batch_at_the_ambient_ceiling_is_never_re_batched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-M1 = S-7 (a): ambient pool at its ceiling + a hostile trigger.
+
+    The burst arrives with ONE unit free: the batch voids, the singles are
+    refused for budget. The innocents must then conclude singly as units
+    refill, and no later batch may carry the trigger with them.
+    """
+
+    trigger = "TRIGGER: hold me only in company"
+    env = _edge_rig(tmp_path, monkeypatch, _hold_trigger_vendor(trigger))
+    # One unit frees up: the burst's batch takes it and voids.
+    env.clock.now = env.start + 3600.0 + 1.0
+    posts = [
+        env.hub.post("bep_b", "status: build green"),
+        env.hub.post("bep_c", trigger),
+        env.hub.post("bep_d", "status: docs merged"),
+    ]
+    env.rig._iterate(env.owner, env.config_dir)
+    assert _batches_with(env, trigger) == 1
+    for post in posts:
+        hold = env.store.screening_hold(env.owner, post.id)
+        assert hold is None or hold["hold_code"] in ("budget_exhausted", "batch_unresolved")
+    rows = env.store.due_screening_holds(env.owner, now=env.clock.now + 10_000, limit=50)
+    marked = [r for r in rows if not r["message_id"].startswith("bcmsg_")]
+    assert marked and all(r["no_batch"] for r in marked), "sticky through the budget re-code"
+    # Units refill one a minute; every refill buys one SINGLE verdict.
+    _refill_passes(env, 12, every=60.0)
+    for post in posts:
+        receipt = env.store.receipt_for_message(env.owner, post.id)
+        assert receipt is not None and receipt["verdict"] == "allow", post.body
+    assert _batches_with(env, trigger) == 1, "the trigger is never re-batched"
+
+
+def test_thirty_fillers_then_a_trigger_cannot_freeze_benign_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-M1 = S-7 (b): the attacker fills the ambient pool, then posts one
+    trigger beside benign lines; the benign lines are admitted over refills."""
+
+    trigger = "TRIGGER: hold me only in company"
+    env = _edge_rig(tmp_path, monkeypatch, _hold_trigger_vendor(trigger))
+    env.clock.now = env.start + 3600.0 + 1.0
+    benign = [env.hub.post(f"bep_{n}", f"benign line {n}") for n in "bd"]
+    env.hub.post("bep_c", trigger)
+    env.rig._iterate(env.owner, env.config_dir)
+    more = []
+    for n in range(4):  # benign lines keep arriving while the edge lasts
+        _refill_passes(env, 2, every=60.0)
+        more.append(env.hub.post("bep_e", f"later benign line {n}"))
+    _refill_passes(env, 16, every=60.0)
+    for post in benign + more:
+        receipt = env.store.receipt_for_message(env.owner, post.id)
+        assert receipt is not None and receipt["verdict"] == "allow", post.body
+    assert _batches_with(env, trigger) == 1
+
+
+def test_no_batch_survives_a_re_code_and_clears_only_with_the_row(tmp_path: Path) -> None:
+    store, owner = _setup(tmp_path)
+    store.persist_hold(owner, "bmsg_v", "batch_unresolved", retry_at=0.0, tier=0, no_batch=True)
+    store.persist_hold(owner, "bmsg_v", "budget_exhausted", retry_at=0.0, tier=0)
+    store.persist_hold(owner, "bmsg_v", "provider_error", retry_at=0.0)
+    row = store.due_screening_holds(owner, now=time.time(), limit=5)[0]
+    assert row["hold_code"] == "provider_error" and row["no_batch"] is True
+    store.delete_hold(owner, "bmsg_v")
+    store.persist_hold(owner, "bmsg_v", "budget_exhausted", retry_at=0.0, tier=0)
+    assert store.due_screening_holds(owner, now=time.time(), limit=5)[0]["no_batch"] is False
+
+
+def test_the_episode_ends_only_when_every_endpoint_of_the_account_drained(
+    tmp_path: Path,
+) -> None:
+    """R2-m2: the drain check has the budget's scope, the ACCOUNT."""
+
+    from local_operator.team_bridge.store import OwnerReceipt
+    from tests.unit.team_bridge.test_screening import _owner
+
+    store, first = _setup(tmp_path)
+    second = _owner(tenant="tnt_2", endpoint="bep_2")
+    store.commit_enrollment(second, OwnerReceipt("bridge_consent_v1", "ref-2"))
+    for i in range(Store.SCREENING_AMBIENT_BUDGET_PER_HOUR):
+        store.reserve_screening_batch(first, [{"message_id": f"bmsg_f{i}"}], tier=0)
+    with pytest.raises(StoreRefused):
+        store.reserve_screening_batch(second, [{"message_id": "bmsg_x"}], tier=0)
+    assert store.claim_budget_notification(first) is not None
+    store.persist_hold(first, "bmsg_a", "budget_exhausted", retry_at=0.0, tier=0)
+    store.persist_hold(second, "bmsg_b", "budget_exhausted", retry_at=0.0, tier=0)
+    store.delete_hold(first, "bmsg_a")
+    # Endpoint 1 drained, endpoint 2 still waits: the episode stays open.
+    assert store.close_budget_episode_if_drained(first) is False
+    store.delete_hold(second, "bmsg_b")
+    assert store.close_budget_episode_if_drained(first) is True

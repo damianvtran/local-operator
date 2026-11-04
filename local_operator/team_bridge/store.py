@@ -3033,6 +3033,10 @@ class Store:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
         if "tier" not in columns:
             conn.execute("ALTER TABLE screening_holds ADD COLUMN tier INTEGER")
+        # ``no_batch`` (#3400 round 2): the sticky retry-alone mark, see
+        # :meth:`persist_hold`. Added the same additive, nullable way.
+        if "no_batch" not in columns:
+            conn.execute("ALTER TABLE screening_holds ADD COLUMN no_batch INTEGER")
 
     @staticmethod
     def _breaker_has_class_column(conn: sqlite3.Connection) -> bool:
@@ -4354,8 +4358,12 @@ class Store:
     #: whole 40 and the owner's DM waited the hour. No split of a fixed 40
     #: survives N colluding senders, so the last units are reserved for the
     #: sender CLASS the hub states (``sender_kind``), which an agent cannot
-    #: claim. WHY NESTED rather than flat: measured on the 1 human + 6 agents
-    #: flood (scripts/bench_batch_screening.py), a flat 30/10 split let the
+    #: claim. That class is the hub's PERSON route, not proof a human typed
+    #: it (#3400 round 2, S-8): any human member of the room, or a script with
+    #: their token, can spend the last 5; there is no per-sender bound until
+    #: the hub sends ``sender_account_id`` (S-5). WHY NESTED rather than
+    #: flat: measured on the 1 human + 6 agents flood
+    #: (scripts/bench_batch_screening.py), a flat 30/10 split let the
     #: human's own room lines spend the whole reserve and a minute-30 DM was
     #: never screened that hour. The 40 itself is fixed — moderation spend is
     #: not loosened — so every reserve is carved out of it, never added to it.
@@ -4514,10 +4522,17 @@ class Store:
                 self._init(conn)
                 self._begin_write(conn)
                 _ensure_budget_episode_table(conn)
+                # ACCOUNT-wide, the scope the budget and the episode share
+                # (#3400 round 2, R2-m2): one endpoint draining must not end
+                # the episode while a sibling endpoint of the same account
+                # still waits on the budget, or the sibling's next refusal
+                # would open a new episode and re-notify.
                 held = conn.execute(
-                    "SELECT 1 FROM screening_holds WHERE owner_key = ? "
-                    "AND hold_code = 'budget_exhausted' LIMIT 1",
-                    (_owner_key(owner),),
+                    "SELECT 1 FROM screening_holds h JOIN enrollments e "
+                    "ON e.owner_key = h.owner_key "
+                    "WHERE e.canonical_base_url = ? AND e.account_id = ? "
+                    "AND h.hold_code = 'budget_exhausted' LIMIT 1",
+                    (owner.canonical_base_url, owner.account_id),
                 ).fetchone()
                 if held is not None:
                     return False
@@ -6373,12 +6388,23 @@ class Store:
         keep_existing: bool = False,
         failure_class: str | None = None,
         tier: int | None = None,
+        no_batch: bool = False,
     ) -> None:
         """Durably quarantine a VALID-LIVE-OWNER early refusal (H3-Q8).
 
         ``tier`` (``SCREENING_TIER_*``) is the message's budget tier when the
         writer knows it; :meth:`due_screening_holds` serves higher tiers first.
         A re-hold without one keeps the tier already on the row.
+
+        ``no_batch`` marks a message that came out of a VOIDED batch (#3400
+        round 2, R2-M1 = S-7): its retry is a single screen, never a batch.
+        The mark is STICKY — a re-hold for any later code (a single screen
+        refused for budget re-codes the row ``budget_exhausted``, which is
+        otherwise batchable) keeps it — and only the row's deletion at a final
+        verdict clears it. Without the stickiness, on a budget edge the same
+        group was re-batched with its trigger on every refill, voided again,
+        and never admitted. It also bounds the cost: a message voids at most
+        ONE batch, since every retry after that screens it alone.
 
         ``failure_class`` is set only by the screening pipeline's
         ``provider_error`` fallback write; any other caller writes NULL.
@@ -6412,10 +6438,15 @@ class Store:
             self._ensure_hold_failure_class_column(conn)
             self._ensure_hold_tier_column(conn)
             if not keep_existing:
-                on_conflict += ", tier = COALESCE(excluded.tier, screening_holds.tier)"
+                on_conflict += (
+                    ", tier = COALESCE(excluded.tier, screening_holds.tier)"
+                    ", no_batch = MAX(COALESCE(excluded.no_batch, 0), "
+                    "COALESCE(screening_holds.no_batch, 0))"
+                )
             conn.execute(
                 "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
-                "retry_at, created_at, failure_class, tier) VALUES (?,?,?,?,?,?,?) " + on_conflict,
+                "retry_at, created_at, failure_class, tier, no_batch) "
+                "VALUES (?,?,?,?,?,?,?,?) " + on_conflict,
                 (
                     _owner_key(owner),
                     _contentless_delivery_key(message_id),
@@ -6424,6 +6455,7 @@ class Store:
                     time.time(),
                     _closed_failure_class(failure_class),
                     tier if isinstance(tier, int) and not isinstance(tier, bool) else None,
+                    1 if no_batch else None,
                 ),
             )
 
@@ -6468,9 +6500,19 @@ class Store:
                 # A read path never alters the table; a store without the
                 # column simply has no tiers yet. (Never a bare integer here:
                 # SQLite reads ``ORDER BY -1`` as a column index and errors.)
+                # A NULL tier sorts LAST. Ranking it as agent-addressed (the
+                # #3400 round-2 R2-m1 suggestion) was measured to slow the
+                # backlog drain: the screening core's bare ``bcmsg_`` duplicate
+                # rows carry no tier, and they then filled the bounded pass
+                # ahead of real rows (bench hour 2: 2102 vs 1926 unscreened).
+                # Every writer that knows a tier passes it — the pair lane
+                # writes the addressed tier explicitly — so NULL is only a
+                # legacy or duplicate row.
                 tier = "COALESCE(tier, -1) DESC, " if "tier" in columns else ""
+                no_batch = "COALESCE(no_batch, 0)" if "no_batch" in columns else "0"
                 rows = conn.execute(
-                    "SELECT message_id, hold_code, retry_at, created_at FROM screening_holds "
+                    f"SELECT message_id, hold_code, retry_at, created_at, {no_batch} AS no_batch "
+                    "FROM screening_holds "
                     "WHERE owner_key = ? AND (retry_at IS NULL OR retry_at <= ?) "
                     # HIGHEST TIER, THEN OLDEST, among the due rows (agent-server
                     # #294 S-1; #3400 m3): a refill makes a whole backlog due at
@@ -6485,6 +6527,7 @@ class Store:
                         "hold_code": row["hold_code"],
                         "retry_at": row["retry_at"],
                         "created_at": row["created_at"],
+                        "no_batch": bool(row["no_batch"]),
                     }
                     for row in rows
                 ]
