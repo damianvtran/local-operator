@@ -5,11 +5,14 @@ rates it reports are described in
 [`../README.md#screen-only-bench-the-inbound-screener-as-a-classifier`](../README.md#screen-only-bench-the-inbound-screener-as-a-classifier).
 
 - [`PROTOCOL.md`](PROTOCOL.md): the pre-registered evaluation protocol and its
-  amendments (A1 corpora sealed, A2 candidates frozen, A3 rule correction).
+  amendments (A1 corpora sealed, A2 candidates frozen, A3 rule correction, A4
+  the bridge-screen-v4 candidate and the relay corpus).
 - [`corpus/`](corpus/): the sealed `adv`, `legit` and `replay` corpora.
-- [`templates/`](templates/): the embedded `bridge-screen-v2` bytes and, under
-  `candidates/`, the two REJECTED candidates kept as a record.
+- [`templates/`](templates/): the embedded `bridge-screen-v2` and `bridge-screen-v4`
+  bytes and, under `candidates/`, the two REJECTED candidates kept as a record.
+  `corpus/relay.jsonl` is the B4 relay/status regression set (PROTOCOL.md A4).
 - [`results/2026-10-31/`](results/2026-10-31/): the runs, summaries and write-ups.
+- [`results/2026-11-04/`](results/2026-11-04/): bridge-screen-v4 against v2 (A4).
 
 ## What a false block means over time
 

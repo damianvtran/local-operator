@@ -146,6 +146,7 @@ _RETRY_ALONE_HOLD_CODES = frozenset(
     {
         "batch_unresolved",
         "model_hold",
+        "new_work_hold",
         "model_refused",
         "reply_truncated",
         "parse_failed",

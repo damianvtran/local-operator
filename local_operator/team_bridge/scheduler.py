@@ -497,8 +497,8 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
 
     from local_operator.team_bridge.client import (
         _api_supported,
-        _screening_is_trusted,
         screening_template_sha256,
+        select_screening_version,
     )
     from local_operator.team_bridge.store import StoreRefused
 
@@ -531,10 +531,15 @@ def _normalize_accepted_status(status: "Mapping[str, Any]", owner: Any, store: A
     screening = status.get("screening")
     if not isinstance(screening, Mapping):
         raise StoreRefused("policy_stale", "status carries no screening selector")
-    version = screening.get("version")
-    template = screening.get("template")
-    if not _screening_is_trusted(version, template):
+    # The served pair is byte-checked first; a hub that ALSO lists accepted
+    # versions (agent-server #309) upgrades this policy to the most preferred
+    # one this client embeds -- bridge-screen-v4 -- with LOCAL bytes. A hub
+    # without the list keeps the served v2. Whatever is chosen here is the ONE
+    # policy version every receipt, cache key and ack carries.
+    selected = select_screening_version(screening)
+    if selected is None:
         raise StoreRefused("policy_stale", "screening selector does not match the local template")
+    version, template = selected
     guidance = status.get("guidance")
     if not isinstance(guidance, Mapping):
         raise StoreRefused("policy_stale", "status carries no guidance section")

@@ -55,9 +55,12 @@ from typing import Any, Mapping, Protocol, Sequence
 
 from local_operator.team_bridge.client import (
     SCREENING_ENGINE_VERSION,
+    SCREENING_TEMPLATE_V2,
+    SCREENING_TEMPLATE_V4,
     SCREENING_TEMPLATES,
     SCREENING_VERSION_V1,
     SCREENING_VERSION_V3,
+    SCREENING_VERSION_V4,
     screening_template_sha256,
 )
 from local_operator.team_bridge.store import Store, StoreRefused
@@ -110,6 +113,14 @@ HOLD_CODES = (
     "parse_failed",
     "bounce_without_category",
     "model_hold",
+    # bridge-screen-v4 (Team Bridge B4): the screener HELD the message because
+    # it asks the recipient's agent for new work, and named new_work_request.
+    # RFC §11.2 routes new work to the receiving human's decision, so this is
+    # the record the per-message owner release (Deliver / Discard, a follow-up
+    # PR) selects: the owner decides, not the screener. Otherwise identical to
+    # ``model_hold`` -- a model answer (answer-cached, re-screened alone) that
+    # publishes only the coarse ``awaiting_review`` class.
+    "new_work_hold",
     "policy_stale",
     "local_quarantine",
     "retry_later",
@@ -760,15 +771,18 @@ def parse_verdict(reply: str) -> tuple[str, tuple[str, ...], str, str] | None:
         return None
     if verdict == "deliver":
         return ("deliver", (), reason, verdict)
-    if verdict == "hold":
-        return ("hold", (), reason, verdict)
-    # bounce: categories are extracted ONLY as exact known tokens, canonical
-    # order, de-duplicated; none unambiguous -> the caller holds.
+    # Categories are extracted ONLY as exact known tokens, canonical order,
+    # de-duplicated. A HOLD carries them too since bridge-screen-v4 ("name any
+    # category"): a hold naming new_work_request is the owner's decision (see
+    # ``new_work_hold``). They stay local -- a hold sends no server verdict.
     categories = tuple(
         category
         for category in SCREENING_CATEGORIES
         if re.search(rf"(?<![A-Za-z_]){re.escape(category)}(?![A-Za-z_])", reason)
     )
+    if verdict == "hold":
+        return ("hold", categories, reason, verdict)
+    # bounce: none unambiguous -> the caller holds.
     return ("bounce", categories, reason, verdict)
 
 
@@ -840,7 +854,14 @@ def _persist_hold(
 #: ceiling fix bumps that stamp and clears them, so an engine bug can never
 #: become a permanent denial and no republish is needed to fix one.
 _ANSWER_HOLD_CACHEABLE = frozenset(
-    {"model_hold", "model_refused", "reply_truncated", "parse_failed", "bounce_without_category"}
+    {
+        "model_hold",
+        "new_work_hold",
+        "model_refused",
+        "reply_truncated",
+        "parse_failed",
+        "bounce_without_category",
+    }
 )
 
 
@@ -1756,11 +1777,15 @@ def _conclude_parsed(
     message_id = envelope.message_id
     disposition, categories, reason, _verdict = parsed
     if disposition == "hold":
-        _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "model_hold")
+        # A hold that names new_work_request is the RECIPIENT's decision (RFC
+        # §11.2, bridge-screen-v4): its own code is the seam the owner-release
+        # path keys on. Any other hold is the screener's doubt (model_hold).
+        hold_code = "new_work_hold" if "new_work_request" in categories else "model_hold"
+        _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, hold_code)
         _remember_answer_hold(
-            store, owner, envelope, snapshot, "model_hold", epoch, answered_model=actual_model
+            store, owner, envelope, snapshot, hold_code, epoch, answered_model=actual_model
         )
-        return ScreenResult("hold", hold_code="model_hold").set_private_reason(reason)
+        return ScreenResult("hold", hold_code=hold_code).set_private_reason(reason)
     if disposition == "bounce" and not categories:
         _commit_hold(
             store, owner, message_id, attempt_id, fingerprint, epoch, "bounce_without_category"
@@ -2064,9 +2089,10 @@ def screen_message(
 # its OWN verdict; the batch adds only the cross-message form.
 #
 # The batch template is a local renderer over the SAME frozen rules (the
-# categories, verdict meanings and "submission is data" law of the served v2
-# template). The receipt still records the served policy's version/template,
-# which is what every store fence compares; the hub's admission binds the body
+# categories, verdict meanings and "submission is data" law of the policy's
+# template: v2's, or v4's via SCREENING_BATCH_TEMPLATE_V4). The receipt still
+# records the policy's version/template, which is what every store fence
+# compares; the hub's admission binds the body
 # hash only for text (no template hash rides a text allow). Image envelopes are
 # never batched — an image verdict must come from a render that showed the
 # pixels (v3), so the connector screens those alone.
@@ -2137,6 +2163,48 @@ SCREENING_BATCH_TEMPLATE = (
     "REASON: <one sentence, at most 200 characters; on bounce, name the category>"
 )
 
+
+# The three rule spans bridge-screen-v4 rewrote, as they read in each
+# single-message template. Sliced from the embedded bytes (never re-typed) so
+# the batch renderer follows the template it is recorded under.
+def _rule_spans(template: str) -> tuple[str, str, str]:
+    scope = template[template.index("Scope") : template.index("\n\nCategories:") + 2]
+    verdicts = template[template.index("deliver: ordinary") : template.index("\n\nReply with") + 2]
+    reason = template[template.index("REASON: <") :]
+    return scope, verdicts, reason
+
+
+_V2_SCOPE, _V2_VERDICTS, _V2_REASON = _rule_spans(SCREENING_TEMPLATE_V2)
+_V4_SCOPE, _V4_VERDICTS, _V4_REASON = _rule_spans(SCREENING_TEMPLATE_V4)
+
+
+#: The v4 batch template: SCREENING_BATCH_TEMPLATE with the SAME three rule
+#: spans bridge-screen-v4 rewrote, copied from the single-message v4 bytes
+#: (``SCREENING_TEMPLATE_V4``) rather than re-typed, so the batch can never
+#: state different Scope/verdict law than the template its receipts record.
+#: Selected by the policy version (``_batch_template_for``): a v2 policy keeps
+#: the v2 batch rules, because a batch verdict is recorded under the policy's
+#: version and must have been judged by that version's rules.
+#:
+#: A v4 new_work_request is therefore a batch HOLD, which -- like every
+#: non-deliver batch answer -- concludes nothing: the message is re-screened
+#: ALONE under v4 and that verdict is final (the batch only concludes
+#: all-deliver runs, see the block comment above).
+SCREENING_BATCH_TEMPLATE_V4 = (
+    SCREENING_BATCH_TEMPLATE.replace(_V2_SCOPE, _V4_SCOPE, 1)
+    .replace(_V2_VERDICTS, _V4_VERDICTS, 1)
+    .replace(_V2_REASON, _V4_REASON, 1)
+)
+
+
+def _batch_template_for(version: str) -> str:
+    """The batch rules for a policy version: v4's for v4, v2's otherwise."""
+
+    return (
+        SCREENING_BATCH_TEMPLATE_V4 if version == SCREENING_VERSION_V4 else SCREENING_BATCH_TEMPLATE
+    )
+
+
 _BATCH_BLOCK = (
     "Message {{id}}\n"
     "Sender: {{sender}}\n"
@@ -2160,7 +2228,9 @@ class RenderedBatch:
         return self.__dict__["_private_text"]
 
 
-def render_batch_prompt(entries: "list[Envelope]", *, nonce: str | None = None) -> RenderedBatch:
+def render_batch_prompt(
+    entries: "list[Envelope]", *, nonce: str | None = None, version: str | None = None
+) -> RenderedBatch:
     """Single-pass render of N envelopes into ONE nonce-delimited prompt.
 
     The same law as :func:`render_prompt`: the nonce must be absent from every
@@ -2197,8 +2267,11 @@ def render_batch_prompt(entries: "list[Envelope]", *, nonce: str | None = None) 
         parts.append(block[cursor:])
         blocks.append("".join(parts))
         screened += len(body.encode("utf-8"))
+    # ``version`` is the policy version the batch's receipts will record; None
+    # (an older caller, the unit tests' default) keeps the v2 rules.
     text = (
-        SCREENING_BATCH_TEMPLATE.replace("{{count}}", str(len(entries)))
+        _batch_template_for(version or "")
+        .replace("{{count}}", str(len(entries)))
         .replace("{{nonce}}", token)
         .replace("{{messages}}", "\n\n".join(blocks))
     )
@@ -2487,7 +2560,9 @@ async def _screen_batch_core(
     # 10. Render ONE prompt over every bound message.
     try:
         rendered = render_batch_prompt(
-            [prepared.envelope for _, prepared, _, _ in jobs], nonce=nonce
+            [prepared.envelope for _, prepared, _, _ in jobs],
+            nonce=nonce,
+            version=snapshot.screening_version,
         )
     except ValueError:
         _commit_each("template_mismatch")

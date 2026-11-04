@@ -213,6 +213,9 @@ def test_the_cache_key_is_content_equality_only(tmp_path) -> None:
     assert screening._ANSWER_HOLD_CACHEABLE == frozenset(
         {
             "model_hold",
+            # bridge-screen-v4: a hold naming new_work_request is a model
+            # answer too; only its code differs (the owner-release seam).
+            "new_work_hold",
             "model_refused",
             "reply_truncated",
             "parse_failed",
