@@ -561,7 +561,7 @@ def test_space_separated_receipt_never_starts_with_dash() -> None:
     receipts = [mint_adoption_receipt() for _ in range(4000)]
     assert not any(r.startswith("-") for r in receipts)
     assert len(set(receipts)) == len(receipts)
-    assert all(len(r) >= 32 for r in receipts)  # entropy unchanged: 24 random bytes
+    assert all(len(r) >= 32 for r in receipts)  # 24 random bytes; ~0.02 bits lost to the first-symbol constraint
 
 
 def test_existing_dash_receipt_still_parses_with_equals_form(parser) -> None:

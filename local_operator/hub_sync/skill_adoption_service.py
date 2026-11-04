@@ -32,8 +32,8 @@ def mint_adoption_receipt() -> str:
     URL-safe base64 alphabet, which includes ``-``, so about 1 receipt in 64
     began with ``-``; argparse then read that separate value as an option and
     refused with "expected one argument". Drawing again until the first
-    character is not ``-`` keeps the full 24 random bytes (192 bits) and the
-    same alphabet, so existing receipts and their lookup are unaffected; only
+    character is not ``-`` keeps the 24-byte length and the same alphabet
+    (constraining one of 64 first symbols costs ~0.02 bits of 192), so existing receipts and their lookup are unaffected; only
     the leading character is constrained.
     """
     while True:

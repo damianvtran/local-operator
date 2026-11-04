@@ -66,9 +66,9 @@ lop skills pull <id> --org <tenant> --dry-run
 lop skills pull <id> --org <tenant> --adopt-receipt=<receipt> --yes
 ```
 
-Write the receipt with `=`. Receipts minted before 0.96.1 could begin with `-`
-(about 1 in 64), which argparse reads as an option when the value is passed
-separately; the `=` form accepts every receipt.
+Write the receipt with `=`. Receipts minted by older versions could begin with
+`-` (about 1 in 64), which argparse reads as an option when the value is passed
+separately; the `=` form accepts every receipt, old or new.
 
 Use `--public` instead of `--org <tenant>` for a public Hub skill. Keep the
 same scope, alias, `--no-subscribe` policy and `--strategy` choice from preview
