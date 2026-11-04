@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "record_kind": "portable_evidence_manifest",
+  "audit_id": "ur26host1",
+  "receipt": "receipt.json",
+  "report": "report.md",
+  "file_count": 2,
+  "files": [
+    {
+      "path": "record.json",
+      "bytes": 8706,
+      "sha256": "1162c19ec59fc459eb31c8be8b4f3131071a06a7e4dccc255b7ed612318f5423",
+      "origin": "/Users/damian/.local-operator/sessions/1b7a2a90c876/scratchpad/hosting-ur-audit-reader1/record.json"
+    },
+    {
+      "path": "report.md",
+      "bytes": 7995,
+      "sha256": "9b25abd15f0947fe731a21527ff03e7f84fc28709ddc915326d8e7b029eb1af3",
+      "origin": "/Users/damian/.local-operator/sessions/1b7a2a90c876/scratchpad/hosting-ur-audit-reader1/report.md"
+    }
+  ]
+}

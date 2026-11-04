@@ -1,0 +1,122 @@
+{
+  "schema": "i18n-audit-record/1",
+  "audit_id": "hosting-vi-r2rd",
+  "locale": "vi",
+  "namespace": "wire.errors.hosting",
+  "audit_date": "2026-11-03",
+  "key_count": 1,
+  "reader": 2,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "6431174917d4",
+    "requested_model": "UNKNOWN",
+    "served_model": "UNKNOWN",
+    "actual_model_source": "This turn's session state carries no model header; nothing inferred. No fallback claimed for this turn.",
+    "fallback": "none claimed",
+    "independent_from_translator_session": true,
+    "translator_session": "15986c0af719",
+    "code_author_session": "94dcef624dec",
+    "other_reader_verdict_read": false
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9"
+    },
+    "vi": {
+      "path": "/Users/damian/.local-operator/sessions/15986c0af719/scratchpad/hosting-vi/target/vi/wire.errors.hosting.json",
+      "sha256": "4a9d101e5c8ddba0c55f1428427f26174b0e10055701d896d0ce68cc1312c647"
+    }
+  },
+  "author_record": {
+    "path": "/Users/damian/.local-operator/sessions/15986c0af719/scratchpad/hosting-vi/record.json",
+    "sha256": "c0f9f5ec0629c41e60a0c108670c3f4d55ebafb0b8bf463cc2ebc44b07eb0391"
+  },
+  "style_authority": [
+    {
+      "path": "~/local-operator/i18n/style-guides/vi.md",
+      "sha256": "e4901497ed553e2b2ae4a2660bf776adb787b89e11d7eb0f8d08f3da4b227888"
+    },
+    {
+      "path": "~/local-operator/i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  ],
+  "corpus_read": [
+    {
+      "path": "/Users/damian/local-operator/.worktrees/tui-chrome-fr/local_operator/i18n/catalogues/vi/wire.settings.json",
+      "sha256": "50138f286689e4277818b86d46975526c5bf548fe4cf243cbd6cd6052ede27d4"
+    },
+    {
+      "path": "/Users/damian/local-operator/.worktrees/tui-chrome-fr/local_operator/i18n/catalogues/vi/wire.errors.sdk_startup.json",
+      "sha256": "ac6858150eb6e5d0856bafa729764e61d400fd6bdf3504d4b2ffa4cbb4300abd"
+    },
+    {
+      "path": "/Users/damian/local-operator/.worktrees/tui-chrome-fr/local_operator/i18n/catalogues/vi/wire.errors.desktop.json",
+      "sha256": "76472652f9fc76e770342b8e3562f624295a7a52b62109e52a265fc245efe78c"
+    },
+    {
+      "path": "/Users/damian/local-operator/.worktrees/tui-chrome-fr/local_operator/i18n/catalogues/vi/cli.global_help.json",
+      "sha256": "59e2de056a9c5dbc77ab3bead9dbfb80d75dc47c98073d47d69274ef6509842a"
+    }
+  ],
+  "source_state": "new English namespace, uncommitted, absent at base 87ca846245b2; not shipped",
+  "findings": [],
+  "advisories": [
+    {
+      "id": "A1",
+      "gating": false,
+      "scope": "outside this key: wire.errors.sdk_startup.attach_hosting_unconfigured (vi)",
+      "note": "Frame remedy keeps English «hosting» while the cause clause and corpus say «nhà cung cấp»; suggest «Hãy cấu hình nhà cung cấp cho thư mục gốc này…» or mark `hosting` as code."
+    }
+  ],
+  "mechanical": {
+    "key_parity": true,
+    "duplicate_keys": false,
+    "nfc": true,
+    "cf_or_bidi": false,
+    "combining_marks": false,
+    "icu_params": 0,
+    "placeholders": "N/A — no arguments",
+    "cldr": "N/A — no plural/select",
+    "terminal_period": true,
+    "capitalized": true,
+    "english_fallback": false
+  },
+  "consumer_splice": "pure string substitution into the vi sdk_startup frame; NOT a render",
+  "holds": {
+    "native_render": "NOT RUN",
+    "pseudo": "NOT RUN",
+    "rtl": "N/A (vi LTR)",
+    "width": "no maxCells in context; not measured"
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "advisory_ids": [
+      "A1"
+    ]
+  },
+  "audit_notes_not_execution_log": "Executed only stdlib hashing/JSON/unicodedata in eval; no validator, formatter, test or render.",
+  "artifacts": [
+    {
+      "path": "report.md",
+      "sha256": "f8ba29c750a7ba9355e941d0e3b2fb4661c33449427d4389055e0c4d3e3ef2bf"
+    }
+  ],
+  "not_modified": [
+    "target",
+    "source",
+    "author packet",
+    "repo",
+    "ledger",
+    "generated",
+    "baseline",
+    "TUI R1/R2 records"
+  ]
+}

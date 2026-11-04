@@ -22,6 +22,8 @@
  */
 import { type ReactNode, useState } from "react";
 import { cn } from "../lib/cn";
+import { useCapabilities } from "../store";
+import type { Capabilities } from "../types";
 
 /** Which layout pairs the picture with the row's status mark. */
 export const STATUS_PLACEMENT: "badge" | "beside" = "badge";
@@ -33,6 +35,39 @@ export function agentAvatarUrl(
 ): string | null {
 	if (!agentId || !sha) return null;
 	return `/v1/agents/${encodeURIComponent(agentId)}/avatar?v=${encodeURIComponent(sha)}`;
+}
+
+/** The square variants the relay can serve (core `agent_avatar.DERIVATIVE_SIZES`). */
+export const AVATAR_VARIANTS = [64, 128, 256] as const;
+
+/**
+ * The variant edge to request for a `cssPx` slot at `dpr`, or `null` for the
+ * 512px original.
+ *
+ * WHY. Drawing the 512px original into a 24px row ships ~10x the bytes over the
+ * tunnel; drawing a variant smaller than CSS px x devicePixelRatio is what makes
+ * a picture blurry on a retina screen. So: the SMALLEST variant whose edge is
+ * >= the device pixels the slot covers, and the original when even 256 is too
+ * small (a 64px slot at 4x). A missing/odd DPR reads as 1.
+ */
+export function avatarVariant(cssPx: number, dpr: number): number | null {
+	const density = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+	const needed = Math.ceil(cssPx * density);
+	return AVATAR_VARIANTS.find((edge) => edge >= needed) ?? null;
+}
+
+/** Whether this relay honours `?size=` (core feature `agent_avatar_sizes`). An
+ *  older relay ignores the query and would serve the original anyway, but the
+ *  flag keeps the URL (the browser cache key) identical on relays that predate it. */
+export function avatarSizesServed(capabilities: Capabilities | null): boolean {
+	const flag = capabilities?.features?.agent_avatar_sizes;
+	return typeof flag === "number" && flag >= 1;
+}
+
+/** `url` with the right-sized variant appended, or `url` untouched. */
+export function sizedAvatarUrl(url: string, cssPx: number, dpr: number, served: boolean): string {
+	const edge = served ? avatarVariant(cssPx, dpr) : null;
+	return edge === null ? url : `${url}${url.includes("?") ? "&" : "?"}size=${edge}`;
 }
 
 /**
@@ -73,14 +108,18 @@ export function AgentAvatar({
 	className,
 }: {
 	url: string;
-	/** Edge in CSS px; the stored file is 512², so any phone density is sharp. */
+	/** Edge in CSS px; the request asks for the variant covering size x DPR. */
 	size: number;
 	onFailed?: () => void;
 	className?: string;
 }) {
+	const served = avatarSizesServed(useCapabilities());
+	/* DPR read at render: a phone's density does not change while a row is up,
+	   and a re-render (any list frame) picks up a moved-between-screens window. */
+	const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio;
 	return (
 		<img
-			src={url}
+			src={sizedAvatarUrl(url, size, dpr, served)}
 			alt=""
 			width={size}
 			height={size}

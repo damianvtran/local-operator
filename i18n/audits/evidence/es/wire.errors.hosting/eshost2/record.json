@@ -1,0 +1,130 @@
+{
+  "record_schema": "i18n-audit-record/1",
+  "audit_id": "es-wh2-f1",
+  "audit_kind": "independent_translation_audit",
+  "audit_role": "ES reader2 — fresh-context replacement for the same key; supersedes an untrusted prior reader report without altering that preserved record",
+  "locale": "es",
+  "namespace": "wire.errors.hosting",
+  "audit_date": "2026-11-03",
+  "key_count": 1,
+  "keys": [
+    "wire.errors.hosting.not_configured"
+  ],
+  "auditor": {
+    "agent": "i18n-auditor",
+    "role_reader": "ES reader2 (fresh context)",
+    "session": "425221b9b2c6",
+    "model_requested": "radient/auto",
+    "model_served": "UNKNOWN — the served provider/model is not exposed to this session",
+    "actual_model_source": "session header 'Model: radient/auto' (requested alias only); no served-model disclosure available in-context",
+    "actual_fallback_used": "unknown (served model unexposed)",
+    "independent_from_translator_session": true,
+    "translator_session": "804764f54d82",
+    "code_author_session": "94dcef624dec",
+    "prior_auditor_conclusions_read": false,
+    "target_files_edited": false
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9"
+    },
+    "target": {
+      "locale": "es",
+      "path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/hosting-es/wire.errors.hosting.json",
+      "sha256": "8de6f07aa22bb654bc0e45390bc803ba28f37698e6e08ffe95399d895ff3c5cf"
+    }
+  },
+  "source_of_record_crosscheck": {
+    "en_catalogue": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "byte_identical_to_audited_en_bundle": true
+    },
+    "context_catalogue": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9",
+      "byte_identical_to_audited_context_bundle": true
+    },
+    "es_catalogue_file_present_in_repo": false,
+    "es_catalogue_scan": "no i18n/catalogues/es/wire.errors.hosting.json in the core worktree — target is display-key-only, uncommitted and unshipped, as stated in the brief"
+  },
+  "reference_inputs": [
+    "/Users/damian/local-operator/i18n/style-guides/es.md (read in full)",
+    "/Users/damian/local-operator/i18n/glossary.md (read in full)",
+    "~/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/es/*.json (shipped es terminology, grepped)"
+  ],
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/425221b9b2c6/scratchpad/i18n-audits/es/wire.errors.hosting/es-wh2-f1/report.md",
+      "sha256": "0f061200d60d6dce4cb323663a2472094a48909290cc4bd1e94661b2b979900e",
+      "bytes": 5361,
+      "role": "linked audit report; reasoned notes, not an execution log"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/425221b9b2c6/scratchpad/i18n-audits/es/wire.errors.hosting/es-wh2-f1/audit.log",
+      "sha256": "05b3f7bf6001610abf37e87fbb370e52cd0ea9e437866224bfc8bb73a7b1634e",
+      "bytes": 2075,
+      "role": "values transcribed from the actual check run in this session (stdlib json/hashlib/unicodedata + grep); not a repo-validator log"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/425221b9b2c6/scratchpad/i18n-audits/es/wire.errors.hosting/es-wh2-f1/record.json",
+      "sha256": "self — digest in record.sha256.txt; a record cannot embed its own hash",
+      "role": "this record"
+    }
+  ],
+  "gates": {
+    "mechanical": {
+      "verdict": "pass",
+      "checks": "valid JSON (en, context, target); key sets identical, 0 added, 0 dropped; 0 placeholders in either side; no backticks/markup/tags; no ICU/plural structure (key takes no arguments, so CLDR es categories one/many/other are N/A — reason: no '{' selector exists); NFC in both; no Cf/Cc/Co/Cs format characters; no trailing whitespace; single spaces; no BOM; trailing newline absent on all three files (consistent)"
+    },
+    "repo_validator": "NOT RUN — source-only exception for this pass forbids processes; the mechanical layer was executed with stdlib json/hashlib/unicodedata plus a direct read of every file. Not claimed as a validator run.",
+    "accuracy": "pass — see report",
+    "idiom_and_register": "pass — see report",
+    "terminology": "pass — 'plataforma de alojamiento' matches the shipped es catalogue rendering of hosting platform (cli.global_help.hosting, cli.exec_worker_help.hosting, cli.credential_help.credential); glossary has no hosting row and the es guide records none, so catalogue precedent governs",
+    "fit": "NOT RUN — the context sidecar declares no maxCells/maxChars (fields: note, role, tone); measured 49 cells vs en 35 (+40% in characters), all narrow glyphs; no cap exists to judge against",
+    "native_review": "NOT RUN",
+    "pseudo_localization": "NOT RUN",
+    "rtl": "N/A — es is LTR",
+    "ledger_write": "NOT PERFORMED — no repo or ledger edit permitted in this source-only pass; record + report retained in session scratch as the artifact of record and pending attachment"
+  },
+  "findings": [],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "contract_checks": {
+    "condition_only_no_remedy": "pass — the target names the condition and adds no remedy clause",
+    "complete_sentence_after_colon": "pass — one independent clause with subject, verb and agreement; 'La' article present",
+    "terminal_period": "pass",
+    "initial_capitalization": "pass — required by the sidecar ('keep its terminal period and its capitalization'); Spanish lowercase-after-colon convention is deliberately overridden by the source contract and is not scored as a defect",
+    "legacy_exception_string_untouched": "pass — session_factory.HostingNotConfiguredError English text is unchanged and is not this key's consumer text",
+    "no_added_dynamic_detail": "pass — no placeholders, counts or root-specific detail"
+  },
+  "observations_not_findings": [
+    "Capitalized 'La' after a colon conflicts with RAE lowercase-after-colon convention but is mandated verbatim by the context sidecar; recorded so a future reader does not 'fix' it.",
+    "35→49 characters (+40%) exceeds the es guide's typical 15–25% growth band; harmless with no declared cap, but the consuming refusal frame owns fit and fit was not exercised here."
+  ],
+  "audit_notes_not_execution_log": true,
+  "companions": {
+    "report": "report.md (reasoned findings and conclusions; notes, not an execution log)",
+    "audit_log": "audit.log (values transcribed from the actual eval-tool run in session 425221b9b2c6; not a repo-validator log)"
+  },
+  "original_lost_evidence": null,
+  "new_report_is_original": false,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "scope_note": "Single-key replacement audit, not a programme completion claim; the seven-locale programme remains open.",
+  "ledger_note": "es wire.errors.hosting.not_configured passed, 0 B/M; independent reader2 425221b9b2c6 (radient/auto, served UNKNOWN); en 458d8f8b ctx ed0ae50f es 8de6f07a; fit/native NORUN, no cap"
+}

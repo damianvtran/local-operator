@@ -1,0 +1,99 @@
+{
+  "audit_id": "vi-sdkstartup-r2-20261103",
+  "locale": "vi",
+  "namespace": "wire.errors.sdk_startup",
+  "audit_date": "2026-11-03",
+  "key_count": 4,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "7188e3347110",
+    "model": "radient/auto (requested, from session header)",
+    "actual_model_source": "session header only; served model id not exposed to this session => UNKNOWN",
+    "fallback_used": "none configured or observed",
+    "independent_from_translator_session": true,
+    "translator_session": "15986c0af719"
+  },
+  "pass_number": 2,
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e"
+    },
+    "vi_target": {
+      "path": "/Users/damian/.local-operator/sessions/15986c0af719/scratchpad/sdk-startup-vi-remedy-fix/target/vi/wire.errors.sdk_startup.json",
+      "sha256": "7c9a6bfb0907dc38d2b22e8dfb808f61852479b1d8d9b10b7ad8c7c8c99ef95e"
+    },
+    "vi_baseline": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/vi/wire.errors.sdk_startup.json",
+      "sha256": "ac6858150eb6e5d0856bafa729764e61d400fd6bdf3504d4b2ffa4cbb4300abd"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/7188e3347110/scratchpad/i18n-audit-vi-sdkstartup-r2/report.md",
+      "sha256": "f625e81b2136a8ae538215a4e3d6cd7fe54f423adbbb1a6eb37a943819a1ae35"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/7188e3347110/scratchpad/i18n-audit-vi-sdkstartup-r2/record.json",
+      "sha256": "see receipt.json (self-hash cannot be embedded)"
+    }
+  ],
+  "scope": {
+    "audited_scope": "namespace wire.errors.sdk_startup — delta + direct neighbours",
+    "changed_values": [
+      "wire.errors.sdk_startup.attach_hosting_unconfigured"
+    ],
+    "unchanged_values_verified_identical": 3,
+    "excluded": [
+      "other namespaces / whole vi corpus beyond terminology spot-evidence"
+    ],
+    "translator_edits_made": false
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "F1"
+    ],
+    "finding_classes": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 1
+    },
+    "nit_scope": "F1 pre-existing in tool_inventory_mismatch, unchanged by this delta, non-gating"
+  },
+  "verification": {
+    "binding_hashes_matched": 4,
+    "replacement": "whole-file byte equality: new == old.replace('Hãy cấu hình hosting','Hãy cấu hình nhà cung cấp'), single occurrence",
+    "residual_prose_english_hosting": "none in value",
+    "placeholders": "identical names/types per key; no ICU plural/select present",
+    "icu_structure": "hand-rolled brace scan (stdlib) — not a validator run",
+    "quote_escaping": "doubled apostrophes preserved; even counts",
+    "terminology_evidence": "nhà cung cấp 74 values; settings.hosting.label/help, cli.global_help.hosting, exec_worker_help.hosting localize the hosting axis the same way; dịch vụ lưu trữ 0, nhà cung cấp dịch vụ 0; runtime kept in 32 values, môi trường chạy 0"
+  },
+  "holds": [
+    "repo i18n validator NOT RUN (tool restriction)",
+    "ICU runtime render NOT RUN",
+    "pseudo-locale expansion NOT RUN",
+    "RTL NOT applicable",
+    "terminal-width/render fit NOT RUN",
+    "no maxCells/maxChars hint in context sidecar",
+    "git range-diff CLI NOT RUN (byte-level proof instead)",
+    "no repo or ledger edit by this audit"
+  ],
+  "audit_notes_not_execution_log": [
+    "checks above were computed locally with stdlib hashlib/json/os; no command log exists for this audit"
+  ],
+  "evidence_status": {
+    "tracked_path_target": "i18n/audits/evidence/vi/wire.errors.sdk_startup/vi-sdkstartup-r2-20261103/",
+    "currently_in_repo": false,
+    "note": "record + report live in auditor session scratch only; not yet committed to the tracked evidence root"
+  },
+  "ledger_note": "vi sdk_startup reader2 passed; 1 key changed (hosting->nhà cung cấp), 0 blocker/major, 1 pre-existing NIT; en 5390ecb2 ctx 82f193fd vi 7c9a6bfb. rec i18n/audits/evidence/vi/wire.errors.sdk_startup/vi-sdkstartup-r2-20261103/record.json",
+  "ledger_note_len": 234
+}

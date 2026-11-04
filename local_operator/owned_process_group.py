@@ -324,6 +324,12 @@ def _pgid_outcome(pid):
         return type(exc).__name__
 
 
+# Closing-delta relists allowed inside ONE strict_linux attempt. The deadline is
+# the real bound; this cap only guarantees termination under an injected or
+# stalled clock. Exhausting it is an incomplete attempt (stricter), never a pass.
+_LINUX_CENSUS_RELISTS = 8
+
+
 def strict_linux(
     pgid,
     deadline,
@@ -344,6 +350,50 @@ def strict_linux(
     attempts, attempt_count, remaining_ids = [], 0, 16
     phase = "opening-deadline"
 
+    def classify(entry):
+        """Return the parsed group of /proc/<entry>, or None when ENOENT proves it gone.
+
+        Raises Unknown for every other outcome (EACCES, EIO, a short or
+        unparseable row, a stat row missing beside a live directory). The
+        opening scan and the closing-delta reconciliation share this one
+        proof so an added PID can never be excused by a weaker rule.
+        """
+        nonlocal phase
+        path = f"/proc/{entry}"
+        phase = "row-read"
+        try:
+            raw = read(path + "/stat")
+        except FileNotFoundError:
+            try:
+                stat(path)
+            except FileNotFoundError:
+                return None
+            # The directory exists but the row did not read: retry it once.
+            # A transient miss during churn is not a malformed row, and only a
+            # second miss is genuinely unreadable identity.
+            try:
+                raw = read(path + "/stat")
+            except FileNotFoundError:
+                raise Unknown("stat row missing for existing PID")
+            except (OSError, UnicodeError) as exc:
+                raise Unknown("unreadable /proc row") from exc
+        except (OSError, UnicodeError) as exc:
+            raise Unknown("unreadable /proc row") from exc
+        phase = "row-parse"
+        try:
+            left, tail = (
+                raw[: raw.index("(")].strip(),
+                raw[raw.rindex(")") + 1 :].split(),
+            )
+            if int(left) != int(entry) or len(tail) < 3 or len(tail[0]) != 1:
+                raise ValueError("invalid process stat")
+            parent, group = int(tail[1]), int(tail[2])
+            if parent < 0 or group < 0:
+                raise ValueError("negative process identity")
+        except (ValueError, IndexError) as exc:
+            raise Unknown("malformed /proc row") from exc
+        return group
+
     def scan():
         nonlocal phase, attempt_count
         # Keep the existing six attempts and exact deadline/read cadence. These
@@ -356,59 +406,129 @@ def strict_linux(
             attempt_count = attempt + 1
             first, last = None, None
             result, disappeared, parsed = [], set(), set()
+            relists = 0
+            reconciled = {"different_group": 0, "same_group": 0, "gone": 0, "departed": 0}
+            unclassified, listed, gone_members = None, set(), set()
             phase = "opening-scan"
             try:
                 first = {n for n in listdir("/proc") if n.isdigit()}
+                listed = set(first)
                 phase = "row-scan"
                 for entry in first:
                     if clock() >= deadline:
                         phase = "row-deadline"
                         raise Unknown("strict /proc row deadline")
-                    path = f"/proc/{entry}"
-                    phase = "row-read"
-                    try:
-                        raw = read(path + "/stat")
-                    except FileNotFoundError:
-                        try:
-                            stat(path)
-                        except FileNotFoundError:
-                            disappeared.add(entry)
-                            continue
-                        # The directory exists but the row did not read: retry it once.
-                        # A transient miss during churn is not a malformed row, and only a
-                        # second miss is genuinely unreadable identity.
-                        try:
-                            raw = read(path + "/stat")
-                        except FileNotFoundError:
-                            raise Unknown("stat row missing for existing PID")
-                        except (OSError, UnicodeError) as exc:
-                            raise Unknown("unreadable /proc row") from exc
-                    except (OSError, UnicodeError) as exc:
-                        raise Unknown("unreadable /proc row") from exc
-                    phase = "row-parse"
-                    try:
-                        left, tail = (
-                            raw[: raw.index("(")].strip(),
-                            raw[raw.rindex(")") + 1 :].split(),
-                        )
-                        if int(left) != int(entry) or len(tail) < 3 or len(tail[0]) != 1:
-                            raise ValueError("invalid process stat")
-                        parent, group = int(tail[1]), int(tail[2])
-                        if parent < 0 or group < 0:
-                            raise ValueError("negative process identity")
-                    except (ValueError, IndexError) as exc:
-                        raise Unknown("malformed /proc row") from exc
+                    group = classify(entry)
+                    if group is None:
+                        disappeared.add(entry)
+                        continue
                     parsed.add(entry)
                     if group == pgid:
                         result.append(int(entry))
-                phase = "closing-scan"
-                last = {n for n in listdir("/proc") if n.isdigit()}
-                if first - disappeared == last:
-                    # RAW NAMESPACE, before the group filter, for the same reason as Darwin.
-                    leader_seen = str(pgid) in (first | last)
-                    phase = "complete"
-                    return sorted(result), True, leader_seen
-                phase = "namespace-changed"
+                # RECONCILE THE CLOSING DELTA TO A FIXPOINT (PR3269, CI run
+                # 41657372783 job 125993075099; architect ruling 641ae72fe5d1,
+                # "Unstable /proc census at refresh"). The old completeness test
+                # was a machine-wide zero delta (opening minus proven-gone ==
+                # closing), so ANY unrelated fork or exit on a busy runner
+                # failed all six attempts and refresh() refused with
+                # "unstable /proc census" while our group was perfectly stable.
+                # The promise that test made is "every PID in the final list is
+                # classified", and that is what is kept here, not weakened:
+                # - a REMOVED PID was already read (parsed) or proven gone in
+                #   this attempt, so it is classified; our-group ones stay in
+                #   `result` and refresh() samples them;
+                # - an ADDED PID (including a proven-gone PID listed again, i.e.
+                #   possible PID reuse, because it is not in `parsed`) is read
+                #   with the SAME proof as the opening scan: another pgid or
+                #   ENOENT-gone is harmless, our pgid joins `result`, and every
+                #   other outcome (EACCES, EIO, short/unparseable row) leaves
+                #   the attempt INCOMPLETE -- never a silent omission;
+                # - then /proc is listed again until a listing adds nothing
+                #   unclassified. Relists are capped per attempt and every read
+                #   checks the deadline, so the six attempts and the caller's
+                #   deadline still bound the whole census; an unsettled delta
+                #   is Unknown, never the last partial attempt.
+                #
+                # - an OUR-group PID that a listing no longer contains is NOT
+                #   "already classified" (review round 1, R1): keeping it would
+                #   hand refresh()/_terminal_absence a corpse and refuse exactly
+                #   the post-SIGKILL census this change exists to complete, and
+                #   would defeat #3360's in-census-1-not-in-census-2 rule. It is
+                #   re-read: ENOENT on row AND directory drops it (departed);
+                #   a positive read while absent from the listing is a
+                #   contradiction, and any other outcome is unknown -- both
+                #   leave the attempt incomplete. A departure also forces one
+                #   more listing, so a child it forked before exiting is seen.
+                #   Foreign removals need no re-read: they never enter result.
+                # - PID-reuse blind spot (review round 1, m1): a PID parsed as
+                #   foreign is not re-read if a later listing still shows it, so
+                #   a reuse of that PID by our group between relists is missed.
+                #   The old zero-delta rule had the same blind spot within one
+                #   attempt; relists widen the window by at most
+                #   _LINUX_CENSUS_RELISTS listings inside the same deadline.
+                while True:
+                    phase = "closing-scan"
+                    last = {n for n in listdir("/proc") if n.isdigit()}
+                    listed |= last
+                    departed = sorted({str(pid) for pid in result} - last, key=int)
+                    pending = sorted(last - parsed, key=int)
+                    if not pending and not departed:
+                        # RAW NAMESPACE, before the group filter, for the same reason as Darwin.
+                        leader_seen = str(pgid) in listed
+                        phase = "complete"
+                        return sorted(result), True, leader_seen
+                    if clock() >= deadline:
+                        phase = "row-deadline"
+                        raise Unknown("strict /proc row deadline")
+                    work = [(entry, True) for entry in departed]
+                    work += [(entry, False) for entry in pending]
+                    if relists >= _LINUX_CENSUS_RELISTS:
+                        # unclassified_count: PIDs this attempt still had to
+                        # classify when it stopped (m2: one meaning everywhere).
+                        unclassified = len(work)
+                        phase = "namespace-changed"
+                        break
+                    relists += 1
+                    phase = "reconcile"
+                    for index, (entry, was_ours) in enumerate(work):
+                        if clock() >= deadline:
+                            phase = "row-deadline"
+                            raise Unknown("strict /proc row deadline")
+                        try:
+                            group = classify(entry)
+                        except Unknown:
+                            unclassified = len(work) - index
+                            phase = "reconcile-unclassified"
+                            break
+                        if was_ours:
+                            if group is not None:
+                                # Readable while the listing omits it: the two
+                                # facts contradict, so nothing here is proven.
+                                unclassified = len(work) - index
+                                phase = "reconcile-contradiction"
+                                break
+                            # A filter, not list.remove: the session-deletion
+                            # guard flags every `.remove` call shape. Same
+                            # effect -- result holds each PID once.
+                            result = [pid for pid in result if pid != int(entry)]
+                            parsed.discard(entry)
+                            disappeared.add(entry)
+                            gone_members.add(entry)
+                            reconciled["departed"] += 1
+                            continue
+                        if group is None:
+                            disappeared.add(entry)
+                            reconciled["gone"] += 1
+                            continue
+                        parsed.add(entry)
+                        disappeared.discard(entry)
+                        if group == pgid:
+                            result.append(int(entry))
+                            reconciled["same_group"] += 1
+                        else:
+                            reconciled["different_group"] += 1
+                    if unclassified is not None:
+                        break
             finally:
                 # A diagnostic must not replace any original read/parse/deadline
                 # refusal. Record only facts already obtained in THIS attempt.
@@ -423,15 +543,25 @@ def strict_linux(
                             {
                                 "pid": int(pid),
                                 "relation": (
-                                    "unobserved"
-                                    if pid not in parsed
-                                    else "same-group" if int(pid) in result else "different-group"
+                                    "departed-same-group"
+                                    if pid in gone_members
+                                    else (
+                                        "unobserved"
+                                        if pid not in parsed
+                                        else (
+                                            "same-group"
+                                            if int(pid) in result
+                                            else "different-group"
+                                        )
+                                    )
                                 ),
                             }
                             for pid in selected
                         ]
 
-                    added = closing - opening if last is not None else set()
+                    # m3: arrivals accumulate across every relist of the
+                    # attempt; removals compare the opening and final listings.
+                    added = listed - opening if last is not None else set()
                     removed = opening - closing if last is not None else set()
                     attempts.append(
                         {
@@ -442,6 +572,9 @@ def strict_linux(
                             "added_count": len(added),
                             "removed_count": len(removed),
                             "confirmed_disappeared_count": len(disappeared),
+                            "relist_count": relists,
+                            "reconciled": dict(reconciled),
+                            "unclassified_count": unclassified,
                             "added": entries(added),
                             "removed": entries(removed),
                             "confirmed_disappeared": entries(disappeared),

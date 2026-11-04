@@ -257,6 +257,65 @@ def _tail(text: str, limit: int = 400) -> str:
     return joined[-limit:] if len(joined) > limit else joined
 
 
+_CHAIN_SEPARATORS = (
+    "During handling of the above exception, another exception occurred:",
+    "The above exception was the direct cause of the following exception:",
+)
+
+
+def _traceback_block(text: str, max_lines: int = 60, max_chars: int = 6000) -> str:
+    """The LAST `Traceback (most recent call last)` block and all output after it.
+
+    WHY this exists (and why `_tail` was not widened): `exec.offline` failed on
+    windows-latest / CPython 3.12.10 (run 41751317494, job 126324068649) and the
+    four-line `_tail` kept only the CPython frame
+    (`asyncio/base_events.py` `_attach: assert self._sockets is not None`,
+    CPython gh-109564 -- Server.close racing a mid-accept connection, fixed on
+    main and 3.14/3.15 backports only, so 3.12 stays exposed). Every lop frame
+    above it was dropped, so which server lop closed was unknowable. Outcome
+    history: over 22 completed runs since 11-02 there were 14 successes, 7
+    cancelled and 1 failure (per the #3367 owner). This helper preserves the evidence; it
+    does NOT explain or fix the failure.
+
+    Returns "" when there is no traceback. Over-long blocks keep the TAIL (the
+    innermost frames and the exception line) and say how much was elided.
+    A CHAINED exception ("During handling of the above exception, another
+    exception occurred:" / "The above exception was the direct cause of the
+    following exception:") is kept whole, from its FIRST traceback: the root
+    cause sits above the separator and is the block most likely to name the lop
+    frame. A traceback header quoted earlier in unrelated output, not joined by
+    a separator, is not pulled in.
+    Splitting on splitlines() makes Windows `\r\n` endings harmless.
+    """
+    lines = [ln.rstrip() for ln in (text or "").splitlines() if ln.strip()]
+    marker = "Traceback (most recent call last)"
+    starts = [i for i, ln in enumerate(lines) if marker in ln]
+    if not starts:
+        return ""
+    first = starts[-1]
+    # Walk back across chain separators: [..tb..] SEP [..tb..] SEP [last tb].
+    while True:
+        j = first - 1
+        if j < 0 or lines[j].strip() not in _CHAIN_SEPARATORS:
+            break
+        prev = [i for i in starts if i < j]
+        if not prev:
+            break
+        first = prev[-1]
+    block = lines[first:]
+    elided = 0
+    if len(block) > max_lines:
+        elided += len(block) - max_lines
+        block = block[-max_lines:]
+    joined = "\n".join(block)
+    if len(joined) > max_chars:
+        joined = joined[-max_chars:]
+        elided = max(elided, 1)
+    if elided:
+        joined = f"[... earlier traceback output elided ...]\n{joined}"
+    return joined
+
+
 def _first_line(text: str, limit: int = 240) -> str:
     for line in (text or "").splitlines():
         if line.strip():
@@ -1361,7 +1420,24 @@ def probe_exec_offline(env: dict[str, str]) -> Result:
     text = (proc.stdout or "") + (proc.stderr or "")
     traceback = "Traceback (most recent call last)" in text
     if traceback:
-        return Result("exec.offline", "FAIL", _tail(text), {"rc": proc.returncode})
+        # Short summary stays first so the matrix table keeps its shape; the
+        # whole traceback follows (see _traceback_block for why).
+        summary = _tail(text)
+        block = _traceback_block(proc.stderr or "") or _traceback_block(text)
+        detail = f"{summary}\n--- rc={proc.returncode} full traceback ---\n{block}"
+        return Result(
+            "exec.offline",
+            "FAIL",
+            detail,
+            {
+                "rc": proc.returncode,
+                "traceback": block,
+                # Unredacted child output: acceptable because this is public CI
+                # running the offline `lop exec` (no provider token configured).
+                "stderr_tail": (proc.stderr or "")[-1500:],
+                "stdout_tail": (proc.stdout or "")[-1500:],
+            },
+        )
     return Result(
         "exec.offline",
         "PASS",

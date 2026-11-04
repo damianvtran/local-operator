@@ -349,3 +349,106 @@ def test_explicit_fallback_resolves_only_the_chosen_guidance(
     assert (hub_quality in body) is (strategy == "take-hub")
     assert model.requests == []
     assert _bytes(folder) == before
+
+
+# --- Relocated siblings referenced from INSIDE references/ ---
+#
+# A real-world shape: requirements.md and rubric.md sit at the skill root while
+# files under references/ mention them as bare inline code paths (table rows
+# below mirror such a tree). Read from references/, the bare name resolves to
+# references/<name> -- exactly where relocation puts the file. Those links were
+# dangling locally and become CORRECT after the move, so the merge must accept
+# them verbatim instead of refusing "ambiguous inline filepath". The earlier
+# fixtures only referenced the moved files from the root SKILL.md, which is why
+# this shape dead-ended every strategy.
+
+_ENRICHMENT_LINE = (
+    "| `dob_coverage` | The run-level floor is **99%** of rows carrying a `dob_value`, "
+    "stated or inferred (`requirements.md` R20). A row that cannot reach a stated date "
+    "must be pushed to an inference rather than left empty, and an inference that stays "
+    "too weak to publish is recorded in `notes` with the exact blocker. |\n"
+)
+_RECORD_LINE = "| `confidence` | `high` / `medium` / `low`, defined as in `rubric.md`. |\n"
+
+
+def _municipal_with_sibling_refs(tmp_path: Path, *, changed: bool = True):
+    folder, remote, local_quality, hub_quality = _municipal(tmp_path, changed=changed)
+    (folder / "references").mkdir()
+    (folder / "references" / "enrichment-contract.md").write_text(
+        "# Enrichment contract\n\n| Field | Rule |\n| --- | --- |\n" + _ENRICHMENT_LINE
+    )
+    (folder / "references" / "record-contract.md").write_text(
+        "# Record contract\n\n| Field | Rule |\n| --- | --- |\n" + _RECORD_LINE
+    )
+    data = remote.to_json()
+    data["files"] = list(data["files"]) + [
+        {
+            "path": "references/enrichment-contract.md",
+            "content": "# Enrichment contract\n\n| Field | Rule |\n| --- | --- |\n"
+            + _ENRICHMENT_LINE,
+        },
+        {
+            "path": "references/record-contract.md",
+            "content": "# Record contract\n\n| Field | Rule |\n| --- | --- |\n" + _RECORD_LINE,
+        },
+    ]
+    return folder, SkillDocument.from_json(data), local_quality, hub_quality
+
+
+@pytest.mark.parametrize("strategy", ["merge", "keep-local", "take-hub"])
+def test_sibling_refs_inside_references_never_dead_end(
+    tmp_path: Path, strategy: Literal["merge", "keep-local", "take-hub"]
+) -> None:
+    folder, remote, _local, _hub = _municipal_with_sibling_refs(tmp_path)
+    before = _bytes(folder)
+
+    proposal = adoption.build_proposal(
+        ALIAS, adoption.read_tree(folder), remote, resolver=FaithfulModel(), strategy=strategy
+    )
+
+    assert proposal.state == "ready", proposal.to_json()
+    assert proposal.document is not None
+    files = {entry.path: entry.content for entry in proposal.document.files}
+    # Left verbatim: the bare sibling name is correct at its new home.
+    assert _RECORD_LINE in files["references/record-contract.md"]
+    assert _ENRICHMENT_LINE in files["references/enrichment-contract.md"]
+    assert _bytes(folder) == before
+
+
+def test_sibling_refs_equal_case_adopts_without_model(tmp_path: Path) -> None:
+    folder, remote, _local, _hub = _municipal_with_sibling_refs(tmp_path, changed=False)
+    model = FaithfulModel()
+
+    proposal = adoption.build_proposal(ALIAS, adoption.read_tree(folder), remote, resolver=model)
+
+    assert proposal.state == "equal", proposal.to_json()
+    assert model.requests == []
+
+
+def test_inline_path_to_relocated_basename_elsewhere_still_refuses(tmp_path: Path) -> None:
+    """Scope guard: only the relocation's own destination is accepted.
+
+    From ``references/sub/`` the bare name resolves to ``references/sub/rubric.md``:
+    it neither exists locally nor is where rubric.md moves, so it is still
+    genuinely ambiguous and the merge keeps asking for a choice.
+    """
+    folder, remote, _local, _hub = _municipal(tmp_path)
+    (folder / "references" / "sub").mkdir(parents=True)
+    (folder / "references" / "sub" / "guide.md").write_text("Scored as in `rubric.md`.\n")
+
+    with pytest.raises(adoption.AdoptionError) as caught:
+        adoption.build_proposal(ALIAS, adoption.read_tree(folder), remote, resolver=FaithfulModel())
+    assert caught.value.code == "adoption-needs-choice"
+    assert str(caught.value) == "ambiguous inline filepath"
+
+
+def test_merged_skill_md_keeps_terminal_newline(tmp_path: Path) -> None:
+    folder, remote, _local, _hub = _municipal(tmp_path)
+
+    proposal = adoption.build_proposal(
+        ALIAS, adoption.read_tree(folder), remote, resolver=FaithfulModel()
+    )
+
+    assert proposal.document is not None
+    skill = {f.path: f.content for f in proposal.document.files}["SKILL.md"]
+    assert skill.endswith("\n") and not skill.endswith("\n\n\n")
