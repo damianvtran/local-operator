@@ -11,5 +11,6 @@
   "cli.hub_org.list_failed": "Не удалось получить список элементов {kind} организации: {cause}",
   "cli.hub_org.ineligible_signed_out": "Каталоги организаций — функция Radient Team; вы не вошли в Radient (lop login radient).",
   "cli.hub_org.unknown_org": "Ни одна из ваших организаций с тарифом Team не соответствует «{ref}»; укажите --org с одной из них:",
-  "cli.hub_org.plan_empty": "Всё уже связано; делать pull нечего."
+  "cli.hub_org.plan_empty": "Всё уже связано; делать pull нечего.",
+  "cli.hub_org.team_block_heading": "{org} (организация)"
 }

@@ -11,5 +11,6 @@
   "cli.hub_org.list_failed": "无法列出组织的{kind}项：{cause}",
   "cli.hub_org.ineligible_signed_out": "组织目录是Radient Team功能；你尚未登录Radient（lop login radient）。",
   "cli.hub_org.unknown_org": "没有与“{ref}”匹配的Team套餐组织；用--org指定以下之一：",
-  "cli.hub_org.plan_empty": "所有项均已链接，无需pull。"
+  "cli.hub_org.plan_empty": "所有项均已链接，无需pull。",
+  "cli.hub_org.team_block_heading": "{org}（组织）"
 }

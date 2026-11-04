@@ -11,5 +11,6 @@
   "cli.hub_org.list_failed": "No se pudieron listar los elementos {kind} de la organización: {cause}",
   "cli.hub_org.ineligible_signed_out": "Los catálogos de organización son una función de Radient Team; no has iniciado sesión en Radient (lop login radient).",
   "cli.hub_org.unknown_org": "Ninguna de tus organizaciones con plan Team coincide con “{ref}”; pasa --org con una de estas:",
-  "cli.hub_org.plan_empty": "Todo ya está vinculado; no hay nada por hacer pull."
+  "cli.hub_org.plan_empty": "Todo ya está vinculado; no hay nada por hacer pull.",
+  "cli.hub_org.team_block_heading": "{org} (organización)"
 }

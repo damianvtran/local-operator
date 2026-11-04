@@ -11,5 +11,6 @@
   "cli.hub_org.list_failed": "Impossible de lister les éléments {kind} de l’organisation : {cause}",
   "cli.hub_org.ineligible_signed_out": "Les catalogues d’organisation sont une fonctionnalité Radient Team ; vous n’êtes pas connecté à Radient (lop login radient).",
   "cli.hub_org.unknown_org": "Aucune de vos organisations au forfait Team ne correspond à « {ref} » ; passez --org avec l’une d’elles :",
-  "cli.hub_org.plan_empty": "Tout est déjà lié ; rien à récupérer."
+  "cli.hub_org.plan_empty": "Tout est déjà lié ; rien à récupérer.",
+  "cli.hub_org.team_block_heading": "{org} (organisation)"
 }

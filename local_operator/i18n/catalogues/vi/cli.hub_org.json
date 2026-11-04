@@ -11,5 +11,6 @@
   "cli.hub_org.list_failed": "Không thể liệt kê các mục {kind} của tổ chức: {cause}",
   "cli.hub_org.ineligible_signed_out": "Danh mục tổ chức là tính năng của Radient Team; bạn chưa đăng nhập Radient (lop login radient).",
   "cli.hub_org.unknown_org": "Không có tổ chức dùng gói Team nào của bạn khớp với “{ref}”; truyền --org với một trong các tổ chức sau:",
-  "cli.hub_org.plan_empty": "Mọi mục đều đã được liên kết; không có gì cần pull."
+  "cli.hub_org.plan_empty": "Mọi mục đều đã được liên kết; không có gì cần pull.",
+  "cli.hub_org.team_block_heading": "{org} (tổ chức)"
 }
