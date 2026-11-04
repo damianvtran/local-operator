@@ -461,6 +461,60 @@ def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
     return {"ok": False, "code": code, "error": message}
 
 
+#: The ops whose payload is ONE outgoing message, mapped to the field the op
+#: reads it from. The params model is shared by every op and carries both a
+#: ``text`` (the pair-inbox ops' historical name) and a ``body`` (the room ops'
+#: name), so a model naturally writes ``text`` for ``channel_post`` or ``body``
+#: for ``send`` — and the op then saw an empty message and refused "needs
+#: non-empty body" (reproduced twice in production, 2026-11-04). For these ops
+#: the two words can only mean the same thing, so the other one is an ALIAS.
+#: No other op reads either field: ``react`` takes ``emoji``, ``channel_create``
+#: takes ``name``/``topic``, ``take_up`` RETURNS ``text`` rather than taking it,
+#: and the reads take neither — which is why the alias is scoped to this map and
+#: never applied tool-wide, where it could silently give a stray field meaning.
+MESSAGE_FIELD_BY_OP: dict[str, str] = {
+    "channel_post": "body",
+    "dm": "body",
+    "send": "text",
+    "reply": "text",
+}
+
+
+def _normalize_message_field(
+    op: str, args: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Fold the alias onto the op's own message field, or refuse a conflict.
+
+    Aliasing (rather than only a better refusal) is safe because for a message
+    op both fields name the same payload, and it is what makes the model's first
+    natural attempt work instead of costing a retry. Two NON-EMPTY values that
+    differ are refused, never resolved: picking either would send a message the
+    caller may not have meant, and a sent message cannot be recalled. Identical
+    values are one message spelt twice and pass. A whitespace-only value counts
+    as empty, matching each op's own emptiness check. A non-string is left for
+    the params model to refuse with its own typed error.
+    """
+    canonical = MESSAGE_FIELD_BY_OP.get(op)
+    if canonical is None:
+        return args, None
+    alias = "body" if canonical == "text" else "text"
+    if alias not in args:
+        return args, None
+    primary = args.get(canonical, "")
+    secondary = args[alias]
+    if not isinstance(primary, str) or not isinstance(secondary, str):
+        return args, None
+    if primary.strip() and secondary.strip() and primary != secondary:
+        return args, _error(
+            f"{op} got both {canonical} and {alias} with different content; pass the "
+            f"message once, as {canonical}. Nothing was sent"
+        )
+    folded = {key: value for key, value in args.items() if key != alias}
+    if not primary.strip():
+        folded[canonical] = secondary
+    return folded, None
+
+
 #: A refusal's ``field``/``rule`` is a server identifier, never prose. Bound and
 #: flatten it anyway: this text is billed into the agent's context and persisted
 #: in the transcript, so an upstream answer that smuggled newlines or a paragraph
@@ -1029,9 +1083,9 @@ async def _direct_message(
     params, refused = _dm_recipient(params)
     if refused is not None:
         return refused
-    if params.body and params.text:
-        return _error("dm takes body or text, not both")
-    text = params.body or params.text
+    # ``text`` was already folded onto ``body`` (or refused as a conflicting
+    # second message) by ``_normalize_message_field`` in the executor.
+    text = params.body
     if not text.strip():
         return _error("dm needs non-empty body")
     thread_root_id = params.thread_root_id.strip()
@@ -1503,6 +1557,12 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     fence = outbound_tool_fence(runtime) if op in OUTBOUND_OPS else owner_fence_refusal(runtime)
     if fence is not None:
         return _error(fence["error"], code=fence["code"])
+    # After the fence (a drifted runtime refuses before reading any argument) and
+    # before every op-specific step, so reply resolution, the outbox intent and
+    # the wire body all see the one canonical field. Local and network-free.
+    args, refused = _normalize_message_field(op, args)
+    if refused is not None:
+        return refused
     if op == "channel_post":
         refused = _validate_reply_destination(runtime, args)
         if refused is not None:
