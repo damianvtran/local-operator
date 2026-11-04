@@ -1051,6 +1051,17 @@ async def run_forever(
                 None, config_dir=config_dir, owner_source=owner_source, stop=stop
             )
             continue
+        # Outside ``_run_iteration_inner`` on purpose: that is skipped while the hub
+        # is down, which is when holds age. Its own guard, closed code only — the
+        # alert is chrome and must never stop the receiver.
+        try:
+            from local_operator.team_bridge import hold_alert
+
+            await hold_alert.tick(owner, config_dir)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.info("bridge connector: long-hold alert skipped code=hold_alert_failed")
         started = _time.monotonic()
         try:
             access = await access_provider()

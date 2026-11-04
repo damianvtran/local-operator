@@ -1,0 +1,65 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.errors.hosting",
+  "audit_pass": "initial contribution audit (reader 2)",
+  "status": "passed",
+  "key_count": 1,
+  "keys": ["wire.errors.hosting.not_configured"],
+  "target_value": "托管平台未配置。",
+  "findings": [],
+  "advisories": ["A1 non-gating contract boundary (legacy exception and foreign errors stay English by design)", "A2 non-gating author-record typo: 休 should be 尚"],
+  "source_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+  "context_sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9",
+  "target_sha256": "b4cd49fd638d7aa7b9f6142a61d465918d69734c7c970025da9121f18907207e",
+  "mechanical": {
+    "key_parity": true,
+    "json_parses": true,
+    "nfc_stable": true,
+    "cf_codepoints": 0,
+    "ascii_letters_or_digits": 0,
+    "placeholders_or_braces": 0,
+    "terminal_codepoint": "U+3002",
+    "cells": 16,
+    "icu_arguments": "none (argument-free source and target; parity vacuous)",
+    "cldr": "NOT APPLICABLE — no plural/select",
+    "english_fallback": false,
+    "maxCells": "none declared"
+  },
+  "consumer": "sdk.py:603-632 composes the key; ownership test uses the ENGLISH catalogue plus exact exception type, so the translation cannot break it; legacy exception text remains English by contract",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "6433b7a5b3e9",
+    "requested_model": "radient/auto (session header)",
+    "served_model": "UNKNOWN",
+    "served_model_note": "own completed usage exposes only the auto-router label (provider radient, model_id auto); no concrete upstream model and no fallback inferred",
+    "actual_model_source": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/transcript.jsonl",
+      "entry_id": "bd031790f6ad427f926b099c0abdfa99",
+      "at_ms": 1793736572912
+    },
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_code_author": true,
+    "code_author_session": "94dcef624dec",
+    "other_reader_verdict_read": false
+  },
+  "holds": {
+    "repo_validator_scanner_generation": "NOT RUN",
+    "production_formatter_renderer": "NOT RUN",
+    "native_or_rendered_frame": "NOT RUN",
+    "pseudo_localization": "NOT RUN",
+    "rtl": "not applicable (zh-CN)",
+    "activation_or_shipped_state": "not claimed",
+    "english_free_for_composed_refusal": "not claimed"
+  },
+  "record": {
+    "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/hosting-zh-CN-audit-reader2/record.json",
+    "sha256": "3c8603eaa495fed7e30489c82297935e6d9bd8d9f14f1da34a542df1cd5e615f"
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/hosting-zh-CN-audit-reader2/report.md",
+      "sha256": "91788d476cb45cf4160bc260817c65c3720432da6a63814c6a70b1d41361ebf7"
+    }
+  }
+}

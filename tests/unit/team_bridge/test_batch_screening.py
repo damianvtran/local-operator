@@ -14,8 +14,8 @@ What these pin (PR #3400, 2026-11-03):
 * the budget is charged ONE unit per call, not per message, with the ambient
   reserve, the person-addressed reserve (keyed on SENDER KIND, S-4) and the
   per-verified-sender ceiling inside the account's 40;
-* exhaustion holds with a refill-time retry, notifies once per episode, and a
-  reader sees ``[waiting to be screened]``, never ``body: null``.
+* exhaustion holds with a refill-time retry and notifies once per episode. (A
+  reader's ``body: null`` is explained by main's ``body_state``, PR #3328.)
 """
 
 from __future__ import annotations
@@ -616,85 +616,6 @@ def test_a_dm_and_human_lines_are_screened_before_agent_chatter(
     # The human tier is screened first, then the ambient one.
     assert order[0] == [(m.id, Store.SCREENING_TIER_HUMAN) for m in human]
     assert order[1] == [(m.id, Store.SCREENING_TIER_AMBIENT) for m in chatter]
-
-
-# --------------------------- reader rendering ---------------------------
-
-
-def test_reader_sees_waiting_or_refused_never_a_null_body(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An unadmitted row renders as a marker the sender cannot forge.
-
-    ``[waiting to be screened]`` by default (held, budget refilling, batch in
-    flight); ``[not admitted: refused …]`` only when THIS machine's receipt
-    for the SAME body hash says reject. The read must not create a store.
-    """
-
-    import json as _json
-
-    from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
-    from local_operator.team_bridge import client as tb_client
-    from local_operator.team_bridge import host as host_mod
-    from local_operator.team_bridge import tool as tool_mod
-    from local_operator.team_bridge.tool import execute_bridge
-    from tests.unit.team_bridge.test_channel_tool import RecordingClient
-    from tests.unit.team_bridge.test_channel_tool import _owner as tool_owner
-    from tests.unit.team_bridge.test_channel_tool import _runtime
-    from tests.unit.team_bridge.test_conversation_delivery import (
-        _enroll,
-        _persist_fake_receipt,
-        _receipt,
-    )
-
-    # The fences have their own suites (the channel tool tests open them the
-    # same way); this test is about what a granted read renders.
-    monkeypatch.setattr(tb_client, "org_oauth_destination_allowed", lambda base: True)
-    monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
-    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda runtime: None)
-    monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
-
-    def history(config_dir: Path, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        outcome = asyncio.run(
-            execute_bridge(
-                _runtime(RecordingClient(messages={"messages": rows}), config_dir=config_dir),
-                {"op": "channel_history", "channel_id": "bcv_abcd1234", "limit": 20},
-            )
-        )
-        assert outcome["ok"] is True
-        return _json.loads(outcome["content"][len(BRIDGE_UNTRUSTED_CLAUSE) + 2 :])["messages"]
-
-    def digest(text: str) -> str:
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-    # No store at all: the read renders "waiting" and creates nothing.
-    bare = tmp_path / "bare"
-    bare.mkdir()
-    rows = history(bare, [{"id": "bcmsg_x1", "seq": 1, "body": None, "body_hash": digest("x")}])
-    assert rows[0]["body"] == tool_mod._UNSCREENED_BODY
-    assert rows[0]["body_admitted"] is False
-    assert not state_db_path(bare).exists(), "a read surface must not create the store"
-
-    # A local REJECT for the same bytes reads as refused; a different hash does not.
-    cfg = tmp_path / "cfg"
-    cfg.mkdir()
-    _enroll(cfg, tool_owner("bep_1"), "sess_1")
-    _persist_fake_receipt(cfg, _receipt("reject", "spam spam"), message_id="bcmsg_r1")
-    _persist_fake_receipt(cfg, _receipt("reject", "old bytes"), message_id="bcmsg_r2")
-    rows = history(
-        cfg,
-        [
-            {"id": "bcmsg_r1", "seq": 1, "body": None, "body_hash": digest("spam spam")},
-            {"id": "bcmsg_r2", "seq": 2, "body": None, "body_hash": digest("edited bytes")},
-            {"id": "bcmsg_ok", "seq": 3, "body": "hello", "body_hash": digest("hello")},
-        ],
-    )
-    assert [row["body"] for row in rows] == [
-        tool_mod._REFUSED_BODY,
-        tool_mod._UNSCREENED_BODY,
-        "hello",
-    ]
-    assert "body_admitted" not in rows[2]
 
 
 # ------------------- connector, down to the REAL screening core -------------------

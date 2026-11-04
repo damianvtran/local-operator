@@ -68,7 +68,15 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
 - **channel_history** — a bounded page of messages. The server admits bodies
   per (message, endpoint) screening; an agent sees the METADATA (sender, seq,
   hash) of messages it has not admitted, with ``body`` null, and only the
-  admitted bodies. There is intentionally no local body cache here. The one
+  admitted bodies. A null body also carries ``body_state`` so it is never read
+  as a blank message: ``held`` (screening has not released it; only a coarse
+  ``hold_class`` and ``held_for_s`` are shown), ``not_admitted``,
+  ``rejected`` (hub-supplied only, never derived here), or ``unavailable``
+  (the agent's own post could not be read back in this read: the read-back
+  failed, or the page held more own posts than one read fetches). It means this agent
+  has not been given that message; it is NOT an empty message and its content
+  must not be inferred. No body, hold code or category is ever shown.
+  There is intentionally no local body cache here. The one
   exception to ``body: null`` is a message THIS account authored: the hub never
   delivers it back for admission, so history and thread fetch its text per read
   (hash-verified, never stored) so a sender can read what it wrote.
@@ -129,6 +137,7 @@ import base64
 import hashlib
 import json
 import re
+import time
 import unicodedata
 import uuid
 from collections.abc import Mapping
@@ -2011,17 +2020,15 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             )
         # Bodies are external content even when the sender is a teammate's
         # agent: the same untrusted wrap as take_up. Unadmitted messages carry
-        # ``body: null`` from the hub — metadata only, no local cache — and the
-        # reader sees a marker in its place (``_mark_unadmitted_bodies``).
+        # ``body: null`` — metadata only — and stay that way (no local cache).
         if isinstance(result, dict) and isinstance(result.get("messages"), list):
             restored = await _restore_own_bodies(
                 runtime, channel_id, result["messages"], endpoint_id
             )
+            await _annotate_body_state(runtime, result["messages"])
         else:
             restored = set()
         images = await _history_images(runtime, channel_id, result, endpoint_id, restored)
-        if isinstance(result, dict) and isinstance(result.get("messages"), list):
-            _mark_unadmitted_bodies(runtime, result["messages"])
         return {
             "ok": True,
             "state": "ok",
@@ -2054,7 +2061,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 f"could not read the thread: {_failure_text(failure)}", code="thread_failed"
             )
         # Same untrusted wrap as channel_history: a reply body is external
-        # content, and an unadmitted one is null from the server (marked below).
+        # content, and an unadmitted one is already null from the server.
         # Images too (R1-02): the channel timeline excludes replies, so this
         # is the ONLY read through which a reply's admitted images can reach
         # the agent — same caption, same fresh context fetch, same budget.
@@ -2067,10 +2074,10 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             if isinstance(replies, list):
                 thread_rows.extend(replies)
         restored = await _restore_own_bodies(runtime, channel_id, thread_rows, endpoint_id)
+        await _annotate_body_state(runtime, thread_rows)
         images = await _history_images(
             runtime, channel_id, {"messages": thread_rows}, endpoint_id, restored
         )
-        _mark_unadmitted_bodies(runtime, thread_rows)
         return {
             "ok": True,
             "state": "ok",
@@ -2209,41 +2216,128 @@ async def _restore_own_bodies(
     return filled
 
 
-#: What an agent reads in place of a body the hub withheld (``body: null``).
-#: WHY: a null body read as "empty message" or as a hub failure, and a reader
-#: agent would answer it as if the sender said nothing. Most often the message
-#: is waiting for this machine's screener (a held message, a budget that is
-#: refilling, a batch still in flight); a local REJECT receipt for it says the
-#: screener refused it instead. ``body_admitted: false`` rides beside the text
-#: so the marker is a fact of the row, not something a sender could type.
-_UNSCREENED_BODY = "[waiting to be screened]"
-_REFUSED_BODY = "[not admitted: refused by screening]"
+#: The closed ``body_state.state`` vocabulary an agent may be shown on a row
+#: whose ``body`` is null. ``unavailable`` is local-only (the agent's own post
+#: could not be read back in this read, whether the fetch failed or the row was
+#: past :data:`OWN_BODY_FETCH_MAX`); the other three may also arrive from the hub.
+_HUB_BODY_STATES = frozenset({"held", "rejected", "not_admitted"})
+_BODY_STATE_SINCE_MAX = 40
+#: ``since`` is a timestamp the model will read as one: only the ISO-8601 shape
+#: (``T`` separator, explicit zone) passes, so a hub string cannot smuggle prose
+#: through a field that looks like data. ASCII digits only (``re.ASCII``).
+_BODY_STATE_SINCE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})", re.ASCII
+)
 
 
-def _mark_unadmitted_bodies(runtime: BridgeRuntime, rows: list[Any]) -> None:
-    """Replace each remaining ``body: null`` with its reader marker, in place.
+def _hub_body_state(value: Any) -> dict[str, str] | None:
+    """The hub's own ``body_state`` reduced to ``state`` (+ ``since``), or ``None``.
 
-    Runs AFTER own-body restore and the image captions (both read ``body is
-    None`` as "not admitted"), and only on the copy handed to the model.
+    Forward-compatible wire shape: the hub knows what this machine cannot (a
+    rejection), so a well-formed value wins. Everything else on it — a reason,
+    a category, a label — is dropped, and a malformed value is ignored so the
+    local answer stands.
     """
 
-    from .store import Store
+    if not isinstance(value, dict):
+        return None
+    state = value.get("state")
+    if not isinstance(state, str) or state not in _HUB_BODY_STATES:
+        return None
+    kept = {"state": state}
+    since = value.get("since")
+    if (
+        isinstance(since, str)
+        and len(since) <= _BODY_STATE_SINCE_MAX
+        and _BODY_STATE_SINCE.fullmatch(since) is not None
+    ):
+        kept["since"] = since
+    return kept
 
-    store = Store(Path(runtime.config_dir))
+
+async def _annotate_body_state(runtime: BridgeRuntime, rows: list[Any]) -> None:
+    """Say WHY a row's ``body`` is still null, in place (``body_state``).
+
+    WHY. An agent read ``body: null`` as a blank message. The hub sends it for a
+    message this endpoint has not been given: held in screening, or not
+    admitted. The agent must learn that, and nothing more.
+
+    WHAT IT NEVER DOES. It never fetches or returns another member's body, never
+    reads ``screening_receipts`` (so ``rejected`` can only come from the hub —
+    deriving it here would disclose moderation outcomes), and never emits the
+    hold code, categories or reasons: only a coarse class and an age. A row that
+    already has a body gets nothing, and a stray hub ``body_state`` on it is
+    removed.
+    """
+
+    import asyncio
+
+    pending: list[dict[str, Any]] = []
     for row in rows:
-        if not isinstance(row, dict) or "body" not in row or row.get("body") is not None:
+        if not isinstance(row, dict):
             continue
-        verdict = None
-        if isinstance(row.get("id"), str):
-            try:
-                receipt = store.receipt_verdict_readonly(runtime.owner, row["id"])
-            except Exception:  # noqa: BLE001 — unknown reads as waiting
-                receipt = None
-            # The receipt speaks only for the bytes it screened.
-            if receipt is not None and receipt[1] == row.get("body_hash"):
-                verdict = receipt[0]
-        row["body"] = _REFUSED_BODY if verdict == "reject" else _UNSCREENED_BODY
-        row["body_admitted"] = False
+        if row.get("body") is not None:
+            row.pop("body_state", None)
+            continue
+        # Reduce (or drop) the hub's value on EVERY null-body row first: a row
+        # whose id is not a conversation message id still passes through this
+        # function, and must not carry a reason/category/long string onward.
+        reduced = _hub_body_state(row.get("body_state"))
+        if reduced is None:
+            row.pop("body_state", None)
+        else:
+            row["body_state"] = reduced
+        message_id = row.get("id")
+        if (
+            not isinstance(message_id, str)
+            or _CONVERSATION_MESSAGE_ID.fullmatch(message_id) is None
+        ):
+            continue  # no local state is ever derived for a non-conversation id
+        pending.append(row)
+    if not pending:
+        return
+
+    holds: dict[str, dict[str, Any]] = {}
+    if any(_hub_body_state(row.get("body_state")) is None for row in pending):
+        from .store import Store, StoreRefused
+
+        try:
+            holds = await asyncio.to_thread(
+                Store(Path(runtime.config_dir)).hold_states_readonly,
+                runtime.owner,
+                [row["id"] for row in pending],
+            )
+        except (StoreRefused, OSError):
+            holds = {}  # no hold information: the row reads not_admitted
+
+    own = getattr(runtime.owner, "account_id", "")
+    now = time.time()
+    for row in pending:
+        from_hub = _hub_body_state(row.get("body_state"))
+        if from_hub is not None:
+            row["body_state"] = from_hub
+            continue
+        hold = holds.get(row["id"])
+        sender = row.get("sender")
+        if hold is not None:
+            state: dict[str, Any] = {"state": "held", "hold_class": hold["hold_class"]}
+            created = hold.get("created_at")
+            if isinstance(created, (int, float)):
+                state["held_for_s"] = max(0, int(now - created))
+            row["body_state"] = state
+        elif (
+            own
+            and isinstance(sender, dict)
+            and sender.get("account_id") == own
+            and sender.get("kind") == "agent"
+        ):
+            # The owner's own agent post that is still null after the read-back
+            # pass: the fetch failed, or the row sat past OWN_BODY_FETCH_MAX and
+            # was never tried. Either way the text exists and is ours, it just
+            # could not be read back in THIS read.
+            row["body_state"] = {"state": "unavailable"}
+        else:
+            row["body_state"] = {"state": "not_admitted"}
 
 
 async def _history_images(

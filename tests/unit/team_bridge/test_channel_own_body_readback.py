@@ -158,8 +158,7 @@ async def test_another_members_unadmitted_row_stays_null_and_is_never_fetched() 
     )
 
     by_id = {r["id"]: r["body"] for r in rows}
-    # The withheld row reads as the marker, never as an empty body (#3400).
-    assert by_id == {theirs: tool_mod._UNSCREENED_BODY, mine: "my reply"}
+    assert by_id == {theirs: None, mine: "my reply"}
     assert hub.body_calls == [mine]  # screening is not bypassed for anyone else
 
 
@@ -194,7 +193,7 @@ async def test_a_body_that_does_not_verify_is_not_shown(override: dict[str, Any]
         )
     )
     assert [r["id"] for r in rows] == [mine]
-    assert rows[0]["body"] == tool_mod._UNSCREENED_BODY
+    assert rows[0]["body"] is None
 
 
 @pytest.mark.asyncio
@@ -207,7 +206,7 @@ async def test_a_failed_body_read_leaves_the_hubs_null_and_the_read_succeeds() -
             _runtime(hub), {"op": "channel_history", "channel_id": CONV, "limit": 10}
         )
     )
-    assert rows[0]["body"] == tool_mod._UNSCREENED_BODY
+    assert rows[0]["body"] is None
 
 
 @pytest.mark.asyncio
@@ -235,7 +234,7 @@ async def test_the_accounts_own_human_row_is_not_restored() -> None:
             _runtime(hub), {"op": "channel_history", "channel_id": CONV, "limit": 10}
         )
     )
-    assert [(r["id"], r["body"]) for r in rows] == [(human, tool_mod._UNSCREENED_BODY)]
+    assert [(r["id"], r["body"]) for r in rows] == [(human, None)]
     assert hub.body_calls == []
 
 
@@ -253,13 +252,7 @@ async def test_only_the_newest_rows_are_restored_up_to_the_cap(
     )
     by_id = {r["id"]: r["body"] for r in rows}
     # History is newest-first, so the cap keeps the three newest.
-    assert [by_id[i] for i in ids] == [
-        tool_mod._UNSCREENED_BODY,
-        tool_mod._UNSCREENED_BODY,
-        "m2",
-        "m3",
-        "m4",
-    ]
+    assert [by_id[i] for i in ids] == [None, None, "m2", "m3", "m4"]
     assert sorted(hub.body_calls) == sorted(ids[2:])
 
 
@@ -273,7 +266,7 @@ async def test_a_body_that_cannot_be_hashed_leaves_null_and_the_read_succeeds() 
             _runtime(hub), {"op": "channel_history", "channel_id": CONV, "limit": 10}
         )
     )
-    assert rows[0]["body"] == tool_mod._UNSCREENED_BODY
+    assert rows[0]["body"] is None
 
 
 @pytest.mark.asyncio

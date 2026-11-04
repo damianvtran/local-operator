@@ -2719,6 +2719,26 @@
     },
     {
       "locale": "fr",
+      "namespace": "wire.errors.hosting",
+      "source_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two independent sessions: c44e0f808e48, 35aac0a677bc)",
+        "model": "radient/auto (served model not disclosed by the route)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace wire.errors.hosting (1 key: the owned display cause the startup refusal splices into its {error} slot) authored at base 87ca846245b2 against frozen English sha256 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63. fr 'La plateforme d’hébergement n’est pas configurée.' keeps the typographic apostrophes and the corpus term for hosting platform. Two independent readers, neither the translator nor the code author, both PASSED on these bytes with 0 blocker/major/minor/nit (sessions c44e0f808e48, 35aac0a677bc). Source-only assembly: no rendered, native-speaker, width, RTL or validator proof, and no activation, shipped or release claim. Evidence: i18n/audits/evidence/fr/wire.errors.hosting/ (bundles ['frhost1', 'frhost2'], frozen inputs under _inputs/)."
+    },
+    {
+      "locale": "fr",
       "namespace": "wire.skill_adoption",
       "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
       "translator": {
@@ -2868,6 +2888,48 @@
       },
       "status": "passed",
       "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 1 major, 2 minor (F1, F2, F3), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/fr/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-a, task subagent)",
+        "session": "886288cfe273",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_alert at source hash cb3fcf96f055: key set and ICU placeholder/plural-structure parity with en, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical, safety meaning (count, held longer than threshold, agent NOT given the messages, no deletion/review claim, cleared text does not claim delivery), 'Agent messages' title and 'held' wording against the locale's cli.team_bridge catalogue and glossary/style guide. 0 blocker / 0 major / 2 minor. Plural one/many/other present and correct (many = 'de messages'/'de minutes'). Minors: (1) both titles use a plain space before ':' where fr.md requires U+202F and cli.team_bridge titles use it; (2) held is 'retenu' here but 'en attente' in cli.team_bridge.status.screening_held (the tui.notices.stopped_session_held key also uses 'retenu'); 'retenu' is the clearer safety wording, so not blocking. Passed with minors outstanding. Single independent audit pass; no cross-model second audit."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-r2a, task subagent)",
+        "session": "3c5e5fe61f9b",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent re-audit (not the translator; supersedes the row at the old English hash) of cli.team_bridge_alert at source hash f433a71daee9: key set and ICU placeholder/plural-structure parity with en for all 4 keys, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical in long_hold.body, meaning ('held for more than N minutes and has not reached your agent'; cleared = no message held longer than the threshold; no delivery, deletion or review claim), 'Agent messages' title wording and 'held' term against the locale's cli.team_bridge catalogue, glossary and style guide; every key rendered with the repo formatter. 0 blocker / 0 major / 1 minor. one/many/other present and correct (many = 'de messages'/'de minutes'; 1 000 000 de messages renders correctly); U+202F before ':' present in both titles; verb agreement correct (est retenu / sont retenus). Minor: held is 'retenu' here but 'en attente' in cli.team_bridge.status.screening_held (tui.notices also uses 'retenu'); 'retenu' is the clearer wording for a message that has not reached the agent, so not blocking. Passed with 1 minor outstanding. Single independent audit pass; no cross-model second audit."
     }
   ]
 }

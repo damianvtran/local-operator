@@ -1044,9 +1044,17 @@ export function Composer({
 	}, [pid]);
 
 	const addFiles = async (files: Iterable<File>) => {
+		/* Nothing silent: a file that cannot be attached (not an image, or one
+		   the browser cannot decode — e.g. a HEIC this browser lacks a decoder
+		   for) is named in the composer's alert instead of vanishing. */
+		const failed: string[] = [];
 		for (const f of files) {
 			const img = await fileToImage(f);
 			if (img) setImages((cur) => [...cur, img]);
+			else failed.push(f.name || "file");
+		}
+		if (failed.length > 0) {
+			setError(`Couldn't attach ${failed.join(", ")}. Only images the browser can open are supported — try a JPEG or PNG.`);
 		}
 	};
 
