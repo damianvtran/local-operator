@@ -178,6 +178,17 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(os.environ["OPENROUTER_API_KEY"], meter.LOG.read_text())
         self.assertNotIn("hello", meter.LOG.read_text())
 
+    async def test_health_reports_caps_and_no_secrets(self):
+        # R7 F22: the coding driver refuses a meter whose caps differ from its
+        # CLI caps, so /health must report them -- and nothing secret.
+        self.serve(BENCH_BUDGET_USD="5", BENCH_TRIAL_BUDGET_USD="0.5")
+        assert self.api is not None
+        response = await self.api.get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["caps"], {"total_usd": 5.0, "trial_usd": 0.5})
+        self.assertNotIn(os.environ["OPENROUTER_API_KEY"], response.text)
+        self.assertNotIn(os.environ["BENCH_SPEND_FILE"], response.text)
+
     async def test_total_cap_independent_of_trial_ids(self):
         self.serve(BENCH_BUDGET_USD="0.2", BENCH_TRIAL_BUDGET_USD="1")
         self.assertEqual((await self.post("one")).status_code, 200)

@@ -14,8 +14,9 @@ container route (meter port, LoP edge, Codex bridge -> translator -> meter)
 ends at it, and it enforces trial and campaign caps on durable reservations.
 The former lane-local reservation guard sat on no container route once the gate
 existed, so it was removed rather than kept as a silent second layer; the
-``--*-budget-usd`` and price arguments remain preregistration bindings that the
-operator must also give the meter (BENCH_BUDGET_USD, BENCH_TRIAL_BUDGET_USD).
+``--*-budget-usd`` arguments must equal the meter's BENCH_BUDGET_USD and
+BENCH_TRIAL_BUDGET_USD: preflight reads them from its /health and refuses on any
+difference (R7 F22), so a meter started with other caps cannot silently govern.
 """
 
 from __future__ import annotations
@@ -189,6 +190,52 @@ def current_run_file(args):
     return Path(path).resolve()
 
 
+def check_meter_caps(args):
+    """Refuse unless the running meter enforces exactly the CLI caps (R7 F22).
+
+    The meter is the lane's single budget authority, so its caps -- not the
+    CLI's -- are what bound spend. Exact float equality on purpose: both sides
+    parse the same decimal text, and any drift means a different budget. A
+    meter without a ``caps`` report (an older build) is refused, not trusted.
+    """
+    from urllib.request import urlopen
+
+    with urlopen(args.meter_url.rstrip("/") + "/health", timeout=5) as response:
+        caps = json.loads(response.read()).get("caps")
+    if not isinstance(caps, dict) or (caps.get("total_usd"), caps.get("trial_usd")) != (
+        args.total_budget_usd,
+        args.trial_budget_usd,
+    ):
+        raise ValueError(
+            "meter caps differ from --total-budget-usd/--trial-budget-usd "
+            f"(meter reports {caps!r}); restart the meter with matching "
+            "BENCH_BUDGET_USD/BENCH_TRIAL_BUDGET_USD"
+        )
+
+
+@contextmanager
+def codex_current_run(args, harness, run_id):
+    """Point the meter's current-run file at this Codex run, then restore it.
+
+    R7 F21: restored in ``finally`` (success, error, timeout, interrupt) to its
+    prior bytes, or removed if absent, so no later request through the bridge
+    is tagged with a finished run's id. Non-Codex trials never touch it.
+    """
+    if harness != "codex-best":
+        yield
+        return
+    path = current_run_file(args)
+    prior = path.read_bytes() if path.exists() else None
+    path.write_text(run_id)  # the meter tags Codex rows from it
+    try:
+        yield
+    finally:
+        if prior is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(prior)
+
+
 def container_plan(run_id, harness, image, *, meter_port, bridge_port, edge=None):
     """Harbor arguments that put one paid trial behind the gate (egress.py).
 
@@ -200,11 +247,15 @@ def container_plan(run_id, harness, image, *, meter_port, bridge_port, edge=None
     import egress
     from urllib.parse import urlsplit
 
-    ports = [meter_port, bridge_port] + ([edge["port"]] if edge else [])
-    urls = {
-        "anthropic": egress.gate_url(meter_port, f"/r/{run_id}"),
-        "codex": egress.gate_url(bridge_port, "/v1"),
-    }
+    # The bridge reaches the meter as /r/@current, tagged from the meter's
+    # current-run file, which names a Codex run only during that run. Any other
+    # harness that could reach it would bill under a stale Codex id and bypass
+    # its own trial cap (R7 F21), so only Codex trials get the bridge port.
+    codex = harness == "codex-best"
+    ports = [meter_port] + ([bridge_port] if codex else []) + ([edge["port"]] if edge else [])
+    urls = {"anthropic": egress.gate_url(meter_port, f"/r/{run_id}")}
+    if codex:
+        urls["codex"] = egress.gate_url(bridge_port, "/v1")
     env = {}
     if harness == "local-operator":
         if not edge:
@@ -261,6 +312,7 @@ def preflight(args):
             or parsed.fragment
         ):
             raise ValueError("transport URL must be credential-free HTTP(S)")
+    check_meter_caps(args)
     if args.output.resolve() == HERE or HERE in args.output.resolve().parents:
         raise ValueError("outputs must be outside published source")
     if (
@@ -532,9 +584,10 @@ def run_trial(args, harness, task):
         with egress_canary() as canary:
             if canary in plan["ports"]:
                 raise ValueError("egress canary collides with a gate port")
-            return _run_gated_trial(
-                args, harness, task, run_id, job, cls, version, plan, edge, canary
-            )
+            with codex_current_run(args, harness, run_id):
+                return _run_gated_trial(
+                    args, harness, task, run_id, job, cls, version, plan, edge, canary
+                )
     finally:
         stop_edge(edge)
 
@@ -652,7 +705,6 @@ def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge,
     if harness == "claude-code":
         argv += ["--ae", "ENABLE_TOOL_SEARCH=true", "--effort", "high"]
     if harness == "codex-best":
-        current_run_file(args).write_text(run_id)  # the meter tags Codex rows from it
         config = {
             "model_provider": "bench",
             "model_catalog_json": "/tmp/bench-support/codex-model-catalog.json",

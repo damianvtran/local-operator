@@ -889,7 +889,13 @@ def make_app(guard: BudgetGuard) -> Starlette:
     """The meter app around ONE guard built at startup (F6)."""
 
     async def health(_: Request) -> Response:
-        return JSONResponse({"ok": True, "models": sorted(guard.rates)})
+        # Caps let a dispatcher refuse a meter started with other budgets
+        # than its preregistered ones (R7 F22). Numbers only: no key, no path.
+        return JSONResponse({
+            "ok": True,
+            "models": sorted(guard.rates),
+            "caps": {"total_usd": guard.total, "trial_usd": guard.trial},
+        })
 
     async def route(request: Request) -> Response:
         return await proxy(guard, request)

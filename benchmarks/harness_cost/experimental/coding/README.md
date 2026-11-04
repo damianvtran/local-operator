@@ -68,10 +68,13 @@ Responses translator is also separately provisioned; optional
 Never put a credential in URLs, CLI arguments, JSON attestations or logs.
 
 The lane's Codex bridge listens on loopback :8789 (must be free); containers
-reach it, the meter and the LoP edge only through the bench gate.
+reach it, the meter and the LoP edge only through the bench gate, and only a
+Codex trial's gate forwards the bridge port (R7 F21).
 `--meter-current-run-file` must be the meter's absolute `BENCH_CURRENT_RUN_FILE`:
 Codex rows are tagged from it, and a mismatch leaves the trial with no rows
-(recorded unverified, lane stops). The driver only owns/reaps the processes it
+(recorded unverified, lane stops). The driver writes the run id there only for
+the Codex trial and restores the prior contents (or removes the file) afterwards,
+whatever the outcome. The driver only owns/reaps the processes it
 starts (bridge, per-trial LoP edge); it does not restart shared services.
 
 ## Paid coding dispatch hard-blocked — evidence admission incomplete
@@ -127,7 +130,8 @@ desktop lane (R6 F19): every container route -- meter port, LoP edge, and Codex
 bridge -> translator -> meter -- ends at its ledger, which enforces the trial and
 campaign caps on durable reservations (`../ADAPTERS.md`). Start it with
 `BENCH_BUDGET_USD`/`BENCH_TRIAL_BUDGET_USD` equal to `--total-budget-usd` and
-`--trial-budget-usd`. The lane-local reservation guard that used to sit on
+`--trial-budget-usd`: preflight reads the meter's caps from `/health` and refuses
+unless both match exactly (R7 F22). The lane-local reservation guard that used to sit on
 :8788 was removed: after the bench gate it was on no container route, so it was
 a documented layer that bounded nothing. Measured `usage.cost` is reported
 separately; missing costs are never treated as

@@ -525,7 +525,7 @@ class DriverContainerTests(unittest.TestCase):
             "run1", "local-operator", EgressTests.IMAGE, meter_port=8787, bridge_port=8789,
             edge={"port": 41000, "env": child, "ca_file": Path("/host/edge-ca.pem")},
         )
-        self.assertEqual(plan["ports"], [8787, 8789, 41000])
+        self.assertEqual(plan["ports"], [8787, 41000])  # no bridge for LoP (R7 F21)
         self.assertEqual(plan["env"]["HTTPS_PROXY"], "http://run1:n@bench-gate:41000")
         self.assertEqual(plan["env"]["SSL_CERT_FILE"], egress.CA_TARGET)
         self.assertEqual(plan["urls"]["anthropic"], "http://bench-gate:8787/r/run1")
@@ -546,6 +546,7 @@ class DriverContainerTests(unittest.TestCase):
                                   edge={"port": 3, "env": {}, "ca_file": Path("/edge-ca.pem")})
         plan = driver.container_plan("r", "omp", "i", meter_port=8787, bridge_port=8789)
         self.assertEqual(plan["env"], {})
+        self.assertEqual(plan["ports"], [8787])
 
     def test_edge_mount_is_the_ca_file(self):
         # R6 N6: never the run dir (it holds edge-requests.jsonl).
@@ -583,6 +584,130 @@ class DriverContainerTests(unittest.TestCase):
             self.assertNotIn(port, plan["ports"])
         with self.assertRaises(OSError):
             socket.create_connection(("127.0.0.1", port), timeout=1).close()
+
+    def test_bridge_port_is_gated_only_for_codex(self):
+        # R7 F21: the bridge tags rows from the meter's current-run file, so
+        # any other harness reaching it would bill a finished Codex run's id.
+        for harness in ("claude-code", "omp", "opencode", "hermes"):
+            plan = driver.container_plan("r", harness, "i", meter_port=8787, bridge_port=8789)
+            self.assertNotIn(8789, plan["ports"], harness)
+            self.assertNotIn("codex", plan["urls"], harness)
+        plan = driver.container_plan("r", "codex-best", "i", meter_port=8787, bridge_port=8789)
+        self.assertEqual(plan["ports"], [8787, 8789])
+        self.assertEqual(plan["urls"]["codex"], "http://bench-gate:8789/v1")
+
+    def test_codex_current_run_is_restored_after_every_outcome(self):
+        # R7 F21: success, error and timeout all restore the prior contents
+        # (or absence) so no later trial is metered under this Codex run.
+        import subprocess
+
+        outcomes = (None, RuntimeError("trial incomplete"),
+                    subprocess.TimeoutExpired("harbor", 1), KeyboardInterrupt())
+        for prior in (None, b"coding__codex-best__older__r0"):
+            for outcome in outcomes:
+                with self.subTest(prior=prior, outcome=type(outcome).__name__), \
+                        tempfile.TemporaryDirectory(
+                            dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")) as tmp:
+                    root = Path(tmp)
+                    current = root / "current_run"
+                    if prior is not None:
+                        current.write_bytes(prior)
+                    args = argparse.Namespace(
+                        output=root / "out", request_log=root / "requests.jsonl",
+                        meter_url="http://127.0.0.1:8787", image="i", rep=0,
+                        meter_current_run_file=current,
+                    )
+                    seen = []
+
+                    def trial(*a, **_k):
+                        seen.append(current.read_text())
+                        if outcome is not None:
+                            raise outcome
+
+                    task = {"task8": "abcd1234", "name": "t"}
+                    with patch.object(driver, "block_paid_coding"), \
+                            patch.object(driver, "_run_gated_trial", side_effect=trial):
+                        if outcome is None:
+                            driver.run_trial(args, "codex-best", task)
+                        else:
+                            with self.assertRaises(type(outcome)):
+                                driver.run_trial(args, "codex-best", task)
+                    self.assertEqual(seen, ["coding__codex-best__abcd1234__r0"])
+                    if prior is None:
+                        self.assertFalse(current.exists())
+                    else:
+                        self.assertEqual(current.read_bytes(), prior)
+
+    def test_non_codex_trial_never_touches_the_current_run_file(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")) as tmp:
+            root = Path(tmp)
+            current = root / "current_run"
+            current.write_bytes(b"coding__codex-best__older__r0")
+            args = argparse.Namespace(
+                output=root / "out", request_log=root / "requests.jsonl",
+                meter_url="http://127.0.0.1:8787", image="i", rep=0,
+                meter_current_run_file=current,
+            )
+            with patch.object(driver, "block_paid_coding"), \
+                    patch.object(driver, "_run_gated_trial", return_value=None):
+                driver.run_trial(args, "omp", {"task8": "abcd1234", "name": "t"})
+            self.assertEqual(current.read_bytes(), b"coding__codex-best__older__r0")
+
+    def _health_server(self, body):
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - stdlib hook name
+                data = json.dumps(body).encode()
+                self.send_response(200 if self.path == "/health" else 404)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *_):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_meter_caps_must_equal_the_cli_caps(self):
+        # R7 F22: the meter is the sole budget authority, so a meter started
+        # with different caps would silently govern the lane. Refuse instead.
+        url = self._health_server({"ok": True, "models": [],
+                                   "caps": {"total_usd": 5.0, "trial_usd": 0.5}})
+        good = argparse.Namespace(meter_url=url, total_budget_usd=5.0, trial_budget_usd=0.5)
+        driver.check_meter_caps(good)
+        for total, trial in ((5.0, 0.6), (4.0, 0.5), (5.000001, 0.5)):
+            with self.subTest(total=total, trial=trial), \
+                    self.assertRaisesRegex(ValueError, "meter caps"):
+                driver.check_meter_caps(argparse.Namespace(
+                    meter_url=url, total_budget_usd=total, trial_budget_usd=trial))
+        legacy = self._health_server({"ok": True, "models": []})
+        with self.assertRaisesRegex(ValueError, "meter caps"):
+            driver.check_meter_caps(argparse.Namespace(
+                meter_url=legacy, total_budget_usd=5.0, trial_budget_usd=0.5))
+
+    def test_preflight_refuses_a_meter_with_other_caps(self):
+        url = self._health_server({"ok": True, "models": [],
+                                   "caps": {"total_usd": 9.0, "trial_usd": 0.5}})
+        with tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")) as tmp:
+            args = argparse.Namespace(
+                total_budget_usd=5.0, trial_budget_usd=0.5, input_usd_per_m=1.0,
+                output_usd_per_m=1.0, billing_tier="explicit", preregistration=None,
+                preregistration_sha256="", runtime_attestation=None, runtime_sha256="",
+                toolwire_attestation=None, toolwire_sha256="", oracle_attestation=None,
+                oracle_sha256="", tasks="t", harnesses="omp", rep=0,
+                meter_current_run_file=Path(tmp) / "current_run",
+                meter_url=url, translator_url="http://127.0.0.1:1", output=Path(tmp) / "o",
+            )
+            with patch.object(driver, "block_paid_coding"), \
+                    patch.object(driver, "frozen", return_value={}), \
+                    self.assertRaisesRegex(ValueError, "meter caps"):
+                driver.preflight(args)
 
     def test_gold_digests_hash_only(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")) as tmp:
