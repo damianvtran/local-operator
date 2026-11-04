@@ -36,8 +36,16 @@ def test_wildcard_scope_matches_any_tool_arguments() -> None:
 def test_invalid_frontmatter_skipped(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING):
         assert parse_rule("no frontmatter", source="bad.md") is None
-        assert parse_rule(_rule("name: r\nscope: tool:bash\naction: nuke\ncondition: [x]"), source="a.md") is None
-        assert parse_rule(_rule("name: r\nscope: text\naction: block\ncondition: [x]"), source="s.md") is None
+        assert (
+            parse_rule(
+                _rule("name: r\nscope: tool:bash\naction: nuke\ncondition: [x]"), source="a.md"
+            )
+            is None
+        )
+        assert (
+            parse_rule(_rule("name: r\nscope: text\naction: block\ncondition: [x]"), source="s.md")
+            is None
+        )
     assert "bad.md" in caplog.text
 
 
@@ -50,9 +58,13 @@ def test_bad_regex_skipped_with_warning(caplog: pytest.LogCaptureFixture) -> Non
     assert rule is not None and len(rule.conditions) == 1
     assert "(unclosed" in caplog.text
     with caplog.at_level(logging.WARNING):
-        assert parse_rule(
-            _rule("name: r\nscope: tool:bash\naction: block\ncondition: ['(unclosed']"), source="r.md"
-        ) is None
+        assert (
+            parse_rule(
+                _rule("name: r\nscope: tool:bash\naction: block\ncondition: ['(unclosed']"),
+                source="r.md",
+            )
+            is None
+        )
 
 
 def test_user_file_cannot_claim_builtin_resolver() -> None:

@@ -770,8 +770,7 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "guardrails.critical_override": (
         True,
         lambda s, w: (
-            _guardrails(w, authorised=True).critical_override
-            and not s._guard_override_authorised
+            _guardrails(w, authorised=True).critical_override and not s._guard_override_authorised
         ),
     ),
     "tools.search_interception.enabled": (False, lambda s, w: _search_interception(w)[0]),

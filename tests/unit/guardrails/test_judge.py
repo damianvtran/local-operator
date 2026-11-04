@@ -26,7 +26,9 @@ async def test_allow_runs() -> None:
 
 @pytest.mark.asyncio
 async def test_block_reason_is_returned() -> None:
-    result = await run_judge(BRIEF, await _answer("BLOCK: user asked for a scratch file"), timeout=5)
+    result = await run_judge(
+        BRIEF, await _answer("BLOCK: user asked for a scratch file"), timeout=5
+    )
     assert not result.allowed and result.reason == "user asked for a scratch file"
 
 
@@ -63,5 +65,5 @@ async def test_none_judge_blocks() -> None:
 
 def test_parse_tolerates_markdown_emphasis() -> None:
     assert parse_answer("**ALLOW**") == (True, "")
-    assert parse_answer("") [0] is False
-    assert parse_answer("ALLOWED, because") [0] is False
+    assert parse_answer("")[0] is False
+    assert parse_answer("ALLOWED, because")[0] is False

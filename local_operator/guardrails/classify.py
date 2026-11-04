@@ -168,7 +168,11 @@ def _critical_reason(path: str, target: Target, prot: _Protected) -> str | None:
         return "the filesystem root"
     for state in prot.state_roots:
         if _is_ancestor_or_self(path, state):
-            return "the local-operator state root" if path == state else "an ancestor of the state root"
+            return (
+                "the local-operator state root"
+                if path == state
+                else "an ancestor of the state root"
+            )
     for install in prot.install_roots:
         if _is_ancestor_or_self(path, install):
             return "the installed lop generations"
@@ -279,9 +283,7 @@ def classify_bash(
 ) -> Verdict:
     """Rank a bash command. Pure parse: the command is never executed."""
     home = env.get("HOME") or os.path.expanduser("~")
-    resolution = resolve_command(
-        command, cwd=_norm(cwd) if cwd else None, env=env, home=home
-    )
+    resolution = resolve_command(command, cwd=_norm(cwd) if cwd else None, env=env, home=home)
     return classify_targets(
         resolution.targets,
         resolution.opaque_reasons,

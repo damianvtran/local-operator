@@ -58,14 +58,14 @@ def _consumer_defaults() -> dict[str, object]:
     # The registry carries a literal because settings_io stays off that
     # module's import path; THIS is what turns a drift into a red test.
     from local_operator.agent_profiles import AUTO_UPDATE_SEEDS_DEFAULT
+    from local_operator.compaction.thresholds import CompactionSettings
+    from local_operator.cross_session import DEFAULT_HIDE_CROSS_SESSION
     from local_operator.guardrails.check import (
         GUARDRAILS_CRITICAL_OVERRIDE_DEFAULT,
         GUARDRAILS_ENABLED_DEFAULT,
         GUARDRAILS_RULES_DIR_DEFAULT,
     )
     from local_operator.guardrails.judge import GUARDRAILS_JUDGE_TIMEOUT_DEFAULT
-    from local_operator.compaction.thresholds import CompactionSettings
-    from local_operator.cross_session import DEFAULT_HIDE_CROSS_SESSION
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
     from local_operator.harness.subagent import (
         DEFAULT_MAX_TEAM_DEPTH,
@@ -1166,8 +1166,7 @@ def test_guardrails_rows_share_the_consumer_paths(
         == check.GUARDRAILS_CRITICAL_OVERRIDE_PATH
     )
     assert (
-        settings_io.BY_KEY["guardrails.judge_timeout_s"].path
-        == check.GUARDRAILS_JUDGE_TIMEOUT_PATH
+        settings_io.BY_KEY["guardrails.judge_timeout_s"].path == check.GUARDRAILS_JUDGE_TIMEOUT_PATH
     )
     assert settings_io.BY_KEY["guardrails.rules_dir"].path == check.GUARDRAILS_RULES_DIR_PATH
     settings_io.write_setting(manager, settings_io.BY_KEY["guardrails.enabled"], False)

@@ -124,7 +124,11 @@ def read_settings(*, override_authorised: bool) -> GuardSettings:
         timeout = min(max(float(timeout_raw), _MIN_TIMEOUT_S), _MAX_TIMEOUT_S)
     except (TypeError, ValueError):
         timeout = GUARDRAILS_JUDGE_TIMEOUT_DEFAULT
-    rules_dir = Path(os.path.expanduser(rules_raw)) if isinstance(rules_raw, str) and rules_raw else default_rules
+    rules_dir = (
+        Path(os.path.expanduser(rules_raw))
+        if isinstance(rules_raw, str) and rules_raw
+        else default_rules
+    )
     return GuardSettings(
         # Only a literal ``false`` disables user rules; junk reads as on.
         enabled=enabled is not False,
@@ -228,10 +232,16 @@ async def _dangerous_delete(
     )
     risk_name = "critical-overridden" if risk is Risk.CRITICAL else "high"
     _journal(
-        DANGEROUS_DELETE_RULE, risk_name, "allow" if result.allowed else "block", result.latency_s, targets
+        DANGEROUS_DELETE_RULE,
+        risk_name,
+        "allow" if result.allowed else "block",
+        result.latency_s,
+        targets,
     )
     if result.allowed:
-        return GuardOutcome(blocked=False, rule=DANGEROUS_DELETE_RULE, risk=risk_name, destructive=True)
+        return GuardOutcome(
+            blocked=False, rule=DANGEROUS_DELETE_RULE, risk=risk_name, destructive=True
+        )
     return GuardOutcome(
         blocked=True,
         text=_review_text(DANGEROUS_DELETE_RULE, result.reason, targets),

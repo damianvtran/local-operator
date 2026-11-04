@@ -493,7 +493,9 @@ class Resolution:
     opaque_reasons: list[str] = field(default_factory=list)
 
 
-def _operands(words: list[Expanded], value_flags: frozenset[str] = frozenset()) -> tuple[list[Expanded], list[str]]:
+def _operands(
+    words: list[Expanded], value_flags: frozenset[str] = frozenset()
+) -> tuple[list[Expanded], list[str]]:
     """Split argv tail into (operands, flags); ``--`` ends the flags."""
     operands: list[Expanded] = []
     flags: list[str] = []
@@ -521,9 +523,7 @@ def _operands(words: list[Expanded], value_flags: frozenset[str] = frozenset()) 
 
 
 def _has_short(flags: list[str], letters: str) -> bool:
-    return any(
-        not f.startswith("--") and any(c in f[1:] for c in letters) for f in flags
-    )
+    return any(not f.startswith("--") and any(c in f[1:] for c in letters) for f in flags)
 
 
 #: Programs whose operands are removed. ``grm``/``gunlink`` are the GNU names on

@@ -4119,7 +4119,9 @@ def bash_guard_environment(context: ToolContext | None) -> tuple[dict[str, str],
     injections.update(scratchpad_env_injection(scratch_root))
     if (temp_owner := confinement if confinement is not None else shell_write) is not None:
         injections["TMPDIR"] = str(temp_owner.temp_dir())
-    env = shell_env.child_environment(_bash_env_policy(confinement, shell_write), injections=injections)
+    env = shell_env.child_environment(
+        _bash_env_policy(confinement, shell_write), injections=injections
+    )
     return env, scratch_root
 
 

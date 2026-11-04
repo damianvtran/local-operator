@@ -91,7 +91,7 @@ def render_brief(brief: JudgeBrief) -> str:
 def parse_answer(text: str) -> tuple[bool, str]:
     """``(allowed, reason)``; anything off-contract is a block."""
     first = (text or "").strip().splitlines()[0].strip() if (text or "").strip() else ""
-    stripped = first.strip("*`\" ")
+    stripped = first.strip('*`" ')
     if stripped.upper() == "ALLOW":
         return True, ""
     if stripped.upper().startswith("BLOCK"):
@@ -100,9 +100,7 @@ def parse_answer(text: str) -> tuple[bool, str]:
     return False, "judge unavailable: answer was not ALLOW or BLOCK"
 
 
-async def run_judge(
-    brief: JudgeBrief, judge: JudgeCall | None, *, timeout: float
-) -> JudgeResult:
+async def run_judge(brief: JudgeBrief, judge: JudgeCall | None, *, timeout: float) -> JudgeResult:
     """Ask the judge; every failure mode is a block with a named reason."""
     started = time.monotonic()
     if judge is None:
