@@ -225,6 +225,28 @@ def test_outcomes(details: dict[str, Any], outcome: str | None, code: str | None
     assert (row["outcome"], row["code"]) == (outcome, code)
 
 
+@pytest.mark.parametrize(
+    ("op", "verb"), [("channel_post", "Couldn't post in"), ("dm", "Couldn't message")]
+)
+def test_a_skipped_double_send_never_reads_as_posted(op: str, verb: str) -> None:
+    """#3377 round 3, m-1: the reply guard's skip is ``ok`` (nothing failed) but
+    was NOT posted, so the card must not say "Posted in"/"Messaged"."""
+
+    from local_operator.team_bridge.reply_guard import Skipped
+
+    details = Skipped(seconds_ago=2).as_result(CHANNEL)
+    row = bridge_row({"op": op, "channel_id": CHANNEL, "body": "Approved."}, details)
+    assert (row["outcome"], row["code"]) == ("skipped", "duplicate")
+    settled_verb, _summary, word = render_bridge_row(row, running=False)
+    assert settled_verb == verb
+    assert word == "not posted · duplicate"
+    assert outcome_word(row, short=True) == "not posted"
+    assert bridge_row_line(row, running=False).endswith("Approved. · not posted · duplicate")
+    # A real post of the same call still reads as posted, with no outcome word.
+    posted = bridge_row({"op": op, "channel_id": CHANNEL, "body": "Approved."}, _posted())
+    assert posted["outcome"] is None
+
+
 def test_dm_to_an_agent_not_yet_accepted_is_awaiting_acceptance() -> None:
     details = _posted(destination_type="conversation_dm", recipient_state="invited")
     assert bridge_row({"op": "dm", "body": "x"}, details)["outcome"] == "awaiting_acceptance"

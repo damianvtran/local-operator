@@ -156,7 +156,7 @@ export interface BridgeRowFacts {
 	emoji?: string | null;
 	/** null = an ordinary landed call; everything else is a caveat the row
 	    must state (an inbox-only send is NOT a conversation post). */
-	outcome?: null | "inbox_only" | "refused" | "failed" | "unconfirmed" | "awaiting_acceptance";
+	outcome?: null | "inbox_only" | "refused" | "failed" | "unconfirmed" | "awaiting_acceptance" | "skipped";
 	code?: string | null;
 }
 
