@@ -439,7 +439,12 @@ def test_measured_both_census_shape_converges_on_a_fresh_cycle(monkeypatch):
     assert world.calls == 4
     assert world.cap.probe["members"] == [LEADER, 22]
     assert world.cap.probe["sample_retries"] == [
-        {"cycle": 0, "rerun": [21], "censuses": [[LEADER, 20, 21, 22], [LEADER, 21, 22]]}
+        {
+            "cycle": 0,
+            "rerun": [21],
+            "rerun_count": 1,
+            "censuses": [[LEADER, 20, 21, 22], [LEADER, 21, 22]],
+        }
     ]
     # The verdict rests on the final cycle only: its censuses departed nobody,
     # so the first cycle's departure of 20 is not published as evidence.
@@ -590,3 +595,94 @@ def test_a_retry_record_never_leaks_into_a_later_refresh(monkeypatch):
     assert world.cap.probe["sample_retries"]
     assert world.refresh().status == "VERIFIED"
     assert "sample_retries" not in world.cap.probe
+
+
+def _diagnostic(pid):
+    return {pid: {"pid": pid, "reason": "read-error", "errno": errno.ENOENT}}
+
+
+# Conjuncts `_departed`'s ordering keeps from deciding through `refresh` are
+# pinned on the predicate itself, each against the same qualifying control.
+
+
+@pytest.mark.parametrize("pid", ["leader", "pgid"])
+def test_rerunnable_never_reruns_on_the_witness(monkeypatch, pid):
+    world = in_both(monkeypatch)
+    number = world.cap.leader if pid == "leader" else world.cap.pgid
+    assert world.cap._rerunnable([21], [LEADER, 21], _diagnostic(21)) is True
+    assert world.cap._rerunnable([number], [number, 21], _diagnostic(number)) is False
+
+
+def test_rerunnable_requires_census_two(monkeypatch):
+    world = in_both(monkeypatch)
+    assert world.cap._rerunnable([21], [LEADER, 21], _diagnostic(21)) is True
+    assert world.cap._rerunnable([21], [LEADER], _diagnostic(21)) is False
+
+
+def test_rerunnable_refuses_an_injected_sampler_even_with_a_diagnostic(monkeypatch):
+    # The `injected-sampler` counterexample above refuses for want of a row;
+    # here the row is present and ESRCH answers, so the sampler alone decides.
+    world = in_both(monkeypatch)
+    assert world.cap._rerunnable([21], [LEADER, 21], _diagnostic(21)) is True
+    world.cap.samples = world.kernel.samples
+    assert world.cap._rerunnable([21], [LEADER, 21], _diagnostic(21)) is False
+
+
+@pytest.mark.parametrize(
+    "budget, calls",
+    # One cycle costs exactly 2.0 on a frozen clock, ending at 2.0. A further
+    # cycle needs 2.0 + 2 * 2.0 = 6.0 STRICTLY below the deadline: at 6.0 it is
+    # refused (pins `<`, not `<=`), and a 1x factor (4.0 < 6.0) would retry.
+    [(6.0, 2), (6.25, 4)],
+    ids=["equal-refuses", "just-fits-reruns-once"],
+)
+def test_the_budget_needs_twice_the_last_cycle_strictly(monkeypatch, budget, calls):
+    world = in_both(monkeypatch)
+    now = [0.0]
+    census = world.census
+
+    def timed(pgid, deadline):
+        now[0] += 1.0
+        return census(pgid, deadline)
+
+    world.cap.clock = lambda: now[0]
+    world.cap.census = timed
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Path, "read_text", lambda path, *a, **k: world.read(path))
+        verdict = world.cap.refresh(deadline=budget)
+    assert_refused(world, verdict)
+    assert world.calls == calls
+
+
+@pytest.mark.parametrize("shape", ["raises", "incomplete"])
+def test_a_census_failure_after_a_retry_refuses_on_its_own_reason(monkeypatch, shape):
+    world = in_both(monkeypatch)
+    census = world.census
+
+    def failing(pgid, deadline):
+        if world.calls < 2:
+            return census(pgid, deadline)
+        world.calls += 1
+        if shape == "raises":
+            raise owned.Unknown("synthetic census failure")
+        return owned.AuthoritativeCensus((LEADER, 22), False, True, "synthetic gap")
+
+    world.cap.census = failing
+    verdict = world.refresh()
+    assert verdict.status == "REFUSED"
+    assert (
+        verdict.reason
+        == {
+            "raises": "Unknown:synthetic census failure",
+            "incomplete": "Unknown:census incomplete: synthetic gap",
+        }[shape]
+    )
+    assert world.calls == 3
+    assert verdict.members == ()
+    assert world.cap.probe["residuals"] == []
+    # The discarded cycle 0 is recorded only as a retry row; its members and
+    # observations must not sit beside cycle 1's refusal as if they were its own.
+    assert [row["cycle"] for row in world.cap.probe["sample_retries"]] == [0]
+    assert "members" not in world.cap.probe
+    assert "observed" not in world.cap.probe
+    assert "vanished" not in world.cap.probe

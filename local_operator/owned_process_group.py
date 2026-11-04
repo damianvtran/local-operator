@@ -1374,6 +1374,12 @@ class OwnedGroup:
                 started = self.clock()
                 members = []
                 samples = {}
+                # A cycle that refuses before re-publishing these (its census
+                # raises or is incomplete, its sample overruns) must not show a
+                # DISCARDED cycle's members/observations beside its refusal; the
+                # `sample_retries` rows are the only record of earlier cycles.
+                for stale in ("members", "observed"):
+                    self.probe.pop(stale, None)
                 try:
                     first = self._members(deadline)
                     second = self._members(deadline)
@@ -1444,6 +1450,7 @@ class OwnedGroup:
                             {
                                 "cycle": cycle,
                                 "rerun": unresolved[:16],
+                                "rerun_count": len(unresolved),
                                 "censuses": [first[:16], second[:16]],
                             }
                         )
@@ -1634,7 +1641,12 @@ class OwnedGroup:
         This predicate ONLY decides whether another full census->census->sample
         cycle starts. It never removes a member and never feeds evidence into the
         next cycle, so it may be looser than `_departed` only in admitting the
-        in-both shape; every other conjunct is the same one `_departed` uses:
+        in-both shape; every other conjunct is the same one `_departed` uses.
+        The census-2 and non-empty conjuncts never decide today -- `_departed`
+        runs first and either prunes a census-1-only pid or leaves it unresolved
+        for a reason re-checked here, and `unresolved` is non-empty whenever
+        `absent` is -- so they are a defence-in-depth net for a later reordering,
+        not dead code:
 
         - ``unresolved`` is non-empty and EVERY pid in it qualifies (one
           unexplained member is a refusal, not a retry);
