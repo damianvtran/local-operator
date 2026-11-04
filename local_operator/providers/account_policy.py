@@ -95,8 +95,9 @@ def reset_candidate(
 
     Older reports can conservatively retain depletion until every relevant
     measured window is still future; a non-depleted older report stays
-    "unknown" but keeps its still-future reset deadlines for ranking (never a
-    reopening). Paid balances retain the existing usage_health contract, not
+    "unknown" (or "reserve", which only grows within an unelapsed window) but
+    keeps its still-future reset deadlines for ranking (never a reopening).
+    Paid balances retain the existing usage_health contract, not
     invented periods.
     """
     from local_operator.providers.usage import usage_health
@@ -159,7 +160,13 @@ def reset_candidate(
         # own. The verdict stays conservative — never "healthy" (it may have
         # filled since; a reactive 429 still fails over), and never a stated
         # reopening, since a stale depletion's resets are only a lower bound.
-        state = "depleted" if health.state == "depleted" else "unknown"
+        # Utilization only grows inside an unelapsed window (and the gates
+        # above guarantee none has elapsed), so a stale "reserve" is still at
+        # least reserve exactly as a stale "depleted" is still depleted: keep
+        # it in the reserve tier. Mapping it to "unknown" would let its
+        # still-true deadline rank a nearly spent account FIRST, ahead of
+        # fresh healthy ones. Only "healthy" is unprovable once stale.
+        state = health.state if health.state in ("depleted", "reserve") else "unknown"
         if state == "depleted":
             return ResetCandidate(account_id, state)
         return ResetCandidate(

@@ -387,6 +387,21 @@ def test_stale_report_with_an_elapsed_window_still_ranks_nowhere():
     assert reset_candidate(1, held, "m", NOW) == ResetCandidate(1, "depleted")
 
 
+def test_stale_reserve_ranks_in_the_reserve_tier_not_first():
+    # A stale 95%-used account resetting in 5d must not outrank a fresh
+    # healthy one resetting in 6d: usage only grows within an unelapsed
+    # window, so "at least reserve" still holds and it stays last.
+    stale_reserve = reset_candidate(
+        1, report(limit("7 day", 5 * _DAY, 0.95), age=45 * 60_000), "m", NOW
+    )
+    fresh_healthy = reset_candidate(2, report(limit("7 day", 6 * _DAY, 0.2)), "m", NOW)
+    assert stale_reserve.state == "reserve"
+    assert stale_reserve.weekly_ms == NOW + 5 * _DAY
+    assert fresh_healthy.state == "healthy"
+    for i in range(100):
+        assert reset_ranked_ids([stale_reserve, fresh_healthy], f"session-{i}") == [2, 1]
+
+
 def test_stale_deadline_bound_is_measured_from_the_fetch():
     # A deadline more than one period past the report's own fetch is garbled,
     # even though it is less than a period from now.
