@@ -24,6 +24,25 @@ from local_operator.hub_sync.skill_document import SkillDocument
 PREVIEWS = "adoption-previews"
 
 
+def mint_adoption_receipt() -> str:
+    """A preview receipt the printed CLI command can always accept (issue #3394).
+
+    The CLI tells users to confirm a reviewed preview with
+    ``--adopt-receipt <receipt> --yes``. ``secrets.token_urlsafe`` uses the
+    URL-safe base64 alphabet, which includes ``-``, so about 1 receipt in 64
+    began with ``-``; argparse then read that separate value as an option and
+    refused with "expected one argument". Drawing again until the first
+    character is not ``-`` keeps the 24-byte length and the same alphabet
+    (constraining one of 64 first symbols costs ~0.02 bits of 192), so
+    existing receipts and their lookup are unaffected; only the leading
+    character is constrained.
+    """
+    while True:
+        token = secrets.token_urlsafe(24)
+        if not token.startswith("-"):
+            return token
+
+
 def _refusal(code: str, message: str) -> LinkError:
     # Message construction stays at the point of use so live locale changes do
     # not freeze English at module import time. The code is a stable protocol.
@@ -89,7 +108,7 @@ def adopt_skill(
                 allow_llm=allow_llm,
                 strategy=strategy,
             )
-            token = secrets.token_urlsafe(24)
+            token = mint_adoption_receipt()
             payload = proposal.to_json()
             captured = {
                 "preview_receipt": token,

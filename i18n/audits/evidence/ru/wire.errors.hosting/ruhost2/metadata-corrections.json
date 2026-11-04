@@ -1,0 +1,241 @@
+{
+  "kind": "metadata_corrections",
+  "companion_version": 1,
+  "status": "provenance/metadata correction only — the audited value and the audit verdict are unchanged",
+  "not_a_new_audit_kind": true,
+  "audit_id": "r2b",
+  "locale": "ru",
+  "namespace": "wire.errors.hosting",
+  "file_group": "wire.errors.hosting",
+  "audit_date": "2026-11-03",
+  "corrections_date": "2026-11-03",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "9f874dd64c37",
+    "requested_model": "radient/auto",
+    "served_model": "UNKNOWN",
+    "actual_model_source": "harness system prompt line 'Model: radient/auto'; the route exposes no underlying provider/model id, so served identity is UNKNOWN and no fallback is claimed"
+  },
+  "original_record": {
+    "path": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2/record.json",
+    "sha256": "d962d9996c8344e9e684c38bc2713f31a807c49314b08c58ab93c01ecc4fbd21",
+    "note": "original bytes preserved untouched; corrected facts live only in this companion"
+  },
+  "preserved_members": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2/record.json",
+      "sha256": "d962d9996c8344e9e684c38bc2713f31a807c49314b08c58ab93c01ecc4fbd21",
+      "role": "original audit record",
+      "untouched": true
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2/report.md",
+      "sha256": "2de8aac11df72a2bfba7f7f865c6aef0158adfea31337515f60418b8b04690ad",
+      "role": "original audit report",
+      "untouched": true
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2/audit.log",
+      "sha256": "cacb680b534f6c928f9cc2168a9a6fc7b1b98c6094aa68dbe548ddf6ce5f87d7",
+      "role": "original execution log",
+      "untouched": true
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2/receipt.json",
+      "sha256": "63c9a8b53e88eec6738600c27d8b361f0952c4df1ea4f603b59b848234b9a0f5",
+      "role": "original receipt",
+      "untouched": true
+    }
+  ],
+  "inputs_rehashed": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "length": 35
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9"
+    },
+    "target_ru": {
+      "path": "/Users/damian/.local-operator/sessions/06e83e0ae0f9/scratchpad/hosting-ru-r2/target/ru/wire.errors.hosting.json",
+      "sha256": "38478ec0af7bdcb739dcd1bbbd82c8c50345e9869c2b21921f9a46d4bab1737a",
+      "length": 34
+    },
+    "r1_target": {
+      "path": "/Users/damian/.local-operator/sessions/06e83e0ae0f9/scratchpad/hosting-ru/target/ru/wire.errors.hosting.json",
+      "sha256": "6fe2a88318b042c082047f0ac4b6a76c88d68957a1053f75ce9c0617efd0317d",
+      "length": 32
+    }
+  },
+  "corrections": [
+    {
+      "id": "MC-1",
+      "class": "wrong number and wrong direction",
+      "where": "record.json:115 mechanical_checks.string_length_source_vs_target",
+      "wrong": "58 vs 33 chars (as expected, EN longer)",
+      "actual": "English source = 35 characters; Russian target = 34 characters. The target is 1 character SHORTER than the source (34 - 35 = -1), not longer. Both numbers in the old statement are wrong.",
+      "recomputed": {
+        "en_len": 35,
+        "ru_len": 34,
+        "target_minus_source": -1,
+        "r1_len": 32,
+        "target_minus_r1": 2
+      },
+      "how_verified": "len() over the parsed values of the exact staged files in this session; Python stdlib json only",
+      "related_note": "the record's separate char_delta '+2 (32 -> 34)' is correct because it measures against the R1 target, not the English source; that field is not being corrected"
+    },
+    {
+      "id": "MC-2",
+      "class": "wrong filename",
+      "where": "record.json:109 mechanical_checks.glossary_idiom_terms",
+      "wrong": "0 hit in i18n/glossary.json for this bundle's terms",
+      "wrong_part": "only the filename: there is no glossary.json",
+      "corrected": "0 hits in i18n/glossary.md (the glossary is Markdown)",
+      "recomputed": {
+        "glossary_markdown_worktree": {
+          "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/i18n/glossary.md",
+          "exists": true
+        },
+        "glossary_markdown_main": {
+          "path": "/Users/damian/local-operator/i18n/glossary.md",
+          "exists": true
+        },
+        "hits_for_hosting_terms": 0
+      },
+      "how_verified": "path existence plus the earlier read-only term search over the Markdown glossary"
+    },
+    {
+      "id": "MC-3",
+      "class": "wrong script path",
+      "where": "record.json:120 validator.reason",
+      "wrong": "scripts/validate_translations.py",
+      "actual": "the core catalogue validator is scripts/i18n/check.py; scripts/validate_translations.py does not exist. The record's run=false stands: no validator was executed in this pass (source-only override), so no validator output is claimed.",
+      "recomputed": {
+        "validator_path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/scripts/i18n/check.py",
+        "exists": true,
+        "run": false
+      },
+      "how_verified": "listing of scripts/i18n/ (check.py, generate.py, emit.mjs, login.py, shard_ledger.py, deferred_watch.py) plus path existence"
+    },
+    {
+      "id": "MC-4",
+      "class": "wrong path in the session's final report (not in record.json)",
+      "where": "final report to manager",
+      "wrong": "local_model/.../catalogues/ru",
+      "actual": "local_operator/.../catalogues/ru — exact: /Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/ru",
+      "recomputed": {
+        "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/ru",
+        "exists": true,
+        "en_catalogue": {
+          "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.hosting.json",
+          "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+          "exists": true
+        }
+      },
+      "how_verified": "Path.exists() and sha256 over the exact worktree paths"
+    },
+    {
+      "id": "MC-5",
+      "class": "wrong class name in the session's final report (not in record.json)",
+      "where": "final report to manager",
+      "wrong": "HostingNotConfiguredException",
+      "actual": "HostingNotConfiguredError — class local_operator.session_factory.HostingNotConfiguredError(ValueError) declared at session_factory.py:365; it raises \"Hosting platform is not configured.\" at session_factory.py:816",
+      "how_verified": "direct read of the core source file; line numbers from an enumerated scan of the file"
+    }
+  ],
+  "independently_recomputed": {
+    "key": "wire.errors.hosting.not_configured",
+    "key_parity_with_en": true,
+    "key_count": 1,
+    "en_value": "Hosting platform is not configured.",
+    "ru_value": "Платформа размещения не настроена.",
+    "lengths": {
+      "en": 35,
+      "ru": 34,
+      "r1": 32
+    },
+    "context_fields": [
+      "note",
+      "role",
+      "tone"
+    ],
+    "context_has_maxCells": false,
+    "context_has_maxChars": false,
+    "context_has_budget": false,
+    "interpolation_args": 0,
+    "icu_plural_select": "N/A — no arguments and no plural/select message, so CLDR category coverage has nothing to apply to",
+    "nfc_normalised": true,
+    "cf_cc_bidi_characters": 0,
+    "class": {
+      "name": "HostingNotConfiguredError",
+      "module": "local_operator.session_factory",
+      "decl_line": 365,
+      "raise_line": 816,
+      "declaration": "class HostingNotConfiguredError(ValueError):",
+      "raise_text": "raise HostingNotConfiguredError(\"Hosting platform is not configured.\")"
+    },
+    "exact_paths": {
+      "en": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "context": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "target_ru": "/Users/damian/.local-operator/sessions/06e83e0ae0f9/scratchpad/hosting-ru-r2/target/ru/wire.errors.hosting.json",
+      "r1_target": "/Users/damian/.local-operator/sessions/06e83e0ae0f9/scratchpad/hosting-ru/target/ru/wire.errors.hosting.json",
+      "worktree": "/Users/damian/local-operator/.worktrees/startup-owned-copy",
+      "ru_catalogue_dir": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/ru",
+      "en_catalogue": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.hosting.json",
+      "en_context": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.hosting.context.json",
+      "validator": "/Users/damian/local-operator/.worktrees/startup-owned-copy/scripts/i18n/check.py",
+      "all_exist": true
+    }
+  },
+  "verdict_state": {
+    "status": "passed",
+    "changed_by_this_companion": false,
+    "statement": "The audit verdict does NOT change. Status remains passed with 0 BLOCKER, 0 MAJOR, 0 MINOR, 0 NIT findings on the key. The corrected items are metadata facts (lengths, filenames, script path, one path and one class name in the session report); none of them touches the audited value or the reasoning that the value matches the settled CORE ru rendering.",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "scope_boundaries": {
+    "new_validation_pass": false,
+    "new_translation": false,
+    "new_review_round": false,
+    "native_or_rendered_proof": "NOT RUN — unchanged from the original record; nothing in this companion asserts a render, fit or cap result",
+    "fit_claim": "none — the context sidecar has no maxCells/maxChars/budget",
+    "repo_writes": false,
+    "ledger_written": false
+  },
+  "other_reader_note": "Reader 1's record reportedly invents a different key (hosting.platform_not_configured), a 34/50 budget and timeout/max_retries fields. Those belong to that bundle and are not adjudicated here; each bundle corrects its own metadata. This companion corrects the r2b bundle and the r2b session's final report only.",
+  "bundle_manifest": {
+    "policy": "append-only: members are listed once with their hashes; later companions append entries and never rewrite earlier ones; old wrong facts remain in history",
+    "members": [
+      {
+        "path": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2/report.md",
+        "sha256": "2de8aac11df72a2bfba7f7f865c6aef0158adfea31337515f60418b8b04690ad",
+        "role": "audit report (original)"
+      },
+      {
+        "path": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2/audit.log",
+        "sha256": "cacb680b534f6c928f9cc2168a9a6fc7b1b98c6094aa68dbe548ddf6ce5f87d7",
+        "role": "execution log (original)"
+      },
+      {
+        "path": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2/record.json",
+        "sha256": "d962d9996c8344e9e684c38bc2713f31a807c49314b08c58ab93c01ecc4fbd21",
+        "role": "audit record (original, contains the wrong metadata listed above)"
+      },
+      {
+        "path": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2/receipt.json",
+        "sha256": "63c9a8b53e88eec6738600c27d8b361f0952c4df1ea4f603b59b848234b9a0f5",
+        "role": "receipt (original)"
+      },
+      {
+        "path": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2/metadata-corrections.json",
+        "sha256": null,
+        "role": "this metadata-corrections companion",
+        "self_reference": "hash omitted by construction"
+      }
+    ]
+  },
+  "audit_notes_not_execution_log": "This companion is provenance metadata, not an execution log. The only tool activity behind it is read/glob/write/eval with Python stdlib json/hashlib/unicodedata/pathlib; no process, no git, no project imports, no repo writes, no validator.",
+  "backdated": false
+}

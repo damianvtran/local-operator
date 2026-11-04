@@ -2481,6 +2481,26 @@
     },
     {
       "locale": "zh-CN",
+      "namespace": "wire.errors.hosting",
+      "source_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two independent sessions: e55f54b6a26e, 6433b7a5b3e9)",
+        "model": "radient/auto (served model not disclosed by the route)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace wire.errors.hosting (1 key: the owned display cause the startup refusal splices into its {error} slot) authored at base 87ca846245b2 against frozen English sha256 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63. zh-CN '托管平台未配置。' keeps the terminal ideographic full stop and the corpus term for hosting platform. Two independent readers, neither the translator nor the code author, both PASSED on these bytes with 0 blocker/major/minor/nit (sessions e55f54b6a26e, 6433b7a5b3e9). Source-only assembly: no rendered, native-speaker, width, RTL or validator proof, and no activation, shipped or release claim. Evidence: i18n/audits/evidence/zh-CN/wire.errors.hosting/ (bundles ['zhhost1', 'zhhost2'], frozen inputs under _inputs/)."
+    },
+    {
+      "locale": "zh-CN",
       "namespace": "wire.skill_adoption",
       "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
       "translator": {
@@ -2610,6 +2630,48 @@
       },
       "status": "passed",
       "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 936eec9d7ec1cf185590e1a87fe2544997bad62b0e9867417012054668101e77; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-a, task subagent)",
+        "session": "886288cfe273",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_alert at source hash cb3fcf96f055: key set and ICU placeholder/plural-structure parity with en, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical, safety meaning (count, held longer than threshold, agent NOT given the messages, no deletion/review claim, cleared text does not claim delivery), 'Agent messages' title and 'held' wording against the locale's cli.team_bridge catalogue and glossary/style guide. 0 blocker / 0 major / 2 minor. other-only plural correct. Minors: (1) spaces around digits/placeholders ('有 # 条', '超过 {minutes…}') against the zh-CN.md no-space rule (the catalogue has ~50 existing keys with the same pattern); (2) long_hold.body '被暂扣已超过' is slightly stiff, '已被暂扣超过' reads more natural. '暂扣' matches cli.team_bridge. Passed with minors outstanding. Single independent audit pass; no cross-model second audit."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-r2a, task subagent)",
+        "session": "3c5e5fe61f9b",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent re-audit (not the translator; supersedes the row at the old English hash) of cli.team_bridge_alert at source hash f433a71daee9: key set and ICU placeholder/plural-structure parity with en for all 4 keys, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical in long_hold.body, meaning ('held for more than N minutes and has not reached your agent'; cleared = no message held longer than the threshold; no delivery, deletion or review claim), 'Agent messages' title wording and 'held' term against the locale's cli.team_bridge catalogue, glossary and style guide; every key rendered with the repo formatter. 0 blocker / 0 major / 1 minor. other-only plural correct; no spaces around digits/placeholders; classifier 条 for messages; full-width punctuation; no full stop on titles; '暂扣' matches cli.team_bridge. Minor: '详情请运行' uses 请 although the English says 'Run' not 'please' (zh-CN.md reserves 请 for the English 'please'); the shipped catalogue elsewhere uses bare 运行 (e.g. '然后运行`lop …`'); suggest '详情：运行`lop team-bridge receiver status`。'. Passed with 1 minor outstanding. Single independent audit pass; no cross-model second audit."
     }
   ]
 }

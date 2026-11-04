@@ -57,6 +57,10 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Receipt-bound skill adoption owns its preview/consent vocabulary.
         "wire.skill_adoption",
         "wire.errors.files",
+        # The owned "hosting is not configured" cause clause, composed INTO the
+        # startup refusals above: without its own key a locale that translates
+        # the frame still inherits that one English sentence mid-sentence.
+        "wire.errors.hosting",
         "wire.errors.media",
         # Agent profile pictures: the refusals `PUT /v1/agents/{id}/avatar` returns
         # (unsupported_type, too_large, too_many_pixels, undecodable, not_found,

@@ -1,0 +1,20 @@
+{
+  "session": "e55f54b6a26e",
+  "requested_route": "radient/auto",
+  "observed_label": "radient/auto",
+  "underlying_served_model": "UNKNOWN",
+  "actual_model_source": "own transcript.jsonl completed assistant payload.usage (latest completed turn)",
+  "usage": {
+    "provider": "radient",
+    "model_id": "auto",
+    "at_ms": 1793736546831,
+    "input_tokens": 288345,
+    "output_tokens": 645,
+    "cache_read_tokens": 287744,
+    "context_tokens": 288345,
+    "reasoning_tokens": 481,
+    "usd_cost": 0.002680764,
+    "billing_basis": "subscription_api_equivalent"
+  },
+  "fallback": "none asserted for this turn"
+}
