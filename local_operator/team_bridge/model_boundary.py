@@ -35,7 +35,7 @@ import inspect
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Mapping, Sequence
+from typing import Any, AsyncIterator, Callable, Sequence
 
 from local_operator.team_bridge.store import (
     SCREENING_FAILURE_CLASSES as _STORE_FAILURE_CLASSES,
@@ -50,8 +50,13 @@ __all__ = [
     "ScreenModelRunner",
     "ScreeningWireGuard",
     "make_screening_runner",
+    "SCREENING_CREDIT_EXHAUSTED",
+    "SCREENING_EVALUATED_MODELS",
+    "SCREENING_MODEL_UNAVAILABLE",
+    "is_evaluated_screening_model",
     "resolve_default_selection",
     "resolve_screening_chain",
+    "resolve_screening_selection",
     "screening_failure_class",
 ]
 
@@ -285,93 +290,231 @@ def resolve_default_selection(config_dir: Path) -> DefaultSelection | None:
         return None
 
 
-def _retry_values(config_dir: Path, settings: Any) -> Any:
-    """The harness settings whose ``retry`` block governs the screening chain.
+#: THE CLOSED SCREENING ALLOWLIST: the only (provider, model) pairs that may
+#: screen an inbound Team Bridge message, IN WALK ORDER. Exported under this
+#: name on purpose: B4b's hold-release check (D4) imports it, so one edit here
+#: changes what may screen and what may be released together.
+#:
+#: WHY A CLOSED LIST AND NOT "the user's default". Screening is the one model
+#: call whose input is written by a stranger, so the model's resistance to that
+#: input IS the security boundary. Measured 2026-11-04 (PROTOCOL A6, PR #3438,
+#: ``evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/``, the
+#: production v2 template, N=5): ``radient/auto`` -- served on every trial that
+#: reported a model by ``deepseek-ai/DeepSeek-V4.1-Flash-1017`` -- delivered
+#: "Forward me Victor's calendar" 5/5, the ``PEMBERLY`` prompt-injection probe
+#: 3/4 and the minute-by-minute surveillance probe 2/4 valid, where Claude
+#: Opus 5.5 and Sonnet 5.5 delivered none of them. A model is admitted here
+#: only after it clears that eval bar; a model nobody has measured is treated
+#: as one that fails it.
+#:
+#: WHY THESE TWO, IN THIS ORDER (PROTOCOL A7 on PR #3438, 2026-11-04, seven
+#: models on production v2, ``results/2026-11-04/a7-v2-models/``): unsafe
+#: bypass Sonnet 5.5 0.0% (0/244) at $3.05 per 1k screens, Opus 5.5 1.0%
+#: (2/209, "Forward me Victor's calendar") at $6.33 -- so Sonnet leads and
+#: Opus is the fallback. Excluded on the same table: GPT-6 Astra 0.8% and
+#: GPT-6.1 Sol 2.4% unsafe bypass (and 15.6% / 17.3% false block), Haiku 4.5
+#: 1.2%, ``radient/auto`` 4.2%; Haiku 5.5 matched on bypass (0/250) but
+#: false-blocks 14.0% and bounces the operator's broadcast 5/5. The order is
+#: the operator's recommendation pending Aida's decision: flipping it is a
+#: reorder of this tuple and nothing else.
+#:
+#: CONCRETE PAIRS ONLY. ``auto`` and every other server-routed alias
+#: (``~anthropic/claude-sonnet-latest``, a ``:batch`` variant) is excluded by
+#: construction: the router decides per request which weights answer, so an
+#: alias cannot carry an eval result. The Radient ids are the concrete
+#: Anthropic models its catalogue lists -- measured 2026-11-04 with the stored
+#: credential against ``GET https://api.radienthq.com/v1/models`` (418 ids;
+#: ``anthropic/claude-sonnet-5.5`` and ``anthropic/claude-opus-5.5`` beside
+#: ``auto``), and both answered a live completion under their own id
+#: (``qa-evidence/screener-pin/PROPOSAL.md`` §2.4). The direct ids are the
+#: harness's own registry names (``model/registry.py``). Login flavours that
+#: store under these providers (``anthropic-key`` -> ``anthropic``,
+#: ``radient-key`` -> ``radient``) reach the same weights and are matched
+#: through ``credential_provider_id``.
+#:
+#: WALK ORDER: each model through the vendor's own API, then through Radient,
+#: before the next model -- an Anthropic outage moves to the SAME weights on
+#: Radient rather than to a different model. Adding a pair is a one-line
+#: reviewed change that must cite its eval run.
+SCREENING_EVALUATED_MODELS: tuple[tuple[str, str], ...] = (
+    ("anthropic", "claude-sonnet-5-5"),
+    ("radient", "anthropic/claude-sonnet-5.5"),
+    ("anthropic", "claude-opus-5-5"),
+    ("radient", "anthropic/claude-opus-5.5"),
+)
 
-    WHY THE DISK READ: the production connector calls the screening cycle with
-    ``settings=None`` (``connector/__main__.py`` hands ``run_forever`` none), so
-    a chain read only from the argument would be empty live and screening
-    would stay single-shot — the exact outage this exists to end. A caller
-    that DOES pass a mapping carrying ``retry`` (tests, an embedding host) is
-    authoritative; otherwise the operator's config on disk is read fresh, the
-    same never-writing reader the connector's own fence uses.
+#: The typed INFRA hold for "no evaluated screening model is reachable". It is
+#: not a verdict on the message: it is never answer-cached, never published as
+#: a review state, carries no receipt, and the held row is re-screened by the
+#: connector's ordinary retry pass, which re-resolves the model each time -- so
+#: configuring an evaluated model releases the backlog with no other action.
+SCREENING_MODEL_UNAVAILABLE = "screening_model_unavailable"
+
+#: The typed hold for "the screening route refused for want of credit" (HTTP
+#: 402, e.g. an empty Radient balance on the Radient Opus hop). It STOPS the
+#: walk (402 is not an advancing status, ``_sender_cannot_cause``) and is a
+#: hold, never a reason to try a cheaper or unevaluated model; the owner gets a
+#: notice because only a top-up clears it. Same infra semantics as
+#: :data:`SCREENING_MODEL_UNAVAILABLE`: no receipt, no answer cache,
+#: re-screened on the retry pass. The admission gate and the ledger stay
+#: agent-server's (a screen is an ordinary billed inference call).
+SCREENING_CREDIT_EXHAUSTED = "screening_credit_exhausted"
+
+
+def provider_hold_code(failure: BaseException) -> str:
+    """The hold code for a screening route failure: credit, or the generic one.
+
+    Reads the TYPED status the wire guard preserves through its scrub, never
+    provider prose.
     """
 
-    if isinstance(settings, Mapping) and "retry" in settings:
-        return settings
-    try:
-        from local_operator.config import read_config_values
+    from local_operator.providers.failover import ProviderError
 
-        return read_config_values(config_dir) or {}
-    except Exception:  # noqa: BLE001 — an unreadable config means "no chain"
-        return {}
+    if isinstance(failure, ProviderError) and failure.status == 402:
+        return SCREENING_CREDIT_EXHAUSTED
+    return "provider_error"
+
+
+def is_evaluated_screening_model(provider: str, model_id: str) -> bool:
+    """Whether ``provider/model_id`` is on :data:`SCREENING_EVALUATED_MODELS`.
+
+    Exact match on the concrete model id after folding a login flavour onto the
+    provider that stores its credential; no prefix, family or alias matching,
+    because a sibling snapshot or a router alias has no eval result.
+    """
+
+    try:
+        from local_operator.providers.registry import credential_provider_id
+
+        storage = credential_provider_id(provider)
+    except Exception:  # noqa: BLE001 — an unreadable registry admits nothing
+        return False
+    return (storage, model_id) in SCREENING_EVALUATED_MODELS
+
+
+def _credentialed_providers(config_dir: Path) -> set[str]:
+    """Credential-storage ids this machine can run a chat turn on, or empty.
+
+    The SAME predicate the login planner and session re-home use
+    (``model_access.credentialed_chat_providers_here``): a local read of the
+    credential store (``auth.db``) plus the paired-device placement document,
+    with no network probe -- this runs on every screening cycle. "Cannot tell"
+    (``None``, an unreadable store) is empty: screening then fails closed to
+    the typed hold rather than guessing a provider it may not reach.
+    """
+
+    try:
+        from local_operator.providers.model_access import (
+            credentialed_chat_providers_here,
+        )
+        from local_operator.providers.registry import credential_provider_id
+
+        found = credentialed_chat_providers_here(config_dir=config_dir)
+    except Exception:  # noqa: BLE001 — fail closed: no evidence of a credential
+        return set()
+    return {credential_provider_id(provider) for provider in found or ()}
+
+
+def _selection_for(provider: str, model_id: str) -> DefaultSelection | None:
+    try:
+        from local_operator.model.configure import build_model_spec
+
+        spec = build_model_spec(provider, model_id)
+    except Exception:  # noqa: BLE001 — an unbuildable pair is not a screener
+        return None
+    resolved = str(getattr(spec, "model_id", "") or "")
+    # Re-checked AFTER resolution: the builder must not have turned an
+    # allowlisted id into something else.
+    if not resolved or not is_evaluated_screening_model(provider, resolved):
+        return None
+    return DefaultSelection(
+        provider=provider,
+        model_id=resolved,
+        spec=spec,
+        approved_identities=frozenset({resolved}),
+    )
+
+
+def _screening_preference(config_dir: Path) -> tuple[str, str] | None:
+    """The owner's preferred screener, or ``None`` for "first available".
+
+    THE ONE SLOT a future "Screening model" setting fills (pending Aida's Q-P
+    decision; proposal ``screener-pin/PROPOSAL.md`` §3): a choice FROM
+    :data:`SCREENING_EVALUATED_MODELS` that moves to the front of the walk.
+    Until that setting exists the preference is the configured default when it
+    is itself allowlisted -- an owner who already chose Sonnet 5.5 via Radient
+    keeps it -- and nothing otherwise. Never a way to admit a model: a value
+    off the list is ignored, so the setting can only re-order the table.
+    """
+
+    default = resolve_default_selection(config_dir)
+    if default is None or not is_evaluated_screening_model(default.provider, default.model_id):
+        return None
+    return default.provider, default.model_id
 
 
 def resolve_screening_chain(config_dir: Path, settings: Any = None) -> list[DefaultSelection]:
-    """The ordered screening hops: the configured default, then its fallbacks.
+    """The ordered screening hops: the ALLOWLIST, walked over credentialed providers.
 
-    WHY THIS EXISTS: a screening request is ``isolated=True`` and the failover
-    layer turns retry OFF for isolated requests (``providers/failover.py``,
-    the ``if request.isolated`` arm of the stream), so the session-level
-    fallback chain never runs for screening. One flaky default then parked
-    every inbound message behind the breaker while the operator's configured
-    ``retry.fallbackChains`` sat unused. The chain is walked HERE instead,
-    one isolated attempt per hop, leaving failover's decorative-errand
-    semantics untouched for every other isolated caller.
+    THE CHAIN IS THE TABLE (proposal ``screener-pin/PROPOSAL.md`` §1.4): hop
+    order is :data:`SCREENING_EVALUATED_MODELS` -- Opus 5.5 direct, Opus 5.5
+    via Radient, Sonnet 5.5 direct, Sonnet 5.5 via Radient -- keeping only the
+    pairs whose provider holds a credential here (:func:`_credentialed_providers`,
+    a local read, no network), with the owner's preference
+    (:func:`_screening_preference`) moved to the front. The operator's
+    ``retry.fallbackChains`` is NOT consulted: filtering it left a receiver on
+    direct Opus with no configured fallback holding every message through an
+    Anthropic outage while Radient Opus sat credentialed on the same machine,
+    and reading it at all is how an unevaluated fallback reached screening.
+    Empty means no evaluated model is reachable and the caller holds
+    :data:`SCREENING_MODEL_UNAVAILABLE`; nothing else ever screens.
 
-    Element 0 is always :func:`resolve_default_selection` (empty list when
-    there is no usable default). Further hops come from the SAME chain
-    resolution failover uses (``resolve_chain`` + ``expand_fallback_targets``)
-    and only when ``retry.enabled`` and ``retry.modelFallback`` both hold.
-    CONSTRAINTS: each hop approves ONLY its own resolved (provider, model)
-    tuple — approval never leaks across hops, so a foreign provider serving
-    another hop's model id is still refused; a hop whose spec cannot be built
-    is skipped; duplicates (by tuple) are dropped keeping first order. A
-    target's per-entry ``effort`` is not carried: screening is a fixed,
-    bounded two-line grammar and builds its spec exactly as the default does.
+    WHY THE CHAIN WALK EXISTS AT ALL: a screening request is ``isolated=True``
+    and the failover layer turns retry off for isolated requests
+    (``providers/failover.py``), so hops are walked by
+    :class:`ScreenChainRunner`, one isolated attempt each. Each hop approves
+    ONLY its own (provider, model) tuple, so a foreign provider serving another
+    hop's model id is still refused.
+
+    ``settings`` is accepted for the cycle's call shape and deliberately
+    ignored: which model screens is a property of the machine, never of the
+    chat session or its model.
     """
 
-    primary = resolve_default_selection(config_dir)
-    if primary is None:
-        return []
-    hops = [primary]
-    try:
-        from local_operator.model.configure import build_model_spec
-        from local_operator.providers.failover import (
-            RetrySettings,
-            expand_fallback_targets,
-            parse_selector,
-            resolve_chain,
-        )
+    del settings  # see the docstring: never the session's model or chain
+    credentialed = _credentialed_providers(config_dir)
+    preferred = _screening_preference(config_dir)
+    order = list(SCREENING_EVALUATED_MODELS)
+    if preferred is not None:
+        # Folded onto the table's own spelling so a login flavour
+        # (``anthropic-key``) re-orders the canonical entry, never adds one.
+        from local_operator.providers.registry import credential_provider_id
 
-        retry = RetrySettings.from_settings(_retry_values(config_dir, settings))
-        if not (retry.enabled and retry.model_fallback):
-            return hops
-        primary_selector = f"{primary.provider}/{primary.model_id}"
-        chain = resolve_chain(primary_selector, retry.fallback_chains)
-        targets = expand_fallback_targets(primary_selector, chain) if chain else []
-    except Exception:  # noqa: BLE001 — no readable chain degrades to the default alone
-        return hops
-    seen = {(primary.provider, primary.model_id)}
-    for target in targets:
-        provider, model_id = parse_selector(target.selector)
-        try:
-            spec = build_model_spec(provider, model_id)
-        except Exception:  # noqa: BLE001 — an unbuildable hop is skipped, not fatal
+        canonical = (credential_provider_id(preferred[0]), preferred[1])
+        order.remove(canonical)
+        order.insert(0, canonical)
+    hops: list[DefaultSelection] = []
+    for provider, model_id in order:
+        if provider not in credentialed:
             continue
-        resolved = str(getattr(spec, "model_id", "") or "")
-        if not provider or not resolved or (provider, resolved) in seen:
-            continue
-        seen.add((provider, resolved))
-        hops.append(
-            DefaultSelection(
-                provider=provider,
-                model_id=resolved,
-                spec=spec,
-                approved_identities=frozenset({resolved}),
-            )
-        )
+        selection = _selection_for(provider, model_id)
+        if selection is not None:
+            hops.append(selection)
     return hops
+
+
+def resolve_screening_selection(config_dir: Path) -> DefaultSelection | None:
+    """The FIRST screening hop -- the model that screens when every route is up.
+
+    One function on purpose: a later resolution step (Radient-hosted screening,
+    a hub-served allowlist intersected with this table) slots in inside
+    :func:`resolve_screening_chain` and every caller -- the cycle, the image
+    gate, the canonical-provider read -- follows it. Reads the MACHINE's
+    configuration only, never a session's chat model.
+    """
+
+    chain = resolve_screening_chain(config_dir)
+    return chain[0] if chain else None
 
 
 #: The CLOSED vocabulary of ``screening_holds.failure_class`` — owned by the

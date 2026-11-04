@@ -70,6 +70,22 @@ def notify_probe_suspected_title() -> Msg:
     return Msg("cli.team_bridge.notify.probe_suspected_title", {})
 
 
+def notify_screening_credit_exhausted_body() -> Msg:
+    return Msg("cli.team_bridge.notify.screening_credit_exhausted_body", {})
+
+
+def notify_screening_credit_exhausted_title() -> Msg:
+    return Msg("cli.team_bridge.notify.screening_credit_exhausted_title", {})
+
+
+def notify_screening_model_unavailable_body() -> Msg:
+    return Msg("cli.team_bridge.notify.screening_model_unavailable_body", {})
+
+
+def notify_screening_model_unavailable_title() -> Msg:
+    return Msg("cli.team_bridge.notify.screening_model_unavailable_title", {})
+
+
 def outcome_absent() -> Msg:
     return Msg("cli.team_bridge.outcome.absent", {})
 

@@ -865,11 +865,12 @@ async def run_screening_cycle(
     """
 
     from local_operator.team_bridge.model_boundary import (
+        SCREENING_MODEL_UNAVAILABLE,
         ScreenChainRunner,
         make_screening_runner,
         resolve_screening_chain,
     )
-    from local_operator.team_bridge.screening import screen_message_async
+    from local_operator.team_bridge.screening import ScreenResult, screen_message_async
     from local_operator.team_bridge.store import Store, StoreRefused, serialize_serving
 
     # ONE capture of the whole hop list: hop 0 is the configured default (the
@@ -878,7 +879,18 @@ async def run_screening_cycle(
     # own chain for isolated requests (see resolve_screening_chain).
     chain = resolve_screening_chain(config_dir, settings)
     if not chain:
-        return None
+        # FAIL CLOSED (PROTOCOL A6, PR #3438): no evaluated screening model is
+        # reachable, so nothing screens -- not radient/auto, not the default.
+        # A TYPED hold rather than ``None`` so the owner surface can say why;
+        # it is decided before any status fetch, reservation or spend, and it
+        # writes no receipt and no answer cache, so the retry pass re-screens
+        # the message once a model is configured.
+        # A batch answers ``None`` ("the single path decides"), so each message
+        # takes this same hold from its own single screen, and the pass does
+        # not count a model call that never happened.
+        if batch:
+            return None
+        return ScreenResult("hold", hold_code=SCREENING_MODEL_UNAVAILABLE)
     selection = chain[0]
     # ACCEPTED STATUS (R8/Q3): the owner-pinned SDK status is received
     # through the normal accepted-status seam — an injected fetcher (the

@@ -41,6 +41,33 @@ from local_operator.team_bridge.types import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _fixture_models_are_evaluated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Admit this file's FIXTURE models to the screening allowlist.
+
+    These tests pin the connector's screening plumbing on stand-in models; which model MAY screen is
+    policy, pinned against the real closed table in
+    ``test_screening_model_allowlist.py``. Without this every fixture default
+    (``openai/gpt-5.4`` ...) would fail closed before the mechanism under test
+    ran.
+    """
+
+    from local_operator.team_bridge import model_boundary
+
+    fixtures = (("openai", "gpt-5.4"), ("openai", "gpt-5.4-mini"))
+    monkeypatch.setattr(
+        model_boundary,
+        "SCREENING_EVALUATED_MODELS",
+        fixtures + model_boundary.SCREENING_EVALUATED_MODELS,
+    )
+    # Every fixture provider is "signed in": the chain walks credentialed pairs.
+    monkeypatch.setattr(
+        model_boundary,
+        "_credentialed_providers",
+        lambda _config_dir: {provider for provider, _model in fixtures},
+    )
+
+
 def _access(owner: Any) -> SimpleNamespace:
     """The authenticated access double the producer fence PINS (TB-14).
 

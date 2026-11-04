@@ -248,5 +248,25 @@
     "role": "local owner notification (inbox item) raised by the agent-messages receiver",
     "tone": "calm, factual, operator-facing; no alarm, no blame",
     "note": "Body of the same notification. Three facts must survive: (1) the hourly screening budget is used up, so NEW agent messages wait unscreened; (2) nothing is lost: they are screened automatically as the budget refills; (3) messages from people, and messages addressed to the owner's agent (a mention or a direct message), are screened before other agent chatter. Do not imply messages were rejected, deleted or that anyone was notified."
+  },
+  "cli.team_bridge.notify.screening_model_unavailable_title": {
+    "role": "local owner notification (inbox item) raised by the agent-messages receiver",
+    "tone": "calm, factual, operator-facing; no alarm, no blame",
+    "note": "Agent messages is the product name of Team Bridge. Title shown ONLY to the owner of the receiving agent when NO approved screening model is available, so every incoming agent message is held. 'Screening' = the moderation check every incoming agent message passes before the agent may read it. NOT temporary: it stays until the owner acts. 'Held' is the namespace's term for a message that has not reached the agent."
+  },
+  "cli.team_bridge.notify.screening_model_unavailable_body": {
+    "role": "local owner notification (inbox item) raised by the agent-messages receiver",
+    "tone": "calm, factual, operator-facing; no alarm, no blame",
+    "note": "Body of the same notification. Facts that must survive: (1) screening now runs only on models tested for it, named exactly: Claude Opus 5.5 or Claude Sonnet 5.5, via Anthropic or Radient (product and model names stay in Latin script, untranslated); (2) none is available here, so new agent messages are held; (3) nothing is lost; (4) the fix: sign in to Anthropic, OR on Radient set the default model to one of those two; Radient's automatic model ('auto') is NOT used for screening; (5) held messages are re-screened once a model is available. Do not imply messages were rejected, deleted, or that a human reviews them."
+  },
+  "cli.team_bridge.notify.screening_credit_exhausted_title": {
+    "role": "local owner notification (inbox item) raised by the agent-messages receiver",
+    "tone": "calm, factual, operator-facing; no alarm, no blame",
+    "note": "Agent messages is the product name of Team Bridge. Title shown ONLY to the owner of the receiving agent when the screening call through their Radient account was refused for insufficient credit (HTTP 402). 'Screening' = the moderation check every incoming agent message passes before the agent may read it. Not temporary: it stays until the owner adds credit or signs in to Anthropic."
+  },
+  "cli.team_bridge.notify.screening_credit_exhausted_body": {
+    "role": "local owner notification (inbox item) raised by the agent-messages receiver",
+    "tone": "calm, factual, operator-facing; no alarm, no blame",
+    "note": "Body of the same notification. Facts that must survive: (1) the safety check runs on an approved model through the owner's Radient account; (2) that account lacks credit for it, so new agent messages are held; (3) nothing is lost AND no other model is used instead (this is deliberate: screening never falls back to an unapproved model); (4) the fix: add credit in the Radient console, or sign in to Anthropic; (5) held messages are re-screened automatically. Product names (Radient, Anthropic) stay in Latin script. Do not imply messages were rejected or deleted."
   }
 }

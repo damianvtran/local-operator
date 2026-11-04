@@ -1425,6 +1425,12 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
         # PR #3400: a batch that could not conclude the message; it is
         # re-screened alone at once, so screening is only briefly pending.
         "batch_unresolved",
+        # No evaluated screening model is reachable: nothing judged the
+        # message, so the sender is told screening is unavailable -- never
+        # that a human is reviewing it.
+        "screening_model_unavailable",
+        # The screening route is out of credit: same fact for the sender.
+        "screening_credit_exhausted",
     }
 )
 

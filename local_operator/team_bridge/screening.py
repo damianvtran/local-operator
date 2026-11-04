@@ -141,6 +141,15 @@ HOLD_CODES = (
     # owner has no designated session, or a session/spine holds the claim.
     "badge_only",
     "claimed_elsewhere",
+    # No EVALUATED screening model is reachable (model_boundary
+    # ``SCREENING_EVALUATED_MODELS``): an infra hold, never a verdict. Never
+    # answer-cached, never releasable, and re-screened on the retry pass, which
+    # re-resolves the model -- so configuring Anthropic or a Radient concrete
+    # model clears it.
+    "screening_model_unavailable",
+    # The screening route refused for want of credit (HTTP 402): an infra
+    # hold with an owner notice, never a fallback to another model.
+    "screening_credit_exhausted",
 )
 
 #: Per-type RAW utf8 caps on the fetched body (§8.3 screening inputs).
@@ -1347,9 +1356,13 @@ def _screen_prepare(
     # so the registered input proof pins the same value the job will carry.
     _canonical_provider = getattr(snapshot, "provider", None) or ""
     if not _canonical_provider:
-        from local_operator.team_bridge.model_boundary import resolve_default_selection
+        from local_operator.team_bridge.model_boundary import (
+            resolve_screening_selection,
+        )
 
-        _resolved = resolve_default_selection(config_dir)
+        # The screening model, never the bare configured default: the two
+        # differ whenever the default is not an evaluated screener.
+        _resolved = resolve_screening_selection(config_dir)
         _canonical_provider = _resolved.provider if _resolved is not None else ""
 
     # 8b. IMMUTABLE INPUT PROOF (R8/Q3): every canonical field of this
@@ -1692,7 +1705,11 @@ async def _screen_spend(
 
         failure_class = screening_failure_class(failure)
         retry_at = _record_failure(store, owner, failure_class=failure_class)
+        # A 402 is its own owner-visible reason (an empty balance only a
+        # top-up clears), still a route failure for the breaker.
+        from local_operator.team_bridge.model_boundary import provider_hold_code
 
+        route_code = provider_hold_code(failure)
         _commit_hold(
             store,
             owner,
@@ -1700,10 +1717,10 @@ async def _screen_spend(
             attempt_id,
             fingerprint,
             epoch,
-            "provider_error",
+            route_code,
             failure_class=failure_class,
         )
-        return ScreenResult("hold", hold_code="provider_error", retry_at=retry_at)
+        return ScreenResult("hold", hold_code=route_code, retry_at=retry_at)
 
     # 11b. A provider RESPONSE — even a valid model HOLD — is a provider
     #      SUCCESS: it resets consecutive failures (A5). Only the exception
@@ -2597,8 +2614,10 @@ async def _screen_batch_core(
                 pass
             _commit_each(HOLD_BATCH_UNRESOLVED, failure_class=failure_class)
             return _finish()
+        from local_operator.team_bridge.model_boundary import provider_hold_code
+
         _record_failure(store, owner, failure_class=failure_class)
-        _commit_each("provider_error", failure_class=failure_class)
+        _commit_each(provider_hold_code(failure), failure_class=failure_class)
         return _finish()
 
     try:
