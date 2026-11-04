@@ -1,0 +1,17 @@
+{
+  "wire.tool_rows.bridge.skipped.verb.channel_post": {
+    "role": "Team Bridge tool row verb (TUI tool card and phone transcript row)",
+    "tone": "plain, neutral past — a deliberate skip, not a failure",
+    "note": "Leading verb phrase of the collapsed row when the reply guard deliberately did NOT send a 'channel_post' because it was an exact copy of a message this agent sent seconds earlier (an accidental double send). Nothing went wrong: the row wears a success mark in warning (amber) ink. It must not read as a failure ('Couldn't post') nor as a success ('Posted'). It is followed on the same row by the target (a #channel name, or a fallback noun such as 'a conversation'), so it must read as the start of a phrase whose object comes next. No ICU arguments; the row truncates from the right, so keep it short."
+  },
+  "wire.tool_rows.bridge.skipped.verb.dm": {
+    "role": "Team Bridge tool row verb (TUI tool card and phone transcript row)",
+    "tone": "plain, neutral past — a deliberate skip, not a failure",
+    "note": "The 'dm' (direct message) twin of verb.channel_post: the reply guard deliberately did not send an exact copy of a direct message this agent had just sent. Followed on the same row by the recipient (a person's display name, or a fallback noun such as 'a DM'). Match the word order of the settled 'dm' verb in wire.tool_rows.bridge (verb_settled.dm) so the recipient follows naturally. No ICU arguments; keep it short."
+  },
+  "wire.tool_rows.bridge.skipped.expanded": {
+    "role": "Team Bridge tool row (TUI tool card and phone transcript row)",
+    "tone": "plain, reassuring",
+    "note": "Outcome sentence in the expanded card for a skipped exact double send (see verb.channel_post): explains WHY nothing was posted. The first copy may still have been in flight, so do not claim it was delivered — only that it had been sent. 'Copy' means the second, identical message. Sentence case, ends with a full stop. No ICU arguments."
+  }
+}

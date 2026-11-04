@@ -226,11 +226,13 @@ def test_outcomes(details: dict[str, Any], outcome: str | None, code: str | None
 
 
 @pytest.mark.parametrize(
-    ("op", "verb"), [("channel_post", "Couldn't post in"), ("dm", "Couldn't message")]
+    ("op", "verb"), [("channel_post", "Skipped post in"), ("dm", "Skipped message to")]
 )
 def test_a_skipped_double_send_never_reads_as_posted(op: str, verb: str) -> None:
     """#3377 round 3, m-1: the reply guard's skip is ``ok`` (nothing failed) but
-    was NOT posted, so the card must not say "Posted in"/"Messaged"."""
+    was NOT posted, so the card must not say "Posted in"/"Messaged". Design D1:
+    nor "Couldn't post in"/"Couldn't message" — nothing stopped it; the guard
+    chose not to send, so it has its own verb."""
 
     from local_operator.team_bridge.reply_guard import Skipped
 
@@ -245,6 +247,77 @@ def test_a_skipped_double_send_never_reads_as_posted(op: str, verb: str) -> None
     # A real post of the same call still reads as posted, with no outcome word.
     posted = bridge_row({"op": op, "channel_id": CHANNEL, "body": "Approved."}, _posted())
     assert posted["outcome"] is None
+
+
+@pytest.mark.parametrize(("op", "headline"), [("channel_post", "Skipped post in #general")])
+def test_a_skipped_card_explains_why_when_expanded(op: str, headline: str) -> None:
+    """Design D2 / code m-A: the expanded skip card said nothing about why. It
+    now carries a keyed sentence, never claims the first copy was delivered,
+    and keeps every id in the internals."""
+
+    from local_operator.team_bridge.reply_guard import Skipped
+
+    args = {"op": op, "channel_id": CHANNEL, "body": "Approved."}
+    details = {**Skipped(seconds_ago=2).as_result(CHANNEL), "conversation_label": "general"}
+    view = bridge_expanded(bridge_row(args, details), args, details)
+    assert view["headline"] == headline
+    assert view["outcome"] == (
+        "Not posted: an identical message had just been sent, so this copy was skipped."
+    )
+    assert "delivered" not in view["outcome"] and "bcv_" not in view["outcome"]
+    assert ("content", f"duplicate send to {CHANNEL}") in view["internals"]
+
+
+def test_only_guarded_ops_get_the_skip_verb() -> None:
+    """An op the reply guard does not cover keeps its failed verb on a skip:
+    still true (nothing was posted), and no untranslated guess."""
+
+    row = bridge_row({"op": "react", "message_id": "bcmsg_x", "emoji": "+1"}, {})
+    row = {**row, "outcome": "skipped", "code": "duplicate"}
+    assert render_bridge_row(row, running=False)[0] == "Couldn't react in"
+
+
+SKIP_KEYS = (
+    "wire.tool_rows.bridge.skipped.verb.channel_post",
+    "wire.tool_rows.bridge.skipped.verb.dm",
+    "wire.tool_rows.bridge.skipped.expanded",
+)
+
+
+@pytest.mark.parametrize("locale", ["fr", "es", "zh-CN", "ru", "vi", "ur", "hi"])
+def test_every_shipped_locale_carries_the_skip_copy(locale: str) -> None:
+    """The three skip strings are carried by all seven locales and render from
+    that locale's catalogue, never the English source, and the verb is never
+    the locale's own failed verb (D1 in translation, not just in English)."""
+
+    from local_operator.i18n import catalogues, text
+
+    own = catalogues.load_catalogue(locale, "wire.tool_rows.bridge.skipped")
+    english = catalogues.load_catalogue("en", "wire.tool_rows.bridge.skipped")
+    assert set(own) == set(english) == set(SKIP_KEYS)
+    parent = catalogues.load_catalogue(locale, "wire.tool_rows.bridge")
+    from local_operator.team_bridge.reply_guard import Skipped
+
+    details = Skipped(seconds_ago=2).as_result(CHANNEL)
+    previous = text.active_locale()
+    text.set_active_locale(locale)
+    try:
+        for op, failed_key in (
+            ("channel_post", "wire.tool_rows.bridge.verb_failed.channel_post"),
+            ("dm", "wire.tool_rows.bridge.verb_failed.dm"),
+        ):
+            args = {"op": op, "channel_id": CHANNEL, "body": "Approved."}
+            row = bridge_row(args, details)
+            verb, _summary, word = render_bridge_row(row, running=False)
+            assert verb == own[f"wire.tool_rows.bridge.skipped.verb.{op}"]
+            assert verb != english[f"wire.tool_rows.bridge.skipped.verb.{op}"]
+            assert verb != parent[failed_key]
+            assert word and word.endswith(" · duplicate")
+            sentence = bridge_expanded(row, args, details)["outcome"]
+            assert sentence == own["wire.tool_rows.bridge.skipped.expanded"]
+            assert sentence != english["wire.tool_rows.bridge.skipped.expanded"]
+    finally:
+        text.set_active_locale(previous)
 
 
 def test_dm_to_an_agent_not_yet_accepted_is_awaiting_acceptance() -> None:
