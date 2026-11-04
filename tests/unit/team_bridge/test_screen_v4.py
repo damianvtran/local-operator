@@ -40,7 +40,7 @@ from local_operator.team_bridge.client import (
 from tests.unit.team_bridge.test_screening import Policy, Runner, _item, _run, _setup
 
 #: agent-server #309 pins the same value (internal/bridge/texts_test.go).
-V4_SHA256 = "8c524b3f2261cc5c5dc377b51e8977cc06842ea2af91e26df6f51e7757bf99cf"
+V4_SHA256 = "6104f0caf9ab91b63f467fe7a1a33c6fef5b65c733541ade19027441d3649e4e"
 _REPO = Path(__file__).resolve().parents[3]
 _EVAL_V4 = _REPO / "evals/team_bridge_moderation/screen/templates/bridge-screen-v4.txt"
 
@@ -186,7 +186,7 @@ def test_the_b4_relay_renders_under_v4_and_delivers_with_a_v4_receipt(tmp_path: 
     assert result.receipt is not None
     assert result.receipt.prompt_version == SCREENING_VERSION_V4
     assert result.receipt.template_sha256 == SCREENING_TEMPLATE_V4_SHA256
-    assert "Relaying, forwarding or summarizing work to a member" in runner.calls[0]
+    assert "relaying or summarizing work to a member" in runner.calls[0]
 
 
 def test_a_new_work_hold_is_its_own_seam_and_other_holds_stay_model_hold(tmp_path: Path) -> None:

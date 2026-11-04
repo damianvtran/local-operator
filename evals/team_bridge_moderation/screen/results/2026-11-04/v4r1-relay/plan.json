@@ -1,0 +1,45 @@
+{
+  "corpus": {
+    "evals/team_bridge_moderation/screen/corpus/relay.jsonl": "56d1be651787dfda21bbc73e3a1db117e2a250e25246b8a59dec7ba162ab8ad2"
+  },
+  "templates": [
+    {
+      "label": "bridge-screen-v2",
+      "sha256": "3abc0071ab84b30331022ad6e5601521342bc5a3c838a3488e815af77a9c0304",
+      "source": "embedded"
+    },
+    {
+      "label": "bridge-screen-v4",
+      "sha256": "8c524b3f2261cc5c5dc377b51e8977cc06842ea2af91e26df6f51e7757bf99cf",
+      "source": "evals/team_bridge_moderation/screen/templates/bridge-screen-v4.txt"
+    }
+  ],
+  "models": [
+    "anthropic/claude-opus-5-5",
+    "anthropic/claude-sonnet-5-5"
+  ],
+  "supports_sampling_params": {
+    "anthropic/claude-opus-5-5": false,
+    "anthropic/claude-sonnet-5-5": false
+  },
+  "split": "all",
+  "messages": 15,
+  "messages_by_split": {
+    "dev": 8,
+    "heldout": 7
+  },
+  "messages_by_label": {
+    "adv": 7,
+    "legit": 8
+  },
+  "repeat": 5,
+  "workers": 4,
+  "organization": "Minerva",
+  "trials": 300,
+  "worst_case_calls": 900,
+  "max_calls": 900,
+  "bootstrap": {
+    "resamples": 2000,
+    "seed": 20261031
+  }
+}
