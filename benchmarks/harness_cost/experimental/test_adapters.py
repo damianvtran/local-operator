@@ -527,6 +527,99 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.post(diagnostics=diagnostics)).status_code, 200)
         self.assertEqual(json.loads(self.calls[0].content)["diagnostics"], diagnostics)
 
+    async def test_context_management_is_price_neutral_and_forwarded_unchanged(self):
+        # F23 RED repro: the exact top-level key set omp 18.11.2 and Claude Code
+        # 2.1.274 sent in container S4 (meter-in-keys.jsonl), refused with 402
+        # "unpriced request extension" before this fix.
+        context_management = {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]}
+        body = {
+            "context_management": context_management,
+            "max_tokens": 32000,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            "metadata": {"user_id": "bench"},
+            "model": meter.MODEL,
+            "output_config": {"effort": "high"},
+            "stream": False,
+            "system": [{"type": "text", "text": "sys"}],
+            "thinking": {"type": "adaptive"},
+            "tools": [{"name": "bash", "input_schema": {"type": "object"}}],
+        }
+        self.assertEqual(
+            sorted(body),
+            ["context_management", "max_tokens", "messages", "metadata", "model",
+             "output_config", "stream", "system", "thinking", "tools"],
+        )
+        self.response = {"model": "anthropic/claude-sonnet-5.5", "usage": {"cost": 0.01}}
+        assert self.api is not None
+        response = await self.api.post("/r/trial/v1/messages", json=body)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(json.loads(self.calls[0].content)["context_management"],
+                         context_management)
+        ledger = self.ledger()
+        self.assertEqual(ledger["usd"], 0.01)
+        self.assertFalse(ledger["blocked"])
+        self.assertNotIn("trial", ledger["voids"])
+
+    async def test_unknown_request_keys_stay_refused(self):
+        for update in ({"context_editing": {}}, {"compaction": {}}, {"speed": "fast"}):
+            with self.subTest(update=update):
+                run = "unk-" + hashlib.sha256(repr(update).encode()).hexdigest()[:8]
+                response = await self.post(run, **update)
+                self.assertEqual(response.status_code, 402)
+                self.assertIn("unpriced request extension", response.text)
+                self.assertIn(run, self.ledger()["voids"])
+        self.assertEqual(self.calls, [])
+
+    async def test_observed_priced_usage_shape_settles_clean(self):
+        # The full usage shape seen in 4419 metered rows (incl. null fields).
+        self.response = {"model": "anthropic/claude-sonnet-5.5", "usage": {
+            "input_tokens": 10, "output_tokens": 3, "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 5, "cache_creation": {"ephemeral_5m_input_tokens": 0},
+            "cost": 0.01, "is_byok": False, "cost_details": {"upstream_inference_cost": 0.01},
+            "output_tokens_details": {"thinking_tokens": 0}, "inference_geo": "global",
+            "service_tier": "standard", "speed": "standard", "server_tool_use": None,
+            "iterations": None,
+        }}
+        self.assertEqual((await self.post()).status_code, 200)
+        ledger = self.ledger()
+        self.assertFalse(ledger["blocked"])
+        self.assertEqual(ledger["usd"], 0.01)
+
+    async def test_unpriced_usage_fields_record_the_bill_and_latch(self):
+        # Compaction reports its iteration tokens ONLY in usage.iterations (the
+        # top-level counts exclude them): a bill the meter cannot reconcile.
+        self.response = {"model": "anthropic/claude-sonnet-5.5", "usage": {
+            "input_tokens": 10, "output_tokens": 3, "cost": 0.01,
+            "iterations": [{"type": "compaction", "input_tokens": 900, "output_tokens": 80}],
+        }}
+        self.assertEqual((await self.post()).status_code, 200)
+        self.assertEqual((await self.post("other")).status_code, 402)
+        ledger = self.ledger()
+        self.assertEqual(ledger["usd"], 0.01)
+        self.assertTrue(ledger["blocked"])
+        self.assertIn("unqualified bill", " ".join(ledger["voids"]["trial"]))
+        row = json.loads(meter.LOG.read_text().splitlines()[0])
+        self.assertEqual(row["unpriced_usage"], ["iterations"])
+
+    async def test_unpriced_usage_fields_in_a_stream_latch(self):
+        chunks = (
+            b'data: {"type":"message_start","message":{"model":"served",'
+            b'"usage":{"input_tokens":2,"cost":0.01}}}\n\n'
+            b'data: {"type":"message_delta","usage":{"cost":0.02,"output_tokens":3,'
+            b'"iterations":[{"type":"compaction","input_tokens":9}]}}\n\n'
+        )
+        self.upstream._transport = httpx.MockTransport(
+            lambda req: httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=httpx.ByteStream(chunks)
+            )
+        )
+        response = await self.post(stream=True)
+        self.assertEqual(response.content, chunks)
+        ledger = self.ledger()
+        self.assertEqual(ledger["usd"], 0.02)
+        self.assertTrue(ledger["blocked"])
+        self.assertEqual(ledger["pending"], {})
+
     def test_main_output_cap_below_native_128000_is_refused_at_startup(self):
         with patch.dict(os.environ, {"BENCH_MAX_OUTPUT_TOKENS": "127999"}):
             with self.assertRaises(ValueError):

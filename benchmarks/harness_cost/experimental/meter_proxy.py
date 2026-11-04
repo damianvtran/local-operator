@@ -387,6 +387,13 @@ class BudgetGuard:
             # Price-neutral request metadata: forwarded unchanged so the
             # product's native diagnostics/refusal-retry path stays intact.
             "diagnostics",
+            # Anthropic's native context editing (omp 18.11.2 and Claude Code
+            # 2.1.274 send it on every turn; container S4 F23). Edits only
+            # shrink what the provider counts as input, which the response
+            # ``usage`` reports, so the request key itself carries no price.
+            # The edit that DOES bill extra (compaction) reports its tokens
+            # only in ``usage.iterations``: ``unpriced_usage`` latches that.
+            "context_management",
         }
         if set(body) - allowed:
             raise ValueError("unpriced request extension")
@@ -630,6 +637,48 @@ def _patch_body(body: WireObject) -> dict[str, object]:
     return meta
 
 
+# Response ``usage`` fields the bill is read from (``cost`` settles; the token
+# counts and details feed the published reconciliation).
+PRICED_USAGE = frozenset({
+    "input_tokens", "output_tokens", "cache_creation_input_tokens",
+    "cache_read_input_tokens", "cache_creation", "cost", "cost_details",
+})
+# Descriptive fields, price-neutral ONLY at these values: the shape of every
+# metered row on record (4419 rows, 2026-11-04). Any other value names a
+# billing basis this meter does not price: a BYOK bill, a non-standard tier or
+# speed, a regional premium, server-tool fees, or compaction iterations whose
+# tokens the top-level counts exclude. Thinking tokens are already inside
+# ``output_tokens``, so ``output_tokens_details`` is a breakdown, not a charge.
+_NEUTRAL_USAGE = {
+    "is_byok": lambda v: v is None or v is False,
+    "service_tier": lambda v: v in (None, "standard", "default"),
+    "speed": lambda v: v in (None, "standard"),
+    "inference_geo": lambda v: v in (None, "global"),
+    "output_tokens_details": lambda v: v is None or isinstance(v, dict),
+    "server_tool_use": lambda v: v is None or (
+        isinstance(v, dict) and all(n in (0, None) for n in v.values())),
+    "iterations": lambda v: v is None or v == [],
+}
+
+
+def unpriced_usage(usage: object) -> list[str]:
+    """Usage fields this meter cannot price (sorted); ``[]`` means the bill is whole.
+
+    WHY: settlement reads only ``usage.cost`` and ``_merge_usage`` keeps only
+    known keys, so an unknown or non-neutral field would otherwise vanish from
+    the ledger silently. A non-empty result settles the stated cost (it was
+    charged) as an UNQUALIFIED bill, which latches (F23).
+    """
+    if usage is None:
+        return []
+    if not isinstance(usage, dict):
+        return ["<usage-not-object>"]
+    return sorted(
+        k for k, v in usage.items()
+        if k not in PRICED_USAGE and not (k in _NEUTRAL_USAGE and _NEUTRAL_USAGE[k](v))
+    )
+
+
 def _merge_usage(acc: WireObject, usage: WireObject | None) -> None:
     if not usage:
         return
@@ -800,10 +849,14 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
         }
         status = resp.status_code
 
-        def write_row(usage: WireObject, extra: dict[str, object] | None = None) -> None:
+        def write_row(
+            usage: WireObject, extra: dict[str, object] | None = None, unpriced: frozenset = frozenset()
+        ) -> None:
             # OpenRouter returns the billed amount in usage.cost: it feeds the
             # hard budget stop and is reported beside our list-price computation.
-            guard.settle(reservation, usage.get("cost"))
+            guard.settle(reservation, usage.get("cost"), qualified=not unpriced)
+            if unpriced:
+                row["unpriced_usage"] = sorted(unpriced)
             if _provider_fault(status):
                 # Provider overload/rate-limit/server error: external
                 # infrastructure, so the attempt is invalid and may be rerun
@@ -822,6 +875,7 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
 
             async def gen():
                 usage: WireObject = {}
+                unpriced: set[str] = set()
                 buf = b""
                 stop = None
                 err = None
@@ -841,13 +895,17 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
                                     t = d.get("type")
                                     if t == "message_start":
                                         row["served_model"] = d.get("message", {}).get("model")
-                                        _merge_usage(usage, d.get("message", {}).get("usage"))
+                                        part = d.get("message", {}).get("usage")
+                                        unpriced.update(unpriced_usage(part))
+                                        _merge_usage(usage, part)
                                     elif t == "message_delta":
+                                        unpriced.update(unpriced_usage(d.get("usage")))
                                         _merge_usage(usage, d.get("usage"))
                                         stop = d.get("delta", {}).get("stop_reason") or stop
                                     elif t == "error":
                                         err = "upstream_error"
-                    write_row(usage, {"stream": True, "stop_reason": stop, "error": err})
+                    write_row(usage, {"stream": True, "stop_reason": stop, "error": err},
+                              frozenset(unpriced))
                     settled = True
                 finally:
                     await resp.aclose()
@@ -866,11 +924,13 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
         finally:
             await resp.aclose()
         usage: WireObject = {}
+        unpriced: frozenset = frozenset()
         extra: dict[str, object] = {"stream": False}
         try:
             d = json.loads(content)
             if is_messages:
                 usage = d.get("usage") or {}
+                unpriced = frozenset(unpriced_usage(d.get("usage")))
                 row["served_model"] = d.get("model")
                 extra["stop_reason"] = d.get("stop_reason")
             if status >= 400:
@@ -878,7 +938,7 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
         except Exception:
             pass
         owned = False
-        write_row(usage, extra)
+        write_row(usage, extra, unpriced)
         return Response(content, status_code=status, headers=passthrough_headers)
     finally:
         if owned:
