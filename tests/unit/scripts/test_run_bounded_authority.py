@@ -161,7 +161,7 @@ def test_each_wrapper_path_reauthorizes_without_unbounded_wait(
         over_budget_message=lambda _, **kwargs: "MEMORY LIMIT EXCEEDED",
         soft_notice=lambda _: None,
     )
-    monkeypatch.setattr(wrapper.memory_guard, "Guard", lambda *_: guard)
+    monkeypatch.setattr(wrapper.memory_guard, "Guard", lambda *_, **__: guard)
     if mode == "monitor-error":
 
         class Closed:

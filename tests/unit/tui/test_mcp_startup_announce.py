@@ -953,7 +953,7 @@ async def test_the_announce_keeps_its_semantic_lamp() -> None:
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 24)) as pilot:
         toast = app.query_one(Toast)
-        assert await _until(pilot, lambda: toast.display)
+        assert await _until(pilot, lambda: _painted_boxes_ready([toast]))
         # The PAINTED cells, which is the only place the lamp is observable:
         # `Toast` stores the renderable through Textual's internal content
         # accessor, so the frame is what a caller is entitled to inspect.
@@ -1277,6 +1277,51 @@ def _network_fleet() -> McpStartupOutcome:
     )
 
 
+def _painted_boxes_ready(blocks) -> bool:  # type: ignore[no-untyped-def]
+    """DOM membership precedes Screen's layout publication, even after mount.
+
+    Require a real painted box, not the EXPECTED column: a wrong nonzero width
+    must still reach (and fail) the separate budget oracle.
+    """
+    return bool(blocks) and all(
+        block.is_mounted
+        and block.display
+        and block.is_on_screen
+        and block.size.width > 0
+        and block.size.height > 0
+        for block in blocks
+    )
+
+
+def _assert_notice_budget(app, blocks, columns, sidebar) -> None:  # type: ignore[no-untyped-def]
+    column = app._mcp_notice_painted_column()
+    for block in blocks:
+        # ``Scalar.cells`` is the cell count the layout pass assigned, and None
+        # when the block was left at ``1fr`` (the fraction the lane resolves).
+        cells = getattr(block.styles.width, "cells", None)
+        if isinstance(cells, int):
+            # The boot card clamps the notice to the same column the input
+            # shell resolves to, and the shell's width comes from the sheet's
+            # clamp rather than from the resolver the composer and the layout
+            # pass share — so this is the check that sees a resolution wrong
+            # in both call sites (review round 5, R5-4).
+            shell = app.query_one("#input-shell")
+            shell_column = shell.size.width + shell.styles.gutter.width
+            assert cells == shell_column, (
+                f"at {columns} columns (sidebar={sidebar}) the layout pinned "
+                f"{cells} but the input shell is painted {shell_column}"
+            )
+            assert cells == column, (
+                f"at {columns} columns (sidebar={sidebar}) the layout pinned "
+                f"{cells} but the composer measured {column}"
+            )
+        else:
+            assert block.size.width == column, (
+                f"at {columns} columns (sidebar={sidebar}) the lane painted "
+                f"{block.size.width} but the composer measured {column}"
+            )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("columns", [60, 68, 74, 84, 100, 150, 190])
 @pytest.mark.parametrize("sidebar", [False, True])
@@ -1328,32 +1373,85 @@ async def test_the_notice_budget_is_the_column_the_block_is_painted_in(
             await _quiet(pilot)
         blocks = [block for block in app.query(".notice-block") if isinstance(block, NoticeBlock)]
         assert blocks, "no notice painted"
-        column = app._mcp_notice_painted_column()
-        for block in blocks:
-            # ``Scalar.cells`` is the cell count the layout pass assigned, and None
-            # when the block was left at ``1fr`` (the fraction the lane resolves).
-            cells = getattr(block.styles.width, "cells", None)
-            if isinstance(cells, int):
-                # The boot card clamps the notice to the same column the input
-                # shell resolves to, and the shell's width comes from the sheet's
-                # clamp rather than from the resolver the composer and the layout
-                # pass share — so this is the check that sees a resolution wrong
-                # in both call sites (review round 5, R5-4).
-                shell = app.query_one("#input-shell")
-                shell_column = shell.size.width + shell.styles.gutter.width
-                assert cells == shell_column, (
-                    f"at {columns} columns (sidebar={sidebar}) the layout pinned "
-                    f"{cells} but the input shell is painted {shell_column}"
-                )
-                assert cells == column, (
-                    f"at {columns} columns (sidebar={sidebar}) the layout pinned "
-                    f"{cells} but the composer measured {column}"
-                )
-            else:
-                assert block.size.width == column, (
-                    f"at {columns} columns (sidebar={sidebar}) the lane painted "
-                    f"{block.size.width} but the composer measured {column}"
-                )
+        assert await _until(
+            pilot, lambda: _painted_boxes_ready(blocks)
+        ), "no notice layout published"
+        _assert_notice_budget(app, blocks, columns, sidebar)
+
+
+@pytest.mark.asyncio
+async def test_notice_readiness_waits_for_real_layout_not_the_expected_width(monkeypatch) -> None:
+    """Hold the real publisher, not fake geometry or a replacement notice.
+
+    Reproduce DOM-before-layout deterministically; forwarding the same pending
+    publisher must make readiness true without teaching it the expected width.
+    This models a scheduling boundary, not a claim about a particular CI trace.
+    """
+    from textual.screen import Screen
+
+    from tests.unit.tui.conftest import await_session_boot
+
+    held = False
+    attempted = False
+    real_publish = Screen._on_timer_update
+
+    def gated_publish(screen):
+        nonlocal attempted
+        if held and screen._layout_required:
+            # The timer keeps firing while held; real_publish restores its normal pause on release.
+            attempted = True
+            return  # Leave the pending flag intact for the original consumer.
+        return real_publish(screen)
+
+    monkeypatch.setattr(Screen, "_on_timer_update", gated_publish)
+    app = OperatorApp(lambda: _factory(_session(_outcome(), session_id="clean")))
+    async with app.run_test(size=(84, 24)) as pilot:
+        await await_session_boot(app)
+        await pilot.pause()
+        assert not app.query(".notice-block")
+        screen = app.screen
+        published = False
+
+        def after_layout(_screen):
+            nonlocal published
+            published = True
+
+        screen.screen_layout_refresh_signal.subscribe(screen, after_layout, immediate=True)
+        try:
+            held = True
+            app._report_mcp_startup(_session(_network_fleet(), session_id="failed"))
+            assert await _until(pilot, lambda: app.query(".notice-block"))
+            blocks = list(app.query(".notice-block"))
+            assert attempted and screen._layout_required
+            assert all(block.is_mounted and block.display and block.visible for block in blocks)
+            assert all(block.size.width == 0 and block.size.height == 0 for block in blocks)
+            assert not _painted_boxes_ready(blocks)
+            with pytest.raises(AssertionError, match="lane painted 0"):
+                _assert_notice_budget(app, blocks, 84, False)
+
+            held = False
+            screen._on_timer_update()
+            assert await _until(pilot, lambda: published and _painted_boxes_ready(blocks))
+            assert list(app.query(".notice-block")) == blocks
+            assert all(block.size.width == 80 and block.size.height == 1 for block in blocks)
+            _assert_notice_budget(app, blocks, 84, False)
+
+            # A REAL incorrect layout must remain ready: equality belongs to the
+            # oracle, never the wait predicate (otherwise it could hide a defect).
+            published = False
+            old_width = blocks[0].styles.width
+            try:
+                blocks[0].styles.width = 79
+                assert await _until(pilot, lambda: published and _painted_boxes_ready(blocks))
+                assert blocks[0].size.width == 79
+                with pytest.raises(AssertionError, match="layout pinned 79"):
+                    _assert_notice_budget(app, blocks, 84, False)
+            finally:
+                blocks[0].styles.width = old_width
+        finally:
+            held = False
+            screen._on_timer_update()
+            screen.screen_layout_refresh_signal.unsubscribe(screen)
 
 
 @pytest.mark.asyncio
