@@ -21810,7 +21810,9 @@ class BrowserParams(BaseModel):
     )
     quality: str | None = Field(
         default=None,
-        description="'record_start': 'standard' (default) or 'high' (sharper H.264, +0.8GB RAM)",
+        description=(
+            "'record_start': 'standard' (default) or 'high' (sharper H.264, +0.5-0.7GB RAM)."
+        ),
     )
 
     @field_validator("x", "y", mode="before")
@@ -26666,7 +26668,13 @@ def _record_echo_side(result: dict[str, Any], key: str) -> int | None:
     value = result.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if float(value) != int(value):
+    # Total, like `_whole`: a non-finite or out-of-range echo must read as a
+    # mismatch (the typed `record_size_mismatch`), not raise with the clip live.
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number) or number != int(number):
         return None
     return int(value)
 

@@ -2070,6 +2070,30 @@ def test_a_hostile_start_field_never_escapes_and_is_dropped(
     assert "H.264" in result.text
 
 
+@pytest.mark.parametrize(
+    "bad", [float("nan"), float("inf"), float("-inf"), 1e999, 10**400, -(10**400)], ids=repr
+)
+@pytest.mark.parametrize("side", ["width", "height"])
+def test_a_hostile_size_echo_is_a_mismatch_not_a_traceback(
+    side: str, bad: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The clip is already recording when the echo is read: raise nothing, keep the path."""
+    result, _ = _call(
+        "record_start",
+        tmp_path,
+        monkeypatch,
+        client=_SizedHost(),
+        width=1280,
+        height=720,
+        reply={"recording": True, "path": "", "width": 1280, "height": 720, side: bad},
+    )
+    assert result.is_error
+    details = result.details or {}
+    assert details["reason"] == "record_size_mismatch"
+    assert "unreported size" in result.text
+    assert builtin._APPROVED_RECORDINGS["ui:7:nonce"] == details["target"]
+
+
 def test_a_default_stop_is_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The AV1 receipt keeps its sentence and its details, even from a newer host."""
     target = tmp_path / "clip.mp4"

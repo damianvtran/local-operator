@@ -435,7 +435,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "this transcript.\n"
             "- 'record_start'/'record_stop' make an MP4 of this tab (default AV1: "
             "QuickTime only; quality='high' is sharper H.264, played in Chromium, "
-            "~0.8 GB more RAM); path= is approved first, never overwritten. "
+            "~0.5-0.7 GB more RAM); path= is approved first, never overwritten. "
             "width=/height= go together (area <= 3840x2160). A default clip over "
             "64 MiB (32 in a scratchpad) is discarded: 4K ~150 s worst case, 75 s "
             "there. Desktop host only.\n"
