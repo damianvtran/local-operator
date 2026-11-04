@@ -54700,12 +54700,14 @@ class OperatorApp(App[None]):
         selected = sound.configured().sound_id
         custom_ids = {row.id for row in custom_sounds.list_sounds()}
         choices = settings_io.BY_KEY["notifications.sound.id"].resolved_choices
-        # The id column is sized from the CONTENT (design round 1, D1): custom
-        # ids are hashed slugs of 20+ cells, and a fixed 17-cell column put
-        # their names out of line with every built-in above. Capped so one
-        # long id cannot push every name off a narrow notice; an id past the
-        # cap takes its own line with the name indented beneath it.
-        width = min(max((cell_len(str(c.value)) for c in choices), default=0), 24)
+        # Sized from the CONTENT (design round 1, D1), not a fixed 17 cells,
+        # and from the BUILT-IN ids only: a hashed custom slug (20+ cells) must
+        # not drag every built-in name rightward. A longer id, or a row whose
+        # name would wrap at the transcript's width, puts its name on the next
+        # line under the name column instead, so no row wraps mid-name.
+        builtin = [str(c.value) for c in choices if c.value not in custom_ids]
+        width = max((cell_len(value) for value in builtin), default=0)
+        room = self._notice_text_width()
         lines = [_t_sound(_sound_keys.list_title()), _t_sound(_sound_keys.list_hint())]
         mine: list[str] = []
         for choice in choices:
@@ -54718,17 +54720,38 @@ class OperatorApp(App[None]):
                 if value == sound.DEFAULT_SOUND_ID
                 else ""
             )
-            if cell_len(value) > width:
-                rows = [f"{mark} {value}", f"  {' ' * width} {choice.description}{tail}"]
+            name = f"{choice.description}{tail}"
+            pad = " " * max(0, width - cell_len(value))
+            one_line = f"{mark} {value}{pad} {name}"
+            if cell_len(value) > width or cell_len(one_line) > room:
+                rows = [f"{mark} {value}", f"    {name}"]
             else:
-                pad = " " * (width - cell_len(value))
-                rows = [f"{mark} {value}{pad} {choice.description}{tail}"]
+                rows = [one_line]
             (mine if value in custom_ids else lines).extend(rows)
         if mine:
             lines.append(_t_sound(_sound_keys.list_yours()))
             lines.append(_t_sound(_sound_keys.list_yours_hint()))
             lines.extend(mine)
         self._system_notice("\n".join(lines))
+
+    def _notice_text_width(self) -> int:
+        """Cells a notice line has before it wraps, measured from a PAINTED notice.
+
+        Not the transcript's content width: the conversation column is clamped
+        (``max(75, 70%)`` in local_operator.tcss), so at 100 columns a notice is
+        75 cells wide inside a 96-cell transcript. The 2-cell gutter lead is
+        subtracted. Before any notice is painted, the transcript width stands
+        in; the worst case is a wrapped row, never a lost one.
+        """
+        from local_operator.tui.widgets.transcript import NoticeBlock
+
+        try:
+            view = self._transcript_view()
+            painted = [b for b in view.blocks() if isinstance(b, NoticeBlock) and b.region.width]
+            width = painted[-1].region.width if painted else view.scrollable_content_region.width
+        except Exception:  # noqa: BLE001 — unmounted transcript: no wrap guard
+            return 1_000
+        return max(20, width - 2)
 
     @staticmethod
     def _sound_known(sound_id: str) -> bool:
