@@ -33,7 +33,7 @@ from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session.attachments import store_for_transcript_dir
 from local_operator.session.user_attachments import list_user_attachments
 
-from ._fixtures import SESSION, png, write_journal
+from ._fixtures import SESSION, append_journal, line, png, write_journal
 
 TOKEN = "user-attachments-test-token"
 URL = f"/v1/desktop/sessions/{SESSION}/user-attachments"
@@ -256,6 +256,74 @@ def test_inventory_cache_invalidates_when_journal_changes(root: Path) -> None:
         "old.txt",
         "new.txt",
     ]
+
+
+def _doc(name: str, digest: str) -> dict[str, Any]:
+    return {"type": "document", "filename": name, "mime_type": "text/plain", "attachment": digest}
+
+
+def _filenames(directory: Path) -> list[str]:
+    return [item["filename"] for item in list_user_attachments(directory)["items"]]
+
+
+def test_an_append_resumes_from_the_previous_scan_and_matches_a_full_one(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live journal only grows: the listing after an append reads the appended bytes only.
+
+    Proved by what the resumed read is HANDED (its start offset), not by timing, and by the
+    answer equalling a cold full scan of the same file.
+    """
+    from local_operator.session import user_attachments
+
+    directory = _session(root)
+    first = _user("u1", 1.0, [_doc("a.txt", "0" * 32)])
+    path = write_journal(directory, [first])
+    assert _filenames(directory) == ["a.txt"]
+    consumed = path.stat().st_size
+
+    starts: list[int] = []
+    real = user_attachments._scan_plain
+
+    def spy(*args: Any, **kwargs: Any):
+        starts.append(kwargs["start"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(user_attachments, "_scan_plain", spy)
+    append_journal(directory, [_user("u2", 2.0, [_doc("b.txt", "1" * 32)])])
+    resumed = list_user_attachments(directory)
+
+    assert starts == [consumed]
+    user_attachments._INVENTORY_CACHE.clear()
+    assert resumed == list_user_attachments(directory)
+    assert [item["filename"] for item in resumed["items"]] == ["a.txt", "b.txt"]
+
+
+def test_a_torn_final_line_is_read_whole_once_its_newline_lands(root: Path) -> None:
+    directory = _session(root)
+    path = write_journal(directory, [_user("u1", 1.0, [_doc("a.txt", "0" * 32)])])
+    torn = line(_user("u2", 2.0, [_doc("b.txt", "1" * 32)]))
+    with path.open("ab") as handle:
+        handle.write(torn[:-12])
+    assert _filenames(directory) == ["a.txt"]
+    with path.open("ab") as handle:
+        handle.write(torn[-12:])
+    assert _filenames(directory) == ["a.txt", "b.txt"]
+
+
+def test_a_replaced_journal_is_rescanned_not_resumed(root: Path) -> None:
+    """``compact_file`` rewrites through ``os.replace``: a new inode must never be resumed,
+    even when it is larger than the old scan (the offset would point into other bytes)."""
+    directory = _session(root)
+    write_journal(directory, [_user("u1", 1.0, [_doc("a.txt", "0" * 32)])])
+    assert _filenames(directory) == ["a.txt"]
+    replacement = directory / "transcript.jsonl.tmp"
+    replacement.write_bytes(
+        line(_user("u9", 9.0, [_doc("z.txt", "9" * 32)]))
+        + line(_user("u10", 10.0, [_doc("y.txt", "8" * 32)]))
+    )
+    os.replace(replacement, directory / "transcript.jsonl")
+    assert _filenames(directory) == ["z.txt", "y.txt"]
 
 
 def test_no_journal_is_an_empty_list(root: Path) -> None:
