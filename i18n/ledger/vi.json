@@ -3069,6 +3069,48 @@
     },
     {
       "locale": "vi",
+      "namespace": "tui.update",
+      "source_sha256": "2d3f1a132c443c0894b99a3c064d7fa702a5a1334b4854953b2b09083fab12c3",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure)",
+        "session": "9615db04a717",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "340352200f28",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit, 4 new keys. Auditor fixed 1 minor/nit (see record); 0 unresolved blocker/major. Target SHA-256 1005d04c04e7d7ab296adadd9e84e5d289c149801fe583bd21a94101da78f5f1. Evidence: i18n/audits/update-notice-tui-340352200f28.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.update",
+      "source_sha256": "123da7e1fce2892a4216e438f2d3470a47d7cf02d7eb890dcefa2835b949997b",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure round-1 remediation)",
+        "session": "d3534e994383",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "c6a7b830880b",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent round-2 re-audit (7 keys). Auditor fixed 1 finding (see record); 0 unresolved blocker/major. Target SHA-256 ef5df2ec85967727273dc28df98681cbbac7162c432e712b412caac6dabc9314. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "vi",
       "namespace": "relay.highlights",
       "source_sha256": "8d1002cbbc015243fdf7709ec51b7179d40a508a042e38f7085e7bdaad5cf131",
       "translator": {

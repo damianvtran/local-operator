@@ -247,16 +247,44 @@ async def test_dm_resolves_a_current_agent_and_posts_as_runtime_identity(runtime
 
 @pytest.mark.asyncio
 async def test_dm_human_target_does_not_silently_invite_their_agent(runtime):
+    """A human target is sent AS a human member, and the real hub's refusal of it
+    is answered honestly.
+
+    This fake used to ACCEPT the human-member DM and the test asserted a posted
+    body — a success the real hub never gives: agent-server refuses any DM with a
+    non-agent member (``400 invalid_request field=members rule=agent_required``,
+    ``bridge_conversation_service.go``). The fake now models that refusal, so the
+    test pins what an agent actually sees: no silent agent invite, no post, and
+    ``dm_human_unsupported`` pointing at a private group instead of ``dm_failed``.
+    """
+
     del runtime.client.directory_result["members"][1]["agent"]
+    client = runtime.client
+
+    async def refuse_human_member(body: Any, **kwargs: Any) -> dict[str, Any]:
+        client.calls.append({"method": "create_conversation", "body": dict(body), **kwargs})
+        if any(member.get("kind") != "agent" for member in body["members"]):
+            raise BridgeRefusal(
+                "invalid_request",
+                "This messaging request is not valid. See details for the field.",
+                http_status=400,
+                details={"field": "members", "rule": "agent_required"},
+            )
+        return client.created_result
+
+    client.create_conversation = refuse_human_member
     result = await execute_bridge(
         runtime, {"op": "dm", "account_id": "acc_2", "target": "human", "text": "for Dana"}
     )
-    assert result["ok"] is True
-    assert runtime.client.calls[1]["body"]["members"][1] == {
+    assert result["ok"] is False
+    assert result["code"] == "dm_human_unsupported"
+    assert "channel_create kind=group" in result["error"]
+    assert "Nothing was sent" in result["error"]
+    assert client.calls[1]["body"]["members"][1] == {
         "account_id": "acc_2",
         "kind": "human",
     }
-    assert runtime.client.calls[2]["text"] == "for Dana"
+    assert [c["method"] for c in client.calls] == ["directory", "create_conversation"]
     assert "recipient_state" not in result
 
 

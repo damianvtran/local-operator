@@ -1222,9 +1222,12 @@ def _resolve_role(agent: str, parent_session: "Session") -> "AgentProfile | None
     if not agent or agent == "task":
         return None
     try:
-        from local_operator.agent_profiles import resolve_profile
+        from local_operator.agent_profiles import resolve_profile, with_delivery_pointer
 
-        return resolve_profile(agent, registry=getattr(parent_session, "agent_registry", None))
+        profile = resolve_profile(agent, registry=getattr(parent_session, "agent_registry", None))
+        # Child construction is the one boundary where a stale registered
+        # engineering role gets the delivery pointer; see with_delivery_pointer.
+        return with_delivery_pointer(profile) if profile is not None else None
     except Exception:  # noqa: BLE001 - role guidance is enrichment, not a gate
         logger.warning("could not resolve agent role %r; launching a full child", agent)
         return None

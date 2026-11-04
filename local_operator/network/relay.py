@@ -3052,6 +3052,21 @@ def leave(
         record.removed_ids.append(device_id)
     if persist:
         store.save(record, root)
+        from local_operator.network.credentials.state import PlacementState
+
+        # This non-authoritative cache must never interrupt the already committed
+        # departure's audit/epoch rotation, including on a namespace-guard refusal.
+        # Keep membership persistence OUTSIDE this catch; control signals propagate.
+        try:
+            PlacementState.forget_persisted_owner(record.network_id, device_id, root=root)
+        except Exception as exc:  # noqa: BLE001 — cache failure cannot retain the old epoch
+            # Only bounded identifiers: exception text/tracebacks may carry paths,
+            # cached metadata or credential material. The real path guard stays on.
+            logger.warning(
+                "relay: owner observation cleanup failed network=%s exception=%s",
+                record.network_id[:80],
+                type(exc).__name__[:64],
+            )
     return member
 
 
