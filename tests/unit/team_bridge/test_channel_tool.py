@@ -18,6 +18,7 @@ from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
 from local_operator.harness.types import ToolContext
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge import host as host_mod
+from local_operator.team_bridge import tool as tool_mod
 from local_operator.team_bridge.client import TeamBridgeClient
 from local_operator.team_bridge.store import OwnerSnapshot
 from local_operator.team_bridge.tool import (
@@ -440,7 +441,9 @@ async def test_channel_history_reads_as_the_agent_endpoint() -> None:
         }
     ]
     page = json.loads(outcome["content"][len(BRIDGE_UNTRUSTED_CLAUSE) + 2 :])
-    assert page["messages"][0]["body"] is None
+    # An unadmitted row is marked for the reader, never left an empty body.
+    assert page["messages"][0]["body"] == tool_mod._UNSCREENED_BODY
+    assert page["messages"][0]["body_admitted"] is False
 
 
 @pytest.mark.asyncio
@@ -751,7 +754,7 @@ async def test_channel_thread_reads_as_the_agent_endpoint_untrusted_wrapped() ->
         }
     ]
     page = json.loads(outcome["content"][len(BRIDGE_UNTRUSTED_CLAUSE) + 2 :])
-    assert page["replies"][0]["body"] is None
+    assert page["replies"][0]["body"] == tool_mod._UNSCREENED_BODY
 
 
 @pytest.mark.asyncio

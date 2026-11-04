@@ -51,6 +51,7 @@ from ..attachments import (
 )
 from ..client import SCREENING_TEMPLATE_V3_SHA256, BridgeRefusal
 from ..types import ConversationFeedRef
+from .batch_screen import take_fetched, take_result
 from .coalesce import CARD_COALESCED, card_is_buffered
 from .wake import (
     CLAIM_TTL_S,
@@ -966,6 +967,48 @@ def _notify_probe_suspected(config_dir: Path, session_id: str, endpoint_id: str)
         logger.info("bridge: probe notification unrecorded code=notify_failed")
 
 
+async def _notify_budget_exhausted(
+    store: Any, owner: Any, config_dir: Path, session_id: str
+) -> None:
+    """Tell the owner ONCE per episode that screening ran out of budget.
+
+    WHY (agent-server #294 security review, S-1). With the hub's wake caps
+    gone, the per-account screening budget is the real ceiling, and an owner
+    whose messages silently wait for an hour has no way to know why. One item
+    per exhaustion episode (``Store.claim_budget_notification``), keyed per
+    endpoint so a repeat updates the same item; contentless like the probe
+    notification: no sender, body, room or count. Best-effort: never turns
+    the hold into a failure.
+    """
+
+    import asyncio
+
+    try:
+        first = await asyncio.to_thread(store.claim_budget_notification, owner)
+    except Exception:  # noqa: BLE001 — chrome; the hold stands
+        return
+    if not first:
+        return
+    from local_operator.i18n.keys import cli_team_bridge as _k
+    from local_operator.i18n.text import tr
+    from local_operator.notifications.store import NotificationStore
+
+    def _notify() -> None:
+        t = tr("cli.team_bridge")
+        NotificationStore(config_dir).notify(
+            session_id,
+            title=t(_k.notify_budget_exhausted_title()),
+            body_md=t(_k.notify_budget_exhausted_body()),
+            priority="normal",
+            key=f"team-bridge-budget:{owner.endpoint_id}",
+        )
+
+    try:
+        await asyncio.to_thread(_notify)
+    except Exception:  # noqa: BLE001 — a notification is chrome, the hold stands
+        logger.info("bridge: budget notification unrecorded code=notify_failed")
+
+
 def _badge_only(config_dir: Path, message_id: str) -> dict[str, Any]:
     """The §5.6 badge-only outcome, made COUNTABLE (review round 1, 7b).
 
@@ -1078,7 +1121,9 @@ async def handle_conversation_available(
         # post even a metadata-only card: that would still wake the recipient.
         sender: Mapping[str, Any] = {}
 
-        fetched = await _fetch_body(client, ref, owner, access)
+        # The iteration's batch pass may already hold this message's body
+        # read (connector/batch_screen.py); reuse it rather than a second GET.
+        fetched = take_fetched(ref) or await _fetch_body(client, ref, owner, access)
         if fetched is None:
             # Missing/old classification route or an unbound response: keep
             # the hold rather than treating a weaker history read as authority.
@@ -1234,14 +1279,24 @@ async def handle_conversation_available(
         )
         if screened_images is not None:
             item["attachments"] = screened_images
-        result = await screen_item(
+        # A batch screen of THIS body hash in this pass is this message's own
+        # verdict (one call, one verdict per message); anything else screens
+        # here, unchanged.
+        result = take_result(ref, body_hash) or await screen_item(
             owner, item, config_dir=config_dir, auth_store=auth_store, settings=settings
         )
         if result is None:
             return await held("screening_unavailable")
         disposition = getattr(result, "disposition", None)
         if disposition == "hold":
-            return await held(getattr(result, "hold_code", None) or "screening_hold")
+            code = getattr(result, "hold_code", None) or "screening_hold"
+            outcome = await held(code)
+            if code == "budget_exhausted":
+                # The durable retry fires when the budget refills, never on a
+                # poll; and the owner hears about it once per episode.
+                outcome["retry_at"] = getattr(result, "retry_at", None)
+                await _notify_budget_exhausted(store, owner, config_dir, designation)
+            return outcome
         receipt = getattr(result, "receipt", None)
         if disposition == "bounce":
             if receipt is None:

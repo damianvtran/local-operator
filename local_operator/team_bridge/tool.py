@@ -2011,7 +2011,8 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             )
         # Bodies are external content even when the sender is a teammate's
         # agent: the same untrusted wrap as take_up. Unadmitted messages carry
-        # ``body: null`` — metadata only — and stay that way (no local cache).
+        # ``body: null`` from the hub — metadata only, no local cache — and the
+        # reader sees a marker in its place (``_mark_unadmitted_bodies``).
         if isinstance(result, dict) and isinstance(result.get("messages"), list):
             restored = await _restore_own_bodies(
                 runtime, channel_id, result["messages"], endpoint_id
@@ -2019,6 +2020,8 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         else:
             restored = set()
         images = await _history_images(runtime, channel_id, result, endpoint_id, restored)
+        if isinstance(result, dict) and isinstance(result.get("messages"), list):
+            _mark_unadmitted_bodies(runtime, result["messages"])
         return {
             "ok": True,
             "state": "ok",
@@ -2051,7 +2054,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 f"could not read the thread: {_failure_text(failure)}", code="thread_failed"
             )
         # Same untrusted wrap as channel_history: a reply body is external
-        # content, and an unadmitted one is already null from the server.
+        # content, and an unadmitted one is null from the server (marked below).
         # Images too (R1-02): the channel timeline excludes replies, so this
         # is the ONLY read through which a reply's admitted images can reach
         # the agent — same caption, same fresh context fetch, same budget.
@@ -2067,6 +2070,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         images = await _history_images(
             runtime, channel_id, {"messages": thread_rows}, endpoint_id, restored
         )
+        _mark_unadmitted_bodies(runtime, thread_rows)
         return {
             "ok": True,
             "state": "ok",
@@ -2203,6 +2207,43 @@ async def _restore_own_bodies(
     filled: set[str] = set()
     await asyncio.gather(*(fill(row) for row in wanted))
     return filled
+
+
+#: What an agent reads in place of a body the hub withheld (``body: null``).
+#: WHY: a null body read as "empty message" or as a hub failure, and a reader
+#: agent would answer it as if the sender said nothing. Most often the message
+#: is waiting for this machine's screener (a held message, a budget that is
+#: refilling, a batch still in flight); a local REJECT receipt for it says the
+#: screener refused it instead. ``body_admitted: false`` rides beside the text
+#: so the marker is a fact of the row, not something a sender could type.
+_UNSCREENED_BODY = "[waiting to be screened]"
+_REFUSED_BODY = "[not admitted: refused by screening]"
+
+
+def _mark_unadmitted_bodies(runtime: BridgeRuntime, rows: list[Any]) -> None:
+    """Replace each remaining ``body: null`` with its reader marker, in place.
+
+    Runs AFTER own-body restore and the image captions (both read ``body is
+    None`` as "not admitted"), and only on the copy handed to the model.
+    """
+
+    from .store import Store
+
+    store = Store(Path(runtime.config_dir))
+    for row in rows:
+        if not isinstance(row, dict) or "body" not in row or row.get("body") is not None:
+            continue
+        verdict = None
+        if isinstance(row.get("id"), str):
+            try:
+                receipt = store.receipt_verdict_readonly(runtime.owner, row["id"])
+            except Exception:  # noqa: BLE001 — unknown reads as waiting
+                receipt = None
+            # The receipt speaks only for the bytes it screened.
+            if receipt is not None and receipt[1] == row.get("body_hash"):
+                verdict = receipt[0]
+        row["body"] = _REFUSED_BODY if verdict == "reject" else _UNSCREENED_BODY
+        row["body_admitted"] = False
 
 
 async def _history_images(

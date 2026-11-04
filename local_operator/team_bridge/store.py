@@ -35,7 +35,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 from local_operator.team_bridge.types import (
     ACK_TARGETS,
@@ -575,6 +575,26 @@ def _ensure_answer_hold_table(conn: sqlite3.Connection) -> None:
             "ALTER TABLE screening_answer_holds "
             "ADD COLUMN engine_version TEXT NOT NULL DEFAULT ''"
         )
+
+
+def _ensure_budget_episode_table(conn: sqlite3.Connection) -> None:
+    """Create the budget-exhaustion episode table on a store that predates it.
+
+    WHY. When the account's screening budget runs out the owner is told ONCE
+    per episode (agent-server #294 security review, S-1) -- not once per held
+    message, which in a flooded room would be dozens of identical items. An
+    episode opens on the first account-wide refusal and closes on the next
+    successful reservation; ``notified_at`` is claimed atomically so two
+    connectors never both notify. Contentless: an account scope and two
+    timestamps. Purely ADDITIVE (``IF NOT EXISTS``) like
+    :func:`_ensure_answer_hold_table`: a lost row costs at most one repeated
+    notification, never budget or authority.
+    """
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS screening_budget_episodes ("
+        "account_scope TEXT PRIMARY KEY, started_at REAL, notified_at REAL)"
+    )
 
 
 def _ensure_producer_table(conn: sqlite3.Connection) -> None:
@@ -3451,6 +3471,32 @@ class Store:
                 "created_at": row["created_at"],
             }
 
+    def receipt_verdict_readonly(
+        self, owner: OwnerSnapshot, message_id: str
+    ) -> tuple[str, str] | None:
+        """``(verdict, body_sha256)`` of this machine's receipt, read-only.
+
+        For the bridge tool's reader marker (``[waiting to be screened]`` vs a
+        refusal): a read surface, so it must never create or upgrade the store
+        (the rule of :meth:`screening_hold_readonly`). ``None`` when there is
+        no store, no receipt, or the store cannot be read.
+        """
+
+        try:
+            with self._connect_readonly() as conn:
+                if conn is None:
+                    return None
+                row = conn.execute(
+                    "SELECT verdict, body_sha256 FROM screening_receipts "
+                    "WHERE owner_key = ? AND message_id = ?",
+                    (_owner_key(owner), str(message_id)),
+                ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        return str(row["verdict"]), str(row["body_sha256"])
+
     def content_proof_readonly(
         self, owner: OwnerSnapshot, message_ids: Sequence[str]
     ) -> dict[str, dict[str, Any]]:
@@ -4253,6 +4299,58 @@ class Store:
     #: the physical cap must count those even when the logical one allows it.
     SCREENING_BUDGET_PER_HOUR = 40
 
+    #: THE UNIT IS ONE SCREENING CALL, NOT ONE MESSAGE (2026-11-03). Agent
+    #: replies are no longer capped by the hub (agent-server #294 removed its
+    #: wake caps), so a busy room can deliver far more than 40 messages an
+    #: hour. The connector therefore screens a coalesced wake's messages in ONE
+    #: model call (``screening.screen_batch_async``) and that call is charged
+    #: as ONE unit, however many messages it covers. Every message still gets
+    #: its own logical row (its own body hash, proof, receipt and write-once
+    #: commit); the rows of one call share a ``batch_id`` and the windows below
+    #: count DISTINCT ``COALESCE(batch_id, attempt_id)``. A row without a
+    #: batch id (every single-message screen, every pre-upgrade row) is its own
+    #: unit, which is exactly the old per-message count.
+    #:
+    #: PRIORITY INSIDE THE SAME 40 (agent-server #294 security review, S-1).
+    #: With the hub's caps gone this budget is the real ceiling, and a flood of
+    #: agent chatter in one room would otherwise spend it all and leave the
+    #: owner's own DM to their agent unscreened for up to an hour. Each call
+    #: has a TIER, the highest of its messages':
+    #:
+    #: * ``SCREENING_TIER_ADDRESSED`` (2) — a DM or a mention of this agent;
+    #: * ``SCREENING_TIER_HUMAN`` (1) — sent by a person, not addressed here;
+    #: * ``SCREENING_TIER_AMBIENT`` (0) — agent chatter in a shared room.
+    #:
+    #: Ambient calls may use at most 30 of the 40 units an hour, so 10 are
+    #: always held back for people and addressed messages. Inside those 10, a
+    #: person's room lines may take 5 more (35 for tiers 0-1 together), so the
+    #: last 5 are reachable ONLY by addressed messages. WHY NESTED: measured on
+    #: the 1 human + 6 agents flood (scripts/bench_batch_screening.py), a flat
+    #: 30/10 split let the human's own ~28 room lines an hour spend all 10
+    #: reserved units by minute 20, and a DM to the owner's agent at minute 30
+    #: was never screened that hour. The 40 itself is fixed — moderation spend
+    #: is not loosened — so the reserve is carved out of it, never added to it.
+    #: Why 30 for ambient: with coalesced batches of up to 20 messages a unit
+    #: covers a whole backlog, so 30 units still screen a busy room's backlog
+    #: as units refill; 5 addressed-only units cover a person's DMs and
+    #: mentions in an hour with room to spare, and each wake batches them.
+    SCREENING_TIER_AMBIENT = 0
+    SCREENING_TIER_HUMAN = 1
+    SCREENING_TIER_ADDRESSED = 2
+    SCREENING_AMBIENT_BUDGET_PER_HOUR = 30
+    SCREENING_UNADDRESSED_BUDGET_PER_HOUR = 35
+
+    #: Per VERIFIED sender, inside the account's 40 (the decision recorded on
+    #: #3199; first drafted on the unmerged ``fix/3199-sender-budget``). A unit
+    #: is charged to every verified sender whose message rides in it, so one
+    #: sender cannot spend more than half the account's hour however their
+    #: messages are batched. "Verified" means the identity came from the hub
+    #: (the pair lane's stored participant; a conversation body read that
+    #: carries ``sender_account_id``) — a sender can never strip it, so an
+    #: unknown-provenance call forms no bucket of its own and is bounded by the
+    #: account and ambient ceilings alone.
+    SCREENING_SENDER_BUDGET_PER_HOUR = 20
+
     #: Floor for an account turn lease: the screening wall deadline is 45 s,
     #: so a lease SHORTER than this could expire under a live dispatch and
     #: admit a second worker mid-call. Short supplied TTLs are raised to
@@ -4265,6 +4363,177 @@ class Store:
         # namespace: a new endpoint or a re-enrollment must not reset spend.
         return f"{owner.canonical_base_url}|{owner.account_id}"
 
+    @staticmethod
+    def _ensure_attempt_allocation_columns(conn: sqlite3.Connection) -> None:
+        """Add the per-call allocation columns to a ledger that predates them.
+
+        ``batch_id`` groups the logical rows of ONE screening call (the budget
+        unit), ``priority`` is the call's tier (``SCREENING_TIER_*``), and
+        ``sender_account_id`` is the verified sender a row is charged to.
+
+        ADDITIVE AND NULLABLE, so no schema stamp moves (the rule of
+        :meth:`_ensure_hold_failure_class_column`): an older binary sharing the
+        file never names them, and a pre-upgrade row reads NULL — its own unit,
+        counted at the ADDRESSED tier (so it still counts against the 40 and
+        can never let a lower tier past its own fence) and charged to no
+        sender.
+        Not in ``_V3_COLUMNS``: a ledger without them is not damaged.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_attempts)")}
+        for column, kind in (
+            ("batch_id", "TEXT"),
+            ("priority", "INTEGER"),
+            ("sender_account_id", "TEXT"),
+        ):
+            if column not in columns:
+                conn.execute(f"ALTER TABLE screening_attempts ADD COLUMN {column} {kind}")
+
+    def _check_budget(
+        self,
+        conn: sqlite3.Connection,
+        scope: str,
+        kind: str,
+        now: float,
+        *,
+        tier: int,
+        senders: Iterable[str] = (),
+    ) -> None:
+        """Refuse ONE more unit of ``kind`` when any ceiling is spent.
+
+        Runs inside the caller's ``BEGIN IMMEDIATE`` write, so parallel workers
+        can never each take the last unit. Units are DISTINCT
+        ``COALESCE(batch_id, attempt_id)`` inside the rolling hour; a unit's
+        tier is the highest of its rows'.
+        """
+
+        tiers = [int(row["tier"]) for row in self._spent_units(conn, scope, kind, now)]
+        if len(tiers) >= self.SCREENING_BUDGET_PER_HOUR:
+            raise StoreRefused("budget_exhausted", f"{kind} units/hour/account exhausted")
+        if tier <= self.SCREENING_TIER_AMBIENT:
+            ambient = sum(1 for spent in tiers if spent <= self.SCREENING_TIER_AMBIENT)
+            if ambient >= self.SCREENING_AMBIENT_BUDGET_PER_HOUR:
+                raise StoreRefused("ambient_exhausted", f"{kind} ambient units/hour exhausted")
+        if tier <= self.SCREENING_TIER_HUMAN:
+            unaddressed = sum(1 for spent in tiers if spent <= self.SCREENING_TIER_HUMAN)
+            if unaddressed >= self.SCREENING_UNADDRESSED_BUDGET_PER_HOUR:
+                raise StoreRefused(
+                    "unaddressed_exhausted", f"{kind} unaddressed units/hour exhausted"
+                )
+        for sender in {s for s in senders if s}:
+            spent = conn.execute(
+                "SELECT COUNT(DISTINCT COALESCE(batch_id, attempt_id)) FROM screening_attempts "
+                "WHERE account_scope = ? AND kind = ? AND at > ? AND sender_account_id = ?",
+                (scope, kind, now - 3600.0, sender),
+            ).fetchone()[0]
+            if int(spent) >= self.SCREENING_SENDER_BUDGET_PER_HOUR:
+                # The sender id never leaves this refusal's caller: it is the
+                # hub's own handle, and the code is all a hold records.
+                raise StoreRefused("sender_exhausted", f"{kind} sender units/hour exhausted")
+
+    def _spent_units(
+        self, conn: sqlite3.Connection, scope: str, kind: str, now: float
+    ) -> list[sqlite3.Row]:
+        """``(at, tier)`` per spent unit in the rolling hour, oldest first."""
+
+        return conn.execute(
+            "SELECT MIN(at) AS at, MAX(COALESCE(priority, ?)) AS tier "
+            "FROM screening_attempts WHERE account_scope = ? AND kind = ? AND at > ? "
+            "GROUP BY COALESCE(batch_id, attempt_id) ORDER BY at",
+            (self.SCREENING_TIER_ADDRESSED, scope, kind, now - 3600.0),
+        ).fetchall()
+
+    def _note_budget_refusal(self, owner: OwnerSnapshot, code: str) -> None:
+        """Open an exhaustion EPISODE (best effort; never masks the refusal).
+
+        The refusal itself rolls its transaction back, so the episode is
+        written in a fresh one. Only an ACCOUNT-wide refusal opens an episode:
+        a single sender at its own ceiling is that sender's problem, not a
+        reason to tell the owner their screening stopped.
+        """
+
+        if code not in ("budget_exhausted", "ambient_exhausted", "unaddressed_exhausted"):
+            return
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                _ensure_budget_episode_table(conn)
+                conn.execute(
+                    "INSERT INTO screening_budget_episodes (account_scope, started_at) "
+                    "VALUES (?, ?) ON CONFLICT(account_scope) DO UPDATE SET "
+                    "started_at = COALESCE(started_at, excluded.started_at)",
+                    (self._account_scope(owner), time.time()),
+                )
+        except (sqlite3.Error, StoreRefused):
+            pass
+
+    def _close_budget_episode(self, conn: sqlite3.Connection, scope: str) -> None:
+        """A successful reservation ENDS the episode, so the next one notifies."""
+
+        _ensure_budget_episode_table(conn)
+        conn.execute(
+            "UPDATE screening_budget_episodes SET started_at = NULL, notified_at = NULL "
+            "WHERE account_scope = ? AND started_at IS NOT NULL",
+            (scope,),
+        )
+
+    def claim_budget_notification(self, owner: OwnerSnapshot) -> bool:
+        """``True`` exactly ONCE per open exhaustion episode for this account.
+
+        The caller raises the owner's notification only on ``True``; the claim
+        and the mark are one write, so two connectors (or two holds in one
+        pass) can never both notify. A store that cannot answer says ``False``
+        — a missed notification is chrome, a repeated one is noise.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                _ensure_budget_episode_table(conn)
+                cursor = conn.execute(
+                    "UPDATE screening_budget_episodes SET notified_at = ? "
+                    "WHERE account_scope = ? AND started_at IS NOT NULL AND notified_at IS NULL",
+                    (time.time(), self._account_scope(owner)),
+                )
+                return cursor.rowcount == 1
+        except (sqlite3.Error, StoreRefused):
+            return False
+
+    def screening_budget_refill_at(self, owner: OwnerSnapshot, *, tier: int) -> float | None:
+        """When the NEXT logical unit a call of ``tier`` may use frees up.
+
+        The scheduled retry of a budget hold is set to this instant (never a
+        poll): the oldest unit in the pool that is full leaves the rolling
+        hour then. ``None`` when nothing is spent or the store cannot say —
+        the caller falls back to its ordinary bounded backoff. A per-sender
+        refusal answers the account's oldest unit, which can only be EARLY:
+        an early retry re-holds without spend.
+        """
+
+        now = time.time()
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._ensure_attempt_allocation_columns(conn)
+                units = self._spent_units(conn, self._account_scope(owner), "logical", now)
+        except (sqlite3.Error, StoreRefused):
+            return None
+        if not units:
+            return None
+        pool = list(units)
+        if len(units) < self.SCREENING_BUDGET_PER_HOUR:
+            for ceiling_tier, ceiling in (
+                (self.SCREENING_TIER_AMBIENT, self.SCREENING_AMBIENT_BUDGET_PER_HOUR),
+                (self.SCREENING_TIER_HUMAN, self.SCREENING_UNADDRESSED_BUDGET_PER_HOUR),
+            ):
+                lower = [row for row in units if int(row["tier"]) <= ceiling_tier]
+                if tier <= ceiling_tier and len(lower) >= ceiling:
+                    pool = lower
+                    break
+        return float(pool[0]["at"]) + 3600.0
+
     def _reserve_bucket(
         self,
         owner: OwnerSnapshot,
@@ -4272,6 +4541,8 @@ class Store:
         kind: str,
         message_id: str | None,
         fingerprint: str | None,
+        tier: int = 2,
+        sender_account_id: str = "",
     ) -> str:
         """Durably charge ONE attempt of ``kind`` BEFORE its I/O.
 
@@ -4283,27 +4554,111 @@ class Store:
         — never a reset to 40.
         """
 
+        return self._reserve_units(
+            owner,
+            kind=kind,
+            entries=[(message_id, fingerprint, sender_account_id)],
+            tier=tier,
+            batch=False,
+        )[0]
+
+    def _reserve_units(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        kind: str,
+        entries: Sequence[tuple[str | None, str | None, str]],
+        tier: int,
+        batch: bool,
+    ) -> list[str]:
+        """Charge ONE unit covering ``entries`` (one row each) BEFORE the I/O.
+
+        ``batch`` stamps every row with one shared ``batch_id`` — the rows of
+        one screening call. Each row keeps its own message id and fingerprint,
+        so every per-message fence downstream (bind, dispatch, finish) is
+        exactly the single-message fence.
+        """
+
+        if not entries:
+            raise StoreRefused("invalid_outcome", "a unit needs at least one message")
         now = time.time()
-        attempt_id = str(uuid.uuid4())
-        with self._connect() as conn:
-            self._init(conn)
-            self._begin_write(conn)
-            self._require_live(conn, owner)
-            scope = self._account_scope(owner)
-            spent = conn.execute(
-                "SELECT COUNT(*) FROM screening_attempts "
-                "WHERE account_scope = ? AND kind = ? AND at > ?",
-                (scope, kind, now - 3600.0),
-            ).fetchone()[0]
-            if int(spent) >= self.SCREENING_BUDGET_PER_HOUR:
-                raise StoreRefused("budget_exhausted", f"{kind} attempts/hour/account exhausted")
-            conn.execute(
-                "INSERT INTO screening_attempts "
-                "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (attempt_id, kind, scope, _owner_key(owner), message_id, fingerprint, now),
+        batch_id = str(uuid.uuid4()) if batch else None
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                self._require_live(conn, owner)
+                self._ensure_attempt_allocation_columns(conn)
+                scope = self._account_scope(owner)
+                self._check_budget(
+                    conn,
+                    scope,
+                    kind,
+                    now,
+                    tier=tier,
+                    senders=[sender for _, _, sender in entries],
+                )
+                ids: list[str] = []
+                for message_id, fingerprint, sender in entries:
+                    attempt_id = str(uuid.uuid4())
+                    conn.execute(
+                        "INSERT INTO screening_attempts "
+                        "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, "
+                        "at, batch_id, priority, sender_account_id) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            attempt_id,
+                            kind,
+                            scope,
+                            _owner_key(owner),
+                            message_id,
+                            fingerprint,
+                            now,
+                            batch_id,
+                            int(tier),
+                            sender or None,
+                        ),
+                    )
+                    ids.append(attempt_id)
+                if kind == "logical":
+                    self._close_budget_episode(conn, scope)
+                return ids
+        except StoreRefused as refusal:
+            self._note_budget_refusal(owner, refusal.code)
+            raise
+
+    def reserve_screening_batch(
+        self,
+        owner: OwnerSnapshot,
+        entries: Sequence[Mapping[str, Any]],
+        *,
+        tier: int,
+    ) -> list[str]:
+        """The LOGICAL charge for ONE batched screening call: one unit, N rows.
+
+        Each entry is ``{message_id, input_proof, sender_account_id}``; the
+        proof is registered exactly as :meth:`reserve_screening_attempt`
+        registers it, so ``bind_attempt_fingerprint`` and every later fence
+        see a row indistinguishable from a single-message reservation — only
+        the shared ``batch_id`` differs. Returns the attempt ids in order.
+        """
+
+        rows: list[tuple[str | None, str | None, str]] = []
+        for entry in entries:
+            proof = entry.get("input_proof")
+            stored = (
+                _PROOF_PREFIX + json.dumps(dict(proof), sort_keys=True, separators=(",", ":"))
+                if isinstance(proof, Mapping)
+                else entry.get("fingerprint")
             )
-            return attempt_id
+            rows.append(
+                (
+                    str(entry["message_id"]),
+                    stored if isinstance(stored, str) else None,
+                    str(entry.get("sender_account_id") or ""),
+                )
+            )
+        return self._reserve_units(owner, kind="logical", entries=rows, tier=tier, batch=True)
 
     def reserve_screening_attempt(
         self,
@@ -4312,8 +4667,16 @@ class Store:
         message_id: str | None = None,
         fingerprint: str | None = None,
         input_proof: Mapping[str, Any] | None = None,
+        tier: int = 2,
+        sender_account_id: str = "",
     ) -> str:
         """The LOGICAL screening charge, optionally bound to message + tuple.
+
+        ``tier`` / ``sender_account_id`` place the unit in its pool and charge
+        it to a verified sender (see the budget constants). The defaults —
+        the addressed tier, no sender — are what every caller that predates
+        the split gets, so none of them is fenced by a pool it never knew
+        about.
 
         The pipeline ALWAYS binds (message + full policy fingerprint); the
         unbound form exists for budget accounting talk (QA probes, breaker
@@ -4333,7 +4696,12 @@ class Store:
                 dict(input_proof), sort_keys=True, separators=(",", ":")
             )
         return self._reserve_bucket(
-            owner, kind="logical", message_id=message_id, fingerprint=stored
+            owner,
+            kind="logical",
+            message_id=message_id,
+            fingerprint=stored,
+            tier=tier,
+            sender_account_id=sender_account_id,
         )
 
     def reserve_http_attempt(
@@ -6029,7 +6397,10 @@ class Store:
                 rows = conn.execute(
                     "SELECT message_id, hold_code, retry_at, created_at FROM screening_holds "
                     "WHERE owner_key = ? AND (retry_at IS NULL OR retry_at <= ?) "
-                    "ORDER BY COALESCE(retry_at, created_at) LIMIT ?",
+                    # OLDEST FIRST among the due rows (agent-server #294 S-1):
+                    # a refill makes a whole backlog due at once, and the
+                    # bounded pass must serve the longest-waiting first.
+                    "ORDER BY created_at, COALESCE(retry_at, created_at) LIMIT ?",
                     (_owner_key(owner), float(now), int(limit)),
                 ).fetchall()
                 return [

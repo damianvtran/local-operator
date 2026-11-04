@@ -34,6 +34,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from local_operator.team_bridge.connector.batch_screen import (
+    prescreen_conversation_refs,
+    prescreen_scope,
+)
 from local_operator.team_bridge.connector.coalesce import card_is_buffered
 from local_operator.team_bridge.connector.conversation import (
     handle_conversation_available,
@@ -381,6 +385,35 @@ async def retry_due_holds(
     store = Store(config_dir)
     _release_engaged_holds(store, owner, config_dir, now=_time.time())
     due = store.due_screening_holds(owner, now=_time.time(), limit=limit)
+    # HELD MESSAGES ARE RE-SCREENED IN BATCHES TOO (PR #3386). A budget refill
+    # makes a whole backlog due at once; re-driving it one model call per
+    # message would spend one refilled unit per message and the backlog would
+    # never drain. The due conversation rows (oldest first, bounded by
+    # ``limit``) are screened together here, and each re-drive below consumes
+    # its own verdict. Best effort: a row this cannot cover screens alone.
+    batchable = [
+        ref
+        for ref in (
+            _conversation_hold_ref(row["message_id"])
+            for row in due
+            # A parked stale claim may not be re-driven this pass at all.
+            if row["hold_code"] != HOLD_STALE_CLAIM
+        )
+        if ref is not None
+    ]
+    try:
+        await prescreen_conversation_refs(
+            owner,
+            batchable,
+            config_dir=config_dir,
+            access=access,
+            auth_store=auth_store,
+            settings=settings,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as failure:  # noqa: BLE001 — never stops the retry pass
+        _log_delivery_failure("batch_screen_retry", failure)
     outcomes: list[dict[str, Any]] = []
     for row in due:
         message_id = row["message_id"]
@@ -546,7 +579,10 @@ async def retry_due_holds(
                 # retried. The spine said "hold" THIS pass, so writing the row
                 # can never resurrect a delivered message.
                 store.persist_hold(
-                    owner, message_id, new_code or "hold", retry_at=_time.time() + gap
+                    owner,
+                    message_id,
+                    new_code or "hold",
+                    retry_at=_hold_due(outcome.get("retry_at"), _time.time() + gap),
                 )
             except StoreRefused:
                 pass  # fenced owner: the next live pass owns the row
@@ -627,7 +663,9 @@ def _park_stale_claim(
     logger.info("bridge connector parked: stage=claim code=%s", HOLD_STALE_CLAIM)
 
 
-def _persist_hold_backoff(store: Any, owner: Any, message_id: str, code: str) -> None:
+def _persist_hold_backoff(
+    store: Any, owner: Any, message_id: str, code: str, *, retry_at: Any = None
+) -> None:
     """Write/advance a durable ``screening_holds`` row for a held outcome.
 
     TB-04 + sec MINOR-1 (PR #2378): feed consumption is once-only (TB-01), so
@@ -641,12 +679,29 @@ def _persist_hold_backoff(store: Any, owner: Any, message_id: str, code: str) ->
     from local_operator.team_bridge.store import StoreRefused
 
     attempts = _RETRY_ATTEMPTS.get(message_id, 0)
-    gap = min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S)
+    due = _hold_due(retry_at, _time.time() + min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S))
     try:
-        store.persist_hold(owner, message_id, str(code)[:64] or "hold", retry_at=_time.time() + gap)
+        store.persist_hold(owner, message_id, str(code)[:64] or "hold", retry_at=due)
     except StoreRefused:
         pass  # fenced owner: the next live pass owns the row
     _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
+
+
+def _hold_due(retry_at: Any, backoff_at: float) -> float:
+    """The retry instant for a hold: the hold's OWN time when it names one.
+
+    A ``budget_exhausted`` hold knows exactly when the budget refills (the
+    oldest spent unit leaves the rolling hour); retrying at the doubling
+    backoff instead either re-spends a pass on a budget that is still empty
+    or waits up to an hour past the refill. Bounded to the backoff ceiling so
+    a bad clock can never park a message for longer than any other hold.
+    """
+
+    import time as _time
+
+    if isinstance(retry_at, (int, float)) and not isinstance(retry_at, bool):
+        return min(float(retry_at), _time.time() + RETRY_MAX_S)
+    return backoff_at
 
 
 async def run_iteration(
@@ -668,7 +723,7 @@ async def run_iteration(
     # iteration is buffered per (endpoint, conversation, thread) and flushed
     # once at the end, so a burst that lands in one batch costs ONE wake. The
     # per-message screen/admit/reserve path inside is unchanged.
-    with CONNECTOR_COALESCER.scope():
+    with CONNECTOR_COALESCER.scope(), prescreen_scope():
         try:
             summary = await _run_iteration_inner(
                 owner,
@@ -803,6 +858,21 @@ async def _run_iteration_inner(
             # R2-3: the ref is consumed below, so a claim left by a connector
             # that died mid-spine must leave a durable retry behind.
             _park_stale_claim(store, owner, message_id, message_id, outcome)
+    # BATCH SCREENING (connector/batch_screen.py): one model call per wake
+    # batch, one verdict per message, before the per-message handlers below
+    # consume those verdicts. Best effort: anything it cannot cover is
+    # screened by its handler exactly as before.
+    try:
+        await prescreen_conversation_refs(
+            owner,
+            list(plan.conversation_deliveries),
+            config_dir=config_dir,
+            access=access,
+            auth_store=auth_store,
+            settings=settings,
+        )
+    except Exception as failure:  # noqa: BLE001 — never starves the handlers
+        _log_delivery_failure("batch_screen", failure)
     for conversation_ref in plan.conversation_deliveries:
         # Conversation deliveries have their OWN card path; the pair inbox
         # reader above must never see one.
@@ -822,7 +892,11 @@ async def _run_iteration_inner(
         handled.append(outcome)
         if outcome.get("action") == "hold":
             _persist_hold_backoff(
-                store, owner, conversation_ref.encode(), str(outcome.get("code") or "hold")
+                store,
+                owner,
+                conversation_ref.encode(),
+                str(outcome.get("code") or "hold"),
+                retry_at=outcome.get("retry_at"),
             )
         elif outcome.get("action") == "claimed_elsewhere":
             # Same R2-3 park, keyed like every conversation hold (by ref).
