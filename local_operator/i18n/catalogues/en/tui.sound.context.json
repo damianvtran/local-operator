@@ -1,0 +1,138 @@
+{
+  "tui.sound.added": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "{name} is the user's display name for the sound, {id} its machine id (verbatim, lowercase-hyphenated), {seconds} a decimal like 1.25. `/sound use {id}` is a command and stays verbatim."
+  },
+  "tui.sound.added_selected": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "Same placeholders as tui.sound.added."
+  },
+  "tui.sound.default": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "Marker after the built-in sound that ships as the default, in the /sound list output. Lowercase fragment."
+  },
+  "tui.sound.disabled": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "Receipt for `/sound off`. 'Banners' are desktop notification banners."
+  },
+  "tui.sound.enabled": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "Receipt for `/sound on`."
+  },
+  "tui.sound.id_help": {
+    "role": "TUI /settings row help line",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "Help line under the Sound row of the TUI /settings page; REPLACES the shared wire help there because the TUI user controls sounds with /sound rather than `lop sound`. `system` is a setting value and stays verbatim; /sound add and /sound doctor are commands and stay verbatim."
+  },
+  "tui.sound.list_title": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "Heading line of `/sound list`. The /sound commands and <id> stay verbatim."
+  },
+  "tui.sound.list_yours": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "Sub-heading before the user's own (custom) sounds in `/sound list`. Commands and <id>/<name> stay verbatim."
+  },
+  "tui.sound.not_found": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "{id} is what the user typed (verbatim). /sound list stays verbatim."
+  },
+  "tui.sound.off": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "State word filled into tui.sound.status ({state})."
+  },
+  "tui.sound.on": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "State word filled into tui.sound.status ({state})."
+  },
+  "tui.sound.preview_failed": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "/sound doctor stays verbatim."
+  },
+  "tui.sound.preview_muted": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "LOCAL_OPERATOR_NO_SOUND is an environment variable name and stays verbatim."
+  },
+  "tui.sound.preview_playing": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "{name} is a sound's display name, {volume} a number 0–100."
+  },
+  "tui.sound.preview_silent": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "Shown when the configured volume is 0."
+  },
+  "tui.sound.preview_ssh": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "Refusal: lop runs on a remote machine over SSH; playing there would sound on that machine."
+  },
+  "tui.sound.preview_system": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "`system` is a setting value and stays verbatim."
+  },
+  "tui.sound.read_failed": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "{file} is the path the user typed, {reason} an operating-system error text (may be English)."
+  },
+  "tui.sound.removed": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "{name} display name, {id} machine id."
+  },
+  "tui.sound.renamed": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "{id} machine id, {name} the new display name."
+  },
+  "tui.sound.save_failed": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "{reason} is an English validation or OS error text from the settings writer."
+  },
+  "tui.sound.selected": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "Receipt for `/sound use <id>`. {name} is the sound's display name."
+  },
+  "tui.sound.slash": {
+    "role": "slash-command picker description",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "Description of the /sound command in the slash-command picker and /help. Keep it short: the description column wraps past about 55 cells.",
+    "maxCells": 55
+  },
+  "tui.sound.status": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "Reply to a bare `/sound`. {name} display name, {volume} 0–100, {state} is tui.sound.on or tui.sound.off."
+  },
+  "tui.sound.usage": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "Usage line for an unknown /sound word. Every /sound word, <id>, <file>, <name> and [id] stays verbatim; 0–100 is a literal range."
+  },
+  "tui.sound.volume_range": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "Refusal for `/sound volume` with a value outside 0–100 or not a whole number."
+  },
+  "tui.sound.volume_set": {
+    "role": "TUI /sound command receipt or refusal (a notice line in the transcript)",
+    "tone": "plain, calm, says what happened or what to do next",
+    "note": "Receipt for `/sound volume N`. {volume} is the number."
+  }
+}

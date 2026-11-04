@@ -369,11 +369,15 @@ class Setting:
     #: Opt-IN rather than inferred from the kind, because previewing is not a
     #: property of having choices — it is a claim that the value has a live
     #: apply path AND a reliable revert, and every target is another revert
-    #: route that has to be correct on every exit from the expansion. Only
+    #: route that has to be correct on every exit from the expansion.
     #: ``tui.theme`` sets it: it already repaints live through
     #: ``OperatorApp._apply_theme``, and the page captures the applied value on
-    #: open and restores it on every cancel route. ``display.*`` is the other
-    #: candidate and is deliberately left off until that revert is earned.
+    #: open and restores it on every cancel route. ``notifications.sound.id``
+    #: sets it too, and is the one target with NOTHING to revert: its preview
+    #: plays the highlighted sound once (debounced in the app) and changes no
+    #: state, so the page captures and restores nothing for it.
+    #: ``display.*`` is the other candidate and is deliberately left off until
+    #: that revert is earned.
     #:
     #: Consumed by the settings page only. Nothing in this module previews
     #: anything — a preview must never reach a writer, which is exactly why the
@@ -2830,6 +2834,11 @@ SETTINGS: tuple[Setting, ...] = (
         choices_source=_notification_sound_choices,
         gated_by="notifications.sound.enabled",
         synonyms=("ringtone", "tone", "alert"),
+        # Arrowing through the choices auditions each one (TUI audit U2). Safe
+        # without a revert because a sound is an event, not a state; the app
+        # debounces it (`OperatorApp._schedule_sound_preview`) so a held arrow
+        # plays only the row the cursor settles on.
+        preview=True,
     ),
     Setting(
         key="notifications.sound.volume",

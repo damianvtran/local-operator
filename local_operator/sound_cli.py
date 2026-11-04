@@ -36,7 +36,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from local_operator.i18n.cli_help import help_text
 from local_operator.i18n.keys import wire_notification_sound as _ns
@@ -196,8 +196,24 @@ def list_command() -> int:
 _DIGEST_RE = re.compile(r"^[0-9a-f]{32}(?:[0-9a-f]{32})?$")
 
 
-def _read_source(source: str) -> tuple[bytes, str] | int:
-    """``(bytes, label)`` for a path or an attachment digest, or an exit code.
+class AttachmentMissing(LookupError):
+    """``source`` looked like an attachment digest and no attachment has it."""
+
+    @property
+    def text(self) -> str:
+        """The keyed refusal in the active locale, rendered HERE so the TUI
+        front end gains no reference to the deferred ``wire.notification_sound``
+        namespace (``deferred_wire_inventory.json`` lists this module)."""
+        return render(_ns.error_attachment_missing(digest=str(self.args[0])))
+
+
+def load_source(source: str) -> tuple[bytes, str]:
+    """``(bytes, label)`` for a path or an attachment digest, printing nothing.
+
+    Shared by ``lop sound add`` and the TUI's ``/sound add`` so both accept the
+    same sources with the same caps. Raises :class:`AttachmentMissing` for an
+    unknown digest and ``OSError`` for an unreadable path; each front end words
+    those its own way.
 
     A digest-shaped argument that is not an existing file is read through
     ``AttachmentStore.get_bytes``, which re-checks the content against its
@@ -215,16 +231,23 @@ def _read_source(source: str) -> tuple[bytes, str] | int:
 
         found = AttachmentStore().get_bytes(source[:32])
         if found is None:
-            _err(render(_ns.error_attachment_missing(digest=source)))
-            return 1
+            raise AttachmentMissing(source)
         return found[0], source[:32]
+    with path.open("rb") as handle:
+        raw = handle.read(custom_sounds.MAX_INPUT_BYTES + 1)
+    return raw, path.name
+
+
+def _read_source(source: str) -> tuple[bytes, str] | int:
+    """:func:`load_source` for the CLI: the pair, or an exit code after printing why."""
     try:
-        with path.open("rb") as handle:
-            raw = handle.read(custom_sounds.MAX_INPUT_BYTES + 1)
+        return load_source(source)
+    except AttachmentMissing as missing:
+        _err(missing.text)
+        return 1
     except OSError as error:
         _err(f"could not read {source}: {error.strerror or error}")
         return 1
-    return raw, path.name
 
 
 def _select(sound_id: str) -> None:
@@ -335,22 +358,25 @@ def preview_command(sound_id: str, volume: int | None) -> int:
     from local_operator.notifications import play, sound
     from local_operator.tui.notify import desktop_belongs_to_this_process
 
-    if sound_id == sound.SYSTEM_SOUND_ID:
+    # The decision is `sound.preview_plan`, shared with the TUI's previews so
+    # the enabled/NO_SOUND/volume-0 rules cannot drift between surfaces. The
+    # range refusal keeps its old place AFTER the id checks (the CLI's existing
+    # precedence), so an out-of-range level is withheld from the plan until then.
+    in_range = volume is None or 0 <= volume <= 100
+    decided = sound.preview_plan(sound_id, volume if in_range else None)
+    if decided.outcome == "system":
         _say("`system` means lop plays nothing; your terminal or OS plays its own sound.")
         return 0
-    entry = sound.playable(sound_id)
-    if entry is None:
+    if decided.outcome == "unknown":
         _err(f"unknown sound {sound_id!r}; choose one of: {', '.join(sound.sound_ids())}")
         return 2
-    if volume is not None and not 0 <= volume <= 100:
+    if not in_range:
         _err("--volume must be between 0 and 100")
         return 2
-    level = float(volume) if volume is not None else sound.configured().effective_volume
-    amplitude = sound.gain(level)
-    if os.environ.get(sound.ENV_NO_SOUND):
+    if decided.outcome == "muted":
         _say(f"{sound.ENV_NO_SOUND} is set; not playing {sound_id}.")
         return 0
-    if amplitude <= 0:
+    if decided.outcome == "silent" or decided.plan is None:
         _say(f"volume is 0; {sound_id} would be silent.")
         return 0
     if not desktop_belongs_to_this_process(report=False):
@@ -358,9 +384,11 @@ def preview_command(sound_id: str, volume: int | None) -> int:
             "note: HOME is redirected, so notifications would stay silent here; "
             "a preview still plays (set LOCAL_OPERATOR_NO_SOUND=1 to mute it)"
         )
+    level, amplitude, plan = decided.volume, decided.gain, decided.plan
     _say(f"playing {sound_id} at volume {level:g} (gain {amplitude:.2f})")
-    playable_id, path, sha = entry
-    code = play.play(path, amplitude, sound_id=playable_id, sha256=sha, leg="preview")
+    code = play.play(
+        plan.path or Path(), amplitude, sound_id=plan.sound_id, sha256=plan.sha256, leg="preview"
+    )
     if code != 0:
         _err("could not play the sound: no audio device answered (see `lop sound doctor`)")
     return code
@@ -391,9 +419,15 @@ def _cmux_sound(home: Path) -> str:
     return value if isinstance(value, str) and value else _CMUX_DEFAULT_SOUND
 
 
-def doctor_command() -> int:
+def doctor_command(say: Callable[[str], None] | None = None) -> int:
     """What the next notification on THIS terminal will sound like, and every
-    case where two sounds play, with its fix (review round 1, M1)."""
+    case where two sounds play, with its fix (review round 1, M1).
+
+    ``say`` receives each line instead of stdout: the TUI's ``/sound doctor``
+    collects them into one notice, because a ``print`` inside a running
+    Textual app lands nowhere the user can see.
+    """
+    say = say or _say
     from local_operator import terminals
     from local_operator.notifications import sound
     from local_operator.tui import notify
@@ -403,37 +437,37 @@ def doctor_command() -> int:
     if not notify.notifications_enabled():
         # Lead with it (QA Q1): with banners off nothing plays, so a first line
         # reading "plays soft-pulse" would contradict the conclusion.
-        _say(
+        say(
             "lop: silent (banners are off: display.notifications or "
             "LOCAL_OPERATOR_NO_NOTIFICATIONS); a sound only plays with a banner"
         )
-        _say(f"  when banners are on: {_describe(plan)}")
+        say(f"  when banners are on: {_describe(plan)}")
         return 0
     env = os.environ
     if terminals.is_ssh(env) and plan.kind == "file":
         # The same rule as `tui/notify._sound_plan` (review round 2, R2-M1): the
         # player would sound on the REMOTE machine, so lop stays out of it
         # entirely and the terminal-side behaviour is exactly as before.
-        _say(
+        say(
             "lop: over SSH: lop plays no sound of its own; your local terminal's "
             "notification sound applies"
         )
-        _say(f"  on this machine directly it would play {plan.sound_id}")
-        _say("double sound: none expected (only your local terminal signals)")
+        say(f"  on this machine directly it would play {plan.sound_id}")
+        say("double sound: none expected (only your local terminal signals)")
         return 0
-    _say(f"lop: {_describe(plan)}")
+    say(f"lop: {_describe(plan)}")
     if plan.kind == "file":
-        _say(f"  file: {plan.path}")
-        _say(f"  gain: {plan.gain:.2f}   at most one sound every {sound.THROTTLE_S:g}s")
+        say(f"  file: {plan.path}")
+        say(f"  gain: {plan.gain:.2f}   at most one sound every {sound.THROTTLE_S:g}s")
     for problem in _problems(sound.configured(values), plan):
-        _say(f"  note: {problem}")
+        say(f"  note: {problem}")
     protocol = notify.detect_protocol(env)
     # The SAME condition `Notifier.send` uses to drop the BEL: a file plan that
     # clears the rig guard. Under a redirected HOME lop plays nothing, and the
     # page must not claim its sound replaces anything.
     lop_plays = plan.kind == "file" and notify.desktop_belongs_to_this_process(report=False)
     if plan.kind == "file" and not lop_plays:
-        _say(
+        say(
             "  note: HOME is redirected (a test run, container or sandbox), so lop "
             "plays no notification sound here; the terminal's own signal is left as is"
         )
@@ -442,7 +476,7 @@ def doctor_command() -> int:
     double: list[str] = []
     if terminals.is_cmux(env):
         value = _cmux_sound(Path.home())
-        _say(f"banner leg: cmux (cmux notifications.sound = {value})")
+        say(f"banner leg: cmux (cmux notifications.sound = {value})")
         if lop_plays and value != "none":
             double.append(  # i18n: ignore operator CLI output, English-only
                 'cmux plays its own sound too. Fix: set "notifications": {"sound": "none"} '
@@ -450,9 +484,9 @@ def doctor_command() -> int:
             )
     else:
         if protocol == "osc99":
-            _say("banner leg: kitty OSC 99, sent with s=silent while lop plays its own sound")
+            say("banner leg: kitty OSC 99, sent with s=silent while lop plays its own sound")
         elif protocol == "osc9":
-            _say("banner leg: OSC 9 (Ghostty, iTerm2, WezTerm, Warp); it has no sound field")
+            say("banner leg: OSC 9 (Ghostty, iTerm2, WezTerm, Warp); it has no sound field")
             if lop_plays and terminals.is_ghostty(env):
                 double.append(  # i18n: ignore operator CLI output, English-only
                     "Ghostty plays the system default sound with every OSC 9 banner. "
@@ -460,21 +494,21 @@ def doctor_command() -> int:
                     "sounds off for Ghostty in System Settings > Notifications."
                 )
         elif lop_plays and not in_mux:
-            _say("banner leg: none in the terminal; lop's sound replaces the terminal bell")
+            say("banner leg: none in the terminal; lop's sound replaces the terminal bell")
             if terminals.term_program(env) == terminals.TERM_PROGRAM_APPLE:
                 # Review round 2, R2-m1: on Terminal.app the BEL is also the
                 # unfocused window's only visual cue (Dock bounce and badge).
-                _say(
+                say(
                     "  Terminal.app: without the bell there is no Dock bounce or badge; "
                     "choose `system` to keep them (lop then plays nothing): "
                     "lop config edit notifications.sound.id system"
                 )
         else:
-            _say("banner leg: terminal bell")
+            say("banner leg: terminal bell")
         if protocol == "bell" and sys.platform.startswith("linux"):
-            _say("  + notify-send, sent with suppress-sound while lop plays its own sound")
+            say("  + notify-send, sent with suppress-sound while lop plays its own sound")
         if in_mux:
-            _say(f"  inside {mux}: a terminal bell is also sent, to flag the pane")
+            say(f"  inside {mux}: a terminal bell is also sent, to flag the pane")
             if lop_plays:
                 double.append(  # i18n: ignore operator CLI output, English-only
                     f"inside {mux} the terminal bell is kept (it is the only pane flag), "
@@ -483,7 +517,7 @@ def doctor_command() -> int:
                     "(lop then plays nothing): lop config edit notifications.sound.id system"
                 )
     for line in double:
-        _say(f"double sound: {line}")
+        say(f"double sound: {line}")
     if not double:
-        _say("double sound: none expected on this terminal")
+        say("double sound: none expected on this terminal")
     return 0

@@ -1310,6 +1310,11 @@ _FRONTEND_LOCAL_SLASHES = {
     # dispatches it. A runtime-side `/network` would act on another machine's
     # mesh, which is why it is not there.
     "network",
+    # The notification sound is THIS machine's: `config.yml`'s
+    # `notifications.sound.*`, the custom store under `config_dir()/sounds`,
+    # and the speakers a preview plays on. Routed to a runtime it would audition
+    # a sound on another computer and edit another machine's selection.
+    "sound",
     # The projects page and its store are THIS machine's: `config_dir()/projects`
     # is the row store, `config_dir()/sessions/` is what the page's linked
     # sessions resolve against, and the run records its runtime state reads are

@@ -456,3 +456,95 @@ def play_for_banner(leg: str, plan: SoundPlan | None = None) -> bool:
     ``notify-send``, ``detached``).
     """
     return play_plan(resolve() if plan is None else plan, leg=leg)
+
+
+#: What :func:`preview_plan` decided. ``play``: ``plan`` is a ``file`` plan to
+#: start. Every other outcome plays nothing and names why, so each surface can
+#: word its own receipt (the CLI prints English operator text, the TUI renders
+#: keyed copy) without re-deriving the decision.
+PreviewOutcome = Literal["play", "system", "unknown", "muted", "silent", "ssh", "failed"]
+
+
+@dataclasses.dataclass(frozen=True)
+class Preview:
+    """The decision for one audition, built by :func:`preview_plan`."""
+
+    outcome: PreviewOutcome
+    sound_id: str
+    #: The 0-100 level the preview uses (the configured one unless overridden).
+    volume: float = 0.0
+    gain: float = 0.0
+    #: The ``file`` plan to play when ``outcome == "play"``; ``None`` otherwise.
+    plan: SoundPlan | None = None
+
+
+def preview_plan(
+    sound_id: str,
+    volume: float | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    values: Mapping[str, Any] | None = None,
+) -> Preview:
+    """Decide what auditioning ``sound_id`` would do, playing nothing.
+
+    THE ONE DECISION every preview surface shares (``lop sound preview``, the
+    TUI ``/settings`` row and ``/sound preview``), extracted from the CLI so the
+    rules cannot drift between them (notification-sounds addendum 2, §1):
+
+    * It ignores ``notifications.sound.enabled``: a person auditions a sound
+      before deciding to turn sounds on (C1 QA row 8).
+    * It ignores the 1.5 s throttle (the caller passes ``throttle=False``): that
+      throttle stops bursts of NOTIFICATIONS, and an audition is not one.
+    * It honours ``LOCAL_OPERATOR_NO_SOUND`` and a 0 volume, as every player does.
+
+    ``volume`` is the caller's validated 0-100 override; ``None`` uses the
+    configured level. Range checking stays with the caller because each surface
+    words the refusal differently (an argparse flag vs the registry's message).
+    """
+    source_env = os.environ if env is None else env
+    if sound_id == SYSTEM_SOUND_ID:
+        return Preview("system", sound_id)
+    entry = playable(sound_id)
+    if entry is None:
+        return Preview("unknown", sound_id)
+    level = float(volume) if volume is not None else configured(values).effective_volume
+    amplitude = gain(level)
+    if source_env.get(ENV_NO_SOUND):
+        return Preview("muted", sound_id, level, amplitude)
+    if amplitude <= 0:
+        return Preview("silent", sound_id, level, amplitude)
+    playable_id, path, sha = entry
+    plan = SoundPlan("file", playable_id, amplitude, path, sha)
+    return Preview("play", playable_id, level, amplitude, plan)
+
+
+def preview(
+    sound_id: str,
+    volume: float | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> Preview:
+    """Audition ``sound_id`` now in a DETACHED player; never waits, never raises.
+
+    For callers on an event loop (the TUI). ``lop sound preview`` plays in the
+    foreground instead, because a CLI that returned before the sound finished
+    would let the shell prompt race it; it shares :func:`preview_plan`.
+
+    OVER SSH it refuses with outcome ``ssh``, the same rule ``tui/notify.py``'s
+    ``_sound_plan`` applies to notifications: the player would sound on the
+    REMOTE computer's speakers (or nowhere on a headless host), which is never
+    what someone browsing a list in their local terminal means. The CLI does not
+    refuse, because there the person typed a command on that machine on purpose.
+
+    ``outcome == "failed"`` means the player child could not be started.
+    """
+    decided = preview_plan(sound_id, volume, env=env)
+    if decided.outcome != "play" or decided.plan is None:
+        return decided
+    from local_operator import terminals
+
+    if terminals.is_ssh(env):
+        return dataclasses.replace(decided, outcome="ssh", plan=None)
+    if not play_plan(decided.plan, leg="preview", throttle=False):
+        return dataclasses.replace(decided, outcome="failed")
+    return decided

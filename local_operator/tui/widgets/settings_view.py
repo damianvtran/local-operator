@@ -56,6 +56,7 @@ from textual.widgets import Static
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
 from local_operator.i18n.keys import tui_small as _x
+from local_operator.i18n.keys import tui_sound as _sound_keys
 from local_operator.i18n.text import active_locale, register_refresh, tr, tr_record
 from local_operator.settings_io import Kind, Section, Setting
 from local_operator.team_bridge import availability as bridge_availability
@@ -75,6 +76,7 @@ from local_operator.tui.widgets.tool_card import truncate_cells
 from local_operator.tui.widgets.transcript import wrap_cells
 
 _t = display_tr("tui.small")
+_t_sound = display_tr("tui.sound")
 _raw_t = tr("tui.small")
 _record_t = tr_record("tui.small")
 
@@ -1930,7 +1932,7 @@ class SettingsView(Vertical):
                 self._select_stored_choice(setting)
                 # Only now, with the cursor on a real choice, can a preview
                 # apply — and on the stored value it is a no-op by construction.
-                self._preview_choice()
+                self._preview_choice(opening=True)
             # Reveal the CHOICES, not just the row that owns them. Scrolling
             # the selected row into view is not enough: expanding a row sitting
             # on the viewport's bottom edge put every choice below the fold, so
@@ -2784,15 +2786,17 @@ class SettingsView(Vertical):
             self._selected = settled
 
     # -- preview ------------------------------------------------------------
-    def _preview_choice(self) -> None:
+    def _preview_choice(self, *, opening: bool = False) -> None:
         """Apply the highlighted choice to the RUNNING APP, storing nothing.
 
-        Only for a setting that opts in with ``Setting.preview`` — today just
-        ``tui.theme``. The value is posted as :class:`SettingsPreview`, which is
-        deliberately a DIFFERENT message from :class:`SettingsChanged`: the
-        latter is the write notification, and routing a preview through it is
-        how a preview would eventually be made to persist by a well-meaning
-        edit to the app's handler. Two messages means the live-apply path is
+        Only for a setting that opts in with ``Setting.preview``: ``tui.theme``
+        (a live repaint, captured and reverted) and ``notifications.sound.id``
+        (an audition, nothing captured; see the comment below). The value is
+        posted as :class:`SettingsPreview`, which is deliberately a DIFFERENT
+        message from :class:`SettingsChanged`: the latter is the write
+        notification, and routing a preview through it is how a preview would
+        eventually be made to persist by a well-meaning edit to the app's
+        handler. Two messages means the live-apply path is
         reachable without the write path being involved at all.
 
         The value the user started on is captured on the way IN, and it is the
@@ -2806,7 +2810,18 @@ class SettingsView(Vertical):
             return
         if not row.setting.preview:
             return
-        if self._preview_before is None:
+        if opening and row.setting.key != "tui.theme":
+            # Opening a list lands on the STORED choice. For the theme that
+            # preview is a no-op; for a sound it would play the current sound
+            # on every open, which the user did not ask to hear. Auditions
+            # start when the cursor MOVES.
+            return
+        # Only the THEME has a state to capture and put back. The other
+        # previewing row, `notifications.sound.id`, auditions a sound: an event
+        # with nothing to restore, so it must not arm `_preview_before` — a
+        # capture taken there would make `_revert_preview` re-apply the theme
+        # (a full transcript re-ink) on every close of the sound list.
+        if row.setting.key == "tui.theme" and self._preview_before is None:
             self._preview_before = theme_mod.current_theme()
         self.post_message(SettingsPreview(row.setting.key, row.choice.value))
 
@@ -4803,6 +4818,14 @@ class SettingsView(Vertical):
                 clause_style = _bridge_ink()
             width = self._detail_width()
             help_text = _paint(row.setting.help, source_locale="en")
+            if row.setting.key == "notifications.sound.id":
+                # The registry help is SHARED with the desktop and `lop config`,
+                # so it names `lop sound add` / `lop sound doctor`. Inside the
+                # TUI the same controls are `/sound` (addendum 2, §1 U3), and
+                # pointing a TUI user at a shell command they would have to leave
+                # the app for is the gap the audit named. Only this page's line
+                # is repointed; the CLI and desktop keep their own wording.
+                help_text = _t_sound(_sound_keys.id_help())
             if row.setting.hotkey_scope == "desktop":
                 # The desktop sentence REPLACES the registry help on this page,
                 # for the reason `_DESKTOP_HOTKEY_DETAIL` states. The registry
