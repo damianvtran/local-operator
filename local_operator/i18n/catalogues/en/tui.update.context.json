@@ -1,0 +1,37 @@
+{
+  "tui.update.checking": {
+    "role": "status",
+    "tone": "dim system notice",
+    "note": "First line of /update, shown before the install method is known. Deliberately neutral: whether running sessions are safe depends on the install method, which the later lines state. Lower-case start, terminal voice."
+  },
+  "tui.update.updating": {
+    "role": "status",
+    "tone": "dim system notice",
+    "note": "Shown while the installer runs on the safe install method (the new build lands beside the running one). {version} is a version number like 0.98.1, keep verbatim. 'Running sessions' are the user's agent runtimes, which keep working."
+  },
+  "tui.update.updating_in_place": {
+    "role": "status",
+    "tone": "dim system notice",
+    "note": "Shown while the installer runs on an install method (pip, pipx, or Windows) that overwrites the files running sessions use. Honest caution: sessions may be interrupted. Must NOT reassure. {version} verbatim."
+  },
+  "tui.update.restarting": {
+    "role": "status",
+    "tone": "dim system notice",
+    "note": "After a successful install on the safe install method, just before the terminal relaunches. Only the terminal viewer restarts; agent sessions run in their own processes and keep running. Keep it short: it should fit one 100-column line. {version} verbatim."
+  },
+  "tui.update.restarting_in_place": {
+    "role": "status",
+    "tone": "dim system notice",
+    "note": "After a successful in-place install, just before the terminal relaunches. No reassurance about sessions on purpose: the in-place install can have disturbed them. {version} verbatim."
+  },
+  "tui.update.relaunch_when_idle": {
+    "role": "status",
+    "tone": "dim system notice",
+    "note": "After a successful install when local in-terminal work prevents the relaunch. 'Local work' is work running inside this terminal (a shell command, an in-process session); 'sessions' are the detached agent runtimes, which keep running. {version} verbatim."
+  },
+  "tui.update.relaunch_when_idle_in_place": {
+    "role": "status",
+    "tone": "dim system notice",
+    "note": "After a successful in-place install when local in-terminal work prevents the relaunch. No reassurance about sessions on purpose. 'Local work' is work running inside this terminal. {version} verbatim."
+  }
+}

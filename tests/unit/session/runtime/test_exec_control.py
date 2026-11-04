@@ -841,3 +841,20 @@ def test_a_supervisor_stop_is_classified_deliberate_not_unattributed(
     assert status == "cancelled"
     assert detail["stop_class"] == "deliberate" and detail["stop"]["via"] == "control-stop"
     assert "unattributed" not in json.dumps(detail)
+
+
+@pytest.mark.asyncio
+async def test_aclose_unsubscribes_the_access_listener(isolated_config: Path) -> None:
+    """R1-3 (#3427): the exec run never disposes its handle, so its teardown owes
+    the process-wide effective-access listener the handle installed. A process
+    reused after the run must not keep republishing the finished run's band."""
+    from local_operator.network.credentials import effective
+
+    before = list(effective._listeners)
+    control = await start_exec_control(FakeSession(), cwd="/tmp")
+    assert len(effective._listeners) == len(before) + 1
+    await control.aclose()
+    assert effective._listeners == before
+    # Idempotent: a second close (or a later dispose) is a no-op, never a raise.
+    control.handle.close_access_listener()
+    assert effective._listeners == before

@@ -51,9 +51,19 @@ and model-family quota window gates eligibility.
 - `fair`: use a stable per-session spread, without ranking reset or headroom
   forecasts. Eligibility and reserve last-resort ordering still apply.
 
-No extra blocking usage probes are made for ranking. Reset forecasts use reports
-at most 30 minutes old; missing, stale, malformed, past, unsupported or
-future-fetched reset evidence does not invent a deadline. Weekly-unknown accounts
+No extra blocking usage probes are made for ranking. A report older than 30
+minutes no longer counts as healthy or a proven reopening, but each reset
+deadline still in the future and within its own period of the fetch keeps
+ranking (a garbled one beyond that bound is dropped on its own): a window's
+reset instant cannot move before it elapses, so an account resetting in 5 days
+is still used before one resetting in 6 even when nobody has refreshed
+`/usage` lately. Usage only grows within an unelapsed window, so a stale
+reserve or depleted verdict still holds — a stale reserve account stays in the
+reserve tier, behind fresh healthy accounts — while a stale healthy one becomes
+unknown. A stale report with an elapsed or reset-less measured window, or a
+paid balance, ranks neutral.
+Missing, malformed, past, unsupported or future-fetched reset evidence does not
+invent a deadline. Weekly-unknown accounts
 join a neutral tie pool rather than starving behind known accounts. Without
 comparable weekly data use actual five-hour data where the account reports a
 five-hour window, otherwise the stable hash.

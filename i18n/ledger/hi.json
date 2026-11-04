@@ -3009,6 +3009,48 @@
     },
     {
       "locale": "hi",
+      "namespace": "tui.update",
+      "source_sha256": "2d3f1a132c443c0894b99a3c064d7fa702a5a1334b4854953b2b09083fab12c3",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure)",
+        "session": "9615db04a717",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "340352200f28",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit, 4 new keys. No findings; 0 unresolved blocker/major. Target SHA-256 d59edfe5c45023eeea66526c5b5c06e4746550be36da419ee4f2242eb54b682c. Evidence: i18n/audits/update-notice-tui-340352200f28.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.update",
+      "source_sha256": "123da7e1fce2892a4216e438f2d3470a47d7cf02d7eb890dcefa2835b949997b",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure round-1 remediation)",
+        "session": "d3534e994383",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "c6a7b830880b",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent round-2 re-audit (7 keys). 0 unresolved blocker/major. Target SHA-256 b9177e5664ad868053f7b95b46ce0cd3817081d5500c53b0271d876b1bc586a7. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "hi",
       "namespace": "wire.notification_sound",
       "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
       "translator": {

@@ -121,7 +121,16 @@ def exact_shape(record: Mapping[str, Any]) -> bool:
     # ``kind`` is digest-bound too but needs no check here (#3087 r2, N2-1): create_request
     # limits it to ``approvals.KINDS``, and the only other kind with an op payload
     # (``local_authority``) carries no ``device`` block, which the check above refuses.
-    if record.get("requested_by") != {"device_id": data["owner_device"], **_REQUESTED_BY}:
+    # The one undisplayed value ``requested_by`` may vary in is the filing session,
+    # shape-pinned (``approvals.filing_session``) the way ``reason`` is pinned to a
+    # vocabulary; a pre-attribution card's ``""`` still verifies.
+    filed = record.get("requested_by")
+    session = filed.get("session_id") if isinstance(filed, dict) else None
+    if session != approvals.filing_session(session) or filed != {
+        "device_id": data["owner_device"],
+        **_REQUESTED_BY,
+        "session_id": session,
+    }:
         return False
     if record.get("credential_ref") is not None:
         return False
@@ -652,7 +661,14 @@ def _complete_capability(data: dict[str, Any], root: Path | None) -> None:
 
 
 def request(
-    network: str, owner: str, recipient: str, key: str, scope: str, root: Path | None = None
+    network: str,
+    owner: str,
+    recipient: str,
+    key: str,
+    scope: str,
+    root: Path | None = None,
+    *,
+    filed_by_session: str = "",
 ) -> dict[str, Any]:
     subject = _subject(network, owner, recipient, key, root)
     if scope not in {"device", "session"} or (key == "github" and scope != "device"):
@@ -694,7 +710,13 @@ def request(
     result = approvals.create_request(
         kind=approvals.KIND_DEVICE_ONBOARD,
         request_id=approvals.new_request_id(),
-        requested_by={"device_id": owner, "session_id": "", "surface": "cli"},
+        # Stamped HERE, before ``create_request`` computes the digest, so the
+        # attribution is part of what is signed and is never rewritten afterwards.
+        requested_by={
+            "device_id": owner,
+            "session_id": approvals.filing_session(filed_by_session),
+            "surface": "cli",
+        },
         # The member's display name rides the digest-bound device block so the disclosure can
         # name the recipient (QA #3002 round 1, Q2); display-only, never an identifier.
         device={

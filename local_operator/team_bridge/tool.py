@@ -159,7 +159,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 
-from . import agent_attachments, reply_guard
+from . import agent_attachments, reply_guard, secret_guard
 from .client import ATTACHMENT_MAX_COUNT, TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
 from .recipient_resolution import (
@@ -610,6 +610,22 @@ def _failure_text(failure: BaseException) -> str:
     if code:
         pairs.append(f"code={code}")
     pairs.extend(field_rule)
+    # An EDGE block (client ``_edge_blocked``) has no field/rule: its evidence is
+    # WHICH edge answered (``server``) and HOW (``content_type``) — header values
+    # the client already bounded, never the page. They ride the footer only for
+    # that code, so a hub refusal's footer stays exactly code/field/rule, and an
+    # agent's report of the failure carries the layer that refused it.
+    if code == "edge_blocked":
+        status = getattr(failure, "http_status", None)
+        if isinstance(status, int):
+            pairs.append(f"status={status}")  # i18n: ignore machine key=value footer token
+        if isinstance(details, Mapping):
+            for key in ("server", "content_type"):
+                # The media type alone: ``; charset=…`` would put a space
+                # inside the footer's one-token-per-pair shape.
+                value = _refusal_token(details.get(key)).split(";")[0].strip()
+                if value:
+                    pairs.append(f"{key}={value}")
     if not pairs:
         return str(failure)
     return f"{failure} [refusal {' '.join(pairs)}]"
@@ -1089,6 +1105,39 @@ async def _resolve_dm_target(
     )
 
 
+#: The honest answer when the hub refuses an agent→person DM (interim, B1).
+#: agent-server refuses a DM whose members are not ALL agents, by a written rule
+#: (``internal/services/bridge_conversation_service.go``: a human member is
+#: ``400 invalid_request field=members rule=agent_required`` — "a human's DM with
+#: an agent is the human's to create", §14.3). The generic ``dm_failed`` with
+#: that footer read as a bug to retry; the agent's real next step is a private
+#: group with the person, which the hub DOES let an agent create. When the hub
+#: grows agent→person DMs this arm simply stops firing; nothing else depends on it.
+DM_HUMAN_UNSUPPORTED_SENTENCE = (
+    "Nothing was sent: this Radient hub can't open an agent→person DM yet. Post in "
+    "a private group with them instead: channel_create kind=group with them as a "
+    "member, then channel_post to it."
+)
+
+
+def _refuses_human_dm_member(failure: BaseException) -> bool:
+    """Whether ``failure`` is exactly the hub's agent-only-DM rule.
+
+    Keyed on the coded triple, never on the sentence: ``code=invalid_request``
+    with ``field=members`` and ``rule=agent_required``. The same rule name is
+    also used for ``origin_session_id`` (an actor-less send), which is a
+    different refusal and must keep its own text — hence the field check.
+    """
+
+    details = getattr(failure, "details", None)
+    return (
+        getattr(failure, "code", "") == "invalid_request"
+        and isinstance(details, Mapping)
+        and details.get("field") == "members"
+        and details.get("rule") == "agent_required"
+    )
+
+
 async def _direct_message(
     runtime: "BridgeRuntime", params: "BridgeToolParams", endpoint_id: str
 ) -> dict[str, Any]:
@@ -1144,6 +1193,8 @@ async def _direct_message(
             return _not_reachable(
                 str(code), f"the hub refused that recipient: {_failure_text(failure)}"
             )
+        if _refuses_human_dm_member(failure):
+            return _error(DM_HUMAN_UNSUPPORTED_SENTENCE, code="dm_human_unsupported")
         return _error(
             f"the direct message was not opened: {_failure_text(failure)}", code="dm_failed"
         )
@@ -1728,6 +1779,20 @@ def _validate_reply_destination(
     return None
 
 
+def _channel_create_free_text(args: Mapping[str, Any]) -> str:
+    """Every free-text field ``channel_create`` sends, one per line, for the scan.
+
+    One line each so a label-plus-value shape cannot be assembled ACROSS two
+    fields (a ``name`` ending in a credential word beside a ``topic`` value).
+    """
+
+    parts = [args.get("name"), args.get("topic")]
+    members = args.get("members")
+    if isinstance(members, list):
+        parts.extend(m.get("display_label") for m in members if isinstance(m, Mapping))
+    return "\n".join(part for part in parts if isinstance(part, str) and part)
+
+
 async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[str, Any]:
     """Run one tool op. Returns a JSON-ish dict; the AgentTool wrapper turns it
     into a ``ToolResult`` (and the honest error shape into ``is_error``)."""
@@ -1782,6 +1847,29 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     args, refused = _normalize_message_field(op, args)
     if refused is not None:
         return refused
+    # CREDENTIAL GUARD (secret_guard). Here, once, for every op in
+    # MESSAGE_FIELD_BY_OP (dm, channel_post, send, reply) rather than inside each
+    # op: this is the last point every message body passes through BEFORE the
+    # admission gate (which may schedule a status read), name resolution (a
+    # directory read), the pair outbox intent and the reply-guard reservation,
+    # so a refused message makes no network call and leaves no local record. A
+    # per-op call would sit after those for send/reply, and a later op would have
+    # to remember to add it. After the fence, so a drifted runtime still refuses
+    # without reading the body at all.
+    message_field = MESSAGE_FIELD_BY_OP.get(op)
+    if message_field is not None:
+        refused = secret_guard.refuse_secret_in(op, args.get(message_field))
+        if refused is not None:
+            return refused
+    if op == "channel_create":
+        # A room's name, topic and member labels are free text the hub stores
+        # and shows to every member on every device — the same exposure as a
+        # post (review m1/S-3). Raw args, before the params model, so the scan
+        # sees exactly what would be sent; non-string shapes are left for the
+        # model's own typed refusal.
+        refused = secret_guard.refuse_secret_in(op, _channel_create_free_text(args))
+        if refused is not None:
+            return refused
     if op == "channel_post":
         refused = _validate_reply_destination(runtime, args)
         if refused is not None:

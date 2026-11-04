@@ -1,0 +1,9 @@
+{
+  "tui.update.checking": "buscando actualizaciones…",
+  "tui.update.updating": "actualizando a v{version}… las sesiones en curso siguen trabajando",
+  "tui.update.updating_in_place": "actualizando a v{version} sobre la instalación actual; las sesiones en curso pueden interrumpirse",
+  "tui.update.restarting": "actualizado a v{version}; reiniciando esta terminal. Las sesiones siguen funcionando.",
+  "tui.update.restarting_in_place": "actualizado a v{version}; reiniciando esta terminal.",
+  "tui.update.relaunch_when_idle": "actualizado a v{version}; reinicia cuando el trabajo local esté inactivo. Las sesiones siguen funcionando.",
+  "tui.update.relaunch_when_idle_in_place": "actualizado a v{version}; reinicia cuando el trabajo local esté inactivo."
+}

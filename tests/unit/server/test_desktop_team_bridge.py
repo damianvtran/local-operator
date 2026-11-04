@@ -883,6 +883,7 @@ async def test_status_composes_state_local_config_consent_and_the_screening_rece
     # The captured-account guard receipt (R6) and the refused-slot record (R3).
     assert result["consent_account_guard"] is True
     assert result["state_note"] is None
+    assert result["trial_ended"] is None
     assert result["texts_rejected"] == []
     # The local keys the renderer composes its gate from.
     # The consent hold: an absent local key reads as OFF.
@@ -902,6 +903,100 @@ async def test_status_composes_state_local_config_consent_and_the_screening_rece
     assert result["screening"] == {"required": True}
     assert result["error"] is None
     assert discipline.boundaries == ["app_start"]
+
+
+def _ended_row(tenant_id: str, **extra: Any) -> dict[str, Any]:
+    # The QA round-1 (Q5) wire shape after a trial ends: the org row is
+    # ``eligible:false`` with no endpoint (owner, or a member the end disabled),
+    # and agent-server #296 marks it positively with ``trial_ended_at``.
+    row: dict[str, Any] = {
+        "tenant_id": tenant_id,
+        "tenant_name": "Org",
+        "eligible": False,
+        "endpoint": None,
+        "counts": {"unread": 0, "requests_pending": 0, "blocked": 0},
+        "trial_end": "2026-11-01T00:00:00Z",
+        "trial_ended_at": "2026-11-01T00:00:00Z",
+    }
+    row.update(extra)
+    return row
+
+
+async def test_status_carries_an_ended_trial_org_through_state_a(api):
+    client, _root, discipline = api
+    discipline.check_result = _status_check(
+        payload={"api_version": "1", "available": True, "tenants": [_ended_row("tnt_ended")]}
+    )
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    # The selection and the letter are unchanged: nothing is eligible and
+    # nothing is retained, so A with no selected tenant...
+    assert result["surface_state"] == "A"
+    assert result["tenant_id"] is None
+    # ...but the ended org rides beside it, so the renderer can show the paused
+    # band for THAT org instead of a trial on-ramp.
+    assert result["trial_ended"] == {
+        "tenant_id": "tnt_ended",
+        "trial_ended_at": "2026-11-01T00:00:00Z",
+    }
+
+
+async def test_status_trial_ended_needs_positive_evidence_and_no_eligible_org(api):
+    client, _root, discipline = api
+    # ``eligible:false`` alone is NOT evidence of an ended trial (R9).
+    bare = _ended_row("tnt_x")
+    del bare["trial_ended_at"]
+    discipline.check_result = _status_check(
+        payload={"api_version": "1", "available": True, "tenants": [bare]}
+    )
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["trial_ended"] is None
+    # An eligible org is the machine's subject: an ended trial elsewhere is not news.
+    eligible = {
+        "tenant_id": "tnt_1",
+        "tenant_name": "Org",
+        "eligible": True,
+        "endpoint": None,
+        "counts": {"unread": 0, "requests_pending": 0, "blocked": 0},
+    }
+    discipline.check_result = _status_check(
+        payload={
+            "api_version": "1",
+            "available": True,
+            "tenants": [eligible, _ended_row("tnt_ended")],
+        }
+    )
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["tenant_id"] == "tnt_1"
+    assert result["trial_ended"] is None
+    # A retained-endpoint row (F) carrying the marker wins over an earlier
+    # marked row, so ``trial_ended`` and ``tenant_id`` name the same org.
+    retained = _ended_row("tnt_retained", endpoint={"endpoint_id": "ep_1", "state": "active"})
+    discipline.check_result = _status_check(
+        payload={
+            "api_version": "1",
+            "available": True,
+            "tenants": [_ended_row("tnt_first"), retained],
+        }
+    )
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["surface_state"] == "F"
+    assert result["tenant_id"] == "tnt_retained"
+    assert result["trial_ended"]["tenant_id"] == "tnt_retained"
+    # R2-1: a selected row WITHOUT the marker answers nothing, never another
+    # org's marker — otherwise ``tenant_id`` and ``trial_ended`` disagree.
+    unmarked = _ended_row("tnt_retained", endpoint={"endpoint_id": "ep_1", "state": "active"})
+    del unmarked["trial_ended_at"]
+    discipline.check_result = _status_check(
+        payload={
+            "api_version": "1",
+            "available": True,
+            "tenants": [_ended_row("tnt_other"), unmarked],
+        }
+    )
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["surface_state"] == "F"
+    assert result["tenant_id"] == "tnt_retained"
+    assert result["trial_ended"] is None
 
 
 async def test_status_never_claims_a_receiver_that_is_not_installed(api):
