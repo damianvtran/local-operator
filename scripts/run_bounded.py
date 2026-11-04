@@ -221,6 +221,25 @@ _POLL_SECONDS = 0.05
 #: between them.
 _AUTHORITY_REFRESH_SECONDS = 1.0
 
+#: Wall-time bound on the cleanup proof: the slice past any grace wait in which
+#: the kill, finally and terminal phases must re-prove authority and send.
+#: 3.0 s because that is the bound the SAME census work already gets at capture
+#: and at the steady-state required refresh (``now + 3.0`` below). It replaced a
+#: 0.25 s allowance inherited from the pre-#3274 five-sleep sweep, which was
+#: never sized for a census: a successful leader-exit sweep now runs ~10 full
+#: strict ``/proc`` scans (each refresh is two censuses, and ``signal()``
+#: refreshes again before its syscall). On a preempted CI worker 0.25 s ran out
+#: mid-scan, the SIGKILL was refused and the grandchild survived -- the
+#: 2026-10-30 incident shape (#3365, CI 41684135750).
+#:
+#: NOT a grace period: nothing waits for it, it only caps how long a proof may
+#: take before it refuses. It does not extend the census's six-attempt churn
+#: limit, and it buys no time for an unreadable or malformed row, which still
+#: refuses at once. Signal authority rests on the reservation witness (our
+#: unreaped zombie leader, re-checked immediately before every syscall), never
+#: on elapsed time, so a longer bound weakens no pin.
+_CLEANUP_PROOF_SECONDS = 3.0
+
 #: Wall-clock ceiling for one run record's filesystem work. Every other step of a
 #: refusal is deadline-bounded; a wedged home directory must not be the one
 #: unbounded operation on a path that is already refusing.
@@ -543,7 +562,7 @@ def _reap(owner, grace, stream, *, reason, send, require, deadline):
         if owner.leader_terminal(deadline):
             return
         time.sleep(min(_POLL_SECONDS, max(0, deadline - time.monotonic())))
-    send(signal.SIGKILL, reason + ":kill", deadline + 0.25)
+    send(signal.SIGKILL, reason + ":kill", deadline + _CLEANUP_PROOF_SECONDS)
 
 
 def _memory_budget(override_mb: int | None) -> tuple[memory_guard.Budget, str]:
@@ -867,12 +886,14 @@ def _run_cleanup_required(
             # cadence rather than once per poll: see _AUTHORITY_REFRESH_SECONDS.
             if signum or timed_out or now >= next_probe:
                 probe_until = (
-                    begin_cleanup(grace + 0.25) if signum or timed_out else min(deadline, now + 3.0)
+                    begin_cleanup(grace + _CLEANUP_PROOF_SECONDS)
+                    if signum or timed_out
+                    else min(deadline, now + 3.0)
                 )
                 require(owner.refresh(deadline=probe_until), "required-refresh")
                 next_probe = now + _AUTHORITY_REFRESH_SECONDS
             if signum:
-                until = begin_cleanup(grace + 0.25)
+                until = begin_cleanup(grace + _CLEANUP_PROOF_SECONDS)
                 send(signum, "forward", until)
                 _reap(
                     owner,
@@ -881,12 +902,12 @@ def _run_cleanup_required(
                     reason=f"signal {signum} received",
                     send=send,
                     require=require,
-                    deadline=until - 0.25,
+                    deadline=until - _CLEANUP_PROOF_SECONDS,
                 )
                 rc = 128 + signum
                 break
             if timed_out:
-                until = begin_cleanup(grace + 0.25)
+                until = begin_cleanup(grace + _CLEANUP_PROOF_SECONDS)
                 _reap(
                     owner,
                     grace,
@@ -894,7 +915,7 @@ def _run_cleanup_required(
                     reason=f"timeout after {timeout:g}s",
                     send=send,
                     require=require,
-                    deadline=until - 0.25,
+                    deadline=until - _CLEANUP_PROOF_SECONDS,
                 )
                 _report(
                     stream,
@@ -971,7 +992,7 @@ def _run_cleanup_required(
                         _report(
                             stream, f"[run_bounded] {memory_guard.unsignalled_line(unsignalled)}"
                         )
-                    send(signal.SIGKILL, "memory", begin_cleanup(0.25))
+                    send(signal.SIGKILL, "memory", begin_cleanup(_CLEANUP_PROOF_SECONDS))
                     break
                 notice = guard.soft_notice(sample)
                 if notice:
@@ -1002,9 +1023,9 @@ def _run_cleanup_required(
         raise
     finally:
         try:
-            # Retain the existing quarter-second final allowance, not a new
-            # grace period per pass. Never claim a requested signal means reaped.
-            until = begin_cleanup(0.25)
+            # One shared cleanup-proof bound (see _CLEANUP_PROOF_SECONDS), not a
+            # new grace period per pass. Never claim a requested signal means reaped.
+            until = begin_cleanup(_CLEANUP_PROOF_SECONDS)
             for attempt in range(5):
                 if proof_failed:
                     break  # no automatic signal retry after loss of authority

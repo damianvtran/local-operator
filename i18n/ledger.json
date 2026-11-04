@@ -2891,6 +2891,26 @@
     },
     {
       "locale": "es",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 1 major, 0 minor (E1), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/es/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "es",
       "namespace": "cli.team_bridge_alert",
       "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
       "translator": {
@@ -5837,6 +5857,26 @@
       },
       "status": "passed",
       "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 21c69011c26caa9a4b797b84f39768909a736357d5f2dc04c09163b61e5f8745; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 1 major, 2 minor (F1, F2, F3), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/fr/cli.team_bridge/tbb3400/record.json"
     },
     {
       "locale": "fr",
@@ -8865,6 +8905,26 @@
     },
     {
       "locale": "hi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 1 major, 1 minor (H1, H2), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/hi/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "hi",
       "namespace": "cli.team_bridge_alert",
       "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
       "translator": {
@@ -11887,6 +11947,26 @@
     },
     {
       "locale": "ru",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 1 major, 0 minor (R1), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/ru/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "ru",
       "namespace": "cli.team_bridge_alert",
       "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
       "translator": {
@@ -14709,6 +14789,26 @@
       },
       "status": "passed",
       "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 5fe45b9bb2f02e4639318d00d84a1f66603851fbf68b2e6c081ede475e7d444b; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 2 major, 1 minor (U1, U2, U3), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/ur/cli.team_bridge/tbb3400/record.json"
     },
     {
       "locale": "ur",
@@ -17755,6 +17855,26 @@
     },
     {
       "locale": "vi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 4,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 2 major, 2 minor (V1, V2, V3, V4), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/vi/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "vi",
       "namespace": "cli.team_bridge_alert",
       "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
       "translator": {
@@ -20463,6 +20583,26 @@
       },
       "status": "passed",
       "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 936eec9d7ec1cf185590e1a87fe2544997bad62b0e9867417012054668101e77; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 0 major, 1 minor (Z1), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/zh-CN/cli.team_bridge/tbb3400/record.json"
     },
     {
       "locale": "zh-CN",

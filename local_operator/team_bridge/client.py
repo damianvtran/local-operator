@@ -1089,6 +1089,130 @@ def _envelope_result(response: httpx.Response) -> dict[str, Any]:
     return result
 
 
+#: Generic FILE attachments (agent-server S3a/S3b, ``docs/bridge-files-s3b-binding.md``).
+#: The hub's transport bound is its largest class cap (``BridgeFileMaxBytes`` =
+#: container/other, 25 MiB); pdf (20 MiB) and text (2 MiB) are tighter, but the
+#: CLASS is the hub's byte sniff, which this client deliberately does not
+#: second-guess. Refusing above the transport bound BEFORE any I/O is what keeps a
+#: 26 MiB pick from being streamed to a hub that would only answer 413.
+FILE_MAX_BYTES = 25 * 1024 * 1024
+#: The hub's combined per-message bound: images AND files together (at most
+#: :data:`ATTACHMENT_MAX_COUNT` of them images).
+FILE_MAX_PER_MESSAGE = 10
+#: The only ``status.files`` / upload wire version this client speaks. The hub
+#: REQUIRES ``X-Bridge-Files-Version`` in file mode, and a block of another
+#: version reads as off: a future incompatible shape is negotiated, never guessed.
+FILES_VERSION = 1
+#: The closed class vocabulary the hub sniffs into (``BridgeFileClasses``). A
+#: class is a LABEL for display and caps, never a safety claim.
+FILE_CLASSES = ("pdf", "text", "container", "other")
+#: The hub's bound on the ENCODED ``X-Bridge-File-Name`` (``BridgeFileMaxNameEncoded``).
+#: Checked locally so an over-long name is the same ``attachment_invalid`` the hub
+#: would answer, without a 25 MiB body travelling first.
+FILE_NAME_MAX_ENCODED = 1024
+
+
+def encode_file_name(name: str) -> str:
+    """``name`` as the hub's ``X-Bridge-File-Name`` value: percent-encoded UTF-8.
+
+    A header cannot be trusted to carry UTF-8 or to avoid CR/LF, so the contract
+    is percent-encoding, and the hub decodes it with Go's ``url.PathUnescape``.
+    ``safe=""`` escapes EVERYTHING outside the RFC 3986 unreserved set — notably
+    ``+`` (``%2B``), ``/`` and ``%`` — so the hub's decode returns exactly these
+    characters and a literal ``+`` is never read back as a space. Cleaning
+    (bidi controls, path parts, the 120-scalar bound) is the hub's job; this
+    function only transports. The name is user content: it is never logged.
+    """
+
+    encoded = urllib.parse.quote(name, safe="", encoding="utf-8", errors="strict")
+    if len(encoded) > FILE_NAME_MAX_ENCODED:
+        raise BridgeRefusal(
+            "attachment_invalid",
+            "The file name is too long.",  # i18n: ignore, no code
+            http_status=422,
+        )
+    return encoded
+
+
+def _file_ids(ids: Sequence[str] | None, image_ids: Sequence[str]) -> list[str]:
+    """The validated generic-file id list for a send, or ``[]`` for "none".
+
+    File ids share the image id grammar (the hub mints both as ``batt_``). The
+    hub refuses a duplicate, an id in both lists, and more than
+    :data:`FILE_MAX_PER_MESSAGE` items across both; refusing here saves a round
+    trip and keeps the send order — which is the display order — untouched.
+    """
+
+    if not ids:
+        return []
+    out = list(ids)
+    if len(set(out)) != len(out):
+        raise ValueError("file ids must be distinct")
+    if set(out) & set(image_ids):
+        raise ValueError("an id may not be both an image and a file")
+    if len(out) + len(image_ids) > FILE_MAX_PER_MESSAGE:
+        raise ValueError(f"at most {FILE_MAX_PER_MESSAGE} images and files per message")
+    for value in out:
+        _require_attachment_id(value)
+    return out
+
+
+def files_capability(payload: Any) -> dict[str, Any] | None:
+    """The hub's ``files`` capability block, or ``None`` = generic files off.
+
+    The sibling of :func:`attachments_capability`, with the same reading rule:
+    every surface hides file affordances and never sends ``files`` unless this
+    returns a block. The hub serves ``files`` whenever its attachment service is
+    wired, with ``enabled`` mirroring ``BRIDGE_FILES_ENABLED`` (off in every
+    deployment today), so ``enabled: false`` is the COMMON answer, not an error.
+    Only ``version == 1`` (the one shape this client speaks), ``enabled: true``
+    and ``download_only: true`` (the S3 promise: no inline rendering) read as
+    on; a class is kept only when it is in :data:`FILE_CLASSES` with a positive
+    cap no larger than :data:`FILE_MAX_BYTES`, and a block with no usable class
+    is off — a malformed block is never a guess at the hub's limits.
+    """
+
+    if not isinstance(payload, Mapping):
+        return None
+    block = payload.get("files")
+    if not isinstance(block, Mapping):
+        return None
+    version = block.get("version")
+    if isinstance(version, bool) or version != FILES_VERSION:
+        return None
+    if block.get("enabled") is not True or block.get("download_only") is not True:
+        return None
+    raw_classes = block.get("classes")
+    if not isinstance(raw_classes, list):
+        return None
+    classes: list[dict[str, Any]] = []
+    for entry in raw_classes:
+        if not isinstance(entry, Mapping):
+            continue
+        name, cap = entry.get("class"), entry.get("max_bytes")
+        if (
+            name in FILE_CLASSES
+            and isinstance(cap, int)
+            and not isinstance(cap, bool)
+            and 0 < cap <= FILE_MAX_BYTES
+            and all(c["class"] != name for c in classes)
+        ):
+            classes.append({"class": name, "max_bytes": cap})
+    if not classes:
+        return None
+    out: dict[str, Any] = {
+        "version": FILES_VERSION,
+        "enabled": True,
+        "download_only": True,
+        "classes": classes,
+    }
+    for key in ("max_items", "max_images"):
+        value = block.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            out[key] = value
+    return out
+
+
 def _refusal(response: httpx.Response) -> BridgeRefusal:
     """Map one non-2xx answer onto :class:`BridgeRefusal` (§6.5).
 
@@ -3261,6 +3385,7 @@ class TeamBridgeClient:
         thread_root_id: str | None = None,
         attachment_ids: Sequence[str] | None = None,
         mentions: Sequence[Mapping[str, Any]] | None = None,
+        files: Sequence[str] | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
         pre_http_guard: Callable[[], None] | None = None,
@@ -3292,12 +3417,20 @@ class TeamBridgeClient:
         like a directed one in the server's answer. Omitted when empty, so an
         undirected post remains byte-identical to the pre-mention wire (the same
         capability-negotiation rule the attachments key follows).
+
+        ``files`` binds staged GENERIC files (``upload_attachment(mode="file")``),
+        in display order. Sent only when non-empty, for the same reason as
+        ``attachment_ids``: a hub predating S3b, or one with files off, must
+        see the unchanged wire. Callers gate on :func:`files_capability`.
         """
 
         body: dict[str, Any] = {"client_ref": client_ref, "body": text}
         ids = _attachment_ids(attachment_ids)
         if ids:
             body["attachment_ids"] = ids
+        file_ids = _file_ids(files, ids)
+        if file_ids:
+            body["files"] = file_ids
         if tenant_id:
             body["tenant_id"] = tenant_id
         if agent_label:
@@ -3837,8 +3970,11 @@ class TeamBridgeClient:
         data: bytes,
         *,
         tenant_id: str | None = None,
+        actor_endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
+        mode: Literal["image", "file"] = "image",
+        name: str | None = None,
     ) -> dict[str, Any]:
         """Stage one image for a later send: ``{attachment: {id, mime, ...}}``.
 
@@ -3847,6 +3983,28 @@ class TeamBridgeClient:
         second local opinion would only be a way for the two to disagree.
         """
 
+        # ``mode="file"`` is the S3a generic-file contract on the SAME hub route
+        # (see :meth:`_upload_file`). It branches before the image path so the
+        # image upload below stays byte-identical, and ``name`` is a file-only
+        # field: an image never carries one.
+        if mode == "file":
+            # Agents may not stage files (the hub refuses ``agent_actor``, and
+            # no screening path exists), and ``_upload_file`` has no actor
+            # query: an agent-addressed file call must fail loudly rather than
+            # stage the bytes as the HUMAN (review F1). Spelled like #3335's
+            # agent-image parameter so the two signatures merge as one.
+            if actor_endpoint_id is not None:
+                raise ValueError("an agent endpoint cannot upload files")
+            return await self._upload_file(
+                conversation_id,
+                data,
+                name=name,
+                tenant_id=tenant_id,
+                access=access,
+                expected_account_id=expected_account_id,
+            )
+        if mode != "image" or name is not None:
+            raise ValueError("an image upload takes no name; mode is 'image' or 'file'")
         if not data:
             raise BridgeRefusal(
                 "attachment_invalid",
@@ -3868,6 +4026,66 @@ class TeamBridgeClient:
             access=access,
             expected_account_id=expected_account_id,
         )
+
+    async def _upload_file(
+        self,
+        conversation_id: str,
+        data: bytes,
+        *,
+        name: str | None,
+        tenant_id: str | None,
+        access: OAuthAccess | None,
+        expected_account_id: str | None,
+    ) -> dict[str, Any]:
+        """Stage one GENERIC file: ``{file: {id, class, mime, size, ...}}``.
+
+        The hub's file mode (agent-server ``messaging_attachments.go``): the same
+        raw-body ``POST …/attachments``, negotiated by ``X-Bridge-Attachment-Mode:
+        file`` plus the REQUIRED ``X-Bridge-Files-Version: 1`` (an absent version
+        is a 400 there, not an implicit v1). ``name`` rides percent-encoded in
+        the optional ``X-Bridge-File-Name``; it is the user's content, so it never
+        reaches a URL, a query or a log line here. The hub answers ``415
+        file_class_disabled`` while files are off, so callers gate on
+        :func:`files_capability` rather than probing with bytes.
+
+        Bound and encoding are both checked BEFORE any I/O, and the pinned
+        ``expected_account_id`` is compared in :meth:`_authorized` before the
+        request is built, so a wrong account never sends a byte either.
+        """
+
+        if not data:
+            raise BridgeRefusal(
+                "attachment_invalid",
+                "The file is empty.",  # i18n: ignore, no code
+                http_status=422,
+            )
+        if len(data) > FILE_MAX_BYTES:
+            raise BridgeRefusal(
+                "attachment_too_large",
+                "The file is larger than allowed.",  # i18n: ignore, no code
+                http_status=413,
+                details={"limit_bytes": FILE_MAX_BYTES},
+            )
+        headers = {
+            "X-Bridge-Attachment-Mode": "file",
+            "X-Bridge-Files-Version": str(FILES_VERSION),
+        }
+        # An empty name is "no name", exactly as the hub reads an absent header.
+        if name:
+            headers["X-Bridge-File-Name"] = encode_file_name(name)
+        params = {"tenant_id": tenant_id} if tenant_id else None
+        response = await self._authorized(
+            "POST",
+            f"/messaging/conversations/{conversation_id}/attachments",
+            params=params,
+            content=bytes(data),
+            extra_headers=headers,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+        if response.status_code >= 400:
+            raise _refusal(response)
+        return _envelope_result(response)
 
     async def delete_attachment(
         self,

@@ -1788,6 +1788,11 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
         # as unavailability (the executor refuses it properly afterwards).
         pair = _record_size_from_args(args)
         size = "" if pair is None else f" at {pair[0]}x{pair[1]}"
+        # The engine changes what the clip costs and what it is, so it rides the
+        # same row as the size. Read leniently like the size: a bad value is
+        # refused properly by the executor, and must not crash a description.
+        if str(args.get("quality") or "").strip().lower() == "high":
+            size += " (high quality)"
         if not raw_path.strip():
             root = str(_files.recordings_root())
             home = str(Path.home())
@@ -21489,6 +21494,12 @@ _RECORD_ABSENT_REASONS = frozenset(
         "record_unsupported",
         "record_av1_unavailable",
         "record_failed",
+        # A refused QUALITY starts nothing either: the host checks the value and
+        # its encoder before the first CDP call, and never falls back to the
+        # default clip. `record_quality_mismatch` (the harness's own echo
+        # failure) is deliberately NOT here: that clip IS recording.
+        "record_quality",
+        "record_quality_unavailable",
         # A refused SIZE starts nothing, so the approval must not survive
         # it — and it is listed here rather than inferred from the reason's
         # prefix, because this set is the whitelist that PROVES absence.
@@ -21801,6 +21812,12 @@ class BrowserParams(BaseModel):
         default=None,
         description="'record_start' viewport height in pixels (240-3840, even; needs width).",
     )
+    quality: str | None = Field(
+        default=None,
+        description=(
+            "'record_start': 'standard' (default) or 'high' (sharper H.264, +0.5-0.7GB RAM)."
+        ),
+    )
 
     @field_validator("x", "y", mode="before")
     @classmethod
@@ -21816,6 +21833,22 @@ class BrowserParams(BaseModel):
         """
         if isinstance(value, bool):
             raise ValueError("must be a number, not a boolean")
+        return value
+
+    @field_validator("quality", mode="before")
+    @classmethod
+    def _normalise_quality(cls, value: Any) -> Any:
+        """Fold case and padding, and read an empty string as "not given".
+
+        Models emit ``""`` for a field they leave unset (every other string
+        field here defaults to it), and ``"High"`` for ``"high"``. Neither
+        should cost a refused call; any other spelling is refused by
+        :func:`_record_quality_problem` with the accepted pair. A non-string is
+        left alone so pydantic names it.
+        """
+        if isinstance(value, str):
+            folded = value.strip().lower()
+            return folded or None
         return value
 
     @field_validator("width", "height", mode="before")
@@ -22768,6 +22801,71 @@ def _record_size_refusal(tool_call_id: str, params: BrowserParams) -> ToolResult
     return _record_size_result(tool_call_id, _record_size_problem(params))
 
 
+#: The accepted `quality` values. `standard` is the default AV1 clip and is the
+#: same request as leaving the field out.
+_RECORD_QUALITIES = ("standard", "high")
+
+
+def _record_quality_problem(params: BrowserParams) -> tuple[str, str, str]:
+    """``(param, why, sentence)`` for an unusable `quality`, or three empty strings.
+
+    The host refuses the same fault as ``record_quality`` / ``why: value`` after
+    the approval prompt; answering it here costs the user no approval for a clip
+    that could never start. Same triple shape as :func:`_record_size_problem`, so
+    the plan-time hook (text only) and the typed result share one sentence.
+    """
+    if params.quality is None or params.quality in _RECORD_QUALITIES:
+        return "", "", ""
+    return (
+        "quality",
+        "value",
+        f"'quality' for 'record_start' must be 'standard' or 'high' (got {params.quality!r}). "
+        "Omit it for the default clip. Nothing was started.",
+    )
+
+
+def _record_quality_type_problem(exc: ValidationError, action: Any) -> tuple[str, str, str]:
+    """The typed refusal for a `quality` that is not text, or empty strings.
+
+    Confined to a fault on `quality` alone for the reason the size twin is: any
+    other malformed field belongs to the executor's own validation error.
+    """
+    faulted = exc.errors()
+    if not faulted or any(not err["loc"] or err["loc"][0] != "quality" for err in faulted):
+        return "", "", ""
+    if str(action or "").strip().lower() != "record_start":
+        return "", "", ""
+    shown = _shown_size_value(faulted[0].get("input"))
+    return (
+        "quality",
+        "value",
+        f"'quality' for 'record_start' must be 'standard' or 'high' (got {shown}). Omit it "
+        "for the default clip. Nothing was started.",
+    )
+
+
+def _record_quality_result(tool_call_id: str, problem: tuple[str, str, str]) -> ToolResult | None:
+    """The TYPED refusal for a `quality` the host could not honour, or ``None``.
+
+    ``reason`` is the host's own spelling (``record_quality``) so a transcript
+    reader and `_RECORD_ABSENT_REASONS` treat both producers alike.
+    """
+    param, why, sentence = problem
+    if not sentence:
+        return None
+    return _error(
+        tool_call_id,
+        "browser",
+        sentence,
+        details={
+            "error_code": "record_quality",
+            "reason": "record_quality",
+            "param": param,
+            "why": why,
+        },
+    )
+
+
 def _browser_args_problem(
     tool_call_id: str, action: str, params: BrowserParams
 ) -> ToolResult | None:
@@ -22790,7 +22888,9 @@ def _browser_args_problem(
         # refused above by `_validate_record_fields`; a size on them is never a
         # `record_size` fault.
         return None
-    return _record_size_refusal(tool_call_id, params)
+    return _record_size_refusal(tool_call_id, params) or _record_quality_result(
+        tool_call_id, _record_quality_problem(params)
+    )
 
 
 def _browser_record_size_refusal(args: dict[str, Any], offered: frozenset[str]) -> str | None:
@@ -22812,10 +22912,14 @@ def _browser_record_size_refusal(args: dict[str, Any], offered: frozenset[str]) 
         params = BrowserParams(**args)
     except ValidationError as exc:
         _param, _why, sentence = _record_size_type_problem(exc, args.get("action"))
+        if not sentence:
+            _param, _why, sentence = _record_quality_type_problem(exc, args.get("action"))
         return sentence or None
     if params.action.strip().lower() != "record_start":
         return None
     _param, _why, sentence = _record_size_problem(params)
+    if not sentence:
+        _param, _why, sentence = _record_quality_problem(params)
     return sentence or None
 
 
@@ -22834,6 +22938,14 @@ def _validate_record_fields(action: str, params: BrowserParams) -> str:
     """
     from local_operator import browser_files as _files
 
+    if action != "record_start" and params.quality is not None:
+        # The same house rule as the size: a field an action ignores is refused,
+        # because a caller that sent it to `record_stop` would believe it had
+        # changed how the clip is encoded.
+        return (
+            f"'quality' is only valid for 'record_start' (got it on '{action}'): the encoder "
+            "is fixed when the recording starts"
+        )
     if action not in _RECORD_ACTIONS:
         if params.width is not None or params.height is not None:
             # The same house rule `timeout_s`/`path` follow: a field an action
@@ -26415,7 +26527,19 @@ def _recording_landed(
     elif isinstance(raw_duration, float):
         duration_ms = raw_duration
     length = f"{duration_ms / 1000:.1f} s" if duration_ms is not None else "an unrecorded length"
-    stopped = " It auto-stopped at the time limit." if bool(result.get("auto_stopped")) else ""
+    high_facts, high_copy = _high_stop_facts(result)
+    if high_facts.get("stop_reason") == "max_bytes":
+        # The byte cap ENDS a high-quality clip gracefully: what was recorded is
+        # a complete, playable file, unlike the default engine, which discards
+        # an over-cap clip. Said so, because "auto-stopped at the time limit"
+        # would send the agent to lengthen `timeout_s` when the fix is a shorter
+        # or smaller clip.
+        stopped = (
+            " It hit the size limit and was finished early: the file is complete up to "
+            "that point, shorter than the time asked for."
+        )
+    else:
+        stopped = " It auto-stopped at the time limit." if bool(result.get("auto_stopped")) else ""
     # Said in the RECEIPT, not only in the docstring: after a restart this call
     # checked the file's shape and size, not that it is the destination the user
     # approved, and the model must know which guarantee it actually has
@@ -26424,11 +26548,117 @@ def _recording_landed(
     return _text(
         tool_call_id,
         "browser",
-        f"Recording saved to {target} ({size} bytes, {length}).{stopped}{unverified} "
-        "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; it is not "
-        "expected to play in Chrome's <video> (not tested).",
-        details={"path": str(target), "bytes": size},
+        f"Recording saved to {target} ({size} bytes, {length}).{stopped}{unverified}"
+        f"{high_copy} {_H264_CLIP_NOTE if high_facts else _AV1_CLIP_NOTE}",
+        details={"path": str(target), "bytes": size, **high_facts},
     )
+
+
+#: What a clip IS, said in the receipt so the agent does not promise playback it
+#: cannot back. The default clip is AV1 and the QuickTime claim is the one
+#: decoded in the desktop PR's real-path run; the H.264 claim is the Chromium
+#: `<video>` decode and seek check the desktop PR ran on its high-quality clips
+#: (1080p and 4K played, 0 dropped frames) and the same run's AV1 clips, which
+#: Chromium refused (DEMUXER_ERROR_NO_SUPPORTED_STREAMS). Both were macOS arm64
+#: only, so neither sentence claims another player or platform.
+_AV1_CLIP_NOTE = (
+    "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; Chromium's <video> "
+    "could not play it in testing."
+)
+_H264_CLIP_NOTE = (
+    "H.264 MP4: it played in Chromium's <video> and macOS AVFoundation in testing "
+    "(other players not tested)."
+)
+
+
+def _whole(result: dict[str, Any], key: str) -> int | None:
+    """A non-negative whole number from a host result, or ``None`` (bool is not one).
+
+    Total on purpose: this runs after the clip is on disk, so an exception here
+    would lose the receipt of a saved file. ``float(huge_int)`` raises
+    ``OverflowError`` and ``int(nan)`` raises ``ValueError``, so non-finite and
+    out-of-range values are dropped before either conversion.
+    """
+    value = result.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number) or number < 0 or number != int(number):
+        return None
+    return int(value)
+
+
+def _number(result: dict[str, Any], key: str) -> float | None:
+    """A finite non-negative number from a host result, or ``None``."""
+    value = result.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def _high_start_facts(result: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """``(details, copy)`` for what a high-quality start reports about its clip.
+
+    Each field is taken only when it has the expected shape: the host is not the
+    judge of its own result, and an unreadable field is left out rather than
+    guessed. The copy is a fragment that follows "high quality".
+    """
+    facts: dict[str, Any] = {"quality": "high", "codec": "h264"}
+    parts: list[str] = []
+    encoder = result.get("encoder")
+    if encoder in ("hardware", "software"):
+        facts["encoder"] = encoder
+        parts.append(f"{encoder} encoder")
+    width, height = _whole(result, "width"), _whole(result, "height")
+    if width and height:
+        facts.update(width=width, height=height)
+        parts.append(f"{width}x{height}")
+    fps = _whole(result, "fps")
+    if fps:
+        facts["fps"] = fps
+        parts.append(f"up to {fps} fps")
+    bitrate = _whole(result, "bitrate_bps")
+    if bitrate:
+        facts["bitrate_bps"] = bitrate
+        parts.append(f"target {bitrate / 1_000_000:g} Mbps")
+    return facts, (", " + ", ".join(parts)) if parts else ""
+
+
+def _high_stop_facts(result: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """``(details, copy)`` for what a high-quality STOP reports, or empty for any other clip."""
+    if result.get("quality") != "high" and result.get("codec") != "h264":
+        return {}, ""
+    facts: dict[str, Any] = {"quality": "high"}
+    parts: list[str] = []
+    encoder = result.get("encoder")
+    if encoder in ("hardware", "software"):
+        facts["encoder"] = encoder
+        parts.append(f"{encoder} encoder")
+    frames = _whole(result, "frames")
+    if frames is not None:
+        facts["frames"] = frames
+        parts.append(f"{frames} frames")
+    measured = _number(result, "measured_fps")
+    if measured is not None:
+        facts["measured_fps"] = measured
+        parts.append(f"{measured:.1f} fps measured")
+    kbps = _number(result, "avg_bitrate_kbps")
+    if kbps is not None:
+        facts["avg_bitrate_kbps"] = kbps
+        parts.append(f"{kbps:.0f} kbps average")
+    reason = result.get("stop_reason")
+    if reason in ("stop", "max_duration", "max_bytes"):
+        facts["stop_reason"] = reason
+    return facts, (" High quality: " + ", ".join(parts) + ".") if parts else ""
 
 
 def _record_echo_side(result: dict[str, Any], key: str) -> int | None:
@@ -26442,7 +26672,13 @@ def _record_echo_side(result: dict[str, Any], key: str) -> int | None:
     value = result.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if float(value) != int(value):
+    # Total, like `_whole`: a non-finite or out-of-range echo must read as a
+    # mismatch (the typed `record_size_mismatch`), not raise with the clip live.
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number) or number != int(number):
         return None
     return int(value)
 
@@ -26465,6 +26701,7 @@ async def _browser_record(
     verifies it here rather than trusting the host's report.
     """
     from local_operator import browser_files as files
+    from local_operator.browser_bridge.protocol import RECORD_QUALITY_CAPABILITY
 
     # No size check here: both dispatcher entries (`execute_browser`, and the
     # direct `_execute_browser`) refuse a bad size before this lane runs, so a
@@ -26477,6 +26714,19 @@ async def _browser_record(
         # resolved or any wire call is made: a pre-feature app must produce the
         # typed refusal, not a dial that times out on an unknown method.
         return problem
+    high = action == "record_start" and params.quality == "high"
+    if high:
+        # `record_quality` is a CAPABILITY, not a wire method, for the reason
+        # `record_size` is: a host that lacks it ignores the field and records the
+        # default AV1 clip while reporting success. Checked before the approval
+        # path is resolved or remembered and before any wire call, so an old app
+        # starts nothing. NOT before the prompt: the host client this needs does
+        # not exist at plan time, so the user has already approved the row.
+        problem = _capability_problem(
+            tool_call_id, RECORD_QUALITY_CAPABILITY, client, surface=state.surface_id
+        )
+        if problem is not None:
+            return problem
     sized = params.width is not None and params.height is not None
     if sized:
         # `record_size` is a CAPABILITY, not a wire method: a host that
@@ -26516,6 +26766,11 @@ async def _browser_record(
         wire.update(path=str(target), max_duration_s=duration, max_bytes=cap)
         if sized:
             wire.update(width=params.width, height=params.height)
+        if high:
+            # Sent only for `high`: an absent `quality` keeps a default start
+            # byte-identical to the wire every host already understands, and
+            # `standard` is the same request as absent.
+            wire["quality"] = "high"
         result, problem = await _bridge_call(
             tool_call_id, action, wire, surface=state.surface_id, client=client
         )
@@ -26545,6 +26800,36 @@ async def _browser_record(
         # which is correct: the host replaces a different owner's recording, and
         # a same-owner second start is refused before this line.
         _APPROVED_RECORDINGS[state.surface_id] = str(target)
+        if high and result.get("codec") != "h264":
+            # The capability file can be one app-swap stale, and a host without
+            # `quality` ignores the field and records the default AV1 clip. The
+            # echoed codec is the only evidence the clip is the sharper one that
+            # was asked for, so anything but "h264" is a FAILED start. The
+            # encoder is running, so the approval is kept (the size echo below
+            # does the same) and the caller is told how to save it.
+            codec = result.get("codec")
+            running = f"{codec} " if isinstance(codec, str) and codec else "an unreported "
+            return _error(
+                tool_call_id,
+                "browser",
+                f"the clip is NOT high quality: the desktop app started it with {running}"
+                "codec, not H.264. A build without high-quality recording ignores 'quality' "
+                "and records the default AV1 clip while reporting success. The approved "
+                f"destination {target} is kept, so 'record_stop' saves this clip; stop it and "
+                "update Local Operator before retrying for a high-quality one.",
+                details={
+                    "target": str(target),
+                    # Distinct from `record_quality`: that reason is in
+                    # `_RECORD_ABSENT_REASONS` (a refused start proves nothing is
+                    # recording), while this one proves the opposite and must
+                    # leave the clip stoppable.
+                    "error_code": "record_quality_mismatch",
+                    "reason": "record_quality_mismatch",
+                    "param": "quality",
+                    "why": "not_applied",
+                    "requested_quality": "high",
+                },
+            )
         if sized:
             # The capability file can be one app-swap stale, and an old host
             # answers a SIZED start by silently recording at its default size
@@ -26586,13 +26871,23 @@ async def _browser_record(
         }
         if sized:
             details.update(width=params.width, height=params.height)
+        if high:
+            facts, summary = _high_start_facts(result)
+            details.update(facts)
+            return _text(
+                tool_call_id,
+                "browser",
+                f"Recording started: {target} (max {duration:g} s, up to "
+                f"{cap // (1024 * 1024)} MiB{at_size}; high quality{summary}). Stop it with "
+                f"'record_stop' to save the file. {_H264_CLIP_NOTE}",
+                details=details,
+            )
         return _text(
             tool_call_id,
             "browser",
             f"Recording started: {target} (max {duration:g} s, up to "
             f"{cap // (1024 * 1024)} MiB{at_size}). Stop it with 'record_stop' to save the file. "
-            "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; it is not "
-            "expected to play in Chrome's <video> (not tested).",
+            f"{_AV1_CLIP_NOTE}",
             # `target`, not `path`: a started recording has not written anything
             # yet, and `details["path"]` is what marks a browser result as a
             # produced file (session_files.scan records it as an artifact). A
@@ -27975,12 +28270,16 @@ async def execute_browser(
         # not tell "nothing started" from any other bad argument.
         size_refusal = _record_size_result(
             tool_call_id, _record_size_type_problem(exc, args.get("action"))
+        ) or _record_quality_result(
+            tool_call_id, _record_quality_type_problem(exc, args.get("action"))
         )
         if size_refusal is not None:
             return size_refusal
         early = None  # the established path below names the malformed field
     if early is not None and early.action.strip().lower() == "record_start":
-        size_refusal = _record_size_refusal(tool_call_id, early)
+        size_refusal = _record_size_refusal(tool_call_id, early) or _record_quality_result(
+            tool_call_id, _record_quality_problem(early)
+        )
         if size_refusal is not None:
             return size_refusal
     state = _browser_state(context)

@@ -844,8 +844,13 @@ async def run_screening_cycle(
     ttl: float = 120.0,
     accepted_capture: "AcceptedCapture | None" = None,
     status_fetcher: "Callable[[], Awaitable[Any]] | None" = None,
+    batch: bool = False,
 ) -> Any:
     """The SHIPPED THIN production composition (R6/Q3).
+
+    ``batch=True`` screens EVERY item in one model call and returns a list of
+    results in item order (``None`` when the account turn is busy); the
+    default screens the cursor's one target, exactly as before.
 
     accepted-status/config-default PUBLISHER -> durable account cycle ->
     lazy production factory -> PUBLIC screening core, as ONE ordinary
@@ -1058,6 +1063,40 @@ async def run_screening_cycle(
         provider=selection.provider,
     )
     cycle = AccountScreeningCycle(store=store, owner=owner, holder=holder, ttl=ttl)
+
+    if batch:
+        from local_operator.team_bridge.screening import screen_batch_async
+
+        def _batch_hop(hop: Any) -> Any:
+            # The guard binds the message that CARRIES the call: the bound
+            # job's, read when the hop is built (after binding), so a cache
+            # hit that drops out of the batch can never be the carrier.
+            bound = chain_runner.bound_job
+            return make_screening_runner(
+                config_dir=config_dir,
+                store=store,
+                owner=owner,
+                message_id=bound.message_id if bound is not None else "",
+                auth_store=auth_store,
+                settings=settings,
+                selection=hop,
+                reply_messages=len(items),
+            )
+
+        chain_runner = ScreenChainRunner(chain, _batch_hop)
+
+        async def _screen_all(_target: "Mapping[str, Any]") -> Any:
+            return await screen_batch_async(
+                owner,
+                items,
+                config_dir=config_dir,
+                policy=cast("ScreeningPolicy", policy),
+                runner=chain_runner,
+            )
+
+        # ONE turn, ONE call: the cycle's single-target selection only picks
+        # the cursor's sender here; the batch screens every item in the wake.
+        return await cycle.run_once(items, _screen_all)
 
     async def _screen(item: "Mapping[str, Any]") -> Any:
         message_block = item.get("message")
