@@ -80,7 +80,18 @@ MAX_GOAL_REJUDGES = 3
 
 #: The continuation turn's text, split so the recogniser below can match the
 #: FIXED halves around an arbitrary goal without a regex over user text.
-GOAL_CONTINUATION_HEAD = "Continue working toward this goal:\n\n"
+#: The AUTOMATED marker opens the head because of the 2026-11-04 incident: after
+#: an unattended run deleted the state root and was told to stop, two goal
+#: continuations arrived and the agent read them as a person telling it to carry
+#: on. The marker says what the row is and that a stop or hold still stands.
+GOAL_CONTINUATION_MARKER = (
+    "[Automated goal check — not a message from the user. A stop or hold the user "
+    "gave still applies.]\n\n"
+)
+#: The head every row persisted before the marker carried. Still RECOGNISED, so
+#: an old transcript's continuation rows never repaint as the operator's words.
+LEGACY_GOAL_CONTINUATION_HEAD = "Continue working toward this goal:\n\n"
+GOAL_CONTINUATION_HEAD = GOAL_CONTINUATION_MARKER + LEGACY_GOAL_CONTINUATION_HEAD
 
 GOAL_CONTINUATION_TAIL = (
     "\n\nMake concrete progress with the tools available, then state plainly "
@@ -193,7 +204,11 @@ def is_goal_continuation_instruction(text: str) -> bool:
     documents, and vanishingly unlikely.
     """
     stripped = text.strip()
-    return stripped.startswith(GOAL_CONTINUATION_HEAD) and stripped.endswith(GOAL_CONTINUATION_TAIL)
+    if not stripped.endswith(GOAL_CONTINUATION_TAIL):
+        return False
+    return stripped.startswith(GOAL_CONTINUATION_HEAD) or stripped.startswith(
+        LEGACY_GOAL_CONTINUATION_HEAD
+    )
 
 
 def _never() -> bool:
