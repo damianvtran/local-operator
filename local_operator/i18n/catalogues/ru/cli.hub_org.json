@@ -8,5 +8,8 @@
   "cli.hub_org.plan": "{count, plural, one {# элемент} few {# элемента} many {# элементов} other {# элемента}} для pull, {conflicts, plural, one {# несвязанная локальная копия} few {# несвязанные локальные копии} many {# несвязанных локальных копий} other {# несвязанной локальной копии}}; запустите повторно с --yes, чтобы применить.",
   "cli.hub_org.adopted_heading": "Локальные копии, принятые под управление:",
   "cli.hub_org.last_enrol": "Последняя автосинхронизация: {at}, {pulled, plural, one {получен # элемент} few {получено # элемента} many {получено # элементов} other {получено # элемента}}",
-  "cli.hub_org.list_failed": "Не удалось получить список элементов {kind} организации: {cause}"
+  "cli.hub_org.list_failed": "Не удалось получить список элементов {kind} организации: {cause}",
+  "cli.hub_org.ineligible_signed_out": "Каталоги организаций — функция Radient Team; вы не вошли в Radient (lop login radient).",
+  "cli.hub_org.unknown_org": "Ни одна из ваших организаций с тарифом Team не соответствует «{ref}»; укажите --org с одной из них:",
+  "cli.hub_org.plan_empty": "Всё уже связано; делать pull нечего."
 }

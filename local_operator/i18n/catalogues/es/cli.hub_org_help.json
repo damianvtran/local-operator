@@ -2,7 +2,7 @@
   "cli.hub_org_help.org": "Agentes, equipos y habilidades compartidos de tu organización (Radient Team)",
   "cli.hub_org_help.list": "Listar el catálogo de la organización y el estado local de cada elemento",
   "cli.hub_org_help.pull": "Hacer pull del catálogo de la organización y seguir suscrito a sus actualizaciones",
-  "cli.hub_org_help.org_flag": "ID de tenant de la organización (por defecto, tu única organización apta)",
+  "cli.hub_org_help.org_flag": "Nombre de la organización, prefijo de nombre inequívoco o ID de tenant (por defecto, tu única organización apta)",
   "cli.hub_org_help.kind": "Solo este tipo (repetible)",
   "cli.hub_org_help.name": "Solo este elemento: ID del hub, nombre o prefijo de nombre inequívoco (repetible)",
   "cli.hub_org_help.json": "Emitir JSON legible por máquina",

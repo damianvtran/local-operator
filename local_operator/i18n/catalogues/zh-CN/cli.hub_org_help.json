@@ -2,7 +2,7 @@
   "cli.hub_org_help.org": "你所在组织共享的智能体、团队和技能（Radient Team）",
   "cli.hub_org_help.list": "列出组织目录及每项在本地的状态",
   "cli.hub_org_help.pull": "pull组织目录并持续订阅其更新",
-  "cli.hub_org_help.org_flag": "组织租户ID（默认为你唯一符合条件的组织）",
+  "cli.hub_org_help.org_flag": "组织名称、唯一的名称前缀或租户ID（默认为你唯一符合条件的组织）",
   "cli.hub_org_help.kind": "仅限此类型（可重复）",
   "cli.hub_org_help.name": "仅限此项：hub ID、名称或唯一的名称前缀（可重复）",
   "cli.hub_org_help.json": "输出机器可读的JSON",

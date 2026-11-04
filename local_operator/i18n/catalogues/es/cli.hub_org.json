@@ -8,5 +8,8 @@
   "cli.hub_org.plan": "{count, plural, one {# elemento} many {# de elementos} other {# elementos}} por hacer pull, {conflicts, plural, one {# copia local sin vincular} many {# de copias locales sin vincular} other {# copias locales sin vincular}}; vuelve a ejecutar con --yes para aplicar.",
   "cli.hub_org.adopted_heading": "Copias locales adoptadas:",
   "cli.hub_org.last_enrol": "Última sincronización automática: {at}, {pulled, plural, one {pull de # elemento} many {pull de # de elementos} other {pull de # elementos}}",
-  "cli.hub_org.list_failed": "No se pudieron listar los elementos {kind} de la organización: {cause}"
+  "cli.hub_org.list_failed": "No se pudieron listar los elementos {kind} de la organización: {cause}",
+  "cli.hub_org.ineligible_signed_out": "Los catálogos de organización son una función de Radient Team; no has iniciado sesión en Radient (lop login radient).",
+  "cli.hub_org.unknown_org": "Ninguna de tus organizaciones con plan Team coincide con “{ref}”; pasa --org con una de estas:",
+  "cli.hub_org.plan_empty": "Todo ya está vinculado; no hay nada por hacer pull."
 }

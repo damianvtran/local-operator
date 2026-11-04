@@ -2,7 +2,7 @@
   "cli.hub_org_help.org": "Tác nhân, nhóm và kỹ năng dùng chung của tổ chức bạn (Radient Team)",
   "cli.hub_org_help.list": "Liệt kê danh mục của tổ chức và trạng thái cục bộ của từng mục",
   "cli.hub_org_help.pull": "Pull danh mục của tổ chức và tiếp tục đăng ký nhận cập nhật",
-  "cli.hub_org_help.org_flag": "Id tenant của tổ chức (mặc định là tổ chức đủ điều kiện duy nhất của bạn)",
+  "cli.hub_org_help.org_flag": "Tên tổ chức, tiền tố tên duy nhất hoặc id tenant (mặc định là tổ chức đủ điều kiện duy nhất của bạn)",
   "cli.hub_org_help.kind": "Chỉ loại này (có thể lặp lại)",
   "cli.hub_org_help.name": "Chỉ mục này: id hub, tên hoặc tiền tố tên duy nhất (có thể lặp lại)",
   "cli.hub_org_help.json": "Xuất JSON máy đọc được",

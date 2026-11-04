@@ -8,5 +8,8 @@
   "cli.hub_org.plan": "{count, plural, other {# mục}} cần pull, {conflicts, plural, other {# bản cục bộ chưa liên kết}}; chạy lại với --yes để áp dụng.",
   "cli.hub_org.adopted_heading": "Bản cục bộ đã đưa vào quản lý:",
   "cli.hub_org.last_enrol": "Lần đồng bộ tự động gần nhất: {at}, {pulled, plural, other {đã pull # mục}}",
-  "cli.hub_org.list_failed": "Không thể liệt kê các mục {kind} của tổ chức: {cause}"
+  "cli.hub_org.list_failed": "Không thể liệt kê các mục {kind} của tổ chức: {cause}",
+  "cli.hub_org.ineligible_signed_out": "Danh mục tổ chức là tính năng của Radient Team; bạn chưa đăng nhập Radient (lop login radient).",
+  "cli.hub_org.unknown_org": "Không có tổ chức dùng gói Team nào của bạn khớp với “{ref}”; truyền --org với một trong các tổ chức sau:",
+  "cli.hub_org.plan_empty": "Mọi mục đều đã được liên kết; không có gì cần pull."
 }

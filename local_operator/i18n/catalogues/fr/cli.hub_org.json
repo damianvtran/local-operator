@@ -8,5 +8,8 @@
   "cli.hub_org.plan": "{count, plural, one {# élément} many {# d’éléments} other {# éléments}} à récupérer, {conflicts, plural, one {# copie locale non liée} many {# de copies locales non liées} other {# copies locales non liées}} ; relancez avec --yes pour appliquer.",
   "cli.hub_org.adopted_heading": "Copies locales adoptées :",
   "cli.hub_org.last_enrol": "Dernière synchronisation automatique : {at}, {pulled, plural, one {# élément récupéré} many {# d’éléments récupérés} other {# éléments récupérés}}",
-  "cli.hub_org.list_failed": "Impossible de lister les éléments {kind} de l’organisation : {cause}"
+  "cli.hub_org.list_failed": "Impossible de lister les éléments {kind} de l’organisation : {cause}",
+  "cli.hub_org.ineligible_signed_out": "Les catalogues d’organisation sont une fonctionnalité Radient Team ; vous n’êtes pas connecté à Radient (lop login radient).",
+  "cli.hub_org.unknown_org": "Aucune de vos organisations au forfait Team ne correspond à « {ref} » ; passez --org avec l’une d’elles :",
+  "cli.hub_org.plan_empty": "Tout est déjà lié ; rien à récupérer."
 }

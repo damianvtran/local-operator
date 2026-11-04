@@ -2,7 +2,7 @@
   "cli.hub_org_help.org": "Agents, équipes et compétences partagés de votre organisation (Radient Team)",
   "cli.hub_org_help.list": "Lister le catalogue de l’organisation et l’état local de chaque élément",
   "cli.hub_org_help.pull": "Récupérer le catalogue de l’organisation et rester abonné à ses mises à jour",
-  "cli.hub_org_help.org_flag": "id de locataire de l’organisation (par défaut, votre seule organisation éligible)",
+  "cli.hub_org_help.org_flag": "Nom de l’organisation, préfixe de nom non ambigu ou id de locataire (par défaut, votre seule organisation éligible)",
   "cli.hub_org_help.kind": "Uniquement ce type (répétable)",
   "cli.hub_org_help.name": "Uniquement cet élément : id de hub, nom ou préfixe de nom non ambigu (répétable)",
   "cli.hub_org_help.json": "Émettre du JSON lisible par machine",
