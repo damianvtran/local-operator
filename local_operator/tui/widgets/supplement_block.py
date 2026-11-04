@@ -344,6 +344,12 @@ class SupplementBlock(TranscriptBlock):
         """
         if more_count <= 0:
             return []
+        if not self._more_paths():
+            # A count with no stored paths (unnamed sweep hits past the sweep's file bound,
+            # QA round 2 Q4): state it, but not as a clickable disclosure -- expanding it
+            # would open onto nothing. ``_more_line`` stays unset so no click lands here.
+            text = supplement_mod.more_text(more_count)
+            return [self._fit(self._line(text, style=self._muted_style()), body)]
         if not self._expanded:
             self._more_line = base_index
             text = supplement_mod.more_text(more_count)

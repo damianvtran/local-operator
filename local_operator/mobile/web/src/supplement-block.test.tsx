@@ -641,3 +641,21 @@ describe("deliverables written to disk (highlights contract)", () => {
 		revoked.mockRestore();
 	});
 });
+
+describe("an unlisted files_more count (QA round 2, Q4)", () => {
+	it("states the count as a plain line, never a disclosure that opens onto nothing", () => {
+		const { container } = render(
+			<SupplementBlock
+				beat={beat({
+					files: [file(), file({ path: "b.md", name: "b.md" }), file({ path: "c.md", name: "c.md" })],
+					filesMore: 2,
+					more: [],
+				})}
+				sessionId="s1"
+				jobLive={false}
+			/>,
+		);
+		expect(container.querySelector("[data-supplement-more-count]")?.textContent).toBe("2 more files");
+		expect(container.querySelector("[data-supplement-more]")).toBeNull();
+	});
+});

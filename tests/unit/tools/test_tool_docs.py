@@ -307,7 +307,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # costs +5, measured by this test's print on both LOP_ASK_NONBLOCKING arms.
     "ask": 1083,
     "ask_withdraw": 452,
-    "bash": 295,
+    # 295 -> 311 (highlights deliverables, #3392): the new ``deliver`` parameter's
+    # one-line doc ("Files to show under your answer.") -- re-measured via this
+    # test's own print; bash and eval are the only entries that moved, +16 each.
+    "bash": 311,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
     # claim lifecycle, and why "decide" is not an op. First measured at 572
     # tokens DELIBERATELY in the canonical (hermetic, tiktoken-exact) arm; every
@@ -426,7 +429,8 @@ MEASURED_TOKENS: dict[str, int] = {
     # The ordered-hunks and anchor-line descriptions were shortened without
     # changing their contract; this is the measured tool://edit cost (347 -> 326).
     "edit": 326,
-    "eval": 372,
+    # 372 -> 388 (#3392): the same ``deliver`` parameter line as bash, +16.
+    "eval": 388,
     #: Media wave-2 edit lane (2026-10-10): the source paragraph now names
     #: the by-reference input (``source_attachment``) and the edit rungs;
     #: +63 tokens over the 730 the slimming wave measured — re-measured

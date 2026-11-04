@@ -452,7 +452,15 @@ export const SupplementBlock = memo(function SupplementBlock({
 							sessionId={sessionId}
 						/>
 					))}
-					{moreCount > 0 && (
+					{moreCount > 0 && beat.more.length === 0 && (
+						/* A count with nothing stored to list (unnamed sweep hits past the
+						   sweep's file bound, QA round 2 Q4): a disclosure would open onto
+						   nothing, so the cut is stated as a plain, non-interactive line. */
+						<span className="text-meta text-ink-dim" data-supplement-more-count="">
+							{moreText(moreCount)}
+						</span>
+					)}
+					{moreCount > 0 && beat.more.length > 0 && (
 						/* The disclosure TOGGLES its words with the state, the desktop's
 						   grammar exactly (`N more files` ⇄ `Show fewer`, UI #971;
 						   UX round 1, U2): the chevron says the state, the label says

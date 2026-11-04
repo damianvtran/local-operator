@@ -328,7 +328,12 @@ def is_sensitive_for_supplements(
     raw = os.fspath(path)
     expanded = os.path.expanduser(raw)
     if not os.path.isabs(expanded):
-        expanded = os.path.join(cwd or os.getcwd(), expanded)
+        if not cwd:
+            # No process-cwd guess here (the cwd-omission census): a relative path with no
+            # caller cwd cannot be placed inside the scratchpad, so it gets no carve-out
+            # and is judged exactly as ``is_sensitive`` judges it.
+            return is_sensitive(path, cwd=cwd)
+        expanded = os.path.join(cwd, expanded)
     written = os.path.normpath(expanded)
     try:
         resolved = os.path.realpath(written)
