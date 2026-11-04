@@ -1,6 +1,6 @@
 {
-  "tui.update.checking": "正在检查更新…运行中的会话会继续工作",
-  "tui.update.updating": "正在更新到 v{version}…运行中的会话会继续工作",
-  "tui.update.restarting": "已更新到 v{version}；正在重启此终端。你的会话会继续运行。",
-  "tui.update.relaunch_when_idle": "已更新到 v{version}；请在本地工作空闲时重新启动。你的会话会继续运行。"
+  "tui.update.checking": "正在检查更新……运行中的会话会继续工作",
+  "tui.update.updating": "正在更新到v{version}……运行中的会话会继续工作",
+  "tui.update.restarting": "已更新到v{version}；正在重启此终端。你的会话会继续运行。",
+  "tui.update.relaunch_when_idle": "已更新到v{version}；请在本地工作空闲时重新启动。你的会话会继续运行。"
 }
