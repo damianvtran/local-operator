@@ -676,6 +676,21 @@ class MeshCredentialBroker:
                     f"on {self.self_device_name or self.self_device}; nothing was lent",
                 )
 
+        #     The same exclusion for an ACCOUNT-SCOPED DENIAL, on every holder kind
+        #     (#3427 QA round 2, Q-4). The deny names one account; the row choice
+        #     below is session-hashed, so without this about half of a borrower's
+        #     sessions landed on the denied row and were refused at mint although a
+        #     permitted row existed. Hiding its row here means it is neither picked
+        #     nor refreshed for this peer. It is NOT added to ``peer_excluded``: this
+        #     is the owner's own policy, not the holder's evidence, so "every row
+        #     hidden" still answers as the owner's ``no_local_credential`` path and a
+        #     denied-only pool stays refused by the mint guard. That guard (step 4,
+        #     ``serving_guard`` -> ``check_borrow``) is unchanged and remains the
+        #     backstop: an exclusion that misses a row still cannot lend its token.
+        denied_rows = self._account_denied_row_ids(by, key)
+        if denied_rows:
+            excluded_ids = tuple(sorted(set(excluded_ids) | denied_rows))
+
         # 2d. THE BORROWER'S RESTING ROWS (``PlacementState.cool_down``): rows the
         #     requester saw answer a usage limit, hidden from THIS resolve exactly as
         #     the derived-holder exclusion above hides rows — nothing on the owner is
@@ -715,6 +730,7 @@ class MeshCredentialBroker:
                     by=by,
                     excluded_ids=excluded_ids,
                     peer_excluded=peer_excluded,
+                    denied_excluded=tuple(sorted(denied_rows)),
                     anchor=anchor,
                     peer_demoted=peer_demoted,
                     policy=policy,
@@ -818,6 +834,7 @@ class MeshCredentialBroker:
             # with different permitted rows must never share one resolve.
             tuple(fields.get("excluded_ids", ())),
             tuple(fields.get("peer_excluded", ())),
+            tuple(fields.get("denied_excluded", ())),
             # The anchor and the peer's demotions change which row wins, so they
             # are part of the question too.
             fields.get("anchor"),
@@ -862,6 +879,7 @@ class MeshCredentialBroker:
         by: str,
         excluded_ids: tuple[int, ...] = (),
         peer_excluded: tuple[int, ...] = (),
+        denied_excluded: tuple[int, ...] = (),
         anchor: tuple[int, int] | None = None,
         peer_demoted: tuple[int, ...] = (),
         policy: str | None = None,
@@ -870,6 +888,8 @@ class MeshCredentialBroker:
 
         ``peer_excluded`` is the subset of ``excluded_ids`` the REQUESTER named (its
         resting rows). It changes what may win: see the guard after the resolve.
+        ``denied_excluded`` is the subset hidden because the requester is denied that
+        ACCOUNT (``grant`` step 2c); it narrows the same way.
         ``anchor`` / ``peer_demoted`` are the requester's affinity anchor and 5xx
         demotions, applied through ``lend_selection_context``.
         """
@@ -920,7 +940,7 @@ class MeshCredentialBroker:
         except Exception as exc:  # noqa: BLE001 — classified below, never propagated
             return self._classify_refresh_failure(exc, key)
         if (
-            peer_excluded
+            (peer_excluded or denied_excluded)
             and access is not None
             and int(getattr(access, "credential_id", 0) or 0) <= 0
         ):
@@ -933,6 +953,20 @@ class MeshCredentialBroker:
             # Under a peer exclusion only a stored row (id > 0) may win; anything
             # else reads as "nothing left", answered below.
             access = None
+        if access is None and denied_excluded:
+            stamps = set(self._row_stamps(provider))
+            if stamps and stamps <= set(denied_excluded):
+                # EVERY ROW THIS PROVIDER HAS IS AN ACCOUNT THE HOLDER IS DENIED. The
+                # answer the mint guard gave before the exclusion existed, and the
+                # one a denial is: ``not_a_holder``, not "nothing signed in" (which
+                # would send the borrower to a re-login that cannot help).
+                return BrokerError(
+                    code="not_a_holder",
+                    key=key,
+                    owner_device=self.self_device,
+                    owner_device_name=self.self_device_name,
+                    message=f"no login for {provider!r} on this device is shared with this device",
+                )
         if access is None and peer_excluded:
             # EVERY LENDABLE ROW WAS EXCLUDED BY THE HOLDER (QA round 1, Q3). Not
             # "nothing signed in": the rows exist and the holder saw them answer a
@@ -2220,6 +2254,32 @@ class MeshCredentialBroker:
             )
         except Exception:  # noqa: BLE001 — an unreadable store explains nothing
             return None
+
+    def _account_denied_row_ids(self, by: str, key: str) -> set[int]:
+        """Row ids of ``key``'s logins whose account ``by`` is denied. Metadata only.
+
+        Read from the store's credential-free inventory (no token is decrypted to
+        decide what to hide), matched on the same ``account_id`` the mint guard
+        compares. An unreadable store or consent document hides nothing: this only
+        narrows a lend, and the mint guard still refuses a denied account.
+        """
+        from local_operator.network.credentials import consent
+
+        accounts = consent.denied_accounts(self.network_id, self.self_device, by, key, self.root)
+        if not accounts:
+            return set()
+        from local_operator.providers.auth_store import AuthStore
+
+        # THE SAME DATABASE the resolve reads (``_auth_store_instance``), not a
+        # path re-derived from ``root``: an injected store or an ambient default
+        # would otherwise be inventoried from a different file than it selects from.
+        db_path = getattr(self._auth_store_instance(), "_db_path", None)
+        snapshot = AuthStore.native_oauth_inventory(Path(db_path)) if db_path else None
+        return {
+            int(row_id)
+            for provider, row_id, _marker, account, *_rest in snapshot or ()
+            if provider == key and account in accounts
+        }
 
     def _row_stamps(self, provider: str) -> dict[int, int]:
         """``{credential_id: updated_at}`` for a provider, to observe a refresh.
