@@ -19,6 +19,7 @@ one, and a reader grepping for a leaked key must not find a test.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -74,7 +75,8 @@ SECRET_CASES: list[tuple[str, str, str, str]] = [
         "aws-secret-console-label",
         f"Secret access key: {AWS_SECRET}",
         AWS_SECRET,
-        "aws-secret-access-key",
+        # The shared table's spaced-label rule already owns this spelling.
+        "credential-assignment",
     ),
     (
         "aws-secret-sdk-json",
@@ -188,7 +190,7 @@ def test_the_refusal_never_logs_the_value(caplog: pytest.LogCaptureFixture) -> N
     from local_operator.team_bridge.secret_guard import refuse_secret_in
 
     with caplog.at_level("DEBUG"):
-        refused = refuse_secret_in("dm", f"Secret access key: {AWS_SECRET}")
+        refused = refuse_secret_in("dm", f"SecretAccessKey: {AWS_SECRET}")
     assert refused is not None
     assert AWS_SECRET not in caplog.text
     assert "aws-secret-access-key" in caplog.text
@@ -245,6 +247,21 @@ def test_a_bodyless_403_is_the_edge_and_hostile_headers_are_dropped() -> None:
     refusal = _refusal(httpx.Response(403, headers={"server": "evil\x1b[31m" + "x" * 200}))
     assert refusal.code == "edge_blocked"
     assert refusal.details == {}
+
+
+def test_the_edge_sentence_never_coaches_a_retry_or_spells_a_trigger() -> None:
+    """Security review S-1 + n1: the firewall may be the last barrier for a
+    credential the local guard missed, so the sentence must not say what tripped
+    it or invite a rephrased resend, and must not quote a path itself (an agent
+    relaying it into a post would trip the same rule)."""
+
+    message = _refusal(httpx.Response(403, text=WAF_PAGE)).message
+    lowered = message.lower()
+    for coaching in ("try once more", "try again", "retry", "rephrase", "without them"):
+        assert coaching not in lowered, coaching
+    assert re.search(r"\.\./|~/|\.aws|/\S", message) is None
+    assert "Do not resend a credential" in message
+    assert "tell your user what you tried to send" in message
 
 
 def test_the_hubs_own_json_403_keeps_its_code() -> None:
@@ -369,3 +386,104 @@ async def test_the_same_rule_on_another_field_stays_dm_failed(tmp_path: Path) ->
     )
     assert outcome["code"] == "dm_failed"
     assert "field=origin_session_id rule=agent_required" in outcome["error"]
+
+
+# --- round 1 remediation ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"name": f"keys {AWS_KEY_ID}"},
+        {"topic": f"aws_secret_access_key = {AWS_SECRET}"},
+        {"members": [{"account_id": "acc_2", "display_label": f"token={GITHUB_TOKEN[4:]}"}]},
+    ],
+    ids=["name", "topic", "member-label"],
+)
+async def test_channel_create_free_text_is_scanned_before_any_request(
+    tmp_path: Path, fields: dict[str, Any]
+) -> None:
+    """Review m1/S-3: a room's name, topic and labels are shown to every member."""
+
+    client = StrictClient()
+    outcome = await execute_bridge(
+        _admitted(client, tmp_path), {"op": "channel_create", "kind": "group", **fields}
+    )
+    assert outcome["ok"] is False and outcome["code"] == SECRET_DETECTED_CODE
+    assert client.touched == [] and list(tmp_path.iterdir()) == []
+    for secret in (AWS_KEY_ID, AWS_SECRET, GITHUB_TOKEN[4:]):
+        assert secret not in json.dumps(outcome)
+
+
+@pytest.mark.asyncio
+async def test_a_benign_channel_create_still_goes_out(tmp_path: Path) -> None:
+    client = RecordingClient()
+    outcome = await execute_bridge(
+        _admitted(client, tmp_path),
+        {"op": "channel_create", "kind": "group", "name": "launch", "topic": "password reset UX"},
+    )
+    assert outcome["ok"] is True
+    assert [c["method"] for c in client.calls] == ["create_conversation"]
+
+
+def test_the_aws_configure_prompt_form_is_caught() -> None:
+    """Review m2: ``aws configure`` puts a bracketed default before the colon."""
+
+    for default in ("[None]", "[****************" + AWS_SECRET[-4:] + "]"):
+        assert credential_classes(f"AWS Secret Access Key {default}: {AWS_SECRET}") == [
+            "aws-secret-access-key"
+        ]
+
+
+@pytest.mark.parametrize(
+    "body", ["tokens: 1234567890", "total tokens: 9876543210", "used tokens= 123456789"]
+)
+def test_an_all_digit_count_is_not_a_credential(body: str) -> None:
+    """Review m3: a usage count under a plural ``tokens`` label is prose."""
+
+    assert credential_classes(body) == []
+
+
+def test_one_aws_secret_line_names_one_class() -> None:
+    """Review n2: an ``AWS_SECRET_ACCESS_KEY=`` line is one credential."""
+
+    assert credential_classes(f"AWS_SECRET_ACCESS_KEY={AWS_SECRET}") == ["credential-assignment"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [f"key {AWS_KEY_ID}", "an ordinary hello"])
+async def test_a_scanner_fault_refuses_and_never_fails_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+) -> None:
+    """Review N-1: a broken pattern table holds the message back, typed — for a
+    secret AND a benign body, since the guard cannot tell them apart while broken."""
+
+    from local_operator.team_bridge import secret_guard
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError(f"scanner exploded on {body}")
+
+    monkeypatch.setattr(secret_guard, "scrub_shapes_with_hits", broken)
+    client = StrictClient()
+    outcome = await execute_bridge(
+        _admitted(client, tmp_path),
+        {"op": "channel_post", "channel_id": "bcv_abcd1234", "body": body},
+    )
+    assert outcome["ok"] is False
+    assert outcome["code"] == "secret_scan_unavailable"
+    assert "Nothing was sent" in outcome["error"]
+    assert body not in json.dumps(outcome)
+    assert client.touched == [] and list(tmp_path.iterdir()) == []
+
+
+def test_the_vault_sentence_never_states_the_handoff_as_working() -> None:
+    """Review S-4: the Vault path is named as intended, and as not available yet."""
+
+    from local_operator.team_bridge.secret_guard import refuse_secret_in
+
+    refused = refuse_secret_in("dm", f"key {AWS_KEY_ID}")
+    assert refused is not None
+    assert "not available to agents yet" in refused["error"]
+    assert "The way to share one is" not in refused["error"]
+    assert refused["error"].count("Vault") == VAULT_HANDOFF_SENTENCE.count("Vault")

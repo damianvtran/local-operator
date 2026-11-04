@@ -1779,6 +1779,20 @@ def _validate_reply_destination(
     return None
 
 
+def _channel_create_free_text(args: Mapping[str, Any]) -> str:
+    """Every free-text field ``channel_create`` sends, one per line, for the scan.
+
+    One line each so a label-plus-value shape cannot be assembled ACROSS two
+    fields (a ``name`` ending in a credential word beside a ``topic`` value).
+    """
+
+    parts = [args.get("name"), args.get("topic")]
+    members = args.get("members")
+    if isinstance(members, list):
+        parts.extend(m.get("display_label") for m in members if isinstance(m, Mapping))
+    return "\n".join(part for part in parts if isinstance(part, str) and part)
+
+
 async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[str, Any]:
     """Run one tool op. Returns a JSON-ish dict; the AgentTool wrapper turns it
     into a ``ToolResult`` (and the honest error shape into ``is_error``)."""
@@ -1845,6 +1859,15 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     message_field = MESSAGE_FIELD_BY_OP.get(op)
     if message_field is not None:
         refused = secret_guard.refuse_secret_in(op, args.get(message_field))
+        if refused is not None:
+            return refused
+    if op == "channel_create":
+        # A room's name, topic and member labels are free text the hub stores
+        # and shows to every member on every device — the same exposure as a
+        # post (review m1/S-3). Raw args, before the params model, so the scan
+        # sees exactly what would be sent; non-string shapes are left for the
+        # model's own typed refusal.
+        refused = secret_guard.refuse_secret_in(op, _channel_create_free_text(args))
         if refused is not None:
             return refused
     if op == "channel_post":

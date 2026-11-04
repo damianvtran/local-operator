@@ -1249,15 +1249,28 @@ def files_capability(payload: Any) -> dict[str, Any] | None:
 #: gateway failure, not a block, and an uncoded 404 is the outdated-hub signal
 #: (see ``owned_agent_invitations``) and must stay ``bridge_error``.
 EDGE_BLOCKED_CODE = "edge_blocked"
+#:
+#: WHAT THE SENTENCE MUST NOT SAY (security review S-1). It never tells the agent
+#: what tripped the firewall or to retry without it: in the incident class the
+#: block fires BECAUSE the message quoted a credentials file, so for a credential
+#: the local guard missed, the firewall is the last barrier, and "remove the path
+#: and try again" is instructions for getting round it. Nor does it spell a
+#: trigger (a parent-directory or home-directory path): an agent that relays this
+#: sentence into a post would trip the same rule (review n1). The decision goes
+#: back to the human. A test pins both.
 EDGE_BLOCKED_SENTENCE = (  # i18n: ignore model-facing refusal sentence, like the §6.5 class
     "The edge firewall in front of Radient blocked this request before it reached "
-    "Radient, so nothing was posted or changed. Content that looks like an attack "
-    "signature can trigger it — for example file paths such as ../ or ~/.aws/… — so "
-    "rephrase without them and try once more."
+    "Radient, so nothing was posted or changed. Do not resend a credential, a file's "
+    "contents, or the same text in any form. If this was ordinary text, tell your "
+    "user what you tried to send and let them decide."
 )
 
 #: An edge header value is untrusted text that lands in a log and a tool
-#: result: one bounded token of a conservative alphabet, or nothing.
+#: result: one bounded token of a conservative alphabet, or nothing. Whatever
+#: the edge (or an intermediary) puts there still reaches the model, up to 64
+#: characters of that alphabet — accepted (review N-2): it is the response's,
+#: never the request's, so it can disclose nothing the caller sent, and it is
+#: the evidence of WHICH layer refused.
 _EDGE_HEADER_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ./;=+_-]{0,63}")
 
 
