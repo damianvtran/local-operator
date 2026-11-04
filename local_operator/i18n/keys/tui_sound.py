@@ -18,10 +18,6 @@ def added_selected(*, name: str, id: str, seconds: str) -> Msg:
     return Msg("tui.sound.added_selected", {"name": name, "id": id, "seconds": seconds})
 
 
-def default() -> Msg:
-    return Msg("tui.sound.default", {})
-
-
 def disabled() -> Msg:
     return Msg("tui.sound.disabled", {})
 
@@ -34,12 +30,20 @@ def id_help() -> Msg:
     return Msg("tui.sound.id_help", {})
 
 
+def list_hint() -> Msg:
+    return Msg("tui.sound.list_hint", {})
+
+
 def list_title() -> Msg:
     return Msg("tui.sound.list_title", {})
 
 
 def list_yours() -> Msg:
     return Msg("tui.sound.list_yours", {})
+
+
+def list_yours_hint() -> Msg:
+    return Msg("tui.sound.list_yours_hint", {})
 
 
 def not_found(*, id: str) -> Msg:
@@ -92,6 +96,10 @@ def renamed(*, id: str, name: str) -> Msg:
 
 def save_failed(*, reason: str) -> Msg:
     return Msg("tui.sound.save_failed", {"reason": reason})
+
+
+def section_description() -> Msg:
+    return Msg("tui.sound.section_description", {})
 
 
 def selected(*, name: str) -> Msg:

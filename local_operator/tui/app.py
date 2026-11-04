@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import inspect
 import logging
 import os
@@ -139,6 +140,7 @@ from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
 from local_operator.i18n.keys import tui_setup_cues as _setup_keys
+from local_operator.i18n.keys import tui_small as _small_keys
 from local_operator.i18n.keys import tui_sound as _sound_keys
 from local_operator.i18n.keys import tui_status_command as _sc_keys
 from local_operator.i18n.keys import tui_tags as _tag_keys
@@ -530,9 +532,7 @@ from local_operator.tui.widgets.settings_view import (
     SettingsView,
     SettingsViewDismissed,
 )
-from local_operator.tui.widgets.status_line import (
-    AGENT_PROFILE_CELLS,
-)
+from local_operator.tui.widgets.status_line import AGENT_PROFILE_CELLS
 from local_operator.tui.widgets.status_line import (
     FORK_PENDING_TEXT as _FORK_PENDING_TEXT,
 )
@@ -21144,6 +21144,53 @@ class OperatorApp(App[None]):
             # ``/agent`` — Tab completes profiles, the picker shows the verb.
             editor.set_name_choices(frozenset(c.name.lower() for c in self._agent_choices()))
 
+    def _sound_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
+        """Rows for ``/sound <…>``: the verbs, then ids for the id-taking verbs.
+
+        UX round 1, U2: custom ids are hashed slugs (``custom-doorbell-fc7204``)
+        that nobody should have to type, and ``/theme `` already lists its
+        values. ``use`` and ``preview`` offer every sound (the registry's
+        choices, so the list matches the ``/settings`` row); ``rename`` and
+        ``remove`` offer only the user's own, the only ids they accept. Rows are
+        ``<verb> <id>`` compounds for the reason ``_project_argument_choices``
+        gives: the matcher compares the whole argument.
+        """
+        from local_operator.tui.widgets.command_picker import slash_argument
+
+        argument = slash_argument(
+            editor.text,
+            editor._argument_commands,
+            editor._caret_offset(),
+            editor._command_names,
+        )
+        if argument is None:
+            return []
+        first, space, _rest = argument.partition(" ")
+        if not space:
+            return [ArgumentChoice(word, help_text) for word, help_text in sound_subcommand_rows()]
+        verb = first.casefold()
+        if verb not in ("use", "preview", "rename", "remove"):
+            return []
+        try:
+            from local_operator import settings_io
+            from local_operator.notifications import custom_sounds, sound
+
+            selected = sound.configured().sound_id
+            choices = settings_io.BY_KEY["notifications.sound.id"].resolved_choices
+            if verb in ("rename", "remove"):
+                own = {row.id for row in custom_sounds.list_sounds()}
+                choices = tuple(choice for choice in choices if choice.value in own)
+        except Exception:  # noqa: BLE001 — a picker list never crashes the app
+            return []
+        return [
+            ArgumentChoice(
+                f"{verb} {choice.value}",
+                str(choice.description),
+                detail="← current" if choice.value == selected else "",
+            )
+            for choice in choices
+        ]
+
     def _project_argument_choices(self, editor: Any) -> list[ArgumentChoice]:
         """Rows for the ``/project <…>`` list: the reserved verbs, then names.
 
@@ -40174,7 +40221,17 @@ class OperatorApp(App[None]):
 
         directory = config_dir()
         sections = [
-            section
+            (
+                # The shared section description names `lop sound preview`,
+                # right for the desktop and `lop config` but a shell detour
+                # inside the TUI (design round 1, D2): the palette shows the
+                # TUI's own sentence for this one section.
+                dataclasses.replace(
+                    section, description=_t_sound(_sound_keys.section_description())
+                )
+                if section.name == "notification_sound"
+                else section
+            )
             for section in settings_io.SECTIONS
             if bridge_availability.section_visible(section.name, directory)
         ]
@@ -40467,6 +40524,9 @@ class OperatorApp(App[None]):
         if view is None:
             return False
         self._settings_view = None
+        # Leaving the page ends any sound audition it started (UX round 1, U1),
+        # by every route that tears the page down, not only its own `esc`.
+        self._stop_sound_preview()
         # A theme PREVIEW is applied to the running app and never stored
         # (#440 §3), so it has to be undone before the page that owns it goes
         # away. Done here rather than only in the page's own `esc` handler
@@ -42079,6 +42139,12 @@ class OperatorApp(App[None]):
         collapses the list by design.
         """
         self._sound_preview_request = (sound_id, volume, browsing)
+        # The sound still playing is for a row the cursor has LEFT (or a value
+        # just replaced by a commit), so it stops now, not when the debounce
+        # fires: at most one audition is ever audible (UX round 1, U1).
+        from local_operator.notifications import sound
+
+        sound.stop_preview()
         pending = getattr(self, "_sound_preview_timer", None)
         if pending is not None:
             pending.stop()
@@ -42156,6 +42222,12 @@ class OperatorApp(App[None]):
         """
         from local_operator.notifications import sound
 
+        if key == "notifications.sound.enabled" and value is False:
+            # "Off" must silence what is already sounding AND what is queued
+            # (review round 1, m1): a volume commit audition still inside its
+            # window would otherwise play after the user just turned sound off.
+            self._stop_sound_preview()
+            return
         if key == "notifications.sound.id":
             if value:
                 self._schedule_sound_preview(str(value))
@@ -42166,6 +42238,26 @@ class OperatorApp(App[None]):
                 self._schedule_sound_preview(current, float(value))
         elif key == "notifications.sound.enabled" and value is True:
             self._schedule_sound_preview(current)
+
+    def _stop_sound_preview(self) -> None:
+        """End the audition: cancel a pending one and stop the one sounding.
+
+        The gestures that mean "not that one any more" (UX round 1, U1): `esc`
+        or leaving the Sound list, closing `/settings`, `/sound off`. A NEW
+        audition needs no call here — ``sound.preview`` supersedes the player
+        itself — so this is only for the exits that start nothing.
+        """
+        pending = getattr(self, "_sound_preview_timer", None)
+        if pending is not None:
+            pending.stop()
+        self._sound_preview_timer = None
+        self._sound_preview_request = None
+        try:
+            from local_operator.notifications import sound
+
+            sound.stop_preview()
+        except Exception:  # noqa: BLE001 — stopping a sound must never break an exit
+            logger.debug("could not stop the sound preview", exc_info=True)
 
     @staticmethod
     def _sound_label(sound_id: str) -> str:
@@ -52832,14 +52924,9 @@ class OperatorApp(App[None]):
             picker.set_notice("")
             return
         if message.command == "sound":
-            # From the vocabulary, the `/network` rule: the picker cannot offer
-            # a word `_cmd_sound` refuses.
-            picker.set_choices(
-                [
-                    ArgumentChoice(name=word, description=help_text)
-                    for word, help_text in sound_subcommand_rows()
-                ]
-            )
+            # Two-level like `/project`: the verbs, then sound ids once an
+            # id-taking verb's space is typed (`_sound_argument_choices`).
+            picker.set_choices(self._sound_argument_choices(editor))
             picker.set_notice("")
             return
         if message.command == "project":
@@ -53343,6 +53430,12 @@ class OperatorApp(App[None]):
             # catch-up used when a team/agent registry appears after the list
             # opened. Reuse the opening fill so rows and snapshots stay paired.
             self._fill_name_argument_list(editor, message.command)
+        elif message.command == "sound":
+            # `/sound use `/`preview `/`rename `/`remove ` crossing into (or out
+            # of) the id slot; the same builder as the opening.
+            picker = editor.picker
+            picker.set_notice("")
+            picker.set_choices(self._sound_argument_choices(editor))
         elif message.command == "project":
             # `/project show `/`delete `/`link `/`unlink ` crossing into (or
             # back out of) the name slot. Same fill as the opening, so the rows
@@ -54504,6 +54597,12 @@ class OperatorApp(App[None]):
             if len(rest) != 1:
                 self._system_notice(_t_sound(_sound_keys.usage()), "warning")
                 return
+            if not self._sound_known(rest[0]):
+                # The plain sentence `preview` gives (design round 1, D3), not
+                # the validator's wall of every id; range errors still come
+                # from the registry, where its wording reads fine.
+                self._system_notice(_t_sound(_sound_keys.not_found(id=rest[0])), "warning")
+                return
             if self._sound_write("notifications.sound.id", rest[0]):
                 self._system_notice(_t_sound(_sound_keys.selected(name=self._sound_label(rest[0]))))
                 self._audition_sound_commit("notifications.sound.id", rest[0])
@@ -54530,8 +54629,13 @@ class OperatorApp(App[None]):
             if not rest:
                 self._system_notice(_t_sound(_sound_keys.usage()), "warning")
                 return
-            name = " ".join(rest[1:]) or None
-            self.run_worker(self._sound_add(rest[0], name), thread=False, group="sound")
+            # `--select` chooses the new sound in the same step (UX round 1,
+            # U3), the `lop sound add --select` flag; anywhere after the path.
+            select = "--select" in rest[1:]
+            name = " ".join(word for word in rest[1:] if word != "--select") or None
+            self.run_worker(
+                self._sound_add(rest[0], name, select=select), thread=False, group="sound"
+            )
         elif verb == "rename":
             if len(rest) < 2:
                 self._system_notice(_t_sound(_sound_keys.usage()), "warning")
@@ -54550,7 +54654,9 @@ class OperatorApp(App[None]):
             # as the CLI it comes from (docs/I18N.md, `lop disk`).
             lines: list[str] = []
             sound_cli.doctor_command(say=lines.append)
-            report = "\n".join(lines)
+            # The CLI's `lop:` lead names the program in a shell; inside lop it
+            # is noise (design round 1, D7).
+            report = "\n".join(line.removeprefix("lop: ") for line in lines)
             self._system_notice(report)
 
     def _sound_write(self, key: str, value: Any) -> bool:
@@ -54593,23 +54699,45 @@ class OperatorApp(App[None]):
 
         selected = sound.configured().sound_id
         custom_ids = {row.id for row in custom_sounds.list_sounds()}
-        lines = [_t_sound(_sound_keys.list_title())]
+        choices = settings_io.BY_KEY["notifications.sound.id"].resolved_choices
+        # The id column is sized from the CONTENT (design round 1, D1): custom
+        # ids are hashed slugs of 20+ cells, and a fixed 17-cell column put
+        # their names out of line with every built-in above. Capped so one
+        # long id cannot push every name off a narrow notice; an id past the
+        # cap takes its own line with the name indented beneath it.
+        width = min(max((cell_len(str(c.value)) for c in choices), default=0), 24)
+        lines = [_t_sound(_sound_keys.list_title()), _t_sound(_sound_keys.list_hint())]
         mine: list[str] = []
-        for choice in settings_io.BY_KEY["notifications.sound.id"].resolved_choices:
-            mark = "●" if choice.value == selected else " "
+        for choice in choices:
+            value = str(choice.value)
+            mark = "●" if value == selected else " "
+            # The page's own `(default)` marker for the shipped default (D6),
+            # the same keyed string, so the two surfaces cannot drift.
             tail = (
-                f"  · {_t_sound(_sound_keys.default())}"
-                if choice.value == sound.DEFAULT_SOUND_ID
+                " " + tr("tui.small")(_small_keys.settings_view_default_marker()).strip()
+                if value == sound.DEFAULT_SOUND_ID
                 else ""
             )
-            line = f"{mark} {choice.value:<17} {choice.description}{tail}"
-            (mine if choice.value in custom_ids else lines).append(line)
+            if cell_len(value) > width:
+                rows = [f"{mark} {value}", f"  {' ' * width} {choice.description}{tail}"]
+            else:
+                pad = " " * (width - cell_len(value))
+                rows = [f"{mark} {value}{pad} {choice.description}{tail}"]
+            (mine if value in custom_ids else lines).extend(rows)
         if mine:
             lines.append(_t_sound(_sound_keys.list_yours()))
+            lines.append(_t_sound(_sound_keys.list_yours_hint()))
             lines.extend(mine)
         self._system_notice("\n".join(lines))
 
-    async def _sound_add(self, source: str, name: str | None) -> None:
+    @staticmethod
+    def _sound_known(sound_id: str) -> bool:
+        from local_operator import settings_io
+
+        choices = settings_io.BY_KEY["notifications.sound.id"].resolved_choices
+        return any(choice.value == sound_id for choice in choices)
+
+    async def _sound_add(self, source: str, name: str | None, *, select: bool = False) -> None:
         """Import a sound off the loop, then answer with one receipt."""
         from local_operator import sound_cli
         from local_operator.notifications import custom_sounds
@@ -54632,9 +54760,14 @@ class OperatorApp(App[None]):
                 "warning",
             )
             return
-        self._system_notice(
-            _t_sound(_sound_keys.added(name=row.name, id=row.id, seconds=f"{row.duration_s:.2f}"))
-        )
+        seconds = f"{row.duration_s:.2f}"
+        if select and self._sound_write("notifications.sound.id", row.id):
+            self._system_notice(
+                _t_sound(_sound_keys.added_selected(name=row.name, id=row.id, seconds=seconds))
+            )
+            self._audition_sound_commit("notifications.sound.id", row.id)
+            return
+        self._system_notice(_t_sound(_sound_keys.added(name=row.name, id=row.id, seconds=seconds)))
 
     def _sound_store_op(self, op: str, sound_id: str, name: str) -> None:
         """``rename`` / ``remove`` through ``custom_sounds``, with its own refusals."""
@@ -54647,7 +54780,14 @@ class OperatorApp(App[None]):
                 return
             removal = custom_sounds.remove(sound_id)
         except custom_sounds.SoundRejected as refusal:
-            self._system_notice(refusal.text, "warning")
+            # An unknown id gets the TUI's own sentence naming `/sound list`
+            # (review m2, QA Q1, design D2a); the shared copy names the CLI.
+            text = (
+                _t_sound(_sound_keys.not_found(id=sound_id))
+                if refusal.code == "not_found"
+                else refusal.text
+            )
+            self._system_notice(text, "warning")
             return
         text = _t_sound(_sound_keys.removed(name=removal.sound.name, id=removal.sound.id))
         if removal.selection_reset:

@@ -106,15 +106,27 @@ def test_preview_refuses_over_ssh_and_starts_nothing(monkeypatch: pytest.MonkeyP
 
 
 def test_preview_is_unthrottled_and_detached(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[dict[str, Any]] = []
+    """No throttle claim, and the player argv is the detached `preview` leg."""
+    argvs: list[list[str]] = []
 
-    def fake(plan: Any, *, leg: str, throttle: bool = True) -> bool:
-        calls.append({"id": plan.sound_id, "leg": leg, "throttle": throttle})
-        return True
+    class _Child:
+        pid = 1
 
-    monkeypatch.setattr(sound, "play_plan", fake)
+        def poll(self) -> int:
+            return 0
+
+    def spawn(argv: list[str], **_kw: Any) -> _Child:
+        argvs.append(list(argv))
+        return _Child()
+
+    monkeypatch.setattr("local_operator.proc.spawn_detached_child", spawn)
+    monkeypatch.setattr(sound, "claim_throttle", lambda *a, **k: pytest.fail("throttled"))
+    monkeypatch.setattr(sound, "_PREVIEW_CHILD", None)
     assert sound.preview("felt-marimba", env={}).outcome == "play"
-    assert calls == [{"id": "felt-marimba", "leg": "preview", "throttle": False}]
+    assert len(argvs) == 1
+    argv = argvs[0]
+    assert argv[argv.index("--leg") + 1] == "preview"
+    assert argv[argv.index("--sound-id") + 1] == "felt-marimba"
 
 
 # -- /sound vocabulary ---------------------------------------------------------
@@ -371,3 +383,153 @@ async def test_a_row_in_edit_is_not_clobbered_and_catches_up_after(tmp_path: Pat
         # The cancel ends the gesture; the held reload lands on the next paint.
         assert view._editing is None
         assert _row_value(view, "notifications.sound.volume") == 40
+
+
+# -- round 1 remediation -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_held_reload_never_moves_a_half_written_config_aside(tmp_path: Path) -> None:
+    """Review round 1, M1: the deferred reload must not run `_load_config`'s
+    rename-aside on a file that is broken by the time the gesture ends."""
+    from local_operator.config_watch import ConfigChange
+
+    app = _app()
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        view = _open_sound_list(app)
+        await pilot.pause()
+        _external_write(tmp_path, 40)  # a real file with a real value
+        _select_row(view, "notifications.sound.volume")
+        view.action_activate()
+        await pilot.pause()
+        app._on_config_change(
+            ConfigChange(values={}, changed_keys=("notifications.sound.volume",), source="disk")
+        )
+        assert view._reload_pending is True
+        config = tmp_path / "config.yml"
+        config.write_text("values:\n  notifications: [unclosed\n")  # mid-save
+        await pilot.press("escape")
+        await pilot.pause()
+        # The file is where it was, nothing was renamed, the page kept its
+        # last good snapshot, and the reload is still owed.
+        assert config.exists()
+        assert not list(tmp_path.glob("config.yml.bad*"))
+        assert view._reload_pending is True
+        # Once the file is whole again, the next change lands normally.
+        _external_write_raw(config, 55)
+        assert view.reload_from_disk() is True
+        assert _row_value(view, "notifications.sound.volume") == 55
+
+
+def _external_write_raw(config: Path, volume: int) -> None:
+    config.write_text(yaml.safe_dump({"values": {"notifications": {"sound": {"volume": volume}}}}))
+
+
+class _FakeChild:
+    """A stand-in player: records when it started and whether it was stopped."""
+
+    pid = 0
+    live: list["_FakeChild"] = []
+    peak = 0
+
+    def __init__(self, sound_id: str) -> None:
+        self.sound_id = sound_id
+        self.stopped = False
+        _FakeChild.live.append(self)
+        _FakeChild.peak = max(_FakeChild.peak, len(_FakeChild.live))
+
+    def poll(self) -> int | None:
+        return 0 if self.stopped else None
+
+    def stop(self) -> None:
+        self.stopped = True
+        _FakeChild.live.remove(self)
+
+
+@pytest.fixture
+def fake_players(monkeypatch: pytest.MonkeyPatch) -> list[_FakeChild]:
+    """Fake the player child at the spawn seam; `killpg` stops the matching fake."""
+    started: list[_FakeChild] = []
+    _FakeChild.live = []
+    _FakeChild.peak = 0
+    monkeypatch.delenv(sound.ENV_NO_SOUND, raising=False)
+
+    def spawn(plan: Any) -> _FakeChild:
+        child = _FakeChild(plan.sound_id)
+        child.pid = 10_000 + len(started)
+        started.append(child)
+        return child
+
+    def killpg(pid: int, _sig: int) -> None:
+        next(child for child in started if child.pid == pid).stop()
+
+    monkeypatch.setattr(sound, "_start_preview_child", spawn)
+    monkeypatch.setattr(sound.os, "killpg", killpg)
+    monkeypatch.setattr(sound, "_PREVIEW_CHILD", None)
+    return started
+
+
+@pytest.mark.asyncio
+async def test_reading_pace_browse_keeps_at_most_one_player_alive(
+    fake_players: list[_FakeChild],
+) -> None:
+    """UX round 1, U1: six presses ~380 ms apart outlive the debounce on every
+    row; each new audition must stop the one before it, and esc stops the last."""
+    app = _app()
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        view = _open_sound_list(app)
+        await pilot.pause()
+        view.action_activate()
+        await pilot.pause()
+        for _ in range(6):
+            view.action_move(1)
+            await _settle(pilot, 0.38)
+        await _settle(pilot, 0.3)
+        assert len(fake_players) == 6, [c.sound_id for c in fake_players]
+        assert _FakeChild.peak == 1
+        assert [c.stopped for c in fake_players] == [True] * 5 + [False]
+        await pilot.press("escape")
+        await pilot.pause()
+        assert fake_players[-1].stopped and _FakeChild.live == []
+
+
+@pytest.mark.asyncio
+async def test_sound_off_cancels_a_pending_commit_audition(
+    fake_players: list[_FakeChild],
+) -> None:
+    """Review round 1, m1: `/sound off` inside the debounce window plays nothing."""
+    app = _app()
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        app._run_slash_command("/sound volume 30")
+        app._run_slash_command("/sound off")
+        await _settle(pilot, 0.6)
+        assert fake_players == []
+        assert app._sound_preview_request is None
+
+
+@pytest.mark.asyncio
+async def test_sound_verbs_speak_tui_copy_and_select_on_add(tmp_path: Path) -> None:
+    source = tmp_path / "bell.wav"
+    source.write_bytes(tone(0.3))
+    app = _app()
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        for command in ("/sound use nope", "/sound remove nope", "/sound rename nope X"):
+            app._run_slash_command(command)
+            await pilot.pause()
+        notices = _notices(app)
+        assert sum("There is no sound called nope. Run /sound list" in t for t in notices) == 3
+        assert not any("lop sound" in t or "expected one of" in t for t in notices)
+        app._run_slash_command(f"/sound add {source} Bell --select")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        (row,) = custom_sounds.list_sounds()
+        assert row.name == "Bell"
+        assert _values(tmp_path)["notifications"]["sound"]["id"] == row.id
+        assert any("chose it as your notification sound" in t for t in _notices(app))
+        app._run_slash_command("/sound doctor")
+        await pilot.pause()
+        assert not any(line.startswith("lop:") for t in _notices(app) for line in t.splitlines())

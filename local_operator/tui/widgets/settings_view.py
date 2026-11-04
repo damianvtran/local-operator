@@ -2592,15 +2592,33 @@ class SettingsView(Vertical):
 
         ``True`` when the page reloaded now.
         """
-        if self._mid_gesture():
+        if self._mid_gesture() or not self._reload_safely():
             self._reload_pending = True
             return False
-        self._reload_pending = False
+        self._repaint()
+        return True
+
+    def _reload_safely(self) -> bool:
+        """Re-read the file ONLY if it parses right now; ``False`` keeps the paint.
+
+        ``ConfigManager.reload`` never raises on a broken file: ``_load_config``
+        prints to stderr, RENAMES config.yml to ``config.yml.bad.<stamp>`` and
+        returns defaults (review round 1, M1, reproduced: a held reload landing
+        on a half-saved file left no config.yml at all). That rename is right at
+        startup and wrong here, so the same guard ``settings_io`` runs before
+        its own reloads (``_require_readable_config``) runs first. An unreadable
+        file leaves the reload pending; the watcher delivers again when the
+        file next changes, and the next repaint retries.
+        """
+        try:
+            settings_io._require_readable_config(self._manager)
+        except Exception:  # noqa: BLE001 — unreadable or unstattable: keep the paint
+            return False
         try:
             self._manager.reload()
-        except Exception:  # noqa: BLE001 — a torn read keeps the last good paint
+        except Exception:  # noqa: BLE001 — keep the last good snapshot
             return False
-        self._repaint()
+        self._reload_pending = False
         return True
 
     def _mid_gesture(self) -> bool:
@@ -2905,6 +2923,15 @@ class SettingsView(Vertical):
         settles the row and then closes the expansion): with nothing captured
         there is nothing to put back.
         """
+        if self._expanded == "notifications.sound.id":
+            # A sound list closing by any cancel route (esc, an arrow off the
+            # group, a click elsewhere) ends its audition too (UX round 1, U1).
+            # Called directly like `_apply_theme` below: the list's own repaint
+            # follows, and a posted message would arrive after the sound has
+            # already played on.
+            stop = getattr(getattr(self, "app", None), "_stop_sound_preview", None)
+            if stop is not None:
+                stop()
         restore = self._preview_before
         if restore is None:
             return
@@ -3727,12 +3754,10 @@ class SettingsView(Vertical):
     def _repaint(self) -> None:
         if self._reload_pending and not self._mid_gesture():
             # A config change arrived mid-gesture (`reload_from_disk`); the
-            # gesture has ended, so adopt the newer file before painting.
-            self._reload_pending = False
-            try:
-                self._manager.reload()
-            except Exception:  # noqa: BLE001 — keep the last good snapshot
-                pass
+            # gesture has ended, so adopt the newer file before painting —
+            # through the same parse guard, so a file broken in the meantime
+            # stays in place and the reload stays pending.
+            self._reload_safely()
         # Height ladder BEFORE the paints: it toggles `display` / padding
         # on the chrome widgets, which is what the layout reads, and the
         # paints (detail text, pane budget) have to see the same decision.

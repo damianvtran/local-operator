@@ -65,6 +65,7 @@ import logging
 import math
 import os
 import sys
+import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -545,6 +546,71 @@ def preview(
 
     if terminals.is_ssh(env):
         return dataclasses.replace(decided, outcome="ssh", plan=None)
-    if not play_plan(decided.plan, leg="preview", throttle=False):
+    # A NEW audition supersedes the one still sounding (UX round 1, U1): a
+    # person stepping down the list at reading pace outlives the debounce on
+    # every row, and without this each row's player kept going, measured at up
+    # to four sounds at once. A sound picker plays only the row you are on.
+    stop_preview()
+    child = _start_preview_child(decided.plan)
+    if child is None:
         return dataclasses.replace(decided, outcome="failed")
+    with _PREVIEW_LOCK:
+        global _PREVIEW_CHILD
+        _PREVIEW_CHILD = child
     return decided
+
+
+#: The one audition player this process started and may still be sounding.
+#: Only auditions are tracked: a NOTIFICATION sound is never cut short by a
+#: preview (it is a different event the user did not just choose to replace),
+#: so ``play_plan`` keeps its fire-and-forget spawn.
+_PREVIEW_CHILD: Any = None
+_PREVIEW_LOCK = threading.Lock()
+
+
+def _start_preview_child(plan: SoundPlan) -> Any:
+    """Spawn the detached player for ``plan`` and return its ``Popen`` (or ``None``)."""
+    if plan.kind != "file" or plan.path is None:
+        return None
+    try:
+        from local_operator.proc import spawn_detached_child
+
+        return spawn_detached_child(player_argv(plan, leg="preview"))
+    except Exception:  # noqa: BLE001 — an audition must never affect its caller
+        logger.debug("preview sound failed to start", exc_info=True)
+        return None
+
+
+def stop_preview() -> bool:
+    """Stop the audition player this process started, if it is still sounding.
+
+    Called before every new audition and by the TUI on the gestures that end
+    one (a commit, ``/sound off``, leaving the list). Signals the EXACT child
+    by its ``Popen`` handle (never a pid looked up later, which could have been
+    reused) and its process group, with SIGTERM: the player's default handler
+    exits at once and the audio device stops with the process. ``True`` when a live player was
+    stopped. Never raises.
+    """
+    global _PREVIEW_CHILD
+    with _PREVIEW_LOCK:
+        child, _PREVIEW_CHILD = _PREVIEW_CHILD, None
+    if child is None:
+        return False
+    try:
+        if child.poll() is not None:
+            return False
+        if os.name == "posix":
+            # The player is a session leader (`spawn_detached` uses setsid), so
+            # its pid IS its group id. Signal the GROUP: on the afplay fallback
+            # the sound comes from a grandchild that terminating the leader
+            # alone would leave playing. `poll()` above just proved the leader
+            # unreaped, so the pid cannot have been recycled.
+            import signal
+
+            os.killpg(child.pid, signal.SIGTERM)
+        else:  # pragma: no cover - exercised on Windows hosts
+            child.terminate()
+        return True
+    except Exception:  # noqa: BLE001 — an already-gone child is the goal state
+        logger.debug("could not stop the preview player", exc_info=True)
+        return False
