@@ -33,8 +33,9 @@ def mint_adoption_receipt() -> str:
     began with ``-``; argparse then read that separate value as an option and
     refused with "expected one argument". Drawing again until the first
     character is not ``-`` keeps the 24-byte length and the same alphabet
-    (constraining one of 64 first symbols costs ~0.02 bits of 192), so existing receipts and their lookup are unaffected; only
-    the leading character is constrained.
+    (constraining one of 64 first symbols costs ~0.02 bits of 192), so
+    existing receipts and their lookup are unaffected; only the leading
+    character is constrained.
     """
     while True:
         token = secrets.token_urlsafe(24)
