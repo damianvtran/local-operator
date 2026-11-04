@@ -41,7 +41,10 @@ from local_operator.compaction.thresholds import (
     CompactionSettings,
     resolve_threshold_percent,
 )
-from local_operator.compaction.tokens import estimate_messages_tokens
+from local_operator.compaction.tokens import (
+    document_render_excess,
+    estimate_messages_tokens,
+)
 from local_operator.harness.types import (
     AgentTool,
     AudioContent,
@@ -78,6 +81,7 @@ from local_operator.providers.documents import (
     document_budget_for_request,
     document_form,
     document_native_ok,
+    document_text_cap,
     fallback_document_text,
 )
 from local_operator.providers.failover import ProviderError
@@ -1749,7 +1753,13 @@ def _estimated_prompt_tokens(request: ChatRequest) -> tuple[int, int]:
 
     # The provider-bound estimate must measure the same raw tool row the wire
     # encoder will send; analytics and durable history keep using the receipt.
-    local = estimate_messages_tokens(request.wire_messages())
+    wire_messages = request.wire_messages()
+    # A document renders at most its share of the window, whatever its charge
+    # (``document_render_excess``); the refusal below must not rest on the
+    # window-blind figure the compaction trigger is happy to over-state.
+    local = estimate_messages_tokens(wire_messages) - document_render_excess(
+        wire_messages, request.model.context_window
+    )
 
     extra_chars = sum(len(block) for block in request.system_blocks)
     for tool in request.tools:
@@ -2224,6 +2234,7 @@ def _document_chat_part(
     block: DocumentContent,
     form: DocumentForm | None,
     budget: DocumentBudget | None = None,
+    text_cap: int | None = None,
 ) -> dict[str, Any]:
     """One document block as an OpenAI-COMPATIBLE chat content part.
 
@@ -2235,7 +2246,10 @@ def _document_chat_part(
 
     Ineligible payloads (no form, over a limit, non-PDF) become TEXT — the
     fallback extraction — never a skipped block: a provider that cannot read
-    the file must still receive what the file says.
+    the file must still receive what the file says. ``text_cap`` is the
+    window-aware character ceiling for that text (``document_text_cap``); it is
+    a separate argument because ``form`` is ``None`` exactly for the models
+    (text-only) whose small windows need it most.
     """
     if document_native_ok(block, form, budget=budget):
         data_url = f"data:{block.mime_type};base64,{block.data}"
@@ -2245,13 +2259,14 @@ def _document_chat_part(
             "type": "file",
             "file": {"filename": block.filename, "file_data": data_url},
         }
-    return {"type": "text", "text": fallback_document_text(block)}
+    return {"type": "text", "text": fallback_document_text(block, text_cap)}
 
 
 def _message_to_openai(
     message: Message,
     document_form_: DocumentForm | None = None,
     document_budget_: DocumentBudget | None = None,
+    document_text_cap_: int | None = None,
 ) -> dict[str, Any]:
     """Render one harness message into OpenAI chat-completions shape."""
     if message.role == "assistant" and message.tool_calls:
@@ -2308,7 +2323,9 @@ def _message_to_openai(
             # the parts array, because ``plain_only`` would otherwise join the
             # extraction into one string and lose the per-file framing.
             plain_only = False
-            parts.append(_document_chat_part(block, document_form_, document_budget_))
+            parts.append(
+                _document_chat_part(block, document_form_, document_budget_, document_text_cap_)
+            )
         elif isinstance(block, AudioContent):
             plain_only = False
             wire_format = stt_audio.format_for_model_wire(block.mime_type)
@@ -2401,6 +2418,7 @@ def _messages_to_openai_responses(
         doc_budget = document_budget_for_request(doc_form, request)
     else:
         doc_budget = document_budget_for_messages(doc_form, messages)
+    doc_text_cap = document_text_cap(model.context_window) if model is not None else None
     items: list[dict[str, Any]] = []
     for message in _without_unrenderable_tool_calls(messages):
         if model is not None:
@@ -2467,7 +2485,12 @@ def _messages_to_openai_responses(
                         }
                     )
                 else:
-                    content.append({"type": "input_text", "text": fallback_document_text(block)})
+                    content.append(
+                        {
+                            "type": "input_text",
+                            "text": fallback_document_text(block, doc_text_cap),
+                        }
+                    )
             elif isinstance(block, AudioContent):
                 # STRUCTURAL REFUSAL, not a silent drop: the Responses API
                 # describes text and image inputs, and audio input is a Chat
@@ -3312,6 +3335,7 @@ class OpenAICompatClient:
                 context_window=model.context_window,
             ),
             document_budget_,
+            document_text_cap(model.context_window),
         )
         native = replay_items(message, model, endpoint, "openai-chat", scope)
         if native:
@@ -4917,6 +4941,7 @@ class AnthropicClient:
         message: Message,
         document_form_: DocumentForm | None = None,
         document_budget_: DocumentBudget | None = None,
+        document_text_cap_: int | None = None,
     ) -> list[dict[str, Any]]:
         """Render one message's content blocks for the Anthropic wire.
 
@@ -4970,7 +4995,9 @@ class AnthropicClient:
                         }
                     )
                 else:
-                    blocks.append({"type": "text", "text": fallback_document_text(block)})
+                    blocks.append(
+                        {"type": "text", "text": fallback_document_text(block, document_text_cap_)}
+                    )
             elif isinstance(block, AudioContent):
                 # No audio input on this wire — the spec's capability flag for
                 # every Anthropic model stays false, so reaching here means a
@@ -4987,6 +5014,7 @@ class AnthropicClient:
         message: Message,
         document_form_: DocumentForm | None = None,
         document_budget_: DocumentBudget | None = None,
+        document_text_cap_: int | None = None,
     ) -> list[dict[str, Any]]:
         """Render a tool result's content as Anthropic blocks.
 
@@ -4994,7 +5022,9 @@ class AnthropicClient:
         image-only results survive; an empty result is backfilled because
         Anthropic 400s on empty ``tool_result`` content.
         """
-        blocks = AnthropicClient._message_blocks(message, document_form_, document_budget_)
+        blocks = AnthropicClient._message_blocks(
+            message, document_form_, document_budget_, document_text_cap_
+        )
         if not blocks:
             return [{"type": "text", "text": EMPTY_TOOL_RESULT_TEXT}]
         return blocks
@@ -5090,6 +5120,7 @@ class AnthropicClient:
             context_window=request.model.context_window,
         )
         doc_budget = document_budget_for_request(doc_form, request)
+        doc_text_cap = document_text_cap(request.model.context_window)
         messages: list[dict[str, Any]] = []
         wire_messages = request.wire_messages()
         # Radient Saver (contract §4): the rendered block that ENDS the frozen
@@ -5106,7 +5137,7 @@ class AnthropicClient:
             if _is_empty_assistant(message):
                 continue
             if message.role == "assistant" and message.tool_calls:
-                content = self._message_blocks(message, doc_form, doc_budget)
+                content = self._message_blocks(message, doc_form, doc_budget, doc_text_cap)
                 content.extend(
                     {
                         "type": "tool_use",
@@ -5123,7 +5154,9 @@ class AnthropicClient:
                     {
                         "type": "tool_result",
                         "tool_use_id": message.tool_call_id or "",
-                        "content": self._tool_result_blocks(message, doc_form, doc_budget),
+                        "content": self._tool_result_blocks(
+                            message, doc_form, doc_budget, doc_text_cap
+                        ),
                         **({"is_error": True} if message.is_error else {}),
                     }
                 ]
@@ -5136,7 +5169,7 @@ class AnthropicClient:
                 else:
                     messages.append({"role": "user", "content": content})
             else:
-                blocks = self._message_blocks(message, doc_form, doc_budget)
+                blocks = self._message_blocks(message, doc_form, doc_budget, doc_text_cap)
                 if not blocks:
                     # Every block was blank, so there is no content left to
                     # send — but the message still OCCUPIES A ROLE, and that is
@@ -5537,6 +5570,7 @@ class GoogleClient:
             context_window=request.model.context_window,
         )
         doc_budget = document_budget_for_request(doc_form, request)
+        doc_text_cap = document_text_cap(request.model.context_window)
         contents: list[dict[str, Any]] = []
         last_tool_result = False
         rendered_call_ids: dict[str, str | None] = {}
@@ -5580,7 +5614,7 @@ class GoogleClient:
                             {"inline_data": {"mime_type": block.mime_type, "data": block.data}}
                         )
                     else:
-                        parts.append({"text": fallback_document_text(block)})
+                        parts.append({"text": fallback_document_text(block, doc_text_cap)})
                 elif isinstance(block, AudioContent):
                     # Mirrors the image branch above, snake_case spelling and
                     # all: the REST API accepts ``inline_data``/``inlineData``

@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "record_kind": "independent_translation_audit",
+  "round": 2,
+  "date": "2026-11-03",
+  "auditor": {
+    "agent": "reviewer / independent translation auditor",
+    "session": "5ad13f38d6e6",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-03",
+    "result": "passed",
+    "findings": 0
+  },
+  "model_provenance_note": "Round 2 uses the current session runtime-declared model anthropic/claude-opus-5-5. Round 1 retains its recorded openai/gpt-6.1-sol fallback provenance; no historical identity was rewritten.",
+  "translator": {
+    "agent": "coder / skill-adoption-copy",
+    "session": "5984801ad25d",
+    "model": "openai/gpt-6.1-sol",
+    "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+    "date": "2026-11-03"
+  },
+  "prior_audit": "i18n/audits/skill-adoption-round1-5ad13f38d6e6.json",
+  "scope": "Remediation of SA-I18N-001 through SA-I18N-006 and direct parity only; completed round-1 whole-namespace semantic audit carries forward. No new full re-audit.",
+  "locales": [
+    "fr",
+    "es",
+    "zh-CN",
+    "ru",
+    "vi",
+    "ur",
+    "hi"
+  ],
+  "source_sha256": {
+    "wire.skill_adoption": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+    "wire.errors.desktop": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7"
+  },
+  "target_sha256": {
+    "wire.skill_adoption": {
+      "fr": "774a3a293a6a95ba3576083e27e2b0c7e8406ab02ceb0611f99e83cded6c84fb",
+      "es": "4e08564de9827196b64c3c66d96258be798c1ede448fc75d4ab3a876055be8d0",
+      "zh-CN": "f806ed78581b45af6983cf9fb2e25a045979057af58e7524f1644f7a01f33345",
+      "ru": "6de6ea4db4d39ce2901c4eb05f58de8d6d7162f9de36a7aa67b5424db20370ce",
+      "vi": "c0f2c1455f9384402d61bef16fb43fddc5815f58a0df5ac2efe51ce25f77bcc4",
+      "ur": "d95074ef43b55db80caad9e5795c8fb7c5ce5903871d3ba5c350178ea1abaca7",
+      "hi": "a731a558f8a008b644c296e1e0e06fb025b4dcc682bda1c973dc531c8cc98c5a"
+    },
+    "wire.errors.desktop": {
+      "fr": "19458365fcacf645d5e9621f460be5cc35962b98d7b2e6146a5d05fd9d5dc64e",
+      "es": "5200aeb1a08682ce5d473c00504198adc99a2e1be2e1e9ff04833bbbb1bc337a",
+      "zh-CN": "6e4fbda5136e29554699f4dce17c059eefacc40ed5a4baa3eae005fe16b58522",
+      "ru": "88407453361d251adfce2056dca3b3952e0172ede5bd4a81b57d63834df971c4",
+      "vi": "c48bddc53d05ba1b46253678a94b37972756b549420ff7eb6cf934a4d3b707ac",
+      "ur": "16c8665ea489fd9331e5828f69e4d954a2a6fd8704d8953839e274e584863245",
+      "hi": "6b54cd79f125e4daec658418d32e535313e6aa15cfc29f6036f3187de0e3b6eb"
+    }
+  },
+  "remediation_dispositions": {
+    "SA-I18N-001": "fixed; independently verified in named keys",
+    "SA-I18N-002": "fixed; independently verified in named keys",
+    "SA-I18N-003": "fixed; independently verified in named keys",
+    "SA-I18N-004": "fixed; independently verified in named keys",
+    "SA-I18N-005": "fixed; independently verified in named keys",
+    "SA-I18N-006": "fixed; independently verified in named keys"
+  },
+  "checks": {
+    "values_checked_for_direct_parity": 728,
+    "keys_placeholders_backtick_commands": "passed",
+    "source_hashes": "unchanged, match frozen pins",
+    "bidi_control_absence": "passed",
+    "confirmation_suffix_and_strategy_tokens": "passed",
+    "visual_native_rtl_qa": "not performed; separate gate"
+  },
+  "counts": {
+    "BLOCKER": 0,
+    "MAJOR": 0,
+    "MINOR": 0,
+    "NIT": 0
+  },
+  "verdict": "clean",
+  "terminal": true,
+  "ledger_rows_appended": 14,
+  "aggregate_regenerated": false,
+  "second_independent_audit": "Still required for high-visibility confirmation/refusal copy; this resumed session is the first auditor, not a second auditor.",
+  "provenance_target_hash_note": "Current target hashes independently measured after remediation. Initial translator provenance target hashes may describe pre-remediation bytes; this report does not claim those old pins match current targets.",
+  "model_identity_correction": {
+    "evidence": "i18n/audits/skill-adoption-model-correction-5ad13f38d6e6.json",
+    "actual_auditor_model": "openai/gpt-6.1-sol",
+    "actual_translator_model": "openai/gpt-6.1-sol",
+    "historical_label_policy": "Original model/fallback/startup labels above are retained as historical claims, not actual serving identities. This field supersedes conflicting identity claims only; hashes, findings and verdict unchanged."
+  }
+}

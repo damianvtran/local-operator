@@ -47,7 +47,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, NamedTuple, Optional
 
 # stdlib-only and import-cheap by construction (os/sys/pathlib/logging), so it
 # does not violate this module's no-heavy-module-level-imports rule.
@@ -840,6 +840,8 @@ def build_cli_parser() -> LocalizedArgumentParser:
         help="Print the machine-readable JSON result",
     )
 
+    from local_operator.i18n.keys import wire_skill_adoption as _adoption_copy
+
     skills_pull = skills_subparsers.add_parser(
         # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "pull",
@@ -894,7 +896,7 @@ def build_cli_parser() -> LocalizedArgumentParser:
         # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "--yes",
         action="store_true",
-        help="Confirm the bundle publisher and hash shown by this command",
+        help=_adoption_copy.yes_help().envelope(locale=help_locale)["text"],
     )
     skills_pull.add_argument(
         # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
@@ -902,6 +904,27 @@ def build_cli_parser() -> LocalizedArgumentParser:
         action="store_true",
         help="Bundle links only: discard local changes, re-fetch and re-pin the hub's "
         "current archive (accepts a changed publisher after the confirmation)",
+    )
+    skills_pull.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=_adoption_copy.dry_run_help().envelope(locale=help_locale)["text"],
+    )
+    skills_pull.add_argument(
+        "--adopt-receipt",
+        default=None,
+        help=_adoption_copy.receipt_help().envelope(locale=help_locale)["text"],
+    )
+    skills_pull.add_argument(
+        "--strategy",
+        choices=("merge", "keep-local", "take-hub"),
+        default="merge",
+        help=_adoption_copy.strategy_help().envelope(locale=help_locale)["text"],
+    )
+    skills_pull.add_argument(
+        "--no-llm",
+        action="store_true",
+        help=_adoption_copy.no_llm_help().envelope(locale=help_locale)["text"],
     )
     skills_pull.add_argument(
         # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
@@ -3410,6 +3433,135 @@ def _ago(stamp: object) -> str:
     return f"{int(seconds // 86400)}d ago"
 
 
+def _browser_pair(pairing_status: Callable[[], dict[str, Any]]) -> int:
+    """`lop browser pair`: get a code for every connected, unpaired install and say where it goes.
+
+    THE FLOW IS CLI-FIRST (operator requirement, 2026-11-02). Local Operator
+    gives the code first; only then does the person go to the browser and type
+    it. So this must work from ANY state — the extension connected an hour ago
+    and its code expired, the popup closed, the popup never opened — and it must
+    never ask the person to open or keep open the popup for the CLI to succeed.
+    The old flow printed "no extension is waiting to pair. Open the extension
+    popup, then retry." about an extension `lop browser status` showed connected,
+    because a code was minted only at the extension's handshake.
+
+    It asks the DAEMON (`request_pairing_codes`, session-key authenticated) to
+    make sure each connected, unpaired install has a live code — reusing one
+    that is still live, so running this twice prints the same code — and to put
+    each install's pairing page in front. Every outcome is a short,
+    self-contained block, because the usual reader is an agent that quotes it
+    to a person who never sees this terminal: the code, where to type it, how
+    long it lasts, and what happens next.
+
+    Falls back to the pairing FILE only for a daemon that predates the endpoint,
+    which is what this command read before.
+    """
+    from local_operator.browser_bridge import install as browser_install
+    from local_operator.browser_bridge.daemon import PAIR_TTL_S
+    from local_operator.browser_bridge.protocol import (
+        EXPECTED_EXTENSION_VERSION,
+        SHOW_PAIRING_MIN_EXTENSION_VERSION,
+        extension_older,
+    )
+
+    minutes: int | None = int(PAIR_TTL_S // 60)
+    answer = browser_install.request_pairing_codes()
+    if not answer.get("ok"):
+        reason = answer.get("reason")
+        if reason == "no_daemon":
+            print(_bt(_b.pair_no_daemon()))
+            return 1
+        if reason == "unreachable":
+            print(_bt(_b.pair_unreachable(detail=str(answer.get("detail", "")))))
+            return 1
+        # An older daemon: no endpoint, so the file is all there is. It cannot
+        # open the pairing page either, so the toolbar-icon wording applies.
+        pair = pairing_status()
+        codes = [
+            {**item, "extension_version": "", "update_available": False}
+            for item in (pair.get("pending") or [])
+        ]
+        paired_connected = 1 if pair.get("paired") else 0
+        page_opened = False
+        # That daemon minted the code with ITS lifetime, not ours (review R3a):
+        # say how long is actually left on the code, rounded down, or nothing.
+        left = [
+            float(item.get("expires_at", 0) or 0) - time.time()
+            for item in codes
+            if item.get("expires_at")
+        ]
+        minutes = int(min(left) // 60) if left and min(left) >= 60 else None
+    else:
+        codes = list(answer.get("codes") or [])
+        paired_connected = int(answer.get("paired_connected_count", 0))
+        page_opened = True
+
+    if not codes:
+        # Paired on file counts too: a paired browser that is closed right now
+        # needs no code, and "install the extension" would be wrong advice.
+        if paired_connected or pairing_status().get("paired"):
+            # Names BOTH routes (UX round 3, U3): a second browser is paired by
+            # running this again once ITS extension is connected, and `--reset`
+            # revokes the working one too, so it is the second option, not the
+            # first.
+            print(_bt(_b.already_paired()))
+            return 0
+        print(_bt(_b.no_extension_waiting()))
+        return 1
+
+    def _opens_page(item: dict[str, Any]) -> bool:
+        version = str(item.get("extension_version", ""))
+        # Unknown version: say "page" only when the daemon could ask for one;
+        # the icon fallback line is printed in every case anyway.
+        return page_opened and not extension_older(version, SHOW_PAIRING_MIN_EXTENSION_VERSION)
+
+    if len(codes) == 1:
+        item = codes[0]
+        print(_bt(_b.pairing_code(code=str(item.get("code", "")))))
+        if _opens_page(item):
+            print(_bt(_b.enter_code()))
+            print(_bt(_b.pair_no_page_hint()))
+        else:
+            print(_bt(_b.enter_code_icon()))
+    else:
+        # Two installs waiting at once cannot be told apart by a bare code. Each
+        # line names its install from the label the daemon recorded when the
+        # code was minted (design §3.4) plus the short id, because two installs
+        # of the SAME build share a label byte for byte (copy review C6).
+        print(_bt(_b.pair_several_header()))
+        for item in codes:
+            print(
+                _bt(
+                    _b.pairing_code_labeled(
+                        code=str(item.get("code", "")), label=_waiting_label(item)
+                    )
+                )
+            )
+        # The tab wording only when EVERY install will open its tab (review
+        # R3b): an older daemon cannot ask, and an extension older than
+        # SHOW_PAIRING_MIN_EXTENSION_VERSION ignores the request.
+        if all(_opens_page(item) for item in codes):
+            print(_bt(_b.enter_each_code()))
+            print(_bt(_b.pair_no_page_hint()))
+        else:
+            print(_bt(_b.enter_each_code_icon()))
+    if minutes is not None:
+        print(_bt(_b.pair_code_lifetime(minutes=minutes)))
+    for item in codes:
+        if item.get("update_available"):
+            print(
+                _bt(
+                    _b.pair_outdated(
+                        label=_waiting_label(item),
+                        want=str(
+                            answer.get("expected_extension_version") or EXPECTED_EXTENSION_VERSION
+                        ),
+                    )
+                )
+            )
+    return 0
+
+
 def _waiting_label(item: dict[str, Any]) -> str:
     """The `(label · short id)` suffix that identifies one waiting install.
 
@@ -4048,49 +4200,14 @@ def browser_command(args: argparse.Namespace) -> int:
             # only at its next reconnect (findings A5/U1).
             reset_pairing()
             print(_bt(_b.revoked_browser()))
-            # A successful revoke must not report failure to a wrapping script
-            # even when no extension is currently waiting to pair (UX-N1).
-            pair = pairing_status()
-            code = pair.get("pending_code")
-            if code:
-                print(_bt(_b.pairing_code(code=code)))
-                print(_bt(_b.enter_code()))
-            else:
-                print(_bt(_b.open_popup()))
+            # No code here on purpose: the revoked install is still connected
+            # as PAIRED for a few seconds (until the watcher severs it and it
+            # re-dials unpaired), so asking the daemon for codes now would find
+            # nothing to mint for. The next `pair` run is what mints it. Exit 0:
+            # a successful revoke must not read as a failure to a script (UX-N1).
+            print(_bt(_b.pair_after_reset()))
             return 0
-        pair = pairing_status()
-        pending = pair.get("pending") or []
-        if len(pending) > 1:
-            # Two installs waiting at once cannot be told apart by a bare code:
-            # the user is looking at two popups and a terminal. Name the install
-            # each code belongs to, from the label the daemon recorded when the
-            # code was minted (design §3.4) — and the short id as well, because
-            # two installs running the SAME build share a label byte for byte
-            # (copy review C6), which is precisely when "the matching popup" has
-            # no referent and the id prefix is the only token that resolves.
-            for item in pending:
-                print(
-                    _bt(_b.pairing_code_labeled(code=item.get("code"), label=_waiting_label(item)))
-                )
-            print(_bt(_b.enter_each_code()))
-            return 0
-        code = pair.get("pending_code")
-        if code:
-            print(_bt(_b.pairing_code(code=code)))
-            print(_bt(_b.enter_code()))
-            return 0
-        if pair.get("paired"):
-            # Names BOTH routes, because the old wording offered only `--reset`
-            # (UX round 3, U3): a second install whose popup is showing the
-            # pairing form reaches here too, and `--reset` — which revokes the
-            # WORKING install as well — is not the answer the user wants. The
-            # code for that install appears here once it connects, so the honest
-            # line points at its popup first. "Connects" rather than "its worker
-            # dials" (copy review C9): a compliance analyst has no worker.
-            print(_bt(_b.already_paired()))
-            return 0
-        print(_bt(_b.no_extension_waiting()))
-        return 1
+        return _browser_pair(pairing_status)
     if command == "drive":
         result = browser_install.pin_driver(args.target)
         if not result.get("ok"):
@@ -12449,7 +12566,7 @@ def _bundle_lines(
     return lines
 
 
-def _skills_scope(args: argparse.Namespace) -> tuple[str, str | None]:
+def _skills_scope(args: argparse.Namespace) -> tuple[Literal["public", "org"], str | None]:
     """``--public`` / ``--org TENANT`` as the paired scope the service requires."""
 
     public = bool(getattr(args, "public", False))
@@ -12565,6 +12682,38 @@ def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
     return 0
 
 
+def _print_skill_adoption(preview: dict[str, Any]) -> None:
+    """Render ALL reviewed bytes/diffs; do not truncate a consent boundary.
+
+    Each physical line is sanitized independently: terminal controls in remote
+    content cannot erase the prompt or forge a prior line. JSON clients receive
+    the complete structured proposal instead of this terminal projection.
+    """
+    import json as _json
+
+    from local_operator.i18n.keys import wire_skill_adoption as copy
+
+    print(copy.preview_title().envelope()["text"])
+    snapshot = preview.get("snapshot") or {}
+    print(
+        copy.backup_label(
+            path=str(snapshot.get("path") or ""), hash=str(snapshot.get("tree_hash") or "")
+        ).envelope()["text"]
+    )
+    proposal = preview["adoption"]
+    for row in proposal.get("files", []):
+        # Technical field labels stay machine vocabulary. File content includes
+        # both-sided provenance and full diffs, so the CLI is a review surface,
+        # not a claim that the preview exists elsewhere.
+        rendered = _json.dumps(row, ensure_ascii=False, indent=2)
+        for line in rendered.splitlines():
+            print(_safe(line, limit=len(line) + 1))
+    print(copy.receipt_label(receipt=preview["adoption_receipt"]).envelope()["text"])
+    if proposal.get("state") == "needs-choice":
+        print(copy.needs_choice().envelope()["text"])
+    print(copy.no_apply().envelope()["text"])
+
+
 def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
     import json as _json
 
@@ -12585,6 +12734,35 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
     ctx = svc.sync_context(ConfigManager(base_dir))
     alias = getattr(args, "alias", None)
     hub_source = canonical_hub_source(ctx.config_manager) or ""
+    adoption_receipt = getattr(args, "adopt_receipt", None)
+    if adoption_receipt:
+        from local_operator.i18n.keys import wire_skill_adoption as adoption_copy
+
+        if not getattr(args, "yes", False) or getattr(args, "dry_run", False):
+            return _skills_fail(
+                args,
+                LinkError(
+                    "confirmation-required", adoption_copy.preview_required().envelope()["text"]
+                ),
+            )
+        try:
+            adopted = svc.install_skill(
+                ctx,
+                hub_source=hub_source,
+                hub_id=args.hub_id,
+                visibility=visibility,
+                tenant_id=tenant_id,
+                alias=alias,  # type: ignore[arg-type]
+                subscribe=subscribe,
+                confirm=True,
+                adoption_receipt=adoption_receipt,
+                adoption_strategy=getattr(args, "strategy", "merge"),
+                allow_llm=not getattr(args, "no_llm", False),
+            )
+        except LinkError as error:
+            return _skills_fail(args, error)
+        print(_json.dumps(adopted, indent=2))
+        return 0
     try:
         preview = svc.install_skill(
             ctx,
@@ -12596,11 +12774,25 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
             subscribe=subscribe,
             dry_run=True,
             reinstall=reinstall,
+            adoption_strategy=getattr(args, "strategy", "merge"),
+            allow_llm=not getattr(args, "no_llm", False),
         )
     except LinkError as error:
         return _skills_fail(args, error)
     bundle = preview.get("bundle")
     publisher = preview.get("publisher")
+    if preview.get("adoption"):
+        # An authored collision is reviewed separately from an ordinary new
+        # install. --yes cannot skip that review: a subsequent command must
+        # name the durable receipt bound to these exact proposed bytes.
+        if getattr(args, "json", False):
+            print(_json.dumps(preview, indent=2))
+        else:
+            _print_skill_adoption(preview)
+        return 0
+    if getattr(args, "dry_run", False):
+        print(_json.dumps(preview, indent=2))
+        return 0
     confirm_publisher = getattr(args, "confirm_publisher", None)
     confirm_hash = getattr(args, "confirm_hash", None)
     if not getattr(args, "json", False):

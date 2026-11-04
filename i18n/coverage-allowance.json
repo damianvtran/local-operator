@@ -4,17 +4,6 @@
   "pairs": [
     {
       "locale": "fr",
-      "namespace": "wire.aida_cadence",
-      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md).",
-      "owner": "i18n-translator lane",
-      "payoff": "2026-12-31",
-      "missing": [
-        "wire.aida_cadence.interval_hours.help",
-        "wire.aida_cadence.interval_hours.label"
-      ]
-    },
-    {
-      "locale": "fr",
       "namespace": "wire.console",
       "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md).",
       "owner": "i18n-translator lane",

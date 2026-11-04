@@ -340,6 +340,13 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="hover",
                 blurb="Move the pointer onto selector= XOR x+y; desktop app only.",
             ),
+            ToolDocOp(
+                op="select",
+                blurb=(
+                    "Choose options by label/value or zero-based index in selector=; "
+                    "native or ARIA (desktop); extension native only. [] clears native multiples."
+                ),
+            ),
             ToolDocOp(op="scroll", blurb="Move the viewport."),
             ToolDocOp(op="logs", blurb="Console + errors."),
             ToolDocOp(
@@ -395,7 +402,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(op="network_clear", blurb="Drop the buffer."),
             ToolDocOp(
                 op="record_start",
-                blurb="Record THIS tab's video to an .mp4 (desktop host only; see notes).",
+                blurb="Record THIS tab's video to an .mp4 (see notes).",
             ),
             ToolDocOp(
                 op="record_stop",
@@ -426,10 +433,12 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "'network_start' then read with 'network_read'. Bodies are opt-in "
             "per exact origin+path and land in a private session file, never in "
             "this transcript.\n"
-            "- 'record_start'/'record_stop' make an MP4 of this tab (AV1: plays "
-            "in QuickTime; not expected in Chrome's <video>); path= is approved before "
-            "capture and never overwritten, timeout_s= caps the length. Desktop "
-            "host only.\n"
+            "- 'record_start'/'record_stop' make an MP4 of this tab (default AV1: "
+            "QuickTime only; quality='high' is sharper H.264, played in Chromium, "
+            "~0.5-0.7 GB more RAM); path= is approved first, never overwritten. "
+            "width=/height= go together (area <= 3840x2160). A default clip over "
+            "64 MiB (32 in a scratchpad) is discarded: 4K ~150 s worst case, 75 s "
+            "there. Desktop host only.\n"
             "- Hosts, setup, approvals, error meanings: ``guide://browser``."
         ),
     ),
@@ -740,7 +749,11 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 blurb=(
                     "A bounded page of one conversation. Bodies appear only for "
                     "messages this agent admitted; everything else is metadata with "
-                    "`body: null` (no local body cache). This is also how you read "
+                    "`body: null` (no local body cache). A null body with a "
+                    "`body_state` means you have not been given that message (held, "
+                    "not admitted, or your own post that could not be read back in "
+                    "this read) - it is NOT an empty message; "
+                    "do not infer its content. This is also how you read "
                     "the reply to a DM you opened, using the `conversation_id` the "
                     "`dm` result gave you."
                 ),
@@ -749,7 +762,8 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="channel_thread",
                 blurb=(
                     "One thread, oldest-first: the root with its reply count and a "
-                    "bounded page of replies. Same screening rule as history."
+                    "bounded page of replies. Same screening rule as history, "
+                    "including `body_state` on a null body."
                 ),
             ),
             ToolDocOp(
@@ -792,10 +806,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "- WHICH LANE: `dm`/`channel_post` are visible in Team Bridge and "
             "auditable; `send`/`reply` are the legacy pair inbox, invisible in "
             "the UI. One path per intent — do not answer a DM with `send`.\n"
-            "- IMAGES: `dm`/`channel_post` accept `attachments` (up to 4 absolute "
-            "PNG/JPEG paths) ONLY where the hub supports agent uploads; otherwise "
-            "it is refused with `attachments_unavailable`. Never paste image bytes "
-            "or a data: URI into the body.\n"
+            "- IMAGES: no base64 in bodies; `attachments` if hub allows.\n"
             "- WHICH SESSION: any session with this tool may collaborate, but "
             "`take_up`/`ack`/`send`/`reply`, `channels` and `shared_*` belong to "
             "the account's chief-of-staff session. Getting `not_designated` "

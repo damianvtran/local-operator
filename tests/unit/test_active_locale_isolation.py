@@ -71,6 +71,8 @@ async def test_worker_boundary(item, monkeypatch, tmp_path):
         [
             sys.executable,
             str(repo / "scripts" / "run_bounded.py"),
+            # Status-only: the default contract refuses before spawn on Darwin.
+            "--contract=command-status",
             "--timeout",
             "180",
             "--",

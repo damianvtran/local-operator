@@ -981,7 +981,7 @@ Binds are loopback-only (`127.0.0.1`), as the mobile daemon's are
 ### 6.2 First-connect pairing
 
 1. Extension connects with an empty token → daemon replies `hello_ack
-   {paired: false}` and mints a 6-digit code with a 2-minute TTL, single
+   {paired: false}` and mints a 6-digit code with a 15-minute TTL (was 2 minutes; `lop browser pair` also mints one on demand via `POST /pairing/codes`), single
    attempt counter (5 tries then a new code).
 2. The daemon **displays** the code via `lop browser pair` (and `install`
    prints it at the end of its run). The user **types it into the extension
@@ -1098,7 +1098,7 @@ every wait.
 | Daemon's own command budget expired (`internal` + `timeout_s`) | Names the action and its budget (`the browser extension received read but did not answer within 20s`), advises one retry, then the same toggle remedy. Codes and internal verb names stay in `details`, not in the sentence. |
 | One chrome/CDP call exceeded its deadline (`internal` + `stalled`) | `the browser extension stalled on <call> and gave up on this command` + retry, then the same toggle remedy. Names the CALL, which is the useful part when reporting it. |
 | Chrome refuses to debug the tab (`internal` + `undrivable_tab`) | `that tab cannot be driven: it is another extension's page, so Chrome refuses the debugger attachment.` + `open` the URL again. Names no tab: the only handle is the session's opaque capability string. |
-| Daemon up, extension unpaired | `browser bridge not paired: run 'lop browser pair' and enter the code in the extension popup, then retry.` |
+| Daemon up, extension unpaired | `browser bridge not paired: run 'lop browser pair' now, then write the 6-digit code it prints into your reply …` (see `backend.py`; agents give the code first, never "open the popup") |
 | Daemon died between availability check and call (POST refused) | `browser bridge unreachable: the daemon at 127.0.0.1:<port> is not answering. Run 'lop browser status'; 'lop browser install' starts it.` |
 | Origin denied / prompt timeout | `navigation to <origin> was denied by the user (or the permission prompt went unanswered). Do not retry the same origin; ask the user to allow it from the extension popup if it is needed.` |
 | Tab closed by user | `browser tab <token> is gone; dropped the handle. Use 'open' with a URL to get a new tab.` (mirrors builtin.py:5045-5051) |

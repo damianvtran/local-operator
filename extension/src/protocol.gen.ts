@@ -4,13 +4,26 @@ export const PROTO_VERSION = 1 as const;
 // ADVISORY ONLY: nothing is refused for being older (`MIN_SUPPORTED_PROTO` is
 // the compatibility floor). Generated so the popup's update line and the
 // daemon's agree by construction.
-export const EXPECTED_EXTENSION_VERSION = '0.1.25' as const;
+export const EXPECTED_EXTENSION_VERSION = '0.1.26' as const;
 // The ONE spelling of the "a newer extension exists" advisory. `{have}` and
 // `{want}` are the reported and the expected extension versions; the
 // contingency is on the Chrome Web Store because nothing here can know what the
 // store currently offers. Nothing is blocked by an older extension — the copy
 // says so, and must keep saying so.
 export const EXTENSION_UPDATE_NOTE = 'Browser extension {have} < {want} — update it in Chrome when a newer version is offered; nothing is blocked.';
+// How to update an older extension, as one instruction (protocol.py).
+export const EXTENSION_UPDATE_HOW = 'open chrome://extensions, turn on Developer mode (top right), then click Update';
+// The pairing-result sentences. The DAEMON sends them in `pair_result.message`;
+// the extension uses the same constants as its fallback when a message is
+// absent, so one spelling reaches the person whichever side wrote it.
+export const PAIR_MISMATCH_MESSAGE = 'That code didn’t match. Check it and type it again.';
+export const PAIR_EXPIRED_MESSAGE = 'That code expired. Ask Local Operator to “pair my browser” again.';
+export const PAIR_LOCKED_MESSAGE = 'Too many wrong tries. Ask Local Operator to “pair my browser” for a new code.';
+export const PAIR_NO_CODE_MESSAGE = 'There’s no code for this browser yet. Ask Local Operator to “pair my browser”.';
+// What the pairing form tells a person to say to the agent, and how long a
+// code lasts (the daemon's PAIR_TTL_S, in minutes, for copy only).
+export const PAIR_ASK_PHRASE = 'pair my browser';
+export const PAIR_TTL_MINUTES = 15 as const;
 // How long the approval popup waits for a human origin decision before
 // auto-denying. Generated so the daemon's prompt window (this + margin) and
 // the session client's HTTP timeout can never drift below it (finding A3).
@@ -63,7 +76,7 @@ export const CAPABILITY_SWITCHES: Record<string, { label: string; permission: st
   "upload": { label: 'Allow uploads', permission: '' },
 };
 
-export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'press' | 'hover' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'styles' | 'hit_test' | 'ancestors' | 'query' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_inspect' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload' | 'network_start' | 'network_stop' | 'network_read' | 'network_clear' | 'record_start' | 'record_stop';
+export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'press' | 'hover' | 'select' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'styles' | 'hit_test' | 'ancestors' | 'query' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_inspect' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload' | 'network_start' | 'network_stop' | 'network_read' | 'network_clear' | 'record_start' | 'record_stop';
 // Wire methods ONLY the desktop app's browser host serves. They are in `Method`
 // because the vocabulary is shared, but this build must not serve or advertise
 // them: network capture needs a standing channel the extension's worker lifetime
@@ -129,6 +142,9 @@ export interface HelloAck {
 // an existing model, so a released daemon that does not know it ignores the
 // frame instead of closing the socket.
 export interface Role { event: 'role'; role: 'driver' | 'standby'; }
+// Daemon -> extension: open the pairing tab (sent by `lop browser pair` to a
+// connected, unpaired install). Carries NO code, by design.
+export interface ShowPairing { event: 'show_pairing'; }
 export interface PairRequest { event: 'pair'; code: string; }
 export interface PairResult { event: 'pair_result'; ok: boolean; token: string; message: string; }
 export interface Ping { event: 'ping'; }
@@ -160,4 +176,4 @@ export interface OriginDecision {
 export type ExtensionEvent =
   | Hello | PairRequest | Pong | TabClosed | TabUpdate | AwaitingOrigin | AwaitingOriginCleared
   | Unpair | OriginDecision | Capabilities | CapabilitySwitches;
-export type DaemonMessage = HelloAck | PairResult | Ping | Request | Role;
+export type DaemonMessage = HelloAck | PairResult | Ping | Request | Role | ShowPairing;

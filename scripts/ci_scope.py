@@ -483,7 +483,10 @@ JOB_COMMANDS: dict[str, tuple[str, ...]] = {
         # leader that exits while a descendant lives on, which the wrapper sweeps.
         # The bound is `BOUNDED_GATE_TIMEOUT`, above: generous on purpose, because
         # timing out a legitimately slow gate is worse than waiting for it.
-        f".venv/bin/python scripts/{BOUNDED_WRAPPER_NAME} --timeout {BOUNDED_GATE_TIMEOUT} -- "
+        # command-status: this gate consumes pyright's status, not a cleanup
+        # certificate, and the default contract refuses on Darwin before spawn.
+        f".venv/bin/python scripts/{BOUNDED_WRAPPER_NAME} --contract=command-status "
+        f"--timeout {BOUNDED_GATE_TIMEOUT} -- "
         ".venv/bin/python -m pyright --pythonpath .venv/bin/python .",
         # The protocol-sync check is a *step of this job* in ci.yml, not a job
         # of its own: a Python-only protocol edit must fail even when the

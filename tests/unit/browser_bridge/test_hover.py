@@ -95,7 +95,7 @@ def test_hover_is_registered_everywhere_a_desktop_only_method_must_be() -> None:
     assert "hover" in builtin.BROWSER_ACTIONS
     assert "hover" in builtin.CMUX_UNSUPPORTED_BROWSER_ACTIONS
     offset = METHODS.index("press")
-    assert METHODS[offset : offset + 3] == ("press", "hover", "close")
+    assert METHODS[offset : offset + 4] == ("press", "hover", "select", "close")
 
 
 @pytest.mark.asyncio

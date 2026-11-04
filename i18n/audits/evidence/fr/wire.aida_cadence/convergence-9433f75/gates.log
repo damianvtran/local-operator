@@ -1,0 +1,42 @@
+{"gate": "generator", "command": ["/Users/damian/local-operator/.venv/bin/python", "scripts/run_bounded.py", "--contract=command-status", "--memory-mb", "512", "--timeout", "90", "--", "/Users/damian/local-operator/.venv/bin/python", "scripts/i18n/generate.py", "--check"], "outer_pid": 23961, "outer_pgid": 23961, "rc": 0, "group_rows_after_exit": [], "group_rows_after_supervisor": [], "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"}
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+generate.py --check: 123 artifact(s) byte-identical
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=52105085b3024974abdf94b174ac7777 completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/52105085b3024974abdf94b174ac7777.completion.json
+
+{"gate": "catalogues", "command": ["/Users/damian/local-operator/.venv/bin/python", "scripts/run_bounded.py", "--contract=command-status", "--memory-mb", "512", "--timeout", "90", "--", "/Users/damian/local-operator/.venv/bin/python", "scripts/i18n/check.py", "--catalogues-only"], "outer_pid": 24120, "outer_pgid": 24120, "rc": 0, "group_rows_after_exit": [], "group_rows_after_supervisor": [], "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"}
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+check.py: catalogue checks: 0 problem(s)
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=1be9a6e5db9149f09e979e89bb6386a4 completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/1be9a6e5db9149f09e979e89bb6386a4.completion.json
+
+{"gate": "affected-pytest", "command": ["/Users/damian/local-operator/.venv/bin/python", "scripts/run_bounded.py", "--contract=command-status", "--memory-mb", "512", "--timeout", "90", "--", "/Users/damian/local-operator/.venv/bin/python", "-m", "pytest", "tests/unit/i18n/test_language_manifest.py", "tests/unit/i18n/test_ledger_shards.py", "tests/unit/aida/test_aida_interval.py", "-q", "-n0"], "outer_pid": 24209, "outer_pgid": 24209, "rc": 0, "group_rows_after_exit": [], "group_rows_after_supervisor": [], "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"}
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
+.......................................................................[thread-leak] main: tests/unit/aida/test_aida_interval.py::test_interval_registry_write_applies_through_live_config_watcher threads_at_start=2 threads_at_end=3 at_boundary=+1 after_grace=+1 daemon=1/1 names=['lo-analytics-writer']
+. [ 92%]
+......                                                                   [100%][thread-leak] main: 1 test(s) still held 1 thread(s) after a 250ms grace (sum of after_grace); peak 3 live; worst 1: +1 tests/unit/aida/test_aida_interval.py::test_interval_registry_write_applies_through_live_config_watcher
+
+=============================== warnings summary ===============================
+tests/unit/aida/test_aida_interval.py::test_actual_settings_api_numeric_row_and_rejections
+  /Users/damian/local-operator/.worktrees/french-cadence/local_operator/types.py:426: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    @validator(
+
+tests/unit/aida/test_aida_interval.py::test_actual_settings_api_numeric_row_and_rejections
+  /Users/damian/local-operator/.worktrees/french-cadence/local_operator/types.py:446: PydanticDeprecatedSince20: Pydantic V1 style `@validator` validators are deprecated. You should migrate to Pydantic V2 style `@field_validator` validators, see the migration guide for more details. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    @validator("end_time_utc")
+
+tests/unit/aida/test_aida_interval.py::test_actual_settings_api_numeric_row_and_rejections
+  /Users/damian/local-operator/.worktrees/french-cadence/local_operator/server/models/schemas.py:732: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    class ModelEntry(BaseModel):
+
+tests/unit/aida/test_aida_interval.py::test_actual_settings_api_numeric_row_and_rejections
+  /Users/damian/local-operator/.worktrees/french-cadence/local_operator/server/models/schemas.py:767: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    class ModelListResponse(BaseModel):
+
+tests/unit/aida/test_aida_interval.py::test_actual_settings_api_numeric_row_and_rejections
+  /Users/damian/local-operator/.worktrees/french-cadence/local_operator/server/models/schemas.py:814: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.14/migration/
+    class ProviderListResponse(BaseModel):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+78 passed, 5 warnings in 28.68s
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=cdd3775a646d4122b1a213d4cabcf712 completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/cdd3775a646d4122b1a213d4cabcf712.completion.json
+

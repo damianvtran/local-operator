@@ -1,0 +1,149 @@
+{
+  "schema": 1,
+  "audit_id": "hosting-es-r1",
+  "round": "R1",
+  "locale": "es",
+  "namespace": "wire.errors.hosting",
+  "audit_date": "2026-11-03",
+  "key_count": 1,
+  "base_commit": "87ca846245b2",
+  "source": {
+    "root": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1",
+    "en": {
+      "path": "wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "bytes": 82
+    },
+    "context": {
+      "path": "wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9",
+      "bytes": 854
+    },
+    "namespace_committed": false,
+    "namespace_absent_at_base": true,
+    "shipped": false
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9"
+    },
+    "target": {
+      "path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/hosting-es/wire.errors.hosting.json",
+      "sha256": "8de6f07aa22bb654bc0e45390bc803ba28f37698e6e08ffe95399d895ff3c5cf"
+    }
+  },
+  "target": {
+    "path": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/hosting-es/wire.errors.hosting.json",
+    "sha256": "8de6f07aa22bb654bc0e45390bc803ba28f37698e6e08ffe95399d895ff3c5cf",
+    "bytes": 97,
+    "matches_author_record": true,
+    "matches_manager_binding": true
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "f50d87966867",
+    "model_requested": "anthropic/claude-sonnet-5-5",
+    "model_served": "anthropic/claude-sonnet-5-5",
+    "actual_model_source": "session model header (explicit): anthropic/claude-sonnet-5-5; no separate served model id is exposed and no fallback was observed",
+    "fallback": "NONE CLAIMED; no failure event observed",
+    "independent_from_translator_session": true,
+    "translator_session": "804764f54d82",
+    "independent_from_code_author": "94dcef624dec",
+    "self_translation": false,
+    "mt_service_used": false,
+    "other_reader_verdict_read": false
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "scope": "single-key source-only linguistic/mechanical audit"
+  },
+  "findings": [],
+  "mechanical": {
+    "json_object": true,
+    "key_parity": true,
+    "key_count": 1,
+    "nfc": true,
+    "cf": 0,
+    "manual_bidi": 0,
+    "braces": false,
+    "terminal_period": true,
+    "capital_initial": true,
+    "codepoints": 49,
+    "ascii": false,
+    "identical_to_english": false,
+    "zero_icu_args": true,
+    "placeholder_cldr": "N/A by construction: no arguments, no braces, no plural/select structure"
+  },
+  "meaning": {
+    "source": "Hosting platform is not configured.",
+    "target": "La plataforma de alojamiento no está configurada.",
+    "assessment": "names the owned condition; no remedy, provider name, dynamic detail or opaque external-error text added; state passive, feminine agreement; complete statement after a colon",
+    "native_idiom": "natural Spanish; matches the corpus pattern 'La clave ... no está configurada ...' and 'Ese nivel ... no está configurado.'"
+  },
+  "corpus": [
+    "cli.global_help.hosting: Plataforma de alojamiento que usar (radient, deepseek, openai, ...)",
+    "cli.global_help.propagated_hosting: Plataforma de alojamiento para esta ejecución (...)",
+    "cli.exec_worker_help.hosting: Anulación de la plataforma de alojamiento",
+    "cli.credential_help.credential: ... credenciales de distintas plataformas de alojamiento",
+    "wire.errors.media.radient_key_missing: La clave de API de Radient no está configurada en el servidor.",
+    "tui.authoring.invalid_effort: Ese nivel de esfuerzo no está configurado.",
+    "wire.settings.hosting.label: Proveedor predeterminado (settings picker concept, not this condition)"
+  ],
+  "advisories": [
+    {
+      "id": "A1",
+      "text": "Legacy exception contract: session_factory.HostingNotConfiguredError's `str` remains the English sentence; this display-only key does not edit/wrap/translate the exception, its args, type or callers. A surface painting str(error) still shows English until the caller migration consumes this key; no localized-exception claim."
+    },
+    {
+      "id": "A2",
+      "text": "Staged, uncommitted source: the namespace is absent at base 87ca846245b2 and is not shipped, generated, activated or ledgered; this verdict covers the exact staged bytes only."
+    },
+    {
+      "id": "A3",
+      "text": "Term choice 'plataforma de alojamiento' is corpus-backed by current CLI Spanish, not an inference from another locale's wording; wire.settings.hosting.label's 'Proveedor predeterminado' is a different settings-picker concept."
+    },
+    {
+      "id": "A4",
+      "text": "No ledger row, activation, PR comment, repo edit or target edit was made; this record and report are the canonical delivery for the staged copy."
+    }
+  ],
+  "native_holds": {
+    "native_speaker": "NOT RUN",
+    "rendered_frame": "NOT RUN",
+    "pseudo_localisation": "NOT RUN",
+    "rtl": "NOT APPLICABLE — es is LTR",
+    "runtime_consumer": "NOT RUN"
+  },
+  "limitations": [
+    "No project ICU parser, catalogue validator, test suite, formatter, app or native run; mechanical checks are pure stdlib JSON/hash/Unicode checks.",
+    "Source is uncommitted and absent at base; no Git/repo inspection was performed.",
+    "No visible-surface, consumer-wiring or runtime fit is claimed; the legacy exception remains English by contract."
+  ],
+  "preservation": {
+    "tui_chrome_r1_r2": "untouched",
+    "sdk_packets_and_census": "untouched; nothing re-authored"
+  },
+  "ledger": "NOT WRITTEN — no ledger/activation/PR comment per task",
+  "audit_notes_not_execution_log": "report.md and findings.json carry the reasoning; audit.log carries the eval-computed hash/parity/Unicode outputs. No process or test command was run.",
+  "artifacts": [
+    {
+      "path": "report.md",
+      "sha256": "735a2e6469684949eb57f34f67cf79c6eb7f909f9cff0bd1bd45843c83bdd145"
+    },
+    {
+      "path": "findings.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "path": "audit.log",
+      "sha256": "cdc15829ed5b0fb729b83a3091f91bb188d82758cd6fe0f071867b3b0a84cbfc"
+    }
+  ]
+}

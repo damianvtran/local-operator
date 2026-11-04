@@ -372,13 +372,26 @@ MEASURED_TOKENS: dict[str, int] = {
     # name lives in dm's refusal, not in per-request schema prose. Measured by
     # this test's own printed table on the rebased head; the paired start-context
     # figure is in scripts/bench_context_budget.py.
+    # 1890 -> 1901 (2026-11-03): the one-channel clause in the description
+    # ("The one channel for teammates; reply where it arrived") — the incident
+    # fix for cross-channel fan-out to a teammate.
+    # 1901 -> 1951 (2026-11-03): body-state and long-hold alert wording, re-measured
+    # on the tree rebased onto the one-channel clause by this test's own printed value.
     # 1890 -> 1947 (+57, agent image attachments S1): ONE bullet in the opt-in
     # `bridge` reference notes telling a model that `attachments` exists on
     # `dm`/`channel_post` only where the hub supports agent uploads. The param is
     # deliberately NOT in the published schema (SkipJsonSchema), so the always-on
     # wire description/schema bytes did not move; the 1890 baseline was re-measured
     # on this tree before the edit with this test's canonical renderer.
-    "bridge": 1947,
+    # 1962 -> 1978 (+16, merge of main): re-measured on the
+    # merged tree with this test's canonical renderer. Main's own wording is 1962
+    # (8128 chars); the S1 bullet at its original length pushed the merged doc to
+    # 8366 chars, over the 8192-char soft cap, so the bullet was tightened to
+    # "no base64 in bodies; `attachments` if hub allows." (8188 chars, 1978 tokens).
+    # The long form (the `attachments_unavailable` detail) lives in the refusal
+    # itself, not in this opt-in note. 1947 was the pre-merge figure and is not
+    # carried across.
+    "bridge": 1978,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -398,7 +411,36 @@ MEASURED_TOKENS: dict[str, int] = {
     # this test's own print.
     # 1863 -> 1908 (+45, issue #3248): the `hover` op and the chord/selector
     # wording on `press`. Measured by this test's own print.
-    "browser": 1908,
+    # 1908 -> 1968 (+60, issue #3333): the `select` op, its native/ARIA
+    # operation and its host scope, after adding the one-line
+    # BrowserParams.options. Measured by this test's own print.
+    # 1968 -> 2094 (+126, agent-chosen recording size, RS1-RS5): the
+    # width=/height= bounds and the 4K cap arithmetic (about 150 s at 64 MiB,
+    # 75 s in a scratchpad) must be discoverable from the op the model calls;
+    # the measured cost table and the viewport-reflow caveat stay in
+    # `guide://browser`, which is where the reference detail belongs. The cap
+    # figures are a WORST CASE, not a typical rate, so that qualifier rides
+    # beside them (review round 1, m4). Both branches moved this one doc, and
+    # together they pushed it past the 8 KiB soft cap, so the op row and the
+    # note drop the host-only clause they each duplicated from the other
+    # (-5 tokens against the branch's own +131); the number below is measured
+    # on the rebased tree by this test's own print, not a sum of branch deltas.
+    # 2097 -> 2104 (+7, opt-in high-quality recording): `quality='high'` (H.264,
+    # plays in Chrome, costs more CPU) is the one fact a model must meet at the
+    # op, since the default AV1 clip is the lower-quality choice. To stay under the
+    # 8192-char soft cap (8188 chars before this change) the note drops the
+    # width/height bounds the param descriptions and the validator's refusal already
+    # carry, and the op row drops its width/height clause. The when-to-use guidance
+    # and the measured costs live in `guide://browser`. Measured by this test's
+    # own print.
+    # 2104 -> 2116 (+12, review M1 and m-A on the high-quality PR): the earlier
+    # "costs more CPU" was wrong against the measurements (whole-app CPU is LOWER
+    # for `high` on macOS arm64; what rises is main-process CPU and about
+    # 0.5-0.7 GB of RAM), so the note states the RAM cost and the tested
+    # playback instead. Measured by this test's own print; the doc is 8190 chars against
+    # the 8192 cap.
+    # No other tool's entry moved.
+    "browser": 2116,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the

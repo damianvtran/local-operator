@@ -1,0 +1,19 @@
+{
+  "wire.skill_adoption.preview_required": "इस स्थानीय कौशल को लिंक करने से पहले merge का पूर्वावलोकन ज़रूरी है। `lop skills pull` को उसी कौशल ID, दायरे और विकल्पों के साथ चलाएँ और `--dry-run` जोड़ें। दोनों डिफ़ देखें, फिर पुष्टि करने के लिए उन्हीं विकल्पों के साथ `--adopt-receipt <receipt> --yes` इस्तेमाल करें।",
+  "wire.skill_adoption.preview_changed": "इस पूर्वावलोकन के बाद स्थानीय कौशल, Hub का संशोधन या लिंक नीति बदल गई है। नया पूर्वावलोकन बनाएँ और लागू करने से पहले उसकी समीक्षा करें।",
+  "wire.skill_adoption.needs_choice": "सुरक्षित रूप से एक संयुक्त संस्करण नहीं बनाया जा सका। स्पष्ट विकल्प का पूर्वावलोकन करें: स्थानीय संस्करण रखकर लिंक करें, या बैकअप के साथ Hub का संस्करण लें।",
+  "wire.skill_adoption.preview_title": "लिंक करने से पहले स्थानीय और Hub के निर्देशों की समीक्षा करें",
+  "wire.skill_adoption.confirm": "कौशल को Hub से जोड़ने का यह समीक्षित प्रस्ताव लागू करें? [y/N] ",
+  "wire.skill_adoption.cancelled": "रद्द किया गया। स्थानीय कौशल नहीं बदला गया।",
+  "wire.skill_adoption.dry_run_help": "स्थानीय कौशल बदले बिना इंस्टॉलेशन या Hub से जोड़ने का पूर्वावलोकन करें",
+  "wire.skill_adoption.receipt_help": "Hub से जोड़ने का यह पहले से समीक्षित पूर्वावलोकन लागू करें",
+  "wire.skill_adoption.strategy_help": "पूर्वावलोकन के लिए merge, keep-local या take-hub चुनें",
+  "wire.skill_adoption.no_llm_help": "कौशल का पाठ merge मॉडल को न भेजें",
+  "wire.skill_adoption.backup_label": "मूल फ़ोल्डर का स्नैपशॉट: {path} (SHA-256 {hash})",
+  "wire.skill_adoption.receipt_label": "Hub से जोड़ने के पूर्वावलोकन की रसीद: {receipt}",
+  "wire.skill_adoption.no_apply": "केवल पूर्वावलोकन। कुछ भी इंस्टॉल या लिंक नहीं किया गया।",
+  "wire.skill_adoption.inherited_assets": "स्थानीय संसाधन सुरक्षित रखे जाते हैं और merge मॉडल को नहीं भेजे जाते।",
+  "wire.skill_adoption.yes_help": "इंस्टॉलेशन या Hub से जोड़ने के समीक्षित पूर्वावलोकन की पुष्टि करें",
+  "wire.skill_adoption.alias_occupied": "एक स्थानीय कौशल पहले से इस नाम का उपयोग कर रहा है। जोड़ते समय merge की समीक्षा करने के लिए --dry-run के साथ Hub के कौशल का pull करें, या दूसरा नाम चुनें।",
+  "wire.skill_adoption.projection_unsupported": "इस प्लेटफ़ॉर्म पर समीक्षा के बाद मौजूदा स्थानीय कौशल को Hub से जोड़ना अभी समर्थित नहीं है। स्थानीय कौशल और उसका लिंक नहीं बदले गए। जोड़ने के लिए समर्थित प्लेटफ़ॉर्म का उपयोग करें; Hub के कौशल सामान्य तरीके से अब भी इंस्टॉल किए जा सकते हैं।"
+}

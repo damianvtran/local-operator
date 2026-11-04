@@ -28,6 +28,7 @@ on:
       # never run the suite that catches it.
       - '.github/workflows/chrome-web-store.yml'
       - '.github/workflows/chrome-web-store-promote.yml'
+      - '.github/workflows/chrome-web-store-status.yml'
   pull_request:
     paths:
       - 'extension/**'
@@ -43,6 +44,7 @@ on:
       - '.github/workflows/extension.yml'
       - '.github/workflows/chrome-web-store.yml'
       - '.github/workflows/chrome-web-store-promote.yml'
+      - '.github/workflows/chrome-web-store-status.yml'
   workflow_dispatch:
 
 # Matches ci.yml, including the per-SHA group for `main` so a merge commit's

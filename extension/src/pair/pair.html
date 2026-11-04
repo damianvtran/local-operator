@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pair with Local Operator</title>
+    <link rel="stylesheet" href="pair.css" />
+  </head>
+  <body>
+    <!-- THE PAIRING TAB. A normal extension page, not the toolbar popup: a
+         Chrome action popup closes the moment focus leaves it, and reading the
+         code in the chat or the terminal IS leaving it (operator report,
+         2026-11-02). This page keeps the field, the typed digits and the
+         result while the person switches windows and comes back.
+
+         Opened by the worker on `show_pairing` (sent when `lop browser pair`
+         prints a code) and on first install; the popup links here too. Every
+         section ships HIDDEN except #checking, for the same reason as the
+         popup: the first paint must never be a diagnosis the probe has not
+         made yet. -->
+    <main class="card" id="card">
+      <header class="head">
+        <svg
+          class="mark"
+          viewBox="285 253 520 520"
+          fill="none"
+          stroke="currentColor"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <circle cx="490" cy="355" r="78" stroke-width="35" />
+          <circle cx="720" cy="326" r="42" stroke-width="29" />
+          <circle cx="368" cy="686" r="41" stroke-width="29" />
+          <path d="M370 645 V545 a90 90 0 0 1 90 -90 h60 a78 78 0 0 1 66 44" stroke-width="33" />
+          <path d="M590 498 V750" stroke-width="33" />
+          <path d="M600 492 C 646 512 686 480 706 400 L 712 378" stroke-width="33" />
+        </svg>
+        <span class="wordmark">Local Operator</span>
+      </header>
+
+      <div class="body">
+        <section id="checking" class="state" role="status">
+          <h1 class="title">Pair this browser</h1>
+          <p class="sub">Checking for Local Operator on this computer…</p>
+        </section>
+
+        <section id="form-state" class="state hidden">
+          <h1 class="title">Pair this browser</h1>
+          <p class="sub" id="pair-unpaired-note">
+            This browser was unpaired from Local Operator. Pair it again to keep using it.
+          </p>
+          <form id="pair-form" novalidate>
+            <label class="field-label" for="pair-code">Pairing code</label>
+            <input
+              id="pair-code"
+              type="text"
+              inputmode="numeric"
+              pattern="[0-9]*"
+              maxlength="6"
+              autocomplete="one-time-code"
+              spellcheck="false"
+              aria-describedby="pair-hint pair-error pair-help"
+            />
+            <!-- ONE slot, two voices (design D1): a muted hint by default,
+                 replaced in place by the error, so the field and Pair keep one
+                 rhythm and nothing moves when a failure appears. The hint and
+                 the error are separate elements stacked in one reserved box, so
+                 the error keeps its own role="alert" announcement. -->
+            <div class="slot">
+              <p class="hint" id="pair-hint">Type the 6&#8209;digit code Local Operator gave you.</p>
+              <p class="error hidden" id="pair-error" role="alert"></p>
+            </div>
+            <div class="actions">
+              <button type="submit" class="btn primary" id="pair-submit">Pair</button>
+            </div>
+          </form>
+          <!-- The no-code helper (operator requirement, 2026-11-02): a person
+               who arrives here WITHOUT a code must be told, in plain words,
+               exactly what to say to get one. The phrase is generated
+               (PAIR_ASK_PHRASE) so the agent guide and this page say the same
+               thing. Always visible, not behind a tooltip: the person who most
+               needs it is the one who does not know to hover. -->
+          <div class="helper" id="pair-help">
+            <p class="helper-title">Don't have a code?</p>
+            <p class="helper-text">
+              Ask Local Operator: <q id="pair-ask-phrase">pair my browser</q>. It shows you a
+              6&#8209;digit code to type here. Codes work for
+              <span id="pair-ttl">15</span> minutes. You can switch windows; this page keeps
+              what you typed.
+            </p>
+          </div>
+        </section>
+
+        <section id="paired-state" class="state hidden" role="status">
+          <svg
+            class="check"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <path d="M4 12.5 L9.5 18 L20 6.5" stroke-width="2.5" />
+          </svg>
+          <h1 class="title" id="paired-title">Paired.</h1>
+          <p class="sub" id="paired-sub">
+            Local Operator can now use this browser. The first time it visits a website, you'll
+            be asked to Allow it. You can close this tab.
+          </p>
+        </section>
+
+        <section id="unreachable-state" class="state hidden">
+          <h1 class="title">Local Operator isn't running</h1>
+          <p class="sub">
+            This browser can't find Local Operator on this computer. Start Local Operator, then
+            ask it to <q class="ask-phrase">pair my browser</q>.
+          </p>
+          <div class="actions">
+            <button type="button" class="btn" id="retry">Check again</button>
+          </div>
+        </section>
+      </div>
+      <div class="foot"><a href="../options/options.html">Settings</a></div>
+    </main>
+    <script type="module" src="pair.js"></script>
+  </body>
+</html>

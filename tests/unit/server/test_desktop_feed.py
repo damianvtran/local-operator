@@ -1988,7 +1988,7 @@ def test_a_quiet_tick_costs_eight_stats_and_no_record_reads(tmp_path):
     _tick(feed)
     _queued(subscription)
 
-    # All THREE probes are gated shut, so what is measured is the DOORBELL's cost:
+    # All FIVE probes are gated shut, so what is measured is the DOORBELL's cost:
     # the catalogue probe legitimately walks the sessions directory at 1 Hz, the
     # authoring probe stats the profile and team rows at 1 Hz, and including either
     # would measure a different claim.
@@ -1996,6 +1996,7 @@ def test_a_quiet_tick_costs_eight_stats_and_no_record_reads(tmp_path):
     feed._status_probed_at = time.monotonic()
     feed._authoring_probed_at = time.monotonic()
     feed._asks_probed_at = time.monotonic()
+    feed._approvals_probed_at = time.monotonic()
     with _io_watch(feed._registry_dir) as counts:
         _tick(feed)
     assert _statuses(_queued(subscription)) == []

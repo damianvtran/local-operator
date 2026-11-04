@@ -1778,21 +1778,35 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
         from local_operator import browser_files as _files
 
         raw_path = str(args.get("path") or "")
+        # RS7: the size rides in the SAME row as the destination — the question
+        # the user answers is one fact, "write a 3840x2160 clip to HERE", not two
+        # they would have to join themselves. Parsed through `BrowserParams`, the
+        # SAME coercion the executor uses, so a string or integral float in the
+        # raw arguments names the size the clip will really have; a malformed
+        # value returns None and must not crash a description the renderer treats
+        # as unavailability (the executor refuses it properly afterwards).
+        pair = _record_size_from_args(args)
+        size = "" if pair is None else f" at {pair[0]}x{pair[1]}"
+        # The engine changes what the clip costs and what it is, so it rides the
+        # same row as the size. Read leniently like the size: a bad value is
+        # refused properly by the executor, and must not crash a description.
+        if str(args.get("quality") or "").strip().lower() == "high":
+            size += " (high quality)"
         if not raw_path.strip():
             root = str(_files.recordings_root())
             home = str(Path.home())
             shown = root.replace(home, "~", 1) if root.startswith(home) else root
-            return f"record \u2192 {_display_target(shown)}/"
+            return f"record \u2192 {_display_target(shown)}/{size}"
         if _SCHEME_SHAPED_RE.match(raw_path.strip()):
             # This tool resolves no scheme, so the call will be refused: naming
             # the invented relative path would describe a write that never
             # happens (the same reason the screenshot branch refuses to).
-            return f"record: {_display_target(raw_path.strip())}"
+            return f"record: {_display_target(raw_path.strip())}{size}"
         try:
             path, inside, resolvable = _resolve_workspace_path(raw_path, cwd or ".")
         except (OSError, ValueError):
-            return f"record: {_display_target(raw_path)}"
-        return _approval_description(path, inside, "record", resolvable)
+            return f"record: {_display_target(raw_path)}{size}"
+        return f"{_approval_description(path, inside, 'record', resolvable)}{size}"
     if action == "download":
         # The consent question is "may this page write files to your disk", and the
         # DIRECTORY is the answer — the file names are the page's to choose, and a
@@ -21288,6 +21302,7 @@ BROWSER_ACTIONS = (
     # tooltips and hover menus can be exercised. Desktop host only: see
     # DESKTOP_ONLY_METHODS for why the extension cannot deliver it.
     "hover",
+    "select",
     "close",
     # scroll and logs are served by BOTH non-cmux hosts (the paired Local
     # Operator browser extension and the desktop app's browser host); the cmux
@@ -21383,6 +21398,7 @@ CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
     {
         "press",
         "hover",
+        "select",
         "scroll",
         "logs",
         "network_start",
@@ -21474,6 +21490,16 @@ _RECORD_ABSENT_REASONS = frozenset(
         "record_unsupported",
         "record_av1_unavailable",
         "record_failed",
+        # A refused QUALITY starts nothing either: the host checks the value and
+        # its encoder before the first CDP call, and never falls back to the
+        # default clip. `record_quality_mismatch` (the harness's own echo
+        # failure) is deliberately NOT here: that clip IS recording.
+        "record_quality",
+        "record_quality_unavailable",
+        # A refused SIZE starts nothing, so the approval must not survive
+        # it — and it is listed here rather than inferred from the reason's
+        # prefix, because this set is the whitelist that PROVES absence.
+        "record_size",
     }
 )
 
@@ -21514,6 +21540,9 @@ SNAPSHOT_MAX_SEARCH_CHARS = 120
 #: and the conflict checks compare through it so a hint can never be judged
 #: against the other spelling of the same host.
 _BROWSER_BACKENDS = ("ui", "extension", "cmux")
+#: The surface-free site-approval actions. They take `backend` to name the host
+#: whose approval they are about (see `_validate_browser_backend`).
+_ACCESS_ACTIONS = ("request_access", "await_access", "cancel_access")
 
 #: Page text is model input, so it rides the same ceiling as command output
 #: rather than a bespoke one — a single-page app whose body is megabytes would
@@ -21605,6 +21634,30 @@ class BrowserParams(BaseModel):
             "(desktop app only); text entry belongs in 'type'."
         ),
     )
+    options: list[str | int] = Field(
+        default_factory=list,
+        description=(
+            "'select': labels/values or zero-based indexes; [] clears native multiple selects."
+        ),
+    )
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def _strict_select_options(cls, value: Any) -> Any:
+        # bool is an int in Python, and pydantic otherwise coerces numbers. An
+        # index must be an integer the caller actually supplied, not a guess.
+        if not isinstance(value, list) or any(type(item) not in (str, int) for item in value):
+            raise ValueError(
+                "'options' must be a list of strings or integer indexes (not booleans)"
+            )
+        if len(value) > 100:
+            raise ValueError("'options' accepts at most 100 entries")
+        if any(isinstance(item, str) and not item.strip() for item in value):
+            raise ValueError("'options' strings must not be empty or blank; use an index instead")
+        if any(isinstance(item, int) and item < 0 for item in value):
+            raise ValueError("'options' indexes must be zero-based and non-negative")
+        return value
+
     url: str = Field(
         default="",
         description=(
@@ -21621,9 +21674,9 @@ class BrowserParams(BaseModel):
     backend: str = Field(
         default="",
         description=(
-            "'open' fresh surface only: '' (default order), 'ui', 'extension' "
-            "(the user's real profile) or 'cmux'. A held handle or adoption "
-            "outranks it."
+            "'open' fresh surface or *_access host: '' (default order), 'ui', "
+            "'extension' (the user's real profile) or 'cmux'. A held handle or "
+            "adoption outranks it."
         ),
     )
     path: str = Field(
@@ -21637,7 +21690,7 @@ class BrowserParams(BaseModel):
     selector: str = Field(
         default="",
         description="CSS selector, snapshot ref, or a11y locator for the "
-        'click/type/hover target (role=checkbox[name="Active"], label=…, text=…) '
+        'click/type/hover/select target (role=checkbox[name="Active"], label=…, text=…) '
         "resolved against the a11y tree, so it survives framework ids. Also the "
         "read/snapshot scope, query CSS, scroll element, 'press' focus target or "
         "download/upload control.",
@@ -21747,6 +21800,20 @@ class BrowserParams(BaseModel):
         "(default 120, max 600); 'record_start' max recording seconds "
         "(default 120, max 600; the host auto-stops and saves at it).",
     )
+    width: int | None = Field(
+        default=None,
+        description="'record_start' viewport width in pixels (240-3840, even; needs height).",
+    )
+    height: int | None = Field(
+        default=None,
+        description="'record_start' viewport height in pixels (240-3840, even; needs width).",
+    )
+    quality: str | None = Field(
+        default=None,
+        description=(
+            "'record_start': 'standard' (default) or 'high' (sharper H.264, +0.5-0.7GB RAM)."
+        ),
+    )
 
     @field_validator("x", "y", mode="before")
     @classmethod
@@ -21762,6 +21829,46 @@ class BrowserParams(BaseModel):
         """
         if isinstance(value, bool):
             raise ValueError("must be a number, not a boolean")
+        return value
+
+    @field_validator("quality", mode="before")
+    @classmethod
+    def _normalise_quality(cls, value: Any) -> Any:
+        """Fold case and padding, and read an empty string as "not given".
+
+        Models emit ``""`` for a field they leave unset (every other string
+        field here defaults to it), and ``"High"`` for ``"high"``. Neither
+        should cost a refused call; any other spelling is refused by
+        :func:`_record_quality_problem` with the accepted pair. A non-string is
+        left alone so pydantic names it.
+        """
+        if isinstance(value, str):
+            folded = value.strip().lower()
+            return folded or None
+        return value
+
+    @field_validator("width", "height", mode="before")
+    @classmethod
+    def _refuse_uncoercible_size(cls, value: Any) -> Any:
+        """Refuse a size that is not a whole number of pixels, in every spelling.
+
+        Pydantic's lax mode coerces ``"3840"`` and ``3840.0`` to 3840, and the
+        executor records at the coerced value — so the APPROVAL row must read the
+        same coercion or it describes a different clip from the one that starts
+        (review M3: a string size rendered a row with no size at all). A bool is
+        refused for the same reason ``x``/``y`` refuse one: ``True`` would
+        otherwise become a 1-pixel side. The fractional cases raise the field's
+        own error rather than a silent truncation to 3840.
+        """
+        if isinstance(value, bool):
+            raise ValueError("must be a whole number of pixels, not a boolean")
+        if isinstance(value, (str, float)):
+            try:
+                number = float(value)
+            except ValueError:
+                return value  # let the int field name the malformed shape
+            if not number.is_integer():
+                raise ValueError("must be a whole number of pixels")
         return value
 
 
@@ -22145,10 +22252,25 @@ def _validate_browser_backend(action: str, params: BrowserParams) -> str:
     backend = _backend_hint(params)
     if not backend:
         return ""
+    if action in _ACCESS_ACTIONS:
+        # The access actions accept a host too (operator report, 2026-11-02):
+        # an approval belongs to ONE host's jar, and without a way to name it an
+        # agent planning `open backend='extension'` raised (and was told
+        # "allowed" about) the DESKTOP APP's grant, then the open failed with
+        # "not allowed yet". cmux has no permission model, so it is not a host
+        # an approval can be raised on.
+        if backend not in ("ui", "extension"):
+            return (
+                f"'backend' on '{action}' must be 'ui' or 'extension' (got "
+                f"{params.backend!r}): it names the host whose site approval this is; "
+                "cmux has no site approvals"
+            )
+        return ""
     if action != "open":
         return (
-            f"'backend' is only valid for 'open' (got it on '{action}'): it picks "
-            "the host a FRESH surface opens on; no other action chooses a host"
+            f"'backend' is only valid for 'open' and the access actions (got it on "
+            f"'{action}'): it picks the host a FRESH surface opens on, or the host "
+            "whose site approval request_access/await_access/cancel_access is about"
         )
     if backend not in _BROWSER_BACKENDS:
         return (
@@ -22495,7 +22617,7 @@ def _validate_locator_target(action: str, params: BrowserParams) -> str:
     kind = _locator_kind(params.selector)
     if not kind:
         return ""
-    if action in ("click", "type", "upload", "hover", "press"):
+    if action in ("click", "type", "upload", "hover", "press", "select"):
         # `upload` resolves its input through the same ref/CSS/locator path in
         # both hosts, so `label="Choose file"` names a file input there too
         # (agent review round 1, R1-5).
@@ -22510,6 +22632,291 @@ def _validate_locator_target(action: str, params: BrowserParams) -> str:
         f"{kind}= locators resolve a click/type TARGET; '{action}' takes a CSS "
         "selector (or a snapshot ref)"
     )
+
+
+def _record_size_problem(params: BrowserParams) -> tuple[str, str, str]:
+    """``(param, why, sentence)`` for an unusable width/height, or three empty strings.
+
+    One function for the sentence and the two codes, because the harness answers
+    this fault on TWO paths: the pre-dispatch argument check (which can only
+    return text) and the recording lane's typed result (which carries
+    ``reason``/``param``/``why`` the way the host's own refusal does). Two
+    spellings of the same refusal is the defect the shared-reason tables exist
+    to prevent, so the wording lives here and both paths call it.
+
+    The bounds are the host's (mirrored in ``browser_files``): both sides
+    or neither, each even, 240..3840, area at most 3840x2160. Area rather than
+    side is what makes 2160x3840 portrait legal and 3840x3840 illegal — the
+    encoder's price tracks pixels, not the longer edge.
+    """
+    from local_operator import browser_files as _files
+
+    width, height = params.width, params.height
+    if width is None and height is None:
+        return "", "", ""
+    if width is None or height is None:
+        given = "width" if width is not None else "height"
+        missing = "height" if width is not None else "width"
+        return (
+            "size",
+            "incomplete",
+            f"'width' and 'height' must be given together (got {given} only): a clip is "
+            f"sized in both dimensions, and one side alone would record at the default "
+            f"1280x720. Add {missing} or drop {given} for a 1280x720 clip. Nothing was "
+            "started.",
+        )
+    for name, side in (("width", width), ("height", height)):
+        if not _files.RECORD_MIN_SIDE <= side <= _files.RECORD_MAX_SIDE:
+            return (
+                name,
+                "range",
+                f"'{name}' for 'record_start' must be {_files.RECORD_MIN_SIDE} to "
+                f"{_files.RECORD_MAX_SIDE} pixels (got {side}). Nothing was started.",
+            )
+        if side % 2:
+            return (
+                name,
+                "odd",
+                f"'{name}' must be even (got {side}): a sized recording takes even sides, so "
+                "the clip is coded at exactly the viewport you asked for. Nothing was "
+                "started.",
+            )
+    area = width * height
+    if area > _files.RECORD_MAX_PIXELS:
+        return (
+            "size",
+            "area",
+            f"{width}x{height} is {area:,} pixels, over the {_files.RECORD_MAX_PIXELS:,}-pixel "
+            "limit (3840x2160): a recording may be portrait or any aspect inside that "
+            "area, but not larger. Nothing was started.",
+        )
+    return "", "", ""
+
+
+#: Longest caller value quoted back in a size refusal, in characters. The value
+#: is the caller's own argument, but a model can emit a page of digits and the
+#: answer has to stay a sentence the transcript can hold.
+_SIZE_ECHO_CHARS = 24
+
+
+def _shown_size_value(value: Any) -> str:
+    """The caller's own value, quoted for a refusal and bounded."""
+    text = repr(value)
+    if len(text) <= _SIZE_ECHO_CHARS:
+        return text
+    return text[: _SIZE_ECHO_CHARS - 1] + "\u2026"
+
+
+def _record_size_type_problem(exc: ValidationError, action: Any) -> tuple[str, str, str]:
+    """``(param, why, sentence)`` for a size ``BrowserParams`` REJECTED, or empty strings.
+
+    A size is type-checked HERE because nothing else does it: the params schema
+    spells ``width``/``height`` as ``anyOf: [integer, null]``, which the loop's
+    pre-dispatch schema pass reads as "not mine to check", so ``True``, ``3840.5``
+    and ``'abc'`` used to reach the approval prompt and only then be refused —
+    untyped — by ``execute``. The operator approved a clip that could never start.
+
+    Answers only a fault that is confined to width/height on a ``record_start``:
+    any other malformed field belongs to the executor's validation error, which
+    names the field the caller actually got wrong.
+    """
+    from local_operator import browser_files as _files
+
+    locations = {str(err["loc"][0]) for err in exc.errors() if err["loc"]}
+    if not locations or not locations <= {"width", "height"}:
+        return "", "", ""
+    if any(not err["loc"] for err in exc.errors()):
+        # A fault with no field on it is not the size's: answering it here would
+        # hide the field the caller really got wrong.
+        return "", "", ""
+    if str(action or "").strip().lower() != "record_start":
+        return "", "", ""
+    # One side, or both. ``size`` is the param the cross-field bounds already
+    # use, so a consumer grouping these refusals learns no second spelling.
+    faulted = exc.errors()
+    if len(locations) == 1:
+        param = next(iter(locations))
+        side = f"'{param}'"
+        shown = _shown_size_value(faulted[0].get("input"))
+    else:
+        # Each side is quoted against its own name: one value against "width and
+        # height" would describe a fault the caller cannot find.
+        param = "size"
+        side = "'width' and 'height'"
+        shown = " and ".join(
+            f"{_shown_size_value(err.get('input'))} for '{err['loc'][0]}'" for err in faulted
+        )
+    return (
+        param,
+        "type",
+        f"{side} for 'record_start' must be a whole number of pixels, "
+        f"{_files.RECORD_MIN_SIDE} to {_files.RECORD_MAX_SIDE} and even (got {shown}): a clip "
+        "is sized in whole pixels so the viewport is exactly the one approved. "
+        "Nothing was started.",
+    )
+
+
+def _record_size_from_args(args: dict[str, Any]) -> tuple[int, int] | None:
+    """The ``(width, height)`` the executor will record at, from RAW arguments.
+
+    ``BrowserParams`` is the one coercion both halves use: the approval describer
+    sees the arguments before pydantic does, so a string ``"3840"`` (a spelling
+    models emit) used to render a row with no size while the executor recorded at
+    3840x2160 (review M3). A pair that cannot be parsed returns ``None`` — the
+    description must not raise for a call the executor is about to refuse.
+    """
+    try:
+        params = BrowserParams(**args)
+    except ValidationError:
+        return None
+    if params.width is None or params.height is None:
+        return None
+    return params.width, params.height
+
+
+def _record_size_result(tool_call_id: str, problem: tuple[str, str, str]) -> ToolResult | None:
+    """The TYPED refusal for a size the host could not honour, or ``None``.
+
+    ``reason`` is the same spelling the host uses (``record_size``), so one
+    consumer — a transcript reader, the absent-reason whitelist, a later stop —
+    reads both producers the same way.
+    """
+    param, why, sentence = problem
+    if not sentence:
+        return None
+    return _error(
+        tool_call_id,
+        "browser",
+        sentence,
+        details={"error_code": "record_size", "reason": "record_size", "param": param, "why": why},
+    )
+
+
+def _record_size_refusal(tool_call_id: str, params: BrowserParams) -> ToolResult | None:
+    """The typed refusal for the size an already-parsed call asks for, or ``None``."""
+    return _record_size_result(tool_call_id, _record_size_problem(params))
+
+
+#: The accepted `quality` values. `standard` is the default AV1 clip and is the
+#: same request as leaving the field out.
+_RECORD_QUALITIES = ("standard", "high")
+
+
+def _record_quality_problem(params: BrowserParams) -> tuple[str, str, str]:
+    """``(param, why, sentence)`` for an unusable `quality`, or three empty strings.
+
+    The host refuses the same fault as ``record_quality`` / ``why: value`` after
+    the approval prompt; answering it here costs the user no approval for a clip
+    that could never start. Same triple shape as :func:`_record_size_problem`, so
+    the plan-time hook (text only) and the typed result share one sentence.
+    """
+    if params.quality is None or params.quality in _RECORD_QUALITIES:
+        return "", "", ""
+    return (
+        "quality",
+        "value",
+        f"'quality' for 'record_start' must be 'standard' or 'high' (got {params.quality!r}). "
+        "Omit it for the default clip. Nothing was started.",
+    )
+
+
+def _record_quality_type_problem(exc: ValidationError, action: Any) -> tuple[str, str, str]:
+    """The typed refusal for a `quality` that is not text, or empty strings.
+
+    Confined to a fault on `quality` alone for the reason the size twin is: any
+    other malformed field belongs to the executor's own validation error.
+    """
+    faulted = exc.errors()
+    if not faulted or any(not err["loc"] or err["loc"][0] != "quality" for err in faulted):
+        return "", "", ""
+    if str(action or "").strip().lower() != "record_start":
+        return "", "", ""
+    shown = _shown_size_value(faulted[0].get("input"))
+    return (
+        "quality",
+        "value",
+        f"'quality' for 'record_start' must be 'standard' or 'high' (got {shown}). Omit it "
+        "for the default clip. Nothing was started.",
+    )
+
+
+def _record_quality_result(tool_call_id: str, problem: tuple[str, str, str]) -> ToolResult | None:
+    """The TYPED refusal for a `quality` the host could not honour, or ``None``.
+
+    ``reason`` is the host's own spelling (``record_quality``) so a transcript
+    reader and `_RECORD_ABSENT_REASONS` treat both producers alike.
+    """
+    param, why, sentence = problem
+    if not sentence:
+        return None
+    return _error(
+        tool_call_id,
+        "browser",
+        sentence,
+        details={
+            "error_code": "record_quality",
+            "reason": "record_quality",
+            "param": param,
+            "why": why,
+        },
+    )
+
+
+def _browser_args_problem(
+    tool_call_id: str, action: str, params: BrowserParams
+) -> ToolResult | None:
+    """The argument refusal for one call, TYPED where a typed code exists.
+
+    Every check but the size has no host counterpart and stays the historical
+    plain message. The size does: the host reports the same ``record_size`` /
+    ``param`` / ``why`` triple over the wire, so the harness's own refusal must
+    carry it too — a transcript reader and the absent-reason whitelist treat both
+    producers alike. Called from BOTH dispatcher entries (`execute_browser`, the
+    real path, and `_execute_browser`, which tests and the dispatch bridge reach
+    directly), so neither spelling can reach the lane without the typed result
+    (review M1).
+    """
+    invalid = _validate_browser_args(action, params)
+    if invalid:
+        return _error(tool_call_id, "browser", invalid)
+    if action != "record_start":
+        # `record_stop` and every other action carrying width/height is already
+        # refused above by `_validate_record_fields`; a size on them is never a
+        # `record_size` fault.
+        return None
+    return _record_size_refusal(tool_call_id, params) or _record_quality_result(
+        tool_call_id, _record_quality_problem(params)
+    )
+
+
+def _browser_record_size_refusal(args: dict[str, Any], offered: frozenset[str]) -> str | None:
+    """The PLAN-TIME half of the size check, run by the loop before approval.
+
+    The approval prompt is painted before a tool body runs, so a refusal that
+    lived only in `execute` made the operator approve a clip that could never
+    start (review M2, the same defect class as Q-2 on #1546). This hook answers
+    with the same sentence the typed result carries, ending "Nothing was
+    started."; it is text only because ``AgentTool.refuse_args`` returns text,
+    so the codes (`record_size`/`param`/`why`) ride the execute-time result.
+
+    Never raises: the loop skips a hook that throws, and a skipped hook means the
+    prompt comes back. A shape ``BrowserParams`` rejects is refused here too when
+    the fault is confined to width/height; any other malformed field is left to
+    `execute_browser`'s validation error, which names it.
+    """
+    try:
+        params = BrowserParams(**args)
+    except ValidationError as exc:
+        _param, _why, sentence = _record_size_type_problem(exc, args.get("action"))
+        if not sentence:
+            _param, _why, sentence = _record_quality_type_problem(exc, args.get("action"))
+        return sentence or None
+    if params.action.strip().lower() != "record_start":
+        return None
+    _param, _why, sentence = _record_size_problem(params)
+    if not sentence:
+        _param, _why, sentence = _record_quality_problem(params)
+    return sentence or None
 
 
 def _validate_record_fields(action: str, params: BrowserParams) -> str:
@@ -22527,7 +22934,24 @@ def _validate_record_fields(action: str, params: BrowserParams) -> str:
     """
     from local_operator import browser_files as _files
 
+    if action != "record_start" and params.quality is not None:
+        # The same house rule as the size: a field an action ignores is refused,
+        # because a caller that sent it to `record_stop` would believe it had
+        # changed how the clip is encoded.
+        return (
+            f"'quality' is only valid for 'record_start' (got it on '{action}'): the encoder "
+            "is fixed when the recording starts"
+        )
     if action not in _RECORD_ACTIONS:
+        if params.width is not None or params.height is not None:
+            # The same house rule `timeout_s`/`path` follow: a field an action
+            # ignores is refused rather than dropped, because a caller that sent
+            # a size to `screenshot` would otherwise believe it had chosen the
+            # capture's dimensions.
+            return (
+                "'width'/'height' are only valid for 'record_start' (got them on "
+                f"'{action}'): they resize the viewport of the tab being RECORDED"
+            )
         return ""
     if action == "record_stop":
         if params.path.strip():
@@ -22539,6 +22963,11 @@ def _validate_record_fields(action: str, params: BrowserParams) -> str:
             return (
                 "'timeout_s' is only valid for 'record_start' (got it on 'record_stop'): "
                 "it is the recording LENGTH, fixed before the capture begins"
+            )
+        if params.width is not None or params.height is not None:
+            return (
+                "'width'/'height' are only valid for 'record_start' (got them on "
+                "'record_stop'): the clip's size is fixed when the recording starts"
             )
         return ""
     raw_path = params.path.strip()
@@ -22578,6 +23007,10 @@ def _validate_record_fields(action: str, params: BrowserParams) -> str:
                 f"({_files.RECORD_MIN_DURATION_S:g} to {_files.RECORD_MAX_DURATION_S:g}; "
                 f"default {_files.RECORD_DEFAULT_DURATION_S:g}); got {params.timeout_s:g}"
             )
+    # The SIZE is checked by `_browser_args_problem`, the typed entry both
+    # dispatchers call: `record_size` carries the host's own codes, and this
+    # function can only return text, so leaving the check here shadowed the
+    # typed refusal on the real path (review M1).
     return ""
 
 
@@ -22742,6 +23175,25 @@ def _browser_press_refusal(
     )
 
 
+def _select_available_options(raw: Any) -> list[dict[str, Any]]:
+    """Bound a host's suggestions too: page labels are untrusted/model-visible.
+
+    Cap both count and strings, even if a newer peer forgets its own caps. This
+    is a correction list, not a dump of a potentially enormous select menu.
+    """
+    if not isinstance(raw, list):
+        return []
+    return [
+        {
+            "index": item.get("index"),
+            "label": str(item.get("label", ""))[:120],
+            "value": str(item.get("value", ""))[:120],
+        }
+        for item in raw[:50]
+        if isinstance(item, dict)
+    ]
+
+
 def _hover_failure_hint(message: str) -> str:
     """Agent guidance for the two hover failures the host can only describe tersely.
 
@@ -22903,6 +23355,12 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
             # read-back comparison in the lane still catches a failed fill.
             return ""
         return _validate_typed_text(params.text)
+    if action == "select":
+        if "options" not in params.model_fields_set:
+            return (
+                "'select' needs options: labels/values (strings) or zero-based indexes (integers)"
+            )
+        return _validate_selector(params.selector, "select")
     if action == "hover":
         return _validate_hover_args(params)
     if action == "press":
@@ -24559,6 +25017,17 @@ async def _bridge_call(
                     "(or the browser extension), or pass a snapshot ref ('snapshot' shows "
                     "them) / a CSS selector instead."
                 )
+        if action == "select" and exc.data.get("reason") == "option_not_found":
+            available = _select_available_options(exc.data.get("available"))
+            message += "\nAvailable options (zero-based indexes):" + (
+                "\n"
+                + "\n".join(
+                    f"[{item['index']}] {item['label']!r} (value={item['value']!r})"
+                    for item in available
+                )
+                if available
+                else " (none reported)"
+            )
         if action == "hover":
             # Older host copy suggests hit_test for the inner target, but that
             # tool only sees the iframe itself. Do not leave conflicting advice
@@ -24578,6 +25047,8 @@ async def _bridge_call(
         # it from the code alone (`busy` covers `record_active` and
         # `record_limit`), and substring-matching the rendered sentence is the
         # failure mode the typed code exists to remove (review round 2, F1).
+        if action == "select" and exc.data.get("reason") == "option_not_found":
+            problem.details["available"] = _select_available_options(exc.data.get("available"))
         reason = exc.data.get("reason")
         if isinstance(reason, str) and reason:
             problem.details["reason"] = reason
@@ -24930,7 +25401,18 @@ def _access_result_text(
     subject = "the session this run was delegated from" if delegated else "this session"
     extension_host = host != HOST_UI_PREFIX
     if state == "allowed":
-        return _wrap_receipt(f"{origin} is allowed. 'open' or 'goto' the URL now.")
+        # NAME THE HOST (operator report, 2026-11-02). An approval is per host:
+        # the desktop app's browser and the extension are different jars with
+        # different grants. A bare "is allowed" about the app's host read as a
+        # go-ahead to an agent about to `open backend='extension'`, which then
+        # failed with "not allowed yet". Saying which host, and how to ask about
+        # the other one, removes the misreading.
+        other = "extension" if host == HOST_UI_PREFIX else "ui"
+        return _wrap_receipt(
+            f"{origin} is allowed on {_host_label(host)}.\n'open' or 'goto' the URL "
+            f"there now. This approval covers that host only: before opening it with "
+            f"backend={other!r}, call request_access with backend={other!r}."
+        )
     if state == "denied":
         return _wrap_receipt(
             f"the operator denied access to {origin}. Do not retry or re-request "
@@ -26041,7 +26523,19 @@ def _recording_landed(
     elif isinstance(raw_duration, float):
         duration_ms = raw_duration
     length = f"{duration_ms / 1000:.1f} s" if duration_ms is not None else "an unrecorded length"
-    stopped = " It auto-stopped at the time limit." if bool(result.get("auto_stopped")) else ""
+    high_facts, high_copy = _high_stop_facts(result)
+    if high_facts.get("stop_reason") == "max_bytes":
+        # The byte cap ENDS a high-quality clip gracefully: what was recorded is
+        # a complete, playable file, unlike the default engine, which discards
+        # an over-cap clip. Said so, because "auto-stopped at the time limit"
+        # would send the agent to lengthen `timeout_s` when the fix is a shorter
+        # or smaller clip.
+        stopped = (
+            " It hit the size limit and was finished early: the file is complete up to "
+            "that point, shorter than the time asked for."
+        )
+    else:
+        stopped = " It auto-stopped at the time limit." if bool(result.get("auto_stopped")) else ""
     # Said in the RECEIPT, not only in the docstring: after a restart this call
     # checked the file's shape and size, not that it is the destination the user
     # approved, and the model must know which guarantee it actually has
@@ -26050,11 +26544,139 @@ def _recording_landed(
     return _text(
         tool_call_id,
         "browser",
-        f"Recording saved to {target} ({size} bytes, {length}).{stopped}{unverified} "
-        "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; it is not "
-        "expected to play in Chrome's <video> (not tested).",
-        details={"path": str(target), "bytes": size},
+        f"Recording saved to {target} ({size} bytes, {length}).{stopped}{unverified}"
+        f"{high_copy} {_H264_CLIP_NOTE if high_facts else _AV1_CLIP_NOTE}",
+        details={"path": str(target), "bytes": size, **high_facts},
     )
+
+
+#: What a clip IS, said in the receipt so the agent does not promise playback it
+#: cannot back. The default clip is AV1 and the QuickTime claim is the one
+#: decoded in the desktop PR's real-path run; the H.264 claim is the Chromium
+#: `<video>` decode and seek check the desktop PR ran on its high-quality clips
+#: (1080p and 4K played, 0 dropped frames) and the same run's AV1 clips, which
+#: Chromium refused (DEMUXER_ERROR_NO_SUPPORTED_STREAMS). Both were macOS arm64
+#: only, so neither sentence claims another player or platform.
+_AV1_CLIP_NOTE = (
+    "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; Chromium's <video> "
+    "could not play it in testing."
+)
+_H264_CLIP_NOTE = (
+    "H.264 MP4: it played in Chromium's <video> and macOS AVFoundation in testing "
+    "(other players not tested)."
+)
+
+
+def _whole(result: dict[str, Any], key: str) -> int | None:
+    """A non-negative whole number from a host result, or ``None`` (bool is not one).
+
+    Total on purpose: this runs after the clip is on disk, so an exception here
+    would lose the receipt of a saved file. ``float(huge_int)`` raises
+    ``OverflowError`` and ``int(nan)`` raises ``ValueError``, so non-finite and
+    out-of-range values are dropped before either conversion.
+    """
+    value = result.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number) or number < 0 or number != int(number):
+        return None
+    return int(value)
+
+
+def _number(result: dict[str, Any], key: str) -> float | None:
+    """A finite non-negative number from a host result, or ``None``."""
+    value = result.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def _high_start_facts(result: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """``(details, copy)`` for what a high-quality start reports about its clip.
+
+    Each field is taken only when it has the expected shape: the host is not the
+    judge of its own result, and an unreadable field is left out rather than
+    guessed. The copy is a fragment that follows "high quality".
+    """
+    facts: dict[str, Any] = {"quality": "high", "codec": "h264"}
+    parts: list[str] = []
+    encoder = result.get("encoder")
+    if encoder in ("hardware", "software"):
+        facts["encoder"] = encoder
+        parts.append(f"{encoder} encoder")
+    width, height = _whole(result, "width"), _whole(result, "height")
+    if width and height:
+        facts.update(width=width, height=height)
+        parts.append(f"{width}x{height}")
+    fps = _whole(result, "fps")
+    if fps:
+        facts["fps"] = fps
+        parts.append(f"up to {fps} fps")
+    bitrate = _whole(result, "bitrate_bps")
+    if bitrate:
+        facts["bitrate_bps"] = bitrate
+        parts.append(f"target {bitrate / 1_000_000:g} Mbps")
+    return facts, (", " + ", ".join(parts)) if parts else ""
+
+
+def _high_stop_facts(result: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """``(details, copy)`` for what a high-quality STOP reports, or empty for any other clip."""
+    if result.get("quality") != "high" and result.get("codec") != "h264":
+        return {}, ""
+    facts: dict[str, Any] = {"quality": "high"}
+    parts: list[str] = []
+    encoder = result.get("encoder")
+    if encoder in ("hardware", "software"):
+        facts["encoder"] = encoder
+        parts.append(f"{encoder} encoder")
+    frames = _whole(result, "frames")
+    if frames is not None:
+        facts["frames"] = frames
+        parts.append(f"{frames} frames")
+    measured = _number(result, "measured_fps")
+    if measured is not None:
+        facts["measured_fps"] = measured
+        parts.append(f"{measured:.1f} fps measured")
+    kbps = _number(result, "avg_bitrate_kbps")
+    if kbps is not None:
+        facts["avg_bitrate_kbps"] = kbps
+        parts.append(f"{kbps:.0f} kbps average")
+    reason = result.get("stop_reason")
+    if reason in ("stop", "max_duration", "max_bytes"):
+        facts["stop_reason"] = reason
+    return facts, (" High quality: " + ", ".join(parts) + ".") if parts else ""
+
+
+def _record_echo_side(result: dict[str, Any], key: str) -> int | None:
+    """One side of the size a host ECHOED in its start result, or ``None``.
+
+    Strict on purpose: ``True`` is not 1 px and a float is not a viewport, and
+    a comparison that coerced them would certify a clip nobody asked for. The
+    echo is the harness's only evidence that the recording is the size the
+    approval named, so "unreadable" must never read as "matches".
+    """
+    value = result.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    # Total, like `_whole`: a non-finite or out-of-range echo must read as a
+    # mismatch (the typed `record_size_mismatch`), not raise with the clip live.
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number) or number != int(number):
+        return None
+    return int(value)
 
 
 async def _browser_record(
@@ -26075,13 +26697,42 @@ async def _browser_record(
     verifies it here rather than trusting the host's report.
     """
     from local_operator import browser_files as files
+    from local_operator.browser_bridge.protocol import RECORD_QUALITY_CAPABILITY
 
+    # No size check here: both dispatcher entries (`execute_browser`, and the
+    # direct `_execute_browser`) refuse a bad size before this lane runs, so a
+    # second spelling of the same refusal would be unreachable (review M1).
+    # The capability gate and the echo check below stay POST-approval because
+    # they need the selected client, which does not exist at plan time.
     problem = _capability_problem(tool_call_id, action, client, surface=state.surface_id)
     if problem is not None:
         # The capability gate the other stateful actions use, before any path is
         # resolved or any wire call is made: a pre-feature app must produce the
         # typed refusal, not a dial that times out on an unknown method.
         return problem
+    high = action == "record_start" and params.quality == "high"
+    if high:
+        # `record_quality` is a CAPABILITY, not a wire method, for the reason
+        # `record_size` is: a host that lacks it ignores the field and records the
+        # default AV1 clip while reporting success. Checked before the approval
+        # path is resolved or remembered and before any wire call, so an old app
+        # starts nothing. NOT before the prompt: the host client this needs does
+        # not exist at plan time, so the user has already approved the row.
+        problem = _capability_problem(
+            tool_call_id, RECORD_QUALITY_CAPABILITY, client, surface=state.surface_id
+        )
+        if problem is not None:
+            return problem
+    sized = params.width is not None and params.height is not None
+    if sized:
+        # `record_size` is a CAPABILITY, not a wire method: a host that
+        # does not advertise it would record at its default size and report
+        # success, so the harness asks its own record first and refuses with
+        # copy that names the working fallback instead of a version story about
+        # an action that does exist.
+        problem = _capability_problem(tool_call_id, "record_size", client, surface=state.surface_id)
+        if problem is not None:
+            return problem
     wire: dict[str, Any] = {
         "tab": state.surface_id,
         # Identity and display label are trusted host metadata, exactly as every
@@ -26092,10 +26743,11 @@ async def _browser_record(
         target, refusal = _recording_destination(tool_call_id, params.path, context)
         if refusal is not None or target is None:
             return refusal or _error(tool_call_id, "browser", "no recording destination")
-        # Fixed capture parameters (D14): up to 1280x720 (a ceiling; the clip is
-        # scaled to fit) at 10 fps with audio off, the same viewport the agent's
-        # hidden tab already paints. Not tunable in v1
-        # and not sent as fields the host might read as requests to change.
+        # Capture parameters: 10 fps with audio off, the
+        # same viewport the agent's hidden tab already paints, UNLESS the caller
+        # named a size — then the host resizes the tab's viewport to it and
+        # records exactly there. Absent, the fields are not sent at all, so an
+        # unsized start is byte-identical to the pre-feature wire.
         # WHOLE seconds: the validator refuses a fraction, and the host's
         # `durationOf` would too (R1-2). `int()` here is a lossless narrow of a
         # value already proven integral, not a round.
@@ -26108,6 +26760,13 @@ async def _browser_record(
         duration = max(files.RECORD_MIN_DURATION_S, min(duration, files.RECORD_MAX_DURATION_S))
         cap = _recording_cap_bytes(target, context)
         wire.update(path=str(target), max_duration_s=duration, max_bytes=cap)
+        if sized:
+            wire.update(width=params.width, height=params.height)
+        if high:
+            # Sent only for `high`: an absent `quality` keeps a default start
+            # byte-identical to the wire every host already understands, and
+            # `standard` is the same request as absent.
+            wire["quality"] = "high"
         result, problem = await _bridge_call(
             tool_call_id, action, wire, surface=state.surface_id, client=client
         )
@@ -26137,19 +26796,100 @@ async def _browser_record(
         # which is correct: the host replaces a different owner's recording, and
         # a same-owner second start is refused before this line.
         _APPROVED_RECORDINGS[state.surface_id] = str(target)
+        if high and result.get("codec") != "h264":
+            # The capability file can be one app-swap stale, and a host without
+            # `quality` ignores the field and records the default AV1 clip. The
+            # echoed codec is the only evidence the clip is the sharper one that
+            # was asked for, so anything but "h264" is a FAILED start. The
+            # encoder is running, so the approval is kept (the size echo below
+            # does the same) and the caller is told how to save it.
+            codec = result.get("codec")
+            running = f"{codec} " if isinstance(codec, str) and codec else "an unreported "
+            return _error(
+                tool_call_id,
+                "browser",
+                f"the clip is NOT high quality: the desktop app started it with {running}"
+                "codec, not H.264. A build without high-quality recording ignores 'quality' "
+                "and records the default AV1 clip while reporting success. The approved "
+                f"destination {target} is kept, so 'record_stop' saves this clip; stop it and "
+                "update Local Operator before retrying for a high-quality one.",
+                details={
+                    "target": str(target),
+                    # Distinct from `record_quality`: that reason is in
+                    # `_RECORD_ABSENT_REASONS` (a refused start proves nothing is
+                    # recording), while this one proves the opposite and must
+                    # leave the clip stoppable.
+                    "error_code": "record_quality_mismatch",
+                    "reason": "record_quality_mismatch",
+                    "param": "quality",
+                    "why": "not_applied",
+                    "requested_quality": "high",
+                },
+            )
+        if sized:
+            # The capability file can be one app-swap stale, and an old host
+            # answers a SIZED start by silently recording at its default size
+            # and reporting success. The echo is the only evidence the clip is
+            # the size the user approved, so a missing or different pair is a
+            # FAILED start — but the encoder is running, so the approval is kept
+            # and the caller is told how to save what is actually recording.
+            echoed = (_record_echo_side(result, "width"), _record_echo_side(result, "height"))
+            if echoed != (params.width, params.height):
+                running = f"{echoed[0]}x{echoed[1]}" if None not in echoed else "an unreported size"
+                return _error(
+                    tool_call_id,
+                    "browser",
+                    f"the clip is NOT at the {params.width}x{params.height} asked for: the "
+                    f"desktop app started it at {running}. A build without sized recording "
+                    "records at its default 1280x720 and still reports success. The "
+                    f"approved destination {target} is kept, so 'record_stop' saves this "
+                    "clip; stop it and update Local Operator before retrying for a sized one.",
+                    details={
+                        "target": str(target),
+                        # A size DISTINCT from `record_size`: that reason is in
+                        # `_RECORD_ABSENT_REASONS` (a refused start proves no
+                        # encoder is running), while this one proves the OPPOSITE
+                        # — a clip IS recording, at the wrong size, and must
+                        # remain stoppable (review m3).
+                        "error_code": "record_size_mismatch",
+                        "reason": "record_size_mismatch",
+                        "param": "size",
+                        "why": "not_applied",
+                        "requested_width": params.width,
+                        "requested_height": params.height,
+                    },
+                )
+        at_size = f" at {params.width}x{params.height}" if sized else ""
+        details: dict[str, Any] = {
+            "target": str(target),
+            "max_duration_s": duration,
+            "max_bytes": cap,
+        }
+        if sized:
+            details.update(width=params.width, height=params.height)
+        if high:
+            facts, summary = _high_start_facts(result)
+            details.update(facts)
+            return _text(
+                tool_call_id,
+                "browser",
+                f"Recording started: {target} (max {duration:g} s, up to "
+                f"{cap // (1024 * 1024)} MiB{at_size}; high quality{summary}). Stop it with "
+                f"'record_stop' to save the file. {_H264_CLIP_NOTE}",
+                details=details,
+            )
         return _text(
             tool_call_id,
             "browser",
             f"Recording started: {target} (max {duration:g} s, up to "
-            f"{cap // (1024 * 1024)} MiB). Stop it with 'record_stop' to save the file. "
-            "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; it is not "
-            "expected to play in Chrome's <video> (not tested).",
+            f"{cap // (1024 * 1024)} MiB{at_size}). Stop it with 'record_stop' to save the file. "
+            f"{_AV1_CLIP_NOTE}",
             # `target`, not `path`: a started recording has not written anything
             # yet, and `details["path"]` is what marks a browser result as a
             # produced file (session_files.scan records it as an artifact). A
             # phantom row pointing at a file that does not exist until the stop
             # would be worse than no row at all.
-            details={"target": str(target), "max_duration_s": duration, "max_bytes": cap},
+            details=details,
         )
     result, problem = await _bridge_call(
         tool_call_id, action, wire, surface=state.surface_id, client=client
@@ -27046,6 +27786,9 @@ async def _bridge_action(
         wire["key"] = chord
         if params.selector.strip():
             wire["selector"] = params.selector.strip()
+    elif action == "select":
+        wire["selector"] = params.selector.strip()
+        wire["options"] = list(params.options)
     elif action == "hover":
         # selector XOR x/y is guaranteed by _validate_browser_args; send only the
         # half the caller chose so the host never sees a second target.
@@ -27209,6 +27952,31 @@ async def _bridge_action(
             "browser",
             f"Pressed {chord!r} in the owned page{target}. Page: {_page_line(title, href)}",
             details={**details, "key": chord},
+        )
+    if action == "select":
+        selected = _geometry_entry_list(result, "selected")
+        # Do not infer successful selection from a returned label alone: ARIA
+        # controls may ignore a click, and hosts explicitly flag that case.
+        verified = result.get("verified")
+        labels = ", ".join(repr(str(item.get("label", ""))) for item in selected)
+        verdict = " (selection unverified — check the page)" if verified is False else ""
+        details.update(selected=selected, kind=result.get("kind"))
+        if isinstance(verified, bool):
+            details["verified"] = verified
+        # [] is a legitimate clear request for a native multiple select. Only
+        # the host knows multiplicity; the harness must pass it through, while
+        # retaining honest unverified feedback if the live read is inconclusive.
+        operation = (
+            "Cleared selection"
+            if not params.options and not selected
+            else f"Selected {labels or '(none)'}"
+        )
+        return _text(
+            tool_call_id,
+            "browser",
+            f"{operation} in {params.selector.strip()}{verdict}. "
+            f"Page: {_page_line(title, href)}",
+            details=details,
         )
     if action == "hover":
         raw_hit = result.get("hit")
@@ -27471,7 +28239,7 @@ async def execute_browser(
     # a peer. Keep the preflight specific to this additive action so existing
     # actions retain their established validation/ownership ordering.
     preflight_action = str(args.get("action", "")).strip().lower()
-    if preflight_action in ("press", "hover"):
+    if preflight_action in ("press", "hover", "select"):
         try:
             keyboard = BrowserParams(**args)
         except ValidationError as exc:
@@ -27484,6 +28252,32 @@ async def execute_browser(
         invalid = _validate_browser_args(preflight_action, keyboard)
         if invalid:
             return _error(tool_call_id, "browser", invalid)
+    # The recording SIZE is refused here, before ownership or host selection:
+    # the typed result carries the error code the generic validation path
+    # cannot, and a bad size must not depend on a host being reachable to be
+    # answered (review M1). Every OTHER argument check keeps its established
+    # ordering, later in this function, after the lane is chosen.
+    try:
+        early = BrowserParams(**args)
+    except ValidationError as exc:
+        # A size shaped wrong (`True`, `3840.5`, `'abc'`) is typed here for the
+        # same reason the semantic refusal above is: the generic validation error
+        # names the field but carries no `record_size` code, so a reader could
+        # not tell "nothing started" from any other bad argument.
+        size_refusal = _record_size_result(
+            tool_call_id, _record_size_type_problem(exc, args.get("action"))
+        ) or _record_quality_result(
+            tool_call_id, _record_quality_type_problem(exc, args.get("action"))
+        )
+        if size_refusal is not None:
+            return size_refusal
+        early = None  # the established path below names the malformed field
+    if early is not None and early.action.strip().lower() == "record_start":
+        size_refusal = _record_size_refusal(tool_call_id, early) or _record_quality_result(
+            tool_call_id, _record_quality_problem(early)
+        )
+        if size_refusal is not None:
+            return size_refusal
     state = _browser_state(context)
     resource = getattr(state, "resource", None)
     if resource is None or state.surface_id.startswith("surface:"):
@@ -27552,9 +28346,9 @@ async def execute_browser(
             "browser",
             f"unknown action: {action} (expected one of {', '.join(BROWSER_ACTIONS)})",
         )
-    invalid = _validate_browser_args(action, validated)
-    if invalid:
-        return _error(tool_call_id, "browser", invalid)
+    refusal = _browser_args_problem(tool_call_id, action, validated)
+    if refusal is not None:
+        return refusal
     from local_operator.browser_bridge.backend import BridgeError, BridgeUnreachable
     from local_operator.browser_bridge.resources import BrowserOwnershipError
 
@@ -28094,7 +28888,7 @@ async def _execute_browser(
     refusal = _browser_press_refusal(tool_call_id, action, params)
     if refusal is not None:
         return refusal
-    if action in ("press", "hover"):
+    if action in ("press", "hover", "select"):
         # Host-free target validation, before ANY discovery (the same ordering
         # execute_browser's preflight gives the public entry point).
         invalid = _validate_browser_args(action, params)
@@ -28140,10 +28934,12 @@ async def _execute_browser(
             "logins.",
         )
     # Before the state lookup and before every subprocess, including the
-    # liveness probe below: see _validate_browser_args.
-    problem = _validate_browser_args(action, params)
-    if problem:
-        return _error(tool_call_id, "browser", problem)
+    # liveness probe below: a direct caller (the dispatch bridge, tests) can
+    # reach this function without `execute_browser`, so the check repeats here —
+    # carrying the same typed record-size refusal as the outer entry.
+    problem = _browser_args_problem(tool_call_id, action, params)
+    if problem is not None:
+        return problem
     if action == "type" and params.secret_ref.strip():
         # Resolve the ref into `params.text` BEFORE any lane sees the call, so
         # both dispatch lanes (the bridge wire and cmux) carry the value in the
@@ -28174,6 +28970,25 @@ async def _execute_browser(
     # scroll/logs; both non-cmux hosts serve the flow and the hint picks.
     if action in ("request_access", "await_access", "cancel_access"):
         pinned = _host_of_surface(state.surface_id) or _pinned_host_for_access(context)
+        named = _backend_hint(params)
+        if named:
+            # The caller named the host whose approval this is. A HELD surface
+            # still wins (its jar is already decided) — naming a different host
+            # than the one the surface lives on is a contradiction worth saying.
+            wanted = HOST_UI_PREFIX if named == "ui" else HOST_BRIDGE_PREFIX
+            held = _host_of_surface(state.surface_id)
+            if held and held != wanted:
+                return _error(
+                    tool_call_id,
+                    "browser",
+                    f"backend={named!r} contradicts the surface this session holds, which "
+                    f"is on {_host_label(held)}. Site approvals belong to the host a tab "
+                    "lives on; drop 'backend' or close that surface first.",
+                )
+            available = ui_available if wanted == HOST_UI_PREFIX else bridge_available
+            if not available:
+                return _backend_unavailable_result(tool_call_id, named)
+            pinned = wanted
         if state.surface_id.startswith("surface:") or not (ui_available or bridge_available):
             return _error(
                 tool_call_id,
@@ -28658,6 +29473,12 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         name="browser",
         label="Browser",
         describe_approval=_describe_browser_approval,
+        # The size is refused at PLAN time, before the gate paints a consent row
+        # for a clip that cannot start (review M2). Everything that needs the
+        # client — the `record_size` capability check and the echo comparison —
+        # stays after approval, because neither can be answered until a host is
+        # selected.
+        refuse_args=_browser_record_size_refusal,
         description=(
             # Footprint: this description rides in EVERY session's cache prefix, so
             # the per-action detail lives in `guide://browser` (the playbook the

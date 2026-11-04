@@ -23,6 +23,12 @@ Sequences for common cases. Keep the order: wait, read, act, capture. Adapt acti
 2. Click the nav item; await the new heading, not a timeout.
 3. Capture URL, heading, and count. Then go back; it must restore the previous view. Test both directions.
 
+## Select controls
+
+1. Snapshot the select/combobox trigger. `select selector=… options=["English (U.S.)"]` (strings are labels/values; integers are zero-based indexes), not arrow-key presses on macOS OS popups.
+2. Verify the selected label/value and dependent form state. For multiple selects supply the exact replacement set (`options:[]` clears native multiples; single selects refuse it); single selects accept one option. If the host says selection is unverified, inspect before retrying.
+3. Exercise disabled options and a nonexistent label; the typed miss must list available options. Use that list to correct the call rather than guessing. Desktop handles ARIA controls; extension supports native `<select>` only.
+
 ## Hover and keyboard states
 
 1. Snapshot, then `hover` the trigger (selector, or x/y from a `screenshot`/`hit_test`); the reply names the element under the pointer: confirm it is the one you meant. Controls that appear only on hover (`display:none` until then) need the revealing row hovered first.
