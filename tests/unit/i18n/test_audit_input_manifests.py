@@ -131,6 +131,7 @@ def _superseded(locale: str, namespace: str) -> bool:
     return True
 
 
+@pytest.mark.parametrize("path", MANIFESTS, ids=lambda p: p.parent.parent.name)
 def test_manifest_equals_shipped_catalogue_values_byte_for_byte(path: Path) -> None:
     manifest = json.loads(path.read_text(encoding="utf-8"))
     locale = path.parent.parent.name
