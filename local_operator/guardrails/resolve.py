@@ -63,6 +63,9 @@ _PREFIX_WORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until",
 _DECLARE_WORDS = frozenset({"export", "declare", "typeset", "local", "readonly"})
 #: Marker for an opaque stretch inside an expanded word; NUL never occurs in argv.
 OPAQUE_MARK = "\x00"
+#: Same, for a ``$(mktemp …)`` value carried through a variable (R6): still
+#: unknowable, but known to be a fresh entry under the temp directory.
+TEMP_MARK = "\x02"
 
 
 # ---------------------------------------------------------------------------
@@ -72,8 +75,11 @@ OPAQUE_MARK = "\x00"
 
 @dataclass
 class _Part:
-    #: "bare" (unquoted: tilde, $, glob apply), "dq" (double-quoted: $ only),
-    #: "sq" (single-quoted: literal), "sub" (a command-substitution body).
+    #: "bare" (unquoted: tilde, brace, glob apply), "dq" (double-quoted text),
+    #: "sq" (single-quoted or escaped: literal), "sub" (a command-substitution
+    #: body), "proc" (a process-substitution body: runs, expands to a /dev/fd
+    #: path), "pbare"/"pdq" (one ``$NAME``/``${…}`` form, unquoted/quoted —
+    #: atomic so brace expansion never splits a ``${…}``).
     kind: str
     text: str
 
@@ -139,22 +145,99 @@ def _read_dollar(text: str, i: int, word: _RawWord, kind: str) -> int:
         word.add("sub", "\x01arith")
         word.broken |= not ok
         return j
+    pkind = "pbare" if kind == "bare" else "pdq"
     if nxt == "{":
-        end = text.find("}", i + 2)
+        end = _match_brace(text, i + 2)
         if end == -1:
             word.broken = True
             return n
-        word.add(kind, text[i : end + 1])
+        word.parts.append(_Part(pkind, text[i : end + 1]))
         return end + 1
     m = _NAME_RE.match(text, i + 1)
     if m is not None:
-        word.add(kind, text[i : m.end()])
+        word.parts.append(_Part(pkind, text[i : m.end()]))
         return m.end()
     if nxt and nxt in "@*#?$!-0123456789":
-        word.add(kind, text[i : i + 2])
+        word.parts.append(_Part(pkind, text[i : i + 2]))
         return i + 2
     word.add(kind, "$")
     return i + 1
+
+
+def _match_brace(text: str, i: int) -> int:
+    """Index of the ``}`` closing a ``${`` whose body starts at ``i``; -1 if none.
+
+    Depth- and quote-aware so a nested default (``${A:-${B}}``) stays one form.
+    """
+    depth = 1
+    quote: str | None = None
+    j = i
+    while j < len(text):
+        ch = text[j]
+        if quote:
+            if ch == quote:
+                quote = None
+            elif ch == "\\" and quote == '"':
+                j += 1
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch == "\\":
+            j += 1
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return -1
+
+
+_ANSI_ESCAPES = {
+    "a": "\a",
+    "b": "\b",
+    "e": "\x1b",
+    "E": "\x1b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "\\": "\\",
+    "'": "'",
+    '"': '"',
+    "?": "?",
+}
+_ANSI_RE = re.compile(
+    r"\\(x[0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|[0-7]{1,3}|.)", re.S
+)
+
+
+def _decode_ansi_c(body: str) -> str:
+    """Decode a ``$'…'`` body the way bash does (the escapes a model emits)."""
+
+    def one(m: re.Match[str]) -> str:
+        tok = m.group(1)
+        if tok[0] in "xuU" and len(tok) > 1:
+            return chr(int(tok[1:], 16))
+        if tok[0] in "01234567":
+            return chr(int(tok, 8) & 0xFF)
+        return _ANSI_ESCAPES.get(tok, "\\" + tok)
+
+    return _ANSI_RE.sub(one, body)
+
+
+def _ansi_c_end(text: str, i: int) -> int:
+    """Index of the closing ``'`` of a ``$'`` body starting at ``i``; -1 if none."""
+    j = i
+    while j < len(text):
+        if text[j] == "\\":
+            j += 2
+            continue
+        if text[j] == "'":
+            return j
+        j += 1
+    return -1
 
 
 def scan(segment: str) -> tuple[list[_RawWord], list[tuple[str, _RawWord]]]:
@@ -183,6 +266,16 @@ def scan(segment: str) -> tuple[list[_RawWord], list[tuple[str, _RawWord]]]:
             finish()
             i += 1
             continue
+        if ch in "<>" and segment[i + 1 : i + 2] == "(":
+            # Process substitution ``<(…)``/``>(…)``: the body RUNS as a command
+            # and the word becomes a /dev/fd path, never a file we write.
+            body, j, ok = _read_sub(segment, i + 2)
+            if cur is None:
+                cur = _RawWord()
+            cur.parts.append(_Part("proc", body))
+            cur.broken |= not ok
+            i = j
+            continue
         if ch in "<>" or (ch.isdigit() and cur is None and re.match(r"\d+[<>]", segment[i:])):
             # Redirection operator: [n]> [n]>> >| &> <  (and <<, already body-stripped).
             finish()
@@ -205,6 +298,9 @@ def scan(segment: str) -> tuple[list[_RawWord], list[tuple[str, _RawWord]]]:
                 pending_redirect = ">>"
             else:
                 pending_redirect = ">"
+            continue
+        if ch == "\\" and segment[i + 1 : i + 2] == "\n":
+            i += 2
             continue
         if cur is None:
             cur = _RawWord()
@@ -249,9 +345,24 @@ def scan(segment: str) -> tuple[list[_RawWord], list[tuple[str, _RawWord]]]:
             i = j + 1
             continue
         if ch == "\\":
-            if i + 1 < n:
+            # Backslash-newline is a line continuation: it vanishes (R7).
+            if i + 1 < n and segment[i + 1] != "\n":
                 cur.add("sq", segment[i + 1])
             i += 2
+            continue
+        if ch == "$" and segment[i + 1 : i + 2] == "'":
+            # ANSI-C quoting: decoded, then literal (R5).
+            end = _ansi_c_end(segment, i + 2)
+            if end == -1:
+                cur.broken = True
+                i = n
+            else:
+                cur.add("sq", _decode_ansi_c(segment[i + 2 : end]))
+                i = end + 1
+            continue
+        if ch == "$" and segment[i + 1 : i + 2] == '"':
+            # Locale translation ``$"…"`` behaves as a double-quoted string.
+            i += 1
             continue
         if ch == "$":
             i = _read_dollar(segment, i, cur, "bare")
@@ -302,116 +413,303 @@ class Expanded:
     #: Every character came from an unquoted expansion that produced nothing,
     #: so bash drops the word entirely.
     vanished: bool = False
+    #: The opaque part is a ``$(mktemp …)`` path: a fresh temp entry (R6).
+    temp: bool = False
 
 
 def _glob_escape(text: str) -> str:
     return re.sub(r"([*?\[])", r"[\1]", text)
 
 
-def _expand_dollars(text: str, env: Mapping[str, str], out: Expanded) -> tuple[str, bool]:
-    """Expand ``$`` forms in quoted/unquoted text; returns (text, produced_any)."""
-    produced = False
-    pieces: list[str] = []
-    pos = 0
-    for m in _DOLLAR_RE.finditer(text):
-        pieces.append(text[pos : m.start()])
-        pos = m.end()
-        if text[m.start() : m.start() + 1] != "$":
-            continue
-        name = m.group(2)
-        value: str | None
-        if m.group(1) is not None:
-            inner = m.group(1)
-            if _NAME_RE.fullmatch(inner):
-                name = inner
+#: Upper bound on the words one brace expression may produce. Past it the word
+#: is opaque: ``{1..100000}`` is not something to enumerate per bash call.
+MAX_BRACE_RESULTS = 64
+_BRACE_RANGE_RE = re.compile(r"^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?$")
+
+
+def _brace_alternatives(body: str) -> list[str] | None:
+    """The alternatives of one ``{…}`` body, or ``None`` when it is not a brace
+    expression (bash then leaves it literal: ``{a}``, ``{}``)."""
+    m = _BRACE_RANGE_RE.match(body)
+    if m:
+        a, b, step = m.group(1), m.group(2), m.group(3)
+        if a.lstrip("-").isdigit() and b.lstrip("-").isdigit():
+            lo, hi = int(a), int(b)
+            inc = abs(int(step)) if step else 1
+            inc = inc or 1
+            count = abs(hi - lo) // inc + 1
+            if count > MAX_BRACE_RESULTS:
+                raise _TooMany
+            rng = range(lo, hi + 1, inc) if lo <= hi else range(lo, hi - 1, -inc)
+            return [str(x) for x in rng]
+        if a.isalpha() and b.isalpha():
+            lo, hi = ord(a), ord(b)
+            rng = range(lo, hi + 1) if lo <= hi else range(lo, hi - 1, -1)
+            return [chr(x) for x in rng]
+        return None
+    alts: list[str] = []
+    depth = 0
+    start = 0
+    for k, ch in enumerate(body):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            alts.append(body[start:k])
+            start = k + 1
+    if not alts:
+        return None
+    alts.append(body[start:])
+    return alts
+
+
+class _TooMany(Exception):
+    pass
+
+
+def _brace_expand_text(text: str) -> list[str]:
+    """Bash brace expansion over one unquoted text run (``\\x01`` marks atoms)."""
+    depth = 0
+    open_at = -1
+    for k, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                open_at = k
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0:
+                alts = _brace_alternatives(text[open_at + 1 : k])
+                if alts is None:
+                    continue
+                head, tail = text[:open_at], text[k + 1 :]
+                out: list[str] = []
+                for alt in alts:
+                    for expanded_alt in _brace_expand_text(alt):
+                        for rest in _brace_expand_text(tail):
+                            out.append(head + expanded_alt + rest)
+                            if len(out) > MAX_BRACE_RESULTS:
+                                raise _TooMany
+                return out
+    return [text]
+
+
+def _brace_variants(parts: list[_Part]) -> list[list[_Part]] | None:
+    """Every part list a word brace-expands to; ``None`` when past the bound.
+
+    Only ``bare`` text takes part in braces. Other parts (quoted text, ``$…``,
+    substitutions) are atoms: they are swapped for placeholder characters while
+    the brace structure is found, then restored in each variant.
+    """
+    if not any(p.kind == "bare" and "{" in p.text for p in parts):
+        return [parts]
+    atoms: list[_Part] = []
+    flat: list[str] = []
+    for p in parts:
+        if p.kind == "bare":
+            flat.append(p.text)
+        else:
+            flat.append(chr(0xE000 + len(atoms)))
+            atoms.append(p)
+    try:
+        texts = _brace_expand_text("".join(flat))
+    except (_TooMany, RecursionError):
+        return None
+    variants: list[list[_Part]] = []
+    for t in texts:
+        out: list[_Part] = []
+        buf = ""
+        for ch in t:
+            code = ord(ch) - 0xE000
+            if 0 <= code < len(atoms):
+                if buf:
+                    out.append(_Part("bare", buf))
+                    buf = ""
+                out.append(atoms[code])
             else:
-                dm = _BRACE_DEFAULT_RE.match(inner)
-                if dm is None:
-                    out.opaque = True
-                    out.opaque_contained = False
-                    pieces.append(OPAQUE_MARK)
-                    continue
-                name = dm.group(1)
-                current = env.get(name)
-                use_default = current is None or (dm.group(2).startswith(":") and current == "")
-                if use_default:
-                    pieces.append(dm.group(3))
-                    produced = produced or bool(dm.group(3))
-                    continue
-        if name is None:
-            # Positional and special parameters ($1, $@, $$): runtime values.
-            out.opaque = True
-            out.opaque_contained = False
-            pieces.append(OPAQUE_MARK)
-            continue
-        value = env.get(name)
+                buf += ch
+        if buf:
+            out.append(_Part("bare", buf))
+        variants.append(out)
+    return variants
+
+
+def _tilde(text: str, home: str) -> tuple[str, bool]:
+    """Leading tilde expansion; ``(text, opaque)`` — ``~user`` is unknowable."""
+    if not text.startswith("~"):
+        return text, False
+    head, sep, tail = text.partition("/")
+    if head == "~":
+        return home + sep + tail, False
+    if head in ("~+", "~-"):
+        return OPAQUE_MARK + sep + tail, True
+    return OPAQUE_MARK + sep + tail, True
+
+
+def _param(form: str, env: Mapping[str, str], home: str, out: Expanded, depth: int = 0) -> str:
+    """Expand one ``$NAME`` / ``${…}`` form; unknowable forms become opaque."""
+    if form.startswith("${"):
+        inner = form[2:-1]
+    else:
+        inner = form[1:]
+    if _NAME_RE.fullmatch(inner):
+        value = env.get(inner)
         if value is None or value == "":
-            out.empty.append(f"${name} expanded empty" + ("" if value == "" else " (unset)"))
-            continue
+            out.empty.append(f"${inner} expanded empty" + ("" if value == "" else " (unset)"))
+            return ""
+        if TEMP_MARK in value:
+            out.temp = True
+            value = value.replace(TEMP_MARK, OPAQUE_MARK)
         if OPAQUE_MARK in value:
             out.opaque = True
             out.opaque_contained = False
-        pieces.append(value)
-        produced = True
-    pieces.append(text[pos:])
-    return "".join(pieces), produced
+        return value
+    dm = _BRACE_DEFAULT_RE.match(inner)
+    if dm is not None and depth < 4:
+        name, op, default = dm.group(1), dm.group(2), dm.group(3)
+        current = env.get(name)
+        use_default = current is None or (op.startswith(":") and current == "")
+        if not use_default and current is not None:
+            if OPAQUE_MARK in current:
+                out.opaque = True
+                out.opaque_contained = False
+            return current
+        # Bash expands the default word itself: ``$``, a leading ``~`` and
+        # nested ``${}`` (S1 — the incident shape was an unset variable plus a
+        # fallback). Its quotes are stripped as part of that word.
+        raw_words, _ = scan(default.strip() or "''")
+        pieces: list[str] = []
+        for raw in raw_words or [_RawWord()]:
+            sub = expand_one(raw.parts, env, home, depth + 1)
+            out.empty.extend(sub.empty)
+            out.substitutions.extend(sub.substitutions)
+            if sub.opaque:
+                out.opaque = True
+                out.opaque_contained = out.opaque_contained and sub.opaque_contained
+            pieces.append(sub.text)
+        value = " ".join(pieces)
+        if not value:
+            out.empty.append(f"${{{name}{op}…}} expanded empty")
+        return value
+    # ``${#X}``, ``${X%…}``, ``${X/…}``, ``${X:+…}``, ``$1``, ``$@``…: runtime values.
+    out.opaque = True
+    out.opaque_contained = False
+    return OPAQUE_MARK
 
 
-def expand(word: _RawWord, env: Mapping[str, str], home: str) -> Expanded:
-    """Expand a scanned word the way bash would, without running anything."""
+def expand_one(
+    parts: list[_Part], env: Mapping[str, str], home: str, depth: int = 0, broken: bool = False
+) -> Expanded:
+    """Expand ONE brace variant of a word (tilde, parameters, substitutions)."""
     out = Expanded(text="")
     text_parts: list[str] = []
     pattern_parts: list[str] = []
     globbed = False
     literal_seen = False
-    for index, part in enumerate(word.parts):
-        if part.kind == "sub":
+    for index, part in enumerate(parts):
+        if part.kind in ("sub", "proc"):
             body = part.text.strip()
             out.substitutions.append(part.text)
+            if part.kind == "proc":
+                # Expands to a /dev/fd path: never a target the command names.
+                text_parts.append("/dev/fd/63")
+                pattern_parts.append("/dev/fd/63")
+                literal_seen = True
+                continue
             if body in _EMPTY_BODIES:
                 out.empty.append(f"$({body}) expanded empty")
-            else:
-                out.opaque = True
-                first = body.split(None, 1)[0] if body else ""
-                if os.path.basename(first) not in _CONTAINED_PROGRAMS:
-                    out.opaque_contained = False
-                text_parts.append(OPAQUE_MARK)
-                pattern_parts.append(OPAQUE_MARK)
+                continue
+            out.opaque = True
+            out.opaque_contained = out.opaque_contained and _contained_body(body)
+            if _is_mktemp(body):
+                out.temp = True
+            text_parts.append(OPAQUE_MARK)
+            pattern_parts.append(OPAQUE_MARK)
             continue
         if part.kind == "sq":
             text_parts.append(part.text)
             pattern_parts.append(_glob_escape(part.text))
             literal_seen = True
             continue
-        raw = part.text
-        if part.kind == "bare" and index == 0 and raw.startswith("~"):
-            head, sep, tail = raw.partition("/")
-            if head == "~":
-                raw = home + sep + tail
+        if part.kind in ("pbare", "pdq"):
+            value = _param(part.text, env, home, out, depth)
+            if part.kind == "pdq":
+                literal_seen = True
+                text_parts.append(value)
+                pattern_parts.append(_glob_escape(value))
             else:
-                # ``~user`` names another account's home: unknowable here.
+                literal_seen = literal_seen or bool(value)
+                if any(c in value for c in "*?["):
+                    globbed = True
+                text_parts.append(value)
+                pattern_parts.append(value)
+            continue
+        raw = part.text
+        if part.kind == "bare" and index == 0:
+            raw, opaque = _tilde(raw, home)
+            if opaque:
                 out.opaque = True
                 out.opaque_contained = False
-                raw = OPAQUE_MARK + sep + tail
-        expanded, produced = _expand_dollars(raw, env, out)
         if part.kind == "dq":
-            text_parts.append(expanded)
-            pattern_parts.append(_glob_escape(expanded))
+            text_parts.append(raw)
+            pattern_parts.append(_glob_escape(raw))
             literal_seen = True
             continue
-        if expanded:
-            literal_seen = literal_seen or produced or bool(_DOLLAR_RE.sub("", part.text))
-        if any(c in expanded for c in "*?["):
+        literal_seen = literal_seen or bool(raw)
+        if any(c in raw for c in "*?["):
             globbed = True
-        text_parts.append(expanded)
-        pattern_parts.append(expanded)
+        text_parts.append(raw)
+        pattern_parts.append(raw)
     out.text = "".join(text_parts)
     out.pattern = "".join(pattern_parts) if globbed else None
-    out.opaque = out.opaque or OPAQUE_MARK in out.text or word.broken
-    if word.broken:
+    out.opaque = out.opaque or OPAQUE_MARK in out.text or broken
+    if broken:
         out.opaque_contained = False
-    out.vanished = not out.text and not literal_seen and not word.broken
+    out.vanished = not out.text and not literal_seen and not broken
     return out
+
+
+def expand_all(word: _RawWord, env: Mapping[str, str], home: str) -> list[Expanded]:
+    """Every word ``word`` becomes after brace expansion (R3), each expanded.
+
+    Past :data:`MAX_BRACE_RESULTS` the word is ONE opaque result: unknowable,
+    never assumed safe.
+    """
+    variants = _brace_variants(word.parts)
+    if variants is None:
+        out = expand_one(word.parts, env, home, broken=True)
+        out.opaque = True
+        out.opaque_contained = False
+        out.empty.append("brace expansion too large to enumerate")
+        return [out]
+    return [expand_one(v, env, home, broken=word.broken) for v in variants]
+
+
+def expand(word: _RawWord, env: Mapping[str, str], home: str) -> Expanded:
+    """The first brace variant (callers that need one word: program names, cd)."""
+    return expand_all(word, env, home)[0]
+
+
+#: Programs whose output is a single path component in normal use, so a
+#: substitution of one cannot climb out of the directory it sits in — but only
+#: when called with no ``+FORMAT``/path-like argument (S4: ``date +../..``).
+def _contained_body(body: str) -> bool:
+    words = body.split()
+    if not words or os.path.basename(words[0]) not in _CONTAINED_PROGRAMS:
+        return False
+    # S4: an argument that could print a path (``date +../..``, ``id /x``) voids
+    # containment; a plain ``+%s``-style format cannot.
+    return not any("/" in w or "." in w for w in words[1:])
+
+
+def _is_mktemp(body: str) -> bool:
+    words = body.split()
+    return (
+        bool(words)
+        and os.path.basename(words[0]) == "mktemp"
+        and not any("/" in w or ".." in w for w in words[1:] if not w.startswith("-"))
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +731,17 @@ class Target:
     opaque: bool = False
     opaque_contained: bool = False
     unknown_cwd: bool = False
+    #: The word globs its CHILDREN (``dir/*.log``): ``path`` is the directory
+    #: the glob lives in, and the directory itself is not removed (Q2).
+    glob_children: bool = False
+    #: The glob matches every entry of ``path`` (``*``, ``.*``): as good as
+    #: removing the directory's contents wholesale.
+    glob_all: bool = False
+    #: ``find ROOT <selecting predicate> -delete``: removes a SUBSET of ROOT's
+    #: descendants, so ROOT is ranked only against CRITICAL ancestry (R6).
+    selected: bool = False
+    #: The opaque part is a fresh ``$(mktemp …)`` entry (R6).
+    temp: bool = False
 
 
 @dataclass
@@ -455,6 +764,21 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
     text = exp.text
     pattern = exp.pattern
     opaque = exp.opaque
+    contained = opaque and exp.opaque_contained
+    if opaque and OPAQUE_MARK in text:
+        # S4: a ``..`` AFTER an unknowable component climbs by an unknown amount
+        # from an unknown place; containment is void.
+        tail = text[text.index(OPAQUE_MARK) :]
+        if ".." in tail.split("/"):
+            contained = False
+    glob_children = False
+    glob_all = False
+    if pattern is not None and not opaque:
+        last = text.rstrip("/").rsplit("/", 1)[-1]
+        head = text.rstrip("/")[: -len(last)] if last else text
+        if not any(c in head for c in "*?["):
+            glob_children = True
+            glob_all = last in ("*", ".*", "*.*") or set(last) <= {"*", "?"}
     if opaque or pattern is not None:
         # The literal directory above the first unknowable/glob character.
         cut = len(text)
@@ -473,6 +797,20 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
             pattern = os.path.normpath(pattern) if not unknown else None
     else:
         path, unknown = _absolute(text or ".", state.cwd)
+    is_temp = (
+        exp.temp
+        and opaque
+        and text.startswith(OPAQUE_MARK)
+        and ".." not in text.split("/")
+        and not exp.empty
+    )
+    if is_temp:
+        # ``mktemp`` prints an ABSOLUTE path under the temp directory, so the
+        # word is anchored there — not at the cwd the empty literal prefix
+        # would otherwise resolve to.
+        import tempfile
+
+        path, unknown = os.path.realpath(tempfile.gettempdir()), False
     return Target(
         path=path,
         op=op,
@@ -480,8 +818,11 @@ def _target(exp: Expanded, op: str, program: str, state: _State) -> Target:
         pattern=pattern,
         empty=list(exp.empty),
         opaque=opaque,
-        opaque_contained=opaque and exp.opaque_contained,
+        opaque_contained=contained,
         unknown_cwd=unknown,
+        glob_children=glob_children,
+        glob_all=glob_all,
+        temp=is_temp,
     )
 
 
@@ -538,6 +879,49 @@ _MV_VALUE_FLAGS = frozenset({"-t", "-S", "--suffix", "--target-directory"})
 _RSYNC_VALUE_FLAGS = frozenset({"-e", "--rsh", "--exclude", "--include", "--filter", "-f"})
 #: find: the predicates that make a match destructive.
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+#: find predicates that select a SUBSET of the walk (R6).
+_FIND_SELECTING = frozenset(
+    {
+        "-name",
+        "-iname",
+        "-path",
+        "-ipath",
+        "-regex",
+        "-iregex",
+        "-newer",
+        "-mtime",
+        "-mmin",
+        "-empty",
+        "-size",
+        "-user",
+        "-perm",
+        "-wholename",
+        "-iwholename",
+    }
+)
+_HEREDOC_OPEN_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+
+def _heredoc_bodies(command: str) -> list[str]:
+    """The bodies of every heredoc in ``command`` (R2: walked when a shell reads one).
+
+    ``search_guard._split`` strips bodies so data is never read as commands;
+    this recovers them for the one case where the body IS the command.
+    """
+    bodies: list[str] = []
+    for m in _HEREDOC_OPEN_RE.finditer(command):
+        delim = m.group(2)
+        nl = command.find("\n", m.end())
+        if nl == -1:
+            continue
+        lines = command[nl + 1 :].split("\n")
+        body: list[str] = []
+        for line in lines:
+            if line.strip() == delim:
+                break
+            body.append(line)
+        bodies.append("\n".join(body))
+    return bodies
 
 
 def _peel_wrappers(words: list[Expanded]) -> tuple[list[Expanded], bool]:
@@ -596,57 +980,162 @@ def _tilde_value(value: str, home: str) -> str:
     return value
 
 
+#: The delete family, as words, for the "a shell runs text we cannot see" checks.
+_DELETE_WORD_RE = re.compile(
+    r"(?<![\w.-])(rm|grm|rmdir|unlink|shred|truncate|rsync|mv|find|rmtree|unlinkSync|"
+    r"remove|removedirs|rimraf)(?![\w-])"
+)
+#: Interpreter one-liner flags whose argument is code (Q3 — v1 only scans the
+#: text for a delete call and ranks it HIGH; v2 may parse the language).
+_INTERPRETER_CODE_FLAGS = {
+    "python": ("-c",),
+    "python3": ("-c",),
+    "python2": ("-c",),
+    "perl": ("-e", "-E"),
+    "ruby": ("-e",),
+    "node": ("-e", "--eval"),
+    "osascript": ("-e",),
+}
+_INTERPRETER_DELETE_RE = re.compile(
+    r"\b(rmtree|os\.remove|os\.unlink|os\.rmdir|removedirs|\.unlink\(|\.rmdir\(|"
+    r"unlinkSync|rmSync|rmdirSync|File\.delete|FileUtils\.rm|unlink\s*\(|"
+    r"rm\s+-|do shell script)"
+)
+
+
+def _fd_redirect_merge(pieces: list[tuple[str, bool, str]]) -> list[tuple[str, bool, str]]:
+    """Re-join segments ``search_guard._split`` cut at a redirect's ``&`` (Q1).
+
+    The shared splitter reads the ``&`` in ``2>&1``/``>&2``/``2>&-``/``&>file``
+    as a background operator. For this resolver that turned every ``2>&1`` into
+    an empty, opaque overwrite target. A segment ending in ``>``/``<`` cut by a
+    single ``&`` is glued back to what follows, operator included.
+    """
+    out: list[tuple[str, bool, str]] = []
+    for text, piped, op in pieces:
+        if out:
+            prev_text, prev_piped, prev_op = out[-1]
+            if prev_op == "&" and re.search(r"[<>]$", prev_text):
+                out[-1] = (prev_text + "&" + text, prev_piped, op)
+                continue
+        out.append((text, piped, op))
+    return out
+
+
+@dataclass
+class _Snapshot:
+    env: dict[str, str]
+    cwd: str | None
+    home: str
+
+
 class _Walker:
     def __init__(self, env: Mapping[str, str], cwd: str | None, home: str) -> None:
         self.state = _State(env=dict(env), cwd=cwd, home=home)
         self.result = Resolution()
+        #: Paths an earlier segment of THIS command made into a symlink (S7):
+        #: what they point at is resolved only at run time.
+        self.linked: set[str] = set()
+        #: ``for VAR in a b c`` literal lists: a target using $VAR fans out.
+        self.for_lists: dict[str, list[str]] = {}
+
+    # -- state isolation (R4) ----------------------------------------------------
+    def _save(self) -> _Snapshot:
+        st = self.state
+        return _Snapshot(dict(st.env), st.cwd, st.home)
+
+    def _restore(self, snap: _Snapshot) -> None:
+        self.state.env, self.state.cwd, self.state.home = snap.env, snap.cwd, snap.home
+
+    def _isolated_walk(self, command: str, depth: int) -> None:
+        """Walk text that runs in a CHILD shell: its cd/assignments never leak."""
+        snap = self._save()
+        try:
+            self.walk(command, depth)
+        finally:
+            self._restore(snap)
 
     # -- entry -------------------------------------------------------------
     def walk(self, command: str, depth: int = 0) -> None:
         if depth > _MAX_PEEL_DEPTH:
-            if re.search(r"\b(rm|rmdir|unlink|shred|find|mv|rsync|truncate)\b", command):
+            if _DELETE_WORD_RE.search(command):
                 self.result.opaque_reasons.append("nested shell too deep to resolve")
             return
-        for text, _piped, _op in _split(command):
-            self._segment(text, depth)
+        heredocs = _heredoc_bodies(command)
+        pieces = _fd_redirect_merge(_split(command))
+        groups: list[_Snapshot] = []
+        for index, (text, piped, op) in enumerate(pieces):
+            # R4: a subshell ``( … )``, any pipeline stage and a ``&`` job run in
+            # a child process, so their cd/assignments do not reach later
+            # segments. A subshell spans several pieces (``( cd x && rm y )``),
+            # so it is tracked as a stack: state is saved at its ``(`` and
+            # restored after the piece holding its unmatched ``)``.
+            stripped = text.strip()
+            while stripped.startswith("(") and not stripped.startswith("(("):
+                groups.append(self._save())
+                stripped = stripped[1:].lstrip()
+            closes = 0
+            tail = stripped
+            while tail.endswith(")") and tail.count(")") > tail.count("("):
+                closes += 1
+                tail = tail[:-1].rstrip()
+            nxt_piped = index + 1 < len(pieces) and pieces[index + 1][1]
+            isolated = piped or nxt_piped or op == "&"
+            if isolated:
+                snap = self._save()
+                self._segment(text, depth, heredocs, stdin_piped=piped)
+                self._restore(snap)
+            else:
+                self._segment(text, depth, heredocs, stdin_piped=piped)
+            for _ in range(closes):
+                if groups:
+                    self._restore(groups.pop())
 
     # -- one segment ---------------------------------------------------------
-    def _segment(self, text: str, depth: int) -> None:
+    def _segment(
+        self, text: str, depth: int, heredocs: list[str] | None = None, *, stdin_piped: bool = False
+    ) -> None:
         text = _strip_grouping(text)
         if not text:
             return
         raw_words, redirects = scan(text)
         st = self.state
-        words = [expand(w, st.env, st.home) for w in raw_words]
+        words: list[Expanded] = []
+        for w in raw_words:
+            words.extend(expand_all(w, st.env, st.home))
         for w in words:
             for body in w.substitutions:
                 if body.strip() and body.strip() not in _EMPTY_BODIES:
-                    self.walk(body, depth + 1)
+                    self._isolated_walk(body, depth + 1)
+        herestrings: list[str] = []
         for op, raw in redirects:
             if op in (">", ">|"):
-                exp = expand(raw, st.env, st.home)
-                if exp.text.startswith("/dev/"):
-                    continue
-                self._add(exp, "overwrite", ">")
+                for exp in expand_all(raw, st.env, st.home):
+                    if exp.text.startswith("/dev/"):
+                        continue
+                    self._add(exp, "overwrite", ">")
+            elif op == "<<<":
+                herestrings.append(expand(raw, st.env, st.home).text)
         # Leading prefix words and assignments.
         while words and words[0].text in _PREFIX_WORDS and not words[0].opaque:
             words = words[1:]
         raw_assigns: list[str] = []
         while words and _ASSIGN_RE.match(words[0].text):
-            raw_assigns.append(words[0].text)
+            text_value = words[0].text
+            if words[0].temp and text_value.count(OPAQUE_MARK) == 1:
+                text_value = text_value.replace(OPAQUE_MARK, TEMP_MARK)
+            raw_assigns.append(text_value)
             words = words[1:]
         if not words:
             # A bare assignment segment sets a shell variable for what follows.
             for a in raw_assigns:
-                name, _, value = a.partition("=")
-                st.env[name] = _tilde_value(value, st.home)
+                self._assign(a)
             return
         name = os.path.basename(words[0].text)
         if name in _DECLARE_WORDS:
             for w in words[1:]:
-                m = _ASSIGN_RE.match(w.text)
-                if m:
-                    st.env[m.group(1)] = _tilde_value(w.text[m.end() :], st.home)
+                if _ASSIGN_RE.match(w.text):
+                    self._assign(w.text)
             return
         if name in ("cd", "pushd"):
             self._cd(words[1:])
@@ -655,13 +1144,20 @@ class _Walker:
             st.cwd = None
             return
         if name == "for" and len(words) >= 2:
-            # A loop variable is a runtime value.
-            st.env[words[1].text] = OPAQUE_MARK
+            self._for(words[1:])
             return
         if name == "read":
             for w in words[1:]:
                 if not w.text.startswith("-"):
                     st.env[w.text] = OPAQUE_MARK
+            return
+        if name == "env" and any(
+            w.text in ("-S", "--split-string") or w.text.startswith("-S") for w in words[1:3]
+        ):
+            # S6: ``env -S 'cmd …'`` runs its argument as a command line.
+            joined = " ".join(w.text for w in words[1:])
+            if _DELETE_WORD_RE.search(joined):
+                self.result.opaque_reasons.append("env -S runs a command string")
             return
         words, stdin_fed = _peel_wrappers(words)
         if not words:
@@ -669,15 +1165,25 @@ class _Walker:
         name = os.path.basename(words[0].text)
         args = words[1:]
         if name in _SHELL_C_WORDS:
-            self._shell_c(args, depth)
+            self._shell(args, depth, text, heredocs or [], herestrings, stdin_piped)
+            return
+        if name in _INTERPRETER_CODE_FLAGS:
+            self._interpreter(name, args)
+            return
+        if name in ("ssh",):
+            if _DELETE_WORD_RE.search(" ".join(w.text for w in args)):
+                self.result.opaque_reasons.append("remote command over ssh (not resolved)")
             return
         if name == "eval":
             inner = " ".join(w.text for w in args)
             if any(w.opaque for w in args):
-                if re.search(r"\b(rm|rmdir|unlink|shred|find|mv|rsync)\b", inner):
+                if _DELETE_WORD_RE.search(inner):
                     self.result.opaque_reasons.append("eval of an unresolvable command")
                 return
             self.walk(inner, depth + 1)
+            return
+        if name in ("ln", "gln"):
+            self._ln(args)
             return
         if name in DELETE_PROGRAMS:
             flags_with_value = _SHRED_VALUE_FLAGS if name == "shred" else _RM_VALUE_FLAGS
@@ -715,14 +1221,116 @@ class _Walker:
                 for w in operands:
                     self._add(w, "overwrite", name)
             return
+        if name in ("sed", "gsed", "perl") and any(
+            w.text.startswith("-i") or w.text.startswith("--in-place") or w.text == "-pi"
+            for w in args
+        ):
+            # S5: an in-place edit rewrites the file. The last operands are files;
+            # treat each non-flag operand after the script as an overwrite.
+            operands, _ = _operands(args, frozenset({"-e", "-f"}))
+            for w in operands[1:]:
+                self._add(w, "overwrite", name)
+            return
         if name == "dd":
             for w in args:
                 if w.text.startswith("of="):
-                    w2 = Expanded(text=w.text[3:], empty=w.empty, opaque=w.opaque)
+                    # S8: bash expands ``~`` after ``=`` in an argument.
+                    value = _tilde_value(w.text[3:], st.home)
+                    w2 = Expanded(
+                        text=value,
+                        empty=w.empty,
+                        opaque=w.opaque,
+                        opaque_contained=w.opaque_contained,
+                    )
                     self._add(w2, "overwrite", name)
             return
 
     # -- program handlers ------------------------------------------------------
+    def _assign(self, text: str) -> None:
+        name, _, value = text.partition("=")
+        value = _tilde_value(value, self.state.home)
+        self.state.env[name] = value
+        if name == "HOME":
+            # S7: a later ``~`` resolves against the NEW home, as bash does.
+            self.state.home = value or self.state.home
+
+    def _shell(
+        self,
+        args: list[Expanded],
+        depth: int,
+        segment: str,
+        heredocs: list[str],
+        herestrings: list[str],
+        stdin_piped: bool,
+    ) -> None:
+        """A shell word: walk its ``-c`` script, or whatever feeds its stdin.
+
+        R1/S2: ``-c`` may sit inside a short-flag cluster (``-lc``, ``-euc``),
+        ``-o``/``+o`` consume a value, and ``--`` may precede the script. A shell
+        with no ``-c`` reads its script from a file operand or from stdin
+        (R2/S6): a heredoc or herestring body is walked; a pipe or a script file
+        is not visible here, so a delete word anywhere in the segment makes the
+        call opaque (HIGH).
+        """
+        i = 0
+        script: Expanded | None = None
+        wants_c = False
+        while i < len(args):
+            t = args[i].text
+            if wants_c:
+                if t == "--":
+                    i += 1
+                    continue
+                script = args[i]
+                break
+            if t in ("-o", "+o", "-O", "+O", "--rcfile", "--init-file"):
+                i += 2
+                continue
+            if t in ("-c", "--command"):
+                wants_c = True
+                i += 1
+                continue
+            if t.startswith("-") and len(t) > 1 and not t.startswith("--") and "c" in t[1:]:
+                wants_c = True
+                i += 1
+                continue
+            if t.startswith("-") or t.startswith("+"):
+                i += 1
+                continue
+            break  # a script file operand
+        if script is not None:
+            if script.opaque or not script.text.strip():
+                if _DELETE_WORD_RE.search(segment):
+                    self.result.opaque_reasons.append("shell -c with an unresolvable script")
+                return
+            self._isolated_walk(script.text, depth + 1)
+            return
+        if wants_c:
+            if _DELETE_WORD_RE.search(segment):
+                self.result.opaque_reasons.append("shell -c script could not be located")
+            return
+        bodies = list(herestrings) + list(heredocs)
+        for body in bodies:
+            self._isolated_walk(body, depth + 1)
+        if bodies:
+            return
+        if stdin_piped or i < len(args):
+            # Script from a pipe or a file: its text is not in this command.
+            self.result.opaque_reasons.append(
+                "shell reads a script from stdin or a file (not resolved)"
+            )
+
+    def _interpreter(self, name: str, args: list[Expanded]) -> None:
+        """Q3 (v1 hardening): an interpreter one-liner whose code calls a delete."""
+        flags = _INTERPRETER_CODE_FLAGS.get(name, ())
+        for k, w in enumerate(args):
+            if w.text in flags and k + 1 < len(args):
+                if _INTERPRETER_DELETE_RE.search(args[k + 1].text):
+                    self.result.opaque_reasons.append(
+                        f"{name} one-liner calls a delete (not resolved)"
+                    )
+                return
+
     def _cd(self, args: list[Expanded]) -> None:
         st = self.state
         operands = [w for w in args if not (w.text.startswith("-") and len(w.text) > 1)]
@@ -736,17 +1344,38 @@ class _Walker:
         path, _unknown = _absolute(w.text, st.cwd)
         st.cwd = path
 
-    def _shell_c(self, args: list[Expanded], depth: int) -> None:
-        for i, w in enumerate(args):
-            if w.text in ("-c", "--command") and i + 1 < len(args):
-                inner = args[i + 1]
-                if inner.opaque:
-                    self.result.opaque_reasons.append("shell -c with an unresolvable script")
-                    return
-                self.walk(inner.text, depth + 1)
-                return
-            if not w.text.startswith("-"):
-                return
+    def _for(self, words: list[Expanded]) -> None:
+        """``for VAR in WORDS``: R6 — literal lists bind VAR to their values."""
+        st = self.state
+        var = words[0].text
+        values: list[Expanded] = []
+        seen_in = False
+        for w in words[1:]:
+            if not seen_in:
+                seen_in = w.text == "in"
+                continue
+            if w.text.startswith("for") or w.text == "in":
+                continue
+            values.append(w)
+        if not values:
+            st.env[var] = OPAQUE_MARK
+            return
+        if any(v.opaque or v.pattern is not None for v in values):
+            st.env[var] = OPAQUE_MARK
+            return
+        # The body runs once per value; the walker sees it once, so the variable
+        # carries EVERY value and ``_add`` fans a target out per value.
+        st.env[var] = values[0].text
+        self.for_lists[var] = [v.text for v in values]
+
+    def _ln(self, args: list[Expanded]) -> None:
+        operands, flags = _operands(args, frozenset({"-t", "--target-directory"}))
+        if not (_has_short(flags, "s") or "--symbolic" in flags) or len(operands) < 2:
+            return
+        link = operands[-1]
+        path, _ = _absolute(link.text, self.state.cwd)
+        if path is not None:
+            self.linked.add(path.rstrip("/"))
 
     def _find(self, args: list[Expanded]) -> None:
         roots: list[Expanded] = []
@@ -766,10 +1395,23 @@ class _Walker:
                     destructive = True
         if not destructive:
             return
+        # R6: a selecting predicate before the action narrows what is removed to
+        # a subset of descendants; the root is then ranked only for CRITICAL
+        # ancestry (a confused predicate under the state root is still refused).
+        selected = False
+        for j, t in enumerate(texts):
+            if t in ("-delete", *_FIND_EXEC):
+                break
+            if t in _FIND_SELECTING:
+                selected = True
+            if t == "-mindepth" and j + 1 < len(texts) and texts[j + 1].isdigit():
+                selected = selected or int(texts[j + 1]) >= 1
+            if t == "-type" and j + 1 < len(texts) and texts[j + 1] == "f":
+                selected = True
         if not roots:
             roots = [Expanded(text=".")]
         for w in roots:
-            self._add(w, "delete", "find")
+            self._add(w, "delete", "find", selected=selected)
 
     def _mv(self, args: list[Expanded], stdin_fed: bool) -> None:
         operands, flags = _operands(args, _MV_VALUE_FLAGS)
@@ -822,10 +1464,37 @@ class _Walker:
         self._add(root, "clean", "git clean")
 
     # -- recording ---------------------------------------------------------------
-    def _add(self, exp: Expanded, op: str, program: str) -> None:
+    def _add(self, exp: Expanded, op: str, program: str, *, selected: bool = False) -> None:
         if exp.vanished and not exp.empty:
             return
-        self.result.targets.append(_target(exp, op, program, self.state))
+        target = _target(exp, op, program, self.state)
+        target.selected = selected
+        if target.path is not None:
+            stripped = target.path.rstrip("/") or "/"
+            if any(stripped == ln or stripped.startswith(ln + "/") for ln in self.linked):
+                # S7: a symlink made earlier in this same command — its pointee
+                # is decided at run time.
+                target.opaque = True
+                target.opaque_contained = False
+        self.result.targets.append(target)
+        # R6: a literal ``for`` list binds its variable to each value in turn.
+        for var, values in self.for_lists.items():
+            first = values[0]
+            if not first or first not in exp.text or exp.text.count(first) != 1:
+                continue
+            for other in values[1:]:
+                alt = Expanded(
+                    text=exp.text.replace(first, other),
+                    pattern=exp.pattern.replace(first, other) if exp.pattern else None,
+                    empty=list(exp.empty),
+                    opaque=exp.opaque,
+                    opaque_contained=exp.opaque_contained,
+                    temp=exp.temp,
+                )
+                extra = _target(alt, op, program, self.state)
+                extra.selected = selected
+                self.result.targets.append(extra)
+            del var
 
     def _add_overwrite_dest(self, exp: Expanded, program: str) -> None:
         if exp.opaque or exp.pattern is not None:

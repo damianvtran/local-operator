@@ -7149,10 +7149,16 @@ class AgentLoop:
             return None
         tool_context = context.tool_context
         try:
-            authorised = bool(
-                config.guard_override_authorised and config.guard_override_authorised()
+            authorised = (
+                config.guard_override_authorised()
+                if config.guard_override_authorised is not None
+                else frozenset()
             )
-            settings = guard_check.read_settings(override_authorised=authorised)
+            if isinstance(authorised, bool):
+                authorised = (
+                    frozenset({"guardrails.critical_override"}) if authorised else frozenset()
+                )
+            settings = guard_check.read_settings(authorised=frozenset(authorised))
             env: Mapping[str, str] = {}
             scratchpad: str | None = None
             if tool.name == "bash":

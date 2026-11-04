@@ -98,7 +98,9 @@ async def _run(
         convert_to_llm=lambda m: m,
         stream_fn=lambda *_: None,
         guard_judge=judge,
-        guard_override_authorised=(lambda: authorised),
+        guard_override_authorised=(
+            lambda: frozenset({"guardrails.critical_override"}) if authorised else frozenset()
+        ),
     )
     args = {"command": command}
     call = ToolCall(id="c1", name="bash", arguments=args, raw_arguments=json.dumps(args))
@@ -204,3 +206,28 @@ async def test_user_block_rule_applies(home: Path) -> None:
     assert executed == []
     assert result.content[0].text.startswith("BLOCKED by guardrail no-force-push (block)")
     assert "Open a PR instead." in result.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_unauthorised_rules_disable_is_ignored(home: Path) -> None:
+    """S5: a config edit the agent could make cannot switch the user's rules off."""
+    state = home / ".local-operator"
+    rules = state / "rules"
+    rules.mkdir()
+    (rules / "no-force-push.md").write_text(
+        "---\nname: no-force-push\nscope: tool:bash\naction: block\n"
+        "condition: ['git\\s+push\\b.*--force']\n---\nOpen a PR instead.\n"
+    )
+    (state / "config.yml").write_text(
+        "version: 1\nvalues:\n  guardrails:\n    enabled: false\n    rules_dir: /nonexistent\n"
+    )
+    result, executed = await _run(home, "git push --force origin main")
+    assert executed == [] and "no-force-push (block)" in result.content[0].text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["make test 2>&1", "npm test 2>&1 | tee log.txt", "echo e >&2"])
+async def test_q1_fd_duplication_runs_with_zero_judge_calls(home: Path, command: str) -> None:
+    judge = _Judge("BLOCK: should never be asked")
+    result, executed = await _run(home, command, judge=judge)
+    assert len(executed) == 1 and judge.calls == []

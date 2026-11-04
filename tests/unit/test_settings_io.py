@@ -1172,10 +1172,12 @@ def test_guardrails_rows_share_the_consumer_paths(
     settings_io.write_setting(manager, settings_io.BY_KEY["guardrails.enabled"], False)
     settings_io.write_setting(manager, settings_io.BY_KEY["guardrails.critical_override"], True)
     settings_io.write_setting(manager, settings_io.BY_KEY["guardrails.judge_timeout_s"], 7.5)
-    unauthorised = check.read_settings(override_authorised=False)
-    assert unauthorised.enabled is False and unauthorised.judge_timeout_s == 7.5
+    unauthorised = check.read_settings()
+    # Loosenings without an operator's proof read as their safe defaults (S5).
+    assert unauthorised.enabled is True and unauthorised.judge_timeout_s == 7.5
     assert unauthorised.critical_override is False
-    assert check.read_settings(override_authorised=True).critical_override is True
+    authorised = check.read_settings(authorised=check.LOOSENING_KEYS)
+    assert authorised.critical_override is True and authorised.enabled is False
 
 
 def test_search_interception_rows_share_the_consumer_paths(manager: ConfigManager) -> None:

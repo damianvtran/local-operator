@@ -4542,10 +4542,10 @@ class Session:
         self._context_tokens_hint: int | None = (
             self._last_usage.context_tokens if self._last_usage is not None else None
         )
-        # Whether an operator authorised ``guardrails.critical_override`` in this
-        # process (see ``_apply_config_change``). False at boot on purpose: a
-        # value already in config.yml cannot prove who wrote it.
-        self._guard_override_authorised = False
+        # Which guardrail loosenings an operator authorised in this process (see
+        # ``_apply_config_change``). Empty at boot on purpose: a value already in
+        # config.yml cannot prove who wrote it.
+        self._guard_authorised_loosenings: set[str] = set()
         self._last_activity_ms: int = 0  # epoch ms; drives idle-flush pruning
         self._generation = 0  # monotonic turn counter for agent_start/end
         # Boundary-event suppression across a post-compaction continuation:
@@ -19750,7 +19750,7 @@ class Session:
                 # ``_guard_judge``) — deliberately not ``complete_aside``, which
                 # ships the live conversation the judge must not be primed by.
                 guard_judge=self._guard_judge,
-                guard_override_authorised=lambda: self._guard_override_authorised,
+                guard_override_authorised=lambda: frozenset(self._guard_authorised_loosenings),
                 # The request render, not the bare one: the stored-location
                 # hints for the turn's images ride the wire from HERE and from
                 # ``_read_only_prompt`` — the same function, so the aside
@@ -31470,19 +31470,23 @@ class Session:
         # conservative default: only the model branch below consults it, and
         # only to stay quiet about a write this process already reported.
         source = getattr(change, "source", "disk")
-        if "guardrails.critical_override" in changed:
-            # The CRITICAL-deletion override is a LOOSENING of a safety gate, so it
-            # follows the approval gate's rule: honoured only for an operator write
+        guard_keys = {k for k in changed if k.startswith("guardrails.")}
+        if guard_keys:
+            # Guardrail LOOSENINGS (the CRITICAL override, switching user rules
+            # off, repointing their folder — ``guardrails.check.LOOSENING_KEYS``)
+            # follow the approval gate's rule: honoured only for an operator write
             # through this process's own settings facade, never for a file edit
-            # the model (or anything else) made. Any other delivery re-arms.
-            # Boot-time file contents are unattributable and start un-authorised.
+            # the model (or anything else) made (S5). Any other delivery of the
+            # key re-arms it. Boot-time contents are unattributable: none at boot.
+            from local_operator.guardrails.check import LOOSENING_KEYS
             from local_operator.harness.approval import loosening_is_authorised
 
-            override = values.get("guardrails")
-            wanted = isinstance(override, Mapping) and override.get("critical_override") is True
-            self._guard_override_authorised = wanted and loosening_is_authorised(
-                source=source, gate_is_here=True
-            )
+            ok = loosening_is_authorised(source=source, gate_is_here=True)
+            for key in guard_keys & LOOSENING_KEYS:
+                if ok:
+                    self._guard_authorised_loosenings.add(key)
+                else:
+                    self._guard_authorised_loosenings.discard(key)
         if any(key.startswith("compaction.") for key in changed):
             # Same outcome as the factory's ``coerce_compaction_settings`` at
             # build (dict -> validated, invalid -> defaults, absent -> None,

@@ -78,13 +78,48 @@ def _norm(path: str) -> str:
 
 
 def _spellings(path: str) -> set[str]:
-    """The normalised path and, when it exists, its resolved form (symlinks)."""
+    """The normalised path and, when it exists, its resolved form (symlinks).
+
+    R9: on a case-insensitive volume (the macOS default) ``~/.LOCAL-OPERATOR``
+    IS the state root. ``realpath`` keeps the caller's case for components it
+    did not have to resolve, so each existing component is re-cased from its
+    directory listing — the on-disk spelling is what the protected roots use.
+    """
     out = {_norm(path)}
     try:
         out.add(os.path.realpath(path))
     except OSError:
         pass
+    for spelled in list(out):
+        cased = _on_disk_case(spelled)
+        if cased is not None:
+            out.add(cased)
     return out
+
+
+def _on_disk_case(path: str) -> str | None:
+    """``path`` with every EXISTING component in its on-disk case; None if moot."""
+    parts = [p for p in path.split("/") if p]
+    current = "/"
+    changed = False
+    for k, part in enumerate(parts):
+        candidate = os.path.join(current, part)
+        if os.path.lexists(candidate):
+            try:
+                names = os.listdir(current)
+            except OSError:
+                return None
+            if part not in names:
+                match = next((n for n in names if n.casefold() == part.casefold()), None)
+                if match is None:
+                    return None
+                part = match
+                changed = True
+            current = os.path.join(current, part)
+        else:
+            current = os.path.join(current, *parts[k:])
+            break
+    return current if changed else None
 
 
 def _under(path: str, root: str) -> bool:
@@ -201,10 +236,22 @@ def _critical_by_pattern(target: Target, prot: _Protected) -> str | None:
 def _high_reason(path: str, target: Target, prot: _Protected) -> str | None:
     if target.op == "clean" and target.program == "git clean":
         return "git clean removes untracked work"
-    if target.op not in _DESTROYING_OPS:
-        return None
     if any(_under(path, own) for own in prot.own_session):
         return None
+    if target.op not in _DESTROYING_OPS:
+        # S10: overwriting a file inside the state root (outside this session's
+        # own directory) rewrites the harness's data — review it.
+        for state in prot.state_roots:
+            if _under(path, state) and path != state:
+                return "overwrites a file inside the local-operator state root"
+        return None
+    if target.glob_children and not target.glob_all:
+        # Q2: ``rm *.log`` removes matching CHILDREN; the directory survives.
+        for state in prot.state_roots:
+            if _under(path, state):
+                break
+        else:
+            return None
     for state in prot.state_roots:
         if _under(path, state):
             sessions = os.path.join(state, _SESSIONS_DIRNAME)
@@ -245,6 +292,13 @@ def _rank(target: Target, prot: _Protected) -> RankedTarget:
     in_own_pad = any(_under(path, pad) for pad in prot.own_scratchpad) and (
         not target.opaque or target.opaque_contained
     )
+    # R6: ``$(mktemp …)`` names a fresh temp entry, a find with a selecting
+    # predicate removes a subset — neither is "unknown" in the sense that
+    # matters once CRITICAL ancestry was ruled out above.
+    if target.temp:
+        return RankedTarget(target, Risk.LOW, "fresh temporary path ($(mktemp))")
+    if target.selected and not target.opaque and not target.unknown_cwd:
+        return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
     if notes and not in_own_pad:
         return RankedTarget(target, Risk.HIGH, "; ".join(notes))
     for spelling in _spellings(path):

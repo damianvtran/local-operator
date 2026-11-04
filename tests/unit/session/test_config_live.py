@@ -316,9 +316,9 @@ def _search_interception(watcher: ConfigWatcher) -> tuple[bool, bool, bool]:
 
 def _guardrails(_watcher: ConfigWatcher, *, authorised: bool = True) -> Any:
     """What the guardrail checkpoint resolves per checked call (``read_settings``)."""
-    from local_operator.guardrails.check import read_settings
+    from local_operator.guardrails.check import LOOSENING_KEYS, read_settings
 
-    return read_settings(override_authorised=authorised)
+    return read_settings(authorised=LOOSENING_KEYS if authorised else frozenset())
 
 
 def _child_knowledge_slimming(_watcher: ConfigWatcher) -> bool:
@@ -761,16 +761,25 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # ConfigManager (``builtin._search_interception_config``), so an edit lands on
     # the next command — observed through that same reader, not the raw mapping.
     # ``guardrails.*``: read per checked call by ``guardrails.check.read_settings``.
-    # The critical override is a LOOSENING, so a write from another process (this
-    # probe's shape) reaches the file but NOT the session's authorisation flag:
-    # the probe observes the reader with the flag the session actually holds.
-    "guardrails.enabled": (False, lambda s, w: _guardrails(w).enabled),
+    # The three LOOSENING keys reach the file live, but a write from another
+    # process (this probe's shape) does NOT authorise them for the session (S5):
+    # each probe observes the reader with an operator's authorisation AND that
+    # the session's own authorised set stayed empty.
+    "guardrails.enabled": (
+        False,
+        lambda s, w: _guardrails(w).enabled if not s._guard_authorised_loosenings else "armed",
+    ),
     "guardrails.judge_timeout_s": (7.5, lambda s, w: _guardrails(w).judge_timeout_s),
-    "guardrails.rules_dir": ("/tmp/rules-probe", lambda s, w: str(_guardrails(w).rules_dir)),
+    "guardrails.rules_dir": (
+        "/tmp/rules-probe",
+        lambda s, w: (
+            str(_guardrails(w).rules_dir) if not s._guard_authorised_loosenings else "armed"
+        ),
+    ),
     "guardrails.critical_override": (
         True,
         lambda s, w: (
-            _guardrails(w, authorised=True).critical_override and not s._guard_override_authorised
+            _guardrails(w).critical_override if not s._guard_authorised_loosenings else "armed"
         ),
     ),
     "tools.search_interception.enabled": (False, lambda s, w: _search_interception(w)[0]),
@@ -2210,25 +2219,27 @@ async def test_the_model_default_notice_is_change_based(tmp_path, monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_critical_override_needs_an_operator_write_in_this_process(tmp_path) -> None:
-    """``guardrails.critical_override`` loosens a safety gate, so only a write
-    delivered as ``source="local"`` (the settings facade in this process) arms the
-    session's authorisation; a file edit from anywhere else never does, and a
-    later unattributed delivery disarms it again."""
+async def test_guardrail_loosenings_need_an_operator_write_in_this_process(tmp_path) -> None:
+    """Every guardrail LOOSENING (critical override, rules off, rules folder) is
+    authorised only by a ``source="local"`` write (the settings facade in this
+    process); a file edit from anywhere else — including the agent's shell —
+    never authorises it, and a later unattributed delivery disarms it (S5)."""
     from local_operator.config_watch import ConfigChange
 
     session = make_session(tmp_path, RebindableStream({}))
     try:
-        assert session._guard_override_authorised is False
-        on = {"guardrails": {"critical_override": True}}
-        key = frozenset({"guardrails.critical_override"})
-        session._apply_config_change(ConfigChange(values=on, changed_keys=key, source="disk"))
-        assert session._guard_override_authorised is False
-        session._apply_config_change(ConfigChange(values=on, changed_keys=key, source="local"))
-        assert session._guard_override_authorised is True
-        off = {"guardrails": {"critical_override": False}}
-        session._apply_config_change(ConfigChange(values=off, changed_keys=key, source="disk"))
-        assert session._guard_override_authorised is False
+        assert session._guard_authorised_loosenings == set()
+        loose = {"guardrails": {"critical_override": True, "enabled": False, "rules_dir": "/x"}}
+        keys = frozenset(
+            {"guardrails.critical_override", "guardrails.enabled", "guardrails.rules_dir"}
+        )
+        session._apply_config_change(ConfigChange(values=loose, changed_keys=keys, source="disk"))
+        assert session._guard_authorised_loosenings == set()
+        session._apply_config_change(ConfigChange(values=loose, changed_keys=keys, source="local"))
+        assert session._guard_authorised_loosenings == set(keys)
+        back = frozenset({"guardrails.enabled"})
+        session._apply_config_change(ConfigChange(values=loose, changed_keys=back, source="disk"))
+        assert "guardrails.enabled" not in session._guard_authorised_loosenings
     finally:
         await session.dispose()
 

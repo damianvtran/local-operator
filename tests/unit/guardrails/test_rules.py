@@ -85,3 +85,21 @@ def test_user_rules_loaded_from_dir(tmp_path: Path) -> None:
     (tmp_path / "broken.md").write_text("junk")
     rules = load_rules(tmp_path)
     assert [r.name for r in rules.user] == ["a"]
+
+
+def test_broken_rule_warns_once_per_file_version(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import os
+
+    broken = tmp_path / "broken.md"
+    broken.write_text("junk")
+    with caplog.at_level(logging.WARNING):
+        load_rules(tmp_path)
+        load_rules(tmp_path)
+    assert caplog.text.count("broken.md") == 1
+    broken.write_text("junk, edited")
+    os.utime(broken, ns=(1, 2))
+    with caplog.at_level(logging.WARNING):
+        load_rules(tmp_path)
+    assert caplog.text.count("broken.md") == 2

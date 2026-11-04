@@ -188,3 +188,19 @@ def test_a_legacy_continuation_row_is_still_recognised():
     assert is_goal_continuation_instruction(legacy)
     assert is_harness_chrome(legacy)
     assert not is_goal_continuation_instruction(LEGACY_GOAL_CONTINUATION_HEAD + "my own words")
+
+
+def test_loop_goal_prompt_carries_the_marker_and_legacy_rows_still_recognised():
+    """R11: the goal-mode loop's own turn is the same kind of automated row."""
+    from local_operator.session.goal_loop import (
+        LOOP_GOAL_MARKER,
+        LOOP_GOAL_PROMPT,
+        is_loop_goal_instruction,
+    )
+
+    fresh = LOOP_GOAL_PROMPT.format(goal="Ship it")
+    assert fresh.startswith(LOOP_GOAL_MARKER)
+    assert is_loop_goal_instruction(fresh)
+    legacy = fresh[len(LOOP_GOAL_MARKER) :]
+    assert is_loop_goal_instruction(legacy)
+    assert not is_loop_goal_instruction(legacy.split("\n\n", 1)[0] + "\n\nmy own words")

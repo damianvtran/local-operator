@@ -94,13 +94,33 @@ class GuardOutcome:
     destructive: bool = False
 
 
-def read_settings(*, override_authorised: bool) -> GuardSettings:
+#: The keys whose non-default value LOOSENS the guard (S5/R10). Each is
+#: honoured only when the host proves an operator — not the model, not a shell
+#: edit — wrote it in this process (``harness.approval.loosening_is_authorised``);
+#: otherwise the safe default stands. ``judge_timeout_s`` is not here: a
+#: shorter timeout blocks MORE (fail closed), and the bound caps a longer one.
+LOOSENING_KEYS = frozenset(
+    {"guardrails.critical_override", "guardrails.enabled", "guardrails.rules_dir"}
+)
+
+
+def read_settings(
+    *, authorised: frozenset[str] = frozenset(), override_authorised: bool | None = None
+) -> GuardSettings:
     """Read ``guardrails.*`` at call time; any failure returns the safe defaults.
 
     Fresh per call, like ``tools.builtin._search_interception_config``, so an
     edit lands on the next call. An unreadable config is never "moved aside"
     here (that would rename the operator's file mid-turn) — defaults stand.
+
+    ``authorised`` names the :data:`LOOSENING_KEYS` an operator set in this
+    process. A loosening key the file carries WITHOUT that proof is read as its
+    default: an agent cannot switch off the user's rules, repoint them at an
+    empty folder, or lift the CRITICAL refusal by editing config.yml.
+    ``override_authorised`` is the older single-key spelling.
     """
+    if override_authorised:
+        authorised = authorised | {"guardrails.critical_override"}
     from local_operator.config import CONFIG_FILE_NAME, ConfigManager
     from local_operator.paths import config_dir
     from local_operator.tools.shell_env import _config_file_is_unreadable
@@ -126,15 +146,15 @@ def read_settings(*, override_authorised: bool) -> GuardSettings:
         timeout = GUARDRAILS_JUDGE_TIMEOUT_DEFAULT
     rules_dir = (
         Path(os.path.expanduser(rules_raw))
-        if isinstance(rules_raw, str) and rules_raw
+        if isinstance(rules_raw, str) and rules_raw and "guardrails.rules_dir" in authorised
         else default_rules
     )
     return GuardSettings(
-        # Only a literal ``false`` disables user rules; junk reads as on.
-        enabled=enabled is not False,
+        # Only a literal ``false`` disables user rules, and only when authorised.
+        enabled=enabled is not False or "guardrails.enabled" not in authorised,
         # The override needs BOTH the file's ``true`` and the host's proof that
         # an operator (not the model) made that write.
-        critical_override=(override is True) and override_authorised,
+        critical_override=(override is True) and "guardrails.critical_override" in authorised,
         judge_timeout_s=timeout,
         rules_dir=rules_dir,
     )

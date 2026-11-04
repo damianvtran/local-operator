@@ -241,3 +241,238 @@ def test_xargs_rm_is_opaque_high(home: Path) -> None:
 
 def test_subshell_group_still_resolves(home: Path) -> None:
     assert _classify(home, "( cd ~ && rm -rf .local-operator )").risk is Risk.CRITICAL
+
+
+# -- Round 1 review repros (R*/S* code+security review, Q* QA) ----------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -lc 'rm -rf ~/.local-operator'",
+        "sh -ec 'rm -rf ~/.local-operator'",
+        "/bin/bash -euc 'rm -rf ~/.local-operator'",
+        "bash -o pipefail -c 'rm -rf ~/.local-operator'",
+        "bash -c -- 'rm -rf ~/.local-operator'",
+        "bash -lc 'rm -rf ~/.local-operator/$(echo)/'",
+    ],
+)
+def test_r1_s2_shell_flag_clusters_are_walked(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+def test_r1_unlocatable_shell_script_with_delete_word_is_high(home: Path) -> None:
+    # A shell whose script cannot be located while the segment names a delete.
+    assert _classify(home, 'bash -c "$CMD" rm').risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo 'rm -rf ~' | bash",
+        "printf 'rm -rf ~' | sh",
+        "env -S 'rm -rf ~/.local-operator'",
+    ],
+)
+def test_r2_s6_shell_fed_by_stdin_is_at_least_high(home: Path, command: str) -> None:
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+def test_r2_heredoc_body_into_shell_is_walked(home: Path) -> None:
+    command = "bash <<'X'\nrm -rf ~/.local-operator\nX"
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+def test_r2_herestring_into_shell_is_walked(home: Path) -> None:
+    assert _classify(home, "bash <<< 'rm -rf ~/.local-operator'").risk is Risk.CRITICAL
+
+
+def test_s6_process_substitution_is_walked(home: Path) -> None:
+    assert _classify(home, "cat <(rm -rf ~/.local-operator)").risk is Risk.CRITICAL
+    assert _classify(home, "diff <(sort a) <(sort b)").risk is Risk.LOW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf {~/.local-operator,/tmp/x}",
+        "rm -rf ~/.local-operator{/,}",
+        "mv ~/.local-operator{,.bak}",
+        "rm -rf /tmp/x {~,/tmp/y}",
+    ],
+)
+def test_r3_s3_brace_expansion(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+def test_r3_brace_build_dist_low(home: Path) -> None:
+    assert _classify(home, "rm -rf {build,dist}", cwd=home / "repo" / "pkg").risk is Risk.LOW
+
+
+def test_r3_brace_range_bounded(home: Path) -> None:
+    assert _classify(home, "rm -rf /tmp/x{1..5}").risk is Risk.LOW
+    assert _classify(home, "rm -rf /tmp/x{1..100000}").risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -rf $'~/.local-operator'".replace("~", "$HOME_LIT"),
+        "rm -rf $'\\x2f'",
+        "rm -rf $HOME/$'.local-operator'",
+        'rm -rf $"$HOME/.local-operator"',
+    ],
+)
+def test_r5_s3_ansi_c_quoting(home: Path, command: str) -> None:
+    command = command.replace("$HOME_LIT", str(home))
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'rm -rf "${WORKDIR:-$HOME/.local-operator}"',
+        "rm -rf ${UNSET:-~/.local-operator}",
+        "rm -rf ${X:-$HOME}",
+        "X=$HOME; rm -rf ${Y:-$X}",
+        "rm -rf ${X-~}",
+        "rm -rf ${X:=$HOME}",
+        'rm -rf "${WORKDIR:-$HOME/.local-operator}/$(echo)/"',
+    ],
+)
+def test_s1_default_expansion_is_expanded(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "(cd /tmp && rm -rf x); rm -rf .local-operator",
+        "cd /tmp | true; rm -rf .local-operator",
+        "cd /tmp & rm -rf .local-operator",
+        "bash -c 'cd /tmp'; rm -rf .local-operator",
+        "(W=/tmp); rm -rf ${W:-~/.local-operator}",
+    ],
+)
+def test_r4_subshell_state_does_not_leak(home: Path, command: str) -> None:
+    assert _classify(home, command, cwd=home).risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "/$(date +%s)/../../../..",
+        "/$(date +%s)/../../../../agents",
+        "/$(whoami)/../../..",
+        "/$(date +../../..)",
+    ],
+)
+def test_s4_scratchpad_climb_is_not_contained(home: Path, suffix: str) -> None:
+    command = f'rm -rf "$LOCAL_OPERATOR_SCRATCHPAD"{suffix}'
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+def test_s4_date_name_in_scratchpad_still_low(home: Path) -> None:
+    assert _classify(home, 'rm -rf "$LOCAL_OPERATOR_SCRATCHPAD"/run-$(date +%s)').risk is Risk.LOW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "make test 2>&1",
+        "npm test 2>&1 | tee log.txt",
+        "echo e >&2",
+        "ls 2>&-",
+        "cmd 1>&2",
+        "cat a | grep b > /dev/null 2>&1",
+        "make &>build.log",
+    ],
+)
+def test_q1_fd_duplication_is_not_a_target(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.LOW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find . -name __pycache__ -exec rm -rf {} +",
+        "find . -name '*.pyc' -delete",
+        "find . -type f -name '*.tmp' -delete",
+    ],
+)
+def test_r6_find_with_selecting_predicate_in_repo_low(home: Path, command: str) -> None:
+    assert _classify(home, command, cwd=home / "repo").risk is Risk.LOW
+
+
+def test_r6_find_selecting_on_state_root_stays_critical(home: Path) -> None:
+    assert _classify(home, "find ~/.local-operator -name x -delete").risk is Risk.CRITICAL
+
+
+def test_r6_mktemp_and_literal_for_list_low(home: Path) -> None:
+    assert _classify(home, 'T=$(mktemp -d) && touch "$T/a" && rm -rf "$T"').risk is Risk.LOW
+    command = 'for d in a b; do rm -rf "$LOCAL_OPERATOR_SCRATCHPAD/$d"; done'
+    assert _classify(home, command).risk is Risk.LOW
+
+
+def test_r6_literal_for_list_reaching_state_root_critical(home: Path) -> None:
+    command = "for d in ~/.local-operator /tmp/x; do rm -rf $d; done"
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+def test_q2_top_level_glob_in_repo_low(home: Path) -> None:
+    assert _classify(home, "rm -f *.log", cwd=home / "repo").risk is Risk.LOW
+    assert _classify(home, "rm -f *.pyc", cwd=home / "repo").risk is Risk.LOW
+
+
+def test_q2_star_in_repo_root_still_high(home: Path) -> None:
+    assert _classify(home, "rm -rf *", cwd=home / "repo").risk >= Risk.HIGH
+
+
+def test_r7_backslash_newline_is_continuation(home: Path) -> None:
+    assert _classify(home, "rm -rf build \\\ndist", cwd=home).risk is Risk.HIGH  # ~/build, ~/dist
+    assert _classify(home, "rm -rf build \\\ndist", cwd=home / "repo" / "pkg").risk is Risk.LOW
+
+
+def test_s7_home_reassignment_tracked(home: Path) -> None:
+    assert (
+        _classify(home, f"export HOME={home}/x; rm -rf ~/../.local-operator").risk is Risk.CRITICAL
+    )
+
+
+def test_s7_symlink_created_in_same_command_is_opaque(home: Path) -> None:
+    command = "ln -s ~/.local-operator /tmp/l && rm -rf /tmp/l/"
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+def test_s8_tilde_after_equals(home: Path) -> None:
+    assert _classify(home, "dd if=/dev/zero of=~/.local-operator/config.yml").risk is Risk.CRITICAL
+
+
+def test_s5_sed_in_place_on_config_at_least_high(home: Path) -> None:
+    command = "sed -i '' 's/enabled: true/enabled: false/' ~/.local-operator/config.yml"
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+def test_s10_overwrite_inside_state_root_high(home: Path) -> None:
+    assert _classify(home, "echo x > ~/.local-operator/agents/x.md").risk is Risk.HIGH
+    assert _classify(home, 'echo x > "$LOCAL_OPERATOR_SCRATCHPAD"/note.txt').risk is Risk.LOW
+
+
+def test_r9_case_insensitive_volume(home: Path) -> None:
+    import os
+
+    probe = home / ".LOCAL-OPERATOR"
+    if not os.path.exists(probe):
+        pytest.skip("case-sensitive volume")
+    assert _classify(home, "rm -rf ~/.LOCAL-OPERATOR").risk is Risk.CRITICAL
+
+
+def test_q3_python_one_liner_delete_is_high(home: Path) -> None:
+    command = "python3 -c 'import shutil; shutil.rmtree(\"/x/.local-operator\")'"
+    assert _classify(home, command).risk >= Risk.HIGH
+    assert _classify(home, "python3 -c 'print(1)'").risk is Risk.LOW
+
+
+def test_r6_mktemp_at_home_cwd_low(home: Path) -> None:
+    assert _classify(home, 'T=$(mktemp -d); rm -rf "$T"', cwd=home).risk is Risk.LOW
+    assert _classify(home, 'rm -rf "$(mktemp -d)/../.."', cwd=home).risk >= Risk.HIGH

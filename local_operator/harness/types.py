@@ -3882,10 +3882,13 @@ class LoopConfig(BaseModel):
     # run. ``None`` (a host without wiring) means every such call is BLOCKED —
     # fail closed; CRITICAL calls are refused without consulting it at all.
     guard_judge: Callable[[str, str], Awaitable[str]] | None = Field(default=None, exclude=True)
-    # Whether an operator — not the model — authorised ``guardrails.
-    # critical_override`` in this process (``harness.approval.
-    # loosening_is_authorised``). Read per call; ``None`` means never.
-    guard_override_authorised: Callable[[], bool] | None = Field(default=None, exclude=True)
+    # Which guardrail LOOSENINGS (``guardrails.check.LOOSENING_KEYS``) an
+    # operator — not the model — authorised in this process (``harness.approval.
+    # loosening_is_authorised``). Read per call; ``None`` means none. A bare
+    # bool is accepted as the critical-override-only spelling.
+    guard_override_authorised: Callable[[], "frozenset[str] | bool"] | None = Field(
+        default=None, exclude=True
+    )
 
     interrupt_mode: Literal["immediate", "wait"] = "wait"
     # Epoch-ms deadline for the whole run, if any.

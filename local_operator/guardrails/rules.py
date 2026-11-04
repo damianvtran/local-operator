@@ -156,6 +156,14 @@ def parse_rule(text: str, *, source: str, shipped: bool = False) -> Rule | None:
     )
 
 
+#: Parsed rules keyed by (path, mtime_ns, size, shipped) (Q4). The checkpoint
+#: runs on every tool call; re-parsing every file each time re-logged a broken
+#: file's warning per call. A file edit changes the key, so it is re-read — and
+#: warned about — once per version.
+_PARSE_CACHE: dict[tuple[str, int, int, bool], Rule | None] = {}
+_PARSE_CACHE_MAX = 512
+
+
 def _load_dir(directory: Path, *, shipped: bool) -> list[Rule]:
     rules: list[Rule] = []
     try:
@@ -164,11 +172,22 @@ def _load_dir(directory: Path, *, shipped: bool) -> list[Rule]:
         return rules
     for path in files:
         try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            logger.warning("guardrail rule %s unreadable: %s", path, exc)
+            st = path.stat()
+        except OSError:
             continue
-        rule = parse_rule(text, source=str(path), shipped=shipped)
+        key = (str(path), st.st_mtime_ns, st.st_size, shipped)
+        if key in _PARSE_CACHE:
+            rule = _PARSE_CACHE[key]
+        else:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                logger.warning("guardrail rule %s unreadable: %s", path, exc)
+                continue
+            rule = parse_rule(text, source=str(path), shipped=shipped)
+            if len(_PARSE_CACHE) >= _PARSE_CACHE_MAX:
+                _PARSE_CACHE.clear()
+            _PARSE_CACHE[key] = rule
         if rule is not None:
             rules.append(rule)
     return rules
