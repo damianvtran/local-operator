@@ -156,6 +156,16 @@ _AMBIENT_VARS = (
     # drives it onto the "nothing happens" arm while asserting the one nobody runs. Cells
     # that mean "off" set it through ``monkeypatch`` explicitly.
     "LOP_SUPPLEMENTS",
+    # The per-session rules POC flag (``session/rules.RULES_ENV``, read from
+    # ``LOP_SESSION_RULES``). The same ESCAPE-HATCH class as the ask gate: it
+    # decides WHICH ARM every prompt-building and every command-path cell runs,
+    # and it is OFF unless the value is the literal ``"1"``. An inherited value
+    # would put the whole suite on the flag-on path — the cells that pin the
+    # shipped (flag-off) behaviour would pass while asserting the arm nobody
+    # runs, and the sidecar's ABSENCE, which is part of what flag-off promises,
+    # would stop being observable. Cells that mean "on" set it through
+    # ``monkeypatch`` explicitly, which is where the reason is written down.
+    "LOP_SESSION_RULES",
     # The soft query budget's escape hatch (``tools/query_budget.ALLOW_ENV``), the
     # same ESCAPE-HATCH class and scrubbed for the same reason: an inherited value
     # would waive the stop every cell in ``test_query_budget.py`` asserts. Read off

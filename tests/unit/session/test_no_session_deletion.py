@@ -233,6 +233,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only the failed write's own mkstemp temp FILE beside approvals.json; "
         "never a directory",
     ),
+    # Per-session rules (the POC's ``rules.json`` sidecar): the same shape one
+    # file over. ``_write`` swaps the fixed basename ``rules.json`` with a temp
+    # FILE it spelled itself (``rules.<pid>.tmp``) inside the SAME directory,
+    # and the ``unlink`` only clears that temp after a failed write. The session
+    # directory is the CONTAINER of both paths; neither path IS a directory, so
+    # neither call can rename, replace or remove one.
+    (
+        "local_operator/session/rules.py::_write",
+        "os.replace",
+        "Atomic replace of <session>/rules.json by a sibling temp FILE; never a directory",
+    ),
+    (
+        "local_operator/session/rules.py::_write",
+        "<path>.unlink",
+        "Removes only the failed write's own pid-named temp FILE beside rules.json",
+    ),
     # -- procname: the branded interpreter image -----------------------------
     # Every path in this module is built from `sys.prefix` + "bin"/"lib" and a
     # fixed basename (the brand, or the interpreter's own LDLIBRARY name). None
@@ -4210,6 +4226,10 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # tmp -> approvals.json, a FILE inside the conversation's own directory
         # (the atomic-write shape every other sidecar writer here uses).
         "local_operator/session/approval_policy.py::write_override",
+        # Same shape for the rules sidecar: tmp FILE -> rules.json inside that
+        # session's own directory. The receiver is a FILE and the temp is its
+        # sibling, so no session directory is ever displaced.
+        "local_operator/session/rules.py::_write",  # tmp -> rules.json
     }
 )
 
