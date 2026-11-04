@@ -309,7 +309,9 @@ def test_the_attention_payload_equals_the_filed_literals_with_and_without_exclud
     # The attention form is the SILENT one, so it carries no alert at all — and
     # the absence is declared (absent_fields) rather than left to the equality
     # above, so a later edit that "tidy-ups" an alert onto it fails here.
-    assert fixture["absent_fields"] == [ALERT_FIELD, SOUND_FIELD]
+    # ``sound_custom`` is reserved for the visible forms only (ADR amendment
+    # 2026-11-04), so the silent form declares it absent alongside ``sound``.
+    assert fixture["absent_fields"] == [ALERT_FIELD, SOUND_FIELD, "sound_custom"]
     for key in ("payload", "exclude_absent_payload", "body"):
         for absent in fixture["absent_fields"]:
             assert absent not in fixture[key], f"the attention form must not carry {key}.{absent}"
@@ -500,7 +502,13 @@ def test_the_report_block_allow_list_rejects_an_extra_or_mistyped_row() -> None:
     # input there, so a row that loses a field the filed body carries cannot
     # equal ``fixture["body"]``. Asserted here on the file side so the pair is
     # visible in one place.
-    assert set(fixture["report_block_required"]) | set(fixture["report_block_optional"]) == set(
+    # Minus the RESERVED field: ``sound_custom_ready`` is declared so the cloud
+    # accepts it from day one, but the machine does not report it until C5, so
+    # the filed literal (what the machine sends today) must not carry it.
+    reserved = set(fixture["reserved_not_sent"]["report_block"])
+    assert (
+        set(fixture["report_block_required"]) | set(fixture["report_block_optional"])
+    ) - reserved == set(
         fixture["body"]["devices"][0]
     ), "the filed row carries exactly the declared fields"
 
@@ -785,7 +793,8 @@ def test_a_heal_mints_a_new_key_and_the_attention_sequence_never_collides() -> N
         # Off wins over any id, ``system`` included.
         ({"notifications": {"sound": {"enabled": False, "id": "felt-marimba"}}}, SOUND_NONE),
         ({"notifications": {"sound": {"enabled": False, "id": "system"}}}, SOUND_NONE),
-        # A custom sound (C2) is not on the phone in v1, nor is a typo'd id.
+        # A custom sound (C2) sends the built-in fallback in data.sound (its file is
+        # named by the reserved sound_custom, from C5), as does a typo'd id.
         ({"notifications": {"sound": {"id": "custom-3f9a2c"}}}, "soft-pulse"),
         ({"notifications": {"sound": {"id": "soft-puls"}}}, "soft-pulse"),
         # A hand-written off reads as off, exactly as the settings page paints
@@ -832,3 +841,66 @@ def test_both_visible_builders_carry_the_sound_and_refuse_one_the_phone_lacks() 
             completion_payload(**{**COMPLETION_INPUT, "sound": bad})
         with pytest.raises(ValueError, match="unknown push sound"):
             digest_payload(**{**DIGEST_INPUT, "sound": bad})
+
+
+# --- reserved, not sent: sound_custom / sound_custom_ready (ADR 2026-11-04) ----
+
+
+@pytest.mark.parametrize(
+    "name", ["emit-completion.json", "emit-digest.json", "emit-attention.json"]
+)
+def test_the_reserved_custom_sound_fields_are_declared_and_absent_today(name: str) -> None:
+    """The freeze reserves two optional fields the machine does not send yet.
+
+    ADR 0006's amendment of 2026-11-04 (notification-sounds addendum 2 §2.2)
+    declares ``sound_custom`` (completion and digest) and the per-device
+    ``devices[].sound_custom_ready`` now, because the cloud validates with
+    ``extra="forbid"``: declared before S7 builds, the machine can start sending
+    them in C5 without a cloud-first deploy. Until then the builders must emit
+    NEITHER — a premature ``sound_custom`` would tell a cloud to play a file no
+    phone has fetched yet. This cell fails the day C5 starts emitting them, which
+    is when ``reserved_not_sent`` (and this cell) must change with it.
+    """
+    fixture = _fixture(name)
+    reserved = fixture["reserved_not_sent"]
+    visible = name != "emit-attention.json"
+
+    # Declared: in the allow-lists, with the frozen types.
+    assert reserved["report_block"] == ["sound_custom_ready"]
+    assert fixture["report_block_optional"]["sound_custom_ready"] == "bool"
+    if visible:
+        assert reserved["payload"] == ["sound_custom"]
+        assert fixture["payload_optional"]["sound_custom"] == "str"
+        assert "sound_custom" not in fixture["payload_required"]
+    else:
+        assert reserved["payload"] == []
+        assert "sound_custom" not in fixture["payload_optional"]
+        assert "sound_custom" in fixture["absent_fields"]
+
+    # Absent today: from the builders' real output and from the filed literals.
+    built = {
+        "emit-completion.json": lambda: completion_payload(**COMPLETION_INPUT),
+        "emit-digest.json": lambda: digest_payload(**DIGEST_INPUT, exclude=["d" * 32]),
+        "emit-attention.json": lambda: attention_payload(**ATTENTION_INPUT, exclude=["d" * 32]),
+    }[name]()
+    body = emit_body(built, DEVICE_ROWS)
+    for part, value in (
+        ("built", body),
+        *((k, fixture[k]) for k in ("payload", "body", "exclude_absent_payload") if k in fixture),
+    ):
+        assert "sound_custom" not in value, f"{name}.{part} sends the reserved sound_custom"
+        for row in value.get("devices", []):
+            assert "sound_custom_ready" not in row, f"{name}.{part} reports sound_custom_ready"
+
+
+def test_the_reserved_custom_sound_name_is_the_phones_file_stem() -> None:
+    """``c_<sha16>``, underscore: the wire value IS the phone's file name stem.
+
+    Android ``res/raw`` names allow no hyphen and expo-notifications applies one
+    ``sounds:`` list to both platforms (M1 prebuild), so a hyphenated wire value
+    would need a second, cloud-side rename; the underscore makes iOS
+    ``aps.sound = "<sound_custom>.wav"`` the identity.
+    """
+    for name in ("emit-completion.json", "emit-digest.json"):
+        custom = _fixture(name)["sound_values"]["custom"]
+        assert custom.startswith("c_<sha256[:16]>"), custom
