@@ -1156,6 +1156,12 @@ def build_cli_parser() -> LocalizedArgumentParser:
 
     add_disk_parser(subparsers, parent_parser, help_locale=help_locale)
 
+    # `lop sound list|preview|doctor`: notification sounds. Stdlib-only
+    # registration (the `disk` rule); the catalog loads in the handler.
+    from local_operator.sound_cli import add_parser as add_sound_parser
+
+    add_sound_parser(subparsers, parent_parser, help_locale=help_locale)
+
     # Operator authority (issue #1310, revision 2). Registration is stdlib-only
     # for the same reason `secret`'s is: `lop --version` must not load
     # Security.framework, the CNG stack or `cryptography`, and the verbs that do
@@ -17891,6 +17897,10 @@ def main() -> int:
             from local_operator.disk_cli import main as disk_main
 
             return disk_main(args)
+        elif args.subcommand == "sound":
+            from local_operator.sound_cli import main as sound_main
+
+            return sound_main(args)
         elif args.subcommand == "sessions":
             return sessions_command(args)
         elif args.subcommand == "stop":

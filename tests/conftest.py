@@ -602,6 +602,11 @@ _AMBIENT_VARS = (
 _PROCESS_DESKTOP_GATES: tuple[tuple[str, str], ...] = (
     ("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1"),
     ("LOCAL_OPERATOR_NO_DESKTOP_LAUNCH", "1"),
+    # The speakers are the operator's just as the desktop is: a test that clears
+    # the notification switch to exercise a banner leg must still never play a
+    # notification sound (`notifications/sound.py`). A sound test opts in with
+    # `LOCAL_OPERATOR_SOUND_BACKEND=null`, which needs no speakers.
+    ("LOCAL_OPERATOR_NO_SOUND", "1"),
     # The runtime standby (``session/runtime/standby.py``) is an interpreter the
     # warming console FORKS and holds a private descriptor to: it is a child of
     # that host, publishes nothing until it is adopted, and exits the instant the
