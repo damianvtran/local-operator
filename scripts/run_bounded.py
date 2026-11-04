@@ -992,6 +992,11 @@ def _run_cleanup_required(
                         _report(
                             stream, f"[run_bounded] {memory_guard.unsignalled_line(unsignalled)}"
                         )
+                    # QA Q2: a live escaped pid no parentage source could prove
+                    # ours was not signalled — named so it never survives silently.
+                    unverified = getattr(guard, "unverified", None)
+                    if unverified:
+                        _report(stream, f"[run_bounded] {memory_guard.unverified_line(unverified)}")
                     send(signal.SIGKILL, "memory", begin_cleanup(_CLEANUP_PROOF_SECONDS))
                     break
                 notice = guard.soft_notice(sample)

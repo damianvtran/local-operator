@@ -1510,3 +1510,44 @@ def test_wrapper_memory_escape_names_its_own_flag_first(runner, monkeypatch, inh
     else:
         monkeypatch.setenv("LOCAL_OPERATOR_RESOLVED_MEMORY_MB", inherited)
     assert runner._memory_escape() == expected
+
+
+def test_a_breach_names_escaped_descendants_the_guard_could_not_verify(monkeypatch):
+    """Review M1 on PR #3372: every macOS run_bounded run goes through
+    supervise_direct (cleanup-required refuses there), so the "never silent"
+    disclosure for an escaped pid no parentage source could verify must be
+    printed HERE, not only on the cleanup-required path."""
+    base = synthetic_guard()
+
+    class Guard(base):
+        def stop_escaped(self, signum):
+            self.unverified = [77001, 77002]
+            self.unsignalled = []
+            return []
+
+    kernel = FakeKernel(monkeypatch, dies_at=10**9)
+    stream = io.StringIO()
+    outcome = contracts.Outcome()
+    contracts.supervise_direct(
+        ["synthetic"],
+        timeout=None,
+        grace=0.2,
+        env={},
+        outcome=outcome,
+        stop={"signum": 0},
+        stream=stream,
+        spawn=lambda *a, **k: Child(),
+        clock=kernel.clock,
+        sleep=kernel.sleep,
+        boundary=kernel.boundary,
+        group_pids=kernel.group,
+        budget=SimpleNamespace(ceiling_mb=64),
+        guard_factory=Guard,
+    )
+    assert not kernel.runaway
+    text = stream.getvalue()
+    assert outcome.termination_cause == "memory-policy"
+    assert (
+        "[run_bounded] could not verify parentage of escaped descendant(s) "
+        "(unreadable, or re-parented to pid 1), not signalled: 77001, 77002"
+    ) in text, text

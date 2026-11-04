@@ -3027,6 +3027,27 @@
     },
     {
       "locale": "ru",
+      "namespace": "wire.tool_rows.bridge.skipped",
+      "source_sha256": "e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865",
+      "translator": {
+        "agent": "coder (PR #3417 implementer); retranslation i18n-translator (task subagent of this auditor) (c9f77e05a801)",
+        "session": "62d5b457bcf6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev team)",
+        "session": "3dcc5dbc44d0",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent current-byte audit: i18n/audits/evidence/ru/wire.tool_rows.bridge.skipped/rg6a1/record.json. 1M/1m/0n (RU-RG6-1,RU-RG6-2), 0 unresolved blocker/major; 2 key(s) retranslated. Composed row+expanded checked; no native/rendered claim."
+    },
+    {
+      "locale": "ru",
       "namespace": "relay.highlights",
       "source_sha256": "8d1002cbbc015243fdf7709ec51b7179d40a508a042e38f7085e7bdaad5cf131",
       "translator": {

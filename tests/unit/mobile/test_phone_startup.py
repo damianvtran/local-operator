@@ -9,9 +9,13 @@ no sleep followed by a timing assertion stands in for readiness.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
 import re
+import subprocess
 import sys
+import time
 import uuid
 
 import httpx
@@ -103,14 +107,17 @@ def fixture_children(monkeypatch):
     # production reconnect grace is pinned independently in test_stream_reliability.
     monkeypatch.setattr("local_operator.mobile.daemon.PHONE_VIEW_GRACE_S", 0)
     _write_child_config()
-    actual_spawn = asyncio.create_subprocess_exec
+    from local_operator import macos_disclaim
+    from local_operator.mobile import daemon as daemon_mod
+
+    actual_spawn = macos_disclaim.spawn_disclaimed
     children = []
 
-    async def spawn(*args, **kwargs):
+    def spawn(argv, **kwargs):
         # The PHONE-started runtime is named on both axes whenever a branded
         # image was planted, exactly as the viewer's spawn is (see
         # local_operator.procname), and is the bare interpreter with NO label
-        # where one could not be — a labelled argv[0] there is what empties the
+        # where one could not be — a labelled `argv[0]` there is what empties the
         # child's `sys.executable` on Linux, which is a worse outcome than an
         # unnamed row. It used to be the one session start with no branding at
         # all, so a session begun from the phone was a bare `python3.x` row for
@@ -120,30 +127,52 @@ def fixture_children(monkeypatch):
         if kwargs["executable"]:
             # A label with no `executable=` would be a PATH the kernel was asked
             # to execute, so the image always travels with the label.
-            assert args[0].startswith("Local Operator [session] id="), args
+            assert argv[0].startswith("Local Operator [session] id="), argv
         else:
-            assert args[0] == sys.executable, args
-        assert args[1:] == (
+            assert argv[0] == sys.executable, argv
+        assert list(argv[1:]) == [
             "-P",
             "-m",
             "local_operator.session.runtime.process",
-        )
-        assert kwargs["start_new_session"] is True
+        ]
+        # Detachment is now the disclaimed helper's job (own session AND out of
+        # the spawner's macOS responsibility scope; Popen + detached_popen_kwargs
+        # on its fallback), so the call must not smuggle a second detach spelling.
+        assert "start_new_session" not in kwargs
+        assert "creationflags" not in kwargs
+        # Detached stdio: a pipe back to the daemon would die with the daemon.
+        assert kwargs["stdin"] is subprocess.DEVNULL
+        assert kwargs["stdout"] is subprocess.DEVNULL
+        assert kwargs["stderr"] is subprocess.DEVNULL
         assert "LOP_RUNTIME_DEFER_MATERIALISE" not in kwargs["env"]
-        child = await actual_spawn(sys.executable, "-c", CHILD, **kwargs)
+        # The REAL helper spawns the inert fixture, so these cells run the
+        # product's actual detach + disclaim path, not a stand-in.
+        child = actual_spawn([sys.executable, "-c", CHILD], **{**kwargs, "executable": None})
         children.append(child)
         return child
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    # Patched where the daemon imports it: that binding is the one spawn seam.
+    monkeypatch.setattr(daemon_mod, "spawn_disclaimed", spawn)
     return children
+
+
+async def wait_child(child, timeout: float = 10) -> int:
+    """Await a spawned child's exit WITHOUT blocking the loop.
+
+    The child is a ``Popen``/``DisclaimedProcess`` (synchronous ``wait``), not an
+    asyncio ``Process``. Both serialise concurrent waiters on a lock, so this
+    waiter and the daemon's own reaper thread each read the true status.
+    """
+    return await asyncio.to_thread(child.wait, timeout)
 
 
 async def stop_fixture(daemon, children):
     await daemon.close_phone_views()
     for child in children:
         if child.returncode is None:
-            child.terminate()
-        await asyncio.wait_for(child.wait(), 10)
+            with contextlib.suppress(ProcessLookupError):
+                child.terminate()
+        await wait_child(child)
     for task in daemon._dial_tasks.values():
         task.cancel()
     await asyncio.gather(*daemon._dial_tasks.values(), return_exceptions=True)
@@ -251,7 +280,7 @@ async def test_start_is_ready_by_durable_id_and_phone_viewers_hold_actual_child(
             assert session_id not in daemon._phone_attaches
             # The real reaper publishes termination after the LAST viewer.
             # This wait is a hang guard, not an elapsed-time assertion.
-            assert await fixture_children[0].wait() == 0
+            assert await wait_child(fixture_children[0]) == 0
     finally:
         await stop_fixture(daemon, fixture_children)
 
@@ -285,16 +314,17 @@ async def test_a_daemon_that_inherited_a_warm_claim_does_not_pass_it_on(
     the session runtime's exec-time environment, readable by ``ps -E``.
     """
     from local_operator.agent_shell import DAEMON_BEARER_ENVS
+    from local_operator.mobile import daemon as daemon_mod
     from local_operator.session.runtime.types import ENGAGED_ENV
 
-    inner = asyncio.create_subprocess_exec
+    inner = daemon_mod.spawn_disclaimed
     envs: list[dict[str, str]] = []
 
-    async def recording(*args, **kwargs):
+    def recording(argv, **kwargs):
         envs.append(dict(kwargs["env"]))
-        return await inner(*args, **kwargs)
+        return inner(argv, **kwargs)
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", recording)
+    monkeypatch.setattr(daemon_mod, "spawn_disclaimed", recording)
     monkeypatch.setenv(ENGAGED_ENV, "1")
     for name in DAEMON_BEARER_ENVS:
         monkeypatch.setenv(name, "synthetic-bearer-r2-1")
@@ -341,22 +371,27 @@ async def test_abandoned_browser_handoff_releases_child(tmp_path, fixture_childr
             timer._callback(*timer._args)
             assert timer.cancelled()
             assert "handoff12345" not in daemon._phone_attaches
-            assert await fixture_children[0].wait() == 0
+            assert await wait_child(fixture_children[0]) == 0
     finally:
         await stop_fixture(daemon, fixture_children)
 
 
 @pytest.mark.asyncio
 async def test_child_exit_before_registration_is_not_acknowledged(tmp_path, monkeypatch):
-    actual_spawn = asyncio.create_subprocess_exec
+    from local_operator import macos_disclaim
+    from local_operator.mobile import daemon as daemon_mod
+
+    actual_spawn = macos_disclaim.spawn_disclaimed
     children = []
 
-    async def fail(*args, **kwargs):
-        child = await actual_spawn(sys.executable, "-c", "raise SystemExit(2)", **kwargs)
+    def fail(argv, **kwargs):
+        child = actual_spawn(
+            [sys.executable, "-c", "raise SystemExit(2)"], **{**kwargs, "executable": None}
+        )
         children.append(child)
         return child
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fail)
+    monkeypatch.setattr(daemon_mod, "spawn_disclaimed", fail)
     daemon = MobileDaemon(password="pw")
     try:
         async with asyncio.timeout(10):
@@ -367,6 +402,88 @@ async def test_child_exit_before_registration_is_not_acknowledged(tmp_path, monk
         assert not daemon._phone_handoffs
     finally:
         await stop_fixture(daemon, children)
+
+
+@pytest.mark.asyncio
+async def test_a_start_that_times_out_still_reaps_its_child(tmp_path, monkeypatch):
+    """A wedged constructor costs the phone its Start, never a zombie.
+
+    The spawn returns a synchronous ``Popen``/``DisclaimedProcess``, and nothing
+    else owns the exit of a detached child: the daemon's exit watcher is the
+    reaper. The child here never publishes a record, so the start times out and
+    the relay -- by contract -- does not signal it (an unverifiable owner is left
+    to its own residency predicate). When it then exits on its own, the daemon
+    must still have reaped it. The test never calls ``wait``/``poll`` itself:
+    ``returncode`` only becomes non-None when the PRODUCT's waiter collected it.
+    """
+    from local_operator import macos_disclaim
+    from local_operator.mobile import daemon as daemon_mod
+
+    actual_spawn = macos_disclaim.spawn_disclaimed
+    children = []
+    release = tmp_path / "release"
+
+    def wedged(argv, **kwargs):
+        script = (
+            "import os, time\n" f"while not os.path.exists({str(release)!r}): time.sleep(0.02)\n"
+        )
+        child = actual_spawn([sys.executable, "-c", script], **{**kwargs, "executable": None})
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(daemon_mod, "spawn_disclaimed", wedged)
+    monkeypatch.setattr(daemon_mod, "SESSION_START_TIMEOUT_S", 0.5)
+    daemon = MobileDaemon(password="pw")
+    try:
+        async with asyncio.timeout(10):
+            with pytest.raises(TimeoutError):
+                await daemon.spawn_session(str(tmp_path), resume="wedged123456")
+        assert not daemon._phone_attaches
+        assert not daemon._phone_handoffs
+        child = children[0]
+        assert child.returncode is None, "the relay signalled an unverified constructor"
+        release.write_text("go", encoding="utf-8")
+        deadline = time.monotonic() + 10
+        while child.returncode is None:
+            assert time.monotonic() < deadline, "nobody reaped the exited child"
+            await asyncio.sleep(0.02)
+        assert child.returncode == 0
+        # Reaped, not a zombie: the kernel holds no status for it any more.
+        with pytest.raises(ChildProcessError):
+            os.waitpid(child.pid, os.WNOHANG)
+    finally:
+        release.write_text("go", encoding="utf-8")
+        await stop_fixture(daemon, children)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="responsibility disclaim is macOS-only")
+@pytest.mark.asyncio
+async def test_a_phone_started_runtime_is_disclaimed_and_leads_its_own_session(
+    tmp_path, fixture_children
+):
+    """The phone's runtime is out of the spawner's responsibility scope.
+
+    2026-10-09: an Activity Monitor force-quit SIGTERMed nine runtimes within
+    17 ms because they still sat inside the app's macOS responsibility scope.
+    Every other runtime spawn already went through ``spawn_disclaimed``; this
+    pins that the phone-started one does too, by the REAL helper's return type
+    (a ``DisclaimedProcess`` only exists on the posix_spawn+disclaim path) and
+    by the kernel's own session fact.
+    """
+    from local_operator.macos_disclaim import DisclaimedProcess, _fallback_reason
+
+    if _fallback_reason() is not None:
+        pytest.skip("responsibility disclaim unavailable on this host")
+    daemon = MobileDaemon(password="pw")
+    try:
+        async with asyncio.timeout(15):
+            pid = await daemon.spawn_session(str(tmp_path), resume="disclaim1234")
+            child = fixture_children[0]
+            assert pid == child.pid
+            assert isinstance(child, DisclaimedProcess)
+            assert os.getsid(pid) == pid
+    finally:
+        await stop_fixture(daemon, fixture_children)
 
 
 @pytest.mark.asyncio
@@ -463,7 +580,7 @@ async def test_sse_send_failure_cannot_retain_a_phantom_viewer(
                 assert "sendfail1234" in daemon._phone_handoffs
                 daemon.release_phone_view("sendfail1234")
             assert "sendfail1234" not in daemon._phone_attaches
-            assert await fixture_children[0].wait() == 0
+            assert await wait_child(fixture_children[0]) == 0
     finally:
         await stop_fixture(daemon, fixture_children)
 
@@ -495,7 +612,7 @@ async def test_failed_start_cannot_signal_an_owner_that_accepted_work(
             assert not daemon._phone_attaches
             # Its own idle reaper may retire the inert fixture; the relay may
             # only ask the runtime to decide and must never send a process kill.
-            assert await fixture_children[0].wait() == 0
+            assert await wait_child(fixture_children[0]) == 0
     finally:
         monkeypatch.undo()
         await stop_fixture(daemon, fixture_children)
