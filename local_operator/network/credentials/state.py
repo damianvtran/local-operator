@@ -359,6 +359,38 @@ class PlacementState:
             return store._write_private_json(self.path, payload)
 
     @classmethod
+    def forget_persisted_owner(
+        cls, network_id: str, device: str, *, root: Path | None = None
+    ) -> bool:
+        """Evict one owner's metadata from fresh bytes under the shared cache lock.
+
+        This preserves updates committed before this eviction acquires the lock;
+        it does not repair other legacy writers' cross-process last-writer-wins
+        contract. Missing/unrelated caches must not be created or rewritten.
+        """
+        from local_operator.network import store
+
+        bound = cls(network_id, root=root)
+        path = bound.path
+        with store._write_lock(path):
+            if not path.exists():
+                return False
+            _ensure_private_dir(path.parent, root=bound.root)
+            current = cls.load(network_id, bound.root)
+            before = current.to_json()
+            current.forget_owner(device)
+            payload = current.to_json()
+            if payload == before:
+                return False
+            # The JSON wrapper/save would reacquire this lock. Reuse its staged
+            # private writer directly: validation above and one lock cover the
+            # fresh read, owner-only edit and atomic replacement together.
+            store._stage_private(
+                path, lambda handle: json.dump(payload, handle, ensure_ascii=False)
+            )
+            return True
+
+    @classmethod
     def load(cls, network_id: str, root: Path | None = None) -> PlacementState:
         """Read the observations, or an empty set. Never raises for a missing file.
 

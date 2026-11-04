@@ -77,7 +77,7 @@ import uuid
 import weakref
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
@@ -3054,16 +3054,19 @@ def leave(
         store.save(record, root)
         from local_operator.network.credentials.state import PlacementState
 
-        # Observations, not grants: a departed owner's cached sentences and row
-        # ids must leave THIS network/root without touching another owner's ids.
-        # Cleanup is best effort like placement-merge invalidation: cache IO or
-        # corrupt metadata must not interrupt the caller's departure/epoch rotation.
-        with suppress(OSError, ValueError):
-            state = PlacementState.load(record.network_id, root)
-            before = state.to_json()
-            state.forget_owner(device_id)
-            if state.to_json() != before:
-                state.save()
+        # This non-authoritative cache must never interrupt the already committed
+        # departure's audit/epoch rotation, including on a namespace-guard refusal.
+        # Keep membership persistence OUTSIDE this catch; control signals propagate.
+        try:
+            PlacementState.forget_persisted_owner(record.network_id, device_id, root=root)
+        except Exception as exc:  # noqa: BLE001 — cache failure cannot retain the old epoch
+            # Only bounded identifiers: exception text/tracebacks may carry paths,
+            # cached metadata or credential material. The real path guard stays on.
+            logger.warning(
+                "relay: owner observation cleanup failed network=%s exception=%s",
+                record.network_id[:80],
+                type(exc).__name__[:64],
+            )
     return member
 
 
