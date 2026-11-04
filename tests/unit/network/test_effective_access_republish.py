@@ -270,8 +270,9 @@ async def test_a_denied_account_is_never_lent_and_a_pooled_one_is_provider_acces
     (``owner.grant``; a borrower's affinity only steers that choice) and re-checks
     the borrower's account-scoped denials against the lent identity at mint
     (``consent.serving_guard`` -> ``check_borrow``). A denied account is therefore
-    never served: as the only row, or with the borrower anchored to it, the owner
-    refuses. With a second, permitted row the owner lends THAT one, which is real
+    never served: as the only row the owner refuses, and with a second, permitted
+    row it lends THAT one, anchored to the denied row or not (#3437 hides an
+    account-denied row before the choice). Either way it is real
     provider access. The band says the provider is usable; it names no account.
     """
     rig.auth.delete_credentials_for_provider(owner_rig.P)
@@ -312,13 +313,20 @@ async def test_a_denied_account_is_never_lent_and_a_pooled_one_is_provider_acces
         session, asyncio.get_running_loop(), cwd=str(borrower), config_dir=borrower
     )
     try:
-        for detail in (only_denied, anchored):
-            assert detail.get("code") == "not_a_holder", detail
-            assert "access_token" not in detail
-            note_resolution(borrower, owner_rig.P, BrokerError.from_detail(detail))
-            await _settle(handle)
-            band = _band(session)
-            assert (band.effective_state, band.state) == ("withdrawn", "temporarily_unavailable")
+        assert only_denied.get("code") == "not_a_holder", only_denied
+        assert "access_token" not in only_denied
+        note_resolution(borrower, owner_rig.P, BrokerError.from_detail(only_denied))
+        await _settle(handle)
+        band = _band(session)
+        assert (band.effective_state, band.state) == ("withdrawn", "temporarily_unavailable")
+
+        # Anchored to the DENIED row beside a permitted one: the anchor is a
+        # preference among rows this borrower may be lent, never a way to reach (or
+        # be refused by) a denied one, so the owner hides the denied row and lends the
+        # permitted account (#3437). The denied row is still never served.
+        assert anchored.get("kind") == "grant", anchored
+        assert anchored["identity"]["account_id"] == "account-two"
+        assert anchored["credential_ref"]["credential_id"] != denied.id
 
         assert pooled.get("kind") == "grant", pooled
         assert pooled["identity"]["account_id"] == "account-two"
