@@ -692,6 +692,8 @@ def test_exec_offline_fail_detail_names_lop_frames(monkeypatch: pytest.MonkeyPat
     stderr = (
         "noise\r\n" + _TB + "\r\n"
         '  File "C:\\lop\\local_operator\\server.py", line 42, in shutdown\r\n'
+        '  File "C:\\lop\\local_operator\\a.py", line 1, in a\r\n'
+        '  File "C:\\lop\\local_operator\\b.py", line 2, in b\r\n'
         '  File "C:\\py312\\asyncio\\base_events.py", line 295, in _attach\r\n'
         "    assert self._sockets is not None\r\nAssertionError\r\n"
     )
@@ -700,7 +702,38 @@ def test_exec_offline_fail_detail_names_lop_frames(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(xplat_probe, "_cli_argv", lambda *a: ["lop", *a])
     res = xplat_probe.probe_exec_offline({})
     assert res.status == "FAIL"
+    # More than four lines above the end: the old `_tail` dropped this frame.
+    assert "local_operator\\server.py" not in xplat_probe._tail(stderr)
     assert "local_operator\\server.py" in res.detail
     assert "local_operator\\server.py" in res.extra["traceback"]
     # The short summary stays first so the matrix table keeps its shape.
     assert res.detail.startswith(xplat_probe._tail(stderr))
+
+
+_DURING = "During handling of the above exception, another exception occurred:"
+_CAUSE = "The above exception was the direct cause of the following exception:"
+
+
+def test_traceback_block_keeps_both_blocks_of_a_chained_exception() -> None:
+    # RED against the previous helper, which kept only the block after SEP.
+    text = (
+        f'{_TB}\n  File "lop/root.py", line 1, in root\nKeyError: k\n\n{_DURING}\n\n'
+        f'{_TB}\n  File "asyncio/base_events.py", line 295, in _attach\nAssertionError\n'
+    )
+    out = xplat_probe._traceback_block(text)
+    assert "lop/root.py" in out and _DURING in out and out.endswith("AssertionError")
+    three = f"{_TB}\nONE\n{_CAUSE}\n{_TB}\nTWO\n{_DURING}\n{_TB}\nTHREE\n"
+    assert xplat_probe._traceback_block(three).count(_TB) == 3
+
+
+def test_traceback_block_long_chain_keeps_the_tail() -> None:
+    body = "\n".join(f"f{i}" for i in range(50))
+    text = f"{_TB}\nROOT\n{_DURING}\n{_TB}\n{body}\nBoom\n"
+    out = xplat_probe._traceback_block(text, max_lines=10)
+    assert "elided" in out and out.endswith("Boom") and "ROOT" not in out
+
+
+def test_traceback_block_excludes_an_unjoined_earlier_traceback() -> None:
+    text = f"{_TB}\nQUOTED\nunrelated output\n{_TB}\nLAST\n"
+    out = xplat_probe._traceback_block(text)
+    assert "LAST" in out and "QUOTED" not in out

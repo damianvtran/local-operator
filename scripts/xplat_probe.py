@@ -257,6 +257,12 @@ def _tail(text: str, limit: int = 400) -> str:
     return joined[-limit:] if len(joined) > limit else joined
 
 
+_CHAIN_SEPARATORS = (
+    "During handling of the above exception, another exception occurred:",
+    "The above exception was the direct cause of the following exception:",
+)
+
+
 def _traceback_block(text: str, max_lines: int = 60, max_chars: int = 6000) -> str:
     """The LAST `Traceback (most recent call last)` block and all output after it.
 
@@ -267,11 +273,18 @@ def _traceback_block(text: str, max_lines: int = 60, max_chars: int = 6000) -> s
     CPython gh-109564 -- Server.close racing a mid-accept connection, fixed on
     main and 3.14/3.15 backports only, so 3.12 stays exposed). Every lop frame
     above it was dropped, so which server lop closed was unknowable. Outcome
-    history across sightings: 14/7/1. This helper preserves the evidence; it
+    history: over 22 completed runs since 11-02 there were 14 successes, 7
+    cancelled and 1 failure (per the #3367 owner). This helper preserves the evidence; it
     does NOT explain or fix the failure.
 
     Returns "" when there is no traceback. Over-long blocks keep the TAIL (the
     innermost frames and the exception line) and say how much was elided.
+    A CHAINED exception ("During handling of the above exception, another
+    exception occurred:" / "The above exception was the direct cause of the
+    following exception:") is kept whole, from its FIRST traceback: the root
+    cause sits above the separator and is the block most likely to name the lop
+    frame. A traceback header quoted earlier in unrelated output, not joined by
+    a separator, is not pulled in.
     Splitting on splitlines() makes Windows `\r\n` endings harmless.
     """
     lines = [ln.rstrip() for ln in (text or "").splitlines() if ln.strip()]
@@ -279,7 +292,17 @@ def _traceback_block(text: str, max_lines: int = 60, max_chars: int = 6000) -> s
     starts = [i for i, ln in enumerate(lines) if marker in ln]
     if not starts:
         return ""
-    block = lines[starts[-1] :]
+    first = starts[-1]
+    # Walk back across chain separators: [..tb..] SEP [..tb..] SEP [last tb].
+    while True:
+        j = first - 1
+        if j < 0 or lines[j].strip() not in _CHAIN_SEPARATORS:
+            break
+        prev = [i for i in starts if i < j]
+        if not prev:
+            break
+        first = prev[-1]
+    block = lines[first:]
     elided = 0
     if len(block) > max_lines:
         elided += len(block) - max_lines
@@ -1409,6 +1432,8 @@ def probe_exec_offline(env: dict[str, str]) -> Result:
             {
                 "rc": proc.returncode,
                 "traceback": block,
+                # Unredacted child output: acceptable because this is public CI
+                # running the offline `lop exec` (no provider token configured).
                 "stderr_tail": (proc.stderr or "")[-1500:],
                 "stdout_tail": (proc.stdout or "")[-1500:],
             },
