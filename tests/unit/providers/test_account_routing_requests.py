@@ -479,3 +479,44 @@ async def test_all_measured_caps_gate_and_no_paid_tier_activation(routing):
     attempts = []
     await send(store, attempts)
     assert attempts[-1][0] == "Bearer synthetic-token-1"
+
+
+async def test_warm_lease_holds_a_later_reset_then_lapses_to_the_soonest(routing):
+    """2026-11-04: affinity first, but a lapsed or broken lease moves to the soonest.
+
+    The operator saw consumption on an account resetting later than two others.
+    Cache affinity must still win while the lease is warm; once it lapses (the
+    exact expiry instant is already invalid) or the prefix changes, the next
+    resolve must take the sooner-resetting account, from STALE warmer evidence
+    too — before the fix a 45-minute-old report ranked every account neutral and
+    the session hash picked one, later reset or not.
+    """
+    store, rows, reports, clock = routing
+    await send(store, [])  # fresh evidence: rows[0] resets soonest, lease lands there
+    receipt = json.loads(store._account_affinity_store().path_for("synthetic-session").read_text())[
+        "providers"
+    ]["anthropic"]
+    assert receipt["account_id"] == rows[0].id
+    day = 86_400_000
+    # Now rows[0] resets in 6 days, rows[1] in 5, and nobody refreshed /usage.
+    for row, days in ((rows[0], 6), (rows[1], 5)):
+        reports[row.id].limits[0].resets_at_ms = NOW + days * day
+        reports[row.id].fetched_at = NOW - 45 * 60_000
+
+    async def pick(session_id, req=None):
+        with affinity.selection_context(req or request()):
+            access = await store.get_oauth_access(
+                "anthropic", session_id, model_id="claude-sonnet-5"
+            )
+        assert access is not None
+        return access.credential_id
+
+    clock.update(wall=NOW + 299_999, mono=1299.999)
+    assert await pick("synthetic-session") == rows[0].id  # warm: honoured
+    changed = request().model_copy(
+        update={"system_blocks": ["Synthetic other prefix", "Synthetic volatile tail"]}
+    )
+    assert await pick("synthetic-session", changed) == rows[1].id  # prefix change
+    clock.update(wall=NOW + 300_000, mono=1300)
+    assert await pick("synthetic-session") == rows[1].id  # exact expiry is invalid
+    assert {await pick(f"new-session-{i}") for i in range(40)} == {rows[1].id}
