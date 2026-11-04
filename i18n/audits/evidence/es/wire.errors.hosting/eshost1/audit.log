@@ -1,0 +1,46 @@
+# Audit evidence log — es / wire.errors.hosting / hosting-es-r1
+# Source-only; pure stdlib eval (json, hashlib, unicodedata). NO process, bash,
+# subprocess, test, formatter, project import, native, install, CI or Git run.
+
+## Input hashes (computed here)
+en       458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63  (82 bytes)
+context  ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9  (854 bytes)
+target   8de6f07aa22bb654bc0e45390bc803ba28f37698e6e08ffe95399d895ff3c5cf  (97 bytes)
+
+## Key parity and shape
+keys EN: ['wire.errors.hosting.not_configured']
+keys ES: ['wire.errors.hosting.not_configured']
+key parity: True; key count: 1
+value: 'La plataforma de alojamiento no está configurada.'
+codepoints: 49; NFC: True; Cf: [];
+manual bidi controls: []; braces: False;
+terminal period: True; capital initial: True;
+ASCII-only: False; identical to English: False
+
+## Zero-argument rule
+The key carries no ICU arguments, no braces and no dynamic detail. Placeholder
+parity and CLDR plural/select categories are therefore N/A by construction: there
+is no argument whose type or branch set could differ.
+
+## Context read
+role: owned cause clause composed into startup refusals
+tone: diagnostic; names the condition, never restates the remedy
+note: the hosting preflight resolved no provider; the surrounding refusal supplies
+the remedy; the clause is spliced after a colon as a complete statement, so the
+terminal period and capitalization stay; the English source is also the legacy
+HostingNotConfiguredError str, which stays English by contract.
+
+## Corpus evidence (current es catalogues)
+cli.global_help.hosting: "Plataforma de alojamiento que usar (radient, deepseek, openai, ...)"
+cli.global_help.propagated_hosting: "Plataforma de alojamiento para esta ejecución (...)"
+cli.exec_worker_help.hosting: "Anulación de la plataforma de alojamiento"
+cli.credential_help.credential: "... credenciales de distintas plataformas de alojamiento"
+wire.errors.media.radient_key_missing: "La clave de API de Radient no está configurada en el servidor."
+tui.authoring.invalid_effort: "Ese nivel de esfuerzo no está configurado."
+wire.settings.hosting.label: "Proveedor predeterminado" (settings picker concept, not this condition)
+
+## Result
+JSON validity, key parity, NFC, Cf=0, no manual bidi, no braces, capital initial,
+terminal period: PASS. No finding; 0 BLOCKER / 0 MAJOR.
+Native/render/pseudo/RTL/runtime: NOT RUN; es is LTR; those are separate holds.
+No ledger, activation, PR comment, repo edit or target edit was made.

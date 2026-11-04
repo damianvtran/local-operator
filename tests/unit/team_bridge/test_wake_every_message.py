@@ -332,19 +332,24 @@ def _trigger(config_dir: Path, kind: str, now: float, mention: bool = False) -> 
     )
 
 
-def test_the_budget_allows_six_unprompted_posts_per_ten_minutes(tmp_path: Path) -> None:
+def test_the_121st_post_in_ten_minutes_hits_the_absolute_cap(tmp_path: Path) -> None:
+    """Hotfix: the absolute cap (120 / 10 min) is the ONLY refusal left."""
+
     now = 1_000_000.0
-    for index in range(reply_guard.BUDGET_POSTS):
+    for index in range(reply_guard.ABSOLUTE_POSTS):
         assert isinstance(_reserve(tmp_path, now + index), reply_guard.Reservation)
-    refused = _reserve(tmp_path, now + 10)
+    refused = _reserve(tmp_path, now + 300)
     assert isinstance(refused, reply_guard.Refusal)
-    assert refused.code == reply_guard.CODE_BUDGET
+    assert refused.code == reply_guard.CODE_ABSOLUTE
+    # Honest: the oldest post (at ``now``) frees its slot at now + 600, which is
+    # 300 s after the refused attempt.
+    assert refused.retry_after_s == 300
     result = refused.as_result()
-    assert result["ok"] is False and "no_reply" in result["next"]
-    assert 0 < result["retry_after_s"] <= reply_guard.BUDGET_WINDOW_S
-    # The window slides: the first post ages out.
-    later = now + reply_guard.BUDGET_WINDOW_S + 1
-    assert isinstance(_reserve(tmp_path, later), reply_guard.Reservation)
+    assert result["ok"] is False
+    assert result["next"] == "not sent; keep your draft and retry after retry_after_s"
+    assert isinstance(
+        _reserve(tmp_path, now + 300 + refused.retry_after_s), reply_guard.Reservation
+    )
 
 
 def test_a_person_talking_to_their_agent_is_never_throttled(tmp_path: Path) -> None:
@@ -365,22 +370,13 @@ def test_a_person_talking_to_their_agent_is_never_throttled(tmp_path: Path) -> N
     assert all(not slot.agent_to_agent for slot in slots)
 
 
-def test_human_prompted_posts_do_not_spend_the_agent_budget(tmp_path: Path) -> None:
-    """The budget counts agent-initiated posts only (review round 1, m2)."""
+def test_unprompted_agent_posts_are_not_budgeted(tmp_path: Path) -> None:
+    """Hotfix: the 6-per-10-min agent budget is gone (operator, 2026-11-03)."""
 
     now = 1_000_000.0
-    for index in range(reply_guard.BUDGET_POSTS):
-        _trigger(tmp_path, "human", now + index, mention=True)
+    _trigger(tmp_path, "human", now - 10_000, mention=True)  # stale: agent-initiated
+    for index in range(20):
         assert isinstance(_reserve(tmp_path, now + index), reply_guard.Reservation)
-    # The six agent turns after them still have their full budget. A trigger
-    # older than the TTL no longer counts as a human prompt, so these posts are
-    # agent-initiated — the case the budget exists for.
-    _trigger(tmp_path, "human", now - 10_000, mention=True)
-    for index in range(reply_guard.BUDGET_POSTS):
-        when = now + 100 + index
-        assert isinstance(_reserve(tmp_path, when), reply_guard.Reservation)
-    refused = _reserve(tmp_path, now + 200)
-    assert isinstance(refused, reply_guard.Refusal) and refused.code == reply_guard.CODE_BUDGET
 
 
 def test_the_absolute_cap_stops_even_human_prompted_posts(tmp_path: Path) -> None:
@@ -396,14 +392,12 @@ def test_the_absolute_cap_stops_even_human_prompted_posts(tmp_path: Path) -> Non
     assert isinstance(refused, reply_guard.Refusal)
     # A DISTINCT code: the budget says "let the humans talk", this says "stop".
     assert refused.code == reply_guard.CODE_ABSOLUTE
-    assert refused.code != reply_guard.CODE_BUDGET
-    assert refused.code != reply_guard.CODE_COOLDOWN
     assert 0 < refused.retry_after_s <= reply_guard.BUDGET_WINDOW_S
 
 
 def test_the_budget_is_per_conversation(tmp_path: Path) -> None:
     now = 1_000_000.0
-    for index in range(reply_guard.BUDGET_POSTS):
+    for index in range(reply_guard.ABSOLUTE_POSTS):
         _reserve(tmp_path, now + index)
     other = reply_guard.reserve_post(
         tmp_path, endpoint_id="bep_a", conversation_id="bcv_otherconv", now=now + 10
@@ -411,36 +405,41 @@ def test_the_budget_is_per_conversation(tmp_path: Path) -> None:
     assert isinstance(other, reply_guard.Reservation)
 
 
-def test_three_agent_to_agent_turns_start_a_cool_down(tmp_path: Path) -> None:
-    now = 1_000_000.0
-    for index in range(reply_guard.COOLDOWN_AFTER):
-        _trigger(tmp_path, "agent", now + index)
-        slot = _reserve(tmp_path, now + index)
-        assert isinstance(slot, reply_guard.Reservation) and slot.agent_to_agent
-    _trigger(tmp_path, "agent", now + 5)
-    refused = _reserve(tmp_path, now + 5)
-    assert isinstance(refused, reply_guard.Refusal) and refused.code == reply_guard.CODE_COOLDOWN
-    # A post answering a PERSON is exempt from the cool-down (review round 1,
-    # m2: the person is talking to their agent, so silence is the wrong answer)...
-    _trigger(tmp_path, "human", now + 6, mention=False)
-    assert isinstance(_reserve(tmp_path, now + 6), reply_guard.Reservation)
-    # ...and it does NOT lift the cool-down for agent-versus-agent traffic: only
-    # the mention reset and expiry do (wake contract).
-    _trigger(tmp_path, "agent", now + 7)
-    assert isinstance(_reserve(tmp_path, now + 7), reply_guard.Refusal)
-    # ...it expires on its own...
-    assert isinstance(_reserve(tmp_path, now + 5 + reply_guard.COOLDOWN_S), reply_guard.Reservation)
+def test_alternating_agent_replies_in_a_dm_ignore_a_stale_cool_down(tmp_path: Path) -> None:
+    """Hotfix: no agent-to-agent cool-down, and a row an older build armed is ignored.
 
+    Two agents trade 10 replies in one DM, each answering the other's wake, with
+    a LIVE ``cooldown_until`` already stored for both: every post is admitted.
+    """
 
-def test_a_human_mention_resets_the_run_and_lifts_the_cool_down(tmp_path: Path) -> None:
-    now = 1_000_000.0
-    for index in range(reply_guard.COOLDOWN_AFTER):
-        _trigger(tmp_path, "agent", now + index)
-        _reserve(tmp_path, now + index)
-    assert isinstance(_reserve(tmp_path, now + 4), reply_guard.Refusal)
-    _trigger(tmp_path, "human", now + 5, mention=True)
-    slot = _reserve(tmp_path, now + 5)
-    assert isinstance(slot, reply_guard.Reservation) and not slot.agent_to_agent
+    import sqlite3
+
+    dm, now = "bcv_abc12345", 1_000_000.0
+    path = reply_guard.guard_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(reply_guard._SCHEMA)
+        conn.executemany(
+            "INSERT INTO runs (endpoint_id, conversation_id, consecutive, cooldown_until) "
+            "VALUES (?, ?, 0, ?)",
+            [(endpoint, dm, now + 600.0) for endpoint in ("bep_a", "bep_b")],
+        )
+    for index in range(10):
+        endpoint = ("bep_a", "bep_b")[index % 2]
+        when = now + 30 * index
+        reply_guard.record_trigger(
+            tmp_path,
+            endpoint_id=endpoint,
+            conversation_id=dm,
+            sender_kind="agent",
+            mention=False,
+            now=when,
+        )
+        slot = reply_guard.reserve_post(
+            tmp_path, endpoint_id=endpoint, conversation_id=dm, now=when
+        )
+        assert isinstance(slot, reply_guard.Reservation), (index, slot)
+        assert slot.agent_to_agent
 
 
 def test_a_human_prompted_post_breaks_the_agent_run(tmp_path: Path) -> None:
@@ -452,7 +451,7 @@ def test_a_human_prompted_post_breaks_the_agent_run(tmp_path: Path) -> None:
 
 def test_a_released_slot_returns_the_budget(tmp_path: Path) -> None:
     now = 1_000_000.0
-    slots = [_reserve(tmp_path, now + i) for i in range(reply_guard.BUDGET_POSTS)]
+    slots = [_reserve(tmp_path, now + i) for i in range(reply_guard.ABSOLUTE_POSTS)]
     reply_guard.release(tmp_path, slots[-1], endpoint_id="bep_a", conversation_id=CONV)
     assert isinstance(_reserve(tmp_path, now + 10), reply_guard.Reservation)
 
@@ -819,21 +818,21 @@ def _post(runtime: BridgeRuntime, body: str = "ok") -> dict[str, Any]:
     )
 
 
-def test_channel_post_refuses_past_the_budget_with_a_structured_refusal(
+def test_channel_post_refuses_past_the_absolute_cap_with_a_structured_refusal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     a = _owner("a", 1)
     hub = Hub(members=("bep_a",))
     _rig(monkeypatch, hub, {})
     runtime = _runtime(hub, a, tmp_path)
-    for _ in range(reply_guard.BUDGET_POSTS):
+    for _ in range(reply_guard.ABSOLUTE_POSTS):
         assert _post(runtime)["ok"] is True
     refused = _post(runtime)
     assert refused["ok"] is False
-    assert refused["code"] == reply_guard.CODE_BUDGET
+    assert refused["code"] == reply_guard.CODE_ABSOLUTE
     assert refused["retry_after_s"] > 0
     assert (
-        len(hub.agent_posts()) == reply_guard.BUDGET_POSTS
+        len(hub.agent_posts()) == reply_guard.ABSOLUTE_POSTS
     ), "the refused post never reached the hub"
 
 
@@ -849,7 +848,7 @@ def test_a_post_the_hub_refuses_does_not_spend_budget(
         raise RuntimeError("hub down")
 
     monkeypatch.setattr(runtime.client, "conversation_send", refuse)
-    for _ in range(reply_guard.BUDGET_POSTS + 2):
+    for _ in range(reply_guard.ABSOLUTE_POSTS + 2):
         assert _post(runtime)["code"] == "post_failed"
     monkeypatch.undo()
     _rig(monkeypatch, hub, {})
@@ -860,7 +859,12 @@ def test_a_post_the_hub_refuses_does_not_spend_budget(
 
 
 def _converse(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, caps: bool, rounds: int = 60
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    caps: bool,
+    rounds: int = 60,
+    require_quiet: bool = True,
 ) -> tuple[Hub, list[dict[str, Any]], list[dict[str, Any]]]:
     """Drive two "reply to every wake" agents until the conversation goes quiet.
 
@@ -898,7 +902,8 @@ def _converse(
         if not new and not any(hub.feeds.values()):
             break
     else:
-        raise AssertionError("the conversation never went quiet: runaway")
+        if require_quiet:
+            raise AssertionError("the conversation never went quiet: runaway")
     return hub, wakes, refusals
 
 
@@ -915,22 +920,21 @@ def test_two_reply_to_everything_agents_stop_under_the_server_caps(
     print(f"\ncaps on: {len(posts)} agent posts, {len(wakes)} wakes, {len(refusals)} refusals")
 
 
-def test_two_reply_to_everything_agents_stop_on_the_client_guard_alone(
+def test_on_an_old_hub_the_client_guard_bounds_agents_only_by_the_absolute_cap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An OLD hub fans every message out to every agent. The client guard
-    must end it: each agent gets one human-prompted post plus at most
-    COOLDOWN_AFTER agent-to-agent posts before its cool-down refuses."""
+    """An OLD hub fans every message out to every agent. Since the hotfix the
+    client no longer stops agent-to-agent traffic (operator, 2026-11-03); its one
+    bound is the absolute cap per conversation per window."""
 
-    hub, wakes, refusals = _converse(tmp_path, monkeypatch, caps=False)
+    hub, wakes, refusals = _converse(
+        tmp_path, monkeypatch, caps=False, rounds=30, require_quiet=False
+    )
     posts = hub.agent_posts()
     per_agent = {e: sum(1 for m in posts if m.sender_endpoint == e) for e in ("bep_a", "bep_b")}
-    for endpoint, count in per_agent.items():
-        assert count <= 1 + reply_guard.COOLDOWN_AFTER, per_agent
-        assert count <= reply_guard.BUDGET_POSTS
-    assert len(posts) <= 2 * (1 + reply_guard.COOLDOWN_AFTER)
-    assert refusals, "the guard, not luck, ended it"
-    assert {r["code"] for r in refusals} <= {reply_guard.CODE_COOLDOWN, reply_guard.CODE_BUDGET}
+    for count in per_agent.values():
+        assert 6 < count <= reply_guard.ABSOLUTE_POSTS, per_agent
+    assert {r["code"] for r in refusals} <= {reply_guard.CODE_ABSOLUTE}
     print(f"\ncaps off: {per_agent}, {len(wakes)} wakes, refusals={[r['code'] for r in refusals]}")
 
 
@@ -1393,55 +1397,6 @@ def test_a_dm_conversation_reaches_the_card_as_a_direct_message(
     _iterate(a, dirs["a"])
     assert len(wakes) == 1
     assert wakes[0]["card"].splitlines()[0] == "Direct message · from Ada (human, same tenant)"
-
-
-def _three_agent_turns(tmp_path: Path, now: float) -> None:
-    """Drive the guard to a cool-down: three consecutive agent-to-agent turns."""
-
-    for index in range(reply_guard.COOLDOWN_AFTER):
-        _trigger(tmp_path, "agent", now + index)
-        _reserve(tmp_path, now + index)
-    assert isinstance(_reserve(tmp_path, now + 4), reply_guard.Refusal)
-
-
-def test_a_human_reply_in_a_followed_thread_lifts_the_cool_down(tmp_path: Path) -> None:
-    """The guard's reset uses the card's own predicate (E2E round 1, Q-1).
-
-    A person replying IN the thread this agent follows is addressing it, so the
-    cool-down lifts exactly as a mention does — and the proof is the next
-    agent-to-agent post, not the human's own turn (which m2 exempts anyway).
-    """
-
-    now = 1_000_000.0
-    _three_agent_turns(tmp_path, now)
-    reply_guard.record_trigger(
-        tmp_path,
-        endpoint_id="bep_a",
-        conversation_id=CONV,
-        sender_kind="human",
-        mention=False,
-        directed=True,
-        now=now + 5,
-    )
-    _trigger(tmp_path, "agent", now + 6)
-    assert isinstance(_reserve(tmp_path, now + 6), reply_guard.Reservation)
-
-
-def test_an_ambient_human_line_does_not_lift_the_cool_down(tmp_path: Path) -> None:
-    now = 1_000_000.0
-    _three_agent_turns(tmp_path, now)
-    reply_guard.record_trigger(
-        tmp_path,
-        endpoint_id="bep_a",
-        conversation_id=CONV,
-        sender_kind="human",
-        mention=False,
-        directed=False,
-        now=now + 5,
-    )
-    # The answer TO that line is exempt (m2), but the line unlocked nothing:
-    _trigger(tmp_path, "agent", now + 6)
-    assert isinstance(_reserve(tmp_path, now + 6), reply_guard.Refusal)
 
 
 def _captured_directed(

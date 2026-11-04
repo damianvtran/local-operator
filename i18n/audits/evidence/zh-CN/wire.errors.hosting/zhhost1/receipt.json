@@ -1,0 +1,65 @@
+{
+  "audit_id": "e55f54-hosting1",
+  "locale": "zh-CN",
+  "namespace": "wire.errors.hosting",
+  "round": "initial (reader 1)",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "e55f54b6a26e",
+    "model_requested_route": "radient/auto",
+    "model_served_label": "radient/auto",
+    "underlying_served_model": "UNKNOWN",
+    "actual_model_source": "own transcript.jsonl completed assistant payload.usage",
+    "fallback": "none asserted",
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_code_author": true,
+    "code_author_session": "94dcef624dec",
+    "read_other_reader_verdict_before_verdict": false
+  },
+  "record_reference": "record.json",
+  "current_report_verdict": {
+    "status": "passed",
+    "scope": "single display key, zh-CN, source-only",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "severity_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9"
+    },
+    "zh-CN": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/hosting-zh-CN/wire.errors.hosting.json",
+      "sha256": "b4cd49fd638d7aa7b9f6142a61d465918d69734c7c970025da9121f18907207e"
+    }
+  },
+  "artifacts": {
+    "record.json": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/hosting-zh-CN-audit-reader1/record.json",
+      "sha256": "d1cf1909fe4d83648ec55d40190d35ee977c1d410ff5d297be14780e6325ab6b"
+    },
+    "report.md": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/hosting-zh-CN-audit-reader1/report.md",
+      "sha256": "c24156015cd28e4d1f3f1b6e30ecfca908ea929790b1d11c32b39ac3e951612b"
+    },
+    "input-hashes.json": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/hosting-zh-CN-audit-reader1/input-hashes.json",
+      "sha256": "9e50285985692a56282c645c079993515b201eef934aedd46bb1493dfc2fb0d7"
+    },
+    "model-provenance.json": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/hosting-zh-CN-audit-reader1/model-provenance.json",
+      "sha256": "7e98250126448307e70776a3761c5eaf54a12d389331dd9f8592a80073b4eed5"
+    }
+  }
+}

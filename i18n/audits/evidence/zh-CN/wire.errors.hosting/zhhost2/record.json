@@ -1,0 +1,115 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.errors.hosting",
+  "audit_date": "2026-11-03",
+  "reader_role": "second independent reader",
+  "key_count": 1,
+  "keys": ["wire.errors.hosting.not_configured"],
+  "target_value": "托管平台未配置。",
+  "base_commit_supplied_not_verified": "87ca846245b2",
+  "namespace_state": "new English namespace, uncommitted in the owned worktree and absent at base per the supplied binding; this pass has no VCS access and did not verify it. Not shipped; no shipped or activation claim.",
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "derivation": "computed over the frozen file; the owned worktree copy at /Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.hosting.json hashes identically"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9"
+    },
+    "target": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/hosting-zh-CN/wire.errors.hosting.json",
+      "sha256": "b4cd49fd638d7aa7b9f6142a61d465918d69734c7c970025da9121f18907207e"
+    },
+    "author_record": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/hosting-zh-CN/record.json",
+      "sha256": "b9eac189f88dc93f28d605a1b8a1b6b2c203f83d063ac030aca3ff8bfa0d6291"
+    },
+    "author_report": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/hosting-zh-CN/report.md",
+      "sha256": "6ac6edde06665dec5aa745228f278172149ce5d4f1e664b9b5c076cbdc302033"
+    }
+  },
+  "mechanical": {
+    "key_parity": true,
+    "key_order_preserved": true,
+    "json_parses": true,
+    "nfc_stable": true,
+    "cf_codepoints": 0,
+    "ascii_letters_or_digits": 0,
+    "braces_backticks_placeholders": 0,
+    "edge_whitespace": false,
+    "terminal_codepoint": "U+3002",
+    "icu_arguments": "none in source and none in target; argument parity vacuous",
+    "cldr_categories": "NOT APPLICABLE — no plural/select in either file",
+    "cells": 16,
+    "characters": 8,
+    "maxCells": "none declared in the context entry",
+    "english_fallback": false
+  },
+  "terminology_evidence_derived_from_corpus": {
+    "hosting_platform": "托管平台 — cli.global_help.hosting, cli.global_help.propagated_hosting, cli.exec_worker_help.hosting, cli.global_help.description",
+    "not_configured": "未配置 — tui.authoring.invalid_effort (该模型档位未配置。), wire.errors.media.radient_key_missing (服务器未配置Radient API密钥。)",
+    "provider_vs_platform": "提供商 is used for provider (wire.errors.desktop.aida_no_provider); 托管平台 here. No cross-locale uniform-wording assumption applied."
+  },
+  "consumer_evidence": {
+    "site": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/sdk.py:603-632 (startup_cause_text)",
+    "behaviour": "loads the ENGLISH catalogue value for wire.errors.hosting.not_configured and returns render(code, params, locale=startup_refusal_locale()) only when type(error) is HostingNotConfiguredError AND str(error) equals that English source exactly; every other exception, including a subclass, passes str(error) through untouched",
+    "consequence_1": "the ownership test reads the English catalogue, so translating the target cannot break it",
+    "consequence_2": "the legacy exception text stays English by contract; this key is display copy for the owned condition, not a localisation of the exception"
+  },
+  "findings": [],
+  "advisories": [
+    {
+      "id": "A1",
+      "severity": "non-gating contract boundary",
+      "text": "no claim that the legacy HostingNotConfiguredError is localised, or that a refusal carrying a foreign/subclass error is English-free; that boundary is designed in the consumer and is not fixable by zh-CN wording"
+    },
+    {
+      "id": "A2",
+      "severity": "non-gating author-record typo",
+      "text": "the author's record writes 休 where the discussed character is 尚 (托管平台尚未配置。); the delivered copy is unaffected"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "separate_holds": {
+    "repo_validator_scanner_generation": "NOT RUN",
+    "production_formatter_renderer": "NOT RUN",
+    "native_app_or_rendered_frame": "NOT RUN",
+    "pseudo_localization": "NOT RUN",
+    "rtl": "not applicable (zh-CN, LTR)",
+    "activation_or_shipped_state": "not claimed",
+    "english_free_for_composed_refusal": "not claimed"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "6433b7a5b3e9",
+    "requested_model": "radient/auto (session header)",
+    "served_model": "UNKNOWN",
+    "served_model_note": "own completed usage exposes only the auto-router label (provider radient, model_id auto); the concrete upstream model is not recorded and no fallback is inferred",
+    "actual_model_source": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/transcript.jsonl",
+      "entry_id": "bd031790f6ad427f926b099c0abdfa99",
+      "at_ms": 1793736572912
+    },
+    "fallback": "none asserted",
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_code_author": true,
+    "code_author_session": "94dcef624dec",
+    "other_reader_verdict_read": false,
+    "read": "own prior reports only; the new author record and report"
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/hosting-zh-CN-audit-reader2/report.md",
+      "sha256": "91788d476cb45cf4160bc260817c65c3720432da6a63814c6a70b1d41361ebf7"
+    }
+  },
+  "retention": "Original independent audit written by this reader. Coordinator must retain it under the tracked canonical evidence root. No ledger write, activation, generation, PR comment or repo edit. Completed TUI R1/R2 and all earlier SDK/policy/census bundles left untouched."
+}

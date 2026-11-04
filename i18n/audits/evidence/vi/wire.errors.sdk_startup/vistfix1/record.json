@@ -1,0 +1,88 @@
+{
+  "locale": "vi",
+  "namespace": "wire.errors.sdk_startup",
+  "audit_id": "vi1r",
+  "audit_date": "2026-11-03",
+  "key_count": 4,
+  "audit_scope": {
+    "changed_keys": [
+      "wire.errors.sdk_startup.attach_hosting_unconfigured"
+    ],
+    "direct_neighbours_verified_identical": [
+      "wire.errors.sdk_startup.attach_runtime_missing",
+      "wire.errors.sdk_startup.profile_attach_failed",
+      "wire.errors.sdk_startup.tool_inventory_mismatch"
+    ],
+    "whole_corpus": false,
+    "second_independent_pass": "requested by manager; not this report"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "ebf74725105d",
+    "model": "radient/auto",
+    "served_model": "UNKNOWN — not exposed by this harness",
+    "actual_model_source": "harness session header: 'Model: radient/auto'",
+    "independent_from_translator_session": true,
+    "translator_session": "15986c0af719"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.json",
+      "sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.sdk_startup.context.json",
+      "sha256": "82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e"
+    },
+    "vi": {
+      "path": "/Users/damian/.local-operator/sessions/15986c0af719/scratchpad/sdk-startup-vi-remedy-fix/target/vi/wire.errors.sdk_startup.json",
+      "sha256": "7c9a6bfb0907dc38d2b22e8dfb808f61852479b1d8d9b10b7ad8c7c8c99ef95e"
+    },
+    "vi_baseline_old": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/vi/wire.errors.sdk_startup.json",
+      "sha256": "ac6858150eb6e5d0856bafa729764e61d400fd6bdf3504d4b2ffa4cbb4300abd",
+      "role": "pre-change baseline used for the exact-replacement proof"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/ebf74725105d/scratchpad/vi-audit/wire.errors.sdk_startup/vi1r/audit.log",
+      "sha256": "01bed843325db395e0f3c1da54fda11f88de8e3f98b75390e979dae6ccd94487"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/ebf74725105d/scratchpad/vi-audit/wire.errors.sdk_startup/vi1r/report.md",
+      "sha256": "d68202b9f64cfe53f25b77ab085750b91565225d5d2c0bbf89b48fe5e56e38a8"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "vi1r-N1",
+      "vi1r-N2"
+    ],
+    "finding_severities": {
+      "vi1r-N1": "NIT",
+      "vi1r-N2": "NIT"
+    },
+    "new_report_is_original": true,
+    "backdated": false
+  },
+  "ledger_note_suggestion": "vi wire.errors.sdk_startup passed reader1: «hosting»→«nhà cung cấp» exact-replacement, 0 blocker/major; matches corpus (cli.exec_worker_help.hosting) + config.py:630; placeholders/tokens intact; 2 nits non-gating; native fit not run.",
+  "holds_not_run": [
+    "native fit / rendered width",
+    "ICU MessageFormat execution (no plural/select present)",
+    "pseudo-locale",
+    "RTL",
+    "CLI validator",
+    "ledger row write (repo/ledger edits outside this session's authority)"
+  ],
+  "audit_notes_not_execution_log": [
+    "report.md reasoning and severity calls are audit notes, not proof of execution.",
+    "audit.log is the verbatim stdout of the verification code actually run in session ebf74725105d on 2026-11-03.",
+    "No CLI validator, project import, test run, native render or translation service was used."
+  ],
+  "source_quality_observations": [
+    "context sidecar cites wire.errors.sdk_startup.cause_hosting_unconfigured, absent from this namespace's four keys"
+  ]
+}

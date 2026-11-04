@@ -27,6 +27,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
@@ -1955,9 +1956,31 @@ async def get_agent_avatar(
     request: Request,
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     agent_id: str = Path(..., description="ID of the agent", examples=["agent123"]),
+    size: Optional[str] = Query(
+        None,
+        description="Square edge in px of a downscaled variant (64, 128 or 256; feature "
+        "`agent_avatar_sizes`). Omitted: the stored 512px original, unchanged.",
+    ),
 ) -> Response:
     from local_operator import agent_avatar
     from local_operator.i18n.http import etag_matches
+
+    # Validated by hand rather than with ``Literal[64, 128, 256]``: FastAPI does
+    # not coerce a query STRING into an int Literal (every value, valid ones too,
+    # is a 422), and the relay must refuse exactly what this route refuses.
+    try:
+        edge = agent_avatar.parse_size(size)
+    except ValueError:
+        raise RequestValidationError(
+            [
+                {
+                    "type": "literal_error",
+                    "loc": ("query", "size"),
+                    "msg": "Input should be 64, 128 or 256",  # i18n: ignore protocol diagnostic
+                    "input": size,
+                }
+            ]
+        )
 
     try:
         row = agent_registry.get_agent(agent_id)
@@ -1970,14 +1993,17 @@ async def get_agent_avatar(
         raise HTTPException(
             status_code=404, detail=agent_avatar.refusal_envelope(agent_avatar.NOT_FOUND)
         )
-    headers = {"ETag": agent_avatar.etag(meta.sha256), "Cache-Control": "no-cache"}
+    # A variant's validator carries its size (``sized_tag``), so a cached 64px
+    # body never satisfies a 256px revalidation; the original keeps the bare sha.
+    tag = agent_avatar.sized_tag(meta.sha256, edge)
+    headers = {"ETag": agent_avatar.etag(tag), "Cache-Control": "no-cache"}
     # The 304 is decided from the METADATA, before any file read: the sha is the
     # authority, and a revalidation (every paint of a bare URL) costs no I/O.
-    if etag_matches(request.headers.get("if-none-match", ""), meta.sha256):
+    if etag_matches(request.headers.get("if-none-match", ""), tag):
         return Response(status_code=304, headers=headers)
     try:
-        data, mime, _sha = await asyncio.to_thread(
-            agent_avatar.read, agent_registry.agents_dir / agent_id, meta
+        data, mime, _tag = await asyncio.to_thread(
+            agent_avatar.read_sized, agent_registry.agents_dir / agent_id, meta, edge
         )
     except agent_avatar.AvatarError as exc:
         raise _avatar_refusal(exc)

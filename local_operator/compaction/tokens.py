@@ -115,6 +115,15 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
+from local_operator.harness.derived_ids import DERIVED_ID_SUFFIXES
+from local_operator.harness.document_limits import (
+    DOCUMENT_CHARS_PER_TOKEN,
+    DOCUMENT_WINDOW_SHARE,
+    MAX_FALLBACK_TEXT_CHARS,
+    MAX_NATIVE_PDF_PAGES,
+    is_text_mime,
+    text_weight,
+)
 from local_operator.harness.pdf_pages import known_pdf_page_count, pdf_page_count
 from local_operator.harness.types import (
     AttachmentContent,
@@ -155,44 +164,176 @@ IMAGE_TOKEN_ESTIMATE = 1200
 #: let a 100-page document pass the trigger (agent review round 2, minor 3).
 PDF_PAGE_TOKEN_ESTIMATE = 2_500
 
-#: Ceiling for ONE document block's local token charge, in the same unit. A
+#: Ceiling for ONE PDF block's local token charge, in the same unit. A
 #: thousand-page PDF at the per-page estimate would be 2.5M tokens, which is
-#: beyond every context this harness serves; the cap keeps one file from
-#: making the whole history's figure absurd while still being far above a
-#: context window, so the trigger fires and the pass does its job. It also
-#: bounds the BYTE-derived fallback (below) so a 32 MB base64 payload cannot
-#: report an eight-million-token history.
-MAX_DOCUMENT_TOKEN_ESTIMATE = 600 * PDF_PAGE_TOKEN_ESTIMATE
+#: beyond every context this harness serves. Derived from
+#: ``MAX_NATIVE_PDF_PAGES`` rather than chosen separately: that is the most
+#: pages the request builder ever sends NATIVELY (``documents.document_form``),
+#: so the charge never sits below what a native PDF costs, on any window. A
+#: longer PDF is extracted instead, and that text is bounded below this too.
+MAX_DOCUMENT_TOKEN_ESTIMATE = MAX_NATIVE_PDF_PAGES * PDF_PAGE_TOKEN_ESTIMATE
+
+#: Characters the serializer adds around a document's text: the
+#: ``[Document: name (mime)]`` header and the code fence of a text file, or the
+#: sentence of a PDF's truncation note. A flat allowance rather than a count.
+_DOCUMENT_FRAMING_CHARS = 200
+
+#: Characters of the reference sentence apart from the filename (it names the
+#: filename, MIME, byte size and two fixed clauses; measured 190-260 without
+#: the name). Rounded up so the charge stays on the high side of a ~42-52
+#: token line.
+_REFERENCE_FIXED_CHARS = 300
 
 
 def _document_token_estimate(block: DocumentContent) -> int:
-    """Tokens to charge for one document block.
+    """Tokens to charge for one document block: what the request RENDERS.
 
-    Page count first, when the PDF can be parsed: a per-page charge is the
-    quantity providers actually bill and the only one that makes a long text
-    PDF visible to the trigger. The byte-derived charge (base64 length ~= one
-    token per character) is the fallback for an unparseable PDF and for
-    non-PDF documents, and is an over-estimate for both — the safe direction.
+    The charge follows the delivery class, never the byte size, because the
+    bytes of a non-native document do not reach the model. A reference
+    document (video, audio, an archive, an Office file) renders one sentence of
+    ~50 tokens whatever its size; a text file renders its decoded text up to
+    ``MAX_FALLBACK_TEXT_CHARS``; a PDF renders either native pages or an
+    extraction (``MAX_FALLBACK_CHARS``, further cut to the window by the serializer).
+
+    The earlier byte-derived charge (one token per base64 character) was
+    documented as "the safe direction". It is not: this figure feeds a REFUSAL
+    (``providers.clients._effective_max_tokens`` raises when the prompt does
+    not fit the window) as well as the compaction trigger, and a 1 MB video
+    charged 1.33M tokens refused every request while compaction, which can
+    only shed other history, could not shrink it. An over-estimate is safe for
+    a trigger and fatal for a refusal.
 
     Both ``_compute_tokens`` and ``messages_tokens_upper_bound`` must call
     THIS function or the upper bound stops being an upper bound.
     """
-    if block.mime_type == "application/pdf" and block.data:
+    if block.mime_type == "application/pdf":
         # Cached page count first: the digest-keyed answer is enough, and
         # decoding 20 MB of base64 only to hand the parser bytes it has
         # already read cost ~30 ms per turn on the pre-gate path (round-3
         # minor 1).
-        cached, pages = known_pdf_page_count(block.digest)
-        if not cached:
-            try:
-                raw = base64.b64decode(block.data, validate=False)
-            except (ValueError, TypeError):
-                raw = None
-            if raw is not None:
-                pages = pdf_page_count(raw, block.digest)
+        pages: int | None = None
+        if block.data:
+            cached, pages = known_pdf_page_count(block.digest)
+            if not cached:
+                try:
+                    raw = base64.b64decode(block.data, validate=False)
+                except (ValueError, TypeError):
+                    raw = None
+                if raw is not None:
+                    pages = pdf_page_count(raw, block.digest)
         if pages is not None:
             return min(pages * PDF_PAGE_TOKEN_ESTIMATE, MAX_DOCUMENT_TOKEN_ESTIMATE)
-    return min(len(block.data), MAX_DOCUMENT_TOKEN_ESTIMATE)
+        # An uncountable PDF is never sent native on ANY row:
+        # ``document_native_ok`` requires a page count whether or not the row
+        # carries a page limit. The extractor then opens it with the SAME
+        # ``PdfReader(strict=False)`` that just failed to count it (encrypted,
+        # truncated, not a PDF at all), so it renders the one-sentence
+        # reference. Charging the extractor's character bound here instead
+        # (200k tokens) would refuse every request on a 128k-window model for
+        # a file whose real render is ~50 tokens.
+        return _reference_tokens(block)
+    if is_text_mime(block.mime_type):
+        return _text_tokens(_text_units(block))
+    return _reference_tokens(block)
+
+
+def document_render_excess(messages: Sequence[Message], context_window: int) -> int:
+    """Tokens the document charges exceed what the serializers will RENDER.
+
+    ``_document_token_estimate`` is window-blind (it is memoized per message),
+    but every serializer cuts a document's text to
+    ``1 / DOCUMENT_WINDOW_SHARE`` of the model's window
+    (``documents.document_text_cap``) and sends a PDF native only within the
+    same share (``documents._window_page_cap``, on every row). So a document
+    never costs more than that share, and the charge above it is a
+    trigger-side over-estimate that must not reach a REFUSAL: a 400k-character
+    log is charged 200k tokens, which on a 32k-window model would refuse a
+    request whose real render is ~8k.
+    """
+    if context_window <= 0:
+        return 0
+    share = context_window // DOCUMENT_WINDOW_SHARE + _DOCUMENT_FRAMING_CHARS // (
+        DOCUMENT_CHARS_PER_TOKEN
+    )
+    return sum(
+        max(0, _document_token_estimate(block) - share)
+        for message in messages
+        for block in message.content
+        if isinstance(block, DocumentContent)
+    )
+
+
+#: The rendered text's weight per content-addressed digest: the answer cannot
+#: change for the same bytes, and the upper bound asks on every turn.
+_TEXT_UNITS_CACHE: dict[str, int] = {}
+_TEXT_UNITS_CACHE_MAX = 256
+
+#: Base64 characters covering the first ``MAX_FALLBACK_TEXT_CHARS`` characters
+#: of any text (a character is at least one byte, and the render never reads
+#: past that bound). A multiple of 4 so the prefix decodes on its own.
+_TEXT_HEAD_B64 = (MAX_FALLBACK_TEXT_CHARS * 4 // 3 + 4) // 4 * 4 + 4
+
+
+def _text_units(block: DocumentContent) -> int:
+    """``text_weight`` units of the text a text document renders, window-blind.
+
+    ASCII is one unit a character and anything else a token per UTF-8 byte
+    (``document_limits.text_weight``), over the first
+    ``MAX_FALLBACK_TEXT_CHARS`` characters, which is all the serializer reads.
+    This is what puts the charge and the window-aware render cap
+    (``documents.document_text_cap``) in one unit: a byte count alone cannot
+    tell a 1 MB ASCII log from 1 MB of Hangul, which cost three times as much.
+    """
+    digest = block.digest if block.data else None  # an empty block is not its digest's text
+    if digest:
+        cached = _TEXT_UNITS_CACHE.get(digest)
+        if cached is not None:
+            return cached
+    try:
+        head = base64.b64decode(block.data[:_TEXT_HEAD_B64], validate=False)
+        text = head.decode("utf-8", errors="replace")[:MAX_FALLBACK_TEXT_CHARS]
+        units = text_weight(text)
+    except (ValueError, TypeError):
+        # Undecodable payload renders the reference sentence; charge bytes.
+        units = min(block.bytes or len(block.data) * 3 // 4, MAX_FALLBACK_TEXT_CHARS)
+    if digest:
+        # Estimates run on ``asyncio.to_thread`` workers (``Session._offloaded``),
+        # so evict-and-insert is one locked step; the lock-free ``.get`` above
+        # is atomic on its own.
+        with _CACHE_LOCK:
+            if len(_TEXT_UNITS_CACHE) >= _TEXT_UNITS_CACHE_MAX:
+                _TEXT_UNITS_CACHE.pop(next(iter(_TEXT_UNITS_CACHE)), None)
+            _TEXT_UNITS_CACHE[digest] = units
+    return units
+
+
+def _reference_tokens(block: DocumentContent) -> int:
+    """Tokens of the ``[Document reference: ...]`` sentence for ``block``."""
+    return _text_tokens(_REFERENCE_FIXED_CHARS + len(block.filename), framing=0)
+
+
+def document_wire_bytes(block: DocumentContent) -> int:
+    """Bytes ``block`` puts on the wire, by the same class table as the tokens.
+
+    A PDF may go native, which IS its base64, so it keeps ``len(block.data)``
+    (the over-estimate a byte budget wants: an extraction is smaller). Every
+    other document is rendered as text or a reference sentence and never sends
+    its payload. Shared with ``documents._request_room`` so the "everything
+    but documents" subtraction there removes exactly what this ruler added.
+    """
+    if block.mime_type == "application/pdf":
+        # The over-estimate a byte budget wants (native is the largest form).
+        return len(block.data)
+    if is_text_mime(block.mime_type):
+        decoded = block.bytes if block.bytes > 0 else len(block.data) * 3 // 4
+        # UTF-8 is at most 4 bytes a character, and the cap is in characters.
+        return min(decoded, 4 * MAX_FALLBACK_TEXT_CHARS) + _DOCUMENT_FRAMING_CHARS
+    return _REFERENCE_FIXED_CHARS + len(block.filename)
+
+
+def _text_tokens(chars: int, *, framing: int = _DOCUMENT_FRAMING_CHARS) -> int:
+    """Tokens for ``chars`` ``text_weight`` units of rendered document text."""
+    return (chars + framing) // DOCUMENT_CHARS_PER_TOKEN
 
 
 #: Fallback ratio when tiktoken is unavailable: ~4 chars per token.
@@ -1040,11 +1181,16 @@ def estimate_wire_bytes(messages: Sequence[Message], *, utf8_text: bool = False)
                 # review round 1, F1): the block has no `data`, and it never
                 # will, because its bytes live in the store.
                 continue
+            elif isinstance(block, DocumentContent):
+                # By delivery class, through the same table as the token
+                # estimate: only a NATIVE PDF puts its base64 on the wire.
+                # Every other document renders text or a reference sentence,
+                # so charging ``len(block.data)`` made a 29.6 MB video measure
+                # 39 MB against a 16 MB trigger and shed screenshots for a
+                # payload that never left the machine.
+                total += document_wire_bytes(block)
             else:
-                # Documents included: ``block.data`` is the base64 payload,
-                # which IS the wire size of a native part; a fallback renders
-                # less than that, so this stays the safe (over-)estimate the
-                # byte budget wants.
+                # Image and audio base64 IS the wire payload.
                 total += len(block.data)
         for call in message.tool_calls or ():
             # Prefer the provider's own rendering when we kept it: that string
@@ -1402,6 +1548,12 @@ def invalidate_message_cache(message: Message) -> None:
     MUST be called after any in-place mutation of a message (pruning blanks,
     streaming finalize). Idempotent; safe for never-cached messages.
 
+    Also evicts the estimates of the message's DERIVED copies
+    (``harness.derived_ids``): the request is built from those copies, and each
+    is memoized under ``"<id><suffix>"``. Evicting only the source id left the
+    copy's old estimate in place, so a document swapped for its reference line
+    kept being charged as the document and the client refused every turn.
+
     The pop is locked for the same reason the LRU sequences in
     :func:`estimate_tokens` are: a worker thread may be mid-eviction on the
     same OrderedDict. Subscriber callbacks run OUTSIDE the lock — they are
@@ -1410,13 +1562,16 @@ def invalidate_message_cache(message: Message) -> None:
     """
     with _CACHE_LOCK:
         _ESTIMATE_CACHE.pop(message.id, None)
+        derived_ids = {f"{message.id}{suffix}" for suffix in DERIVED_ID_SUFFIXES}
+        for derived_id in derived_ids:
+            _ESTIMATE_CACHE.pop(derived_id, None)
         # Flag even when nothing was cached: the entry this invalidation is
         # racing may not have been INSERTED yet (see _INFLIGHT_ESTIMATES).
         # Popping a miss and returning is exactly how the stale value used to
         # survive. Costs one pass over the in-flight computations, which are
         # bounded by concurrency rather than by history size.
         for inflight in _INFLIGHT_ESTIMATES.values():
-            if inflight.message_id == message.id:
+            if inflight.message_id == message.id or inflight.message_id in derived_ids:
                 inflight.invalidated = True
     for invalidator in list(_INVALIDATORS.values()):
         try:

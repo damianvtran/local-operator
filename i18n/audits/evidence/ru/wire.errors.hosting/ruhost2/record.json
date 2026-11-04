@@ -1,0 +1,185 @@
+{
+  "kind": "independent_translation_audit",
+  "record_version": 1,
+  "audit_id": "r2b",
+  "audit_date": "2026-11-03",
+  "locale": "ru",
+  "namespace": "wire.errors.hosting",
+  "file_group": "wire.errors.hosting",
+  "key_count": 1,
+  "keys": [
+    "wire.errors.hosting.not_configured"
+  ],
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "9f874dd64c37",
+    "requested_model": "radient/auto",
+    "served_model": "UNKNOWN",
+    "actual_model_source": "harness system prompt: 'Model: radient/auto' — the route exposes no underlying provider/model id; served identity is UNKNOWN and no fallback is claimed",
+    "independent_from_translator_session": true,
+    "translator_session": "06e83e0ae0f9",
+    "role": "fresh independent reader 2 (R2 replacement for the contaminated R1 reader-2 judgement)",
+    "authored_this_translation": false
+  },
+  "scope": {
+    "audited": "one key of one locale: the current R2 value, the R1->R2 word delta, and its direct neighbours (the sdk_startup frame that splices it, and the legacy exception string)",
+    "not_audited": [
+      "the ru catalogues wholesale",
+      "other locales or namespaces",
+      "R1 bundle content (preserved untouched, referenced only)",
+      "fit/cap, native render, pseudo-localisation"
+    ]
+  },
+  "inputs": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "role": "English source, frozen"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9",
+      "role": "context/meta sidecar, frozen"
+    },
+    "target_ru": {
+      "path": "/Users/damian/.local-operator/sessions/06e83e0ae0f9/scratchpad/hosting-ru-r2/target/ru/wire.errors.hosting.json",
+      "sha256": "38478ec0af7bdcb739dcd1bbbd82c8c50345e9869c2b21921f9a46d4bab1737a",
+      "role": "R2 target under audit"
+    },
+    "r1_target": {
+      "path": "/Users/damian/.local-operator/sessions/06e83e0ae0f9/scratchpad/hosting-ru/target/ru/wire.errors.hosting.json",
+      "sha256": "6fe2a88318b042c082047f0ac4b6a76c88d68957a1053f75ce9c0617efd0317d",
+      "role": "R1 target — hash recomputed only to prove preservation, not re-audited"
+    },
+    "author_record": {
+      "path": "/Users/damian/.local-operator/sessions/06e83e0ae0f9/scratchpad/hosting-ru-r2/record.json",
+      "sha256": "1b9876bb90059fd2e037f57394df6edbaf7f401f313a9095dc6ae080755e4684"
+    },
+    "r1_record": {
+      "path": "/Users/damian/.local-operator/sessions/06e83e0ae0f9/scratchpad/hosting-ru/record.json",
+      "sha256": "2734a647a3c57bdf3b5863c5d723e20850f8caf282ad80a272cf641fa42edfcd"
+    }
+  },
+  "repo_inputs": {
+    "worktree": "/Users/damian/local-operator/.worktrees/startup-owned-copy",
+    "en_catalogue": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63"
+    },
+    "en_context": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9"
+    },
+    "byte_identical_to_frozen_source": true,
+    "ru_catalogue_dir": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/ru",
+    "ru_namespace_file_exists": false
+  },
+  "source_delta": {
+    "key": "wire.errors.hosting.not_configured",
+    "en": "Hosting platform is not configured.",
+    "from_r1": "Платформа хостинга не настроена.",
+    "to_r2": "Платформа размещения не настроена.",
+    "kind": "one word: «хостинга» -> «размещения»; sentence shape, capitalisation and terminal period unchanged",
+    "char_delta": "+2 (32 -> 34)",
+    "addresses": [
+      "RU-HOST-1 (major, terminology)",
+      "RU-HOST-2 (minor, false zero-corpus premise)"
+    ]
+  },
+  "findings": [],
+  "severities": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "reason": "value matches the settled CORE ru rendering «платформа размещения» in all six shipped occurrences; mechanical checks pass on bytes; sentence contract (capital, terminal period, condition only, no restated remedy) holds"
+  },
+  "mechanical_checks": {
+    "tool": "eval — pure Python stdlib json/hashlib/unicodedata; no process, no subprocess, no project imports, no tests",
+    "json_valid": true,
+    "key_parity_with_en": true,
+    "keys_added_or_dropped": 0,
+    "interpolation_args": 0,
+    "icu_plural_select": "N/A with reason — no plural/select message and no arguments, so CLDR one/few/many/other coverage has nothing to apply to",
+    "glossary_idiom_terms": "0 hit in i18n/glossary.json for this string's terms; context/rules files used instead",
+    "nfc_normalized": true,
+    "bidi_controls": 0,
+    "zero_width_or_bidi_marks": 0,
+    "placeholder_tokens": 0,
+    "markdown_or_markup": "none",
+    "string_length_source_vs_target": "58 vs 33 chars (as expected, EN longer)",
+    "notes": "len(s) values recorded from the same JSON objects; no fit/cap claims made"
+  },
+  "validator": {
+    "run": false,
+    "reason": "profile requires the repo mechanical check (scripts/validate_translations.py), but the operator's task instruction explicitly forbids tool execution in this pass; equivalent checks were done read-only via stdlib"
+  },
+  "terminology_evidence": {
+    "corpus_hits_worktree_ru": 6,
+    "corpus_hits_main_checkout_ru": 0,
+    "worktree_term": "платформа размещения / размещение",
+    "loan_hits_in_worktree_ru": 0,
+    "deployment_term_collisions": 0,
+    "provider_label": "wire.settings.hosting.label = «Провайдер по умолчанию» (provider noun kept distinct)",
+    "files": [
+      "cli.global_help.json (description, hosting, propagated_hosting)",
+      "cli.exec_worker_help.json (hosting)",
+      "cli.credential_help.json (credential)",
+      "wire.errors.sdk_startup.json (attach_hosting_unconfigured)"
+    ],
+    "direct_neighbour_verified": "sdk.py:598-632 — startup_cause_text matches exact type + en-catalogue text, then renders the catalogue message in the resolved locale; frame text ends with ': {error} ' then a remedy sentence"
+  },
+  "history": {
+    "r1_reader2_claims_refuted": [
+      "«no corpus» — false: 6 shipped ru occurrences exist in the CORE worktree; the R1 grep read the main checkout, whose ru/ lacks cli.global_help.json, cli.exec_worker_help.json, cli.credential_help.json, wire.errors.sdk_startup.json and wire.errors.hosting.json entirely",
+      "«Russian sdk frame absent» — false: ru/wire.errors.sdk_startup.json exists and is fully Russian",
+      "«frame English-pinned» — false as stated: only the legacy exception's own string is English by contract (session_factory.py:816, sdk.py:604-617); the frame's display copy renders in-locale"
+    ],
+    "r1_artifacts_untouched": true,
+    "backdated": false,
+    "replacement_for": "R1 reader-2 judgement (not a rewrite of any R1 record)"
+  },
+  "retention": {
+    "bundle": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2",
+    "files": [
+      "record.json",
+      "report.md",
+      "audit.log",
+      "receipt.json"
+    ],
+    "tracked_evidence_path": "i18n/audits/evidence/ru/wire.errors.hosting/r2b/",
+    "tracked_evidence_created": false,
+    "why_not": "repo writes and ledger edits are outside this pass's authority; namespace is uncommitted/unshipped, so no catalogue directory exists to attach to. Nothing here is claimed to be on main.",
+    "ledger": {
+      "written": false,
+      "reason": "same source-only override; row must be written by whoever holds repo write authority"
+    }
+  },
+  "shipped_status": {
+    "committed": false,
+    "unshipped": true,
+    "source_of_claim": "author record declares the namespace absent at base 87ca846245b2; independently confirmed only that no wire.errors.hosting file exists in the main checkout catalogue. Git state not inspected (no process allowed)."
+  },
+  "deviations": [
+    "two process calls (a trivial `echo ok`, one directory `ls`) were made at session start before the source-only rule was adopted; neither read or changed content; disclosed in audit.log",
+    "repo validator not executed by instruction; stdlib checks used instead"
+  ],
+  "audit_notes_not_execution_log": "report.md §Verdict/Notes are analysis; audit.log is the tool-call record of this session. No validator, generator, native or ledger output exists for this pass and none is implied.",
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2/report.md",
+      "sha256": "2de8aac11df72a2bfba7f7f865c6aef0158adfea31337515f60418b8b04690ad",
+      "role": "audit report"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2/audit.log",
+      "sha256": "cacb680b534f6c928f9cc2168a9a6fc7b1b98c6094aa68dbe548ddf6ce5f87d7",
+      "role": "execution log"
+    }
+  ]
+}

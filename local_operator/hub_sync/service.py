@@ -3508,6 +3508,9 @@ def install_skill(
     dry_run: bool = False,
     form: str | None = None,
     reinstall: bool = False,
+    adoption_receipt: str | None = None,
+    adoption_strategy: Literal["merge", "keep-local", "take-hub"] = "merge",
+    allow_llm: bool = True,
 ) -> dict[str, Any]:
     """Install ONE remote skill as a new local link (UI ``hub.skillPull``).
 
@@ -3654,6 +3657,31 @@ def install_skill(
                 }
             )
             return {"reports": [payload], "link": row, "links": snapshot}
+
+        # Adoption is an explicit initial-link transition, not an exception in
+        # the ordinary storage ownership gate. BOTH preview and apply validate
+        # durable ownership before reading text or claiming that installation is
+        # possible; the old early dry-run returned a misleading would-install.
+        owner = prov.alias_owner(ctx.config_dir, "skill", alias)
+        if owner is not None and owner != local_id:
+            raise LinkError(
+                "origin-conflict", "managed alias belongs to another local skill origin"
+            )
+        destination = storage.path(alias)
+        if bundle is None and destination.exists():
+            from local_operator.hub_sync.skill_adoption_service import adopt_skill
+
+            return adopt_skill(
+                ctx,
+                resolved,
+                dry_run=dry_run,
+                confirm=confirm,
+                receipt=adoption_receipt,
+                strategy=adoption_strategy,
+                allow_llm=allow_llm,
+                subscribe=subscribe,
+                auto_push=auto_push,
+            )
 
         # 7b-bundle. The bundle preflight runs BEFORE any policy staging or
         #     download: a public first install must name the publisher and the
@@ -4118,6 +4146,13 @@ def subscribe_skill(
     # Same lease the install/apply paths take: creating the baseline is local
     # state a concurrent tick or install must not interleave with.
     with exclusive(ctx, wait_s=0.0):
+        # Subscription reserves a durable alias too. Another origin remains a
+        # conflict even when its directory is absent or between crash renames.
+        owner = prov.alias_owner(ctx.config_dir, "skill", alias)
+        if owner is not None and owner != local_id:
+            raise LinkError(
+                "origin-conflict", "managed alias belongs to another local skill origin"
+            )
         existing: prov.BaselineRecord | None = None
         for record in prov.iter_baselines(ctx.config_dir):
             if record.kind != "skill" or record.local_id != local_id:
@@ -4132,6 +4167,18 @@ def subscribe_skill(
                 )
             existing = record
             break
+
+        if existing is None or existing.content_state == "absent":
+            from local_operator.hub_sync.skill_adoption_service import _refusal
+            from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+
+            if ManagedSkillStorage(ctx.config_dir).path(alias).exists():
+                # An authored copy is not ABSENT. Minting an absent baseline
+                # here falsely reports subscription success while every runner
+                # pull later CAS-refuses that same folder. Offer the exact same
+                # reviewed adoption as Download, retaining Subscribe intent;
+                # refuse before any baseline, policy or content mutation.
+                raise _refusal("alias-occupied", "review the occupying local skill first")
 
         if existing is None:
             record = replace(

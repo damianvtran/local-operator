@@ -171,3 +171,97 @@ async def test_core_route_refuses_a_symlinked_picture_and_a_nul_id(
     assert planted.status_code == 404 and b"TOPSECRET" not in planted.content
 
     assert (await test_app_client.get("/v1/agents/a%00b/avatar")).status_code == 404
+
+
+# -- size variants (feature ``agent_avatar_sizes``) ------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [64, 128, 256])
+async def test_sized_get_returns_exact_edge_and_sized_etag(test_app_client, agent_id, size):
+    url = f"/v1/agents/{agent_id}/avatar"
+    put = await test_app_client.put(url, content=_png(), headers={"content-type": "image/png"})
+    sha = put.json()["result"]["avatar"]["sha256"]
+
+    got = await test_app_client.get(url, params={"size": size})
+    assert got.status_code == 200, got.text
+    assert got.headers["content-type"] == "image/png"
+    assert Image.open(io.BytesIO(got.content)).size == (size, size)
+    # The variant's validator carries its size: a 64px body must never answer a
+    # 256px revalidation with 304.
+    assert got.headers["etag"] == f'"{sha}-{size}"'
+    assert len(got.content) < int(put.json()["result"]["avatar"]["bytes"])
+
+    cached = await test_app_client.get(
+        url, params={"size": size}, headers={"if-none-match": got.headers["etag"]}
+    )
+    assert cached.status_code == 304
+    # The original's bare-sha tag does not validate a variant, nor vice versa.
+    cross = await test_app_client.get(
+        url, params={"size": size}, headers={"if-none-match": f'"{sha}"'}
+    )
+    assert cross.status_code == 200
+    # Second read comes from the on-disk cache and is byte-identical.
+    again = await test_app_client.get(url, params={"size": size})
+    assert again.content == got.content
+
+
+@pytest.mark.asyncio
+async def test_absent_size_is_the_original_bytes(test_app_client, agent_id):
+    url = f"/v1/agents/{agent_id}/avatar"
+    put = await test_app_client.put(url, content=_png(), headers={"content-type": "image/png"})
+    meta = put.json()["result"]["avatar"]
+    await test_app_client.get(url, params={"size": 64})  # a cached variant must not leak in
+    got = await test_app_client.get(url)
+    assert hashlib.sha256(got.content).hexdigest() == meta["sha256"]
+    assert got.headers["etag"] == f'"{meta["sha256"]}"'
+    assert Image.open(io.BytesIO(got.content)).size == (512, 512)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", ["65", "512", "0", "-64", "abc", "64.0"])
+async def test_invalid_size_is_422(test_app_client, agent_id, size):
+    url = f"/v1/agents/{agent_id}/avatar"
+    await test_app_client.put(url, content=_png(), headers={"content-type": "image/png"})
+    assert (await test_app_client.get(url, params={"size": size})).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_variants_are_swept_on_replace_and_clear(test_app_client, agent_id):
+    url = f"/v1/agents/{agent_id}/avatar"
+    agent_dir = app.state.agent_registry.agents_dir / agent_id
+    await test_app_client.put(url, content=_png(), headers={"content-type": "image/png"})
+    await test_app_client.get(url, params={"size": 64})
+    await test_app_client.get(url, params={"size": 256})
+    first = sorted(p.name for p in agent_dir.glob(".avatar.*"))
+    assert len(first) == 2
+
+    await test_app_client.put(url, content=_png((200, 0, 0)), headers={"content-type": "image/png"})
+    assert sorted(p.name for p in agent_dir.glob(".avatar.*")) == []
+    red = await test_app_client.get(url, params={"size": 64})
+    assert Image.open(io.BytesIO(red.content)).convert("RGB").getpixel((32, 32)) == (200, 0, 0)
+
+    await test_app_client.delete(url)
+    assert list(agent_dir.glob(".avatar.*")) == []
+
+
+@pytest.mark.asyncio
+async def test_a_tampered_cached_variant_is_rebuilt(test_app_client, agent_id):
+    url = f"/v1/agents/{agent_id}/avatar"
+    agent_dir = app.state.agent_registry.agents_dir / agent_id
+    await test_app_client.put(url, content=_png(), headers={"content-type": "image/png"})
+    first = await test_app_client.get(url, params={"size": 128})
+    (cache,) = agent_dir.glob(".avatar.*.128.png")
+    out = io.BytesIO()
+    Image.new("RGB", (64, 64), (0, 255, 0)).save(out, "PNG")
+    cache.write_bytes(out.getvalue())
+    again = await test_app_client.get(url, params={"size": 128})
+    assert Image.open(io.BytesIO(again.content)).size == (128, 128)
+    assert again.content == first.content
+
+
+@pytest.mark.asyncio
+async def test_sizes_feature_flag_advertised(test_app_client):
+    from local_operator.server.features import static_feature_flags
+
+    assert static_feature_flags()["agent_avatar_sizes"] == 1
