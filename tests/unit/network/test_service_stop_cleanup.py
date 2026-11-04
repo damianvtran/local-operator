@@ -29,8 +29,10 @@ def isolated_service(
     forbidden_calls: list[str] = []
 
     # Reuse the existing no-listener Linux service fake, and fail shut at every
-    # actual host-control route. Popen stays a class for import-time typing.
-    class ForbiddenPopen(subprocess.Popen):
+    # actual host-control route. Popen stays a class for import-time typing;
+    # bytes is its default pipe type, but this sentinel never creates streams
+    # (including when the refused caller requests text mode).
+    class ForbiddenPopen(subprocess.Popen[bytes]):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             forbidden_calls.append("Popen")
             raise AssertionError("service cleanup test attempted to start a host process")
@@ -96,14 +98,18 @@ def test_failed_stop_clears_original_root_not_mutated_unit_root(
     print(f"failed stop: argv={calls}; original marker removed; other marker preserved")
 
 
-def test_throwing_stop_arm_clears_original_marker_and_preserves_exception(
-    isolated_service: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("action", ["stop", "uninstall"])
+def test_throwing_service_arm_clears_original_marker_and_preserves_exception(
+    isolated_service: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, action: str
 ) -> None:
     home, original, other = isolated_service
-    failure = subprocess.TimeoutExpired(["synthetic-systemctl", "stop"], 30)
+    verb = "stop" if action == "stop" else "disable"
+    failure = subprocess.TimeoutExpired(["synthetic-systemctl", verb], 30)
+    calls: list[tuple[str, ...]] = []
 
     def fake_systemctl(*args: str, **kwargs: Any) -> Any:
-        if args[0] == "stop":
+        calls.append(args)
+        if args[0] == verb:
             assert relay.deliberate_stop_requested(original)
             relay.mark_deliberate_stop("other synthetic operation", other)
             linux_fakes._write_unit_pinning(home, other)
@@ -112,12 +118,20 @@ def test_throwing_stop_arm_clears_original_marker_and_preserves_exception(
 
     monkeypatch.setattr(supervisors, "systemctl_user", fake_systemctl)
     with pytest.raises(subprocess.TimeoutExpired) as raised:
-        _cli("stop")
+        _cli(action, *(["--purge"] if action == "uninstall" else []))
     assert raised.value is failure
     assert not relay.deliberate_stop_marker_path(original).exists()
     assert relay.deliberate_stop_requested(other)
+    assert linux_fakes._unit(home).exists()
+    expected = (
+        ("stop", relay.SYSTEMD_UNIT)
+        if action == "stop"
+        else ("disable", "--now", relay.SYSTEMD_UNIT)
+    )
+    assert calls == [expected], "no reload or later manager step after a throwing arm"
     print(
-        "throwing arm: original TimeoutExpired propagated; original marker removed; other preserved"
+        f"throwing {action}: argv={calls}; original TimeoutExpired propagated; "
+        "original marker removed; other marker and unit preserved"
     )
 
 
