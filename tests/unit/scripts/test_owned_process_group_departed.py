@@ -45,7 +45,7 @@ def ours_namespace():
 class World:
     """Scripted censuses plus synthetic /proc rows, with per-PID read failures."""
 
-    def __init__(self, monkeypatch, first, second, *, errors=None, live=()):
+    def __init__(self, monkeypatch, first, second, *, errors=None, live=(), script=None):
         monkeypatch.setattr(procstate, "birth_scheme", lambda: SCHEME)
         monkeypatch.setattr(owned, "sys", NS(platform="linux"))
         self.monkeypatch = monkeypatch
@@ -55,6 +55,9 @@ class World:
         for pid in live:
             self.kernel.rows[pid] = (LEADER, LEADER, LEADER, "200")
         self.first, self.second = list(first), list(second)
+        #: Optional census-by-call sequence for multi-cycle histories; past its
+        #: end the plain first/second alternation resumes.
+        self.script = [list(view) for view in (script or ())]
         #: pid -> exception raised (or short row returned) by its stat read.
         self.errors = dict(errors or {})
         self.calls = 0
@@ -67,7 +70,10 @@ class World:
         self.cap._proc_self = ours_namespace
 
     def census(self, pgid, deadline):
-        view = self.first if self.calls % 2 == 0 else self.second
+        if self.calls < len(self.script):
+            view = self.script[self.calls]
+        else:
+            view = self.first if self.calls % 2 == 0 else self.second
         self.calls += 1
         return owned.AuthoritativeCensus(tuple(view), True, LEADER in view)
 
@@ -160,6 +166,9 @@ def test_bbed_corpse_only_shape_is_observed_empty(monkeypatch):
 def test_member_in_census_two_then_enoent_is_refused(monkeypatch):
     world = bbed(monkeypatch, second=[LEADER, 20, 21, 22])
     assert_refused(world, world.refresh())
+    # The in-both shape is re-run, never amnestied: the trigger persisted
+    # through every cycle, so the refusal came only after all of them.
+    assert world.calls == 2 * owned._SAMPLE_CYCLES
 
 
 # 2: anything but this attempt's ENOENT diagnostic ---------------------------
@@ -391,3 +400,193 @@ def test_departed_evidence_reaches_the_run_record(request, monkeypatch, tmp_path
     ownership = receipt["ownership"]
     assert [row["pid"] for row in ownership["vanished"]] == [20, 21]
     assert {row["getpgid"] for row in ownership["vanished"]} == {"ProcessLookupError"}
+
+
+# 14: a both-census member that dies before its sample re-runs the cycle ------
+#
+# CI 41748872018 (job 126359450123) refused a healthy fast-forking command:
+# censuses [[2425,2443,2444,2445,2446],[2425,2444,2445,2446]] with 2444 -- in
+# BOTH -- failing its sample at ENOENT. `_departed` must not drop such a PID (a
+# member seen in census 2 may have forked a live child), so the capability
+# discards the whole cycle and proves again from fresh censuses. Nothing from a
+# discarded cycle reaches the verdict.
+
+
+def in_both(monkeypatch, **overrides):
+    """21 is in both censuses and reads ENOENT; 22 stays live."""
+    kwargs = {
+        "first": [LEADER, 21, 22],
+        "second": [LEADER, 21, 22],
+        "errors": {21: gone(21)},
+        "live": (22,),
+    }
+    kwargs.update(overrides)
+    return World(monkeypatch, kwargs.pop("first"), kwargs.pop("second"), **kwargs)
+
+
+def test_measured_both_census_shape_converges_on_a_fresh_cycle(monkeypatch):
+    world = World(
+        monkeypatch,
+        [LEADER, 22],
+        [LEADER, 22],
+        errors={20: gone(20), 21: gone(21)},
+        live=(22,),
+        script=[[LEADER, 20, 21, 22], [LEADER, 21, 22], [LEADER, 22], [LEADER, 22]],
+    )
+    verdict = world.refresh()
+    assert verdict.status == "VERIFIED", verdict
+    assert verdict.members == (LEADER, 22)
+    assert world.calls == 4
+    assert world.cap.probe["members"] == [LEADER, 22]
+    assert world.cap.probe["sample_retries"] == [
+        {"cycle": 0, "rerun": [21], "censuses": [[LEADER, 20, 21, 22], [LEADER, 21, 22]]}
+    ]
+    # The verdict rests on the final cycle only: its censuses departed nobody,
+    # so the first cycle's departure of 20 is not published as evidence.
+    assert "vanished" not in world.cap.probe
+
+
+def test_late_fork_survivor_is_found_by_the_fresh_census(monkeypatch):
+    # The hole `_departed` guards: 21 forks a live 30 after census 2, then dies.
+    # A re-run must see 30 and keep it, never certify the group empty.
+    world = World(
+        monkeypatch,
+        [LEADER, 30],
+        [LEADER, 30],
+        errors={21: gone(21)},
+        live=(30,),
+        script=[[LEADER, 21], [LEADER, 21], [LEADER, 30], [LEADER, 30]],
+    )
+    verdict = world.refresh(terminal=True)
+    assert verdict.status == "VERIFIED", verdict
+    assert 30 in verdict.members
+    assert world.calls == 4
+
+
+def test_a_trigger_persisting_through_every_cycle_still_refuses(monkeypatch):
+    world = in_both(monkeypatch)
+    verdict = world.refresh()
+    assert_refused(world, verdict)
+    assert world.calls == 6
+    retries = world.cap.probe["sample_failure"]["sample_retries"]
+    assert [row["cycle"] for row in retries] == [0, 1]
+    assert all(row["rerun"] == [21] for row in retries)
+
+
+def test_a_cycle_that_would_not_fit_the_deadline_is_not_started(monkeypatch):
+    world = in_both(monkeypatch)
+    census = world.census
+
+    def slow(pgid, deadline):
+        # Each census costs 1.5s of the 5s budget, so the first cycle takes ~3s
+        # and twice that no longer fits: no second cycle may start.
+        world.kernel.now += 1.5
+        return census(pgid, deadline)
+
+    world.cap.census = slow
+    verdict = world.refresh()
+    assert_refused(world, verdict)
+    assert world.calls == 2
+    assert world.cap.probe["sample_failure"]["sample_retries"] == []
+
+
+def _counterexample(name):
+    """Each removes exactly one `_rerunnable` conjunct from the in-both shape."""
+
+    def errors(failure):
+        return lambda world: world.errors.update({21: failure})
+
+    def departure(probe):
+        return lambda world: setattr(world.cap, "_departure", probe)
+
+    def missing_diagnostic(world):
+        original = procstate._proc_samples
+        world.monkeypatch.setattr(procstate, "_proc_samples", lambda pids, **kwargs: original(pids))
+
+    def injected_sampler(world):
+        world.cap._departure = None
+        world.cap.samples = world.kernel.samples
+
+    return {
+        "EACCES": errors(PermissionError(errno.EACCES, "synthetic")),
+        "EIO": errors(OSError(errno.EIO, "synthetic")),
+        "short-row": errors("short-row"),
+        "missing-diagnostic": missing_diagnostic,
+        "getpgid-our-pgid": departure(lambda pid: LEADER),
+        "getpgid-other-pgid": departure(lambda pid: 4242),
+        "getpgid-EPERM": departure(_raises(PermissionError(errno.EPERM, "synthetic"))),
+        "getpgid-EACCES": departure(_raises(PermissionError(errno.EACCES, "synthetic"))),
+        "getpgid-EINVAL": departure(_raises(OSError(errno.EINVAL, "synthetic"))),
+        "getpgid-other": departure(_raises(RuntimeError("synthetic"))),
+        "foreign-proc-self": lambda world: setattr(world.cap, "_proc_self", lambda: "1"),
+        "unreadable-proc-self": lambda world: setattr(
+            world.cap, "_proc_self", _raises(OSError(errno.ENOENT, "no /proc/self"))
+        ),
+        "injected-sampler": injected_sampler,
+    }[name]
+
+
+COUNTEREXAMPLES = [
+    "EACCES",
+    "EIO",
+    "short-row",
+    "missing-diagnostic",
+    "getpgid-our-pgid",
+    "getpgid-other-pgid",
+    "getpgid-EPERM",
+    "getpgid-EACCES",
+    "getpgid-EINVAL",
+    "getpgid-other",
+    "foreign-proc-self",
+    "unreadable-proc-self",
+    "injected-sampler",
+]
+
+
+@pytest.mark.parametrize("name", COUNTEREXAMPLES)
+def test_each_missing_conjunct_refuses_without_a_retry(monkeypatch, name):
+    world = in_both(monkeypatch)
+    _counterexample(name)(world)
+    assert_refused(world, world.refresh())
+    assert world.calls == 2
+    assert "sample_retries" not in world.cap.probe
+
+
+def test_past_the_diagnostic_cap_refuses_without_a_retry(monkeypatch):
+    many = list(range(20, 37))
+    world = World(
+        monkeypatch,
+        [LEADER, *many],
+        [LEADER, *many],
+        errors={pid: gone(pid) for pid in many},
+    )
+    assert_refused(world, world.refresh())
+    assert world.calls == 2
+    assert world.cap.probe["sample_failure"]["unresolved_count"] == 17
+
+
+def test_one_unexplained_member_refuses_the_whole_retry(monkeypatch):
+    # 21 qualifies, 23 is EACCES: a retry needs EVERY unresolved member.
+    world = in_both(
+        monkeypatch,
+        first=[LEADER, 21, 22, 23],
+        second=[LEADER, 21, 22, 23],
+        errors={21: gone(21), 23: PermissionError(errno.EACCES, "synthetic")},
+    )
+    assert_refused(world, world.refresh())
+    assert world.calls == 2
+
+
+def test_a_retry_record_never_leaks_into_a_later_refresh(monkeypatch):
+    world = World(
+        monkeypatch,
+        [LEADER, 22],
+        [LEADER, 22],
+        errors={21: gone(21)},
+        live=(22,),
+        script=[[LEADER, 21, 22], [LEADER, 21, 22]],
+    )
+    assert world.refresh().status == "VERIFIED"
+    assert world.cap.probe["sample_retries"]
+    assert world.refresh().status == "VERIFIED"
+    assert "sample_retries" not in world.cap.probe
