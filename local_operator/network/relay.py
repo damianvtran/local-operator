@@ -77,7 +77,7 @@ import uuid
 import weakref
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
@@ -3052,6 +3052,18 @@ def leave(
         record.removed_ids.append(device_id)
     if persist:
         store.save(record, root)
+        from local_operator.network.credentials.state import PlacementState
+
+        # Observations, not grants: a departed owner's cached sentences and row
+        # ids must leave THIS network/root without touching another owner's ids.
+        # Cleanup is best effort like placement-merge invalidation: cache IO or
+        # corrupt metadata must not interrupt the caller's departure/epoch rotation.
+        with suppress(OSError, ValueError):
+            state = PlacementState.load(record.network_id, root)
+            before = state.to_json()
+            state.forget_owner(device_id)
+            if state.to_json() != before:
+                state.save()
     return member
 
 
