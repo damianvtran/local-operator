@@ -1,0 +1,105 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.errors.sdk_spec",
+  "audit_date": "2026-11-03",
+  "audit_id": "e55f54-sdk1",
+  "key_count": 21,
+  "source_audit_revision": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "e55f54b6a26e",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_coder_session": "eae0961e4e78",
+    "actual_model_source": "Own completed payload.usage; model-provenance.json",
+    "actual_usage_at_ms": 1793719936469,
+    "fallback": "Observed openai/gpt-6.1-sol differs from initial Anthropic header; no exact chain inferred."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/en.json",
+      "sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/context.json",
+      "sha256": "8735964058f901e1d97527801eb88f5a36585f0d7713c1e21f7f98ebaa55418e"
+    },
+    "zh-CN": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/wire.errors.sdk_spec.json",
+      "sha256": "0ff78d9cecbb7c024a284abc694f1a3d9e21bc283c464cba5ae42b2a227c76ad"
+    },
+    "style": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/zh-CN.style.md",
+      "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+    },
+    "glossary": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-spec-zh-CN-r1/report.md",
+      "sha256": "13eb44a42120b28469f2dcb6f86540a63620a785d7b7861f6c18cbb1a03b7bf8",
+      "kind": "audit_notes_not_execution_log"
+    },
+    "audit.log": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-spec-zh-CN-r1/audit.log",
+      "sha256": "27d337a0a0b18dd7628bcde41428cf8bf77d93d42908ecf098a00336004ce1c2",
+      "kind": "actual_execution_log"
+    },
+    "validate.py.txt": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-spec-zh-CN-r1/validate.py.txt",
+      "sha256": "035916eb480a8482ee0ffa44f043013aa6b6498d832dcd6eadeea72e731be5a2",
+      "kind": "supporting_artifact"
+    },
+    "input-hashes.json": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-spec-zh-CN-r1/input-hashes.json",
+      "sha256": "da5b172f4135343a8e7a42f72d7120cf9f688aabe63727f878c513a1ffbceffd",
+      "kind": "supporting_artifact"
+    },
+    "model-provenance.json": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-spec-zh-CN-r1/model-provenance.json",
+      "sha256": "dc85f41e041a56324923774bb90dfc1ef18704d2505dba73546d38b540fd0564",
+      "kind": "supporting_artifact"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "scope": "staged catalogue linguistic/mechanical only",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  },
+  "historical_contract": {
+    "original_context_preserved": true,
+    "producer_AST_english_pinned_count": 21,
+    "producer_runtime_execution": "NOT RUN",
+    "SessionSpecError_args_str_compatibility": "Must remain unchanged; no waiver",
+    "localized_presentation_path": "NOT CLAIMED",
+    "no_current_UI_sink": "Architect assessment source named in report; not independently rederived"
+  },
+  "verification": {
+    "mechanical": "PASS 21/21",
+    "native_semantic_review": "PASS 21/21",
+    "pseudo": "NOT RUN",
+    "RTL": "not applicable to zh-CN; NOT RUN",
+    "native_fit": "NOT RUN/pending separate integration gate",
+    "second_reader": "separate independent gate; not claimed",
+    "global_release_eligibility": "NOT CLAIMED"
+  },
+  "retention": {
+    "current_location": "Own original scratch bundle, per read-only staged audit task",
+    "intended_canonical_root": "i18n/audits/evidence/zh-CN/wire.errors.sdk_spec/e55f54-sdk1/",
+    "tracked_commit_exists": false
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}
