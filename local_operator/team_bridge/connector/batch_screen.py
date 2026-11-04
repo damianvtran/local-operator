@@ -99,16 +99,28 @@ def take_result(ref: ConversationFeedRef, body_hash: str) -> Any:
     entry = state.results.pop((ref.conversation_id, ref.message_id), None)
     if entry is None or entry[0] != body_hash:
         return None
+    from ..screening import HOLD_BATCH_UNRESOLVED
+
+    if getattr(entry[1], "hold_code", None) == HOLD_BATCH_UNRESOLVED:
+        # The batch could not conclude this message (a neighbour's non-deliver
+        # verdict, or a refused / malformed call): its verdict must come from
+        # a call that saw it ALONE (#3400 S-1, M2/S-6), so the handler screens
+        # it singly now, never re-batched with the same group.
+        return None
     return entry[1]
 
 
 def allocation_for(ref: ConversationFeedRef, display: Mapping[str, Any]) -> dict[str, Any]:
     """The budget allocation of one message, from hub-verified facts only.
 
-    Tier (``Store.SCREENING_TIER_*``): ADDRESSED for a mention of this agent
-    (the feed's own bit) or a DM (``conversation_kind``); HUMAN for a person's
-    line in a shared room (the body read's ``sender_kind``); AMBIENT for the
-    rest. The
+    Tier (``Store.SCREENING_TIER_*``), keyed on the sender KIND the hub
+    states (``sender_kind`` on the body read), because an agent can mention
+    anyone (#3400 security round 1, S-4): HUMAN_ADDRESSED for a person's DM
+    or mention of this agent; ADDRESSED for an agent's; HUMAN for a person's
+    line in a shared room; AMBIENT for the rest. An unknown sender kind (an
+    older hub) is treated as an agent: it never reaches a person's reserve.
+    THE ONE allocation source: the batch pass and the handler's single
+    screen both call this, so no screen is ever charged a default tier. The
     verified sender is the hub's ``sender_account_id`` on the body read when
     it sends one; an older hub sends none, and such a message is charged to
     no sender (bounded by the account and ambient ceilings alone). Display
@@ -120,9 +132,13 @@ def allocation_for(ref: ConversationFeedRef, display: Mapping[str, Any]) -> dict
     sender = display.get("sender_account_id")
     from ..store import Store
 
-    if ref.mention or conversation_kind == "dm":
+    addressed = bool(ref.mention) or conversation_kind == "dm"
+    human = kind == "human"
+    if addressed and human:
+        tier = Store.SCREENING_TIER_HUMAN_ADDRESSED
+    elif addressed:
         tier = Store.SCREENING_TIER_ADDRESSED
-    elif kind == "human":
+    elif human:
         tier = Store.SCREENING_TIER_HUMAN
     else:
         tier = Store.SCREENING_TIER_AMBIENT
@@ -180,9 +196,12 @@ async def prescreen_conversation_refs(
         if fetched is None:
             continue
         state.fetched[(ref.conversation_id, ref.message_id)] = fetched
-        if fetched.attachments:
+        if fetched.attachments is None or fetched.attachments:
             # Images are never batched: an image verdict must come from the
-            # v3 render that showed the pixels (screening module note).
+            # v3 render that showed the pixels (screening module note). Nor
+            # are descriptors this build cannot parse (``None``): the handler
+            # holds those ``attachments_malformed`` before any screen, so a
+            # batch unit spent on them would buy a receipt nothing admits.
             continue
         allocation = allocation_for(ref, fetched.display)
         item = _conversation._screening_item(

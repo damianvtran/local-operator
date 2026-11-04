@@ -1422,6 +1422,9 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
         # class would claim a human is reviewing it, which is not what happens.
         "model_refused",
         "reply_truncated",
+        # PR #3400: a batch that could not conclude the message; it is
+        # re-screened alone at once, so screening is only briefly pending.
+        "batch_unresolved",
     }
 )
 
@@ -3015,6 +3018,23 @@ class Store:
             conn.execute("ALTER TABLE screening_holds ADD COLUMN failure_class TEXT")
 
     @staticmethod
+    def _ensure_hold_tier_column(conn: sqlite3.Connection) -> None:
+        """Add ``tier`` to a ``screening_holds`` that predates it (PR #3400).
+
+        WHY. The retry pass is bounded (``RETRY_BATCH_LIMIT`` rows a pass), and
+        a refill can leave a backlog of hundreds of held messages; served
+        oldest-first alone, a newer held DM waits behind the whole ambient
+        backlog (#3400 code round 1, m3). The tier lets the pass serve a
+        person's DM first. ADDITIVE AND NULLABLE (the rule of
+        :meth:`_ensure_hold_failure_class_column`): a NULL row sorts last,
+        oldest-first among itself, exactly the order it had before.
+        """
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_holds)")}
+        if "tier" not in columns:
+            conn.execute("ALTER TABLE screening_holds ADD COLUMN tier INTEGER")
+
+    @staticmethod
     def _breaker_has_class_column(conn: sqlite3.Connection) -> bool:
         """Whether this file's ``screening_breaker`` already has the column.
 
@@ -4317,27 +4337,37 @@ class Store:
     #: owner's own DM to their agent unscreened for up to an hour. Each call
     #: has a TIER, the highest of its messages':
     #:
-    #: * ``SCREENING_TIER_ADDRESSED`` (2) — a DM or a mention of this agent;
-    #: * ``SCREENING_TIER_HUMAN`` (1) — sent by a person, not addressed here;
+    #: * ``SCREENING_TIER_HUMAN_ADDRESSED`` (3) — a PERSON's DM or mention of
+    #:   this agent, which includes the owner's own DM to their agent;
+    #: * ``SCREENING_TIER_ADDRESSED`` (2) — an AGENT's DM or mention of this
+    #:   agent;
+    #: * ``SCREENING_TIER_HUMAN`` (1) — a person's line in a shared room;
     #: * ``SCREENING_TIER_AMBIENT`` (0) — agent chatter in a shared room.
     #:
-    #: Ambient calls may use at most 30 of the 40 units an hour, so 10 are
-    #: always held back for people and addressed messages. Inside those 10, a
-    #: person's room lines may take 5 more (35 for tiers 0-1 together), so the
-    #: last 5 are reachable ONLY by addressed messages. WHY NESTED: measured on
-    #: the 1 human + 6 agents flood (scripts/bench_batch_screening.py), a flat
-    #: 30/10 split let the human's own ~28 room lines an hour spend all 10
-    #: reserved units by minute 20, and a DM to the owner's agent at minute 30
-    #: was never screened that hour. The 40 itself is fixed — moderation spend
-    #: is not loosened — so the reserve is carved out of it, never added to it.
-    #: Why 30 for ambient: with coalesced batches of up to 20 messages a unit
-    #: covers a whole backlog, so 30 units still screen a busy room's backlog
-    #: as units refill; 5 addressed-only units cover a person's DMs and
-    #: mentions in an hour with room to spare, and each wake batches them.
+    #: Ambient calls may use at most 30 of the 40 units an hour. Tiers 0-2
+    #: together may use at most 35, so the last 5 are reachable ONLY by a
+    #: person addressing this agent. WHY THE RESERVE IS KEYED ON SENDER KIND
+    #: (#3400 security round 1, S-4): the hub lets an agent mention any member
+    #: (up to 50 per message), and #294 removed the wake caps that bounded it,
+    #: so "addressed" alone is something any agent in the room can claim on
+    #: every post. Measured on that attack: 40 mentioning posts spent the
+    #: whole 40 and the owner's DM waited the hour. No split of a fixed 40
+    #: survives N colluding senders, so the last units are reserved for the
+    #: sender CLASS the hub states (``sender_kind``), which an agent cannot
+    #: claim. WHY NESTED rather than flat: measured on the 1 human + 6 agents
+    #: flood (scripts/bench_batch_screening.py), a flat 30/10 split let the
+    #: human's own room lines spend the whole reserve and a minute-30 DM was
+    #: never screened that hour. The 40 itself is fixed — moderation spend is
+    #: not loosened — so every reserve is carved out of it, never added to it.
+    #: Why 30 for ambient: one unit covers a whole coalesced batch (up to 20
+    #: messages), so 30 still drain a busy room's backlog as units refill; 5
+    #: units cover a person's DMs and mentions in an hour with room to spare.
     SCREENING_TIER_AMBIENT = 0
     SCREENING_TIER_HUMAN = 1
     SCREENING_TIER_ADDRESSED = 2
+    SCREENING_TIER_HUMAN_ADDRESSED = 3
     SCREENING_AMBIENT_BUDGET_PER_HOUR = 30
+    #: Tiers 0-2 together: everything but a person addressing this agent.
     SCREENING_UNADDRESSED_BUDGET_PER_HOUR = 35
 
     #: Per VERIFIED sender, inside the account's 40 (the decision recorded on
@@ -4414,8 +4444,8 @@ class Store:
             ambient = sum(1 for spent in tiers if spent <= self.SCREENING_TIER_AMBIENT)
             if ambient >= self.SCREENING_AMBIENT_BUDGET_PER_HOUR:
                 raise StoreRefused("ambient_exhausted", f"{kind} ambient units/hour exhausted")
-        if tier <= self.SCREENING_TIER_HUMAN:
-            unaddressed = sum(1 for spent in tiers if spent <= self.SCREENING_TIER_HUMAN)
+        if tier <= self.SCREENING_TIER_ADDRESSED:
+            unaddressed = sum(1 for spent in tiers if spent <= self.SCREENING_TIER_ADDRESSED)
             if unaddressed >= self.SCREENING_UNADDRESSED_BUDGET_PER_HOUR:
                 raise StoreRefused(
                     "unaddressed_exhausted", f"{kind} unaddressed units/hour exhausted"
@@ -4440,7 +4470,7 @@ class Store:
             "SELECT MIN(at) AS at, MAX(COALESCE(priority, ?)) AS tier "
             "FROM screening_attempts WHERE account_scope = ? AND kind = ? AND at > ? "
             "GROUP BY COALESCE(batch_id, attempt_id) ORDER BY at",
-            (self.SCREENING_TIER_ADDRESSED, scope, kind, now - 3600.0),
+            (self.SCREENING_TIER_HUMAN_ADDRESSED, scope, kind, now - 3600.0),
         ).fetchall()
 
     def _note_budget_refusal(self, owner: OwnerSnapshot, code: str) -> None:
@@ -4468,23 +4498,15 @@ class Store:
         except (sqlite3.Error, StoreRefused):
             pass
 
-    def _close_budget_episode(self, conn: sqlite3.Connection, scope: str) -> None:
-        """A successful reservation ENDS the episode, so the next one notifies."""
+    def close_budget_episode_if_drained(self, owner: OwnerSnapshot) -> bool:
+        """End the exhaustion episode once NO budget hold is left (best effort).
 
-        _ensure_budget_episode_table(conn)
-        conn.execute(
-            "UPDATE screening_budget_episodes SET started_at = NULL, notified_at = NULL "
-            "WHERE account_scope = ? AND started_at IS NOT NULL",
-            (scope,),
-        )
-
-    def claim_budget_notification(self, owner: OwnerSnapshot) -> bool:
-        """``True`` exactly ONCE per open exhaustion episode for this account.
-
-        The caller raises the owner's notification only on ``True``; the claim
-        and the mark are one write, so two connectors (or two holds in one
-        pass) can never both notify. A store that cannot answer says ``False``
-        — a missed notification is chrome, a repeated one is noise.
+        WHY NOT ON THE NEXT RESERVATION (#3400 round 1, code m2 / QA Q-2): under
+        a sustained flood a pool refills every few minutes, so "a reservation
+        succeeded" re-opened the episode on every refill (five notices for one
+        flood). The episode is the backlog's lifetime instead: it ends when the
+        last ``budget_exhausted`` hold for this owner is gone, and only then can
+        a later exhaustion open a NEW episode (and a new, unread notice).
         """
 
         try:
@@ -4492,14 +4514,53 @@ class Store:
                 self._init(conn)
                 self._begin_write(conn)
                 _ensure_budget_episode_table(conn)
+                held = conn.execute(
+                    "SELECT 1 FROM screening_holds WHERE owner_key = ? "
+                    "AND hold_code = 'budget_exhausted' LIMIT 1",
+                    (_owner_key(owner),),
+                ).fetchone()
+                if held is not None:
+                    return False
                 cursor = conn.execute(
-                    "UPDATE screening_budget_episodes SET notified_at = ? "
-                    "WHERE account_scope = ? AND started_at IS NOT NULL AND notified_at IS NULL",
-                    (time.time(), self._account_scope(owner)),
+                    "UPDATE screening_budget_episodes SET started_at = NULL, notified_at = NULL "
+                    "WHERE account_scope = ? AND started_at IS NOT NULL",
+                    (self._account_scope(owner),),
                 )
                 return cursor.rowcount == 1
         except (sqlite3.Error, StoreRefused):
             return False
+
+    def claim_budget_notification(self, owner: OwnerSnapshot) -> float | None:
+        """The open episode's start, exactly ONCE per episode; else ``None``.
+
+        The caller raises the owner's notification only on a value, and keys
+        the item by it: a NEW episode is a NEW item, so it arrives unread even
+        when the owner read or dismissed the last one (QA Q-2 measured that a
+        same-key, same-copy notify is absorbed as "unchanged"). The claim and
+        the mark are one write, so two connectors (or two holds in one pass)
+        can never both notify. A store that cannot answer says ``None`` — a
+        missed notification is chrome, a repeated one is noise.
+        """
+
+        try:
+            with self._connect() as conn:
+                self._init(conn)
+                self._begin_write(conn)
+                _ensure_budget_episode_table(conn)
+                row = conn.execute(
+                    "SELECT started_at FROM screening_budget_episodes WHERE account_scope = ? "
+                    "AND started_at IS NOT NULL AND notified_at IS NULL",
+                    (self._account_scope(owner),),
+                ).fetchone()
+                if row is None:
+                    return None
+                conn.execute(
+                    "UPDATE screening_budget_episodes SET notified_at = ? WHERE account_scope = ?",
+                    (time.time(), self._account_scope(owner)),
+                )
+                return float(row["started_at"])
+        except (sqlite3.Error, StoreRefused):
+            return None
 
     def screening_budget_refill_at(self, owner: OwnerSnapshot, *, tier: int) -> float | None:
         """When the NEXT logical unit a call of ``tier`` may use frees up.
@@ -4526,7 +4587,7 @@ class Store:
         if len(units) < self.SCREENING_BUDGET_PER_HOUR:
             for ceiling_tier, ceiling in (
                 (self.SCREENING_TIER_AMBIENT, self.SCREENING_AMBIENT_BUDGET_PER_HOUR),
-                (self.SCREENING_TIER_HUMAN, self.SCREENING_UNADDRESSED_BUDGET_PER_HOUR),
+                (self.SCREENING_TIER_ADDRESSED, self.SCREENING_UNADDRESSED_BUDGET_PER_HOUR),
             ):
                 lower = [row for row in units if int(row["tier"]) <= ceiling_tier]
                 if tier <= ceiling_tier and len(lower) >= ceiling:
@@ -4541,7 +4602,7 @@ class Store:
         kind: str,
         message_id: str | None,
         fingerprint: str | None,
-        tier: int = 2,
+        tier: int = 3,
         sender_account_id: str = "",
     ) -> str:
         """Durably charge ONE attempt of ``kind`` BEFORE its I/O.
@@ -4620,8 +4681,6 @@ class Store:
                         ),
                     )
                     ids.append(attempt_id)
-                if kind == "logical":
-                    self._close_budget_episode(conn, scope)
                 return ids
         except StoreRefused as refusal:
             self._note_budget_refusal(owner, refusal.code)
@@ -4667,16 +4726,18 @@ class Store:
         message_id: str | None = None,
         fingerprint: str | None = None,
         input_proof: Mapping[str, Any] | None = None,
-        tier: int = 2,
+        tier: int = 3,
         sender_account_id: str = "",
     ) -> str:
         """The LOGICAL screening charge, optionally bound to message + tuple.
 
         ``tier`` / ``sender_account_id`` place the unit in its pool and charge
         it to a verified sender (see the budget constants). The defaults —
-        the addressed tier, no sender — are what every caller that predates
-        the split gets, so none of them is fenced by a pool it never knew
-        about.
+        the top tier (fenced only by the 40), no sender — are what a DIRECT
+        caller that predates the split gets, so none of them is fenced by a
+        pool it never knew about. The screening pipeline never relies on
+        them: it always passes the item's tier (``screening_allocation``),
+        whose own no-hint default is agent-addressed, never the top tier.
 
         The pipeline ALWAYS binds (message + full policy fingerprint); the
         unbound form exists for budget accounting talk (QA probes, breaker
@@ -6311,8 +6372,13 @@ class Store:
         retry_at: float | None = None,
         keep_existing: bool = False,
         failure_class: str | None = None,
+        tier: int | None = None,
     ) -> None:
         """Durably quarantine a VALID-LIVE-OWNER early refusal (H3-Q8).
+
+        ``tier`` (``SCREENING_TIER_*``) is the message's budget tier when the
+        writer knows it; :meth:`due_screening_holds` serves higher tiers first.
+        A re-hold without one keeps the tier already on the row.
 
         ``failure_class`` is set only by the screening pipeline's
         ``provider_error`` fallback write; any other caller writes NULL.
@@ -6344,9 +6410,12 @@ class Store:
             self._begin_write(conn)
             self._require_live(conn, owner)
             self._ensure_hold_failure_class_column(conn)
+            self._ensure_hold_tier_column(conn)
+            if not keep_existing:
+                on_conflict += ", tier = COALESCE(excluded.tier, screening_holds.tier)"
             conn.execute(
                 "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
-                "retry_at, created_at, failure_class) VALUES (?,?,?,?,?,?) " + on_conflict,
+                "retry_at, created_at, failure_class, tier) VALUES (?,?,?,?,?,?,?) " + on_conflict,
                 (
                     _owner_key(owner),
                     _contentless_delivery_key(message_id),
@@ -6354,6 +6423,7 @@ class Store:
                     retry_at,
                     time.time(),
                     _closed_failure_class(failure_class),
+                    tier if isinstance(tier, int) and not isinstance(tier, bool) else None,
                 ),
             )
 
@@ -6394,13 +6464,19 @@ class Store:
                 self._init(conn)
                 if self._live_generation(conn, owner) != owner.enrollment_generation:
                     return []
+                columns = {r[1] for r in conn.execute("PRAGMA table_info(screening_holds)")}
+                # A read path never alters the table; a store without the
+                # column simply has no tiers yet. (Never a bare integer here:
+                # SQLite reads ``ORDER BY -1`` as a column index and errors.)
+                tier = "COALESCE(tier, -1) DESC, " if "tier" in columns else ""
                 rows = conn.execute(
                     "SELECT message_id, hold_code, retry_at, created_at FROM screening_holds "
                     "WHERE owner_key = ? AND (retry_at IS NULL OR retry_at <= ?) "
-                    # OLDEST FIRST among the due rows (agent-server #294 S-1):
-                    # a refill makes a whole backlog due at once, and the
-                    # bounded pass must serve the longest-waiting first.
-                    "ORDER BY created_at, COALESCE(retry_at, created_at) LIMIT ?",
+                    # HIGHEST TIER, THEN OLDEST, among the due rows (agent-server
+                    # #294 S-1; #3400 m3): a refill makes a whole backlog due at
+                    # once, and the bounded pass must serve a person's DM before
+                    # ambient chatter, the longest-waiting first within a tier.
+                    f"ORDER BY {tier}created_at, COALESCE(retry_at, created_at) LIMIT ?",
                     (_owner_key(owner), float(now), int(limit)),
                 ).fetchall()
                 return [

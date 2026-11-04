@@ -136,6 +136,23 @@ _RETRY_ATTEMPTS: dict[str, int] = {}
 #: is one handoff wide; the loss it replaces was the whole message.
 HOLD_STALE_CLAIM = "stale_claim"
 
+#: Holds a retry re-screens ALONE, never inside a batch (#3400 round 1, M2 =
+#: S-6). Each one can be the message's own doing -- a model hold, a refusal
+#: or a malformed reply provoked by its content, or a batch that could not
+#: conclude it -- and a batch voids whenever one id is not ``deliver`` (S-1),
+#: so batching such a row would re-void its neighbours and spend a unit per
+#: pass. Budget and provider holds are content-blind and stay batchable.
+_RETRY_ALONE_HOLD_CODES = frozenset(
+    {
+        "batch_unresolved",
+        "model_hold",
+        "model_refused",
+        "reply_truncated",
+        "parse_failed",
+        "bounce_without_category",
+    }
+)
+
 #: The code a ``stale_claim`` row is re-coded to before its re-drive starts
 #: (see above): an ORDINARY retry — never retired on a released claim — but a
 #: code of its own, because a replayed admission commits no new receipt and so
@@ -396,8 +413,12 @@ async def retry_due_holds(
         for ref in (
             _conversation_hold_ref(row["message_id"])
             for row in due
-            # A parked stale claim may not be re-driven this pass at all.
+            # A parked stale claim may not be re-driven this pass at all, and
+            # a hold the message's OWN content may have provoked is retried
+            # alone: re-batching it with innocent neighbours would void their
+            # call again on every pass (#3400 M2 / S-6).
             if row["hold_code"] != HOLD_STALE_CLAIM
+            and row["hold_code"] not in _RETRY_ALONE_HOLD_CODES
         )
         if ref is not None
     ]
@@ -583,6 +604,7 @@ async def retry_due_holds(
                     message_id,
                     new_code or "hold",
                     retry_at=_hold_due(outcome.get("retry_at"), _time.time() + gap),
+                    tier=outcome.get("tier"),
                 )
             except StoreRefused:
                 pass  # fenced owner: the next live pass owns the row
@@ -591,6 +613,10 @@ async def retry_due_holds(
     if len(_RETRY_ATTEMPTS) > 512:
         # Bound the counter map: it is a scheduling aid, not state worth growth.
         _RETRY_ATTEMPTS.clear()
+    # The exhaustion episode lives as long as its backlog (#3400 m2 / Q-2):
+    # it ends only once no budget hold is left, so a sustained flood is ONE
+    # episode and one notice, and the next exhaustion is a new, unread one.
+    store.close_budget_episode_if_drained(owner)
     return {"due": len(due), "outcomes": outcomes}
 
 
@@ -664,7 +690,13 @@ def _park_stale_claim(
 
 
 def _persist_hold_backoff(
-    store: Any, owner: Any, message_id: str, code: str, *, retry_at: Any = None
+    store: Any,
+    owner: Any,
+    message_id: str,
+    code: str,
+    *,
+    retry_at: Any = None,
+    tier: Any = None,
 ) -> None:
     """Write/advance a durable ``screening_holds`` row for a held outcome.
 
@@ -681,7 +713,7 @@ def _persist_hold_backoff(
     attempts = _RETRY_ATTEMPTS.get(message_id, 0)
     due = _hold_due(retry_at, _time.time() + min(RETRY_BASE_S * (2**attempts), RETRY_MAX_S))
     try:
-        store.persist_hold(owner, message_id, str(code)[:64] or "hold", retry_at=due)
+        store.persist_hold(owner, message_id, str(code)[:64] or "hold", retry_at=due, tier=tier)
     except StoreRefused:
         pass  # fenced owner: the next live pass owns the row
     _RETRY_ATTEMPTS[message_id] = min(attempts + 1, RETRY_MAX_ATTEMPTS)
@@ -897,6 +929,7 @@ async def _run_iteration_inner(
                 conversation_ref.encode(),
                 str(outcome.get("code") or "hold"),
                 retry_at=outcome.get("retry_at"),
+                tier=outcome.get("tier"),
             )
         elif outcome.get("action") == "claimed_elsewhere":
             # Same R2-3 park, keyed like every conversation hold (by ref).

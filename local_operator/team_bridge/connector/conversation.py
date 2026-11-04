@@ -51,7 +51,7 @@ from ..attachments import (
 )
 from ..client import SCREENING_TEMPLATE_V3_SHA256, BridgeRefusal
 from ..types import ConversationFeedRef
-from .batch_screen import take_fetched, take_result
+from .batch_screen import allocation_for, take_fetched, take_result
 from .coalesce import CARD_COALESCED, card_is_buffered
 from .wake import (
     CLAIM_TTL_S,
@@ -976,18 +976,20 @@ async def _notify_budget_exhausted(
     gone, the per-account screening budget is the real ceiling, and an owner
     whose messages silently wait for an hour has no way to know why. One item
     per exhaustion episode (``Store.claim_budget_notification``), keyed per
-    endpoint so a repeat updates the same item; contentless like the probe
-    notification: no sender, body, room or count. Best-effort: never turns
-    the hold into a failure.
+    endpoint AND episode: a new episode is a new, unread item even after the
+    owner read or dismissed the last (#3400 QA Q-2), while repeats inside one
+    episode never re-notify. Contentless like the probe notification: no
+    sender, body, room or count. Best-effort: never turns the hold into a
+    failure.
     """
 
     import asyncio
 
     try:
-        first = await asyncio.to_thread(store.claim_budget_notification, owner)
+        episode = await asyncio.to_thread(store.claim_budget_notification, owner)
     except Exception:  # noqa: BLE001 — chrome; the hold stands
         return
-    if not first:
+    if episode is None:
         return
     from local_operator.i18n.keys import cli_team_bridge as _k
     from local_operator.i18n.text import tr
@@ -1000,7 +1002,7 @@ async def _notify_budget_exhausted(
             title=t(_k.notify_budget_exhausted_title()),
             body_md=t(_k.notify_budget_exhausted_body()),
             priority="normal",
-            key=f"team-bridge-budget:{owner.endpoint_id}",
+            key=f"team-bridge-budget:{owner.endpoint_id}:{int(episode)}",
         )
 
     try:
@@ -1279,6 +1281,13 @@ async def handle_conversation_available(
         )
         if screened_images is not None:
             item["attachments"] = screened_images
+        # EVERY screen carries its budget tier (#3400 round 1, M1 = Q-1 = S-3):
+        # the single path is most live traffic (a one-message wake, the 21st
+        # of a split, an image, a retry), and an unstamped item defaults to
+        # the addressed tier, which let agent chatter spend the people's
+        # reserve. One allocation source for both paths.
+        allocation = allocation_for(ref, display)
+        item["allocation"] = allocation
         # A batch screen of THIS body hash in this pass is this message's own
         # verdict (one call, one verdict per message); anything else screens
         # here, unchanged.
@@ -1291,6 +1300,9 @@ async def handle_conversation_available(
         if disposition == "hold":
             code = getattr(result, "hold_code", None) or "screening_hold"
             outcome = await held(code)
+            # The tier rides the durable hold so the bounded retry pass serves
+            # a person's DM before an ambient backlog (#3400 m3).
+            outcome["tier"] = allocation["tier"]
             if code == "budget_exhausted":
                 # The durable retry fires when the budget refills, never on a
                 # poll; and the owner hears about it once per episode.
