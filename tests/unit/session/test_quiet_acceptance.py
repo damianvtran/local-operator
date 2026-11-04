@@ -137,11 +137,40 @@ async def test_person_arriving_during_host_settlement_is_consumed_once_before_ac
         await session.dispose()
 
 
+def timeout_state(session, events, steer_calls):
+    """Name which settle conjunct stayed true when a wait times out.
+
+    A hosted run failed with a bare TimeoutError, leaving a product hang (the
+    steer never produced the second turn) indistinguishable from a starved
+    runner. Read-only: no behaviour of the session is touched.
+    """
+    ends = [event for event in events if isinstance(event, AgentEndEvent)]
+    tail = ", ".join(
+        f"{getattr(event, 'type', type(event).__name__)}"
+        + (f"(quiet_accepted={event.quiet_accepted})" if isinstance(event, AgentEndEvent) else "")
+        for event in events[-12:]
+    )
+    tasks = [
+        f"{task.get_name()}:{'done' if task.done() else 'pending'}"
+        for task in sorted(asyncio.all_tasks(), key=lambda task: task.get_name())
+    ][:10]
+    queue = getattr(session, "_steering_queue", None)
+    return (
+        "cause unknown, not a fix: new owner never settled in 8s; "
+        f"agent_end_count={len(ends)} (needs 2), is_streaming={session.is_streaming}, "
+        f"turn_lock_locked={session._turn_lock.locked()}, steer_calls={steer_calls[0]}, "
+        f"steering_queue_size={queue.qsize() if queue is not None else 'n/a'}, "
+        f"continuation_queue={len(getattr(session, '_continuation_queue', []))}, "
+        f"last_events=[{tail}], tasks=[{'; '.join(tasks)}]"
+    )
+
+
 @pytest.mark.asyncio
 async def test_input_after_accepted_end_gets_a_new_pipeline_and_generation(tmp_path):
     stream = quiet_stream([StreamTextDelta(delta="new answer"), StreamEndEvent(stop_reason="stop")])
     session = make_session(tmp_path, stream)
     events = []
+    steer_calls = [0]
 
     def observe(event):
         events.append(event)
@@ -149,6 +178,7 @@ async def test_input_after_accepted_end_gets_a_new_pipeline_and_generation(tmp_p
             # The composer uses steer while this owner still holds its lock.
             # prompt() intentionally rejects that phase with TurnInFlight.
             session.steer("new-person-next-owner", message_id="qa-next-owner-person")
+            steer_calls[0] += 1  # counted after steer returned, so a raise is visible
 
     session.subscribe(observe)
     try:
@@ -162,7 +192,10 @@ async def test_input_after_accepted_end_gets_a_new_pipeline_and_generation(tmp_p
             ):
                 await asyncio.sleep(0)
 
-        await asyncio.wait_for(new_owner_settled(), timeout=8)
+        try:
+            await asyncio.wait_for(new_owner_settled(), timeout=8)
+        except TimeoutError:
+            raise AssertionError(timeout_state(session, events, steer_calls)) from None
         ends = [event for event in events if isinstance(event, AgentEndEvent)]
         starts = [event for event in events if getattr(event, "type", "") == "agent_start"]
         assert len(stream.requests) == 2 and len(ends) == len(starts) == 2
