@@ -16,6 +16,7 @@ import asyncio
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -26,8 +27,12 @@ from local_operator.network.credentials.effective import (
     note_lifecycle_observation,
     note_resolution,
 )
-from local_operator.network.credentials.types import BrokerError
+from local_operator.network.credentials.types import BrokerError, Grant
 from local_operator.session.runtime.serving import ServingSessionHandle
+from tests.unit.network import test_credentials_consent as owner_rig
+from tests.unit.network.test_credentials_consent import (  # noqa: F401 — fixture by import
+    rig,
+)
 from tests.unit.network.test_credentials_placement import OWNER, _point_config_at
 from tests.unit.network.test_native_hot_access import _native, _source
 from tests.unit.session.runtime.test_serving import _AccessSession
@@ -115,6 +120,216 @@ async def test_a_newer_refusal_is_republished_too(tmp_path: Path, mesh: Any) -> 
     assert (band.effective_state, band.state) == ("withdrawn", "temporarily_unavailable")
     assert band.last_grant_at is not None
     await handle.dispose()
+
+
+class _ReceiptDuringRead:
+    """Writes ONE receipt from another thread inside the host's claim read.
+
+    That is the window review R1-1 / QA Q10 measured: a receipt that lands after
+    the in-flight read has consumed the receipt store but before it applies its
+    answer. Deterministic, because the write happens inside the read itself.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, root: Path, result: Any) -> None:
+        from local_operator.providers import model_access
+
+        self.reads = 0
+        real = model_access.serving_model_access_here
+
+        def read(selector: str, **kwargs: Any) -> Any:
+            claim = real(selector, **kwargs)
+            self.reads += 1
+            if self.reads == 1:
+                writer = threading.Thread(target=note_resolution, args=(root, "openai", result))
+                writer.start()
+                writer.join(5)
+            return claim
+
+        monkeypatch.setattr(model_access, "serving_model_access_here", read)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "first,during,expected",
+    [
+        # A newer DENIAL during a recovery's read: a wrong ``ok`` is the harmful one.
+        (
+            _native,
+            lambda: BrokerError(code="owner_offline", owner_device=OWNER),
+            "owner_unavailable",
+        ),
+        # A newer RECOVERY during a denial's read: the operator's own symptom.
+        (
+            lambda: BrokerError(code="owner_offline", owner_device=OWNER),
+            _native,
+            "effective_borrow",
+        ),
+    ],
+)
+async def test_the_latest_receipt_wins_over_a_read_already_in_flight(
+    tmp_path: Path,
+    mesh: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    first: Any,
+    during: Any,
+    expected: str,
+) -> None:
+    session, handle = await _host(tmp_path)
+    try:
+        probe = _ReceiptDuringRead(monkeypatch, tmp_path, during())
+
+        note_resolution(tmp_path, "openai", first())
+        await _settle(handle)
+
+        assert _band(session).effective_state == expected
+        latest = effective._receipts[(effective._root(tmp_path), "openai")].state
+        assert latest == expected
+        # One re-read for the one receipt behind the read, not a loop.
+        assert probe.reads == 2
+    finally:
+        await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_receipts_after_the_reread_cap_still_reach_the_band(
+    tmp_path: Path, mesh: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A writer that lands a receipt inside EVERY read: one task stops at the cap,
+    # applies its last answer, and hands the remainder to one fresh task, so the
+    # newest receipt still wins and the work stays bounded.
+    from local_operator.providers import model_access
+    from local_operator.session.runtime import serving
+
+    real = model_access.serving_model_access_here
+    reads: list[int] = []
+    flips = [_native, lambda: BrokerError(code="owner_offline", owner_device=OWNER)]
+
+    def read(selector: str, **kwargs: Any) -> Any:
+        claim = real(selector, **kwargs)
+        reads.append(1)
+        if len(reads) <= serving._MODEL_ACCESS_REREADS:
+            result = flips[len(reads) % 2]()
+            writer = threading.Thread(target=note_resolution, args=(tmp_path, "openai", result))
+            writer.start()
+            writer.join(5)
+        return claim
+
+    session, handle = await _host(tmp_path)
+    try:
+        monkeypatch.setattr(model_access, "serving_model_access_here", read)
+        note_resolution(tmp_path, "openai", BrokerError(code="owner_offline", owner_device=OWNER))
+        for _ in range(4):
+            await _settle(handle)
+
+        latest = effective._receipts[(effective._root(tmp_path), "openai")].state
+        assert _band(session).effective_state == latest
+        assert len(reads) == serving._MODEL_ACCESS_REREADS + 1
+    finally:
+        await handle.dispose()
+
+
+def _owner_row(rig: Any, account: str) -> None:  # noqa: F811 — the imported fixture's name
+    rig.auth.upsert_credential(
+        owner_rig.P,
+        {
+            "type": "oauth",
+            "email": f"{account}@example.invalid",
+            "access": f"synthetic-access-{account}",
+            "refresh": f"synthetic-refresh-{account}",
+            "expires": int((time.time() + 3600) * 1000),
+            "account_id": account,
+        },
+    )
+
+
+def _owner_reply(rig: Any, affinity: Any = None) -> dict[str, Any]:  # noqa: F811
+    frame: dict[str, Any] = {
+        "op": "net_broker",
+        "kind": "grant",
+        "req": 1,
+        "key": owner_rig.P,
+        "provider": owner_rig.P,
+        "from_device": rig.peer.device_id,
+        "for_session": "synthetic-session",
+    }
+    if affinity is not None:
+        frame["affinity"] = affinity
+    link = SimpleNamespace(device_id=rig.peer.device_id, network_id=owner_rig.N, epoch=1)
+    return rig.broker.on_broker(link, frame)["detail"]
+
+
+@pytest.mark.asyncio
+async def test_a_denied_account_is_never_lent_and_a_pooled_one_is_provider_access(
+    rig: Any,  # noqa: F811 — the owner rig, by import
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R1-4 / QA Q9b against the REAL owner broker's decision, not a hand-built grant.
+
+    Receipts are keyed by provider because the OWNER picks the account per lend
+    (``owner.grant``; a borrower's affinity only steers that choice) and re-checks
+    the borrower's account-scoped denials against the lent identity at mint
+    (``consent.serving_guard`` -> ``check_borrow``). A denied account is therefore
+    never served: as the only row, or with the borrower anchored to it, the owner
+    refuses. With a second, permitted row the owner lends THAT one, which is real
+    provider access. The band says the provider is usable; it names no account.
+    """
+    rig.auth.delete_credentials_for_provider(owner_rig.P)
+    _owner_row(rig, "account-one")
+    owner_rig.consent.restrict_and_revoke(
+        owner_rig.N,
+        rig.own.device_id,
+        rig.peer.device_id,
+        {"credential_key": owner_rig.P, "account_ref": "account-one"},
+        "synthetic-account-withdrawal",
+        rig.root,
+    )
+    with owner_rig.placement.mutate(owner_rig.N, rig.root, self_device=rig.own.device_id) as doc:
+        doc.grant(owner_rig.P, rig.peer.device_id, by=rig.own.device_id)
+    denied = rig.auth.list_credentials(owner_rig.P)[0]
+    only_denied = _owner_reply(rig)
+    _owner_row(rig, "account-two")
+    anchored = _owner_reply(rig, {"account_id": denied.id, "account_created_at": denied.created_at})
+    pooled = _owner_reply(rig)
+
+    # The borrower: its own root and a placement naming the same owner, so the
+    # owner's real replies are what the receipt and the band are computed from.
+    borrower = tmp_path / "borrower"
+    borrower.mkdir()
+    document = owner_rig.placement.PlacementDocument(
+        "n_borrower", root=borrower, written_by=rig.own.device_id
+    )
+    document.declare(
+        owner_rig.P, owner_device=rig.own.device_id, provider=owner_rig.P, by=rig.own.device_id
+    )
+    document.grant(owner_rig.P, "recipient", scope="session", by=rig.own.device_id)
+    source = MeshCredentialClient(
+        root=borrower, self_device="recipient", network_id="n_borrower", placement=document
+    )
+    monkeypatch.setattr(MeshCredentialClient, "for_this_device", lambda *_a, **_k: source)
+    session = _AccessSession(f"{owner_rig.P}/synthetic-model")
+    handle = ServingSessionHandle(
+        session, asyncio.get_running_loop(), cwd=str(borrower), config_dir=borrower
+    )
+    try:
+        for detail in (only_denied, anchored):
+            assert detail.get("code") == "not_a_holder", detail
+            assert "access_token" not in detail
+            note_resolution(borrower, owner_rig.P, BrokerError.from_detail(detail))
+            await _settle(handle)
+            band = _band(session)
+            assert (band.effective_state, band.state) == ("withdrawn", "temporarily_unavailable")
+
+        assert pooled.get("kind") == "grant", pooled
+        assert pooled["identity"]["account_id"] == "account-two"
+        note_resolution(borrower, owner_rig.P, Grant.from_detail(pooled))
+        await _settle(handle)
+        band = _band(session)
+        assert (band.effective_state, band.state) == ("effective_borrow", "ok")
+        assert "account" not in band.model_dump_json()
+    finally:
+        await handle.dispose()
+        source.close()
 
 
 @pytest.mark.asyncio

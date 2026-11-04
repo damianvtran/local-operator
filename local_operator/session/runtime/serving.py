@@ -436,6 +436,13 @@ async def _model_resolution_window(deadline: float) -> AsyncIterator[None]:
             raise TimeoutError(card_timed_out_badge().envelope()["text"]) from error
 
 
+#: Upper bound on access-claim reads ONE publish performs while receipts keep
+#: arriving during its read. A re-read is triggered only by a new receipt, so a
+#: real session needs one or two; the bound exists so the task cannot be held
+#: open indefinitely, and the final pass is applied rather than dropped.
+_MODEL_ACCESS_REREADS = 4
+
+
 def _switch_executor() -> concurrent.futures.ThreadPoolExecutor:
     """The dedicated pool for a switch's blocking reads (see above)."""
     global _switch_executor_pool
@@ -1147,6 +1154,10 @@ class ServingSessionHandle(SessionHandle):
         #: :meth:`_schedule_model_access_publish`.
         self._model_access_publish: asyncio.Task[None] | None = None
         self._model_access_publish_selector = ""
+        #: Bumped on the session loop for every receipt that concerns this band,
+        #: read by the in-flight publish to tell whether its answer is already
+        #: older than the newest receipt (see :meth:`_publish_model_access_off_loop`).
+        self._model_access_revision = 0
         #: Unsubscribes :meth:`_on_access_receipt`; a no-op until it is installed
         #: at the end of construction, so a dispose of a half-built handle is safe.
         self._remove_access_listener: Callable[[], None] = lambda: None
@@ -2028,7 +2039,7 @@ class ServingSessionHandle(SessionHandle):
             task.cancel()
         # The access-claim read is additive state about a session that is going
         # away; nothing may publish into its store after disposal.
-        self._remove_access_listener()
+        self.close_access_listener()
         publish = self._model_access_publish
         if publish is not None and not publish.done():
             publish.cancel()
@@ -6090,9 +6101,11 @@ class ServingSessionHandle(SessionHandle):
     def _on_access_receipt(self, root: str, provider: str) -> None:
         """Republish the claim when THIS session's serving provider's receipt moved.
 
-        Called from whichever thread wrote the receipt (a resolve runs on the
-        session loop, a lifecycle frame may not), so the republish is handed to
-        the session loop. Filtered on provider and root here, because the
+        Called from whichever thread wrote the receipt: receipts are THIS
+        process's memory, so the writer is one of this process's own resolves,
+        which may run on the session loop or off it (``asyncio.to_thread``,
+        ``request_grant_sync`` from a worker). The republish is therefore handed
+        to the session loop. Filtered on provider and root here, because the
         receipts are process-wide and several sessions on different roots and
         providers share them: a GitHub or another provider's change must not
         restate this band, and the republish recomputes the claim from the
@@ -6111,9 +6124,35 @@ class ServingSessionHandle(SessionHandle):
         if root != _root(self._config_dir):
             return
         try:
-            self._loop.call_soon_threadsafe(self._schedule_model_access_publish)
+            self._loop.call_soon_threadsafe(self._on_access_receipt_on_loop)
         except RuntimeError:  # the loop has closed: nothing is served any more
             return
+
+    def _on_access_receipt_on_loop(self) -> None:
+        # The revision moves BEFORE the schedule: a publish already in flight
+        # joins rather than restarts (one read per edge), so it is this counter,
+        # not a new task, that tells it the receipt it read is no longer the
+        # newest one. Without it a receipt landing after that read was lost
+        # until some later receipt (review #3427 R1-1, QA Q10).
+        if self._disposing:
+            return
+        self._model_access_revision += 1
+        self._schedule_model_access_publish()
+
+    def close_access_listener(self) -> None:
+        """Stop republishing on receipt changes. Idempotent and non-raising.
+
+        :meth:`dispose` does this; a host that tears down WITHOUT disposing the
+        handle (``ExecControl.aclose``, whose process may outlive the run) must
+        call it, or the process-wide listener keeps this handle alive and keeps
+        scheduling publishes into a store nothing serves any more.
+        """
+        remove = self._remove_access_listener
+        self._remove_access_listener = lambda: None
+        try:
+            remove()
+        except Exception:  # noqa: BLE001 — teardown must not fail on an unsubscribe
+            logger.debug("effective-access unsubscribe failed", exc_info=True)
 
     def _schedule_model_access_publish(self) -> "asyncio.Task[None] | None":
         """Start (or join) the off-loop access-claim publish for the serving model.
@@ -6180,14 +6219,36 @@ class ServingSessionHandle(SessionHandle):
 
             spec = getattr(self._session, "effective_model", None) or self._session.model
             selector = f"{spec.provider}/{spec.model_id}"
-            claim = await self._loop.run_in_executor(
-                _switch_executor(),
-                functools.partial(serving_model_access_here, selector, config_dir=self._config_dir),
-            )
+            # LATEST RECEIPT WINS. A receipt that lands during the read bumps the
+            # revision (on this loop) and joins this task, so the read is redone
+            # until one completes with no receipt behind it. Bounded: each pass
+            # needs a NEW receipt to trigger another, and receipts come from this
+            # process's own resolves; the cap only stops a pathological writer
+            # from holding ONE task open. The last pass is still applied, and a
+            # receipt that arrived during it is handed to a fresh task below
+            # rather than dropped.
+            stale = False
+            claim = None
+            for _ in range(_MODEL_ACCESS_REREADS):
+                revision = self._model_access_revision
+                claim = await self._loop.run_in_executor(
+                    _switch_executor(),
+                    functools.partial(
+                        serving_model_access_here, selector, config_dir=self._config_dir
+                    ),
+                )
+                if self._disposing:
+                    return
+                stale = self._model_access_revision != revision
+                if not stale:
+                    break
             now = getattr(self._session, "effective_model", None) or self._session.model
             if f"{now.provider}/{now.model_id}" != selector:
                 return
             store.refresh_model_access(claim)
+            if stale and asyncio.current_task() is self._model_access_publish:
+                self._model_access_publish = None
+                self._schedule_model_access_publish()
         except Exception:  # noqa: BLE001 — additive state never fails its edge
             logger.debug("model access publication failed", exc_info=True)
 
