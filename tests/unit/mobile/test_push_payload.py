@@ -309,8 +309,8 @@ def test_the_attention_payload_equals_the_filed_literals_with_and_without_exclud
     # The attention form is the SILENT one, so it carries no alert at all — and
     # the absence is declared (absent_fields) rather than left to the equality
     # above, so a later edit that "tidy-ups" an alert onto it fails here.
-    # ``sound_custom`` is reserved for the visible forms only (ADR amendment
-    # 2026-11-04), so the silent form declares it absent alongside ``sound``.
+    # ``sound_custom`` rides the visible forms only (ADR amendment 2026-11-04),
+    # so the silent form declares it absent alongside ``sound``.
     assert fixture["absent_fields"] == [ALERT_FIELD, SOUND_FIELD, "sound_custom"]
     for key in ("payload", "exclude_absent_payload", "body"):
         for absent in fixture["absent_fields"]:
@@ -502,15 +502,12 @@ def test_the_report_block_allow_list_rejects_an_extra_or_mistyped_row() -> None:
     # input there, so a row that loses a field the filed body carries cannot
     # equal ``fixture["body"]``. Asserted here on the file side so the pair is
     # visible in one place.
-    # Minus the RESERVED field: ``sound_custom_ready`` is declared so the cloud
-    # accepts it from day one, but the machine does not report it until C5, so
-    # the filed literal (what the machine sends today) must not carry it.
-    reserved = set(fixture["reserved_not_sent"]["report_block"])
-    assert (
-        set(fixture["report_block_required"]) | set(fixture["report_block_optional"])
-    ) - reserved == set(
+    # ``sound_custom_ready`` is per-EMIT, not credential, state: it is on a row
+    # only when the emit names a custom sound, so the built-in literal (``body``)
+    # carries the credential fields and the custom literal adds exactly the bit.
+    assert set(fixture["report_block_required"]) | set(fixture["report_block_optional"]) == set(
         fixture["body"]["devices"][0]
-    ), "the filed row carries exactly the declared fields"
+    ) | {push_credentials.REPORT_SOUND_READY_FIELD}, "the filed row carries the declared fields"
 
 
 def test_the_attention_form_carries_no_completion_field() -> None:
@@ -843,54 +840,79 @@ def test_both_visible_builders_carry_the_sound_and_refuse_one_the_phone_lacks() 
             digest_payload(**{**DIGEST_INPUT, "sound": bad})
 
 
-# --- reserved, not sent: sound_custom / sound_custom_ready (ADR 2026-11-04) ----
+# --- sound_custom / sound_custom_ready (ADR 2026-11-04, sent from C5) ---------
+
+#: A custom selection's stem and two report rows: one device that reported the
+#: file cached, one that did not. The test's own input, as with DEVICE_ROWS.
+CUSTOM_STEM = "c_3b9f2e7a51c04d86"
+CUSTOM_DEVICE_ROWS: list[dict[str, Any]] = [
+    {**DEVICE_ROWS[0], "sound_custom_ready": True},
+    {
+        "device_id": "7a2e4c6b8d0f12345678a9b0c1d2e3f4",
+        "credential_live": True,
+        "credential_expires_at": 1791592000,
+        "sound_custom_ready": False,
+    },
+]
+
+
+@pytest.mark.parametrize("name", ["emit-completion.json", "emit-digest.json"])
+def test_a_custom_selection_equals_the_filed_custom_literals(name: str) -> None:
+    """``sound_custom`` beside the soft-pulse fallback, and readiness per device.
+
+    The visible forms carry the optional field only when the caller passes it,
+    so the built-in literal stays the pre-C5 shape (the equality cells above)
+    and the custom literal is this one. Both rows of the block pass the block's
+    own allow-list, which now declares ``sound_custom_ready``.
+    """
+    fixture = _fixture(name)
+    if name == "emit-completion.json":
+        built = completion_payload(**COMPLETION_INPUT, sound_custom=CUSTOM_STEM)
+    else:
+        built = digest_payload(
+            **DIGEST_INPUT, exclude=["3f1c9a7b2d4e506182a3b4c5d6e7f809"], sound_custom=CUSTOM_STEM
+        )
+    _check_shape(
+        built, fixture["payload_required"], fixture["payload_optional"], where=f"{name}.custom"
+    )
+    assert built == fixture["custom_payload"]
+    assert built[SOUND_FIELD] == DEFAULT_SOUND_ID, "the fallback every not-ready device plays"
+    assert built[push_payload.SOUND_CUSTOM_FIELD] == CUSTOM_STEM
+    body = emit_body(built, CUSTOM_DEVICE_ROWS)
+    _check_block(body["devices"], fixture, where=f"{name}.custom_body.devices")
+    _check_block(fixture["custom_body"]["devices"], fixture, where=f"{name}.filed.custom")
+    assert body == fixture["custom_body"]
+    assert "reserved_not_sent" not in fixture, "C5 sends both fields; nothing is reserved now"
+
+
+def test_the_custom_sound_field_is_declared_where_it_may_travel_and_nowhere_else() -> None:
+    for name in ("emit-completion.json", "emit-digest.json", "emit-attention.json"):
+        fixture = _fixture(name)
+        assert fixture["report_block_optional"]["sound_custom_ready"] == "bool"
+        if name == "emit-attention.json":
+            assert "sound_custom" not in fixture["payload_optional"]
+            assert "sound_custom" in fixture["absent_fields"]
+        else:
+            assert fixture["payload_optional"]["sound_custom"] == "str"
+            assert "sound_custom" not in fixture["payload_required"]
+            # The built-in literal carries neither field.
+            assert "sound_custom" not in fixture["body"]
+            assert all("sound_custom_ready" not in row for row in fixture["body"]["devices"])
 
 
 @pytest.mark.parametrize(
-    "name", ["emit-completion.json", "emit-digest.json", "emit-attention.json"]
+    "bad", ["c-3b9f2e7a51c04d86", "c_3B9F2E7A51C04D86", "c_123", "custom-x", ""]
 )
-def test_the_reserved_custom_sound_fields_are_declared_and_absent_today(name: str) -> None:
-    """The freeze reserves two optional fields the machine does not send yet.
+def test_a_custom_sound_that_is_not_the_frozen_stem_is_refused(bad: str) -> None:
+    with pytest.raises(ValueError, match="unknown custom push sound"):
+        completion_payload(**COMPLETION_INPUT, sound_custom=bad)
+    with pytest.raises(ValueError, match="unknown custom push sound"):
+        digest_payload(**DIGEST_INPUT, sound_custom=bad)
 
-    ADR 0006's amendment of 2026-11-04 (notification-sounds addendum 2 §2.2)
-    declares ``sound_custom`` (completion and digest) and the per-device
-    ``devices[].sound_custom_ready`` now, because the cloud validates with
-    ``extra="forbid"``: declared before S7 builds, the machine can start sending
-    them in C5 without a cloud-first deploy. Until then the builders must emit
-    NEITHER — a premature ``sound_custom`` would tell a cloud to play a file no
-    phone has fetched yet. This cell fails the day C5 starts emitting them, which
-    is when ``reserved_not_sent`` (and this cell) must change with it.
-    """
-    fixture = _fixture(name)
-    reserved = fixture["reserved_not_sent"]
-    visible = name != "emit-attention.json"
 
-    # Declared: in the allow-lists, with the frozen types.
-    assert reserved["report_block"] == ["sound_custom_ready"]
-    assert fixture["report_block_optional"]["sound_custom_ready"] == "bool"
-    if visible:
-        assert reserved["payload"] == ["sound_custom"]
-        assert fixture["payload_optional"]["sound_custom"] == "str"
-        assert "sound_custom" not in fixture["payload_required"]
-    else:
-        assert reserved["payload"] == []
-        assert "sound_custom" not in fixture["payload_optional"]
-        assert "sound_custom" in fixture["absent_fields"]
-
-    # Absent today: from the builders' real output and from the filed literals.
-    built = {
-        "emit-completion.json": lambda: completion_payload(**COMPLETION_INPUT),
-        "emit-digest.json": lambda: digest_payload(**DIGEST_INPUT, exclude=["d" * 32]),
-        "emit-attention.json": lambda: attention_payload(**ATTENTION_INPUT, exclude=["d" * 32]),
-    }[name]()
-    body = emit_body(built, DEVICE_ROWS)
-    for part, value in (
-        ("built", body),
-        *((k, fixture[k]) for k in ("payload", "body", "exclude_absent_payload") if k in fixture),
-    ):
-        assert "sound_custom" not in value, f"{name}.{part} sends the reserved sound_custom"
-        for row in value.get("devices", []):
-            assert "sound_custom_ready" not in row, f"{name}.{part} reports sound_custom_ready"
+def test_a_custom_sound_never_rides_a_silenced_banner() -> None:
+    with pytest.raises(ValueError, match="silenced"):
+        completion_payload(**{**COMPLETION_INPUT, "sound": SOUND_NONE}, sound_custom=CUSTOM_STEM)
 
 
 def test_the_reserved_custom_sound_name_is_the_phones_file_stem() -> None:
