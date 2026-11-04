@@ -2972,6 +2972,48 @@
       },
       "status": "passed",
       "note": "Independent current-byte audit: i18n/audits/evidence/es/wire.tool_rows.bridge.skipped/rg6a1/record.json. 1M/0m/0n (ES-RG6-1), 0 unresolved blocker/major; 1 key(s) retranslated. Composed row+expanded checked; no native/rendered claim."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.update",
+      "source_sha256": "2d3f1a132c443c0894b99a3c064d7fa702a5a1334b4854953b2b09083fab12c3",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure)",
+        "session": "9615db04a717",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "340352200f28",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit, 4 new keys. No findings; 0 unresolved blocker/major. Target SHA-256 714827c5c1b2ba14506f27a26e35250f75fc8f66456eb34c5a94fba900eb4dbb. Evidence: i18n/audits/update-notice-tui-340352200f28.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.update",
+      "source_sha256": "123da7e1fce2892a4216e438f2d3470a47d7cf02d7eb890dcefa2835b949997b",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure round-1 remediation)",
+        "session": "d3534e994383",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "c6a7b830880b",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent round-2 re-audit (7 keys). 0 unresolved blocker/major. Target SHA-256 657fbdff3b123ed385813f16afc6ce23161bbb36309212ad9990cbdcada306b9. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
     }
   ]
 }
