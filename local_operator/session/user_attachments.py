@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import logging
 import re
@@ -299,16 +300,46 @@ class _Scanned:
     whole once its newline lands rather than parsing half a row now and the rest never.
     ``offset`` is ``None`` for an archive source, which is decoded as a stream and cannot be
     resumed by byte position - those always rescan, as before.
+
+    ``consumed`` is the inventory of the bytes below ``offset`` - the only part a resume may
+    build on. ``listing`` is what a caller is served: ``consumed`` plus whatever a parseable
+    UNTERMINATED final row carries (review R1-2: the old ``iter_lines`` scan listed such a
+    row, and a hand-edited or imported journal can end in one). Those tail items are never
+    folded into ``consumed``, so the row is read again - once - when its newline lands.
+
+    ``tail_len``/``tail_digest`` pin the line that ENDS at ``offset`` (newline included),
+    the same guard ``tail_anchor.TailAnchor.tail_digest`` keeps for the same hazard (review
+    R1-1 / QA Q1): the transcript writer's append rollback (``transcript.py``,
+    ``os.truncate(self.path, previous_size)``) shrinks the file IN PLACE, and the next
+    append can regrow the same inode past the cached size. Inode and size then both look
+    like "only grew", but the bytes below ``offset`` are no longer the ones scanned - a
+    rolled-back attachment would stay listed and the real row at the old offset would be
+    skipped, for good. Resuming only when those bytes still hash to the recorded digest
+    refuses that; a mismatch is a full rescan. (Row ids are uuids, so a different row that
+    is byte-identical to the pinned one is not a case worth a second guard.)
     """
 
-    __slots__ = ("source", "dev", "ino", "size", "mtime_ns", "offset", "inventory")
+    __slots__ = (
+        "source",
+        "dev",
+        "ino",
+        "size",
+        "mtime_ns",
+        "offset",
+        "tail_len",
+        "tail_digest",
+        "consumed",
+        "listing",
+    )
 
     def __init__(
         self,
         source: str,
         st: Any,
         offset: int | None,
-        inventory: _Inventory,
+        consumed: _Inventory,
+        listing: _Inventory | None = None,
+        tail: tuple[int, str] = (0, ""),
     ) -> None:
         self.source = source
         self.dev = st.st_dev
@@ -316,7 +347,9 @@ class _Scanned:
         self.size = st.st_size
         self.mtime_ns = st.st_mtime_ns
         self.offset = offset
-        self.inventory = inventory
+        self.tail_len, self.tail_digest = tail
+        self.consumed = consumed
+        self.listing = consumed if listing is None else listing
 
     def current(self, source: str, st: Any) -> bool:
         return self.source == source and (self.dev, self.ino, self.size, self.mtime_ns) == (
@@ -326,16 +359,36 @@ class _Scanned:
             st.st_mtime_ns,
         )
 
-    def resumable(self, source: str, st: Any) -> bool:
-        """Is ``st`` this same plain file, grown past the consumed offset?"""
-        return (
+    def resumable(self, source: str, st: Any, path: Path) -> bool:
+        """Is ``st`` this same plain file, grown past the consumed offset, prefix intact?"""
+        if not (
             self.offset is not None
-            and not self.inventory[1]  # a truncated listing stays truncated: nothing to add
+            and not self.consumed[1]  # a truncated listing stays truncated: nothing to add
             and self.source == source
             and (self.dev, self.ino) == (st.st_dev, st.st_ino)
             and st.st_size >= self.size
             and st.st_size >= self.offset
-        )
+        ):
+            return False
+        return _tail_verifies(path, self.offset, self.tail_len, self.tail_digest)
+
+
+def _digest(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def _tail_verifies(path: Path, offset: int, length: int, digest: str) -> bool:
+    """Do the ``length`` bytes ending at ``offset`` still hash to ``digest``?"""
+    if offset == 0:
+        return True  # nothing consumed: a "resume" from 0 is a full scan anyway
+    if length <= 0 or length > offset:
+        return False
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset - length)
+            return _digest(handle.read(length)) == digest
+    except OSError:
+        return False
 
 
 _INVENTORY_CACHE: OrderedDict[str, _Scanned] = OrderedDict()
@@ -350,24 +403,29 @@ def _inventory(session_dir: Path) -> _Inventory:
         st = path.stat()
     except OSError:
         # No journal (or an unreadable one): the scan answers for itself, and there is no
-        # identity to cache it against.
+        # identity to cache it against. The session's entry goes too (review R1-3), so an
+        # entry always describes a file that existed when it was last read.
+        with _CACHE_LOCK:
+            _INVENTORY_CACHE.pop(key, None)
         return _scan_user_attachments(session_dir)
     with _CACHE_LOCK:
         entry = _INVENTORY_CACHE.get(key)
         if entry is not None:
             _INVENTORY_CACHE.move_to_end(key)
     if entry is not None and entry.current(str(path), st):
-        return entry.inventory
-    if codec is None and entry is not None and entry.resumable(str(path), st):
+        return entry.listing
+    if codec is None and entry is not None and entry.resumable(str(path), st, path):
         assert entry.offset is not None  # resumable() checked it; narrows for pyright
-        records, truncated = entry.inventory
-        added, truncated, offset = _scan_plain(
-            session_dir, path, start=entry.offset, already=len(records)
+        scanned = _scan_plain(
+            session_dir,
+            path,
+            st,
+            start=entry.offset,
+            base=entry.consumed[0],
+            tail=(entry.tail_len, entry.tail_digest),
         )
-        scanned = _Scanned(str(path), st, offset, (records + added, truncated))
     elif codec is None:
-        added, truncated, offset = _scan_plain(session_dir, path, start=0, already=0)
-        scanned = _Scanned(str(path), st, offset, (added, truncated))
+        scanned = _scan_plain(session_dir, path, st, start=0, base=(), tail=(0, ""))
     else:
         scanned = _Scanned(str(path), st, None, _scan_user_attachments(session_dir))
     with _CACHE_LOCK:
@@ -375,7 +433,7 @@ def _inventory(session_dir: Path) -> _Inventory:
         _INVENTORY_CACHE.move_to_end(key)
         while len(_INVENTORY_CACHE) > _CACHE_SIZE:
             _INVENTORY_CACHE.popitem(last=False)
-    return scanned.inventory
+    return scanned.listing
 
 
 def list_user_attachments(
@@ -462,35 +520,54 @@ def _scan_user_attachments(session_dir: Path) -> _Inventory:
 
 
 def _scan_plain(
-    session_dir: Path, path: Path, *, start: int, already: int
-) -> tuple[tuple[dict[str, Any], ...], bool, int]:
-    """Scan a PLAIN journal from byte ``start``: ``(new items, truncated, consumed offset)``.
+    session_dir: Path,
+    path: Path,
+    st: Any,
+    *,
+    start: int,
+    base: tuple[dict[str, Any], ...],
+    tail: tuple[int, str],
+) -> _Scanned:
+    """Scan a PLAIN journal from byte ``start`` on top of ``base`` (records below ``start``).
 
     Reads bytes so the offset is exact; decodes each line the way ``iter_lines`` does
     (``errors="replace"``, terminator dropped) so a resumed scan and a full one see the same
-    text. Stops BEFORE a final line with no newline: a writer may be mid-append, and that
-    line is read whole on the next call. ``already`` counts records kept from the previous
-    scan, so ``MAX_ITEMS`` bounds the whole listing rather than each increment.
+    text. A final line with no newline is NOT consumed - a writer may be mid-append, and the
+    line is read whole on the next call - but its items are still LISTED when it parses,
+    which is what the whole-journal ``iter_lines`` scan always did (review R1-2). ``tail``
+    is the previous scan's pin for the line ending at ``start``, carried forward when this
+    read consumes nothing new. ``MAX_ITEMS`` bounds the whole listing, not each increment.
     """
     store = store_for_transcript_dir(session_dir)
-    items: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = list(base)
     truncated = False
     offset = start
+    tail_len, tail_digest = tail
+    unterminated = b""
     with path.open("rb") as handle:
         handle.seek(start)
         for raw in handle:
             if not raw.endswith(b"\n"):
+                unterminated = raw
                 break
             offset += len(raw)
+            tail_len, tail_digest = len(raw), _digest(raw)
             line = raw.decode("utf-8", "replace").rstrip("\r\n")
             for item in _items_from_line(line, store):
-                if already + len(items) >= MAX_ITEMS:
+                if len(items) >= MAX_ITEMS:
                     truncated = True
                     break
                 items.append(item)
             if truncated:
                 break
-    return tuple(items), truncated, offset
+    consumed: _Inventory = (tuple(items), truncated)
+    listing = consumed
+    if unterminated and not truncated:
+        extra = _items_from_line(unterminated.decode("utf-8", "replace"), store)
+        if extra:
+            room = MAX_ITEMS - len(items)
+            listing = (tuple(items) + tuple(extra[:room]), len(extra) > room)
+    return _Scanned(str(path), st, offset, consumed, listing, (tail_len, tail_digest))
 
 
 def find_user_attachment(
