@@ -1,0 +1,45 @@
+AUDIT rg6a1 locale=zh-CN date=2026-11-04T11:22:26Z checkout_head=287c53e0a267f85119c26f3eaa1f4245794fef1d (+ uncommitted remediation of this audit)
+COMMAND env -i HOME=<isolated> PATH=/usr/bin:/bin ~/local-operator/.venv/bin/python recheck.py.txt zh-CN
+STDOUT:
+SHA256 en local_operator/i18n/catalogues/en/wire.tool_rows.bridge.skipped.json e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865
+SHA256 context local_operator/i18n/catalogues/en/wire.tool_rows.bridge.skipped.context.json c726ec8a9c1d0f5a9bc8d77096c24b16dc78ed6a9622ecb2edfaf44e2875ca51
+SHA256 zh-CN local_operator/i18n/catalogues/zh-CN/wire.tool_rows.bridge.skipped.json 22d7fcfad84326984dbba5c5e42f84561f4747ad42be88dd598f51b6410f01cf
+PASS key_parity 3 keys
+PASS icu_parse wire.tool_rows.bridge.skipped.expanded
+PASS arguments wire.tool_rows.bridge.skipped.expanded ()
+PASS render_identity wire.tool_rows.bridge.skipped.expanded
+PASS nfc wire.tool_rows.bridge.skipped.expanded
+PASS no_bidi_or_cf wire.tool_rows.bridge.skipped.expanded
+CELLS wire.tool_rows.bridge.skipped.expanded 54 (en 78; sidecar maxCells: none declared)
+PASS icu_parse wire.tool_rows.bridge.skipped.verb.channel_post
+PASS arguments wire.tool_rows.bridge.skipped.verb.channel_post ()
+PASS render_identity wire.tool_rows.bridge.skipped.verb.channel_post
+PASS nfc wire.tool_rows.bridge.skipped.verb.channel_post
+PASS no_bidi_or_cf wire.tool_rows.bridge.skipped.verb.channel_post
+CELLS wire.tool_rows.bridge.skipped.verb.channel_post 12 (en 15; sidecar maxCells: none declared)
+PASS icu_parse wire.tool_rows.bridge.skipped.verb.dm
+PASS arguments wire.tool_rows.bridge.skipped.verb.dm ()
+PASS render_identity wire.tool_rows.bridge.skipped.verb.dm
+PASS nfc wire.tool_rows.bridge.skipped.verb.dm
+PASS no_bidi_or_cf wire.tool_rows.bridge.skipped.verb.dm
+CELLS wire.tool_rows.bridge.skipped.verb.dm 10 (en 18; sidecar maxCells: none declared)
+ROW channel_post ['conversation_label']: 已跳过发布至 #general · Approved. · 未发布 · duplicate
+PASS row_uses_skip_verb channel_post
+EXPANDED channel_post headline='已跳过发布至 #general' outcome='未发布：刚刚已发送过一条相同的消息，因此跳过了这一条。'
+PASS expanded_sentence channel_post
+ROW channel_post [fallback target]: 已跳过发布至 某个对话 · Approved. · 未发布 · duplicate
+PASS row_uses_skip_verb channel_post
+EXPANDED channel_post headline='已跳过发布至 某个对话' outcome='未发布：刚刚已发送过一条相同的消息，因此跳过了这一条。'
+PASS expanded_sentence channel_post
+ROW dm ['conversation_label']: 已跳过私信 Maya · Approved. · 未发布 · duplicate
+PASS row_uses_skip_verb dm
+EXPANDED dm headline='发给Maya的私信' outcome='未发布：刚刚已发送过一条相同的消息，因此跳过了这一条。'
+PASS expanded_sentence dm
+ROW dm [fallback target]: 已跳过私信 对方 · Approved. · 未发布 · duplicate
+PASS row_uses_skip_verb dm
+EXPANDED dm headline='发给某位成员的私信' outcome='未发布：刚刚已发送过一条相同的消息，因此跳过了这一条。'
+PASS expanded_sentence dm
+SUMMARY zh-CN PASS
+
+STDERR:
+EXIT 0
