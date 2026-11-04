@@ -611,6 +611,7 @@ export type MessageParams = {
   "wire.errors.files.sign_route": { "routes": string };
   "wire.errors.files.sign_ttl": { "maximum": string };
   "wire.errors.files.video_type": { "mime_type": string };
+  "wire.errors.hosting.not_configured": undefined;
   "wire.errors.media.media_refusal": { "error": string };
   "wire.errors.media.provider_model_pair": undefined;
   "wire.errors.media.radient_key_missing": undefined;

@@ -1,0 +1,32 @@
+{
+  "kind": "audit_receipt",
+  "audit_id": "r2b",
+  "locale": "ru",
+  "namespace": "wire.errors.hosting",
+  "record": {
+    "path": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2/record.json",
+    "sha256": "d962d9996c8344e9e684c38bc2713f31a807c49314b08c58ab93c01ecc4fbd21"
+  },
+  "artifacts": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2/report.md",
+      "sha256": "2de8aac11df72a2bfba7f7f865c6aef0158adfea31337515f60418b8b04690ad",
+      "role": "audit report"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/9f874dd64c37/scratchpad/hosting-ru-r2-reader2/audit.log",
+      "sha256": "cacb680b534f6c928f9cc2168a9a6fc7b1b98c6094aa68dbe548ddf6ce5f87d7",
+      "role": "execution log"
+    }
+  ],
+  "verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "reason": "value matches the settled CORE ru rendering «платформа размещения» in all six shipped occurrences; mechanical checks pass on bytes; sentence contract (capital, terminal period, condition only, no restated remedy) holds"
+  },
+  "auditor_session": "9f874dd64c37",
+  "requested_model": "radient/auto",
+  "served_model": "UNKNOWN",
+  "note": "Companion to record.json; same provenance. Record written before this receipt, so the record is not self-hashed."
+}
