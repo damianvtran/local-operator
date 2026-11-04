@@ -152,6 +152,7 @@ deadline; this is separate from the bounded legacy identity writer above.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
@@ -219,6 +220,28 @@ _POLL_SECONDS = 0.05
 #: authority. Signals still re-prove inside ``signal()``; this paces enrolment
 #: between them.
 _AUTHORITY_REFRESH_SECONDS = 1.0
+
+#: Wall-time bound on ONE cleanup proof slice: the slice past any grace wait in
+#: which the kill, finally and terminal phases must re-prove authority and send,
+#: and, on the timeout/signal paths, a separate slice before the grace wait for
+#: the SIGTERM's own proof (see ``_reap``).
+#: 3.0 s because that is the bound the SAME census work already gets at capture
+#: and at the steady-state required refresh (the ``+ 3.0`` literals in
+#: ``_run_cleanup_required``, which this module defines below). It replaced a
+#: 0.25 s allowance inherited from the pre-#3274 five-sleep sweep, which was
+#: never sized for a census: a successful leader-exit sweep now runs ~10 full
+#: strict ``/proc`` scans (each refresh is two censuses, and ``signal()``
+#: refreshes again before its syscall). On a preempted CI worker 0.25 s ran out
+#: mid-scan, the SIGKILL was refused and the grandchild survived -- the
+#: 2026-10-30 incident shape (#3365, CI 41684135750).
+#:
+#: NOT a grace period: nothing waits for it, it only caps how long a proof may
+#: take before it refuses. It does not extend the census's six-attempt churn
+#: limit, and it buys no time for an unreadable or malformed row, which still
+#: refuses at once. Signal authority rests on the reservation witness (our
+#: unreaped zombie leader, re-checked immediately before every syscall), never
+#: on elapsed time, so a longer bound weakens no pin.
+_CLEANUP_PROOF_SECONDS = 3.0
 
 #: Wall-clock ceiling for one run record's filesystem work. Every other step of a
 #: refusal is deadline-bounded; a wedged home directory must not be the one
@@ -299,21 +322,69 @@ def _resolve_run_id(supplied: str | None) -> str:
     return "run-" + uuid.uuid4().hex[:12]
 
 
-def _verdict_record(verdict):
-    """The verdict exactly as it was: four fields, unchanged for existing readers.
+def _creation_receipt_record(receipt):
+    if receipt is None:
+        return None
+    return {
+        "pid": receipt.pid,
+        "scheme": receipt.scheme,
+        "birth": receipt.birth,
+        "parent": receipt.parent,
+        "parent_birth": receipt.parent_birth,
+        "pgid": receipt.pgid,
+        "sid": receipt.sid,
+        "observed": receipt.observed,
+    }
 
-    ``Verdict`` gained ``anchor`` and ``refusal_class``; serialising it with
-    ``asdict`` would silently change a published object, so the record spells the
-    old shape out and the new facts live in ``ownership``.
+
+def _verdict_record(verdict):
+    """Keep legacy verdicts stable; explicitly describe the new acquisition state.
+
+    ``asdict(Verdict)`` would silently extend every published verdict. Only the
+    distinct positive-creation status adds its receipt/coverage fields here;
+    legacy proof and refusal verdicts retain their four-field shape.
     """
     if verdict is None:
         return None
-    return {
+    result = {
         "status": verdict.status,
         "reason": verdict.reason,
         "members": list(verdict.members),
         "evidence_age_s": verdict.evidence_age_s,
     }
+    # Only the new acquisition status extends this legacy verdict object. It
+    # names the missing coverage explicitly rather than inferring it from [].
+    if getattr(verdict, "acquisition_kind", None) is not None:
+        result.update(
+            acquisition_kind=verdict.acquisition_kind,
+            creation_receipt=_creation_receipt_record(verdict.creation_receipt),
+            population_coverage=verdict.population_coverage,
+        )
+    return result
+
+
+def _probe_detail(owner, key):
+    """Bound optional diagnostic JSON; it never participates in cleanup proof.
+
+    CI often keeps stderr without scratch receipts. Both surfaces must carry
+    the same current evidence, without unbounded PID lists or raw proc rows.
+    """
+    detail = (getattr(owner, "probe", {}) or {}).get(key)
+    if detail is None:
+        return None
+    try:
+        encoded = json.dumps(detail, sort_keys=True, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) <= 4096:
+            return detail
+    except Exception:  # noqa: BLE001 - diagnostics must not hide the original refusal
+        pass
+    return {"diagnostic_truncated": True}
+
+
+def _sample_failure_detail(owner):
+    # Retain the existing helper seam while sharing its byte bound with census
+    # evidence, which can fail before capture has any witness or member receipt.
+    return _probe_detail(owner, "sample_failure")
 
 
 def _ownership_record(owner, verdict):
@@ -336,11 +407,20 @@ def _ownership_record(owner, verdict):
     return {
         "schema": "run-bounded-ownership/v1",
         "anchor": anchor,
+        "acquisition_kind": probe.get("acquisition_kind"),
+        "creation_receipt": probe.get("creation_receipt"),
+        "population_coverage": getattr(verdict, "population_coverage", None)
+        or ("not-established" if anchor == "leader-live-creation" else None),
+        "exclusive_reap_precondition": probe.get("exclusive_reap_precondition"),
         "pin": (
-            "leader held unreaped: the group number stays reserved, so its "
+            "live creation observed; exclusive reap assumed; no population or cleanup proof"
+            if anchor == "leader-live-creation"
+            else "leader held unreaped: the group number stays reserved, so its "
             "members are ours by construction"
         ),
         "refusal_class": getattr(verdict, "refusal_class", None),
+        "sample_failure": _sample_failure_detail(owner),
+        "census_failure": _probe_detail(owner, "census_failure"),
         "proof": probe.get("proof", []),
         "residuals": probe.get("residuals", []),
         # Members the census saw that had already exited by the sample: gone, not
@@ -467,25 +547,43 @@ def _record_run(
         return None
 
 
-def _reap(owner, grace, stream, *, reason, send, require, deadline):
+def _reap(owner, grace, stream, *, reason, send, require, until):
     """TERM then KILL; the grace wait asks ONE cheap question per tick.
 
     A grace tick asks only "has the leader gone terminal?" through the pin seam —
     it costs one sample, not the two complete strict censuses the old per-tick
     ``refresh`` ran 40 times a second. Authority is re-proven where it is spent:
     inside ``send`` at the SIGTERM and again at the SIGKILL decision.
+
+    ``until`` is the run's one cleanup deadline (``begin_cleanup``), sized by the
+    caller as ``grace + 2 * _CLEANUP_PROOF_SECONDS``: one proof slice for the
+    SIGTERM, then ``grace``, then one slice shared by the kill, finally and
+    terminal phases. The SIGTERM proof is NOT carved out of ``grace``. It used to
+    be (deadline ``start + grace``), and the required refresh just before it
+    spent that window: at ``--grace 0.2`` a slow-but-finishing census refused
+    the TERM, and a refused proof forbids every later signal (the ``finally``
+    no-retry rule), so the SIGKILL never ran and the grandchild outlived an
+    rc 124 run (#3368 QA Q1). ``--grace`` keeps its documented meaning -- how
+    long the group gets to exit AFTER the SIGTERM -- and a group that exits on
+    TERM still ends the wait at once, so no healthy stop waits any longer.
     """
     _report(stream, f"[run_bounded] {reason} — requesting checked SIGTERM")
     # ``send`` is ``require(...)``: a refusal raises AuthorityRefused at this call
     # site, so this function never enters its wait with a lost capability. The
     # exception is the enforcement point; a returned-REFUSED branch here read like
     # one and could never run.
-    send(signal.SIGTERM, reason + ":term", deadline)
+    send(signal.SIGTERM, reason + ":term", min(time.monotonic() + _CLEANUP_PROOF_SECONDS, until))
+    # The grace clock starts when the TERM has been sent, not when cleanup began.
+    deadline = min(time.monotonic() + grace, until)
     while time.monotonic() < deadline:
         if owner.leader_terminal(deadline):
             return
         time.sleep(min(_POLL_SECONDS, max(0, deadline - time.monotonic())))
-    send(signal.SIGKILL, reason + ":kill", deadline + 0.25)
+    # What remains is one proof slice less the required refresh that ran just
+    # before this function on the same bound (two censuses, normally a small
+    # fraction of the slice): the TERM proof is capped at one slice past its
+    # own start, and the wait at ``grace`` past the send.
+    send(signal.SIGKILL, reason + ":kill", until)
 
 
 def _memory_budget(override_mb: int | None) -> tuple[memory_guard.Budget, str]:
@@ -493,7 +591,8 @@ def _memory_budget(override_mb: int | None) -> tuple[memory_guard.Budget, str]:
 
     Missing means canonical auto policy; zero is an explicit, disclosed disable.
     Invalid metadata is an error, never a spelling of unlimited. This only
-    prices the owned child PG, not the wrapper+child aggregate or later setsid.
+    prices the owned child PG plus descendants that left it by setsid (charged by
+    ancestry), not the wrapper itself or a descendant re-parented to pid 1.
     """
     raw = os.environ.get(memory_guard.RESOLVED_MEMORY_MB_ENV)
     inherited: int | None = None
@@ -621,7 +720,7 @@ def _run_cleanup_required(
     if budget.ceiling_mb > 0:
         stream.write(
             f"[run_bounded] memory budget {budget.ceiling_mb} MiB ({budget_source}); "
-            "sampled owned child group only\n"
+            "sampled owned child group and escaped descendants\n"
         )
     else:
         stream.write(bounded_contract.disabled_budget_line(budget_source, budget) + "\n")
@@ -681,7 +780,13 @@ def _run_cleanup_required(
     # whose evidence matters most, and a record carrying only the believed
     # identity is still distinguishable from "no record at all".
     _record_run(
-        owner, stream, run_id, "spawn", command=os.path.basename(argv[0]), start_utc=run_started_utc
+        owner,
+        stream,
+        run_id,
+        "spawn",
+        command=os.path.basename(argv[0]),
+        start_utc=run_started_utc,
+        verdict=owner.last if owner.last.status == "ACQUIRED_POSITIVE" else None,
     )
     refused = False
     proof_failed = False
@@ -699,6 +804,16 @@ def _run_cleanup_required(
         # CI retains stderr, not the per-run scratch JSON. Keep the actual
         # acquisition/refusal cause visible rather than just its record path.
         _report(stream, f"[run_bounded] {phase} refused: {result.reason}")
+        for name in ("sample_failure", "census_failure"):
+            detail = _probe_detail(owner, name)
+            if detail is not None:
+                _report(
+                    stream,
+                    "[run_bounded] "
+                    + name
+                    + "="
+                    + json.dumps(detail, sort_keys=True, separators=(",", ":")),
+                )
         _record_run(
             owner,
             stream,
@@ -710,7 +825,22 @@ def _run_cleanup_required(
         )
 
     def require(result, phase):
-        if result.status == "REFUSED":
+        # Creation admits monitoring ONLY. No refresh/send/probe phase may
+        # borrow that receipt as proof, even if a faulty caller caches it.
+        if phase == "acquire":
+            allowed = {"ACQUIRED_POSITIVE", "VERIFIED", "OBSERVED_EMPTY"}
+        elif phase == "required-refresh":
+            allowed = {"VERIFIED", "OBSERVED_EMPTY"}
+        else:
+            allowed = {"SIGNALED", "OBSERVED_EMPTY"}
+        if result.status not in allowed:
+            if result.status != "REFUSED":
+                result = owned_process_group.Verdict(
+                    "REFUSED",
+                    "unexpected " + result.status + " in " + phase,
+                    result.members,
+                    refusal_class="unproven",
+                )
             fail_proof(result, phase)
             raise AuthorityRefused
         return result
@@ -749,7 +879,12 @@ def _run_cleanup_required(
     unanswered = 0
     try:
         require(owner.last, "acquire")
-        guard = memory_guard.Guard(pgid, budget) if budget.ceiling_mb > 0 else None
+        # descendants=True: charge descendants that called setsid() and left the
+        # group too (see memory_guard.Guard._escaped_descendants for the measured
+        # 1,852 MB-under-1,536 MB miss this closes).
+        guard = (
+            memory_guard.Guard(pgid, budget, descendants=True) if budget.ceiling_mb > 0 else None
+        )
         next_sample = started
         next_probe = started + _AUTHORITY_REFRESH_SECONDS
         unmeasured_reported = False
@@ -772,12 +907,14 @@ def _run_cleanup_required(
             # cadence rather than once per poll: see _AUTHORITY_REFRESH_SECONDS.
             if signum or timed_out or now >= next_probe:
                 probe_until = (
-                    begin_cleanup(grace + 0.25) if signum or timed_out else min(deadline, now + 3.0)
+                    begin_cleanup(grace + 2 * _CLEANUP_PROOF_SECONDS)
+                    if signum or timed_out
+                    else min(deadline, now + 3.0)
                 )
                 require(owner.refresh(deadline=probe_until), "required-refresh")
                 next_probe = now + _AUTHORITY_REFRESH_SECONDS
             if signum:
-                until = begin_cleanup(grace + 0.25)
+                until = begin_cleanup(grace + 2 * _CLEANUP_PROOF_SECONDS)
                 send(signum, "forward", until)
                 _reap(
                     owner,
@@ -786,12 +923,12 @@ def _run_cleanup_required(
                     reason=f"signal {signum} received",
                     send=send,
                     require=require,
-                    deadline=until - 0.25,
+                    until=until,
                 )
                 rc = 128 + signum
                 break
             if timed_out:
-                until = begin_cleanup(grace + 0.25)
+                until = begin_cleanup(grace + 2 * _CLEANUP_PROOF_SECONDS)
                 _reap(
                     owner,
                     grace,
@@ -799,7 +936,7 @@ def _run_cleanup_required(
                     reason=f"timeout after {timeout:g}s",
                     send=send,
                     require=require,
-                    deadline=until - 0.25,
+                    until=until,
                 )
                 _report(
                     stream,
@@ -841,14 +978,47 @@ def _run_cleanup_required(
             if guard is not None and now >= next_sample:
                 sample = guard.sample_sync()
                 next_sample = now + guard.tick_s
+                # Disclosed ONCE per pid (review R1): unreadable by credential is
+                # named, never counted toward fail-closed.
+                fresh = (
+                    guard.new_not_permitted(sample) if hasattr(guard, "new_not_permitted") else []
+                )
+                if fresh:
+                    _report(
+                        stream, f"[run_bounded] {memory_guard.not_permitted_line(sample, fresh)}"
+                    )
                 if guard.should_kill(sample):
+                    # getattr: guard and sample are injectable seams; a
+                    # stand-in that predates descendant accounting has neither.
+                    if getattr(sample, "unaccounted", None):
+                        _report(stream, f"[run_bounded] {memory_guard.unaccounted_line(sample)}")
                     message = guard.over_budget_message(sample, unit="MiB", escape=_memory_escape())
                     _report(stream, f"[run_bounded] {message}")
                     rc = EXIT_MEMORY
                     if _outcome is not None:
                         _outcome.termination_cause = "memory-policy"
                         _outcome.wrapper_exit_code = rc
-                    send(signal.SIGKILL, "memory", begin_cleanup(0.25))
+                    # Escaped descendants FIRST: their parent edge is the only
+                    # ownership proof, and it is gone once the group dies.
+                    stop_escaped = getattr(guard, "stop_escaped", None)
+                    stopped = stop_escaped(signal.SIGKILL) if stop_escaped else []
+                    if stopped:
+                        _report(
+                            stream,
+                            "[run_bounded] SIGKILL to escaped descendant(s) "
+                            + ", ".join(str(pid) for pid in stopped),
+                        )
+                    unsignalled = getattr(guard, "unsignalled", None)
+                    if unsignalled:
+                        _report(
+                            stream, f"[run_bounded] {memory_guard.unsignalled_line(unsignalled)}"
+                        )
+                    # QA Q2: a live escaped pid no parentage source could prove
+                    # ours was not signalled — named so it never survives silently.
+                    unverified = getattr(guard, "unverified", None)
+                    if unverified:
+                        _report(stream, f"[run_bounded] {memory_guard.unverified_line(unverified)}")
+                    send(signal.SIGKILL, "memory", begin_cleanup(_CLEANUP_PROOF_SECONDS))
                     break
                 notice = guard.soft_notice(sample)
                 if notice:
@@ -879,9 +1049,9 @@ def _run_cleanup_required(
         raise
     finally:
         try:
-            # Retain the existing quarter-second final allowance, not a new
-            # grace period per pass. Never claim a requested signal means reaped.
-            until = begin_cleanup(0.25)
+            # One shared cleanup-proof bound (see _CLEANUP_PROOF_SECONDS), not a
+            # new grace period per pass. Never claim a requested signal means reaped.
+            until = begin_cleanup(_CLEANUP_PROOF_SECONDS)
             for attempt in range(5):
                 if proof_failed:
                     break  # no automatic signal retry after loss of authority

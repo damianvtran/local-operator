@@ -1,0 +1,135 @@
+{
+  "audit_id": "e55f54-hosting1",
+  "audit_kind": "independent_translation_audit",
+  "round": "initial (reader 1)",
+  "locale": "zh-CN",
+  "namespace": "wire.errors.hosting",
+  "audit_date": "2026-11-03",
+  "key_count": 1,
+  "keys": [
+    "wire.errors.hosting.not_configured"
+  ],
+  "source_state": {
+    "base_commit": "87ca846245b2",
+    "namespace_absent_at_base": "SUPPLIED by author/manager; NOT verified here (no Git access in this pass)",
+    "committed": false,
+    "shipped": false
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "e55f54b6a26e",
+    "model_requested_route": "radient/auto",
+    "model_served_label": "radient/auto",
+    "underlying_served_model": "UNKNOWN",
+    "actual_model_source": "own transcript.jsonl completed assistant payload.usage",
+    "fallback": "none asserted",
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_code_author": true,
+    "code_author_session": "94dcef624dec",
+    "read_other_reader_verdict_before_verdict": false
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9"
+    },
+    "zh-CN": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/hosting-zh-CN/wire.errors.hosting.json",
+      "sha256": "b4cd49fd638d7aa7b9f6142a61d465918d69734c7c970025da9121f18907207e"
+    }
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/hosting-zh-CN-audit-reader1/report.md",
+      "sha256": "c24156015cd28e4d1f3f1b6e30ecfca908ea929790b1d11c32b39ac3e951612b",
+      "kind": "audit_notes_not_execution_log"
+    },
+    "input-hashes.json": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/hosting-zh-CN-audit-reader1/input-hashes.json",
+      "sha256": "9e50285985692a56282c645c079993515b201eef934aedd46bb1493dfc2fb0d7",
+      "kind": "supporting_artifact"
+    },
+    "model-provenance.json": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/hosting-zh-CN-audit-reader1/model-provenance.json",
+      "sha256": "7e98250126448307e70776a3761c5eaf54a12d389331dd9f8592a80073b4eed5",
+      "kind": "supporting_artifact"
+    }
+  },
+  "findings": [],
+  "current_report_verdict": {
+    "status": "passed",
+    "scope": "single display key, zh-CN, source-only",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "severity_counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    }
+  },
+  "mechanical": {
+    "hashes_recomputed_and_matched": true,
+    "key_parity": true,
+    "nfc": true,
+    "cf_count": 0,
+    "bidi_controls": 0,
+    "ascii_letters": 0,
+    "braces": 0,
+    "edge_whitespace": false,
+    "terminal": "U+3002",
+    "chars": 8,
+    "cells": 16,
+    "maxCells": "none declared in context; no width cap to test",
+    "icu": "not applicable: zero arguments, plain literal"
+  },
+  "native_assessment": {
+    "condition_only": true,
+    "remedy_added": false,
+    "extra_detail_added": false,
+    "complete_after_colon": true,
+    "punctuation": "full-width U+3002 for a full sentence",
+    "capitalization": "N/A in Chinese; no case marker introduced",
+    "terminology": {
+      "hosting platform": "托管平台 (corpus: cli.global_help.hosting, propagated_hosting, cli.exec_worker_help.hosting)",
+      "not configured": "未配置 (corpus: wire.errors.media.radient_key_missing, tui.authoring.invalid_effort)"
+    },
+    "provider_vs_platform": "source says platform; zh follows source with 托管平台; VI provider wording is a different locale decision"
+  },
+  "contract_notes": {
+    "legacy_exception": "HostingNotConfiguredError string stays English by contract; this key is display copy only",
+    "caller_frame": "surrounding refusal and its remedy are caller-owned; not edited or claimed localized",
+    "english_fallback_in_value": false
+  },
+  "holds_not_cleared": [
+    "composed rendering with the calling frame",
+    "pseudo-localization",
+    "native terminal fit",
+    "rendered frames",
+    "second independent reader",
+    "activation/shipped state",
+    "page-level English-free"
+  ],
+  "constraints_observed": [
+    "no translation write",
+    "no repo/target/ledger/generated/baseline edit",
+    "no Git",
+    "no process/subprocess",
+    "no test/scanner/formatter/project import/native/install/CI",
+    "earlier bundles untouched",
+    "no other reader report read"
+  ],
+  "retention": {
+    "current_location": "own scratch bundle",
+    "intended_canonical_root": "i18n/audits/evidence/zh-CN/wire.errors.hosting/e55f54-hosting1/",
+    "tracked_commit_exists": false
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

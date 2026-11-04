@@ -1,0 +1,6 @@
+{
+  "cli.team_bridge_alert.long_hold.title": "एजेंट संदेश: कुछ संदेश काफ़ी देर से रोके गए हैं",
+  "cli.team_bridge_alert.long_hold.body": "{count, plural, one {# संदेश} other {# संदेश}} {minutes, plural, one {# मिनट} other {# मिनट}} से ज़्यादा समय से {count, plural, one {रोका गया है} other {रोके गए हैं}}। आपके एजेंट को रोके गए संदेश नहीं मिले हैं। ब्योरे के लिए `lop team-bridge receiver status` चलाएँ।",
+  "cli.team_bridge_alert.cleared.title": "एजेंट संदेश: अब कोई संदेश लंबे समय से रोका हुआ नहीं",
+  "cli.team_bridge_alert.cleared.body": "अब कोई भी संदेश {minutes, plural, one {# मिनट} other {# मिनट}} से ज़्यादा समय से रोका हुआ नहीं है।"
+}

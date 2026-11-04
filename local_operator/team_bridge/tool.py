@@ -68,7 +68,15 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
 - **channel_history** — a bounded page of messages. The server admits bodies
   per (message, endpoint) screening; an agent sees the METADATA (sender, seq,
   hash) of messages it has not admitted, with ``body`` null, and only the
-  admitted bodies. There is intentionally no local body cache here. The one
+  admitted bodies. A null body also carries ``body_state`` so it is never read
+  as a blank message: ``held`` (screening has not released it; only a coarse
+  ``hold_class`` and ``held_for_s`` are shown), ``not_admitted``,
+  ``rejected`` (hub-supplied only, never derived here), or ``unavailable``
+  (the agent's own post could not be read back in this read: the read-back
+  failed, or the page held more own posts than one read fetches). It means this agent
+  has not been given that message; it is NOT an empty message and its content
+  must not be inferred. No body, hold code or category is ever shown.
+  There is intentionally no local body cache here. The one
   exception to ``body: null`` is a message THIS account authored: the hub never
   delivers it back for admission, so history and thread fetch its text per read
   (hash-verified, never stored) so a sender can read what it wrote.
@@ -128,15 +136,18 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import re
+import time
 import unicodedata
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
 from local_operator.harness.types import (
@@ -148,8 +159,8 @@ from local_operator.harness.types import (
     ToolResult,
 )
 
-from . import reply_guard
-from .client import TeamBridgeClient
+from . import agent_attachments, reply_guard
+from .client import ATTACHMENT_MAX_COUNT, TeamBridgeClient
 from .outbox import Outbox, send_from_outbox
 from .recipient_resolution import (
     ResolutionAuditUnavailable,
@@ -172,6 +183,8 @@ from .types import (
     validate_recipient_shape,
     validate_send_recipient,
 )
+
+logger = logging.getLogger(__name__)
 
 #: Ops the tool accepts. ``decide`` is deliberately absent (see the module
 #: docstring); the executor still names it in its refusal so a model that
@@ -429,6 +442,19 @@ class BridgeToolParams(BaseModel):
     # dm to an account: "agent" (default) reaches that person's chief of
     # staff, "human" the person themself.
     target: Literal["agent", "human"] = "agent"
+    # Absolute paths of local PNG/JPEG images to attach to a dm / channel_post
+    # (see ``agent_attachments``). SkipJsonSchema keeps it OUT of the published
+    # schema ON PURPOSE: the schema is built once at session start, network-free,
+    # while the hub only advertises ``attachments.agent_upload`` at runtime (and
+    # keeps it off by default), so a published field would advertise an option most
+    # hubs refuse AND move every session's tool-doc/start-context token ledgers.
+    # Validation still accepts it (extra="forbid" would otherwise reject it); the
+    # executor refuses it unless the hub advertises the capability, and the
+    # inline-data refusal names it ONLY when the hub advertises it (otherwise it
+    # tells the agent to describe the image or share a link).
+    attachments: SkipJsonSchema[list[str]] = Field(
+        default_factory=list, max_length=ATTACHMENT_MAX_COUNT
+    )
 
     @field_validator("to")
     @classmethod
@@ -450,6 +476,60 @@ class BridgeToolParams(BaseModel):
 
 def _error(message: str, *, code: str = "invalid_request") -> dict[str, Any]:
     return {"ok": False, "code": code, "error": message}
+
+
+#: The ops whose payload is ONE outgoing message, mapped to the field the op
+#: reads it from. The params model is shared by every op and carries both a
+#: ``text`` (the pair-inbox ops' historical name) and a ``body`` (the room ops'
+#: name), so a model naturally writes ``text`` for ``channel_post`` or ``body``
+#: for ``send`` — and the op then saw an empty message and refused "needs
+#: non-empty body" (reproduced twice in production, 2026-11-04). For these ops
+#: the two words can only mean the same thing, so the other one is an ALIAS.
+#: No other op reads either field: ``react`` takes ``emoji``, ``channel_create``
+#: takes ``name``/``topic``, ``take_up`` RETURNS ``text`` rather than taking it,
+#: and the reads take neither — which is why the alias is scoped to this map and
+#: never applied tool-wide, where it could silently give a stray field meaning.
+MESSAGE_FIELD_BY_OP: dict[str, str] = {
+    "channel_post": "body",
+    "dm": "body",
+    "send": "text",
+    "reply": "text",
+}
+
+
+def _normalize_message_field(
+    op: str, args: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Fold the alias onto the op's own message field, or refuse a conflict.
+
+    Aliasing (rather than only a better refusal) is safe because for a message
+    op both fields name the same payload, and it is what makes the model's first
+    natural attempt work instead of costing a retry. Two NON-EMPTY values that
+    differ are refused, never resolved: picking either would send a message the
+    caller may not have meant, and a sent message cannot be recalled. Identical
+    values are one message spelt twice and pass. A whitespace-only value counts
+    as empty, matching each op's own emptiness check. A non-string is left for
+    the params model to refuse with its own typed error.
+    """
+    canonical = MESSAGE_FIELD_BY_OP.get(op)
+    if canonical is None:
+        return args, None
+    alias = "body" if canonical == "text" else "text"
+    if alias not in args:
+        return args, None
+    primary = args.get(canonical, "")
+    secondary = args[alias]
+    if not isinstance(primary, str) or not isinstance(secondary, str):
+        return args, None
+    if primary.strip() and secondary.strip() and primary != secondary:
+        return args, _error(
+            f"{op} got both {canonical} and {alias} with different content; pass the "
+            f"message once, as {canonical}. Nothing was sent"
+        )
+    folded = {key: value for key, value in args.items() if key != alias}
+    if not primary.strip():
+        folded[canonical] = secondary
+    return folded, None
 
 
 #: A refusal's ``field``/``rule`` is a server identifier, never prose. Bound and
@@ -1020,17 +1100,30 @@ async def _direct_message(
     params, refused = _dm_recipient(params)
     if refused is not None:
         return refused
-    if params.body and params.text:
-        return _error("dm takes body or text, not both")
-    text = params.body or params.text
+    # ``text`` was already folded onto ``body`` (or refused as a conflicting
+    # second message) by ``_normalize_message_field`` in the executor.
+    text = params.body
     if not text.strip():
         return _error("dm needs non-empty body")
+    inline_image = await agent_attachments.refuse_inline_image_data_for(runtime, text)
+    if inline_image is not None:
+        return _error(inline_image["error"], code=inline_image["code"])
     thread_root_id = params.thread_root_id.strip()
     if thread_root_id and _CONVERSATION_MESSAGE_ID.fullmatch(thread_root_id) is None:
         return _error("dm thread_root_id must be a message id (bcmsg_…)")
     target, label, refusal = await _resolve_dm_target(runtime, params)
     if refusal is not None or target is None:
         return refusal or _error("dm target unresolved")
+    # Local file checks + the hub's ``agent_upload`` capability, BEFORE the DM is
+    # opened: a refused attachment must not leave a conversation behind.
+    prepared_images: tuple[agent_attachments.PreparedImage, ...] = ()
+    if params.attachments:
+        try:
+            prepared_images = await agent_attachments.prepare_attachments(
+                runtime, params.attachments
+            )
+        except agent_attachments.AttachmentRefused as refused:
+            return _error(refused.message, code=refused.code)
     creator = {
         "account_id": str(getattr(runtime.owner, "account_id", "") or ""),
         "kind": "agent",
@@ -1061,51 +1154,89 @@ async def _direct_message(
     conversation_id = str(view.get("id") or "")
     if _CONVERSATION_ID.fullmatch(conversation_id) is None:
         return _error("the hub opened no usable DM id", code="dm_failed")
-    # LOOP/COST GUARD, DM HALF (review round 1, m1). A DM is an ordinary
-    # conversation with both agents as members, so under the wake contract each
-    # `dm` wakes the other agent exactly like a channel post — two agents trading
-    # DMs is the same runaway the guard exists for, and an older hub enforces no
-    # cap at all. Same limits, same structured refusal as `channel_post`, keyed
-    # on the DM's own conversation id; reserved AFTER every local refusal (a
-    # malformed or unreachable target never spends budget) and BEFORE the write
-    # (a concurrent post of this endpoint sees the slot).
+    # Stage the images (the DM now exists, so there is a conversation to stage
+    # into) BEFORE the reply guard is touched: a failed upload then never reserves a
+    # slot. Every exit below that does not send must discard them.
+    staged_images: list[agent_attachments.StagedImage] = []
+    if prepared_images:
+        try:
+            staged_images = await agent_attachments.stage_attachments(
+                runtime, conversation_id, endpoint_id, prepared_images
+            )
+        except Exception as failure:
+            return _error(
+                f"the image upload did not confirm; nothing was sent: {_failure_text(failure)}",
+                code="attachment_failed",
+            )
+    # REPLY GUARD, DM HALF (review round 1, m1). A DM is an ordinary
+    # conversation, so it gets the same bookkeeping as `channel_post`, keyed on
+    # the DM's own conversation id: never a count refusal (operator, 2026-11-03),
+    # only an exact double send skipped and a one-line warning on a long
+    # one-sided run. Reserved AFTER every local refusal (a malformed or
+    # unreachable target, a refused attachment, a failed upload records nothing)
+    # and BEFORE the write (a concurrent post of this endpoint sees the slot).
+    # Unusable guard state never stops the DM (round 3, m-3): it goes out
+    # untracked, with a warning. No addressees: the DM's conversation id already
+    # names its recipient.
+    # The staged images are released on EVERY exit that does not land the send —
+    # a skipped duplicate, a failed send, and a cancelled turn (CancelledError is
+    # not an ``Exception``) — by one ``finally`` rather than a discard at each
+    # return, so a path added later cannot forget it.
+    slot: reply_guard.Reservation | reply_guard.Skipped | None = None
+    guard_warning: str | None = None
+    guard_busy = False
+    landed = False
     try:
-        slot = reply_guard.reserve_post(
-            runtime.config_dir, endpoint_id=endpoint_id, conversation_id=conversation_id
-        )
-    except reply_guard.ReplyGuardUnavailable:
-        return _error(
-            "the reply guard could not read its state; not posting",
-            code=reply_guard.CODE_UNAVAILABLE,
-        )
-    if isinstance(slot, reply_guard.Refusal):
-        return slot.as_result()
-    try:
-        result = await runtime.client.conversation_send(
-            conversation_id,
-            client_ref=str(uuid.uuid4()),
-            text=text,
-            tenant_id=runtime.tenant_id,
-            actor_endpoint_id=endpoint_id,
-            origin_session_id=runtime.session_id,
-            thread_root_id=thread_root_id or None,
-            expected_account_id=runtime.owner.account_id,
-        )
-    except Exception as failure:
-        # The hub did not take it: the budget slot goes back (the run counter
-        # does not — see ``reply_guard.release``).
-        reply_guard.release(
-            runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=conversation_id
-        )
-        return _error(
-            f"the DM {conversation_id} opened but the post did not confirm: "
-            f"{_failure_text(failure)}",
-            code="post_failed",
-        )
+        try:
+            slot = reply_guard.reserve_post(
+                runtime.config_dir,
+                endpoint_id=endpoint_id,
+                conversation_id=conversation_id,
+                body=_guard_body(text, prepared_images),
+                thread_root_id=thread_root_id,
+            )
+        except reply_guard.ReplyGuardUnavailable as failure:
+            guard_warning = reply_guard.unavailable_warning(failure)
+            guard_busy = failure.transient
+        if isinstance(slot, reply_guard.Skipped):
+            return slot.as_result(conversation_id)
+        try:
+            result = await runtime.client.conversation_send(
+                conversation_id,
+                client_ref=str(uuid.uuid4()),
+                text=text,
+                tenant_id=runtime.tenant_id,
+                actor_endpoint_id=endpoint_id,
+                origin_session_id=runtime.session_id,
+                thread_root_id=thread_root_id or None,
+                expected_account_id=runtime.owner.account_id,
+                **agent_attachments.send_kwargs(staged_images),
+            )
+        except Exception as failure:
+            # The hub did not take it: the slot goes back (``reply_guard.release``).
+            if slot is not None:
+                reply_guard.release(
+                    runtime.config_dir,
+                    slot,
+                    endpoint_id=endpoint_id,
+                    conversation_id=conversation_id,
+                )
+            return _error(
+                f"the DM {conversation_id} opened but the post did not confirm: "
+                f"{_failure_text(failure)}",
+                code="post_failed",
+            )
+        landed = True
+    finally:
+        if not landed:
+            await agent_attachments.discard_attachments(
+                runtime, conversation_id, endpoint_id, staged_images
+            )
     receipt = _post_receipt(
         conversation_id, result, thread_root_id=thread_root_id, lead=f"direct message to {label} in"
     )
     receipt["destination_type"] = "conversation_dm"
+    attachment_warning = _annotate_attachments(receipt, staged_images)
     # The target's membership state is the server's admission answer: an
     # ``invited`` agent will not be woken until its owner accepts, and the
     # sender must know that rather than assume delivery.
@@ -1127,7 +1258,13 @@ async def _direct_message(
                 receipt[
                     "content"
                 ] += f"; recipient agent is {state} (its owner must accept before it is woken)"
-    return receipt
+    return _with_warnings(
+        receipt,
+        guard_warning,
+        slot.warning if slot is not None else None,
+        attachment_warning,
+        _agent_run_advice(runtime, endpoint_id, conversation_id, result, guard_busy=guard_busy),
+    )
 
 
 # -- owner-shared conversations (the chief-of-staff read grant) --------------
@@ -1327,6 +1464,151 @@ def _post_receipt(
     return receipt
 
 
+def _guard_body(text: str, prepared: Sequence[agent_attachments.PreparedImage]) -> str:
+    """The reply guard's duplicate key for a post: the text plus the images it carries.
+
+    WHY. The guard skips a byte-identical re-send within 10 s. Keyed on the text
+    alone, "Here it is" + image A followed by "Here it is" + image B would drop
+    the second, DIFFERENT post as a double send. The key therefore folds in a
+    digest of each image's bytes (not the staged ``batt_`` id: the hub mints a
+    fresh id once a staged row is bound, so an id cannot recognise a re-send of
+    the same image). Same text and same images is still one message; a text-only
+    post keys on the text exactly as before. The reply guard keys its own HMAC
+    over this string, so the digest is never stored.
+    """
+
+    if not prepared:
+        return text
+    digests = ",".join(hashlib.sha256(item.payload()).hexdigest() for item in prepared)
+    return f"{text}\0attachments:{digests}"
+
+
+def _annotate_attachments(
+    receipt: dict[str, Any], staged: Sequence[agent_attachments.StagedImage]
+) -> str | None:
+    """Add the image block to a receipt; a fault becomes a warning, never a failure.
+
+    Called only after the hub ACCEPTED the send, like :func:`_agent_run_advice`:
+    an exception here reported as a tool error would tell the model a delivered
+    message failed and invite a second copy. Returns the warning line to attach.
+    """
+
+    try:
+        agent_attachments.annotate_receipt(receipt, staged)
+    except Exception:  # noqa: BLE001 — receipt decoration after delivery must never fail the post
+        return (
+            f"the post was delivered with {len(staged)} image(s) attached, "
+            "but the receipt could not list them; do not resend"
+        )
+    return None
+
+
+def _with_warnings(receipt: dict[str, Any], *warnings: str | None) -> dict[str, Any]:
+    """Attach the post's warnings to a successful receipt as ONE ``warning`` field.
+
+    Each is one line and absent on all but the posts that cross a threshold:
+    the token-cheap nudges that replaced the count refusals (operator,
+    2026-11-03) — the one-sided run, #294's agent run, and a post that went out
+    without the reply guard. One line per warning, newline-joined, absent when
+    there are none. The tool's renderer (:func:`_model_notes`) puts every line
+    into the text the provider receives; ``details`` alone is never read.
+    """
+
+    lines = [warning for warning in warnings if warning]
+    if lines:
+        receipt["warning"] = "\n".join(lines)
+    return receipt
+
+
+def _agent_wake_notice(result: Any) -> Any:
+    """agent-server #294's ``agent_wake`` from a send answer, or None (older server).
+
+    Read from the same view :func:`_posted_message` reads (the unwrapped
+    message view, or a proxy's nested ``message``), so the two never disagree
+    about which object the hub answered.
+    """
+
+    if not isinstance(result, dict):
+        return None
+    nested = result.get("message")
+    view: dict[str, Any] = nested if isinstance(nested, dict) else result
+    return view.get("agent_wake")
+
+
+def _agent_run_advice(
+    runtime: "BridgeRuntime",
+    endpoint_id: str,
+    conversation_id: str,
+    result: Any,
+    *,
+    guard_busy: bool,
+) -> str | None:
+    """#294's ``agent_wake`` advice for a post the hub ALREADY ACCEPTED, never fatal.
+
+    Called only after a successful send, so a missing notice is a real
+    "below the threshold" reading and resets the remembered level
+    (:func:`reply_guard.agent_run_warning`, QA Q-2). Two rules, both from
+    review round 4:
+
+    * any exception is swallowed and the warning dropped (security S-11): the
+      post has landed, and an advisory fault reported as a tool error would
+      tell the model a delivered message failed — inviting a second copy;
+    * a guard already found BUSY in this call is not asked again (code n-A):
+      each attempt waits out the 5 s busy timeout, and advice is not worth a
+      second wait. The cost (round 5, n-B): a successful send with NO notice
+      in that same call cannot reset the remembered level to 0, because the
+      reset is that skipped lookup. The next send on a free guard resets it,
+      so lock contention delays or loses at most one threshold warning —
+      never a post, and never a warning that should not have fired.
+
+    A swallowed fault leaves one DEBUG line naming the exception CLASS only
+    (security round 5, n-3): a persistent bookkeeping fault (a schema skew
+    from an older build, say) would otherwise disable the warning with
+    nothing to diagnose. Never the message: an exception's text can carry
+    hub-supplied values, and bridge logs never carry content.
+    """
+
+    if guard_busy:
+        return None
+    try:
+        return reply_guard.agent_run_warning(
+            runtime.config_dir,
+            endpoint_id=endpoint_id,
+            conversation_id=conversation_id,
+            notice=_agent_wake_notice(result),
+        )
+    except Exception as exc:  # noqa: BLE001 — advice after delivery must never fail the post
+        logger.debug("bridge: agent-run advice dropped code=%s", type(exc).__name__)
+        return None
+
+
+def _model_notes(outcome: dict[str, Any]) -> str:
+    """Guidance lines the MODEL must read, appended to the tool result's text.
+
+    WHY (review round 3, QA Q-1). A bridge result reaches the provider as its
+    text block only: ``details`` rides ``provider_payload``, which every wire
+    builder is structurally unable to send, and an error result rendered only
+    ``error``. So a ``next`` instruction or a ``retry_after_s`` the model needed
+    was never seen, and the round-1 success-path fix (appending the run warning
+    to ``content``) was one call site's patch. This is the one place: every
+    ``warning`` line on any result, and ``next`` / ``retry_after_s`` on an
+    error, become ``warning:`` / ``next:`` / ``retry_after_s:`` lines.
+    """
+
+    lines: list[str] = []
+    warning = outcome.get("warning")
+    if isinstance(warning, str) and warning.strip():
+        lines.extend(f"warning: {line}" for line in warning.splitlines() if line.strip())
+    if outcome.get("ok") is not True:
+        hint = outcome.get("next")
+        if isinstance(hint, str) and hint.strip():
+            lines.append(f"next: {hint.strip()}")
+        retry = outcome.get("retry_after_s")
+        if isinstance(retry, int) and not isinstance(retry, bool):
+            lines.append(f"retry_after_s: {retry}")
+    return "\n".join(lines)
+
+
 def _full_body_text(result: Any) -> str | None:
     message = (result or {}).get("message") or {}
     body = message.get("body") or {}
@@ -1494,6 +1776,12 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     fence = outbound_tool_fence(runtime) if op in OUTBOUND_OPS else owner_fence_refusal(runtime)
     if fence is not None:
         return _error(fence["error"], code=fence["code"])
+    # After the fence (a drifted runtime refuses before reading any argument) and
+    # before every op-specific step, so reply resolution, the outbox intent and
+    # the wire body all see the one canonical field. Local and network-free.
+    args, refused = _normalize_message_field(op, args)
+    if refused is not None:
+        return refused
     if op == "channel_post":
         refused = _validate_reply_destination(runtime, args)
         if refused is not None:
@@ -1568,6 +1856,12 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         params = BridgeToolParams(**args)
     except Exception as failure:  # pydantic ValidationError, kept dependency-free
         return _error(f"bridge args invalid: {failure}", code="invalid_request")
+
+    if params.attachments and params.op not in agent_attachments.ATTACHMENT_OPS:
+        return _error(
+            "attachments are accepted only by dm and channel_post",
+            code="attachment_invalid",
+        )
 
     if params.op == "take_up":
         if not params.message_id or not params.body_sha256:
@@ -1790,6 +2084,9 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             return _error("channel_post needs a conversation id (bcv_…)")
         if not params.body.strip():
             return _error("channel_post needs non-empty body")
+        inline_image = await agent_attachments.refuse_inline_image_data_for(runtime, params.body)
+        if inline_image is not None:
+            return _error(inline_image["error"], code=inline_image["code"])
         thread_root_id = params.thread_root_id.strip()
         if thread_root_id and _CONVERSATION_MESSAGE_ID.fullmatch(thread_root_id) is None:
             return _error("channel_post thread_root_id must be a message id (bcmsg_…)")
@@ -1866,20 +2163,50 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         refused = _validate_reply_destination(runtime, args)
         if refused is not None:
             return refused
-        # LOOP/COST GUARD (wake contract): every conversation message now wakes
-        # its agent members, so two agents answering every wake would trade
-        # posts for ever. Reserved LAST among the local checks (a malformed or
-        # unresolvable call never spends budget) and BEFORE the wire write (a
-        # concurrent post of the same endpoint sees the slot). Fail closed: a
-        # guard that cannot read its state refuses rather than going silent.
-        slot = None
+        # Attachments: local file checks + the hub's ``agent_upload`` capability,
+        # then the upload itself, all BEFORE the reply guard is touched, so a
+        # refused or failed image never reserves a slot. Staged ids are deleted
+        # below if the send does not land.
+        prepared_images: tuple[agent_attachments.PreparedImage, ...] = ()
+        staged_images: list[agent_attachments.StagedImage] = []
+        if params.attachments:
+            try:
+                prepared_images = await agent_attachments.prepare_attachments(
+                    runtime, params.attachments
+                )
+                staged_images = await agent_attachments.stage_attachments(
+                    runtime, channel_id, endpoint_id, prepared_images
+                )
+            except agent_attachments.AttachmentRefused as refused_attachment:
+                return _error(refused_attachment.message, code=refused_attachment.code)
+            except Exception as failure:
+                return _error(
+                    f"the image upload did not confirm; nothing was sent: {_failure_text(failure)}",
+                    code="attachment_failed",
+                )
+        # REPLY GUARD (wake contract): never a count refusal (operator,
+        # 2026-11-03) — the post is delivered, an exact double send within 10 s
+        # is skipped, and a long one-sided run adds a one-line ``warning``.
+        # Reserved LAST among the local checks (a malformed or unresolvable call
+        # records nothing) and BEFORE the wire write (a concurrent post of the
+        # same endpoint sees the slot). Unusable guard state never stops the
+        # post (round 3, m-3): it goes out untracked, with a warning. The
+        # thread and the addressees are part of the duplicate key (M-1).
+        slot: reply_guard.Reservation | None = None
+        guard_warning: str | None = None
+        guard_busy = False
+        guarded = False
+        addressees = [
+            f"{m.get('kind', '')}:{m.get('account_id', '')}:{m.get('endpoint_id', '')}"
+            for m in mentions
+        ]
 
         class DispatchRefused(Exception):
             def __init__(self, result: dict[str, Any]) -> None:
                 self.result = result
 
         def pre_http_guard() -> None:
-            nonlocal slot
+            nonlocal slot, guard_warning, guard_busy, guarded
             fence = outbound_tool_fence(runtime)
             refusal = (
                 _error(fence["error"], code=fence["code"])
@@ -1889,64 +2216,95 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             if refusal is not None:
                 raise DispatchRefused(refusal)
             # Reserve only when the first physical attempt is authorized.
-            # Releasing an early slot would still consume the run counter;
-            # retries instead revalidate and reuse the same slot/client_ref.
-            if slot is None:
+            # Retries revalidate and reuse the same slot/client_ref, so a
+            # transport retry never counts as a second post (or a duplicate).
+            if not guarded:
+                guarded = True
                 try:
                     reserved = reply_guard.reserve_post(
-                        runtime.config_dir, endpoint_id=endpoint_id, conversation_id=channel_id
+                        runtime.config_dir,
+                        endpoint_id=endpoint_id,
+                        conversation_id=channel_id,
+                        body=_guard_body(params.body, prepared_images),
+                        thread_root_id=thread_root_id,
+                        addressees=addressees,
                     )
-                except reply_guard.ReplyGuardUnavailable:
-                    raise DispatchRefused(
-                        _error(
-                            "the reply guard could not read its state; not posting",
-                            code=reply_guard.CODE_UNAVAILABLE,
-                        )
-                    ) from None
-                if isinstance(reserved, reply_guard.Refusal):
-                    raise DispatchRefused(reserved.as_result())
+                except reply_guard.ReplyGuardUnavailable as failure:
+                    guard_warning = reply_guard.unavailable_warning(failure)
+                    guard_busy = failure.transient
+                    return
+                if isinstance(reserved, reply_guard.Skipped):
+                    # Not a failure: the identical message is already posted.
+                    # Raised only to stop the wire write; the result is ``ok``.
+                    raise DispatchRefused(reserved.as_result(channel_id))
                 slot = reserved
 
         # ONE ref per CALL, minted before dispatch: the client's own 401 refresh
         # retry re-sends this exact body, so that retry is idempotent on the
         # server; a second tool call mints a second ref and is a second message.
         client_ref = str(uuid.uuid4())
+        # Staged ids are released on every exit that does not land the send,
+        # cancellation included (CancelledError is not an ``Exception``).
+        landed = False
         try:
-            result = await runtime.client.conversation_send(
-                channel_id,
-                client_ref=client_ref,
-                text=params.body,
-                tenant_id=runtime.tenant_id,
-                actor_endpoint_id=endpoint_id,
-                origin_session_id=runtime.session_id,
-                thread_root_id=thread_root_id or None,
-                mentions=mentions or None,
-                pre_http_guard=pre_http_guard,
-            )
-        except DispatchRefused as failure:
-            if slot is not None:
-                reply_guard.release(
-                    runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=channel_id
+            try:
+                result = await runtime.client.conversation_send(
+                    channel_id,
+                    client_ref=client_ref,
+                    text=params.body,
+                    tenant_id=runtime.tenant_id,
+                    actor_endpoint_id=endpoint_id,
+                    origin_session_id=runtime.session_id,
+                    thread_root_id=thread_root_id or None,
+                    mentions=mentions or None,
+                    pre_http_guard=pre_http_guard,
+                    **agent_attachments.send_kwargs(staged_images),
                 )
-            return failure.result
-        except Exception as failure:
-            # The hub did not take it: the budget slot goes back. (The run
-            # counter does not — see ``reply_guard.release``.)
-            if slot is not None:
-                reply_guard.release(
-                    runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=channel_id
+            except DispatchRefused as failure:
+                if slot is not None:
+                    reply_guard.release(
+                        runtime.config_dir,
+                        slot,
+                        endpoint_id=endpoint_id,
+                        conversation_id=channel_id,
+                    )
+                return failure.result
+            except Exception as failure:
+                # The hub did not take it: the slot goes back (``reply_guard.release``).
+                if slot is not None:
+                    reply_guard.release(
+                        runtime.config_dir,
+                        slot,
+                        endpoint_id=endpoint_id,
+                        conversation_id=channel_id,
+                    )
+                return _error(
+                    f"the post did not confirm: {_failure_text(failure)}", code="post_failed"
                 )
-            return _error(f"the post did not confirm: {_failure_text(failure)}", code="post_failed")
+            landed = True
+        finally:
+            if not landed:
+                await agent_attachments.discard_attachments(
+                    runtime, channel_id, endpoint_id, staged_images
+                )
         # ONE receipt shape for every conversation write (main's `_post_receipt`,
         # shared with `dm`), EXTENDED with the resolved recipient rather than
         # rebuilt here: a second construction site is how the two lanes drift.
         # ``mention_account_id`` is the id the post was actually directed at, so
         # the confirmation names a fact instead of restating the caller's ask.
-        return _post_receipt(
+        receipt = _post_receipt(
             channel_id,
             result,
             thread_root_id=thread_root_id,
             mention_account_id=recipient_account_id,
+        )
+        attachment_warning = _annotate_attachments(receipt, staged_images)
+        return _with_warnings(
+            receipt,
+            guard_warning,
+            slot.warning if slot is not None else None,
+            attachment_warning,
+            _agent_run_advice(runtime, endpoint_id, channel_id, result, guard_busy=guard_busy),
         )
 
     if params.op == "react":
@@ -2016,6 +2374,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             restored = await _restore_own_bodies(
                 runtime, channel_id, result["messages"], endpoint_id
             )
+            await _annotate_body_state(runtime, result["messages"])
         else:
             restored = set()
         images = await _history_images(runtime, channel_id, result, endpoint_id, restored)
@@ -2064,6 +2423,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             if isinstance(replies, list):
                 thread_rows.extend(replies)
         restored = await _restore_own_bodies(runtime, channel_id, thread_rows, endpoint_id)
+        await _annotate_body_state(runtime, thread_rows)
         images = await _history_images(
             runtime, channel_id, {"messages": thread_rows}, endpoint_id, restored
         )
@@ -2205,6 +2565,130 @@ async def _restore_own_bodies(
     return filled
 
 
+#: The closed ``body_state.state`` vocabulary an agent may be shown on a row
+#: whose ``body`` is null. ``unavailable`` is local-only (the agent's own post
+#: could not be read back in this read, whether the fetch failed or the row was
+#: past :data:`OWN_BODY_FETCH_MAX`); the other three may also arrive from the hub.
+_HUB_BODY_STATES = frozenset({"held", "rejected", "not_admitted"})
+_BODY_STATE_SINCE_MAX = 40
+#: ``since`` is a timestamp the model will read as one: only the ISO-8601 shape
+#: (``T`` separator, explicit zone) passes, so a hub string cannot smuggle prose
+#: through a field that looks like data. ASCII digits only (``re.ASCII``).
+_BODY_STATE_SINCE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})", re.ASCII
+)
+
+
+def _hub_body_state(value: Any) -> dict[str, str] | None:
+    """The hub's own ``body_state`` reduced to ``state`` (+ ``since``), or ``None``.
+
+    Forward-compatible wire shape: the hub knows what this machine cannot (a
+    rejection), so a well-formed value wins. Everything else on it — a reason,
+    a category, a label — is dropped, and a malformed value is ignored so the
+    local answer stands.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    state = value.get("state")
+    if not isinstance(state, str) or state not in _HUB_BODY_STATES:
+        return None
+    kept = {"state": state}
+    since = value.get("since")
+    if (
+        isinstance(since, str)
+        and len(since) <= _BODY_STATE_SINCE_MAX
+        and _BODY_STATE_SINCE.fullmatch(since) is not None
+    ):
+        kept["since"] = since
+    return kept
+
+
+async def _annotate_body_state(runtime: BridgeRuntime, rows: list[Any]) -> None:
+    """Say WHY a row's ``body`` is still null, in place (``body_state``).
+
+    WHY. An agent read ``body: null`` as a blank message. The hub sends it for a
+    message this endpoint has not been given: held in screening, or not
+    admitted. The agent must learn that, and nothing more.
+
+    WHAT IT NEVER DOES. It never fetches or returns another member's body, never
+    reads ``screening_receipts`` (so ``rejected`` can only come from the hub —
+    deriving it here would disclose moderation outcomes), and never emits the
+    hold code, categories or reasons: only a coarse class and an age. A row that
+    already has a body gets nothing, and a stray hub ``body_state`` on it is
+    removed.
+    """
+
+    import asyncio
+
+    pending: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("body") is not None:
+            row.pop("body_state", None)
+            continue
+        # Reduce (or drop) the hub's value on EVERY null-body row first: a row
+        # whose id is not a conversation message id still passes through this
+        # function, and must not carry a reason/category/long string onward.
+        reduced = _hub_body_state(row.get("body_state"))
+        if reduced is None:
+            row.pop("body_state", None)
+        else:
+            row["body_state"] = reduced
+        message_id = row.get("id")
+        if (
+            not isinstance(message_id, str)
+            or _CONVERSATION_MESSAGE_ID.fullmatch(message_id) is None
+        ):
+            continue  # no local state is ever derived for a non-conversation id
+        pending.append(row)
+    if not pending:
+        return
+
+    holds: dict[str, dict[str, Any]] = {}
+    if any(_hub_body_state(row.get("body_state")) is None for row in pending):
+        from .store import Store, StoreRefused
+
+        try:
+            holds = await asyncio.to_thread(
+                Store(Path(runtime.config_dir)).hold_states_readonly,
+                runtime.owner,
+                [row["id"] for row in pending],
+            )
+        except (StoreRefused, OSError):
+            holds = {}  # no hold information: the row reads not_admitted
+
+    own = getattr(runtime.owner, "account_id", "")
+    now = time.time()
+    for row in pending:
+        from_hub = _hub_body_state(row.get("body_state"))
+        if from_hub is not None:
+            row["body_state"] = from_hub
+            continue
+        hold = holds.get(row["id"])
+        sender = row.get("sender")
+        if hold is not None:
+            state: dict[str, Any] = {"state": "held", "hold_class": hold["hold_class"]}
+            created = hold.get("created_at")
+            if isinstance(created, (int, float)):
+                state["held_for_s"] = max(0, int(now - created))
+            row["body_state"] = state
+        elif (
+            own
+            and isinstance(sender, dict)
+            and sender.get("account_id") == own
+            and sender.get("kind") == "agent"
+        ):
+            # The owner's own agent post that is still null after the read-back
+            # pass: the fetch failed, or the row sat past OWN_BODY_FETCH_MAX and
+            # was never tried. Either way the text exists and is ours, it just
+            # could not be read back in THIS read.
+            row["body_state"] = {"state": "unavailable"}
+        else:
+            row["body_state"] = {"state": "not_admitted"}
+
+
 async def _history_images(
     runtime: BridgeRuntime,
     channel_id: str,
@@ -2342,6 +2826,11 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
                 )
             else:
                 content = f"bridge {args.get('op')}: {outcome.get('state', 'ok')}"
+            notes = _model_notes(outcome)
+            if notes and not peer_receipt:
+                # A peer receipt is already the whole outcome as JSON, warning
+                # included; every other shape gets the lines appended (Q-1).
+                content = f"{content}\n{notes}"
             # N1: the served §11.3 guidance is ADVISORY — appended when a
             # status snapshot carried one; its absence degrades advice only.
             client = getattr(runtime, "client", None)
@@ -2381,7 +2870,15 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         return ToolResult(
             tool_call_id=tool_call_id,
             tool_name="bridge",
-            content=[TextContent(text=str(outcome.get("error") or "refused"))],
+            content=[
+                TextContent(
+                    text="\n".join(
+                        part
+                        for part in (str(outcome.get("error") or "refused"), _model_notes(outcome))
+                        if part
+                    )
+                )
+            ],
             details=outcome,
             is_error=True,
         )
@@ -2395,7 +2892,8 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
             "relay request means dm, not 'forward this'); channel_post: rooms; "
             "send/reply: only to answer a pair-inbox (bmsg_) delivery. "
             "shared_*: conversations your owner shared with you. Cannot approve "
-            "or deny. More: read tool://bridge."
+            "or deny. The one channel for teammates; reply where it arrived. "
+            "More: read tool://bridge."
         ),
         parameters=BridgeToolParams.model_json_schema(),
         approval_tier="write",

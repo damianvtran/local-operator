@@ -1,0 +1,10 @@
+PASS: 21/21 JSON keys; exact English key order; actual Chinese translations; ICU argument names/types/order; all technical token checks; no bidi; source has no width caps
+PASS negative control rejected: missing-key
+PASS negative control rejected: renamed-placeholder
+PASS negative control rejected: wrong-placeholder-type
+PASS negative control rejected: mutated-identifier
+PASS negative control rejected: English-duplication
+PASS negative control rejected: bidi-injection
+PASS negative control rejected: malformed-ICU
+PASS negative control rejected: quote-token-loss
+PASS: parser-AST interpolation smoke preserves opaque argument data without reparsing (not production renderer proof)

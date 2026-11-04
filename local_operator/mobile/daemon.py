@@ -40,6 +40,7 @@ import re
 import secrets
 import sqlite3
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -76,6 +77,7 @@ from local_operator.i18n.frames import config_frame_payload
 from local_operator.i18n.keys import relay_login
 from local_operator.i18n.messages import Msg, render
 from local_operator.i18n.resolve import resolve_language
+from local_operator.macos_disclaim import spawn_disclaimed
 from local_operator.mobile import mesh as mobile_mesh
 from local_operator.mobile import projects as mobile_projects
 from local_operator.mobile import push_devices as mobile_push_devices
@@ -107,7 +109,6 @@ from local_operator.mobile.types import (
     SubagentRow,
 )
 from local_operator.network.types import MeshRefusal
-from local_operator.procstate import detached_popen_kwargs
 from local_operator.session.creation import session_created_at
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import ENGAGED_ENV, reported_subagent_count
@@ -3771,6 +3772,49 @@ def _mirror_dial_health(entry: SessionEntry) -> None:
         entry.projection.degraded = bool(entry.degraded)
 
 
+def _spawn_watched_runtime(
+    loop: asyncio.AbstractEventLoop,
+    exited: asyncio.Future[int],
+    argv: list[str],
+    **kwargs: Any,
+) -> Any:
+    """Spawn a phone-started runtime disclaimed, and park ONE thread on its exit.
+
+    WHY A THREAD: ``spawn_disclaimed`` returns a ``Popen`` or ``DisclaimedProcess``
+    with a blocking ``wait``. ``create_subprocess_exec`` used to give two things for
+    free: an awaitable exit, which ``_spawn_session`` races against readiness, and a
+    reap through asyncio's child watcher. Without a waiter, a detached child that
+    exits after the relay stopped watching (a timed-out start the relay must not
+    signal, or a runtime's normal idle exit) stays ``<defunct>`` under a relay that
+    lives for weeks. That is the leak ``launch._harvest_on_exit`` was written for.
+    One daemon thread parked on ``wait()`` covers both: it reaps the child whatever
+    the outcome of the start, and it resolves ``exited`` for the race. Not
+    ``SIGCHLD``/``waitpid(-1)``, which are process-wide and could steal another
+    child's status (same reasoning as ``_harvest_on_exit``).
+
+    The thread starts INSIDE this function, which runs under ``asyncio.to_thread``,
+    so a caller cancelled while the spawn is in flight still leaves its child
+    reaped. The future is resolved through ``call_soon_threadsafe``, and only if it
+    is still pending, so a finished start's cancelled future, or a closed loop,
+    cannot make the reaper raise.
+    """
+    process = spawn_disclaimed(argv, **kwargs)
+
+    def resolve(code: int) -> None:
+        if not exited.done():
+            exited.set_result(code)
+
+    def reap() -> None:
+        code = process.wait()
+        try:
+            loop.call_soon_threadsafe(resolve, code)
+        except RuntimeError:  # loop closed: nobody is racing the exit any more
+            pass
+
+    threading.Thread(target=reap, name=f"reap-phone-{process.pid}", daemon=True).start()
+    return process
+
+
 # ---------------------------------------------------------------------------
 # The daemon
 # ---------------------------------------------------------------------------
@@ -5416,10 +5460,19 @@ class MobileDaemon:
         # The claim is set in a WARM child's environment, so a daemon started
         # from inside a session inherits it and — without this line — hands every
         # session it starts a record claiming an engage that never happened, i.e.
-        # the 300 s keep-alive window bought by the wrong fact. This is the one
-        # runtime spawn outside ``launch._spawn_runtime``, so it does not get
-        # that function's scrub (review round 1, M1).
+        # the 300 s keep-alive window bought by the wrong fact. This spawn builds
+        # its environment by hand rather than through ``launch._spawn_runtime``, so
+        # it does not get that function's scrub (review round 1, M1). It DOES share
+        # that function's spawn primitive (``spawn_disclaimed``, below).
         env.pop(ENGAGED_ENV, None)
+        # A daemon started from a wake-owned runtime is not that supervisor.
+        # Match the viewer spawn's ownership boundary: only the actual minting
+        # supervisor may pass its owner token, never an inherited PID/marker.
+        # Boot also strips these, but the exec-time environment is what a stop
+        # sweep inspects, so clearing only after boot is too late (#3028 r5).
+        from local_operator.wakes.owned_runtimes import stamp_child_env
+
+        stamp_child_env(env)
         # The desktop bearer, for the same reason as the claim above: the viewer's spawn in
         # ``launch._spawn_runtime`` scrubs it and this one did not (#3002 review r2, R2-1).
         # A mobile daemon started from inside a desktop-owned tree would otherwise put the
@@ -5444,7 +5497,31 @@ class MobileDaemon:
         argv0, executable = procname.spawn_identity(
             procname.LABEL_SESSION_ANON, id=str(session_id)[:8]
         )
-        process = await asyncio.create_subprocess_exec(
+        # A SURFACE DYING IS A DISPLAY EVENT, NOT A LIFECYCLE EVENT (operator,
+        # 2026-11): closing or force-quitting any surface -- the app, the TUI, this
+        # relay -- must never terminate a runtime. ``setsid`` alone does not buy
+        # that on macOS. On 2026-10-09 an Activity Monitor force-quit SIGTERMed
+        # nine detached runtimes within 17 ms because they still sat in the app's
+        # macOS RESPONSIBILITY scope, which survives ``setsid`` and reparenting
+        # (see ``local_operator.macos_disclaim``). Every other runtime spawn
+        # (``launch._spawn_runtime``, standby warms, ``lop exec``) already goes
+        # through ``spawn_disclaimed``. This one used ``create_subprocess_exec`` +
+        # ``detached_popen_kwargs`` and so stayed in whatever responsibility chain
+        # the relay sat in, e.g. a relay started from inside the app's tree.
+        #
+        # Constraints kept: the helper's fallback (non-macOS, missing symbols, a
+        # refused attribute) is exactly the old ``Popen`` +
+        # ``detached_popen_kwargs()`` -- Windows keeps its console detachment --
+        # and it logs why it fell back, never silently. It is SYNCHRONOUS
+        # (posix_spawn/Popen), so it runs off the loop. It returns a
+        # ``Popen``/``DisclaimedProcess``, not an asyncio ``Process``: see
+        # ``_spawn_watched_runtime`` for how exit and reaping are observed.
+        loop = asyncio.get_running_loop()
+        exited: asyncio.Future[int] = loop.create_future()
+        process = await asyncio.to_thread(
+            _spawn_watched_runtime,
+            loop,
+            exited,
             # ``python_argv``'s shape with the label in element 0: the label
             # replaces only argv[0], and ``SAFE_PATH_FLAG`` stays at index 1
             # because interpreter options are recognised only before ``-m``.
@@ -5455,13 +5532,15 @@ class MobileDaemon:
             # ``session/runtime/launch.py``, and harder to notice here because
             # nobody is watching a phone daemon's version. See
             # :mod:`local_operator.interpreter`.
-            argv0,
-            SAFE_PATH_FLAG,
-            "-m",
-            # THE SPAWN CONTRACT, from its one home: the residency sweep's census
-            # matches this module by this exact argv word, so a literal here could
-            # drift from ``session/runtime/launch.py``'s without anything failing.
-            RUNTIME_MODULE,
+            [
+                argv0,
+                SAFE_PATH_FLAG,
+                "-m",
+                # THE SPAWN CONTRACT, from its one home: the residency sweep's census
+                # matches this module by this exact argv word, so a literal here could
+                # drift from ``session/runtime/launch.py``'s without anything failing.
+                RUNTIME_MODULE,
+            ],
             executable=executable,
             env=env,
             # Detached stdio: the child speaks through its record and socket;
@@ -5470,14 +5549,6 @@ class MobileDaemon:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            # REAL detachment, per platform. ``start_new_session=True`` is
-            # documented "(POSIX only)" and the Windows ``_execute_child``
-            # parameter is literally ``unused_start_new_session``: a child
-            # spawned for a phone session would silently stay on this daemon's
-            # console, where a console close takes it down — the one thing this
-            # spawn exists to survive. The helper also keeps POSIX on
-            # ``setsid`` (byte-identical behaviour there).
-            **detached_popen_kwargs(),
         )
 
         async def ready() -> None:
@@ -5494,7 +5565,6 @@ class MobileDaemon:
                 await asyncio.sleep(0.05)
 
         readiness = asyncio.create_task(ready())
-        exited = asyncio.create_task(process.wait())
         try:
             async with asyncio.timeout(SESSION_START_TIMEOUT_S):
                 done, _ = await asyncio.wait(
@@ -5507,7 +5577,18 @@ class MobileDaemon:
                 return process.pid
         except BaseException:
             self.release_phone_view(session_id)
-            if process.returncode is None:
+            # ``poll`` rather than ``returncode``: a sync process object only
+            # learns its status when someone asks, and the watcher thread may not
+            # have run yet. It is best-effort, not authoritative: on the ``Popen``
+            # fallback (Linux, Windows) a ``poll`` racing the reaper thread's
+            # blocking ``wait`` can still read ``None`` for a child that has just
+            # exited (only ``DisclaimedProcess`` serialises the two on one lock).
+            # That misread is harmless: the branch below only asks a published,
+            # pid-matched owner to retire itself. ``find_runtime_record`` resolves
+            # only a LIVE owner, so a dead child matches nothing, and a stale match
+            # fails at connect, which the bounded wait below swallows. Either way
+            # nothing is signalled.
+            if process.poll() is None:
                 # A known resume route can receive work from another surface
                 # before this HTTP request finishes. Even a missing welcome is
                 # not proof of an idle constructor: inbox/wake work starts
@@ -6190,20 +6271,38 @@ def build_app(daemon: MobileDaemon):
         from local_operator.paths import config_dir
 
         agent_id = str(request.path_params["agent_id"])
+        # ``?size=64|128|256`` (feature ``agent_avatar_sizes``): the core route's
+        # downscaled variant, so a 24px phone row is not sent the 512px original.
+        # Absent keeps the original bytes and the bare-sha ETag.
+        try:
+            size = agent_avatar.parse_size(request.query_params.get("size"))
+        except ValueError:
+            return JSONResponse(
+                # i18n: ignore protocol diagnostic
+                {"error": "invalid size", "code": "invalid_size"},
+                status_code=422,
+            )
         root = config_dir()
         known = await asyncio.to_thread(agent_avatar.stored_sha, root, agent_id)
-        if known and etag_matches(request.headers.get("if-none-match", ""), known):
+        known_tag = agent_avatar.sized_tag(known, size) if known else None
+        if known_tag and etag_matches(request.headers.get("if-none-match", ""), known_tag):
             return Response(
                 status_code=304,
-                headers={"ETag": agent_avatar.etag(known), "Cache-Control": "private, no-cache"},
+                headers={
+                    "ETag": agent_avatar.etag(known_tag),
+                    "Cache-Control": "private, no-cache",
+                },
             )
         try:
-            data, mime, sha = await asyncio.to_thread(agent_avatar.read_stored, root, agent_id)
+            data, mime, sha = await asyncio.to_thread(
+                agent_avatar.read_stored_sized, root, agent_id, size
+            )
         except agent_avatar.AvatarError as exc:
             return JSONResponse(
                 {"error": exc.reason, "code": exc.reason},
                 status_code=agent_avatar.HTTP_STATUS.get(exc.reason, 404),
             )
+        # ``sha`` is the variant's tag here (``sized_tag``), the bare sha when unsized.
         headers = {"ETag": agent_avatar.etag(sha), "Cache-Control": "private, no-cache"}
         if etag_matches(request.headers.get("if-none-match", ""), sha):
             return Response(status_code=304, headers=headers)

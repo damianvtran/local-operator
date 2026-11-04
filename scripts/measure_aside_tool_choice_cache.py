@@ -235,9 +235,14 @@ class PreFixAnthropicClient(AnthropicClient):
     """
 
     def _build_body(
-        self, request: ChatRequest, *, oauth: bool = False, account: str = ""
+        self,
+        request: ChatRequest,
+        *,
+        oauth: bool = False,
+        account: str = "",
+        scope: str | None = None,
     ) -> dict[str, Any]:
-        body = super()._build_body(request, oauth=oauth, account=account)
+        body = super()._build_body(request, oauth=oauth, account=account, scope=scope)
         if request.tools and request.tool_choice == "none":
             body["tool_choice"] = {"type": "none"}
         return body

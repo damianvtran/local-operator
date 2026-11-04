@@ -263,40 +263,65 @@ then:
 
 ### 4. Pair the extension to this machine — YOU run it and show the code
 
-Pairing is **one-time**: once it succeeds, the extension stores the token and
-the daemon stores its hash, and every later reconnect (daemon restart, browser
-restart, reboot, a brand-new lop session) happens silently with no code and no
-prompt. The user does this exactly once, ever.
+**Write the code in your reply IMMEDIATELY after `lop browser pair` returns —
+before any other tool call, in bold, with where to type it and how long it
+lasts. Never leave it only in the tool output, and do not start a polling loop
+first.** Tool output is collapsed in most interfaces, and most people do not
+know it can be expanded: a code that is only in a tool block is a code the
+person cannot see. (Observed 2026-11-02: three codes in a row expired that way
+while the agent ran more commands; pairing took fourteen minutes.)
 
-Run the command yourself and read the code out of its output:
+The flow is **you first, then the person**. You run the command and hand over
+the code; only then does the person go to the browser. Do NOT ask them to open
+the extension popup first, and never tell them to "open the popup, then retry":
+`lop browser pair` makes the code itself from any state (popup closed or never
+opened, an old code expired), and opens a pairing tab in their Chrome.
 
 ```sh
 lop browser pair
 ```
 
-It prints a 6-digit code (2-minute TTL, five tries then a fresh code). **You
-MUST show that code to the user in your reply and ask them to type it into the
-extension popup** (click the toolbar icon → enter the code). Do not just tell
-them to "run `lop browser pair`": most users start from the TUI and never see
-terminal output, so if you don't surface the code in the conversation they have
-no way to get it. Showing it is correct and safe here — unlike a durable
-password, this is a single-use code with a 2-minute TTL whose entire purpose is
-to be shown to the user; it authorizes nothing on its own and expires in
-minutes. (This is the one browser secret you DO print. Contrast the mobile
-portal password, which must never enter the transcript.)
+Then, in your reply, say something like:
 
-Concretely, say something like: *"Your one-time pairing code is **NNNNNN**.
-Click the Local Operator extension icon in your browser toolbar and type it in.
-This is the only time you'll need to do this."* If the code expires before they
-enter it, just run `lop browser pair` again and show the fresh one.
+> Your pairing code is **123456**. Switch to Chrome: a Local Operator tab is
+> open there. Type the code and press Pair. (No tab? Click the Local Operator
+> icon in Chrome's toolbar; it may be under the puzzle-piece icon.) The code
+> works for 15 minutes. Once we're paired, I'll ask you in Chrome to Allow each
+> new website the first time I visit it.
 
-The code flows terminal → browser (you → the user → the popup) on purpose: that
-direction is the security property that stops a rogue local process from
-pairing itself. Do not try to script the code into the popup on the user's
-normal browser — you have no debug access to it, and that is intentional.
+Facts behind that wording:
+
+- **One code per browser, valid for 15 minutes**, five wrong tries and it is
+  replaced. Running `lop browser pair` again within the 15 minutes prints the
+  SAME code — safe to re-run if you lost it. If it may have expired, re-run
+  and give the new one; never re-send an old code from earlier in the chat.
+- **Several browsers waiting** prints one code per browser, each named
+  (browser + extension version + short id). Give every code and which browser
+  it belongs to.
+- **An outdated extension** gets one line saying how to update it
+  (`chrome://extensions` → Developer mode → Update). Pass it on; pairing still
+  works without updating.
+- **"No browser extension is connected yet"** means Chrome is closed or the
+  extension is not installed or is turned off. Follow step 0 (wake Chrome with
+  `open -g -a "Google Chrome"`) and step 3, then run `lop browser pair` again.
+- **"already paired"**: nothing to do — check `lop browser status`.
+- If the person opens the extension without a code, it tells them to ask you
+  to **"pair my browser"**. That phrase means: run `lop browser pair` and give
+  them the code as above.
+
+Showing the code is correct and safe here — unlike a durable password, it is a
+single-use code whose entire purpose is to be shown to the person; it
+authorizes nothing on its own and expires. (This is the one browser secret you
+DO print. Contrast the mobile portal password, which must never enter the
+transcript.)
+
+The code flows terminal → person → browser on purpose: that direction is the
+security property that stops a rogue local process from pairing itself. Do not
+try to script the code into the extension in the person's normal browser — you
+have no debug access to it, and that is intentional.
 
 Re-pairing (new browser profile, wiped token, uninstalled extension): same
-flow. `lop browser pair --reset` revokes the current pairing first.
+flow. `lop browser pair --reset` revokes every pairing first.
 
 ### 5. Confirm and use
 
@@ -445,7 +470,7 @@ Same `browser` tool. Actions:
 - `network_start` / `network_stop` / `network_read` / `network_clear` (record
   and inspect the tab's own requests — desktop app host only; see below)
 - `record_start` / `record_stop` (record the tab's video to an `.mp4`, at an
-  optional `width`/`height` — desktop app host only; see below)
+  optional `width`/`height` and `quality: "high"` — desktop app host only; see below)
 - `close` (drop the surface and its tab)
 
 ### Network capture: what the tab actually sent and received
@@ -559,11 +584,61 @@ does not have to be the visible one: recording reads the same pixels
   **75 s** inside a scratchpad,
   against roughly 16 minutes at 720p — set `timeout_s` accordingly whenever you
   ask for 4K.
-- **Container and playback.** 10 fps, no audio, MP4 with an AV1 track. It plays
-  in QuickTime/AVFoundation (decoded there in the desktop PR's real-path run).
-  Chrome's `<video>` and H.264-only players are expected not to play AV1-in-MP4;
-  that has not been tested in Chrome here, so check before promising playback
-  to someone.
+- **Container and playback (default clip).** 10 fps, no audio, MP4 with an AV1
+  track. It plays in QuickTime/AVFoundation (decoded there in the desktop PR's
+  real-path run). Chrome's `<video>` and H.264-only players are expected not to
+  play AV1-in-MP4; Chromium's `<video>` refused the default clip in testing
+  (macOS arm64), so do not promise playback outside QuickTime. For a clip
+  people will watch in a browser, or one with readable text, use
+  `quality: "high"` below.
+- **`quality: "high"` — a sharper clip, opt in per recording.** Default is
+  unchanged: omit `quality` (or give `"standard"`) and you get the AV1 clip above.
+  `"high"` records the same tab with a different encoder and writes an H.264
+  MP4 (still 10 fps at most, no audio). It played in Chromium's `<video>` and
+  macOS AVFoundation (tested on macOS arm64 at 1080p and 4K, no dropped frames);
+  no other player or platform was tested, so check before promising playback
+  elsewhere. A page that never changes comes out as one stretched frame, and
+  some players show that as a single still. Use it when the clip will be READ
+  or SHOWN: text-heavy pages (docs, tables, dashboards, code), scrolling,
+  demos, bug reports. The default
+  AV1 encoder smears text on scroll and has no quality setting; the gain is
+  largest at 1920x1080 and below and on scrolling or other motion, and small on
+  a page that does not change. Skip it for a quick check nobody will watch.
+  - Cost (measured on macOS arm64 with the hardware encoder): whole-app CPU is
+    LOWER than the default clip at 1080p and 4K, but the app's main process
+    works harder (about 40-48 % of a core scrolling at 4K, against about 5 %)
+    and the clip holds about 0.5-0.7 GB more RAM. Hardware H.264 is preferred
+    (the start result says `encoder: hardware|software`); software encoding is
+    allowed only at 1920x1080 or smaller. A 4K request with no hardware
+    encoder is refused as `record_quality_unavailable`
+    (`why: software_over_1080p`) instead of running slowly; ask for 1920x1080
+    or drop `quality`. Hardware H.264 at 4K was measured on macOS only; Windows
+    and Linux have not been measured, so expect a refusal there rather than
+    assume it works.
+  - The app NEVER falls back to the default clip by itself: a refused `high`
+    start (`record_quality_unavailable`, `why` = `no_h264_encoder`,
+    `software_over_1080p`, `size_unsupported`, `encoder_start`) starts nothing
+    and writes nothing. Retry smaller, or call `record_start` again WITHOUT
+    `quality` knowingly accepting the lower-quality clip.
+  - An app build without it advertises no `record_quality` capability and is
+    refused after the approval prompt (the app's capabilities are only known
+    then) but before anything is started or sent to the app, so nothing is
+    recorded or written; the copy says to update the app or drop `quality`. A
+    start whose result does not say `codec: "h264"` (a stale app that ignored
+    the field) is reported as a FAILED start, like a wrong size:
+    the AV1 clip IS recording at the approved path, so `record_stop` saves it.
+  - Anything but `standard` or `high` is refused as `record_quality`
+    (`why: value`) before the prompt. `width`/`height` work with it unchanged.
+  - The start result adds `encoder`, `bitrate_bps` (the target) and the real
+    `width`/`height` (even for an unsized clip). The stop result adds `frames`,
+    `measured_fps`, `avg_bitrate_kbps` and `stop_reason` (`stop`, `max_duration`
+    or `max_bytes`). The clip is variable frame rate: a still page costs almost
+    nothing and the last frame is held, so `measured_fps` under 10 is normal.
+  - Reaching the byte cap ends a `high` clip EARLY but keeps it: the file is
+    complete up to that point (`stop_reason: max_bytes`), unlike the default
+    clip, which is discarded. Nothing reaches disk before the stop either way.
+  - Other limits are the same as the default clip (one per session per tab,
+    two app-wide counting both kinds, one above 1920x1080 at a time).
 - The desktop app echoes `width`/`height` in the start result; a clip that
   comes back at another size is reported as a failed sized start (the clip is
   still recording, so `record_stop` can save it — stop it and retry once the
@@ -770,8 +845,8 @@ Every failure is one actionable string; act on it rather than retrying blindly:
      `extension_unresponsive` below, where the toolbar icon does nothing.
   3. **Still nothing?** The extension may be disabled or removed — ask the
      user to check `chrome://extensions`.
-- **"browser bridge not paired"** — run `lop browser pair` and have the user
-  enter the code.
+- **"browser bridge not paired"** — run `lop browser pair` and write the code
+  into your reply right away (step 4); do not ask the user to open the popup.
 - **"browser bridge unreachable: the daemon … is not answering"** — run
   `lop browser status`; `lop browser install` (re)starts it. Logs:
   `lop browser logs`.

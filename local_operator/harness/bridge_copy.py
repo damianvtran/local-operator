@@ -26,10 +26,17 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from local_operator.i18n.keys import wire_tool_rows_bridge as _k
+from local_operator.i18n.keys import wire_tool_rows_bridge_skipped as _ks
 from local_operator.i18n.messages import Msg
 from local_operator.i18n.text import tr
 
 _t = tr("wire.tool_rows.bridge")
+#: The reply guard's skipped double send has its own child namespace (#3377
+#: follow-up, design D1/D2, code m-A) rather than new keys in
+#: ``wire.tool_rows.bridge``: a key added there moves that namespace's English
+#: hash and un-ships every audited locale until all 85 keys are re-audited. A
+#: child carries only the three new strings, so its audit is three strings.
+_ts = tr("wire.tool_rows.bridge.skipped")
 
 #: ``action`` token → its (settled, running, failed) verb keys. The composite
 #: actions spell a dash on the wire (``react-remove``) and an underscore in the
@@ -90,6 +97,16 @@ _VERBS: dict[str, tuple[Callable[[], Msg], Callable[[], Msg], Callable[[], Msg]]
 #: claim it most often is ("Couldn't claim a message"), with no new copy to audit.
 _VERBS["ack"] = _VERBS["ack-working"]
 _UNKNOWN_VERBS = (_k.verb_settled_unknown, _k.verb_running_unknown, _k.verb_failed_unknown)
+
+#: ``action`` -> the verb for a deliberately SKIPPED exact double send (design
+#: round 1, D1): "Couldn't post in" said something blocked the send, when the
+#: guard chose not to send. Only the two ops the guard covers have one; any
+#: other action that ever reports a skip keeps its failed verb, which is still
+#: true (nothing was posted).
+_SKIPPED_VERBS: dict[str, Callable[[], Msg]] = {
+    "channel_post": _ks.verb_channel_post,
+    "dm": _ks.verb_dm,
+}
 
 #: Actions whose verb is a complete phrase: no target follows, only a count.
 _OBJECTLESS = frozenset({"channels", "directory", "shared_conversations"})
@@ -170,6 +187,14 @@ def outcome_word(row: Mapping[str, Any], *, short: bool = False) -> str | None:
         return _t(_k.outcome_short_awaiting_acceptance())
     if short and outcome == "unconfirmed":
         return _t(_k.outcome_short_unconfirmed())
+    if outcome == "skipped":
+        # The reply guard's skipped double send (#3377 round 3, m-1). The cap
+        # keeps the already-translated "not posted" word plus the untranslated
+        # ``duplicate`` code (design D4: the token an operator searches for);
+        # the narrow form is the bare word. The dedicated verb and the
+        # expanded sentence live in ``wire.tool_rows.bridge.skipped``.
+        word = _t(_k.outcome_short_inbox_only())
+        return f"{word} · {code}" if code and not short else word
     if outcome == "inbox_only":
         return _t(_k.outcome_inbox_only())
     if outcome == "refused":
@@ -210,9 +235,14 @@ def render_bridge_row(
     keys = _VERBS.get(action)
     known = keys is not None
     settled, live, failed_verb = keys if keys is not None else _UNKNOWN_VERBS
+    skipped_verb = _SKIPPED_VERBS.get(action) if outcome == "skipped" else None
     if running:
         verb = _t(live())
-    elif outcome in _FAILED_OUTCOMES or (failed and outcome is None):
+    elif skipped_verb is not None:
+        # Neither "Posted in" (it never left, #3377 round 3, m-1) nor
+        # "Couldn't post in" (nothing stopped it; the guard chose, D1).
+        verb = _ts(skipped_verb())
+    elif outcome in _FAILED_OUTCOMES or outcome == "skipped" or (failed and outcome is None):
         verb = _t(failed_verb())
     else:
         verb = _t(settled())
@@ -378,6 +408,12 @@ def bridge_expanded(
     sentence = ""
     if outcome == "inbox_only":
         sentence = _t(_k.expanded_inbox_only())
+    elif outcome == "skipped":
+        # Design D2 / code m-A: the expanded card said nothing about WHY. The
+        # receipt's own ``warning`` is model-facing English (with the seconds),
+        # so the card gets a keyed sentence instead. It never claims the first
+        # copy was delivered: it may still have been in flight (round 3, m-2).
+        sentence = _ts(_ks.expanded())
     elif outcome == "refused":
         sentence = _refusal_sentence(error, code, failed=False)
     elif outcome == "failed":

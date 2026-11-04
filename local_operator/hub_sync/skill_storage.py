@@ -20,7 +20,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from local_operator.config import ConfigManager, read_config_values
 from local_operator.config_writer import config_write_lock
@@ -36,6 +36,7 @@ from local_operator.hub_sync.provenance import (
 )
 from local_operator.hub_sync.skill_document import SkillDocument, validate_name
 from local_operator.hub_sync.transactions import (
+    MAX_RECORD_BYTES,
     LocalTransaction,
     TransactionError,
     TransactionJournal,
@@ -154,6 +155,487 @@ class ManagedSkillStorage:
         self.root = self.config_dir / "skills"
         self.journal = TransactionJournal(self.config_dir)
 
+    @staticmethod
+    def _projection_supported() -> bool:
+        # Capability names survive instrumentation wrapping os.unlink/open; the
+        # supports_dir_fd set describes the backend, not the current wrapper.
+        supported = {function.__name__ for function in os.supports_dir_fd}
+        return (
+            hasattr(os, "O_DIRECTORY")
+            and hasattr(os, "O_NOFOLLOW")
+            and {"open", "mkdir", "stat", "unlink", "rename"} <= supported
+        )
+
+    def _require_projection_support(self) -> None:
+        if not self._projection_supported():
+            from local_operator.i18n.keys.wire_skill_adoption import (
+                projection_unsupported,
+            )
+
+            raise LinkError("projection-unsupported", projection_unsupported().envelope()["text"])
+
+    def _projection_windows_absent(self, alias: str, *, _kernel: Any = None) -> bool:
+        """Absence-only Windows probe; existing projections need a native adapter.
+
+        OPEN_REPARSE_POINT refuses traversal through links/junctions after their
+        attributes are checked. Omitting SHARE_DELETE pins each opened directory
+        against rename/removal while its absolute child path is opened. Keep the
+        entire chain until the leaf probe finishes; lstat checks alone cannot
+        establish absence when an ancestor can be replaced between checks.
+        The resolved config root's ancestry is trusted, as on the POSIX path.
+        """
+        import ctypes
+
+        # WinDLL exists only on Windows; resolve it lazily so non-Windows
+        # imports/type checking do not imply that native API is available here.
+        kernel = _kernel if _kernel is not None else getattr(ctypes, "WinDLL")("kernel32")
+        kernel.CreateFileW.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        kernel.CreateFileW.restype = ctypes.c_void_p
+        kernel.GetFileInformationByHandle.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        kernel.GetFileInformationByHandle.restype = ctypes.c_int32
+        kernel.GetLastError.argtypes = []
+        kernel.GetLastError.restype = ctypes.c_uint32
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel.CloseHandle.restype = ctypes.c_int32
+        handles = []
+        invalid = ctypes.c_void_p(-1).value
+        path = self.config_dir
+        try:
+            for component in (None, "hub", "skill-projections", f"{alias}.json"):
+                if component is not None:
+                    path = path / component
+                handle = kernel.CreateFileW(
+                    str(path),
+                    0x0080,
+                    0x0001 | 0x0002,
+                    None,
+                    3,
+                    0x00200000 | 0x02000000,
+                    None,
+                )  # READ_ATTRIBUTES, SHARE_READ|WRITE, OPEN_EXISTING, NOFOLLOW|BACKUP
+                if handle == invalid:
+                    error = kernel.GetLastError()
+                    if error in (2, 3):  # FILE_NOT_FOUND / PATH_NOT_FOUND only
+                        return True
+                    raise LinkError("skill-validation", "local projection path is unsafe")
+                handles.append(handle)
+                # BY_HANDLE_FILE_INFORMATION is thirteen fixed-width DWORDs;
+                # its first field is attributes. Fixed widths matter on LP64 hosts
+                # running the simulated API tests as well as Windows itself.
+                info = (ctypes.c_uint32 * 13)()
+                if not kernel.GetFileInformationByHandle(handle, ctypes.byref(info)):
+                    raise LinkError("skill-validation", "local projection path is unsafe")
+                attributes = info[0]
+                if attributes & 0x0400:  # ALL reparse points, not only symlinks
+                    raise LinkError("skill-validation", "local projection path is unsafe")
+                if component == f"{alias}.json":
+                    return False  # Never read or silently ignore an existing projection.
+                if not attributes & 0x0010:  # FILE_ATTRIBUTE_DIRECTORY
+                    raise LinkError("skill-validation", "local projection path is unsafe")
+        finally:
+            close_failed = False
+            for handle in reversed(handles):
+                if not kernel.CloseHandle(handle):
+                    close_failed = True
+            if close_failed:
+                raise LinkError("skill-validation", "local projection path is unsafe")
+        return False
+
+    def _projection_absent(self, alias: str) -> bool:
+        if os.name == "nt":
+            return self._projection_windows_absent(alias)
+        # Simulated capability-loss tests still use the real POSIX nofollow
+        # probe, never a pathname approximation of the Windows handle contract.
+        with self._projection_directory() as directory:
+            return directory is None or not self._projection_regular(directory, f"{alias}.json")
+
+    def _require_projection_absent(self, alias: str) -> None:
+        if not self._projection_absent(alias):
+            from local_operator.i18n.keys.wire_skill_adoption import (
+                projection_unsupported,
+            )
+
+            raise LinkError("projection-unsupported", projection_unsupported().envelope()["text"])
+
+    @contextmanager
+    def _projection_directory(self, *, create: bool = False) -> Iterator[int | None]:
+        """Pin every component below the trusted resolved config root, never a link.
+
+        Checking a pathname and then reopening it leaves an ancestor-swap window.
+        Retaining descriptors means a concurrent rename can at most detach our
+        original directory; it cannot redirect a read, replacement or retirement
+        into sessions (or any other unrelated tree). No pathname fallback is safe
+        on hosts without these primitives: a Windows port needs native no-reparse
+        directory handles and handle-relative operations, not lstat/resolve checks.
+        """
+        descriptors: list[int] = []
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        try:
+            if create:
+                self.config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            try:
+                descriptors.append(os.open(self.config_dir, flags))
+            except FileNotFoundError:
+                yield None
+                return
+            for component in ("hub", "skill-projections"):
+                parent = descriptors[-1]
+                if create:
+                    try:
+                        os.mkdir(component, mode=0o700, dir_fd=parent)
+                    except FileExistsError:
+                        pass
+                    else:
+                        # Persist each new directory entry before trusting a record
+                        # after crash recovery, just like atomic_json's ancestors.
+                        os.fsync(parent)
+                try:
+                    descriptors.append(os.open(component, flags, dir_fd=parent))
+                except FileNotFoundError:
+                    yield None
+                    return
+            yield descriptors[-1]
+        except OSError as exc:
+            raise LinkError("skill-validation", "local projection path is unsafe") from exc
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+
+    @staticmethod
+    def _projection_regular(directory: int, leaf: str) -> bool:
+        try:
+            info = os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(info.st_mode):
+            raise LinkError("skill-validation", "local projection path is unsafe")
+        return True
+
+    def _projection_path(self, alias: str) -> Path:
+        # Compatibility/introspection only: IO must retain _projection_directory's
+        # descriptor rather than treating this checked pathname as a capability.
+        validate_name(alias)
+        if not self._projection_supported():
+            self._require_projection_absent(alias)
+        else:
+            with self._projection_directory() as directory:
+                if directory is not None:
+                    self._projection_regular(directory, f"{alias}.json")
+        return self.config_dir / "hub" / "skill-projections" / f"{alias}.json"
+
+    def _projection(self, alias: str) -> Mapping[str, Any] | None:
+        validate_name(alias)
+        if not self._projection_supported():
+            self._require_projection_absent(alias)
+            return None
+        with self._projection_directory() as directory:
+            if directory is None:
+                return None
+            try:
+                descriptor = os.open(
+                    f"{alias}.json",
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    dir_fd=directory,
+                )
+            except FileNotFoundError:
+                return None
+            with os.fdopen(descriptor, "rb") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise LinkError("skill-validation", "local projection path is unsafe")
+                body = stream.read(MAX_RECORD_BYTES + 1)
+                if len(body) > MAX_RECORD_BYTES:
+                    raise LinkError("skill-too-large", "local projection exceeds its bound")
+                value = json.loads(body)
+        if not isinstance(value, dict) or value.get("alias") != alias:
+            raise LinkError("skill-validation", "invalid local projection")
+        paths = value.get("carried_paths")
+        if not isinstance(paths, list) or any(not isinstance(p, str) for p in paths):
+            raise LinkError("skill-validation", "invalid carried paths")
+        return value
+
+    def _write_projection(self, alias: str, value: Mapping[str, Any]) -> None:
+        validate_name(alias)
+        self._require_projection_support()
+        try:
+            body = json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False).encode(
+                "utf-8"
+            )
+        except (TypeError, ValueError, UnicodeError, RecursionError):
+            raise LinkError("skill-validation", "invalid local projection") from None
+        if len(body) > MAX_RECORD_BYTES:
+            raise LinkError("skill-too-large", "local projection exceeds its bound")
+        with self._projection_directory(create=True) as directory:
+            assert directory is not None
+            leaf = f"{alias}.json"
+            self._projection_regular(directory, leaf)
+            temporary = f".projection-{uuid.uuid4().hex}.tmp"
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=directory,
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(body)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                # rename replaces the leaf entry itself; a raced-in symlink is
+                # never followed, and both names remain in our pinned directory.
+                os.replace(temporary, leaf, src_dir_fd=directory, dst_dir_fd=directory)
+                os.fsync(directory)
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
+
+    def _retire_projection(self, alias: str) -> None:
+        # Exclusions belong to the removed content, not to an alias forever.
+        validate_name(alias)
+        if not self._projection_supported():
+            self._require_projection_absent(alias)
+            return
+        with self._projection_directory() as directory:
+            if directory is not None and self._projection_regular(directory, f"{alias}.json"):
+                try:
+                    # unlink never follows the final component, even if it changes
+                    # after the regular-file check; ancestors stay pinned above.
+                    os.unlink(f"{alias}.json", dir_fd=directory)
+                except FileNotFoundError:
+                    return
+                os.fsync(directory)
+
+    def adoption_subject(self, identity: LinkIdentity, alias: str) -> Path:
+        """Shared preview/apply ownership gate; no schema relaxation or origin bypass."""
+        if identity.kind != "skill":
+            raise LinkError("origin-conflict", "adoption requires a skill identity")
+        # Preview enters here before snapshots/model work; refusing only when the
+        # projection is finally written would leave an unsupported adoption half committed.
+        self._require_projection_support()
+        destination = self.path(alias)
+        self.recover()
+        self._recover_unpull_locked(local_id=identity.local_id)
+        owner = alias_owner(self.config_dir, "skill", alias)
+        existing = read_baseline(self.config_dir, "skill", identity.local_id)
+        if existing is not None and existing.identity is not None:
+            existing.identity.require_same_origin(identity)
+        # A subscription owns lineage but has never installed content. It is
+        # precisely the same adoption input, not permission to relink a live copy.
+        resumable = (
+            existing is not None
+            and existing.identity == identity
+            and existing.local_alias == alias
+            and existing.content_state == "absent"
+        )
+        if (
+            (owner is not None and owner != identity.local_id)
+            or (existing is not None and not resumable)
+            or (owner is not None and not resumable)
+        ):
+            raise LinkError("origin-conflict", "adoption requires an unlinked local folder")
+        if self._projection(alias) is not None:
+            raise LinkError("origin-conflict", "adoption alias has an existing projection")
+        if not destination.is_dir():
+            raise LinkError("alias-occupied", "adoption requires a local folder")
+        for pending in self.journal.pending(kind="skill"):
+            if pending.payload.get("local_alias") == alias:
+                raise LinkError("local-concurrent-edit", "adoption alias has a pending transaction")
+        return destination
+
+    def adopt(
+        self,
+        identity: LinkIdentity,
+        alias: str,
+        document: SkillDocument | None,
+        baseline: BaselineRecord,
+        *,
+        expected_tree_hash: str,
+        snapshot: Mapping[str, Any],
+        expected_policy_revision: str | None = None,
+        basis: str = "adopt-merge",
+        carried_paths: tuple[str, ...] = (),
+        checkpoint: Callable[[str], None] | None = None,
+    ) -> LocalTransaction:
+        """CAS an unlinked ORIGINAL raw tree; None links without any content write.
+
+        The snapshot supplied by preview must already be durable before model work.
+        Journal hashes use raw bytes/modes, not the lossy document projection, so
+        recovery can distinguish edits even in carried binary assets.
+        """
+        from local_operator.hub_sync.skill_adoption import local_projection, read_tree
+
+        self._require_projection_support()
+        if baseline.identity != identity or baseline.local_alias != alias:
+            raise LinkError("origin-conflict", "adoption baseline identity does not match")
+        if document is not None and document.name != alias:
+            raise LinkError("skill-validation", "adoption document name differs from alias")
+        if (
+            SkillDocument.from_json(dict(baseline.fields)).fingerprint != baseline.fingerprint
+            or parse_baseline_record(baseline.to_json(), "skill", identity.local_id) is None
+        ):
+            raise LinkError("baseline-unknown", "adoption baseline is invalid")
+        notify = checkpoint or (lambda _phase: None)
+        with config_write_lock(self.config_dir):
+            destination = self.adoption_subject(identity, alias)
+            tree = read_tree(destination)
+            if tree.tree_hash != expected_tree_hash:
+                raise LinkError("local-concurrent-edit", "local folder changed since preview")
+            snapshot_path = Path(str(snapshot.get("path", "")))
+            backups = self.config_dir / "hub" / "backups"
+            if (
+                snapshot_path.parent != backups
+                or not snapshot_path.name.startswith(f"skill-adopt-{alias}-")
+                or snapshot_path.is_symlink()
+                or backups.is_symlink()
+            ):
+                raise LinkError("skill-validation", "adoption snapshot location is invalid")
+            manifest_path = snapshot_path / "manifest.json"
+            if manifest_path.is_symlink():
+                raise LinkError("skill-validation", "adoption snapshot manifest is unsafe")
+            persisted = json.loads(manifest_path.read_text())
+            if (
+                persisted != dict(snapshot)
+                or snapshot.get("tree_hash") != expected_tree_hash
+                or snapshot.get("manifest") != tree.manifest()
+                or read_tree(snapshot_path / "content").tree_hash != expected_tree_hash
+            ):
+                raise LinkError("local-concurrent-edit", "adoption snapshot no longer matches")
+            carried_paths = tuple(sorted(set(carried_paths)))
+            if not set(carried_paths) <= {entry.path for entry in tree.entries}:
+                raise LinkError("skill-validation", "carried asset is not in the local snapshot")
+            if "SKILL.md" in carried_paths:
+                raise LinkError("skill-validation", "SKILL.md cannot be excluded from projection")
+            projection = {"alias": alias, "carried_paths": list(carried_paths)}
+            if document is None:
+                local_projection(tree, carried_paths=carried_paths)
+            values = read_config_values(self.config_dir)
+            if values is None and (self.config_dir / "config.yml").exists():
+                raise LinkError("invalid-link-policy", "configuration is unreadable")
+            policy = read_policy(values or {}, identity)
+            if expected_policy_revision is not None and policy.revision != expected_policy_revision:
+                raise LinkError("policy-revision-changed", "adoption policy changed")
+            transaction = self.journal.prepare(
+                identity,
+                "pull",
+                before_fingerprint=expected_tree_hash,
+                after_fingerprint=expected_tree_hash if document is None else None,
+                payload={
+                    "adapter": "managed-skill-adopt",
+                    "local_alias": alias,
+                    "baseline": baseline.to_json(),
+                    "snapshot": dict(snapshot),
+                    "projection": projection,
+                    "policy_revision": policy.revision,
+                    "keep_raw": document is None,
+                },
+                basis=basis,
+            )
+            notify("prepared")
+            _, staged, backup = self._locations(transaction)
+            if document is not None:
+                self._stage(transaction, document)
+                for entry in tree.entries:
+                    if entry.path not in carried_paths:
+                        continue
+                    target = staged / entry.path
+                    if target.exists() or any(
+                        (staged / file.path).is_relative_to(target) for file in document.files
+                    ):
+                        raise LinkError(
+                            "adoption-needs-choice",
+                            "carried asset collides with proposed document",
+                        )
+                    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    with os.fdopen(fd, "wb") as stream:
+                        stream.write(entry.data)
+                        stream.flush()
+                        os.fchmod(stream.fileno(), _sanitise_staged_mode(entry.mode))
+                        os.fsync(stream.fileno())
+                for directory, _, _ in os.walk(staged, topdown=False):
+                    _sync_directory(Path(directory))
+                after = read_tree(staged).tree_hash
+                transaction = replace(transaction, after_fingerprint=after)
+                self.journal.write(transaction)
+            if read_tree(destination).tree_hash != expected_tree_hash:
+                self.journal.transition(transaction, "blocked", error_class="local-concurrent-edit")
+                raise LinkError("local-concurrent-edit", "local folder changed during adoption")
+            if document is not None:
+                backup.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                _sync_ancestors(backup.parent, self.config_dir / "hub")
+                _sync_ancestors(staged.parent, self.config_dir / "hub")
+                os.replace(destination, backup)
+                _sync_directory(self.root)
+                _sync_directory(backup.parent)
+                notify("old-renamed")
+                if read_tree(backup).tree_hash != expected_tree_hash:
+                    os.replace(backup, destination)
+                    _sync_directory(self.root)
+                    self.journal.transition(
+                        transaction,
+                        "blocked",
+                        error_class="local-concurrent-edit",
+                    )
+                    raise LinkError(
+                        "local-concurrent-edit",
+                        "local folder changed at adoption commit",
+                    )
+                os.replace(staged, destination)
+                _sync_directory(self.root)
+                _sync_directory(staged.parent)
+                notify("new-renamed")
+            if read_tree(destination).tree_hash != transaction.after_fingerprint:
+                self.journal.transition(transaction, "blocked", error_class="local-concurrent-edit")
+                raise LinkError("local-concurrent-edit", "adopted folder changed at commit")
+            transaction = self.journal.transition(transaction, "content-committed")
+            notify("content-committed")
+            self._finish_adoption(transaction)
+            notify("complete")
+            return self.journal.read(transaction.operation_id) or transaction
+
+    def _finish_adoption(self, transaction: LocalTransaction) -> None:
+        alias = validate_name(transaction.payload.get("local_alias"))
+        identity = LinkIdentity.from_json(transaction.link)
+        owner = alias_owner(self.config_dir, "skill", alias)
+        if owner is not None and owner != identity.local_id:
+            raise LinkError("origin-conflict", "adoption alias belongs to another origin")
+        self._write_projection(alias, dict(transaction.payload["projection"]))
+        self._finalize(transaction)
+
+    def _recover_adoption(self, transaction: LocalTransaction) -> None:
+        from local_operator.hub_sync.skill_adoption import read_tree
+
+        self._require_projection_support()
+        if transaction.phase == "blocked":
+            return
+        destination, staged, backup = self._locations(transaction)
+        actual = read_tree(destination).tree_hash if destination.exists() else None
+        if actual == transaction.after_fingerprint and (
+            not transaction.payload.get("keep_raw") or transaction.phase == "content-committed"
+        ):
+            self._finish_adoption(transaction)
+        elif actual is None and backup.exists():
+            if read_tree(backup).tree_hash == transaction.before_fingerprint:
+                os.replace(backup, destination)
+                _sync_directory(self.root)
+                _sync_directory(backup.parent)
+                self.journal.transition(transaction, "aborted")
+            else:
+                self.journal.transition(transaction, "blocked", error_class="local-concurrent-edit")
+        elif actual == transaction.before_fingerprint:
+            self.journal.transition(transaction, "aborted")
+        else:
+            self.journal.transition(transaction, "blocked", error_class="local-concurrent-edit")
+
     # -- unpull (content removal that keeps the link) -------------------------------
 
     def unpull_marker(self, local_id: str) -> Path:
@@ -199,13 +681,28 @@ class ManagedSkillStorage:
                 f"a file named {alias!r} is already in the skills folder; "
                 "move it somewhere else, then try again",
             )
-        document = SkillDocument.from_directory(path)
+        projection = self._projection(alias)
+        if projection is None:
+            document = SkillDocument.from_directory(path)
+        else:
+            from local_operator.hub_sync.skill_adoption import (
+                local_projection,
+                read_tree,
+            )
+
+            document = local_projection(
+                read_tree(path), carried_paths=projection["carried_paths"]
+            ).with_name(alias)
         if document.name != alias:
             raise LinkError("skill-validation", "managed skill name must match its recorded alias")
         return document
 
     def snapshot(self, local_id: str) -> SkillSnapshot:
         with config_write_lock(self.config_dir):
+            if not self._projection_supported():
+                record = read_baseline(self.config_dir, "skill", local_id)
+                if record is not None and record.local_alias is not None:
+                    self._require_projection_absent(record.local_alias)
             self.recover(local_id=local_id)
             # A crashed unpull is settled BEFORE the record is read, so a reader
             # either sees the content (the rename never happened) or the explicit
@@ -228,6 +725,8 @@ class ManagedSkillStorage:
         *,
         mode_source: Path | None = None,
     ) -> Path:
+        # Refuse unsupported/unsafe projection reads before even staging bytes.
+        projection = self._projection(document.name)
         hub = self.config_dir / "hub"
         staging = hub / "staging"
         operation = staging / record.operation_id
@@ -260,9 +759,27 @@ class ManagedSkillStorage:
                 stream.flush()
                 os.chmod(target, _staged_file_mode(previous / file.path))
                 os.fsync(stream.fileno())
+        if projection is not None and previous.exists():
+            from local_operator.hub_sync.skill_adoption import read_tree
+
+            for entry in read_tree(previous).entries:
+                if entry.path not in projection["carried_paths"]:
+                    continue
+                target = content / entry.path
+                if target.exists():
+                    raise LinkError(
+                        "adoption-needs-choice",
+                        "hub file collides with carried local asset",
+                    )
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                with target.open("xb") as stream:
+                    stream.write(entry.data)
+                    stream.flush()
+                    os.chmod(target, _sanitise_staged_mode(entry.mode))
+                    os.fsync(stream.fileno())
         for directory, _children, _files in os.walk(content, topdown=False):
             _sync_directory(Path(directory))
-        if SkillDocument.from_directory(content).fingerprint != document.fingerprint:
+        if self._fingerprint_path(content, alias=document.name) != document.fingerprint:
             raise LinkError("local-concurrent-edit", "staged skill does not match its proposal")
         return content
 
@@ -287,10 +804,27 @@ class ManagedSkillStorage:
                 raise LinkError("skill-validation", "managed skill transaction path is unsafe")
         return destination, staged, backup
 
-    def _fingerprint_path(self, path: Path) -> str | None:
+    def _fingerprint_path(self, path: Path, *, alias: str | None = None) -> str | None:
         if not path.exists():
             return None
-        return SkillDocument.from_directory(path).fingerprint
+        projection = self._projection(alias) if alias is not None else None
+        if projection is None:
+            return SkillDocument.from_directory(path).fingerprint
+        from local_operator.hub_sync.skill_adoption import local_projection, read_tree
+
+        assert alias is not None
+        document = local_projection(read_tree(path), carried_paths=projection["carried_paths"])
+        return document.with_name(alias).fingerprint
+
+    def _raw_hash(self, path: Path) -> str | None:
+        from local_operator.hub_sync.skill_adoption import read_tree
+
+        return read_tree(path).tree_hash if path.exists() else None
+
+    def _raw_matches(self, transaction: LocalTransaction, path: Path, key: str) -> bool:
+        # Old journals have only canonical ancestry pins. New writes additionally
+        # pin bytes/modes, including explicitly excluded local assets.
+        return key not in transaction.payload or self._raw_hash(path) == transaction.payload[key]
 
     def _manager(self) -> ConfigManager:
         # A recovery reader must not seed defaults or move an unreadable file
@@ -381,16 +915,27 @@ class ManagedSkillStorage:
                 notify("old-renamed")
                 # Catch an external edit between precondition read and the
                 # old directory rename; the backup contains those real bytes.
-                if self._fingerprint_path(backup) != before:
+                if self._fingerprint_path(
+                    backup, alias=document.name
+                ) != before or not self._raw_matches(transaction, backup, "raw_before"):
                     os.replace(backup, destination)
                     self.journal.transition(
                         transaction, "blocked", error_class="local-concurrent-edit"
                     )
                     raise LinkError("local-concurrent-edit", "managed skill changed during commit")
+            if not self._raw_matches(transaction, staged, "raw_after"):
+                if backup.exists():
+                    os.replace(backup, destination)
+                    _sync_directory(self.root)
+                self.journal.transition(transaction, "blocked", error_class="local-concurrent-edit")
+                raise LinkError("local-concurrent-edit", "managed staging changed during commit")
             os.replace(staged, destination)
             _sync_directory(self.root)
             notify("new-renamed")
-        if self._fingerprint_path(destination) != document.fingerprint:
+        raw_key = "raw_after" if before != document.fingerprint else "raw_before"
+        if self._fingerprint_path(
+            destination, alias=document.name
+        ) != document.fingerprint or not self._raw_matches(transaction, destination, raw_key):
             self.journal.transition(transaction, "blocked", error_class="local-concurrent-edit")
             raise LinkError("local-concurrent-edit", "managed skill changed after commit")
 
@@ -423,6 +968,8 @@ class ManagedSkillStorage:
         validate_name(alias)
         if document.name != alias:
             raise LinkError("skill-validation", "managed skill name must match its local alias")
+        if not self._projection_supported():
+            self._require_projection_absent(alias)
         # Test fault-injection ONLY; production notifications run after return,
         # never inside the config/definition transaction lock.
         notify = checkpoint or (lambda _phase: None)
@@ -485,6 +1032,7 @@ class ManagedSkillStorage:
                     "baseline": baseline.to_json(),
                     "policy_revision": policy.revision,
                     "automatic": automatic,
+                    "raw_before": self._raw_hash(self.path(alias)),
                 },
                 basis=basis,
             )
@@ -498,11 +1046,19 @@ class ManagedSkillStorage:
             # Slow fsync preparation is outside the short read/commit lock. Actual
             # bytes/policy are checked again when the prepared directory is ready.
             staged = self._stage(transaction, document)
+            transaction = replace(
+                transaction,
+                payload={
+                    **transaction.payload,
+                    "raw_after": self._raw_hash(staged),
+                },
+            )
+            self.journal.write(transaction)
             notify("staged")
             with config_write_lock(self.config_dir):
                 destination, _staged, backup = self._locations(transaction)
-                fresh = self._fingerprint_path(destination)
-                if fresh != before:
+                fresh = self._fingerprint_path(destination, alias=alias)
+                if fresh != before or not self._raw_matches(transaction, destination, "raw_before"):
                     self.journal.transition(
                         transaction, "blocked", error_class="local-concurrent-edit"
                     )
@@ -520,7 +1076,11 @@ class ManagedSkillStorage:
                     raise LinkError(
                         "policy-revision-changed", "link policy changed during preparation"
                     )
-                if self._fingerprint_path(staged) != document.fingerprint:
+                if self._fingerprint_path(
+                    staged, alias=alias
+                ) != document.fingerprint or not self._raw_matches(
+                    transaction, staged, "raw_after"
+                ):
                     self.journal.transition(
                         transaction, "blocked", error_class="local-concurrent-edit"
                     )
@@ -646,7 +1206,11 @@ class ManagedSkillStorage:
                 "pull",
                 before_fingerprint=before,
                 after_fingerprint=document.fingerprint,
-                payload={"adapter": "managed-skill", "local_alias": alias},
+                payload={
+                    "adapter": "managed-skill",
+                    "local_alias": alias,
+                    "raw_before": self._raw_hash(destination),
+                },
                 basis=LOCAL_EDIT_BASIS,
             )
             lease = self.journal.claim(transaction.operation_id)
@@ -659,17 +1223,31 @@ class ManagedSkillStorage:
             # Slow fsync staging happens outside the short root lock; the bytes
             # are compared again under it before anything is renamed.
             staged = self._stage(transaction, document, mode_source=mode_source)
+            transaction = replace(
+                transaction,
+                payload={
+                    **transaction.payload,
+                    "raw_after": self._raw_hash(staged),
+                },
+            )
+            self.journal.write(transaction)
             notify("staged")
             with config_write_lock(self.config_dir):
                 destination, _staged, backup = self._locations(transaction)
-                if self._fingerprint_path(destination) != before:
+                if self._fingerprint_path(
+                    destination, alias=alias
+                ) != before or not self._raw_matches(transaction, destination, "raw_before"):
                     self.journal.transition(
                         transaction, "blocked", error_class="local-concurrent-edit"
                     )
                     raise LinkError(
                         "local-concurrent-edit", "managed skill changed during preparation"
                     )
-                if self._fingerprint_path(staged) != document.fingerprint:
+                if self._fingerprint_path(
+                    staged, alias=alias
+                ) != document.fingerprint or not self._raw_matches(
+                    transaction, staged, "raw_after"
+                ):
                     self.journal.transition(
                         transaction, "blocked", error_class="local-concurrent-edit"
                     )
@@ -752,11 +1330,21 @@ class ManagedSkillStorage:
         """Recover only skill commits; never lock/recover an agent from a reader."""
         with config_write_lock(self.config_dir):
             for transaction in self.journal.pending(kind="skill", local_id=local_id):
-                if transaction.payload.get("adapter") != "managed-skill":
+                adapter = transaction.payload.get("adapter")
+                if adapter not in ("managed-skill", "managed-skill-adopt"):
                     continue
+                if not self._projection_supported():
+                    if adapter == "managed-skill-adopt":
+                        self._require_projection_support()
+                    self._require_projection_absent(
+                        validate_name(transaction.payload.get("local_alias"))
+                    )
                 with self.journal.claim(transaction.operation_id) as claimed:
                     if claimed:
-                        self._recover_one(transaction)
+                        if adapter == "managed-skill-adopt":
+                            self._recover_adoption(transaction)
+                        else:
+                            self._recover_one(transaction)
 
     # -- unpull: remove the managed copy, keep the link ------------------------------
 
@@ -776,6 +1364,10 @@ class ManagedSkillStorage:
         not a delete, so a retried request must not fail on its own earlier effect.
         """
         with config_write_lock(self.config_dir):
+            if not self._projection_supported():
+                record = read_baseline(self.config_dir, "skill", local_id)
+                if record is not None and record.local_alias is not None:
+                    self._require_projection_absent(record.local_alias)
             # Settle a crashed PULL first, exactly as a reader does: its journal
             # may be mid-swap, and unpull must see the real destination (or none)
             # instead of refusing a stale state.
@@ -832,6 +1424,7 @@ class ManagedSkillStorage:
             # content it cannot show.
             _sync_directory(self.root)
             _sync_directory(tombstone.parent)
+            self._retire_projection(alias)
             self._record_absent(record)
             marker.unlink(missing_ok=True)
             # Deleting the tombstone is allowed once the state is durable: the
@@ -922,6 +1515,8 @@ class ManagedSkillStorage:
             ):
                 logger.warning("ignoring malformed unpull marker %s", marker)
                 continue
+            if not self._projection_supported():
+                self._require_projection_absent(validate_name(alias))
             record = read_baseline(self.config_dir, "skill", attempted_id)
             if record is None:
                 marker.unlink(missing_ok=True)
@@ -933,6 +1528,7 @@ class ManagedSkillStorage:
                 continue
             tombstone = self.config_dir / "hub" / "backups" / tombstone_name
             if record.content_state == "absent":
+                self._retire_projection(alias)
                 marker.unlink(missing_ok=True)
                 shutil.rmtree(tombstone, ignore_errors=True)
                 continue
@@ -946,6 +1542,7 @@ class ManagedSkillStorage:
             if not tombstone.exists():
                 marker.unlink(missing_ok=True)
                 continue
+            self._retire_projection(alias)
             self._record_absent(record)
             marker.unlink(missing_ok=True)
             shutil.rmtree(tombstone, ignore_errors=True)
@@ -954,12 +1551,31 @@ class ManagedSkillStorage:
         if transaction.phase == "blocked":
             return
         destination, staged, backup = self._locations(transaction)
-        actual = self._fingerprint_path(destination)
+        actual = self._fingerprint_path(destination, alias=transaction.payload["local_alias"])
         if actual == transaction.after_fingerprint:
+            if (
+                "raw_before" in transaction.payload
+                and "raw_after" not in transaction.payload
+                and transaction.before_fingerprint != transaction.after_fingerprint
+            ):
+                self.journal.transition(transaction, "blocked", error_class="local-concurrent-edit")
+                return
+            key = (
+                "raw_before"
+                if transaction.before_fingerprint == transaction.after_fingerprint
+                else "raw_after"
+            )
+            if not self._raw_matches(transaction, destination, key):
+                self.journal.transition(transaction, "blocked", error_class="local-concurrent-edit")
+                return
             self._finalize(transaction)
             return
         if actual is None and backup.exists() and staged.exists():
-            if self._fingerprint_path(backup) != transaction.before_fingerprint:
+            if self._fingerprint_path(
+                backup, alias=transaction.payload["local_alias"]
+            ) != transaction.before_fingerprint or not self._raw_matches(
+                transaction, backup, "raw_before"
+            ):
                 # External editors do not hold the advisory lease. Even a crash
                 # gap is not permission to promote an unexpectedly changed backup.
                 self.journal.transition(transaction, "blocked", error_class="local-concurrent-edit")
@@ -971,6 +1587,9 @@ class ManagedSkillStorage:
             self.journal.transition(transaction, "aborted")
             return
         if actual == transaction.before_fingerprint:
+            if not self._raw_matches(transaction, destination, "raw_before"):
+                self.journal.transition(transaction, "blocked", error_class="local-concurrent-edit")
+                return
             self.journal.transition(transaction, "aborted")
             if staged.exists():
                 shutil.rmtree(staged)  # only this operation's own prepared tree

@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "audit_id": "pair2",
+  "locale": "hi",
+  "namespace": "cli.browser",
+  "audit_date": "2026-11-02",
+  "scope": "delta over pair1: one new key cli.browser.enter_each_code_icon (PR #3339 review R3b); every other value byte-identical to the pair1-audited catalogue",
+  "keys": [
+    "cli.browser.enter_each_code_icon"
+  ],
+  "supersedes": "i18n/audits/evidence/hi/cli.browser/pair1/record.json (target 255a236a620ab56fe81a3b544adc5097525351d27ecefe126ab9aac28f51b7f8)",
+  "source_sha256": "af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019",
+  "target_sha256": "cde43c6578a8d972e6ceaa2bb63c5b794290a224ae60c63f12833a10789339ee",
+  "translator": {
+    "agent": "translator subagent (job f364d94792a6) of session b2810af2074b",
+    "model": "anthropic/claude-opus-5-5"
+  },
+  "auditor": {
+    "agent": "translation-auditor subagent (job 68b1b726839c) of session b2810af2074b; did not translate or edit",
+    "model": "anthropic/claude-opus-5-5",
+    "result": "passed",
+    "findings": "0B/0M/0m/0n"
+  },
+  "independence": "Separate subagent sessions sharing the Claude model family (disclosed). Not verified: native-speaker review."
+}

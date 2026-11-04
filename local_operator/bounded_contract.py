@@ -449,9 +449,13 @@ def supervise_direct(
         from local_operator.mobile.resources import direct_group_pids as group_pids
     make_guard: Callable[..., Any]
     if guard_factory is None:
+        import functools
+
         from local_operator.memory_guard import Guard
 
-        make_guard = Guard
+        # Charge descendants that setsid() out of the group too; see
+        # memory_guard.Guard._escaped_descendants.
+        make_guard = functools.partial(Guard, descendants=True)
     else:
         make_guard = guard_factory
 
@@ -526,7 +530,19 @@ def supervise_direct(
             if guard is not None and not killed and now >= next_sample:
                 sample = guard.sample_sync()
                 next_sample = now + guard.tick_s
+                # Disclosed ONCE per pid (review R1): unreadable by credential
+                # is named, never counted toward fail-closed.
+                new_np = getattr(guard, "new_not_permitted", None)
+                fresh = new_np(sample) if new_np else []
+                if fresh:
+                    from local_operator.memory_guard import not_permitted_line
+
+                    report(f"[run_bounded] {not_permitted_line(sample, fresh)}")
                 if guard.should_kill(sample):
+                    if getattr(sample, "unaccounted", None):
+                        from local_operator.memory_guard import unaccounted_line
+
+                        report(f"[run_bounded] {unaccounted_line(sample)}")
                     # MiB plus the caller's own knob (design D2.1); None keeps
                     # the guard's default wording for any other embedder.
                     if memory_escape is None:
@@ -536,6 +552,29 @@ def supervise_direct(
                             sample, unit="MiB", escape=memory_escape
                         )
                     report(f"[run_bounded] {message}")
+                    # Escaped descendants FIRST: their parent edge is the only
+                    # ownership proof, and it is gone once the group dies.
+                    stop_escaped = getattr(guard, "stop_escaped", None)
+                    stopped = stop_escaped(signal.SIGKILL) if stop_escaped else []
+                    if stopped:
+                        report(
+                            "[run_bounded] SIGKILL to escaped descendant(s) "
+                            + ", ".join(str(pid) for pid in stopped)
+                        )
+                    unsignalled = getattr(guard, "unsignalled", None)
+                    if unsignalled:
+                        from local_operator.memory_guard import unsignalled_line
+
+                        report(f"[run_bounded] {unsignalled_line(unsignalled)}")
+                    # Review M1 (PR #3372): this is the path every macOS run
+                    # takes, so the "never silent" disclosure for a live escaped
+                    # pid no parentage source could prove ours (not signalled)
+                    # must be printed here too, not only on cleanup-required.
+                    unverified = getattr(guard, "unverified", None)
+                    if unverified:
+                        from local_operator.memory_guard import unverified_line
+
+                        report(f"[run_bounded] {unverified_line(unverified)}")
                     if escalating is None:
                         outcome.wrapper_exit_code = 128 + signal.SIGKILL
                         outcome.termination_cause = "memory-policy"
@@ -618,7 +657,7 @@ def _report_budget(stream, ceiling: int, source: str | None, budget) -> None:
         if ceiling > 0:
             stream.write(
                 f"[run_bounded] memory budget {ceiling} MiB ({source or 'unknown'}); "
-                "sampled owned child group only\n"
+                "sampled owned child group and escaped descendants\n"
             )
         else:
             stream.write(disabled_budget_line(source, budget) + "\n")

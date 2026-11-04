@@ -17,6 +17,7 @@
  * the word "primary" is `sr-only`, so a reader hears which label the dot is on
  * and nobody depends on colour alone.
  */
+import { contentDir } from "../lib/content-direction";
 import { cn } from "../lib/cn";
 import { compressedTags } from "../lib/session-tags";
 import { messageRuntime } from "../store";
@@ -54,7 +55,7 @@ export function SessionTagLine({
 							</span>
 						</>
 					) : null}
-					<span className="truncate">{tag.name}</span>
+					<span dir={contentDir(tag.name)} className="truncate">{tag.name}</span>
 				</span>
 			))}
 			{overflow > 0 ? (

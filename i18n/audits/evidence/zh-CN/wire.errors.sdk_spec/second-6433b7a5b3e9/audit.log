@@ -1,0 +1,31 @@
+{
+  "kind": "actual_execution_results",
+  "command": "env -u XPC_FLAGS ~/local-operator/.venv/bin/python $LOCAL_OPERATOR_SCRATCHPAD/sdk-spec-second-audit.py",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "6433b7a5b3e9",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/transcript.jsonl",
+      "entry_id": "6c5a89ac8b564f078e3e54745ab2d770",
+      "usage": {
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol",
+        "at_ms": 1793719999434
+      }
+    },
+    "fallback": "Actual completed usage serves openai/gpt-6.1-sol, differing from initial anthropic header; known fallback disclosed, no upstream-chain inference.",
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_coder_session": "eae0961e4e78",
+    "not_other_reader_job": "196c3a94b346",
+    "other_reader_report_read": false
+  },
+  "repository_check_catalogues": [],
+  "negative_control": [
+    "zh-CN/wire.errors.sdk_spec: wire.errors.sdk_spec.agent_identity_conflict: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"
+  ],
+  "restored_control": "passed",
+  "opaque_interpolation_key_count": 8,
+  "force_english_producer_count": 21
+}

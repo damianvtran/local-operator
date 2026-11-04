@@ -2440,6 +2440,298 @@
       },
       "status": "passed",
       "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). Fix: reset was '{when}重置', which reads as a past event; now '将于{when}重置' (future, matching 'Resets at'). Round-1 fixes intact: no spaces around CJK/number runs (#秒, 更新于{when}), 账户 throughout incl. accounts_order; throttled drops 上限. other-only plural. 0 blocker / 0 major unresolved. No rendered or native-speaker pass claimed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.browser",
+      "source_sha256": "5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24",
+      "translator": {
+        "agent": "translator (job 0faa675bccf9, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 558baa6e079b, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "CLI-first browser pairing delta (14 keys rewritten/added, open_popup removed) at source_sha256 5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24; target catalogue_sha256 f1bfb87cc4ed9fa5de6c7a10924b58d5f9487588a277b317877de29471c8c866. Independent audit PASS, 0B/0M/0m/2n; dispositions: T1-T2 applied verbatim. Zero unresolved blocker/major. Translator and auditor are separate sessions sharing the Claude model family (disclosed). Not verified: native-speaker review. Evidence: i18n/audits/evidence/zh-CN/cli.browser/pair1/record.json"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.browser",
+      "source_sha256": "af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019",
+      "translator": {
+        "agent": "translator (job f364d94792a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 68b1b726839c, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 064822d38ede40517e1c425b4c9af422b44874408b933715918e493c42fd9997. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/zh-CN/cli.browser/pair2/record.json"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.hosting",
+      "source_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two independent sessions: e55f54b6a26e, 6433b7a5b3e9)",
+        "model": "radient/auto (served model not disclosed by the route)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace wire.errors.hosting (1 key: the owned display cause the startup refusal splices into its {error} slot) authored at base 87ca846245b2 against frozen English sha256 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63. zh-CN '托管平台未配置。' keeps the terminal ideographic full stop and the corpus term for hosting platform. Two independent readers, neither the translator nor the code author, both PASSED on these bytes with 0 blocker/major/minor/nit (sessions e55f54b6a26e, 6433b7a5b3e9). Source-only assembly: no rendered, native-speaker, width, RTL or validator proof, and no activation, shipped or release claim. Evidence: i18n/audits/evidence/zh-CN/wire.errors.hosting/ (bundles ['zhhost1', 'zhhost2'], frozen inputs under _inputs/)."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 f806ed78581b45af6983cf9fb2e25a045979057af58e7524f1644f7a01f33345; context SHA-256 df0189becbf118ae9fa766395b412fe4d32a324cffd7587e87e392c255ed7a94. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 6e4fbda5136e29554699f4dce17c059eefacc40ed5a4baa3eae005fe16b58522; context SHA-256 105c41ad6e03647b789d2f9dba474b2aa84fee4b050bbe11a95e7c2927246036. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "e809a3221b21b41951ef45200378d59f9a66dcda81c45c4b81119c1cbba360be",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported in this resumed delta",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "D3 independent delta audit: only wire.skill_adoption.preview_required changed; prior full audit retained with exact HEAD hash compatibility. Same ID/scope/options, preview/review/receipt confirmation verified. Target SHA-256 61318021dd8ce8557c8a9a48c4a4524dadbc9dcd7870df21057a11847771ce9e; context SHA-256 d24fe484fa7ce9758efc7135b95f2c8c0527a90cde9824b0c82f153779dfacef. Evidence: i18n/audits/skill-adoption-d3-5ad13f38d6e6.json. Unchanged translations retain initial openai/gpt-6.1-sol authorship; changed key translator anthropic/claude-opus-5-5. No aggregate generation or rendered/real-path QA claimed."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "e809a3221b21b41951ef45200378d59f9a66dcda81c45c4b81119c1cbba360be",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "Actual served model verified from transcript metadata; historical startup/fallback claims retained in superseded row.",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Metadata-only correction: prior runtime-label error; actual auditor and translator openai/gpt-6.1-sol. Same approved source/target and verdict; no re-audit or new independent round. Target SHA-256 61318021dd8ce8557c8a9a48c4a4524dadbc9dcd7870df21057a11847771ce9e. Evidence: i18n/audits/skill-adoption-model-correction-5ad13f38d6e6.json. Prior row retains historical labels."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "Actual served model verified from transcript metadata; historical startup/fallback claims retained in superseded row.",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Metadata-only correction: prior runtime-label error; actual auditor and translator openai/gpt-6.1-sol. Same approved source/target and verdict; no re-audit or new independent round. Target SHA-256 6e4fbda5136e29554699f4dce17c059eefacc40ed5a4baa3eae005fe16b58522. Evidence: i18n/audits/skill-adoption-model-correction-5ad13f38d6e6.json. Prior row retains historical labels."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "5313b5455bb3b295e3fe78a5ea465a9e9d85c641927562bad93f58e0e5971f7b",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "identity_evidence": "Parent verified actual serving model; existing model_identity_correction applies",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 936eec9d7ec1cf185590e1a87fe2544997bad62b0e9867417012054668101e77; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 0 major, 1 minor (Z1), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/zh-CN/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-a, task subagent)",
+        "session": "886288cfe273",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_alert at source hash cb3fcf96f055: key set and ICU placeholder/plural-structure parity with en, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical, safety meaning (count, held longer than threshold, agent NOT given the messages, no deletion/review claim, cleared text does not claim delivery), 'Agent messages' title and 'held' wording against the locale's cli.team_bridge catalogue and glossary/style guide. 0 blocker / 0 major / 2 minor. other-only plural correct. Minors: (1) spaces around digits/placeholders ('有 # 条', '超过 {minutes…}') against the zh-CN.md no-space rule (the catalogue has ~50 existing keys with the same pattern); (2) long_hold.body '被暂扣已超过' is slightly stiff, '已被暂扣超过' reads more natural. '暂扣' matches cli.team_bridge. Passed with minors outstanding. Single independent audit pass; no cross-model second audit."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-r2a, task subagent)",
+        "session": "3c5e5fe61f9b",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent re-audit (not the translator; supersedes the row at the old English hash) of cli.team_bridge_alert at source hash f433a71daee9: key set and ICU placeholder/plural-structure parity with en for all 4 keys, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical in long_hold.body, meaning ('held for more than N minutes and has not reached your agent'; cleared = no message held longer than the threshold; no delivery, deletion or review claim), 'Agent messages' title wording and 'held' term against the locale's cli.team_bridge catalogue, glossary and style guide; every key rendered with the repo formatter. 0 blocker / 0 major / 1 minor. other-only plural correct; no spaces around digits/placeholders; classifier 条 for messages; full-width punctuation; no full stop on titles; '暂扣' matches cli.team_bridge. Minor: '详情请运行' uses 请 although the English says 'Run' not 'please' (zh-CN.md reserves 请 for the English 'please'); the shipped catalogue elsewhere uses bare 运行 (e.g. '然后运行`lop …`'); suggest '详情：运行`lop team-bridge receiver status`。'. Passed with 1 minor outstanding. Single independent audit pass; no cross-model second audit."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.sdk_spec",
+      "source_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "21/21 initial catalogue-only contribution; translator7fce46e29bee and independent readers e55f54b6a26e /6433b7a5b3e9, actual openai/gpt-6.1-sol from retained completed usage provenance; both PASS zero findings. Both readers/source/context/target bound in i18n/audits/evidence/zh-CN/wire.errors.sdk_spec/integration-binding.json; originals retained unchanged. Legacy SDK exception contract is VALID: existing producers still explicitly English; factory args/str/attrs/defaults unchanged. No present UI path or native-fit cap claimed; no native/pseudo/RTL execution. This is namespace completeness, NOT SDK exception localization or whole-UI English-free proof."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.tool_rows.bridge.skipped",
+      "source_sha256": "e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865",
+      "translator": {
+        "agent": "coder (PR #3417 implementer)",
+        "session": "62d5b457bcf6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev team)",
+        "session": "3dcc5dbc44d0",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent current-byte audit: i18n/audits/evidence/zh-CN/wire.tool_rows.bridge.skipped/rg6a1/record.json. 0M/0m/0n (none), 0 unresolved blocker/major. Composed row+expanded checked; no native/rendered claim."
     }
   ]
 }

@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "kind": "portable-qa-provenance-override",
+  "session_id": "b65f5adc1dfb",
+  "pr": "https://github.com/damianvtran/local-operator/pull/3349",
+  "actual_served_identity": "openai/gpt-6.1-sol",
+  "source": "Session transcript.jsonl completed message payload.usage.provider and payload.usage.model_id; corroborated by per-identity cumulative usage custom records. Requested/prompt-header model is not served identity.",
+  "usage_evidence": [
+    {
+      "round": "round1",
+      "completed_usage_rows": 18,
+      "identities": [
+        "openai/gpt-6.1-sol"
+      ],
+      "first": {
+        "row_id": "efed0af764c1413893d6fa62bdb12e8d",
+        "ts": 1793696451.842425,
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      },
+      "last": {
+        "row_id": "de9890c1d2fb4445b4b9331b4dd75689",
+        "ts": 1793696742.2092679,
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      }
+    },
+    {
+      "round": "native-round1",
+      "completed_usage_rows": 28,
+      "identities": [
+        "openai/gpt-6.1-sol"
+      ],
+      "first": {
+        "row_id": "849d374aac0046228dcddbb71fc7cb7e",
+        "ts": 1793696797.786966,
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      },
+      "last": {
+        "row_id": "c78ffd6e9d144003a1ac4dcb37b9f800",
+        "ts": 1793697288.492238,
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      }
+    },
+    {
+      "round": "round2",
+      "completed_usage_rows": 11,
+      "identities": [
+        "openai/gpt-6.1-sol"
+      ],
+      "first": {
+        "row_id": "fb39930b36ea436eaca87454cf7e1cc8",
+        "ts": 1793698779.372043,
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      },
+      "last": {
+        "row_id": "5b16f9efcd484fb0ad40ef9f9922e38d",
+        "ts": 1793698990.705771,
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      }
+    }
+  ],
+  "correction_scope": "Only existing GitHub QA comment Reviewer lines. Scope, Head, verdict, findings, commands, captures, tests unchanged. No QA reset. Immutable prior report/machine/pixel files are not rewritten. Apply reviewer_override below when consuming the report identified by immutable SHA-256.",
+  "artifacts": [
+    {
+      "relative_path": "qa-report-round1.md",
+      "immutable_sha256": "0ab916d169a3af3a32fdfed0aa82ff6e5189c0b5b605982c615e8d9a55d0df83",
+      "reviewer_override": "Reviewer: qa-tester / openai/gpt-6.1-sol (actual served model, verified from completed-message usage in session b65f5adc1dfb; prior Sonnet/no-fallback attribution in original native report artifacts was incorrect and header-derived)",
+      "superseded_provenance_line": "Reviewer: qa-tester / openai/gpt-6.1-sol (actual quota fallback; original assigned model anthropic/claude-sonnet-5-5, intermediate switch notice anthropic/claude-opus-5-5; all execution reported here performed after the gpt-6.1-sol switch)",
+      "comment_url": "https://github.com/damianvtran/local-operator/pull/3349#issuecomment-6599564325",
+      "original_comment_body_sha256": "0ab916d169a3af3a32fdfed0aa82ff6e5189c0b5b605982c615e8d9a55d0df83",
+      "corrected_comment_body_sha256": "b1510920551de4193e150c9034af0dc3a5020562c52fc744441472eb06f2d7d7"
+    },
+    {
+      "relative_path": "qa-native-supplement.md",
+      "immutable_sha256": "c976204cc32aa5703b49da767cc1751ef947a36e9df28ea111678607403b0be0",
+      "reviewer_override": "Reviewer: qa-tester / openai/gpt-6.1-sol (actual served model, verified from completed-message usage in session b65f5adc1dfb; prior Sonnet/no-fallback attribution in original native report artifacts was incorrect and header-derived)",
+      "superseded_provenance_line": "Reviewer: qa-tester / anthropic/claude-sonnet-5-5 (actual model identified by this resumed runtime; no model/tool/default changes or fallback invoked during this native pass)",
+      "comment_url": "https://github.com/damianvtran/local-operator/pull/3349#issuecomment-6599736833",
+      "original_comment_body_sha256": "c976204cc32aa5703b49da767cc1751ef947a36e9df28ea111678607403b0be0",
+      "corrected_comment_body_sha256": "ca6b3a82a58f7664b3b2a624dce070f44f04a01ab0f04b01d6802f16d3c0a493"
+    },
+    {
+      "relative_path": "qa-round2.md",
+      "immutable_sha256": "22bdcd5a3acd0e689a81bdba75c2a5cf1a402292a1fb635d52c06d8ebbd93d08",
+      "reviewer_override": "Reviewer: qa-tester / openai/gpt-6.1-sol (actual served model, verified from completed-message usage in session b65f5adc1dfb; prior Sonnet/no-fallback attribution in original native report artifacts was incorrect and header-derived)",
+      "superseded_provenance_line": "Reviewer: qa-tester / anthropic/claude-sonnet-5-5 (actual resumed runtime model; no fallback/model/default/tool changes invoked in this pass)",
+      "comment_url": "https://github.com/damianvtran/local-operator/pull/3349#issuecomment-6600275706",
+      "original_comment_body_sha256": "22bdcd5a3acd0e689a81bdba75c2a5cf1a402292a1fb635d52c06d8ebbd93d08",
+      "corrected_comment_body_sha256": "7158deef185729c3235e04ca88a24843959a58f3ae565f90d2e00c93b5d5ba3e"
+    }
+  ]
+}

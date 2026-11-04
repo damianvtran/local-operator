@@ -1,0 +1,5 @@
+{
+  "wire.tool_rows.bridge.skipped.expanded": "未发布：刚刚已发送过一条相同的消息，因此跳过了这一条。",
+  "wire.tool_rows.bridge.skipped.verb.channel_post": "已跳过发布至",
+  "wire.tool_rows.bridge.skipped.verb.dm": "已跳过私信"
+}

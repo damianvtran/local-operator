@@ -6204,21 +6204,24 @@ def test_a_session_runtime_is_spawned_detached() -> None:
     on launchd abandoning descendants (round-4 corrected exactly that claim: the
     generated plists carry no ``AbandonProcessGroup``, so launchd's default would
     reap a same-group descendant). This asserts the detachment itself — a phone
-    session's spawn calls ``detached_popen_kwargs()``, whose POSIX arm is
-    ``start_new_session=True`` (``setsid``) — so a future edit that drops the
+    session's spawn calls ``spawn_disclaimed`` (own session plus the macOS
+    responsibility disclaim), whose fallback is ``detached_popen_kwargs()``, whose
+    POSIX arm is ``start_new_session=True`` (``setsid``) — so a future edit that drops the
     detachment is caught here rather than silently making the continuity claim
     false. The behaviour it implies is exercised by the synthetic group-signal
     controls below; this cell is the SOURCE fact, not a bounce.
     """
     import inspect
 
-    from local_operator import procstate
+    from local_operator import macos_disclaim, procstate
     from local_operator.mobile import daemon as daemon_mod
 
     spawn = inspect.getsource(daemon_mod.MobileDaemon._spawn_session)
     assert (
-        "detached_popen_kwargs()" in spawn
+        "_spawn_watched_runtime," in spawn
     ), "the session spawn stopped detaching; the continuity claim is now false"
+    assert "spawn_disclaimed(argv" in inspect.getsource(daemon_mod._spawn_watched_runtime)
+    assert "detached_popen_kwargs()" in inspect.getsource(macos_disclaim._fallback_popen)
     assert procstate.detached_popen_kwargs() == {"start_new_session": True}
 
 

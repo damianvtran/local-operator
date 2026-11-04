@@ -1,0 +1,13 @@
+{
+  "provenance_record": "i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-prov-05c51/record.json",
+  "files": [
+    {
+      "path": "i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-prov-05c51/record.json",
+      "sha256": "1cfececb5d4225ecf4325cd8ca1f02042f86b855612dd07d83fc8eabc0c2e735"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-prov-05c51/report.md",
+      "sha256": "1559ee792f99011e7fee5f1ff113200df711d3919cc6a77acc9ed6d82d40e359"
+    }
+  ]
+}

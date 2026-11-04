@@ -1,3 +1,4 @@
+import { contentDir } from "../lib/content-direction";
 import { useMemo, type RefObject } from "react";
 import { navigate } from "../router";
 import type { SubagentDetail, SubagentRow } from "../types";
@@ -42,7 +43,7 @@ function RootRow({ sessionId, onNavigate }: { sessionId: string; onNavigate: () 
 			className="flex min-h-11 w-full items-center gap-2 rounded-sm px-1 text-start active:bg-surface"
 		>
 			<span aria-hidden className="w-4 shrink-0 text-center text-ink-dim">⌂</span>
-			<span className="min-w-0 flex-1 truncate text-body-sm text-ink">Root conversation</span>
+			<span dir={contentDir("Root conversation")} className="min-w-0 flex-1 truncate text-body-sm text-ink">Root conversation</span>
 		</button>
 	);
 }
@@ -107,7 +108,7 @@ export function AgentsSheet({
 				))}
 				<div className="flex min-h-11 items-center gap-2 px-1" aria-current="page">
 					<span aria-hidden className="w-4 shrink-0 text-center text-accent">●</span>
-					<span className="min-w-0 flex-1 truncate text-body-sm font-medium text-ink">
+					<span dir={contentDir(detail.label)} className="min-w-0 flex-1 truncate text-body-sm font-medium text-ink">
 						{detail.label}
 					</span>
 					<span className="text-meta text-ink-dim">current</span>

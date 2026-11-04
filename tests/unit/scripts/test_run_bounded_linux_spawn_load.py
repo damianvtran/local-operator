@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -39,6 +40,44 @@ CHURN = textwrap.dedent("""
     """)
 
 
+def _retain_failure_evidence(output, rc, record_dir, destination):
+    """Archive only bounded diagnostic fields, not arbitrary pytest scratch.
+
+    CI deletes tmp_path after the shard; the original acquire refusal had only
+    record paths left in its log. Keep existing wrapper output and schema-picked
+    evidence without retrying the workload or changing the failing assertion.
+    """
+    try:
+        records = []
+        for path in sorted(record_dir.glob("*.json"))[:8]:
+            payload = json.loads(path.read_text())
+            ownership = payload.get("ownership", {})
+            records.append(
+                {
+                    "phase": payload.get("phase"),
+                    "census_failure": ownership.get("census_failure"),
+                    "sample_failure": ownership.get("sample_failure"),
+                }
+            )
+        evidence = {
+            "schema": "run-bounded-churn-failure/v1",
+            "rc": rc,
+            # 4096 Unicode characters are at most 16 KiB of UTF-8 and
+            # 48 KiB after JSON escaping, leaving the fallback file under 96 KiB.
+            "stderr": output[:4096],
+            "records": records,
+        }
+        encoded = json.dumps(evidence, sort_keys=True)
+        if len(encoded.encode("utf-8")) > 96 * 1024:
+            evidence["records"] = [{"diagnostic_truncated": True}]
+            encoded = json.dumps(evidence, sort_keys=True)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(encoded)
+        print(f"[linux-churn] failure evidence: {destination}")
+    except Exception:  # noqa: BLE001 - artifact failure must preserve the original gate failure
+        print("[linux-churn] failure evidence unavailable")
+
+
 def test_a_healthy_gate_survives_spawn_churn_and_records_its_group(request, monkeypatch, tmp_path):
     # By name: the shared fixture is imported for pytest to see it, and a
     # same-named parameter would shadow that import (F811).
@@ -57,8 +96,15 @@ def test_a_healthy_gate_survives_spawn_churn_and_records_its_group(request, monk
         run_id="linux-churn",
     )
 
-    assert rc == 0, output.getvalue()
     record_dir = tmp_path / "run-bounded-runs"
+    if rc != 0:
+        # Only CI writes the whitelisted artifact directory. Synthetic/local
+        # checks keep their own artifacts in the existing isolated test scratch.
+        evidence_root = Path("test-artifacts/process-proof") if os.environ.get("CI") else tmp_path
+        _retain_failure_evidence(
+            output.getvalue(), rc, record_dir, evidence_root / f"{tmp_path.name}.json"
+        )
+    assert rc == 0, output.getvalue()
     exit_records = sorted(record_dir.glob("*.exit.json"))
     assert exit_records, output.getvalue()
     payload = json.loads(exit_records[0].read_text())

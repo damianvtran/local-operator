@@ -275,3 +275,15 @@ describe("the model row's text", () => {
 		expect(screen.queryByText(aggregated.selector)).toBeNull();
 	});
 });
+
+// happy-dom checks markup only; the browser fixture proves actual ellipsis pixels.
+
+it("keeps technical model prefixes in their LTR truncation island inside RTL chrome", async () => {
+ render(<div dir="rtl"><ModelSheet open onClose={() => {}} pid="qa-bidi" projection={projection} /></div>);
+ const labels = await screen.findAllByText("GLM-5.2 (Token Plan)");
+ for (const label of labels) {
+  expect(label.hasAttribute("data-ltr")).toBe(true);
+  expect(label.className).toContain("truncate");
+  expect(label.closest("button")?.hasAttribute("dir")).toBe(false);
+ }
+});

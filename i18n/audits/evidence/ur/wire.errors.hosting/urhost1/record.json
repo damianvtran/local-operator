@@ -1,0 +1,163 @@
+{
+  "schema": 1,
+  "audit_id": "ur26host1",
+  "kind": "independent_single_key_audit",
+  "audit_date": "2026-11-03",
+  "locale": "ur",
+  "namespace": "wire.errors.hosting",
+  "key_count": 1,
+  "keys": [
+    "wire.errors.hosting.not_configured"
+  ],
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "1b7a2a90c876",
+    "reader": 1,
+    "model_requested": "radient/auto",
+    "model_served": {
+      "provider": "radient",
+      "model_id": "auto"
+    },
+    "model_underlying_upstream": "UNKNOWN",
+    "actual_model_source": "This session exposes only 'radient/auto' (session state header) and this run's usage records report provider 'radient' with model_id 'auto'. The upstream model behind the routing alias is not exposed here, is not inferred, and no provider fallback is claimed. One older record in the session transcript names provider 'openai' / model 'gpt-6.1-sol' from the earlier R1 turn; it is not this audit's serving identity.",
+    "independent_from_translator": true,
+    "translator": {
+      "agent": "i18n-translator",
+      "session": "1955dea69023"
+    },
+    "independent_from_code_author": true,
+    "code_author_session": "94dcef624dec",
+    "other_reader": {
+      "role": "second independent reader, manager-dispatched",
+      "read_before_this_verdict": false
+    }
+  },
+  "inputs": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "bytes": 82,
+      "supplied_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "matches_supplied": true,
+      "value": "Hosting platform is not configured."
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9",
+      "bytes": 854,
+      "supplied_sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9",
+      "matches_supplied": true
+    },
+    "target_locale": {
+      "path": "/Users/damian/.local-operator/sessions/1955dea69023/scratchpad/hosting-ur/targets/ur/wire.errors.hosting.json",
+      "sha256": "8f7977e2ce06a53267f0672f50605e9e5a09b5c52e85b58619acbb90dfbdd732",
+      "bytes": 113,
+      "supplied_sha256": "8f7977e2ce06a53267f0672f50605e9e5a09b5c52e85b58619acbb90dfbdd732",
+      "matches_supplied": true,
+      "value": "ہوسٹنگ پلیٹ فارم ترتیب نہیں دیا گیا۔"
+    },
+    "en_worktree_copy": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "byte_identical_to_supplied_en": true,
+      "note": "readable corroborating copy of the supplied EN bytes; not a substitute for the supplied files"
+    }
+  },
+  "source_context": {
+    "role": "hosting cause clause spliced mid-sentence after a colon inside startup refusals",
+    "tone": "diagnostic; names the condition, never restates the remedy",
+    "constraints_read": "complete statement after the colon; keep terminal period; one copy for the condition; no placeholders or dynamic detail; English doubles as the legacy HostingNotConfiguredError text but that string stays English and is not this key's consumer copy",
+    "preflight_state": "no provider resolved; owned condition, not an opaque external error"
+  },
+  "mechanical": {
+    "json_valid": true,
+    "duplicate_keys": [],
+    "key_parity_en_target": true,
+    "key_count": 1,
+    "utf8": true,
+    "bom": false,
+    "crlf": false,
+    "trailing_newline": true,
+    "indent": "two spaces (repo catalogue style)",
+    "nfc": true,
+    "cf_codepoints": [],
+    "ascii_letters": "",
+    "icu_braces_or_args": false,
+    "terminal_punctuation": "U+06D4 ARABIC FULL STOP, exactly one; no ASCII period and no colon in the value",
+    "leading_or_trailing_space": false,
+    "digits": [],
+    "codepoints": 36,
+    "not_run": {
+      "repo_icu_parser": "source-only round forbids process dispatch; zero-argument key makes the applicable check the no-braces assertion above",
+      "repo_validator_check_py": "not executed (process dispatch prohibited)",
+      "generation_scanner_typecheck_tests_build": "not executed (process dispatch prohibited)",
+      "cldr_plural": "N/A - no plural/select structure in this key",
+      "placeholders": "N/A - no ICU arguments",
+      "pseudo_localisation": "N/A - zero dynamic segments; no pseudo run claimed",
+      "native_rtl_render_width": "NOT RUN - belongs to the separate consumer/renderer gate; no rendered or measured claim made"
+    }
+  },
+  "native_assessment": {
+    "meaning": "PASS - names the unconfigured hosting platform as the owned condition; adds no remedy, next step, external-error wording or detail absent from the English.",
+    "sentence_completeness": "PASS - reads as a complete statement when spliced after the frame's colon and closes with the Urdu full stop.",
+    "terminology": "PASS - 'ترتیب نہیں دیا گیا' matches the shipped wire.errors phrasing (wire.errors.desktop.aida_no_provider); 'ہوسٹنگ' is consistent with the corpus host family and 'پلیٹ فارم' is settled Urdu for platform. Rejecting 'پرووائیڈر' here is correct: the English names the platform, and the provider term would narrow the source.",
+    "agreement": "PASS - پلیٹ فارم is masculine; 'دیا گیا' agrees, as in the corpus precedent.",
+    "register_script": "PASS - impersonal diagnostic passive, all-Urdu script, no second person, no exclamation, no honorific padding, no case issue (Urdu has none), no digits.",
+    "rtl_static": "PASS (static only) - single right-to-left run, no Latin token, path, number or arrow inside it, so no bidi isolation hazard is present in this value; no rendered RTL proof claimed."
+  },
+  "findings": [],
+  "advisories": [
+    {
+      "id": "A-1",
+      "severity": "advisory, no action for the translator",
+      "text": "The English names the platform while the preflight condition is 'no provider configured'. The Urdu mirrors the English as required; if the naming mismatch matters, it is a source-copy decision rather than a translation defect."
+    },
+    {
+      "id": "A-2",
+      "severity": "advisory, out of scope",
+      "text": "Another locale used a provider term where this key's English says platform. That locale is outside this audit; this verdict rests on the English source and the actual ur corpus, not on uniform wording across locales."
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "scope": "one key, linguistic + mechanical; no native, renderer, width or validator clearance"
+  },
+  "separate_gates": {
+    "native_render": "NOT RUN",
+    "rtl_shaping_pixels": "NOT RUN",
+    "runtime_width_fit": "NOT RUN",
+    "repo_validator_icu_cldr": "NOT RUN"
+  },
+  "scope_guards": {
+    "legacy_exception_untouched": "session_factory.HostingNotConfiguredError remains English by contract; not translated, not edited",
+    "display_only_key": true,
+    "caller_or_api_error_edits": "none",
+    "repository_edits": "none",
+    "target_or_ledger_or_generated_or_baseline_edits": "none",
+    "activation_or_pr_comment_or_frame_clearance": "none"
+  },
+  "provenance": {
+    "namespace_is_new": true,
+    "english_uncommitted": true,
+    "absent_at_base_87ca846245b2": "manager and author state; Git was not run in this round, so it is not independently verified here",
+    "shipped": false,
+    "not_a_whole_page_or_locale_clearance": true
+  },
+  "limitations": [
+    "Source-only verdict: no native app/TUI run, no rendered frame, no measured cells, no RTL/shaping proof.",
+    "No repository validator, ICU/CLDR run, generation, scanner, tests, typecheck or build.",
+    "Reader-1 single pass; the second independent reader is separate and was not read before this verdict.",
+    "Git state (uncommitted source, absence at base) was not verified here.",
+    "Any edit to the target value invalidates this record."
+  ],
+  "artifacts": [
+    {
+      "path": "report.md",
+      "sha256": "9b25abd15f0947fe731a21527ff03e7f84fc28709ddc915326d8e7b029eb1af3",
+      "bytes": 7995
+    }
+  ],
+  "audit_notes_not_execution_log": "The mechanical results above were produced with stdlib json/hashlib/unicodedata file reads in this session; they are execution results, not narrative notes. Nothing in this record asserts a validator, ICU, CLDR, pseudo, native or renderer execution."
+}

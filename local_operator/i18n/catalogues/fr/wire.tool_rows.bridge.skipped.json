@@ -1,0 +1,5 @@
+{
+  "wire.tool_rows.bridge.skipped.expanded": "Non publié : un message identique venait d’être envoyé, cette copie a donc été ignorée.",
+  "wire.tool_rows.bridge.skipped.verb.channel_post": "Publication ignorée dans",
+  "wire.tool_rows.bridge.skipped.verb.dm": "Message ignoré pour"
+}

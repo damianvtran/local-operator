@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "record_kind": "portable_evidence_manifest",
+  "audit_id": null,
+  "receipt": "receipt.json",
+  "report": "report.md",
+  "file_count": 3,
+  "files": [
+    {
+      "path": "manifest.json",
+      "bytes": 1069,
+      "sha256": "d5df39f4bdbda1d76cb023df4080195794e5d1922bef4c975665d60ae74d1e41",
+      "origin": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/hosting-fr-audit-reader2/manifest.json"
+    },
+    {
+      "path": "record.json",
+      "bytes": 5873,
+      "sha256": "27e8f8fc81aa836160e79235f32c0c9d583ffdfa4bacda55b0ea9d19917dd2c3",
+      "origin": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/hosting-fr-audit-reader2/record.json"
+    },
+    {
+      "path": "report.md",
+      "bytes": 5052,
+      "sha256": "b6a745c75212a6b857d7d92db5e2dce3dad2cc07422f59cfb18631ebe5a3df91",
+      "origin": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/hosting-fr-audit-reader2/report.md"
+    }
+  ]
+}

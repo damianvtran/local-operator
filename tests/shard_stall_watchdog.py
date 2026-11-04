@@ -1,5 +1,15 @@
 """Name the test a CI shard stalls on, instead of being cancelled by the cap.
 
+CURRENT SOFT-REPORT CONTRACT
+--------------------------
+Report-only workers use ONE configure-owned GIL-held Python reporter, not a
+native frame walker. This loses GIL-independent soft visibility deliberately:
+absence is unavailable/not observed, NEVER a health or never-due certificate.
+Opt-in hard exit remains native with unchanged bounds. Python records carry
+explicit terminal status; legacy native markers do not certify completeness.
+This mitigates a source hazard, not a proven cause of any observed SIGSEGV.
+Historical measurements below describe the original C-timer implementation.
+
 WHY THIS EXISTS
 ---------------
 ``test (3.12, N)`` intermittently reaches the workflow's ``timeout-minutes: 20``
@@ -315,7 +325,11 @@ STACK_EXCERPT_LINES = 400
 
 
 def _fired_lines(text: str) -> list[str] | None:
-    """The first complete stack dump in ``text``, or ``None`` if none fired.
+    """First observed snapshot excerpt; a marker does NOT certify completeness.
+
+    Python records carry explicit terminal captured/truncated/unavailable or
+    incomplete-failed status. A missing terminal means incomplete output; legacy
+    native markers remain recognizable but cannot establish a complete dump.
 
     This is the single definition of "this file is evidence", so the live
     controller report, the cleanup and the workflow's report all agree by
@@ -337,13 +351,29 @@ def _fired_lines(text: str) -> list[str] | None:
     live report past the log's tail.
     """
     lines = text.splitlines()
-    start = next((i for i, line in enumerate(lines) if line.startswith(FIRED_MARKER)), None)
+    start = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if line.startswith((FIRED_MARKER, "[worker Python snapshot] "))
+        ),
+        None,
+    )
     if start is None:
         return None
     end = start + 1
-    while end < len(lines) and not lines[end].startswith(FIRED_MARKER):
+    while end < len(lines) and not lines[end].startswith(
+        (FIRED_MARKER, "[worker Python snapshot] ")
+    ):
         end += 1
-    return lines[start:end][:STACK_EXCERPT_LINES]
+    excerpt = lines[start:end][:STACK_EXCERPT_LINES]
+    if lines[start].startswith("[worker Python snapshot] ") and not any(
+        line.startswith("[worker Python snapshot terminal] ") for line in excerpt
+    ):
+        excerpt = excerpt[: STACK_EXCERPT_LINES - 1] + [
+            "[worker Python snapshot terminal] incomplete-failed (terminal not observed)"
+        ]
+    return excerpt
 
 
 def enabled_seconds() -> float | None:
@@ -494,8 +524,181 @@ def _dump_path(tag: str) -> Path:
     return target / f"{tag}.log"
 
 
+# Soft reports deliberately require the GIL. This mitigates an unpinned native
+# frame-walk hazard; it neither diagnoses a particular crash nor detects a GIL
+# wedge. Opt-in hard exit remains the independent native mechanism.
+PYTHON_MARKER = "[worker Python snapshot] "
+PYTHON_UNAVAILABLE = (
+    "Worker Python snapshot unavailable/not observed; this reporter requires the GIL. "
+    "Absence does not establish that the worker is healthy or that the timer was never due."
+)
+
+
+def _python_snapshot(max_threads=32, max_frames=64, max_bytes=65536):
+    """Only referenced code metadata, never locals/args/source/exception repr.
+
+    References from _current_frames keep frames/code alive while the GIL is
+    held. Bound output as well as traversal; release ALL references on failure.
+    Free-threaded builds are unsupported: do not silently fall back to C.
+    """
+    if getattr(sys, "_is_gil_enabled", lambda: True)() is not True:
+        return "unavailable", []
+    frames = {}
+    frame = None
+    lines = []
+    used = 0
+    truncated = False
+    try:
+        frames = sys._current_frames()
+        for index, (ident, frame) in enumerate(frames.items()):
+            if index >= max_threads:
+                truncated = True
+                break
+            depth = 0
+            while frame is not None:
+                if depth >= max_frames or len(lines) >= STACK_EXCERPT_LINES - 3:
+                    truncated = True
+                    break
+                code = frame.f_code
+                # JSON escaping prevents filenames/functions forging status lines.
+                line = json.dumps(
+                    [ident, code.co_filename[:1024], code.co_name[:256], frame.f_lineno]
+                )
+                size = len(line.encode("utf-8")) + 1
+                if used + size > max_bytes:
+                    truncated = True
+                    break
+                lines.append(line)
+                used += size
+                frame = frame.f_back
+                depth += 1
+        return ("truncated" if truncated else "captured"), lines
+    finally:
+        frame = None
+        code = None
+        frames.clear()
+
+
+class _PythonReporter:
+    """ONE session-owned thread, created at configure before leak baselines.
+
+    State lock protects attribution and borrowed handle use; never reopens a
+    pathname. stop joins WITHOUT the lock. Blocked IO cannot be interrupted:
+    incomplete shutdown retains the thread/handle and prohibits replacement.
+    """
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._generation = 0
+        self._io_lock = threading.Lock()
+        self._job = None
+        self._borrowed_handle = None
+        self._stopping = False
+        self._thread = threading.Thread(target=self._run, name="shard-python-reporter", daemon=True)
+        self._thread.start()
+
+    def arm(self, nodeid, seconds, handle):
+        # Never wait on a blocked write from the previous generation. Invalidate
+        # attribution, retain the borrowed handle, and expose unavailability.
+        if not self._io_lock.acquire(blocking=False):
+            self.disarm()
+            return False
+        try:
+            with self._condition:
+                if self._stopping:
+                    return False
+                self._generation += 1
+                self._borrowed_handle = handle
+                generation = self._generation
+                self._job = None
+            handle.write(
+                f"{ARM_MARKER}{nodeid} exceeded {seconds:g}s; Python reporter requires the GIL.\n"
+            )
+            handle.flush()
+            with self._condition:
+                if self._stopping or generation != self._generation:
+                    return False
+                self._job = (generation, nodeid, seconds, time.monotonic() + seconds, handle)
+                self._condition.notify()
+            return True
+        finally:
+            self._io_lock.release()
+
+    def disarm(self):
+        with self._condition:
+            self._generation += 1
+            self._job = None
+            self._condition.notify()
+
+    def _due(self, now):
+        # Called under the state lock; an injectable clock makes this exact
+        # deadline/generation rule testable without sleeps or native timers.
+        return self._job if self._job is not None and now >= self._job[3] else None
+
+    def _capture(self, job):
+        generation, nodeid, seconds, deadline, handle = job
+        try:
+            status, lines = _python_snapshot()
+        except Exception:
+            status, lines = "incomplete-failed", []
+        with self._io_lock:
+            with self._condition:
+                if self._stopping or self._job is not job or generation != self._generation:
+                    return
+            try:
+                handle.write(
+                    PYTHON_MARKER + json.dumps({"generation": generation, "node": nodeid}) + "\n"
+                )
+                handle.write("\n".join(lines) + "\n")
+                handle.write("[worker Python snapshot terminal] " + status + "\n")
+                handle.flush()
+            except (OSError, ValueError, TypeError):
+                # Best-effort terminal failure; a second IO failure leaves the
+                # begun record explicitly incomplete to the reader.
+                try:
+                    handle.write("[worker Python snapshot terminal] incomplete-failed\n")
+                    handle.flush()
+                except (OSError, ValueError, TypeError):
+                    pass
+                with self._condition:
+                    if self._job is job:
+                        self._job = None
+                return
+            with self._condition:
+                if not self._stopping and self._job is job:
+                    self._job = (generation, nodeid, seconds, time.monotonic() + seconds, handle)
+
+    def _run(self):
+        while True:
+            with self._condition:
+                if self._stopping:
+                    return
+                job = self._due(time.monotonic())
+                if job is None:
+                    delay = None if self._job is None else max(0, self._job[3] - time.monotonic())
+                    self._condition.wait(delay)
+                    continue
+            self._capture(job)
+
+    def stop(self):
+        # Event-independent latch: do not block acquiring a lock held by IO.
+        self._stopping = True
+        if self._condition.acquire(blocking=False):
+            try:
+                self._job = None
+                self._condition.notify()
+            finally:
+                self._condition.release()
+        self._thread.join(timeout=1)
+        return not self._thread.is_alive()
+
+
 class _WorkerTimer:
-    """The C-level per-item timer, armed in an xdist worker.
+    """Worker diagnostics: GIL-held soft reporter or opt-in native hard exit.
+
+    Soft reports cannot observe a GIL wedge; missing output is unavailable/not
+    observed, never proof of health. Native hard bounds retain their original
+    exit semantics. This is risk mitigation, not a diagnosed SIGSEGV repair.
 
     ``repeat=True`` because the bound is a floor, not a schedule: a test that
     runs for three times the bound should leave three snapshots, and the last
@@ -545,6 +748,14 @@ class _WorkerTimer:
                 # keeps timer semantics but must use a non-eligible destination,
                 # never the inode a leftover receipt can still authorize.
                 self._deny_retention()
+        self._reporter = None
+        if hard is None:
+            try:
+                self._reporter = _PythonReporter()
+            except (OSError, RuntimeError):
+                # No native fallback: a failed diagnostic must not arm the
+                # unsafe soft path or fail the enclosing pytest hook.
+                self._disabled = True
 
     def _deny_retention(self) -> None:
         """Separate timer recovery from every previously registered writer inode."""
@@ -576,36 +787,11 @@ class _WorkerTimer:
         return (sized_bound_seconds(nodeid) if seconds is None else seconds, True)
 
     def arm(self, nodeid: str) -> None:
-        """Start the C timer for ``nodeid``; disable quietly if it cannot.
+        """Arm this item's diagnostic with the bound captured at configure.
 
-        One arm per item, because :meth:`disarm` runs on that item's teardown: the
-        timer's unit really is one test, in both modes. That is also the price of
-        the instrument -- one ``faulthandler`` thread create/cancel pair per test,
-        which is why the LOCAL default announces itself rather than being silent.
-
-        Should an arm ever arrive while one is still running (a test that reported
-        no teardown, i.e. a crash or a park), the stale timer is cancelled first --
-        and the reason is stronger than tidiness: ``faulthandler`` does NOT allow
-        several timers, it REPLACES the live one when ``dump_traceback_later`` is
-        called again (measured on this host: the last-armed bound fires, the
-        earlier one never does; the same rule is recorded in
-        ``local_operator/session/runtime/stall_watchdog.py``). Two consequences
-        follow, both of them why the cancel is here rather than optional: an arm
-        silently replaces any other in-process user of the C timer (the runtime
-        watchdog when a test drives it in-process), and :meth:`disarm` cancels
-        whatever is armed rather than only this module's, so the one-arm-per-item
-        invariant has to hold for the whole process.
-
-        Every failure here is swallowed rather than raised. This runs inside a
-        pytest hook, so an exception is an ``INTERNALERROR`` that fails the
-        shard -- the diagnostic is not allowed to be the reason a run goes red,
-        and a run whose dump directory is unusable is still a run worth having.
-
-        ``OverflowError`` is in the tuple even though the resolvers already refuse
-        a bound no timer can hold: the value can also arrive here from a direct
-        construction, and this is the one call whose failure mode is the whole
-        shard. Belt and braces, because the cost of the extra name is zero and the
-        cost of missing it is a red run.
+        Hard-only mode retains process-global native cancellation/exit behavior.
+        Soft mode reuses its session reporter and never calls the C timer. Hooks
+        must not fail a shard on ordinary diagnostic IO/constructor errors.
         """
         if self._disabled:
             return
@@ -630,16 +816,24 @@ class _WorkerTimer:
                     self._handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
                 else:
                     self._handle = self._path.open("w", encoding="utf-8")
-            self._handle.write(f"{ARM_MARKER}{nodeid} exceeded {bound:g}s; every thread follows.\n")
-            self._handle.flush()
-            if self._armed:
+            if hard:
+                self._handle.write(
+                    f"{ARM_MARKER}{nodeid} exceeded {bound:g}s; every thread follows.\n"
+                )
+                self._handle.flush()
+            if self._armed and hard:
                 faulthandler.cancel_dump_traceback_later()
             # ``repeat`` is the difference between the two modes, not a detail: a
             # report-only bound is a floor and wants a fresh snapshot every
             # interval, while a hard bound ENDS the process on the first firing
             # (there is nothing left to repeat with), which is also why the two
             # cannot be requested together.
-            faulthandler.dump_traceback_later(bound, file=self._handle, repeat=not hard, exit=hard)
+            if hard:
+                faulthandler.dump_traceback_later(bound, file=self._handle, repeat=False, exit=True)
+            elif self._reporter is not None:
+                if self._reporter.arm(nodeid, bound, self._handle) is False:
+                    self._armed = False
+                    return
         except (OSError, ValueError, TypeError, OverflowError):
             self._disabled = True
             return
@@ -648,8 +842,11 @@ class _WorkerTimer:
     def disarm(self) -> None:
         if not self._armed:
             return
-        with contextlib.suppress(OSError, RuntimeError, ValueError):
-            faulthandler.cancel_dump_traceback_later()
+        if self._reporter is not None:
+            self._reporter.disarm()
+        else:
+            with contextlib.suppress(OSError, RuntimeError, ValueError):
+                faulthandler.cancel_dump_traceback_later()
         self._armed = False
 
 
@@ -801,7 +998,7 @@ class _Controller:
                 continue
             out.append(f"--- {path} (first snapshot, {len(lines)} lines) ---")
             out.extend(lines)
-        return out
+        return out or [PYTHON_UNAVAILABLE]
 
     def cleanup(self) -> None:
         """Remove armed-but-unfired dumps; keep anything that actually fired.
@@ -988,7 +1185,13 @@ def shutdown() -> None:
         _CONTROLLER.stop()
         _CONTROLLER.cleanup()
     if _WORKER is not None:
-        _WORKER.disarm()
+        if _WORKER._reporter is not None:
+            stopped = _WORKER._reporter.stop()
+            if stopped and _WORKER._handle is not None:
+                with contextlib.suppress(OSError, ValueError):
+                    _WORKER._handle.close()
+        else:
+            _WORKER.disarm()
 
 
 def _install_controller_for_test(seconds: float | None, sink) -> _Controller:
@@ -1010,7 +1213,7 @@ def _armed_nodeids(text: str) -> list[str]:
     """
     out: list[str] = []
     for line in text.splitlines():
-        if line.startswith(FIRED_MARKER):
+        if line.startswith((FIRED_MARKER, "[worker Python snapshot] ")):
             break
         if line.startswith(ARM_MARKER):
             out.append(line[len(ARM_MARKER) :].split(" exceeded ", 1)[0].strip())
@@ -1041,11 +1244,12 @@ def _report_file(path: Path) -> list[str]:
             *snapshot,
         ]
     if not armed:
-        return [f"===== {path} : empty (armed, no test recorded) ====="]
+        return [f"===== {path} : empty (no test recorded) =====", PYTHON_UNAVAILABLE]
     return [
-        f"===== {path} : timer armed but never fired "
+        f"===== {path} : snapshot not observed "
         f"({len(armed)} tests started in this worker) =====",
-        f"in flight at cancel, not fired: {armed[-1]}",
+        f"last armed item: {armed[-1]}",
+        PYTHON_UNAVAILABLE,
     ]
 
 

@@ -161,7 +161,7 @@ def test_each_wrapper_path_reauthorizes_without_unbounded_wait(
         over_budget_message=lambda _, **kwargs: "MEMORY LIMIT EXCEEDED",
         soft_notice=lambda _: None,
     )
-    monkeypatch.setattr(wrapper.memory_guard, "Guard", lambda *_: guard)
+    monkeypatch.setattr(wrapper.memory_guard, "Guard", lambda *_, **__: guard)
     if mode == "monitor-error":
 
         class Closed:
@@ -319,7 +319,13 @@ def _reuse_world(monkeypatch):
         signal_group=lambda *a: fake.calls.append(a),
         deadline=5,
     )
-    assert cap.last.status == "VERIFIED", cap.last.reason
+    # The later reuse/unreadable-witness send tests, not this setup step, must
+    # establish/refuse fresh authority. Linux creation deliberately has none.
+    expected = "ACQUIRED_POSITIVE" if owned.sys.platform.startswith("linux") else "VERIFIED"
+    assert cap.last.status == expected, cap.last.reason
+    if expected == "ACQUIRED_POSITIVE":
+        assert cap.probe["proof"] == []
+        assert cap.last.population_coverage == "not-established"
     return fake, cap
 
 

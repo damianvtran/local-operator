@@ -14,11 +14,14 @@ import type { SessionSummary } from "./types";
 let sessionList: SessionSummary[] = [];
 /* Bumped when a test swaps the list in place: the screen memoises on it. */
 let revision = 0;
+/* null = a relay that predates `agent_avatar_sizes` (every pre-existing test). */
+let caps: Record<string, unknown> | null = null;
 vi.mock("./store", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("./store")>();
 	return {
 		...actual,
 		useSessions: () => ({ sessions: sessionList, connected: true, revision }),
+		useCapabilities: () => caps,
 		retainSessionListStream: () => () => {},
 	};
 });
@@ -50,6 +53,7 @@ const card = (name: string) => screen.getByRole("button", { name: new RegExp(nam
 afterEach(() => {
 	cleanup();
 	sessionList = [];
+	caps = null;
 });
 
 describe("agent picture on list rows", () => {
@@ -152,5 +156,81 @@ describe("agent picture on list rows", () => {
 		await waitFor(() =>
 			expect(card("Retry").querySelector("img")?.getAttribute("src")).toBe("/v1/agents/a/avatar?v=new"),
 		);
+	});
+});
+
+// happy-dom checks markup only; the browser fixture proves actual ellipsis pixels.
+
+it("keeps a mixed-direction conversation title's own truncation end in RTL chrome", () => {
+ sessionList = [summary({ conversation_name: "Identifying prefix — لمبی گفتگو" })];
+ const { container } = render(<div dir="rtl"><SessionListScreen /></div>);
+ const title = screen.getByText("Identifying prefix — لمبی گفتگو");
+ expect(title.getAttribute("dir")).toBe("ltr");
+ expect(title.className).toContain("truncate");
+ expect(title.closest('[dir="rtl"]')).toBe(container.firstElementChild);
+});
+
+// First-strong loses the Urdu beginning after API; neutral titles inherit chrome.
+it.each([
+ ["API منصوبے کی پیش رفت اور اگلے مرحلے کی تفصیلی گفتگو", "rtl"],
+ ["Pure Latin identifying beginning and a long conversation title", "ltr"],
+ ["تحقیقاتی منصوبے کی پیش رفت اور اگلے مرحلے کی تفصیلی گفتگو", "rtl"],
+ ["2026-11-03 12345678901234567890", null],
+])("resolves truncated title %s by dominant script", (name, direction) => {
+ sessionList = [summary({ conversation_name: name })];
+ render(<div dir="rtl"><SessionListScreen /></div>);
+ const title = screen.getByText(name);
+ expect(title.getAttribute("dir")).toBe(direction);
+ expect(title.className).toContain("truncate");
+ expect(title.closest("button")?.hasAttribute("dir")).toBe(false);
+});
+
+describe("right-sized avatar variants (core agent_avatar_sizes)", () => {
+	it("requests the smallest variant whose edge is >= css px x devicePixelRatio", async () => {
+		const { avatarVariant, AVATAR_VARIANTS } = await import("./components/agent-avatar");
+		for (const css of [16, 20, 24, 28, 32, 36, 48, 64]) {
+			for (const dpr of [1, 1.5, 2, 2.625, 3, 4]) {
+				const edge = avatarVariant(css, dpr);
+				const needed = css * dpr;
+				if (edge === null) {
+					// The 512 original: only when even the largest variant is too small.
+					expect(needed).toBeGreaterThan(AVATAR_VARIANTS[AVATAR_VARIANTS.length - 1]);
+				} else {
+					expect(edge).toBeGreaterThanOrEqual(needed);
+					// ...and the SMALLEST such variant, so bandwidth stays sensible.
+					const smaller = AVATAR_VARIANTS.filter((v) => v < edge);
+					for (const v of smaller) expect(v).toBeLessThan(needed);
+				}
+			}
+		}
+		expect(avatarVariant(24, 3)).toBe(128);
+		expect(avatarVariant(28, 2)).toBe(64);
+		expect(avatarVariant(24, Number.NaN)).toBe(64);
+	});
+
+	it("a rendered 24px row at 3x asks the relay for the 128 variant", () => {
+		caps = { features: { agent_avatar_sizes: 1 } };
+		const original = window.devicePixelRatio;
+		Object.defineProperty(window, "devicePixelRatio", { value: 3, configurable: true });
+		try {
+			sessionList = [summary({ session_id: "s1", conversation_name: "Retina", agent_id: "a", avatar_sha256: "f00d" })];
+			render(<SessionListScreen />);
+			const img = card("Retina").querySelector("img[data-agent-avatar]") as HTMLImageElement;
+			expect(img.getAttribute("src")).toBe("/v1/agents/a/avatar?v=f00d&size=128");
+			expect(Number(img.getAttribute("width")) * 3).toBeLessThanOrEqual(128);
+		} finally {
+			Object.defineProperty(window, "devicePixelRatio", { value: original, configurable: true });
+		}
+	});
+
+	it("appends size only when the relay advertises it", async () => {
+		const { sizedAvatarUrl, avatarSizesServed } = await import("./components/agent-avatar");
+		const base = "/v1/agents/a1/avatar?v=abc";
+		expect(sizedAvatarUrl(base, 24, 3, true)).toBe(`${base}&size=128`);
+		expect(sizedAvatarUrl(base, 24, 3, false)).toBe(base);
+		expect(sizedAvatarUrl(base, 128, 3, true)).toBe(base);
+		expect(avatarSizesServed({ features: { agent_avatar_sizes: 1 } } as never)).toBe(true);
+		expect(avatarSizesServed({ features: {} } as never)).toBe(false);
+		expect(avatarSizesServed(null)).toBe(false);
 	});
 });

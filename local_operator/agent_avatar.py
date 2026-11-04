@@ -309,17 +309,222 @@ def store(agent_dir: Path, avatar: NormalisedAvatar) -> dict[str, Any]:
     }
 
 
-def remove_siblings(agent_dir: Path, keep: str) -> None:
-    """Delete every stored picture file except ``keep`` (the committed one)."""
+def remove_siblings(agent_dir: Path, keep: str, keep_sha: Optional[str] = None) -> None:
+    """Delete every stored picture file except ``keep`` (the committed one).
+
+    ``keep_sha`` is the committed picture's digest: size derivatives of any
+    OTHER picture are swept with the stale sibling (see :func:`remove_derivatives`).
+    """
     for name in STORED_NAMES:
         if name != keep:
             (agent_dir / name).unlink(missing_ok=True)
+    remove_derivatives(agent_dir, keep_sha=keep_sha)
 
 
 def remove(agent_dir: Path) -> None:
-    """Delete both possible stored files (absent is fine)."""
+    """Delete both possible stored files and every size derivative (absent is fine)."""
     for name in STORED_NAMES:
         (agent_dir / name).unlink(missing_ok=True)
+    remove_derivatives(agent_dir)
+
+
+# -- size derivatives ----------------------------------------------------------
+#
+# WHY. The stored picture is 512x512 (~240 KB for a detailed PNG), but every
+# surface draws it at 16-64 CSS px. Serving the whole file to a 24px phone row
+# wastes relay/tunnel bandwidth; serving a variant SMALLER than CSS px x device
+# pixel ratio is what made pictures blurry on retina screens. So the GET routes
+# take an optional ``size`` (one of :data:`DERIVATIVE_SIZES`) and a client asks
+# for the smallest variant >= css * dpr. No ``size`` keeps the original bytes and
+# the original ETag, so older clients see no change.
+#
+# CONSTRAINTS. A derivative is a CACHE, never an authority: it is computed from
+# the bytes :func:`read` returned (which already verified the metadata sha and
+# refused symlinks), keyed by that sha, and rebuilt whenever it is missing or
+# does not look like what we wrote. Its name starts with ``.avatar.`` on purpose:
+# the registry's clone/export/import paths already skip that prefix (it is the
+# staging-temp rule), so a cache file never travels in an archive or a clone.
+
+#: The variants a client may ask for. 256 covers a 64px surface at 4x density;
+#: anything larger is the 512 original.
+DERIVATIVE_SIZES = (64, 128, 256)
+_DERIVATIVE_PREFIX = ".avatar."
+_DERIVATIVE_EXT = {"image/png": "png", "image/jpeg": "jpg"}
+
+
+def parse_size(raw: Optional[str]) -> Optional[int]:
+    """The ``size`` query as one of :data:`DERIVATIVE_SIZES`, ``None`` when absent.
+
+    ONE strict parser for the core route and the phone relay, so both answer the
+    same input the same way: canonical decimal digits only (``064``/``64.0``/
+    ``+64``/``0x40`` are refused, where pydantic's lax int would accept some),
+    else ``ValueError``. Canonical because two spellings of one size would be two
+    URL cache keys for one body.
+    """
+    if raw is None:
+        return None
+    if raw.isascii() and raw.isdigit() and str(int(raw)) == raw:
+        if int(raw) in DERIVATIVE_SIZES:
+            return int(raw)
+    raise ValueError(f"unsupported avatar size {raw!r}")
+
+
+def derivative_name(sha256: str, size: int, mime: str) -> str:
+    """The cache basename for ``size`` of the picture whose digest is ``sha256``."""
+    return f"{_DERIVATIVE_PREFIX}{sha256[:12]}.{size}.{_DERIVATIVE_EXT.get(mime, 'png')}"
+
+
+def _is_derivative_name(name: str) -> bool:
+    """A cached variant, or its staging temp (``<variant>.<pid>.<hex>.tmp``).
+
+    The temp counts so a SIGKILL between write and rename leaves no orphan the
+    sweep can never reach. The PICTURE's own staging temp
+    (``.avatar.png.<pid>.<hex>.tmp``) never matches: its third part is the
+    extension, not a size, and it is not this cache's to delete.
+    """
+    parts = name.split(".")
+    if len(parts) == 8 and parts[7] == "tmp":
+        parts = parts[:5]
+    # ["", "avatar", <sha12>, <size>, <ext>]
+    return (
+        len(parts) == 5
+        and parts[0] == ""
+        and parts[1] == "avatar"
+        and parts[3] in {str(s) for s in DERIVATIVE_SIZES}
+        and parts[4] in _DERIVATIVE_EXT.values()
+    )
+
+
+def remove_derivatives(agent_dir: Path, keep_sha: Optional[str] = None) -> None:
+    """Delete cached size variants, except those of ``keep_sha`` when given.
+
+    Best effort: a sweep that fails leaves only a stale cache file that no
+    request will ever name (the name carries the old sha), never a wrong picture.
+    """
+    keep = keep_sha[:12] if keep_sha else None
+    try:
+        names = [entry.name for entry in os.scandir(agent_dir)]
+    except OSError:
+        return
+    for name in names:
+        if _is_derivative_name(name) and name.split(".")[2] != keep:
+            try:
+                (agent_dir / name).unlink(missing_ok=True)
+            except OSError:
+                logger.debug("could not sweep avatar derivative %s", name, exc_info=True)
+
+
+def sized_tag(sha256: str, size: Optional[int]) -> str:
+    """The validator for one variant: the sha alone for the original, else sha+size.
+
+    The original's tag stays the bare sha (frozen contract: ETag == metadata
+    sha256). A variant's must differ, or a cache holding the 64px body would
+    answer a 256px revalidation with 304 and keep the small picture.
+    """
+    return sha256 if size is None else f"{sha256}-{size}"
+
+
+def _read_cached_derivative(path: Path, size: int, mime: str) -> Optional[bytes]:
+    """The cached variant's bytes if it is a regular file of the right edge and type.
+
+    ``lstat`` BEFORE the open, and ``O_NONBLOCK`` on it: the agent can write its
+    own directory, and a FIFO planted at this name would otherwise block the
+    open forever (no writer), pinning one executor thread per request until the
+    pool is gone. A non-regular file is a cache miss; the rebuild's atomic
+    rename then replaces it.
+    """
+    from local_operator.media import sniff_image
+
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+    except (OSError, ValueError):
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
+            data = handle.read(STORED_MAX_BYTES + 1)
+    except OSError:
+        return None
+    info = sniff_image(data) if len(data) <= STORED_MAX_BYTES else None
+    # The agent can write its own directory, so a cache file is checked for the
+    # shape we wrote -- edge AND type, since it is served under ``mime`` -- and a
+    # mismatch is rebuilt rather than served.
+    if info is None or info.mime_type != mime or (info.width, info.height) != (size, size):
+        return None
+    return data
+
+
+def _encode_derivative(data: bytes, mime: str, size: int) -> bytes:
+    image_module = _image_module_for(mime)
+    try:
+        image = image_module.open(io.BytesIO(data))
+        image.load()
+        # LANCZOS: the downscale filter that keeps edges crisp at 2-8x reduction
+        # (the stored file itself is produced the same way in ``normalise``).
+        small = image.resize((size, size), image_module.Resampling.LANCZOS)
+    except Exception as exc:  # noqa: BLE001 — a stored file that will not decode
+        raise AvatarError(UNDECODABLE, str(exc)) from exc
+    buffer = io.BytesIO()
+    if mime == "image/jpeg":
+        small.convert("RGB").save(buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+    else:
+        small.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue()
+
+
+def read_sized(agent_dir: Path, meta: Any, size: Optional[int]) -> tuple[bytes, str, str]:
+    """``(bytes, mime, tag)`` for ``size`` of the stored picture (``None`` = original).
+
+    Always goes through :func:`read` first, so every integrity rule (metadata
+    authority, no symlink, digest match) applies before a variant is served or
+    built; ``tag`` is :func:`sized_tag` of the verified sha. The variant is
+    cached beside the picture and written atomically, so concurrent first
+    requests at worst both encode it.
+    """
+    data, mime, sha = read(agent_dir, meta)
+    return _sized(agent_dir, data, mime, sha, size)
+
+
+def _sized(
+    agent_dir: Path, data: bytes, mime: str, sha: str, size: Optional[int]
+) -> tuple[bytes, str, str]:
+    """The variant of ALREADY-VERIFIED original bytes (``read``'s result)."""
+    if size is None:
+        return data, mime, sha
+    if size not in DERIVATIVE_SIZES:
+        raise ValueError(f"unsupported avatar size {size!r}")
+    tag = sized_tag(sha, size)
+    path = agent_dir / derivative_name(sha, size, mime)
+    cached = _read_cached_derivative(path, size, mime)
+    if cached is not None:
+        return cached, mime, tag
+    encoded = _encode_derivative(data, mime, size)
+    # The staging name keeps the ``.avatar.`` prefix so a SIGKILL-orphaned temp is
+    # skipped by clone/export like every other picture temp.
+    staging = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        with open(staging, "wb") as handle:
+            handle.write(encoded)
+        os.replace(staging, path)
+    except OSError:
+        # A read-only or full disk still serves the variant; it is just not cached.
+        logger.debug("could not cache avatar derivative %s", path, exc_info=True)
+    finally:
+        staging.unlink(missing_ok=True)
+    return encoded, mime, tag
+
+
+def read_stored_sized(
+    config_root: Path, agent_id: str, size: Optional[int]
+) -> tuple[bytes, str, str]:
+    """:func:`read_stored`, for one size variant: ``(bytes, mime, tag)``."""
+    data, mime, sha = read_stored(config_root, agent_id)
+    # ``read_stored`` proved ``agent_id`` is one plain segment, so this join is safe.
+    return _sized(Path(config_root) / "agents" / agent_id, data, mime, sha, size)
 
 
 def stored_name(meta: Any) -> Optional[str]:
