@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "record_kind": "portable_evidence_manifest",
+  "audit_id": "vi-sdkstartup-r2-20261103",
+  "receipt": "receipt.json",
+  "report": "report.md",
+  "file_count": 3,
+  "files": [
+    {
+      "path": "receipt.json",
+      "bytes": 1644,
+      "sha256": "c78bb2bc0a19b6c69f6c282f54ca42da8cff4b5139d0f349c3979fd414c1949b",
+      "origin": "/Users/damian/.local-operator/sessions/7188e3347110/scratchpad/i18n-audit-vi-sdkstartup-r2/receipt.json"
+    },
+    {
+      "path": "record.json",
+      "bytes": 4598,
+      "sha256": "0b6afb23264e5ed9fb831c52ccf7d30c51730922c158a2f380ef9d19e2d3c896",
+      "origin": "/Users/damian/.local-operator/sessions/7188e3347110/scratchpad/i18n-audit-vi-sdkstartup-r2/record.json"
+    },
+    {
+      "path": "report.md",
+      "bytes": 8082,
+      "sha256": "f625e81b2136a8ae538215a4e3d6cd7fe54f423adbbb1a6eb37a943819a1ae35",
+      "origin": "/Users/damian/.local-operator/sessions/7188e3347110/scratchpad/i18n-audit-vi-sdkstartup-r2/report.md"
+    }
+  ]
+}

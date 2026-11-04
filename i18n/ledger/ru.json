@@ -2813,6 +2813,26 @@
     },
     {
       "locale": "ru",
+      "namespace": "wire.errors.hosting",
+      "source_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two independent sessions: ac46f9462716, 9f874dd64c37)",
+        "model": "radient/auto (served model not disclosed by the route)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace wire.errors.hosting (1 key: the owned display cause the startup refusal splices into its {error} slot) authored at base 87ca846245b2 against frozen English sha256 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63. ru 'Платформа размещения не настроена.' matches the settled CORE ru term размещения; the earlier rendering 'Платформа хостинга не настроена.' is superseded history, and its packet (06e83e0ae0f9/scratchpad/hosting-ru, sha 6fe2a883…) is untouched. Two independent readers, neither the translator nor the code author, both PASSED on these bytes with 0 blocker/major/minor/nit (sessions ac46f9462716, 9f874dd64c37). RU remediation history is preserved, not rewritten: R1 judged a different value and the R2 target replaced it after the term check; both R2 bundles carry metadata-correction companions that fix earlier report facts (an invented key name, a 34/50 width-budget claim, filenames and one class/path) without changing the audited value or either verdict. The context sidecar declares no maxCells/maxChars budget, so no fit claim exists to inherit (en 35 / ru 34 codepoints). Source-only assembly: no rendered, native-speaker, width, RTL or validator proof, and no activation, shipped or release claim. Evidence: i18n/audits/evidence/ru/wire.errors.hosting/ (bundles ['ruhost1', 'ruhost2'], frozen inputs under _inputs/)."
+    },
+    {
+      "locale": "ru",
       "namespace": "wire.skill_adoption",
       "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
       "translator": {

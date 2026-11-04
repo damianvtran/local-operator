@@ -2595,6 +2595,26 @@
     },
     {
       "locale": "ur",
+      "namespace": "wire.errors.hosting",
+      "source_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two independent sessions: 1b7a2a90c876, 25304c88781e)",
+        "model": "radient/auto (reader 1); anthropic/claude-sonnet-5-5 requested with served model unexposed (reader 2)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace wire.errors.hosting (1 key: the owned display cause the startup refusal splices into its {error} slot) authored at base 87ca846245b2 against frozen English sha256 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63. ur 'ہوسٹنگ پلیٹ فارم ترتیب نہیں دیا گیا۔' is a complete RTL sentence with a terminal full stop; no shaping, bidi-isolation or width claim is made here. Two independent readers, neither the translator nor the code author, both PASSED on these bytes with 0 blocker/major/minor/nit (sessions 1b7a2a90c876, 25304c88781e). Source-only assembly: no rendered, native-speaker, width, RTL or validator proof, and no activation, shipped or release claim. Evidence: i18n/audits/evidence/ur/wire.errors.hosting/ (bundles ['urhost1', 'urhost2'], frozen inputs under _inputs/)."
+    },
+    {
+      "locale": "ur",
       "namespace": "wire.skill_adoption",
       "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
       "translator": {
