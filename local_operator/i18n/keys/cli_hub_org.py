@@ -54,6 +54,10 @@ def resolved(*, ref: str, hub_id: str) -> Msg:
     return Msg("cli.hub_org.resolved", {"ref": ref, "hub_id": hub_id})
 
 
+def team_block_heading(*, org: str) -> Msg:
+    return Msg("cli.hub_org.team_block_heading", {"org": org})
+
+
 def unknown_org(*, ref: str) -> Msg:
     return Msg("cli.hub_org.unknown_org", {"ref": ref})
 

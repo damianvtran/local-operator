@@ -63,5 +63,10 @@
     "role": "lop CLI output",
     "tone": "plain, operator-facing",
     "note": "dry-run summary when nothing is left to pull: every organization item is already linked on this machine"
+  },
+  "cli.hub_org.team_block_heading": {
+    "role": "lop CLI output",
+    "tone": "plain, operator-facing",
+    "note": "title of a box-drawn block listing one organization's teams after the public results in `lop teams search`; {org} is the organization's name (data). Keep it short: it sits inside a one-line tree frame"
   }
 }

@@ -74,6 +74,7 @@ from local_operator.i18n.keys import cli_failure_details as _failure_details
 from local_operator.i18n.keys import cli_global_help as _gh
 from local_operator.i18n.keys import cli_group_help as _gg
 from local_operator.i18n.keys import cli_hub_help as _hu
+from local_operator.i18n.keys import cli_hub_org as _ho
 from local_operator.i18n.keys import cli_hub_shared_help as _hs
 from local_operator.i18n.keys import cli_install_help as _in
 from local_operator.i18n.keys import cli_login_help as _li
@@ -15572,21 +15573,34 @@ def _print_org_team_rows(records: "list[dict[str, Any]]") -> None:
         label = str(record.get("scope") or "org:").partition(":")[2]
         by_org.setdefault(label, []).append(record)
     for label, rows in by_org.items():
-        # i18n: ignore data rows (org name, team name, id, description); the
-        # tree frame mirrors the public block's, whose copy is not keyed either
-        print(f"\n\033[1;36m╭─ {label} (organization) ─────────────────────────\033[0m")
+        # The heading's only copy is the "(organization)" qualifier, so it is
+        # keyed; the box-drawing frame and colour codes around it are glyphs.
+        # The pragmas below sit INSIDE each call's span, where check.py reads
+        # them (a comment above the call exempts nothing).
+        heading = _ho.team_block_heading(org=label).envelope()["text"]
+        print(
+            # i18n: ignore glyph frame around keyed copy
+            f"\n\033[1;36m╭─ {heading} ─────────────────────────\033[0m"
+        )
         for index, record in enumerate(rows):
             is_last = index == len(rows) - 1
             branch = "└──" if is_last else "├──"
             spine = "│  " if is_last else "│ │"
             print(
+                # i18n: ignore data row (team name, hub id), same shape as the public block
                 f"\033[1;36m│ {branch} {record.get('name', '?')} "
                 f"— id {record.get('id', '?')}\033[0m"
             )
             description = _clip_line(record.get("description"), 72)
             if description:
-                print(f"\033[1;36m{spine}   • {description}\033[0m")
-        print("\033[1;36m╰──────────────────────────────────────────────\033[0m")
+                print(
+                    # i18n: ignore data row (hub description)
+                    f"\033[1;36m{spine}   • {description}\033[0m"
+                )
+        print(
+            # i18n: ignore glyph frame, no copy
+            "\033[1;36m╰──────────────────────────────────────────────\033[0m"
+        )
 
 
 def teams_search_command(args: argparse.Namespace, base_dir: Path) -> int:
