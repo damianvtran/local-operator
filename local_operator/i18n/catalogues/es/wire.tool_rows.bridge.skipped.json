@@ -1,5 +1,5 @@
 {
   "wire.tool_rows.bridge.skipped.expanded": "No se publicó: se acababa de enviar un mensaje idéntico, así que esta copia se omitió.",
   "wire.tool_rows.bridge.skipped.verb.channel_post": "Publicación omitida en",
-  "wire.tool_rows.bridge.skipped.verb.dm": "Mensaje omitido a"
+  "wire.tool_rows.bridge.skipped.verb.dm": "Envío omitido a"
 }
