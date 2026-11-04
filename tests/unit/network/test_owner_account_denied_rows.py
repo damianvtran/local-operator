@@ -177,7 +177,9 @@ def test_the_mint_guard_still_refuses_a_denied_row_the_exclusion_missed(
     from local_operator.network.credentials import owner as owner_mod
 
     monkeypatch.setattr(
-        owner_mod.MeshCredentialBroker, "_account_denied_row_ids", lambda *_a, **_k: set()
+        owner_mod.MeshCredentialBroker,
+        "_account_denied_rows",
+        lambda *_a, **_k: (frozenset(), frozenset()),
     )
     _row(owner_rows, DENIED)
     _row(owner_rows, PERMITTED)
@@ -188,3 +190,87 @@ def test_the_mint_guard_still_refuses_a_denied_row_the_exclusion_missed(
     )
     refused = [r for r in replies if isinstance(r, BrokerError)]
     assert refused and {r.code for r in refused} == {"not_a_holder"}
+
+
+def test_a_static_key_beside_the_denied_login_is_still_a_denial(
+    mesh: Any, owner_rows: AuthStore  # noqa: F811
+) -> None:
+    """#3437 QA Q-1 / review R1-2: the cascade fell to the static key, and the
+    borrower was told ``scope_unknown`` ("Sign in again"), a remedy that cannot help.
+    """
+    _row(owner_rows, DENIED)
+    owner_rows.upsert_credential(STUB_PROVIDER, {"type": "api_key", "key": "synthetic-static"})
+    _deny(mesh, {"credential_key": STUB_PROVIDER, "account_ref": DENIED})
+    for sid in SESSIONS[:6]:
+        reply = _ask(mesh, sid)
+        assert isinstance(reply, BrokerError) and reply.code == "not_a_holder", (sid, reply)
+
+
+def test_rows_stored_under_the_entrys_provider_are_excluded(
+    mesh: Any, owner_rows: AuthStore, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """#3437 review R1-1 / QA Q-2: the key is declared with ANOTHER stored provider.
+
+    The resolve selects from ``entry.provider``; matching the placement key instead
+    hid nothing and the session-hashed split came back.
+    """
+    import dataclasses
+
+    from local_operator.providers import registry
+
+    alias = "meshalias"
+    stub = registry._BY_ID[STUB_PROVIDER]  # noqa: SLF001 — the registry's own table
+    monkeypatch.setitem(
+        registry._BY_ID,  # noqa: SLF001
+        alias,
+        dataclasses.replace(stub, id=alias, store_credentials_as=alias),
+    )
+    with placement_mod.mutate(mesh.network_id, mesh.a.root, self_device=mesh.owner) as doc:
+        doc.declare(STUB_PROVIDER, owner_device=mesh.owner, provider=alias, by=mesh.owner)
+    _pull(mesh)
+    for account in (DENIED, PERMITTED):
+        owner_rows.upsert_credential(
+            alias,
+            {
+                "type": "oauth",
+                "access": f"synthetic-access-{account}",
+                "refresh": f"synthetic-refresh-{account}",
+                "expires": int((time.time() + 3600) * 1000),
+                "account_id": account,
+            },
+        )
+    _deny(mesh, {"credential_key": STUB_PROVIDER, "account_ref": DENIED})
+    replies = {sid: _ask(mesh, sid) for sid in SESSIONS}
+    refused = {sid: r.code for sid, r in replies.items() if isinstance(r, BrokerError)}
+    assert refused == {}, refused
+    assert all(
+        isinstance(r, Grant) and r.access_token == f"synthetic-access-{PERMITTED}"
+        for r in replies.values()
+    )
+
+
+def test_a_numeric_account_id_is_matched_as_text(
+    mesh: Any, owner_rows: AuthStore  # noqa: F811
+) -> None:
+    """#3437 review R1-3: ``json_extract`` returns a JSON number as ``int``."""
+    denied = owner_rows.upsert_credential(
+        STUB_PROVIDER,
+        {
+            "type": "oauth",
+            "access": "synthetic-access-numeric",
+            "refresh": "synthetic-refresh-numeric",
+            "expires": int((time.time() + 3600) * 1000),
+            "account_id": 4242,
+        },
+    )
+    _row(owner_rows, PERMITTED)
+    _deny(mesh, {"credential_key": STUB_PROVIDER, "account_ref": "4242"})
+    # Without the text compare the numeric row is never hidden; sessions that hash
+    # onto it are refused at mint (``scope_unknown``: the guard takes no int id).
+    replies = {sid: _ask(mesh, sid) for sid in SESSIONS}
+    refused = {sid: r.code for sid, r in replies.items() if isinstance(r, BrokerError)}
+    assert refused == {}, refused
+    assert not any(
+        isinstance(r, Grant) and r.credential_ref.credential_id == denied.id
+        for r in replies.values()
+    )
