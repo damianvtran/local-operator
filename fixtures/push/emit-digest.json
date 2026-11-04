@@ -23,7 +23,8 @@
     "computer": "str",
     "count": "int",
     "emit_id": "str",
-    "alert": "object"
+    "alert": "object",
+    "sound": "str"
   },
   "payload_optional": {
     "exclude": "list[str]"
@@ -36,6 +37,23 @@
   "alert_count_one": {
     "title": "Local Operator",
     "body": "Complete · 1 conversation needs you"
+  },
+  "sound_values": {
+    "builtin": [
+      "soft-pulse",
+      "two-note-chime",
+      "felt-marimba",
+      "hum-swell",
+      "task-complete",
+      "signal-handshake",
+      "tape-warble",
+      "bubble-chord",
+      "airy-whistle",
+      "bubble-pulse"
+    ],
+    "default": "the computer's `system` choice: the phone plays its OS default notification sound",
+    "none": "notifications.sound.enabled is false on the computer: the banner posts silently",
+    "fallback": "soft-pulse — any computer selection that is not a built-in (a custom sound, or a hand-edited id that names nothing) sends soft-pulse, because custom sounds are not on the phone in v1"
   },
   "report_block_required": {
     "device_id": "str",
@@ -55,6 +73,7 @@
       "title": "Local Operator",
       "body": "Complete · 4 conversations need you"
     },
+    "sound": "soft-pulse",
     "exclude": [
       "3f1c9a7b2d4e506182a3b4c5d6e7f809"
     ]
@@ -68,7 +87,8 @@
     "alert": {
       "title": "Local Operator",
       "body": "Complete · 4 conversations need you"
-    }
+    },
+    "sound": "soft-pulse"
   },
   "body": {
     "v": 1,
@@ -80,6 +100,7 @@
       "title": "Local Operator",
       "body": "Complete · 4 conversations need you"
     },
+    "sound": "soft-pulse",
     "exclude": [
       "3f1c9a7b2d4e506182a3b4c5d6e7f809"
     ],
@@ -102,6 +123,7 @@
     "THE WINDOW'S emit_id IS PERSISTED (digest_rules_ref §3.4): minted once when the coalescing window closes, reused on restart for that same window, and cleared on the same three exits the completion path uses — because a digest is the one VISIBLE type, so a re-minted key after a restart would show the user the same banner twice.",
     "exclude is PERMITTED here with the attention form's meaning and is NEVER REQUIRED (§3.2 at digest_rules_ref): the required case belongs to the attention emit alone, because what makes it required is an ack, and the nudge an ack produces emits the per-conversation attention correction, never a catch-up digest. A digest that happens to follow an ack in time is not the same thing as one triggered by it. Absent means \"exclude nobody\", which is what the tick-detected path sends; exclude_absent_payload is a whole valid payload, not an empty list.",
     "The key is sha256(\"digest\" ‖ emit_id ‖ computer) — see emit-idempotency-keys.json, which carries the worked vector. The emit_id is minted ONCE when the coalescing window closes and is PERSISTED with the positions that window speaks for, so a restart mid-window re-emits the SAME key; re-minting per attempt would give one batch a new identity each time and defeat the cloud's dedupe (review round 1, B1; the persistence rule is digest_rules_ref §3.4).",
-    "count is §3.2's count: the machine's unread conversation count at composition time, the one aggregate the design discloses to the cloud on purpose."
+    "count is §3.2's count: the machine's unread conversation count at composition time, the one aggregate the design discloses to the cloud on purpose.",
+    "sound is the computer's selected notification sound, MAPPED by the cloud and never composed from (notification-sounds design §3.6, ADR 0006 amendment): aps.sound = \"<id>.wav\" on iOS and android.channel_id = \"sound.<id>\" on Android, with \"default\" and \"none\" as the two non-file values (sound.default / sound.none channels). A custom selection sends soft-pulse (custom sounds are not on the phone in v1); notifications.sound.enabled false sends none. The computer's volume does not travel: the phone plays at its own notification volume. sound_values lists every value the field may carry."
   ]
 }

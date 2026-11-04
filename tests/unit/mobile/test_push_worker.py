@@ -34,6 +34,7 @@ from local_operator.mobile.push_payload import (
     ALERT_BODY_FIELD,
     ALERT_FIELD,
     ALERT_TITLE_FIELD,
+    SOUND_FIELD,
     TYPE_DIGEST,
     attention_emit_key,
     completion_emit_key,
@@ -485,6 +486,38 @@ def test_the_alert_rides_the_visible_types_and_never_the_silent_one(harness: Har
     harness.store.acknowledge("session/alert-me", token)
     assert [record.kind for record in harness.worker.tick()] == ["attention"]
     assert ALERT_FIELD not in harness.plane.calls[1][1], "the silent form has no text"
+
+
+def test_the_sound_is_read_live_from_the_workers_config_and_skips_the_silent_form(
+    harness: Harness,
+) -> None:
+    """``data.sound`` comes from ``<config_dir>/config.yml`` at COMPOSITION, so a
+    setting changed between two emits applies to the second without a restart;
+    and the attention form never carries one (design §6 C3)."""
+    config = harness.root / "config.yml"
+    # No file: every default, so the phone plays Soft pulse.
+    harness.publish("first")
+    assert [record.kind for record in harness.worker.tick()] == ["completion"]
+    assert harness.plane.calls[0][1][SOUND_FIELD] == "soft-pulse"
+
+    config.write_text(
+        "values:\n  notifications:\n    sound:\n      id: custom-3f9a2c\n", encoding="utf-8"
+    )
+    harness.publish("custom")
+    harness.worker.tick()
+    assert harness.plane.calls[1][1][SOUND_FIELD] == "soft-pulse", "custom falls back"
+
+    config.write_text(
+        "values:\n  notifications:\n    sound:\n      enabled: false\n      id: felt-marimba\n",
+        encoding="utf-8",
+    )
+    token = harness.publish("off")
+    harness.worker.tick()
+    assert harness.plane.calls[2][1][SOUND_FIELD] == "none", "disabled sends none"
+
+    harness.store.acknowledge("session/off", token)
+    assert [record.kind for record in harness.worker.tick()] == ["attention"]
+    assert SOUND_FIELD not in harness.plane.calls[3][1], "the silent form has no sound"
 
 
 def test_a_restart_mid_window_reuses_the_same_digest_key(tmp_path: Path) -> None:

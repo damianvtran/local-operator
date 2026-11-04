@@ -24,7 +24,8 @@
     "kind": "str",
     "emit_id": "str",
     "count": "int",
-    "alert": "object"
+    "alert": "object",
+    "sound": "str"
   },
   "payload_optional": {},
   "payload_version": 1,
@@ -35,6 +36,23 @@
   "alert_count_one": {
     "title": "Local Operator",
     "body": "Task complete · 1 conversation needs you"
+  },
+  "sound_values": {
+    "builtin": [
+      "soft-pulse",
+      "two-note-chime",
+      "felt-marimba",
+      "hum-swell",
+      "task-complete",
+      "signal-handshake",
+      "tape-warble",
+      "bubble-chord",
+      "airy-whistle",
+      "bubble-pulse"
+    ],
+    "default": "the computer's `system` choice: the phone plays its OS default notification sound",
+    "none": "notifications.sound.enabled is false on the computer: the banner posts silently",
+    "fallback": "soft-pulse — any computer selection that is not a built-in (a custom sound, or a hand-edited id that names nothing) sends soft-pulse, because custom sounds are not on the phone in v1"
   },
   "kinds": [
     "complete",
@@ -63,7 +81,8 @@
     "alert": {
       "title": "Local Operator",
       "body": "Task complete · 2 conversations need you"
-    }
+    },
+    "sound": "soft-pulse"
   },
   "body": {
     "v": 1,
@@ -78,6 +97,7 @@
       "title": "Local Operator",
       "body": "Task complete · 2 conversations need you"
     },
+    "sound": "soft-pulse",
     "devices": [
       {
         "device_id": "3f1c9a7b2d4e506182a3b4c5d6e7f809",
@@ -97,6 +117,7 @@
     "kind is the STORE's vocabulary — complete, error, interrupted, closed, retired — not the composer's set, which is missing 'closed'.",
     "count is the machine's unread count at composition time: the one aggregate the design discloses to the cloud on purpose.",
     "emit_id is the machine's identity for one emit (dedupe, and the cloud's delivery record). It replaces the revision counters the earlier draft carried — an opaque uuid cannot be read as activity volume.",
-    "There is no aps envelope and no badge here: what the phone receives is the cloud's fan-out, and aps.badge is never sent (payload-forbidden-fields.json)."
+    "There is no aps envelope and no badge here: what the phone receives is the cloud's fan-out, and aps.badge is never sent (payload-forbidden-fields.json).",
+    "sound is the computer's selected notification sound, MAPPED by the cloud and never composed from (notification-sounds design §3.6, ADR 0006 amendment): aps.sound = \"<id>.wav\" on iOS and android.channel_id = \"sound.<id>\" on Android, with \"default\" and \"none\" as the two non-file values (sound.default / sound.none channels). A custom selection sends soft-pulse (custom sounds are not on the phone in v1); notifications.sound.enabled false sends none. The computer's volume does not travel: the phone plays at its own notification volume. sound_values lists every value the field may carry."
   ]
 }

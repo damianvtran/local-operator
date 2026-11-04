@@ -88,6 +88,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from local_operator.config import read_config_values
 from local_operator.mobile import push_devices as mobile_push_devices
 from local_operator.mobile import push_handles
 from local_operator.mobile.push_payload import (
@@ -98,6 +99,7 @@ from local_operator.mobile.push_payload import (
     digest_emit_key,
     digest_payload,
     emit_body,
+    push_sound,
 )
 from local_operator.session.attention import AttentionStore
 from local_operator.session.runtime.presence import PRESENCE_TTL_S, desktop_presence
@@ -1068,6 +1070,12 @@ class PushWorker:
         count = self._count()
         emit_id = item.emit_id or uuid.uuid4().hex
         payload: dict[str, Any]
+        # Read at composition, like ``count``: the sound section is LIVE, so a
+        # change in /settings applies to the next push without a daemon restart.
+        # ``read_config_values`` memoises an unchanged file to one fstat; a torn
+        # read (``None``) takes the defaults, because an emit that waited for a
+        # clean read would delay a banner the user is waiting for.
+        sound = push_sound(read_config_values(self.config_dir))
         if item.kind == EVENT_COMPLETION:
             conversation_identity = item.conversations[0] if item.conversations else ""
             session_id = _session_id_of(conversation_identity)
@@ -1091,6 +1099,7 @@ class PushWorker:
                 kind=kind,
                 emit_id=emit_id,
                 count=count,
+                sound=sound,
             )
         elif item.kind == EVENT_DIGEST:
             # The coalesced catch-up: a set, so it names no conversation and
@@ -1105,7 +1114,7 @@ class PushWorker:
                 if isinstance(member_kind, str):
                     kinds.append(member_kind)
             payload = digest_payload(
-                computer=self.computer, count=count, emit_id=emit_id, kinds=kinds
+                computer=self.computer, count=count, emit_id=emit_id, kinds=kinds, sound=sound
             )
         else:
             # The badge correction: it stands for no record at all and carries a
