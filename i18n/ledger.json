@@ -3015,6 +3015,27 @@
       "note": "Independent round-2 re-audit (7 keys). 0 unresolved blocker/major. Target SHA-256 657fbdff3b123ed385813f16afc6ce23161bbb36309212ad9990cbdcada306b9. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
     },
     {
+      "locale": "es",
+      "namespace": "cli.team_bridge_hold",
+      "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "2c6111e02b16-lane",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-3443, task subagent)",
+        "session": "621890ec619d",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_hold at source hash acc428129160: 8/8 keys present in en order, ICU placeholder/plural structure parity with en ({count} only), required CLDR arms for the locale rendered at counts 1/2/5/21/22 with the repo formatter, NFC, no stray/bidi/zero-width controls, no ASCII apostrophe. Safety meaning checked against the en .context.json: held.* says the message was HELD (not delivered/approved/safe) and names no sender/place/body; delivered.body says only that the agent may READ it (no 'approved'/'accepted'); discarded.body says discarded and the sender was told it was NOT delivered (no 'deleted'/'blocked'); 'Agent messages' product name, 'held' term and the address register match cli.team_bridge_alert / cli.team_bridge in this locale. Pronoun tú ('tu revisión', 'Abre'); 'Mensajes de agentes', 'retenido' and 'entregar' match the alert/receiver precedent; descartar matches the catalogue's descartar. one/many/other all present and agree ('1 mensaje retenido más espera', '2 mensajes retenidos más esperan', 'many' = '# de mensajes… esperan'). 'informó al remitente de que' is correct (no dequeísmo). Dispositions: 0 blocker / 0 major unresolved. Single independent audit pass; no cross-model second audit; no native-speaker or rendered-frame certification."
+    },
+    {
       "locale": "fr",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -6005,6 +6026,27 @@
       },
       "status": "passed",
       "note": "Independent round-2 re-audit (7 keys). Auditor fixed 1 finding (see record); 0 unresolved blocker/major. Target SHA-256 dac1a47af57b181b3482d90c998e88fbd23c95c1335e2e5c8b4acfa54f07e90f. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.team_bridge_hold",
+      "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "2c6111e02b16-lane",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-3443, task subagent)",
+        "session": "621890ec619d",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_hold at source hash acc428129160: 8/8 keys present in en order, ICU placeholder/plural structure parity with en ({count} only), required CLDR arms for the locale rendered at counts 1/2/5/21/22 with the repo formatter, NFC, no stray/bidi/zero-width controls, no ASCII apostrophe. Safety meaning checked against the en .context.json: held.* says the message was HELD (not delivered/approved/safe) and names no sender/place/body; delivered.body says only that the agent may READ it (no 'approved'/'accepted'); discarded.body says discarded and the sender was told it was NOT delivered (no 'deleted'/'blocked'); 'Agent messages' product name, 'held' term and the address register match cli.team_bridge_alert / cli.team_bridge in this locale. Pronoun vous; 'Messages des agents', 'retenu' and 'transmettre' (deliver) match the alert/receiver precedent; 'écarter' (Discard) matches the catalogue's écarté. U+202F precedes the colon in all six titles (verified by codepoint) and U+2019 is the apostrophe throughout, as in cli.team_bridge_alert; the bodies carry no colon so no U+202F is owed. one/many/other present and agree (1 … attend / 2 … attendent / many '# de messages … attendent'). Dispositions: 0 blocker / 0 major unresolved. Single independent audit pass; no cross-model second audit; no native-speaker or rendered-frame certification."
     },
     {
       "locale": "hi",
@@ -9052,6 +9094,27 @@
       },
       "status": "passed",
       "note": "Independent round-2 re-audit (7 keys). 0 unresolved blocker/major. Target SHA-256 b9177e5664ad868053f7b95b46ce0cd3817081d5500c53b0271d876b1bc586a7. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.team_bridge_hold",
+      "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "2c6111e02b16-lane",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-3443, task subagent)",
+        "session": "621890ec619d",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_hold at source hash acc428129160: 8/8 keys present in en order, ICU placeholder/plural structure parity with en ({count} only), required CLDR arms for the locale rendered at counts 1/2/5/21/22 with the repo formatter, NFC, no stray/bidi/zero-width controls, no ASCII apostrophe. Safety meaning checked against the en .context.json: held.* says the message was HELD (not delivered/approved/safe) and names no sender/place/body; delivered.body says only that the agent may READ it (no 'approved'/'accepted'); discarded.body says discarded and the sender was told it was NOT delivered (no 'deleted'/'blocked'); 'Agent messages' product name, 'held' term and the address register match cli.team_bridge_alert / cli.team_bridge in this locale. Pronoun आप; 'एजेंट संदेश', 'रोका गया' and 'पहुँचाना' (deliver) match the alert/receiver precedent; nukta spellings (इंतज़ार) correct per hi.md; खारिज (Discard) is the catalogue's existing dismiss word (relay.asks) and is unambiguous, unlike छोड़ें ('leave'). Verb number and the oblique agree in both arms ('रोका गया 1 और संदेश … रहा है' / 'रोके गए 2 और संदेश … रहे हैं'). one/other present. Dispositions: 0 blocker / 0 major unresolved. Single independent audit pass; no cross-model second audit; no native-speaker or rendered-frame certification."
     },
     {
       "locale": "ru",
@@ -12140,6 +12203,27 @@
       "note": "Independent round-2 re-audit (7 keys). 0 unresolved blocker/major. Target SHA-256 b4a94ff9d16b168f90772d9cada60d25e9a06a55546b9ef4979fd3b2fbd207b1. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
     },
     {
+      "locale": "ru",
+      "namespace": "cli.team_bridge_hold",
+      "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "2c6111e02b16-lane",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-3443, task subagent)",
+        "session": "621890ec619d",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_hold at source hash acc428129160: 8/8 keys present in en order, ICU placeholder/plural structure parity with en ({count} only), required CLDR arms for the locale rendered at counts 1/2/5/21/22 with the repo formatter, NFC, no stray/bidi/zero-width controls, no ASCII apostrophe. Safety meaning checked against the en .context.json: held.* says the message was HELD (not delivered/approved/safe) and names no sender/place/body; delivered.body says only that the agent may READ it (no 'approved'/'accepted'); discarded.body says discarded and the sender was told it was NOT delivered (no 'deleted'/'blocked'); 'Agent messages' product name, 'held' term and the address register match cli.team_bridge_alert / cli.team_bridge in this locale. Lowercase вы; 'Сообщения агентов', 'задержано' and 'доставить' match the alert precedent; ё used per ru.md; guillemets «Сообщения агентов» for the surface name; no space before ':'. one/few/many/other all present with agreeing adjective, noun and verb in every arm (1 задержанное сообщение ждёт, 2 задержанных сообщения ждут, 5 задержанных сообщений ждут, 21 … ждёт, 22 … ждут). 'отклонить' for Discard is the catalogue's reject word, and the discarded text keeps 'не доставлено' for the sender. Observation only (not a defect): the in-app Discard button label lives in the UI repo and should use the same verb. Dispositions: 0 blocker / 0 major unresolved. Single independent audit pass; no cross-model second audit; no native-speaker or rendered-frame certification."
+    },
+    {
       "locale": "ur",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
@@ -14985,6 +15069,27 @@
       },
       "status": "passed",
       "note": "Independent round-2 re-audit (7 keys). 0 unresolved blocker/major. Target SHA-256 bbdaa802ca45802ccbcec85f8cb221db033742f4bc38362b7fb00e8a710abd90. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge_hold",
+      "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "2c6111e02b16-lane",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-3443, task subagent)",
+        "session": "621890ec619d",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_hold at source hash acc428129160: 8/8 keys present in en order, ICU placeholder/plural structure parity with en ({count} only), required CLDR arms for the locale rendered at counts 1/2/5/21/22 with the repo formatter, NFC, no stray/bidi/zero-width controls, no ASCII apostrophe. Safety meaning checked against the en .context.json: held.* says the message was HELD (not delivered/approved/safe) and names no sender/place/body; delivered.body says only that the agent may READ it (no 'approved'/'accepted'); discarded.body says discarded and the sender was told it was NOT delivered (no 'deleted'/'blocked'); 'Agent messages' product name, 'held' term and the address register match cli.team_bridge_alert / cli.team_bridge in this locale. Pronoun آپ; 'ایجنٹ کے پیغامات', 'روکا گیا' and 'پہنچانا' (deliver) match the alert/receiver precedent; مسترد is the catalogue's reject/discard word (47 uses); Urdu punctuation ۔ ، only. one/other agree in number and verb ('روکا گیا 1 مزید پیغام … منتظر ہے' / 'روکے گئے 5 مزید پیغامات … منتظر ہیں'). Bidi: storage is logical order with NO manual RLM/LRM/FSI/PDI (ur.md rule), no Latin runs or LTR islands except the rendered count digits; measured with GNU FriBidi at counts 1 and 5 that the visual order is byte-identical with and without a surrounding FSI/PDI, and identical under LTR and RTL base for the pure-Urdu strings. Render note (not a translation defect): the inbox paints stored title/body_md as plain text, as for cli.team_bridge_alert, so Urdu stays in the documented best-effort TUI stance; web/Electron mirror fully. Dispositions: 0 blocker / 0 major unresolved. Single independent audit pass; no cross-model second audit; no native-speaker or rendered-frame certification."
     },
     {
       "locale": "vi",
@@ -18094,6 +18199,27 @@
       "note": "Independent round-2 re-audit (7 keys). Auditor fixed 1 finding (see record); 0 unresolved blocker/major. Target SHA-256 ef5df2ec85967727273dc28df98681cbbac7162c432e712b412caac6dabc9314. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
     },
     {
+      "locale": "vi",
+      "namespace": "cli.team_bridge_hold",
+      "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "2c6111e02b16-lane",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-3443, task subagent)",
+        "session": "621890ec619d",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_hold at source hash acc428129160: 8/8 keys present in en order, ICU placeholder/plural structure parity with en ({count} only), required CLDR arms for the locale rendered at counts 1/2/5/21/22 with the repo formatter, NFC, no stray/bidi/zero-width controls, no ASCII apostrophe. Safety meaning checked against the en .context.json: held.* says the message was HELD (not delivered/approved/safe) and names no sender/place/body; delivered.body says only that the agent may READ it (no 'approved'/'accepted'); discarded.body says discarded and the sender was told it was NOT delivered (no 'deleted'/'blocked'); 'Agent messages' product name, 'held' term and the address register match cli.team_bridge_alert / cli.team_bridge in this locale. Pronoun dropped except 'bạn' where needed; 'Tin nhắn tác nhân', 'bị giữ' and 'chuyển' (deliver) match the alert/receiver precedent; 'loại bỏ' is the catalogue's discard word (bỏ for short labels). Only the 'other' CLDR arm is required and present, as in cli.team_bridge_alert; 'Thêm # tin nhắn bị giữ đang chờ' reads correctly for 1 and for many. Dispositions: 0 blocker / 0 major unresolved. Single independent audit pass; no cross-model second audit; no native-speaker or rendered-frame certification."
+    },
+    {
       "locale": "zh-CN",
       "namespace": "cli.agents_help",
       "source_sha256": "d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3",
@@ -20865,6 +20991,27 @@
       },
       "status": "passed",
       "note": "Independent round-2 re-audit (7 keys). 0 unresolved blocker/major. Target SHA-256 5804d76d69b59ab3913dba9b179f26a2b3df40134bddc127eda79a5ea181d96c. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge_hold",
+      "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "2c6111e02b16-lane",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-3443, task subagent)",
+        "session": "621890ec619d",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_hold at source hash acc428129160: 8/8 keys present in en order, ICU placeholder/plural structure parity with en ({count} only), required CLDR arms for the locale rendered at counts 1/2/5/21/22 with the repo formatter, NFC, no stray/bidi/zero-width controls, no ASCII apostrophe. Safety meaning checked against the en .context.json: held.* says the message was HELD (not delivered/approved/safe) and names no sender/place/body; delivered.body says only that the agent may READ it (no 'approved'/'accepted'); discarded.body says discarded and the sender was told it was NOT delivered (no 'deleted'/'blocked'); 'Agent messages' product name, 'held' term and the address register match cli.team_bridge_alert / cli.team_bridge in this locale. Pronoun 你 (guide); '智能体消息', '暂扣' and '送达' (deliver) match the alert/receiver precedent; classifier 条; full-width punctuation; no space between CJK and digits; only the 'other' arm is required and present. FINDING 1 (minor, FIXED): the translator rendered Discard as 舍弃 (held.body, discarded.title, discarded.body), a fourth word for one concept — the zh-CN catalogue's term for discarding messages is 丢弃 (tui.notices.kept_going_stopped '待处理消息已丢弃', cli.hub_shared_help.sync_replace), 放弃 is used for abandoning an edit/attempt. Replaced 舍弃→丢弃 in those three strings; no other wording touched and the audit covers the post-fix bytes. Remaining 0 blocker / 0 major. Dispositions: 0 blocker / 0 major unresolved. Single independent audit pass; no cross-model second audit; no native-speaker or rendered-frame certification."
     }
   ]
 }

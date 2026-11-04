@@ -3087,6 +3087,27 @@
       },
       "status": "passed",
       "note": "Independent round-2 re-audit (7 keys). 0 unresolved blocker/major. Target SHA-256 b4a94ff9d16b168f90772d9cada60d25e9a06a55546b9ef4979fd3b2fbd207b1. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.team_bridge_hold",
+      "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "2c6111e02b16-lane",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-3443, task subagent)",
+        "session": "621890ec619d",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_hold at source hash acc428129160: 8/8 keys present in en order, ICU placeholder/plural structure parity with en ({count} only), required CLDR arms for the locale rendered at counts 1/2/5/21/22 with the repo formatter, NFC, no stray/bidi/zero-width controls, no ASCII apostrophe. Safety meaning checked against the en .context.json: held.* says the message was HELD (not delivered/approved/safe) and names no sender/place/body; delivered.body says only that the agent may READ it (no 'approved'/'accepted'); discarded.body says discarded and the sender was told it was NOT delivered (no 'deleted'/'blocked'); 'Agent messages' product name, 'held' term and the address register match cli.team_bridge_alert / cli.team_bridge in this locale. Lowercase вы; 'Сообщения агентов', 'задержано' and 'доставить' match the alert precedent; ё used per ru.md; guillemets «Сообщения агентов» for the surface name; no space before ':'. one/few/many/other all present with agreeing adjective, noun and verb in every arm (1 задержанное сообщение ждёт, 2 задержанных сообщения ждут, 5 задержанных сообщений ждут, 21 … ждёт, 22 … ждут). 'отклонить' for Discard is the catalogue's reject word, and the discarded text keeps 'не доставлено' for the sender. Observation only (not a defect): the in-app Discard button label lives in the UI repo and should use the same verb. Dispositions: 0 blocker / 0 major unresolved. Single independent audit pass; no cross-model second audit; no native-speaker or rendered-frame certification."
     }
   ]
 }

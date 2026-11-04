@@ -3014,6 +3014,27 @@
       },
       "status": "passed",
       "note": "Independent round-2 re-audit (7 keys). 0 unresolved blocker/major. Target SHA-256 657fbdff3b123ed385813f16afc6ce23161bbb36309212ad9990cbdcada306b9. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.team_bridge_hold",
+      "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "2c6111e02b16-lane",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-3443, task subagent)",
+        "session": "621890ec619d",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_hold at source hash acc428129160: 8/8 keys present in en order, ICU placeholder/plural structure parity with en ({count} only), required CLDR arms for the locale rendered at counts 1/2/5/21/22 with the repo formatter, NFC, no stray/bidi/zero-width controls, no ASCII apostrophe. Safety meaning checked against the en .context.json: held.* says the message was HELD (not delivered/approved/safe) and names no sender/place/body; delivered.body says only that the agent may READ it (no 'approved'/'accepted'); discarded.body says discarded and the sender was told it was NOT delivered (no 'deleted'/'blocked'); 'Agent messages' product name, 'held' term and the address register match cli.team_bridge_alert / cli.team_bridge in this locale. Pronoun tú ('tu revisión', 'Abre'); 'Mensajes de agentes', 'retenido' and 'entregar' match the alert/receiver precedent; descartar matches the catalogue's descartar. one/many/other all present and agree ('1 mensaje retenido más espera', '2 mensajes retenidos más esperan', 'many' = '# de mensajes… esperan'). 'informó al remitente de que' is correct (no dequeísmo). Dispositions: 0 blocker / 0 major unresolved. Single independent audit pass; no cross-model second audit; no native-speaker or rendered-frame certification."
     }
   ]
 }
