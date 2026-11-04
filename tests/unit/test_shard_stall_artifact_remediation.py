@@ -465,7 +465,9 @@ def test_r5_closed_handle_readonly_run_cannot_authorize_fallback(
             assert calls == [(300, True)]
         else:
             assert calls == []
-            job = timer._reporter._job
+            reporter = timer._reporter
+            assert reporter is not None
+            job = reporter._job
             assert job is not None and job[2] == 240 and job[4] is timer._handle
         assert timer._armed and not timer._registered
         result = cli(run.parent, tmp_path / "out", registry)
