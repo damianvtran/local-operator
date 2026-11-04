@@ -640,3 +640,67 @@ def test_the_report_names_the_file_every_column_came_from(
     for name in ("macos", "ubuntu"):
         assert name in printed
     assert "columns:" in printed and "Darwin" in printed and "Linux" in printed
+
+
+# --- exec.offline traceback evidence ----------------------------------------
+# `_tail` kept only the CPython frame of a Windows failure (gh-109564); the
+# helper must keep the lop frames above it.
+
+_TB = "Traceback (most recent call last):"
+
+
+def test_traceback_block_found_amid_other_output() -> None:
+    text = f'boot\n{_TB}\n  File "lop/a.py", line 1, in f\nValueError: x\ntrailer\n'
+    assert xplat_probe._traceback_block(text).splitlines() == [
+        _TB,
+        '  File "lop/a.py", line 1, in f',
+        "ValueError: x",
+        "trailer",
+    ]
+
+
+def test_traceback_block_keeps_the_last_of_several() -> None:
+    text = f"{_TB}\nFIRST\n{_TB}\nSECOND\n"
+    out = xplat_probe._traceback_block(text)
+    assert "SECOND" in out and "FIRST" not in out
+
+
+def test_traceback_block_without_traceback_is_empty() -> None:
+    assert xplat_probe._traceback_block("all fine\n") == ""
+
+
+def test_traceback_block_empty_input() -> None:
+    assert xplat_probe._traceback_block("") == ""
+    assert xplat_probe._traceback_block(None) == ""  # type: ignore[arg-type]
+
+
+def test_traceback_block_truncates_keeping_tail_and_notes_elision() -> None:
+    body = "\n".join(f"frame {i}" for i in range(100))
+    out = xplat_probe._traceback_block(f"{_TB}\n{body}\nBoom", max_lines=5)
+    assert "elided" in out and out.endswith("Boom") and "frame 0" not in out
+    out = xplat_probe._traceback_block(f"{_TB}\n{'x' * 500}\nBoom", max_chars=50)
+    assert "elided" in out and out.endswith("Boom")
+
+
+def test_traceback_block_survives_windows_line_endings_and_odd_bytes() -> None:
+    text = f'{_TB}\r\n  File "lop\\srv.py", line 9, in close\r\n\ufffd bad\r\nAssertionError\r\n'
+    out = xplat_probe._traceback_block(text)
+    assert "\r" not in out and "lop\\srv.py" in out and out.endswith("AssertionError")
+
+
+def test_exec_offline_fail_detail_names_lop_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    stderr = (
+        "noise\r\n" + _TB + "\r\n"
+        '  File "C:\\lop\\local_operator\\server.py", line 42, in shutdown\r\n'
+        '  File "C:\\py312\\asyncio\\base_events.py", line 295, in _attach\r\n'
+        "    assert self._sockets is not None\r\nAssertionError\r\n"
+    )
+    proc = subprocess.CompletedProcess([], 1, stdout="", stderr=stderr)
+    monkeypatch.setattr(xplat_probe, "run", lambda *a, **k: proc)
+    monkeypatch.setattr(xplat_probe, "_cli_argv", lambda *a: ["lop", *a])
+    res = xplat_probe.probe_exec_offline({})
+    assert res.status == "FAIL"
+    assert "local_operator\\server.py" in res.detail
+    assert "local_operator\\server.py" in res.extra["traceback"]
+    # The short summary stays first so the matrix table keeps its shape.
+    assert res.detail.startswith(xplat_probe._tail(stderr))
