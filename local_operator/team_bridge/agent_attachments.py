@@ -8,7 +8,8 @@ pasted it into the message TEXT as ``[image …; sha256 …] data:image/jpeg;bas
 that): the bytes ride the model's own output, the transcript, the reply-guard
 bookkeeping, the hub's text store and the audit view, and the receiver never gets
 a screened image — only a wall of characters. The fix at the source is a real
-attachment path plus a refusal of the workaround (:func:`refuse_inline_image_data`).
+attachment path plus a refusal of the workaround (:func:`refuse_inline_image_data_for`,
+whose hint names ``attachments`` only where the hub advertises agent uploads).
 
 THE FLOW, and what is deliberately NOT here:
 
@@ -80,7 +81,10 @@ __all__ = [
     "discard_attachments",
     "prepare_attachments",
     "annotate_receipt",
+    "has_inline_image_data",
+    "inline_image_refusal",
     "refuse_inline_image_data",
+    "refuse_inline_image_data_for",
     "send_kwargs",
     "stage_attachments",
 ]
@@ -204,38 +208,88 @@ class StagedImage:
         return row
 
 
-def refuse_inline_image_data(text: str) -> dict[str, str] | None:
-    """A refusal when ``text`` carries an inline ``data:image/…;base64,`` payload.
+def has_inline_image_data(text: str) -> bool:
+    """Whether ``text`` carries an inline ``data:image/…;base64,`` payload.
 
-    Applies whether or not the hub advertises attachments: pasting image bytes
-    into message text was never a working path, only an expensive one. The error
-    names the supported route so the agent corrects itself rather than retrying
-    the same paste, and says the route exists only where the hub supports agent
-    uploads (the option is hub-gated, so recommending it unconditionally would
-    send an agent to a refusal on a hub that has it off). Content-free by
-    construction: the matched run is never echoed.
+    Pure detection, split from the wording so the refusal can depend on the hub
+    capability without the detector doing any I/O. Applies whether or not the hub
+    advertises attachments: pasting image bytes into message text was never a
+    working path, only an expensive one (the base64 wall in the agent audit view).
     """
 
     if "data:" not in text.lower():
-        return None
+        return False
     for match in _INLINE_IMAGE_HEADER.finditer(text):
         if "base64" not in match.group(1).lower():
             continue
         if _significant_run(text, match.end(), INLINE_IMAGE_DATA_MIN_CHARS) >= (
             INLINE_IMAGE_DATA_MIN_CHARS
         ):
-            return {
-                "code": "inline_image_data",
-                "error": (
-                    "the message text contains an inline data:image base64 payload "
-                    f"(over {INLINE_IMAGE_DATA_MIN_CHARS} characters); nothing was sent. "
-                    "Never paste image bytes into text. Where this hub supports agent "
-                    "uploads, pass the local image file path(s) in the `attachments` "
-                    f"parameter instead (PNG or JPEG, up to {ATTACHMENT_MAX_COUNT} per "
-                    "dm or channel_post); where it does not, describe the image in words"
-                ),
-            }
-    return None
+            return True
+    return False
+
+
+def inline_image_refusal(*, uploads_available: bool) -> dict[str, str]:
+    """The closed ``inline_image_data`` refusal, worded for what the hub can do.
+
+    ONE code in both cases; only the HINT differs, because the supported route is
+    hub-gated. Pointing at ``attachments`` on a hub that does not advertise
+    ``attachments.agent_upload`` (the production default while
+    ``BRIDGE_AGENT_IMAGES_ENABLED`` is off) is a dead end: the agent would retry
+    with the parameter and get ``attachments_unavailable``. So the off wording must
+    never name the parameter. Content-free by construction: the matched run is
+    never echoed, nothing here is derived from the message text.
+    """
+
+    head = (
+        "the message text contains an inline data:image base64 payload "
+        f"(over {INLINE_IMAGE_DATA_MIN_CHARS} characters); nothing was sent. "
+        "Never paste image bytes into text. "
+    )
+    if uploads_available:
+        hint = (
+            "Pass the local image file path(s) in the `attachments` parameter "
+            f"instead (PNG or JPEG, up to {ATTACHMENT_MAX_COUNT} per dm or channel_post)"
+        )
+    else:
+        hint = (
+            "Images cannot be sent over the bridge yet: describe the image in "
+            "words, or share a link or a vault reference instead"
+        )
+    return {"code": "inline_image_data", "error": head + hint}
+
+
+def refuse_inline_image_data(
+    text: str, *, uploads_available: bool = False
+) -> dict[str, str] | None:
+    """A refusal when ``text`` carries an inline image payload, else ``None``.
+
+    ``uploads_available`` defaults to False so a caller with no capability
+    information gets the wording that is true everywhere (it never recommends the
+    gated ``attachments`` route). Tool call sites use
+    :func:`refuse_inline_image_data_for`, which learns the capability.
+    """
+
+    if not has_inline_image_data(text):
+        return None
+    return inline_image_refusal(uploads_available=uploads_available)
+
+
+async def refuse_inline_image_data_for(
+    runtime: "BridgeRuntime", text: str
+) -> dict[str, str] | None:
+    """:func:`refuse_inline_image_data` with the hint chosen from the hub's status.
+
+    The capability is read ONLY on the refusal path: a text-only send makes the
+    identical ``conversation_send`` call as before, with no status read. An
+    unreadable status counts as off (:func:`_agent_upload_capability` fails closed).
+    """
+
+    if not has_inline_image_data(text):
+        return None
+    return inline_image_refusal(
+        uploads_available=await _agent_upload_capability(runtime) is not None
+    )
 
 
 # -- metadata stripping -------------------------------------------------------

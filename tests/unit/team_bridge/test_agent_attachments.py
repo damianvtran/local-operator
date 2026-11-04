@@ -539,21 +539,70 @@ def _data_uri(chars: int, mime: str = "image/jpeg") -> str:
     return f"data:{mime};base64," + "A" * chars
 
 
+# Owner decision D2: ONE closed code, a hint that depends on the hub. With uploads on
+# the hint names `attachments`; with them off (the production default) it must NOT,
+# or the agent walks into `attachments_unavailable`. Each branch is driven through
+# BOTH send ops, and through all three dm body spellings.
+_INLINE_PAYLOAD = _data_uri(2000)
+_INLINE_ARGS = {
+    "channel_post": _post(body=f"[image; sha256 abc] {_INLINE_PAYLOAD}"),
+    "dm body": _dm(body=_INLINE_PAYLOAD),
+    "dm text": {"op": "dm", "endpoint_id": PEER_ENDPOINT, "text": _INLINE_PAYLOAD},
+}
+_OFF_HUBS: dict[str, dict[str, Any]] = {  # FakeHub kwargs; a fresh hub per test
+    "block absent": {"status": {}},
+    "agent_upload false": {"status": CAP_HUMAN_ONLY},
+    "agent_upload not literally true": {
+        "status": {"attachments": dict(CAP_ON["attachments"], agent_upload="true")}
+    },
+    "status raises": {"status_failure": RuntimeError("down")},
+}
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [CAP_ON, CAP_HUMAN_ONLY])
-async def test_long_inline_image_data_is_refused_with_the_attachments_hint(status: Any) -> None:
-    hub = FakeHub(status=status)
-    payload = _data_uri(2000)
-    for args in (
-        _post(body=f"[image; sha256 abc] {payload}"),
-        _dm(body=payload),
-        {"op": "dm", "endpoint_id": PEER_ENDPOINT, "text": payload},
-    ):
-        out = await execute_bridge(_runtime(hub), args)
-        assert out["ok"] is False and out["code"] == "inline_image_data"
-        assert "`attachments`" in out["error"]
-        assert "AAAA" not in out["error"]  # the run is never echoed
+@pytest.mark.parametrize("op", sorted(_INLINE_ARGS))
+async def test_inline_image_refusal_hint_names_attachments_when_the_hub_advertises_uploads(
+    op: str,
+) -> None:
+    hub = FakeHub(status=CAP_ON)
+    out = await execute_bridge(_runtime(hub), _INLINE_ARGS[op])
+    assert out["ok"] is False and out["code"] == "inline_image_data"
+    assert "`attachments`" in out["error"] and "PNG or JPEG" in out["error"]
+    assert "AAAA" not in json.dumps(out)  # the matched run is never echoed
     assert hub.named("conversation_send") == [] and hub.named("create_conversation") == []
+    assert hub.named("upload_attachment") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", sorted(_INLINE_ARGS))
+@pytest.mark.parametrize("off", sorted(_OFF_HUBS))
+async def test_inline_image_refusal_hint_never_names_attachments_when_uploads_are_off(
+    op: str, off: str
+) -> None:
+    hub = FakeHub(**_OFF_HUBS[off])
+    out = await execute_bridge(_runtime(hub), _INLINE_ARGS[op])
+    # Same closed code as the on-branch: no second code was invented.
+    assert out["ok"] is False and out["code"] == "inline_image_data"
+    assert "attachments" not in out["error"].lower()  # no dead-end hint, in any spelling
+    assert "describe the image in words" in out["error"]
+    assert "link" in out["error"] and "vault reference" in out["error"]
+    assert "AAAA" not in json.dumps(out)
+    assert hub.named("conversation_send") == [] and hub.named("create_conversation") == []
+    assert hub.named("upload_attachment") == []
+
+
+@pytest.mark.asyncio
+async def test_inline_image_refusal_reads_the_hub_status_only_on_the_refusal_path() -> None:
+    # A text-only send keeps the pre-attachment call shape: zero status reads.
+    clean = FakeHub(status=CAP_ON)
+    for args in (_post(), _dm(), _post(body="data:image/png;base64," + "A" * 200)):
+        out = await execute_bridge(_runtime(clean), args)
+        assert out["ok"] is True, args
+    assert clean.named("status") == [] and clean.named("upload_attachment") == []
+    # The refusal path reads it exactly once per refused send.
+    refused = FakeHub(status=CAP_ON)
+    await execute_bridge(_runtime(refused), _INLINE_ARGS["channel_post"])
+    assert len(refused.named("status")) == 1
 
 
 @pytest.mark.asyncio
@@ -823,12 +872,16 @@ def test_inline_image_guard_does_not_flag_legitimate_text() -> None:
         assert aa.refuse_inline_image_data(text) is None, text[:50]
 
 
-def test_inline_refusal_text_does_not_promise_attachments_unconditionally() -> None:
+def test_inline_refusal_default_wording_is_the_one_that_is_true_everywhere() -> None:
+    # No capability information => the OFF wording. The default must never point at
+    # the gated `attachments` route (owner decision D2).
     refused = aa.refuse_inline_image_data(_BYPASSES["uppercase"])
-    assert refused is not None
-    error = refused["error"]
-    assert "`attachments`" in error and "Where this hub supports agent uploads" in error
-    assert "where it does not" in error  # the off-hub fallback is stated
+    assert refused is not None and refused["code"] == "inline_image_data"
+    assert "attachments" not in refused["error"].lower()
+    on = aa.refuse_inline_image_data(_BYPASSES["uppercase"], uploads_available=True)
+    assert on is not None and on["code"] == refused["code"] and "`attachments`" in on["error"]
+    assert aa.has_inline_image_data(_BYPASSES["uppercase"]) is True
+    assert aa.has_inline_image_data("an ordinary message") is False
 
 
 # -- NIT: metadata is stripped, pixels and orientation are kept -----------------
@@ -977,7 +1030,9 @@ async def test_inline_guard_refusal_names_the_rule_but_echoes_none_of_the_run(
         _runtime(hub), _post(body=f"x data:image/png;base64,{'A' * 2000}", attachments=[path])
     )
     assert out["code"] == "inline_image_data" and "AAAA" not in json.dumps(out)
-    assert hub.calls == []  # refused before the status read, the upload and the send
+    # Owner decision D2: the refusal reads the (read-only) status once to word its hint;
+    # it still precedes every write: no upload, no conversation, no send.
+    assert [call["method"] for call in hub.calls] == ["status"]
 
 
 # -- 25 MiB source boundary ----------------------------------------------------

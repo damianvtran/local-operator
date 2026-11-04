@@ -447,7 +447,8 @@ class BridgeToolParams(BaseModel):
     # hubs refuse AND move every session's tool-doc/start-context token ledgers.
     # Validation still accepts it (extra="forbid" would otherwise reject it); the
     # executor refuses it unless the hub advertises the capability, and the
-    # inline-data refusal names it for an agent that pasted image bytes into text.
+    # inline-data refusal names it ONLY when the hub advertises it (otherwise it
+    # tells the agent to describe the image or share a link).
     attachments: SkipJsonSchema[list[str]] = Field(
         default_factory=list, max_length=ATTACHMENT_MAX_COUNT
     )
@@ -1047,7 +1048,7 @@ async def _direct_message(
     text = params.body or params.text
     if not text.strip():
         return _error("dm needs non-empty body")
-    inline_image = agent_attachments.refuse_inline_image_data(text)
+    inline_image = await agent_attachments.refuse_inline_image_data_for(runtime, text)
     if inline_image is not None:
         return _error(inline_image["error"], code=inline_image["code"])
     thread_root_id = params.thread_root_id.strip()
@@ -1859,7 +1860,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             return _error("channel_post needs a conversation id (bcv_…)")
         if not params.body.strip():
             return _error("channel_post needs non-empty body")
-        inline_image = agent_attachments.refuse_inline_image_data(params.body)
+        inline_image = await agent_attachments.refuse_inline_image_data_for(runtime, params.body)
         if inline_image is not None:
             return _error(inline_image["error"], code=inline_image["code"])
         thread_root_id = params.thread_root_id.strip()
