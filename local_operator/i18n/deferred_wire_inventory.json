@@ -240,6 +240,31 @@
       "references": {
         "harness/bridge_copy.py": 89
       }
+    },
+    "wire.notification_sound": {
+      "reason": "notification-sound settings rows rendered by settings_io._t, lop sound argparse help and CLI refusals printed in-process, and desktop refusals sent as finished text under MACHINE codes (too_large, too_long, ...), never as message ids",
+      "render_points": [
+        {
+          "path": "local_operator/settings_io.py",
+          "symbol": "settings_io._t",
+          "note": "section, row and choice copy rendered as plain strings"
+        },
+        {
+          "path": "local_operator/sound_cli.py",
+          "symbol": "sound_cli.help_text",
+          "note": "argparse help rendered through help_text; refusals printed as envelope text"
+        },
+        {
+          "path": "local_operator/notifications/custom_sounds.py",
+          "symbol": "custom_sounds.SoundRejected.envelope",
+          "note": "refusals sent with code overridden to the machine code; the client keys on code and shows text"
+        }
+      ],
+      "references": {
+        "notifications/custom_sounds.py": 1,
+        "settings_io.py": 23,
+        "sound_cli.py": 19
+      }
     }
   }
 }

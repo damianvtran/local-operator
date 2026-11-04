@@ -42,6 +42,21 @@ from local_operator.i18n.cli_help import help_text
 from local_operator.i18n.keys import wire_notification_sound as _ns
 
 
+def _t(key: Any, locale: str | None) -> str:
+    """Render one ``wire.notification_sound`` CLI help key for argparse.
+
+    ``key`` is the key FUNCTION, called here: the namespace is deferred (not in
+    the eager wire bundle), and ``scripts/i18n/deferred_watch.py`` requires
+    every deferred key call to sit inside a render wrapper such as ``_t``.
+    """
+    return help_text(key(), locale)
+
+
+def render(message: Any) -> str:
+    """A keyed message's text in the active locale (the CLI's refusal lines)."""
+    return str(message.envelope()["text"])
+
+
 def add_parser(
     subparsers: Any, parent_parser: Any = None, *, help_locale: str | None = None
 ) -> None:
@@ -49,44 +64,38 @@ def add_parser(
     parents = [parent_parser] if parent_parser is not None else []
     sound = subparsers.add_parser(
         "sound",
-        help=help_text(_ns.cli_help(), help_locale),
-        description=help_text(_ns.cli_help(), help_locale),
+        help=_t(_ns.cli_help, help_locale),
+        description=_t(_ns.cli_help, help_locale),
         parents=parents,
     )
     verbs = sound.add_subparsers(dest="sound_command")
-    verbs.add_parser("list", help=help_text(_ns.cli_list_help(), help_locale), parents=parents)
+    verbs.add_parser("list", help=_t(_ns.cli_list_help, help_locale), parents=parents)
     preview = verbs.add_parser(
-        "preview", help=help_text(_ns.cli_preview_help(), help_locale), parents=parents
+        "preview", help=_t(_ns.cli_preview_help, help_locale), parents=parents
     )
-    preview.add_argument("sound_id", help=help_text(_ns.cli_preview_id_help(), help_locale))
+    preview.add_argument("sound_id", help=_t(_ns.cli_preview_id_help, help_locale))
     preview.add_argument(
         "--volume",
         type=int,
         default=None,
         metavar="N",
-        help=help_text(_ns.cli_preview_volume_help(), help_locale),
+        help=_t(_ns.cli_preview_volume_help, help_locale),
     )
-    verbs.add_parser("doctor", help=help_text(_ns.cli_doctor_help(), help_locale), parents=parents)
-    add = verbs.add_parser("add", help=help_text(_ns.cli_add_help(), help_locale), parents=parents)
-    add.add_argument("source", help=help_text(_ns.cli_add_source_help(), help_locale))
-    add.add_argument("--name", default=None, help=help_text(_ns.cli_add_name_help(), help_locale))
-    add.add_argument(
-        "--select", action="store_true", help=help_text(_ns.cli_add_select_help(), help_locale)
-    )
+    verbs.add_parser("doctor", help=_t(_ns.cli_doctor_help, help_locale), parents=parents)
+    add = verbs.add_parser("add", help=_t(_ns.cli_add_help, help_locale), parents=parents)
+    add.add_argument("source", help=_t(_ns.cli_add_source_help, help_locale))
+    add.add_argument("--name", default=None, help=_t(_ns.cli_add_name_help, help_locale))
+    add.add_argument("--select", action="store_true", help=_t(_ns.cli_add_select_help, help_locale))
     add.add_argument(
         "--keep-loudness",
         action="store_true",
-        help=help_text(_ns.cli_add_keep_loudness_help(), help_locale),
+        help=_t(_ns.cli_add_keep_loudness_help, help_locale),
     )
-    rename = verbs.add_parser(
-        "rename", help=help_text(_ns.cli_rename_help(), help_locale), parents=parents
-    )
-    rename.add_argument("sound_id", help=help_text(_ns.cli_rename_id_help(), help_locale))
-    rename.add_argument("name", help=help_text(_ns.cli_rename_name_help(), help_locale))
-    remove = verbs.add_parser(
-        "remove", help=help_text(_ns.cli_remove_help(), help_locale), parents=parents
-    )
-    remove.add_argument("sound_id", help=help_text(_ns.cli_remove_id_help(), help_locale))
+    rename = verbs.add_parser("rename", help=_t(_ns.cli_rename_help, help_locale), parents=parents)
+    rename.add_argument("sound_id", help=_t(_ns.cli_rename_id_help, help_locale))
+    rename.add_argument("name", help=_t(_ns.cli_rename_name_help, help_locale))
+    remove = verbs.add_parser("remove", help=_t(_ns.cli_remove_help, help_locale), parents=parents)
+    remove.add_argument("sound_id", help=_t(_ns.cli_remove_id_help, help_locale))
 
 
 def _say(text: str = "") -> None:
@@ -199,7 +208,7 @@ def _read_source(source: str) -> tuple[bytes, str] | int:
 
         found = AttachmentStore().get_bytes(source[:32])
         if found is None:
-            _err(str(_ns.error_attachment_missing(digest=source).envelope()["text"]))
+            _err(render(_ns.error_attachment_missing(digest=source)))
             return 1
         return found[0], source[:32]
     try:

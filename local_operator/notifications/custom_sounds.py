@@ -64,10 +64,12 @@ from __future__ import annotations
 import array
 import dataclasses
 import json
+import logging
 import math
 import os
 import re
 import secrets
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -85,11 +87,15 @@ MAX_DURATION_S = 10.0
 #: Decoder rounding allowance on top of :data:`MAX_DURATION_S` (an MP3's
 #: encoder delay and padding add a few tens of ms to an exactly-10 s clip).
 DURATION_SLOP_S = 0.05
-#: A clip whose container reports more than this is refused before the full
-#: decode. A 10 MB MP3 can hold ten minutes, which decoded to float would cost
-#: hundreds of MB to learn what the header already says; 30 s leaves room for
-#: generous silence padding around a real 10 s clip.
+#: The most audio the import ever decodes, BEFORE silence is trimmed: a header
+#: claiming more is refused without decoding, and the streamed decode stops
+#: (and refuses) once it has produced more, whatever the header said. 30 s
+#: leaves room for generous silence padding around a real 10 s clip, and bounds
+#: the decode buffer at ~11.5 MB of float32 (48 kHz stereo).
 PRECHECK_DURATION_S = 30.0
+#: Frames per decode chunk. Small enough that the overshoot past the frame cap
+#: is negligible, large enough that the Python loop costs nothing measurable.
+_STREAM_CHUNK_FRAMES = 4096
 #: Longest display name, matching the desktop's inline-rename validation.
 MAX_NAME_CHARS = 40
 
@@ -341,7 +347,12 @@ def _store_failed() -> SoundRejected:
 
 def clean_name(name: str) -> str:
     """A display name, validated. Raises :class:`SoundRejected` (``invalid_name``)."""
-    cleaned = " ".join("".join(ch for ch in str(name) if ch.isprintable()).split())
+    # Control characters are STRIPPED (QA round 1, Q2: deferred, not refused).
+    # Refusing needs a new keyed sentence, which would change the audited
+    # `wire.notification_sound` source and un-ship every locale until a delta
+    # audit; stripping keeps the visible name the user typed.
+    text = "".join(ch for ch in str(name) if ch.isprintable() or ch in " \t\n\r")
+    cleaned = " ".join(text.split())
     if not cleaned:
         raise SoundRejected("invalid_name", 422, _keys().error_name_empty())
     if len(cleaned) > MAX_NAME_CHARS:
@@ -485,6 +496,16 @@ def max_momentary_lufs(channels: list[list[float]], sample_rate: int) -> float:
     return -0.691 + 10 * math.log10(best) if best > 0 else -math.inf
 
 
+def _too_long(file_label: str, seconds: float) -> SoundRejected:
+    return SoundRejected(
+        "too_long",
+        422,
+        _keys().error_too_long(
+            file=file_label, seconds=f"{seconds:.1f}", limit=f"{MAX_DURATION_S:g}"
+        ),
+    )
+
+
 def prepare(raw: bytes, *, file_label: str, keep_loudness: bool = False) -> Prepared:
     """Validate and process ``raw``; raises :class:`SoundRejected` on refusal.
 
@@ -523,27 +544,38 @@ def prepare(raw: bytes, *, file_label: str, keep_loudness: bool = False) -> Prep
         "mp3": miniaudio.mp3_get_info,
         "vorbis": miniaudio.vorbis_get_info,
     }[kind]
+    # The header's duration is a HINT, never a bound (agent review round 1,
+    # R1): FLAC STREAMINFO may say "length unknown" (0) or simply lie, and a
+    # 213 KB FLAC of 20 minutes of near-silence decoded whole costs 911 MB of
+    # float32 before any check runs. So the decode is a STREAM that stops,
+    # and refuses, once it has produced more than PRECHECK_DURATION_S of
+    # audio: at most ~11.5 MB of float32 (30 s of 48 kHz stereo) is ever held,
+    # whatever the container claims. The header still answers the common case
+    # cheaply (a truthful 3-minute song is refused before decoding a frame).
     try:
         info = info_reader(raw)
-        if info.duration > PRECHECK_DURATION_S:
-            raise SoundRejected(
-                "too_long",
-                422,
-                _ns.error_too_long(
-                    file=file_label, seconds=f"{info.duration:.1f}", limit=f"{MAX_DURATION_S:g}"
-                ),
-            )
         source_channels = max(1, min(2, int(info.nchannels)))
         sample_rate = min(int(info.sample_rate), MAX_SAMPLE_RATE)
-        decoded = miniaudio.decode(
+        if info.duration > PRECHECK_DURATION_S:
+            raise _too_long(file_label, info.duration)
+        if sample_rate <= 0:
+            raise SoundRejected("undecodable", 422, _ns.error_undecodable(file=file_label))
+        frame_cap = int(PRECHECK_DURATION_S * sample_rate)
+        interleaved = array.array("f")
+        for chunk in miniaudio.stream_memory(
             raw,
             output_format=miniaudio.SampleFormat.FLOAT32,
             nchannels=source_channels,
             sample_rate=sample_rate,
-        )
+            frames_to_read=_STREAM_CHUNK_FRAMES,
+        ):
+            interleaved.extend(chunk)
+            if len(interleaved) // source_channels > frame_cap:
+                # Honest about what is known: more than the cap was decoded,
+                # and the header (when it said anything) is the best total.
+                raise _too_long(file_label, max(info.duration, PRECHECK_DURATION_S))
     except miniaudio.MiniaudioError:
         raise SoundRejected("undecodable", 422, _ns.error_undecodable(file=file_label)) from None
-    interleaved = decoded.samples
     frames = len(interleaved) // source_channels
     if frames == 0:
         raise SoundRejected("undecodable", 422, _ns.error_undecodable(file=file_label))
@@ -566,13 +598,7 @@ def prepare(raw: bytes, *, file_label: str, keep_loudness: bool = False) -> Prep
 
     # 2. Refuse, never truncate, an over-length clip (settings spec C10).
     if duration > MAX_DURATION_S + DURATION_SLOP_S:
-        raise SoundRejected(
-            "too_long",
-            422,
-            _ns.error_too_long(
-                file=file_label, seconds=f"{duration:.1f}", limit=f"{MAX_DURATION_S:g}"
-            ),
-        )
+        raise _too_long(file_label, duration)
 
     # 3. Fades: a trimmed edge sits exactly where the signal crossed -50 dBFS,
     # and a hot first sample would click as the device starts.
@@ -757,6 +783,37 @@ class Removal:
         return str(self.reset_message().envelope()["text"])
 
 
+class _ResetAuditFilter(logging.Filter):
+    """Drops ConfigManager's "does not carry notifications.sound.id through" record.
+
+    That WARNING is ``ConfigManager``'s audit line for every declared drop, and
+    its reason names ``/settings`` (agent review round 1, R4). For this caller it
+    is noise on the user's terminal, under the keyed "Soft pulse is selected
+    again" line that already says what happened. Scoped to the CURRENT THREAD
+    and this one key, so a concurrent writer's record in a server is untouched.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._thread = threading.get_ident()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.thread != self._thread:
+            return True
+        return "notifications.sound.id" not in str(record.args)
+
+
+@contextmanager
+def _quiet_reset_audit() -> Iterator[None]:
+    target = logging.getLogger("local_operator.config")
+    quiet = _ResetAuditFilter()
+    target.addFilter(quiet)
+    try:
+        yield
+    finally:
+        target.removeFilter(quiet)
+
+
 def remove(sound_id: str) -> Removal:
     """Delete one custom sound; reset the selection to the default if it was selected.
 
@@ -781,6 +838,13 @@ def remove(sound_id: str) -> Removal:
         target = _contained(root, f"{sound_id}.wav")
         if target is not None:
             target.unlink(missing_ok=True)
+        else:
+            # A planted symlink in the sound's slot (QA round 1, Q4): unlink the
+            # LINK itself, never its target. `Path.unlink` does not follow it,
+            # and the id regex already pins the name inside `root`.
+            planted = root / f"{sound_id}.wav"
+            if planted.is_symlink():
+                planted.unlink(missing_ok=True)
         _drop_renders(sound_id)
         selected = _sound._walk(_sound._config_values(), "notifications", "sound", "id")
         reset = selected == sound_id
@@ -789,9 +853,10 @@ def remove(sound_id: str) -> Removal:
             from local_operator.config import ConfigManager
             from local_operator.paths import config_dir
 
-            settings_io.reset_setting(
-                ConfigManager(config_dir()), settings_io.BY_KEY["notifications.sound.id"]
-            )
+            with _quiet_reset_audit():
+                settings_io.reset_setting(
+                    ConfigManager(config_dir()), settings_io.BY_KEY["notifications.sound.id"]
+                )
     return Removal(match, reset)
 
 
@@ -820,6 +885,9 @@ def _prune_renders(root: Path) -> None:
 class Rendered:
     path: Path
     etag: str
+    #: The file's bytes, read while this call still owns it: the route serves
+    #: these, so a later prune of ``path`` cannot fail an in-flight response.
+    data: bytes
 
 
 def render(sound_id: str, volume: int) -> Rendered | None:
@@ -848,7 +916,10 @@ def render(sound_id: str, volume: int) -> Rendered | None:
         return None
     etag = f'"{sha[:16]}-{volume}"'
     if target.is_file():
-        return Rendered(target, etag)
+        try:
+            return Rendered(target, etag, target.read_bytes())
+        except FileNotFoundError:
+            pass  # pruned between the check and the read: render it again
 
     import miniaudio
 
@@ -871,5 +942,6 @@ def render(sound_id: str, volume: int) -> Rendered | None:
         os.replace(tmp, target)
     finally:
         tmp.unlink(missing_ok=True)
+    data = target.read_bytes()
     _prune_renders(root)
-    return Rendered(target, etag)
+    return Rendered(target, etag, data)

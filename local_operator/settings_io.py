@@ -1396,21 +1396,25 @@ def _theme_choices() -> tuple[Choice, ...]:
 
 
 #: Display names of the built-in notification sounds, keyed by catalog id.
+#: The values are the key FUNCTIONS, called inside ``_t(...)`` where the name
+#: is rendered: ``wire.notification_sound`` is a deferred namespace, and the
+#: census (``scripts/i18n/deferred_watch.py``) requires every deferred key call
+#: to sit inside a render wrapper.
 #: A literal table rather than a lookup through the catalog's ``label`` key:
 #: the typed key functions are what the i18n ratchet and pyright check, and
 #: ``test_sound_assets.py`` pins this table to ``sounds/catalog.json`` so the two
 #: cannot drift.
-_NOTIFICATION_SOUND_LABELS: dict[str, _Msg] = {
-    "soft-pulse": _ns.sound_soft_pulse(),
-    "two-note-chime": _ns.sound_two_note_chime(),
-    "felt-marimba": _ns.sound_felt_marimba(),
-    "hum-swell": _ns.sound_hum_swell(),
-    "task-complete": _ns.sound_task_complete(),
-    "signal-handshake": _ns.sound_signal_handshake(),
-    "tape-warble": _ns.sound_tape_warble(),
-    "bubble-chord": _ns.sound_bubble_chord(),
-    "airy-whistle": _ns.sound_airy_whistle(),
-    "bubble-pulse": _ns.sound_bubble_pulse(),
+_NOTIFICATION_SOUND_LABELS: dict[str, Callable[[], _Msg]] = {
+    "soft-pulse": _ns.sound_soft_pulse,
+    "two-note-chime": _ns.sound_two_note_chime,
+    "felt-marimba": _ns.sound_felt_marimba,
+    "hum-swell": _ns.sound_hum_swell,
+    "task-complete": _ns.sound_task_complete,
+    "signal-handshake": _ns.sound_signal_handshake,
+    "tape-warble": _ns.sound_tape_warble,
+    "bubble-chord": _ns.sound_bubble_chord,
+    "airy-whistle": _ns.sound_airy_whistle,
+    "bubble-pulse": _ns.sound_bubble_pulse,
 }
 
 
@@ -1434,7 +1438,7 @@ def _notification_sound_choices() -> tuple[Choice, ...]:
             sound.id,
             sound.id,
             (
-                _t(_NOTIFICATION_SOUND_LABELS[sound.id])
+                _t(_NOTIFICATION_SOUND_LABELS[sound.id]())
                 if sound.id in _NOTIFICATION_SOUND_LABELS
                 else sound.id
             ),

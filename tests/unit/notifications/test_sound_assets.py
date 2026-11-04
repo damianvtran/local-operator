@@ -65,7 +65,7 @@ def test_every_label_key_has_a_registry_name() -> None:
 
     assert set(_NOTIFICATION_SOUND_LABELS) == set(IDS)
     for entry in CATALOG["sounds"]:
-        assert _NOTIFICATION_SOUND_LABELS[entry["id"]].code == entry["label"]
+        assert _NOTIFICATION_SOUND_LABELS[entry["id"]]().code == entry["label"]
 
 
 def test_the_shipped_sounds_fit_the_wheel_budget() -> None:

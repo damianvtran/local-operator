@@ -261,8 +261,9 @@ with the `setting` tool: `notifications.sound.id` = the `custom-…` id that
 `add` printed (`lop sound list` shows every id). `lop sound preview <id>` plays
 it; `lop sound rename <id> <name>` and `lop sound remove <id>` manage it.
 
-Keep clips short: up to 10 seconds after silence is trimmed (longer is refused,
-never cut), 10 MB, 50 sounds. WAV, FLAC, MP3 and OGG Vorbis are accepted; Opus
-and M4A are not, so request `mp3` or `wav` output. Removing the selected sound
+Keep clips short: request `duration_s` ≤ 10, because the store refuses (never
+cuts) anything over 10 seconds after silence is trimmed; the caps are also
+10 MB and 50 sounds. Generated clips are MP3, which is accepted (so are WAV,
+FLAC and OGG Vorbis; Opus and M4A are not). Removing the selected sound
 puts Soft pulse back. Sound on/off and volume are `notifications.sound.enabled`
 and `notifications.sound.volume`.

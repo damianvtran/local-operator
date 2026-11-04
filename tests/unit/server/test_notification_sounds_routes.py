@@ -177,3 +177,109 @@ async def test_every_route_requires_the_desktop_bearer(desktop) -> None:
 
 def test_the_capability_is_advertised() -> None:
     assert feature_flags()["notification_sounds"] == 1
+
+
+# -- R2: nothing reads the body before auth, and the body is counted ------------
+
+
+@pytest.fixture
+def parsed_bytes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Bytes the multipart parser was fed, measured at the parser (the reviewer's probe)."""
+    from starlette.formparsers import MultiPartParser
+
+    seen = [0]
+    original = MultiPartParser.on_part_data
+
+    def counting(self, data: bytes, start: int, end: int) -> None:  # type: ignore[no-untyped-def]
+        seen[0] += end - start
+        return original(self, data, start, end)
+
+    monkeypatch.setattr(MultiPartParser, "on_part_data", counting)
+    return seen
+
+
+def _multipart(size: int) -> tuple[bytes, str]:
+    boundary = "qa-boundary-1234"
+    head = (
+        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="big.wav"\r\n'
+        "Content-Type: audio/wav\r\n\r\n"
+    ).encode()
+    return head + b"R" * size + f"\r\n--{boundary}--\r\n".encode(), boundary
+
+
+@pytest.mark.asyncio
+async def test_an_unauthorized_big_upload_is_refused_before_the_body_is_read(
+    desktop, parsed_bytes
+) -> None:
+    client, _ = desktop
+    body, boundary = _multipart(30 * 1024 * 1024)
+    response = await client.post(
+        "/v1/notification-sounds",
+        content=body,
+        headers={"Authorization": "", "Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    assert response.status_code == 401
+    assert parsed_bytes[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_declared_oversize_body_is_refused_unread(desktop, parsed_bytes) -> None:
+    client, _ = desktop
+    body, boundary = _multipart(30 * 1024 * 1024)
+    response = await client.post(
+        "/v1/notification-sounds",
+        content=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "too_large"
+    assert parsed_bytes[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_chunked_oversize_body_is_cut_off_at_the_cap(desktop, parsed_bytes) -> None:
+    """No Content-Length (a chunked or lying sender): the counted stream stops it."""
+    client, _ = desktop
+    body, boundary = _multipart(30 * 1024 * 1024)
+
+    async def chunks():  # type: ignore[no-untyped-def]
+        for start in range(0, len(body), 256 * 1024):
+            yield body[start : start + 256 * 1024]
+
+    response = await client.post(
+        "/v1/notification-sounds",
+        content=chunks(),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "too_large"
+    limit = custom_sounds.MAX_INPUT_BYTES + notification_sounds._MULTIPART_SLACK
+    assert 0 < parsed_bytes[0] <= limit + 256 * 1024
+
+
+@pytest.mark.asyncio
+async def test_a_body_without_a_file_part_is_422(desktop) -> None:
+    client, _ = desktop
+    response = await client.post("/v1/notification-sounds", data={"name": "x"})
+    assert response.status_code == 422
+
+
+# -- R6: If-None-Match per RFC 9110 ---------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ["{etag}", "W/{etag}", '"other", {etag}', "*"])
+async def test_if_none_match_lists_weak_tags_and_star(desktop, form) -> None:
+    client, _ = desktop
+    first = await client.get("/v1/notification-sounds/soft-pulse/audio?volume=40")
+    etag = first.headers["etag"]
+    again = await client.get(
+        "/v1/notification-sounds/soft-pulse/audio?volume=40",
+        headers={"If-None-Match": form.format(etag=etag)},
+    )
+    assert again.status_code == 304
+    other = await client.get(
+        "/v1/notification-sounds/soft-pulse/audio?volume=40",
+        headers={"If-None-Match": '"nope"'},
+    )
+    assert other.status_code == 200 and other.content[:4] == b"RIFF"

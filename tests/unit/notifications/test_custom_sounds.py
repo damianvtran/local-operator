@@ -22,6 +22,7 @@ from __future__ import annotations
 import io
 import math
 import struct
+import tracemalloc
 import wave
 from pathlib import Path
 
@@ -322,3 +323,95 @@ def test_cli_refusal_prints_the_code(store: Path, capsys) -> None:
     clip.write_text("not audio\n" * 40)
     assert sound_cli.add_command(str(clip), name=None, select=False, keep_loudness=False) == 1
     assert "(undecodable)" in capsys.readouterr().err
+
+
+# -- R1: a container that lies about its length -------------------------------
+
+
+def _crc8(data: bytes) -> int:
+    c = 0
+    for b in data:
+        c ^= b
+        for _ in range(8):
+            c = ((c << 1) ^ 0x07) & 0xFF if c & 0x80 else (c << 1) & 0xFF
+    return c
+
+
+def _crc16(data: bytes) -> int:
+    c = 0
+    for b in data:
+        c ^= b << 8
+        for _ in range(8):
+            c = ((c << 1) ^ 0x8005) & 0xFFFF if c & 0x8000 else (c << 1) & 0xFFFF
+    return c
+
+
+def constant_flac(seconds: float, *, declared_samples: int = 0, sample_rate: int = 48000) -> bytes:
+    """A valid stereo FLAC of ``seconds`` of a quiet constant, with a CHOSEN header length.
+
+    Every frame is two CONSTANT subframes (a few bytes each), so 20 minutes
+    is ~220 KB, far under the 10 MB cap: the agent review's decode bomb, built
+    here without an encoder. ``declared_samples=0`` is STREAMINFO's "length
+    unknown", which ``flac_get_info`` reports as a duration of 0.0.
+    """
+    block = 4096
+    info = struct.pack(">HH", block, block) + b"\0" * 6
+    packed = (sample_rate << 44) | (1 << 41) | (15 << 36) | (declared_samples & ((1 << 36) - 1))
+    info += packed.to_bytes(8, "big") + b"\0" * 16
+    out = bytearray(b"fLaC" + bytes([0x80]) + len(info).to_bytes(3, "big") + info)
+    subframe = b"\x00" + struct.pack(">h", 1200)
+    for n in range(int(seconds * sample_rate) // block):
+        # Fixed block size 4096 (0xC), 48 kHz (0xA), left/right (1), 16-bit.
+        head = bytes([0xFF, 0xF8, 0xCA, 0x18]) + chr(n).encode("utf-8")
+        head += bytes([_crc8(head)])
+        body = head + subframe + subframe
+        out += body + struct.pack(">H", _crc16(body))
+    return bytes(out)
+
+
+@pytest.mark.parametrize("declared_samples", [0, 48000], ids=["length-unknown", "claims-1s"])
+def test_a_lying_header_cannot_make_the_decode_allocate(declared_samples: int) -> None:
+    import miniaudio
+
+    bomb = constant_flac(1200, declared_samples=declared_samples)
+    assert len(bomb) < 300_000
+    assert miniaudio.flac_get_info(bomb).duration <= 1.0  # the header lies
+    tracemalloc.start()
+    try:
+        with pytest.raises(SoundRejected) as caught:
+            custom_sounds.prepare(bomb, file_label="bomb.flac")
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert caught.value.code == "too_long"
+    # The whole 20 minutes would be ~460 MB of float32 alone; the bounded stream
+    # holds at most PRECHECK_DURATION_S of it (~11.5 MB) plus one chunk.
+    assert peak < 40 * 1024 * 1024, f"peak {peak / 1e6:.1f} MB"
+
+
+def test_the_flac_fixture_decodes_when_it_is_short() -> None:
+    """Control: the same generator at 2 s is a real, accepted sound."""
+    row = custom_sounds.add(constant_flac(2.0), source_name="short.flac")
+    assert row.duration_s > 1.5
+
+
+def test_a_planted_symlink_in_a_sound_slot_is_unlinked_on_delete(store: Path) -> None:
+    row = custom_sounds.add(tone(0.3), source_name="a.wav")
+    slot = store / "sounds" / "custom" / f"{row.id}.wav"
+    outside = store / "outside.wav"
+    outside.write_bytes(tone(0.2))
+    slot.unlink()
+    slot.symlink_to(outside)
+    custom_sounds.remove(row.id)
+    assert not slot.is_symlink() and not slot.exists()
+    assert outside.read_bytes() == tone(0.2)  # the target is untouched
+
+
+def test_removing_the_selected_sound_logs_no_stray_warning(store: Path, caplog) -> None:
+    row = custom_sounds.add(tone(0.3), source_name="mine.wav")
+    settings_io.write_setting(
+        ConfigManager(store), settings_io.BY_KEY["notifications.sound.id"], row.id
+    )
+    caplog.set_level("WARNING")
+    assert custom_sounds.remove(row.id).selection_reset
+    assert not [r for r in caplog.records if "does not carry" in r.getMessage()]

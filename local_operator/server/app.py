@@ -897,9 +897,9 @@ async def managed_desktop_boundary(request: Request, call_next):
 async def desktop_validation_error(request: Request, error: RequestValidationError):
     # Pydantic includes the rejected INPUT in its default 422 response. SecretStr
     # protects model dumps, not failures before a model was constructed.
-    if request.url.path.startswith(("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/")) or (
-        desktop_posture().enabled and _legacy_desktop_gated(request.url.path, request.method)
-    ):
+    if request.url.path.startswith(
+        ("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/", "/v1/notification-sounds")
+    ) or (desktop_posture().enabled and _legacy_desktop_gated(request.url.path, request.method)):
         return JSONResponse(status_code=422, content={"detail": "The request has invalid fields."})
     return await request_validation_exception_handler(request, error)
 
