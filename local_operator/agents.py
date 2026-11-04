@@ -1393,8 +1393,9 @@ class AgentRegistry:
                 if previous is None or agent_avatar.stored_name(previous) != normalised.name:
                     (agent_dir / normalised.name).unlink(missing_ok=True)
                 raise
-            # The stale sibling goes only AFTER agent.yml names the new file.
-            agent_avatar.remove_siblings(agent_dir, keep=normalised.name)
+            # The stale sibling goes only AFTER agent.yml names the new file, and
+            # with it every size variant cached for the previous picture.
+            agent_avatar.remove_siblings(agent_dir, keep=normalised.name, keep_sha=meta.sha256)
         agent_avatar.emit(agent_id, agent_dir, meta)
         return meta
 

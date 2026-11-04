@@ -66,10 +66,19 @@ import hashlib
 import io
 import json
 import logging
+import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Sequence
 
+from local_operator.harness.document_limits import (
+    DOCUMENT_CHARS_PER_TOKEN,
+    DOCUMENT_WINDOW_SHARE,
+    MAX_FALLBACK_TEXT_CHARS,
+    MAX_NATIVE_PDF_PAGES,
+    is_text_mime,
+    weighted_prefix_len,
+)
 from local_operator.harness.pdf_pages import known_pdf_page_count, pdf_page_count
 from local_operator.harness.types import DocumentContent
 
@@ -89,8 +98,10 @@ __all__ = [
     "document_budget_for_messages",
     "document_budget_for_request",
     "document_native_ok",
+    "document_text_cap",
     "extract_document_text",
     "fallback_document_text",
+    "is_text_mime",
     "pdf_page_count",
 ]
 
@@ -102,10 +113,6 @@ __all__ = [
 #: document it only half read.
 MAX_FALLBACK_PAGES = 200
 MAX_FALLBACK_CHARS = 400_000
-
-#: How much of a text-ish file the fallback keeps. The same 400k character
-#: bound: text has no page structure to count, and the notice names the cut.
-MAX_FALLBACK_TEXT_CHARS = 400_000
 
 #: Anthropic documents are capped at 600 pages, but only 100 when the request's
 #: context window is under 1M tokens (its PDF page states both). A model whose
@@ -208,10 +215,18 @@ def _request_room(
     under-estimate sends a payload the provider refuses (the failure this
     class of fix exists to prevent).
     """
-    from local_operator.compaction.tokens import estimate_wire_bytes
+    from local_operator.compaction.tokens import (
+        document_wire_bytes,
+        estimate_wire_bytes,
+    )
 
+    # The SAME per-block figure ``estimate_wire_bytes`` charged, so the
+    # subtraction removes exactly the documents' share and leaves ``other``
+    # as the non-document payload. Subtracting the base64 size of a document
+    # the estimator charged as a ~50-token reference would drive ``other``
+    # negative and hand the room back to the next PDF.
     documents = sum(
-        encoded_document_bytes(block)
+        document_wire_bytes(block)
         for message in messages
         for block in message.content
         if isinstance(block, DocumentContent)
@@ -246,21 +261,6 @@ def document_budget_for_request(
     return _request_room(form, request.messages, extra)
 
 
-#: MIME prefixes/suffixes the fallback can read as text. PDF is handled by
-#: extraction first; these are the "text-ish" second arm of contract §3.
-_TEXT_MIMES = frozenset(
-    {
-        "application/json",
-        "application/xml",
-        "application/yaml",
-    }
-)
-
-
-def _is_text_mime(mime_type: str) -> bool:
-    return mime_type.startswith("text/") or mime_type in _TEXT_MIMES
-
-
 def document_form(
     provider: str,
     wire: str,
@@ -281,20 +281,69 @@ def document_form(
     (a caller that cannot name the model, e.g. the legacy ``/v1/chat`` door)
     takes the SMALL limit: unknown is not evidence of a large window, and the
     cost of guessing wrong in the other direction is a paid provider 400.
+
+    EVERY row, the OpenAI Responses wire included, is then narrowed to the
+    window-derived page cap (:func:`_window_page_cap`), so a PDF is sent
+    natively only when the ruler's per-page charge fits its share of the
+    window.
     """
     form = DOCUMENT_FORMS.get(provider)
     if provider == "openai" and wire == "openai-responses":
-        form = _OPENAI_RESPONSES if supports_images else None
-        return form
-    if form is None or form.wire not in _WIRE_FOR_REQUEST:
+        # Not an early return: the Responses row is a different wire for the
+        # same provider id, but a 600-page PDF costs the same window here as
+        # anywhere, so it takes the same window-derived page cap below.
+        if not supports_images:
+            return None
+        form = _OPENAI_RESPONSES
+    else:
+        if form is None or form.wire not in _WIRE_FOR_REQUEST:
+            return None
+        if _WIRE_FOR_REQUEST[form.wire] != wire:
+            return None
+        if form.wire in {"openai_chat", "openai_responses"} and not supports_images:
+            return None
+        if form.wire == "anthropic" and (context_window or 0) < ANTHROPIC_LARGE_CONTEXT_WINDOW:
+            form = replace(form, max_pages=ANTHROPIC_SMALL_CONTEXT_MAX_PAGES)
+    window_pages = _window_page_cap(context_window)
+    return replace(
+        form,
+        max_pages=window_pages if form.max_pages is None else min(form.max_pages, window_pages),
+    )
+
+
+def _window_page_cap(context_window: int | None) -> int:
+    """Native PDF pages one document may carry in a ``context_window`` model.
+
+    The token ruler charges a native page :data:`PDF_PAGE_TOKEN_ESTIMATE`; a
+    document gets ``1 / DOCUMENT_WINDOW_SHARE`` of the window, so the cap is
+    that share divided by the per-page charge (100 pages at 1M, 20 at 200k),
+    never above :data:`MAX_NATIVE_PDF_PAGES` (the ruler's own ceiling).
+    Beyond it the PDF is EXTRACTED instead, whose text is bounded by
+    :func:`document_text_cap`. An unknown window takes the ceiling: no evidence
+    of room, and the same "unknown is small" rule the Anthropic row applies.
+    """
+    if not context_window or context_window <= 0:
+        return MAX_NATIVE_PDF_PAGES
+    from local_operator.compaction.tokens import PDF_PAGE_TOKEN_ESTIMATE
+
+    share = max(1, context_window // DOCUMENT_WINDOW_SHARE // PDF_PAGE_TOKEN_ESTIMATE)
+    return min(share, MAX_NATIVE_PDF_PAGES)
+
+
+def document_text_cap(context_window: int | None) -> int | None:
+    """Budget, in ``text_weight`` units, ONE document's fallback text may render.
+
+    ``1 / DOCUMENT_WINDOW_SHARE`` of the window at
+    :data:`DOCUMENT_CHARS_PER_TOKEN` units a token. For ASCII a unit is a
+    character, so prose and code are cut where they always were; non-ASCII text
+    is charged a token per UTF-8 byte (``harness.document_limits.text_weight``),
+    so no script can render more than the window share. ``None`` (unknown
+    window) leaves only the global :data:`MAX_FALLBACK_CHARS` /
+    :data:`MAX_FALLBACK_TEXT_CHARS` bounds.
+    """
+    if not context_window or context_window <= 0:
         return None
-    if _WIRE_FOR_REQUEST[form.wire] != wire:
-        return None
-    if form.wire in {"openai_chat", "openai_responses"} and not supports_images:
-        return None
-    if form.wire == "anthropic" and (context_window or 0) < ANTHROPIC_LARGE_CONTEXT_WINDOW:
-        form = replace(form, max_pages=ANTHROPIC_SMALL_CONTEXT_MAX_PAGES)
-    return form
+    return max(1, context_window * DOCUMENT_CHARS_PER_TOKEN // DOCUMENT_WINDOW_SHARE)
 
 
 #: Which request wire each table form belongs to. ``openrouter`` and
@@ -408,20 +457,21 @@ def document_native_ok(
     if form is None or block.mime_type != "application/pdf":
         return False
     raw: bytes | None = None
-    if form.max_pages is not None:
-        cached, pages = known_pdf_page_count(block.digest)
-        if not cached:
-            raw = _decoded(block)
-            if raw is None:
-                return False
-            pages = pdf_page_count(raw, block.digest)
-        # An UNCOUNTABLE PDF is not native: if the page structure cannot be
-        # read here, a provider's own parser is at least as likely to refuse
-        # it, and "send and hope" is exactly what the contract forbids. The
-        # fallback then extracts (or degrades to a reference), which never
-        # spends a paid request on a shape the provider rejects.
-        if pages is None or pages > form.max_pages:
+    cached, pages = known_pdf_page_count(block.digest)
+    if not cached:
+        raw = _decoded(block)
+        if raw is None:
             return False
+        pages = pdf_page_count(raw, block.digest)
+    # An UNCOUNTABLE PDF is not native, whether or not the row has a page
+    # limit: if the page structure cannot be read here, a provider's own
+    # parser is at least as likely to refuse it, and "send and hope" is
+    # exactly what the contract forbids. The fallback then extracts (or
+    # degrades to a reference), which never spends a paid request on a shape
+    # the provider rejects. It is also what lets the token ruler charge an
+    # uncountable PDF as the reference sentence it will render.
+    if pages is None or (form.max_pages is not None and pages > form.max_pages):
+        return False
     encoded = _encoded_length(block, raw)
     if encoded > form.max_bytes:
         return False
@@ -443,7 +493,7 @@ def document_injection(
     """
     if document_native_ok(block, form, budget=document_budget(form)):
         return "native"
-    if block.mime_type == "application/pdf" or _is_text_mime(block.mime_type):
+    if block.mime_type == "application/pdf" or is_text_mime(block.mime_type):
         return "extracted"
     return "reference"
 
@@ -454,7 +504,7 @@ def _cached_text_path(digest: str) -> Path:
     return AttachmentStore().root / f"{digest}.txt"
 
 
-def extract_document_text(block: "DocumentContent") -> str:
+def extract_document_text(block: "DocumentContent", budget: int | None = None) -> str:
     """The fallback text for ``block``, with page markers and a truncation note.
 
     PDFs are extracted with ``pypdf`` (lazily imported: it is a base
@@ -468,25 +518,30 @@ def extract_document_text(block: "DocumentContent") -> str:
     Text-ish MIME is decoded directly, bounded. Anything else yields the
     REFERENCE sentence — a model must never receive nothing for a file the
     user believes it can see.
+
+    ``budget`` is the caller's WINDOW-aware ceiling in ``text_weight`` units
+    (:func:`document_text_cap`) and only ever lowers the global bounds: the
+    cache keeps the full extraction so a later request on a bigger model is not
+    served a clipped copy.
     """
     raw = _decoded(block)
     if raw is None:
         return _reference_text(block, reason="its stored bytes could not be decoded")
     if block.mime_type == "application/pdf":
-        return _extract_pdf(block, raw)
-    if _is_text_mime(block.mime_type):
+        return _extract_pdf(block, raw, budget)
+    if is_text_mime(block.mime_type):
         text = raw.decode("utf-8", errors="replace")
-        if len(text) > MAX_FALLBACK_TEXT_CHARS:
-            dropped = len(text) - MAX_FALLBACK_TEXT_CHARS
-            text = (
-                text[:MAX_FALLBACK_TEXT_CHARS]
-                + f"\n[... {dropped} characters truncated from {block.filename}]"
-            )
+        limit = min(len(text), MAX_FALLBACK_TEXT_CHARS)
+        if budget is not None:
+            limit = weighted_prefix_len(text[:limit], budget)
+        if len(text) > limit:
+            dropped = len(text) - limit
+            text = text[:limit] + f"\n[... {dropped} characters truncated from {block.filename}]"
         return f"[Document: {block.filename} ({block.mime_type})]\n```\n{text}\n```"
     return _reference_text(block)
 
 
-def _extract_pdf(block: "DocumentContent", raw: bytes) -> str:
+def _extract_pdf(block: "DocumentContent", raw: bytes, budget: int | None = None) -> str:
     # The cache holds the EXTRACTION only, never the display header: the same
     # bytes can be re-attached under a new filename, and a cached header would
     # then name a file the user is no longer sending.
@@ -494,7 +549,7 @@ def _extract_pdf(block: "DocumentContent", raw: bytes) -> str:
     header = f"[Document: {block.filename} ({block.mime_type}, {block.bytes} bytes)]"
     cached = _read_cached_text(digest)
     if cached is not None:
-        return f"{header}\n{cached}"
+        return f"{header}\n{_finish_extraction(cached, budget, block.filename)}"
     try:
         from pypdf import PdfReader
 
@@ -529,7 +584,51 @@ def _extract_pdf(block: "DocumentContent", raw: bytes) -> str:
     if total > pages_read:
         body += f"\n[... only the first {pages_read} of {total} pages were read]"
     _write_cached_text(digest, body)
-    return f"{header}\n{body}"
+    return f"{header}\n{_finish_extraction(body, budget, block.filename)}"
+
+
+_PAGE_MARKER_RE = re.compile(r"^--- page (\d+) ---\n", re.MULTILINE)
+
+
+def _empty_pages_notice(body: str, filename: str) -> str:
+    """A leading note when extracted pages carry no text, else ``""``.
+
+    A scanned PDF has no text layer, so extraction returns bare page markers.
+    That used to be a PDF the provider could read natively; once a page cap
+    sends it here the model would otherwise answer as if the document were
+    blank. Derived from the body (cached or fresh) rather than stored in the
+    cache, so a cache entry written before this note existed gets it too.
+    """
+    parts = _PAGE_MARKER_RE.split(body)[1:]  # [page, text, page, text, ...]
+    texts = parts[1::2]
+    empty = sum(
+        1 for text in texts if not text.strip() or text.lstrip().startswith("[... only the first")
+    )
+    if not empty:
+        return ""
+    return (
+        f"[Note: {empty} of {len(texts)} extracted pages of {filename} contained no readable "
+        "text (scanned images or blank pages). Their content was NOT passed to you; do not "
+        "treat the document as empty.]\n"
+    )
+
+
+def _finish_extraction(body: str, budget: int | None, filename: str) -> str:
+    """The extraction as sent: empty-page note first, then the window clip."""
+    return _empty_pages_notice(body, filename) + _clip_extraction(body, budget, filename)
+
+
+def _clip_extraction(body: str, budget: int | None, filename: str) -> str:
+    """``body`` cut to ``budget`` ``text_weight`` units, the cut announced."""
+    if budget is None:
+        return body
+    keep = weighted_prefix_len(body, budget)
+    if keep >= len(body):
+        return body
+    return (
+        body[:keep] + f"\n[... {len(body) - keep} characters truncated from {filename} "
+        "to fit the model's context window]"
+    )
 
 
 def _read_cached_text(digest: str) -> str | None:
@@ -569,6 +668,6 @@ def _reference_text(block: "DocumentContent", *, reason: str | None = None) -> s
     )
 
 
-def fallback_document_text(block: "DocumentContent") -> str:
+def fallback_document_text(block: "DocumentContent", budget: int | None = None) -> str:
     """One entry point for the serializers' fallback arm."""
-    return extract_document_text(block)
+    return extract_document_text(block, budget)

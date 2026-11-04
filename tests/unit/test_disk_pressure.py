@@ -139,6 +139,47 @@ def by_path(plan: dp.Plan, path: Path) -> dp.Item:
     return next(i for i in plan.items if i.path == wanted)
 
 
+# Diagnostic only, NOT a fix. test_ignored_nested_repo_with_unpushed_commit_is_kept
+# failed twice on hosted CI only (`assert 'recent' == 'ignored-content'`) and never
+# in two local campaigns (40/40 and 60+60 under heavy CPU load), so the cause is
+# unknown. dp returns "recent" from exactly two places: (1) the outer gitdir admin
+# files (HEAD, index, logs/HEAD) newer than the idle cutoff, (2) the bounded tree
+# walk seeing an entry inside the idle window. The failure message carried only the
+# codes, so the branch and the written path were unrecoverable. `_why` is called
+# only as an assert message (evaluated lazily, so passing runs never touch the
+# filesystem) and names the branch via item.reason plus recently written paths.
+
+
+def _why(item: dp.Item, wt: Path, window_s: float = 2 * 3600, cap: int = 20) -> str:
+    """Failure-path dump: code, reason and entries under ``wt`` touched recently."""
+    lines = [f"code={item.code} reason={item.reason!r}"]
+    try:
+        now = time.time_ns()
+        roots = [wt]
+        with contextlib.suppress(Exception):
+            admin = Path(git(wt, "rev-parse", "--absolute-git-dir"))
+            roots += [admin / "HEAD", admin / "index", admin / "logs" / "HEAD"]
+        seen: list[tuple[float, str]] = []
+        for root in roots:
+            paths = [root]
+            if root.is_dir() and not root.is_symlink():
+                paths += list(root.rglob("*"))
+            for p in paths:
+                try:
+                    st = os.lstat(p)
+                except OSError:
+                    continue
+                if (now - st.st_mtime_ns) / 1e9 <= window_s:
+                    seen.append(((now - st.st_mtime_ns) / 1e9, str(p)))
+        seen.sort()
+        lines += [f"  {age_s:9.1f}s ago  {p}" for age_s, p in seen[:cap]]
+        if len(seen) > cap:
+            lines.append(f"  ... {len(seen) - cap} more")
+    except Exception as exc:  # diagnostics must never mask the real failure
+        lines.append(f"  (diagnostic dump failed: {exc!r})")
+    return "\n".join(lines)
+
+
 # -- reclaimable cases -------------------------------------------------------
 
 
@@ -171,7 +212,7 @@ def test_dirty_worktree_is_kept(fx: Fx) -> None:
     (wt / "scratch.txt").write_text("untracked work")
     fx.idle(wt)
     item = by_path(plan_for(fx), wt)
-    assert (item.action, item.code) == (dp.ACTION_KEEP, "dirty")
+    assert (item.action, item.code) == (dp.ACTION_KEEP, "dirty"), item.reason
     assert (
         dp.apply(plan_for(fx), fx.cfg, confirmation=dp.CONFIRMATION_TYPED).exit_code == 0
         and wt.exists()
@@ -182,7 +223,8 @@ def test_modified_tracked_file_is_kept(fx: Fx) -> None:
     wt = fx.worktree("modified")
     (wt / "modified.txt").write_text("changed")
     fx.idle(wt)
-    assert by_path(plan_for(fx), wt).code == "dirty"
+    item = by_path(plan_for(fx), wt)
+    assert item.code == "dirty", item.reason
 
 
 def test_ignored_files_keep_the_tree_as_ignored_content_not_dirty(fx: Fx) -> None:
@@ -197,14 +239,14 @@ def test_ignored_files_keep_the_tree_as_ignored_content_not_dirty(fx: Fx) -> Non
     (wt / "build" / "x.o").write_text("junk")
     fx.idle(wt)
     item = by_path(plan_for(fx), wt)
-    assert (item.action, item.code) == (dp.ACTION_KEEP, "ignored-content")
+    assert (item.action, item.code) == (dp.ACTION_KEEP, "ignored-content"), item.reason
 
 
 def test_unpushed_commit_is_kept(fx: Fx) -> None:
     wt = fx.worktree("unpushed", push=False)
     fx.idle(wt)
     item = by_path(plan_for(fx), wt)
-    assert (item.action, item.code) == (dp.ACTION_KEEP, "unpushed")
+    assert (item.action, item.code) == (dp.ACTION_KEEP, "unpushed"), item.reason
 
 
 def test_detached_head_on_no_remote_ref_is_kept(fx: Fx) -> None:
@@ -212,7 +254,8 @@ def test_detached_head_on_no_remote_ref_is_kept(fx: Fx) -> None:
     git(wt, "checkout", "-q", "--detach")
     git(wt, "branch", "-D", "detached") if False else None
     fx.idle(wt)
-    assert by_path(plan_for(fx), wt).code == "unpushed"
+    item = by_path(plan_for(fx), wt)
+    assert item.code == "unpushed", item.reason
 
 
 def test_recent_worktree_is_kept(fx: Fx) -> None:
@@ -226,7 +269,7 @@ def test_recent_worktree_is_kept(fx: Fx) -> None:
     now = time.time()
     os.utime(wt / "recent.txt", (now, now))  # a tracked file edited NOW (same content)
     item = by_path(plan_for(fx), wt)
-    assert (item.action, item.code) == (dp.ACTION_KEEP, "recent")
+    assert (item.action, item.code) == (dp.ACTION_KEEP, "recent"), item.reason
 
 
 def test_recent_admin_files_alone_keep_the_tree(fx: Fx) -> None:
@@ -235,7 +278,8 @@ def test_recent_admin_files_alone_keep_the_tree(fx: Fx) -> None:
     admin = Path(git(wt, "rev-parse", "--absolute-git-dir"))
     now = time.time()
     os.utime(admin / "HEAD", (now, now))
-    assert by_path(plan_for(fx), wt).code == "recent"
+    item = by_path(plan_for(fx), wt)
+    assert item.code == "recent", item.reason
 
 
 def test_idle_floor_is_exactly_the_window(fx: Fx) -> None:
@@ -245,14 +289,17 @@ def test_idle_floor_is_exactly_the_window(fx: Fx) -> None:
     stamp = time.time() - 30 * 60
     age(wt, stamp)
     age(Path(git(wt, "rev-parse", "--absolute-git-dir")), stamp)
-    assert by_path(plan_for(fx), wt).code == "recent"
+    item = by_path(plan_for(fx), wt)
+    assert item.code == "recent", item.reason
     # 90 minutes old: past the default window.
     stamp = time.time() - 90 * 60
     age(wt, stamp)
     age(Path(git(wt, "rev-parse", "--absolute-git-dir")), stamp)
-    assert by_path(plan_for(fx), wt).action == dp.ACTION_RECLAIM
+    item = by_path(plan_for(fx), wt)
+    assert item.action == dp.ACTION_RECLAIM, item.reason
     # ...but not past a raised 120-minute window.
-    assert by_path(plan_for(fx, min_idle_minutes=120), wt).code == "recent"
+    item = by_path(plan_for(fx, min_idle_minutes=120), wt)
+    assert item.code == "recent", item.reason
 
 
 def test_locked_worktree_is_kept_with_its_reason(fx: Fx) -> None:
@@ -260,7 +307,7 @@ def test_locked_worktree_is_kept_with_its_reason(fx: Fx) -> None:
     git(fx.primary, "worktree", "lock", "--reason", "agent running", str(wt))
     fx.idle(wt)
     item = by_path(plan_for(fx), wt)
-    assert (item.action, item.code) == (dp.ACTION_KEEP, "locked")
+    assert (item.action, item.code) == (dp.ACTION_KEEP, "locked"), item.reason
     assert "agent running" in item.reason
 
 
@@ -292,7 +339,8 @@ def test_unknown_in_use_state_is_kept(fx: Fx, monkeypatch: pytest.MonkeyPatch) -
     wt = fx.worktree("nolsof")
     fx.idle(wt)
     monkeypatch.setattr(dp, "process_cwds", lambda timeout=0: None)
-    assert by_path(plan_for(fx), wt).code == "in-use-unknown"
+    item = by_path(plan_for(fx), wt)
+    assert item.code == "in-use-unknown", item.reason
 
 
 def test_lsof_failure_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -307,14 +355,15 @@ def test_the_current_working_directory_is_kept(fx: Fx, monkeypatch: pytest.Monke
     wt = fx.worktree("cwd")
     fx.idle(wt)
     monkeypatch.chdir(wt)
-    assert by_path(plan_for(fx), wt).code == "cwd"
+    item = by_path(plan_for(fx), wt)
+    assert item.code == "cwd", item.reason
 
 
 def test_missing_registration_is_kept_not_deleted(fx: Fx) -> None:
     wt = fx.worktree("gone")
     shutil.rmtree(wt)  # fixture teardown of a temp tree, simulating a vanished dir
     item = next(i for i in plan_for(fx).items if i.path.endswith("/gone"))
-    assert (item.action, item.code) == (dp.ACTION_KEEP, "invalid-registration")
+    assert (item.action, item.code) == (dp.ACTION_KEEP, "invalid-registration"), item.reason
     result = dp.apply(plan_for(fx), fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     assert result.exit_code == 0
     # The registration is still there: this command never prunes.
@@ -341,7 +390,8 @@ def test_primary_checkout_is_never_a_candidate_even_when_named_via_a_worktree(fx
     plan = dp.plan(dp.Selection(repos=(str(wt),)), fx.cfg)
     primary_item = next(i for i in plan.items if i.path == os.path.realpath(fx.primary))
     assert primary_item.code == "primary"
-    assert by_path(plan, wt).code == "cwd"
+    item = by_path(plan, wt)
+    assert item.code == "cwd", item.reason
     dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     assert fx.primary.exists() and wt.exists()
 
@@ -597,7 +647,8 @@ def test_ignored_nested_repo_with_unpushed_commit_is_kept(fx: Fx) -> None:
     git(nested, "commit", "-qm", "never pushed")
     fx.idle(wt)
     plan = plan_for(fx)
-    assert by_path(plan, wt).code == "ignored-content"
+    item = by_path(plan, wt)
+    assert item.code == "ignored-content", _why(item, wt)
     dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_TYPED)
     assert (nested / "important.txt").read_text() == "irreplaceable"
 
@@ -612,7 +663,8 @@ def test_ignored_build_output_is_not_carved_out(fx: Fx) -> None:
     (wt / "node_modules").mkdir()
     (wt / "node_modules" / "x.js").write_text("x")
     fx.idle(wt)
-    assert by_path(plan_for(fx), wt).code == "ignored-content"
+    item = by_path(plan_for(fx), wt)
+    assert item.code == "ignored-content", item.reason
 
 
 def test_untracked_nested_repo_is_kept_not_reclaimed(fx: Fx) -> None:
@@ -622,7 +674,8 @@ def test_untracked_nested_repo_is_kept_not_reclaimed(fx: Fx) -> None:
     subprocess.run(["git", "init", "-q", str(nested)], check=True)
     (nested / "f").write_text("f")
     fx.idle(wt)
-    assert by_path(plan_for(fx), wt).code in ("dirty", "ignored-content")
+    item = by_path(plan_for(fx), wt)
+    assert item.code in ("dirty", "ignored-content"), item.reason
 
 
 def test_duplicate_and_overlapping_repo_args_collapse_to_one_item(fx: Fx) -> None:
@@ -759,7 +812,7 @@ def test_mid_rebase_worktree_is_kept(fx: Fx) -> None:
     fx.idle(wt)
     plan = plan_for(fx)
     item = by_path(plan, wt)
-    assert (item.action, item.code) == (dp.ACTION_KEEP, "operation-in-progress")
+    assert (item.action, item.code) == (dp.ACTION_KEEP, "operation-in-progress"), item.reason
     assert dp.apply(plan, fx.cfg, confirmation=dp.CONFIRMATION_TYPED).exit_code == 0
     assert wt.exists() and (admin / "rebase-merge").is_dir()
 

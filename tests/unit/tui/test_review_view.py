@@ -590,6 +590,11 @@ async def test_a_failed_scan_keeps_cached_rows_and_shows_the_notice(refreshes, m
     async with app.run_test(size=(120, 34)) as pilot:
         await _boot(pilot, app)
         view = await _open_review(pilot, app)
+        # `_open_review` returns once the CACHED rows publish (state leaves
+        # "loading"), while the scan is still in flight and `_detail_text` shows
+        # "Refreshing code reviews…" until then: the failure notice exists only
+        # once the scan has raised and the pass has finished. Wait on that.
+        await _settle(pilot, lambda: view._scan_failed and not view._refreshing)
 
         assert view._state == "ready"
         body = _plain(view._body_text)

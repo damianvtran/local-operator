@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "record_kind": "portable_evidence_manifest",
+  "audit_id": "ruh-r2a1",
+  "receipt": "receipt.json",
+  "report": "report.md",
+  "file_count": 4,
+  "files": [
+    {
+      "path": "metadata-corrections.json",
+      "bytes": 12225,
+      "sha256": "b3deed01780385c74c9a857b4819d042de6eda97d42ffd68e097d5878e6a6afc",
+      "origin": "/Users/damian/.local-operator/sessions/ac46f9462716/scratchpad/i18n/audits/ru/wire.errors.hosting/ruh-r2a1/metadata-corrections.json"
+    },
+    {
+      "path": "receipt.json",
+      "bytes": 879,
+      "sha256": "613e1a297b15802325f6425f7e3d7eb088cfae19645cad3f98d5195f1583aa09",
+      "origin": "/Users/damian/.local-operator/sessions/ac46f9462716/scratchpad/i18n/audits/ru/wire.errors.hosting/ruh-r2a1/receipt.json"
+    },
+    {
+      "path": "record.json",
+      "bytes": 10355,
+      "sha256": "f0756cf8aa9869619485d0995df51c5f6fc46d0dd3f183f7b723c620ddc2f614",
+      "origin": "/Users/damian/.local-operator/sessions/ac46f9462716/scratchpad/i18n/audits/ru/wire.errors.hosting/ruh-r2a1/record.json"
+    },
+    {
+      "path": "report.md",
+      "bytes": 11063,
+      "sha256": "8fad20ce9bd75e2fc7245647e41189cc44075659fd8617c730f1f038c82b717b",
+      "origin": "/Users/damian/.local-operator/sessions/ac46f9462716/scratchpad/i18n/audits/ru/wire.errors.hosting/ruh-r2a1/report.md"
+    }
+  ]
+}

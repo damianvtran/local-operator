@@ -1,0 +1,6 @@
+{
+  "cli.team_bridge_alert.long_hold.title": "ایجنٹ کے پیغامات: کچھ پیغامات دیر سے روکے ہوئے ہیں",
+  "cli.team_bridge_alert.long_hold.body": "{count, plural, one {# پیغام} other {# پیغامات}} {minutes, plural, one {# منٹ} other {# منٹ}} سے زیادہ دیر سے {count, plural, one {روکا ہوا ہے} other {روکے ہوئے ہیں}}۔ آپ کے ایجنٹ کو روکے گئے پیغامات نہیں ملے۔ تفصیل کے لیے `lop team-bridge receiver status` چلائیں۔",
+  "cli.team_bridge_alert.cleared.title": "ایجنٹ کے پیغامات: اب کوئی پیغام دیر سے روکا ہوا نہیں",
+  "cli.team_bridge_alert.cleared.body": "اب کوئی پیغام {minutes, plural, one {# منٹ} other {# منٹ}} سے زیادہ دیر سے روکا ہوا نہیں ہے۔"
+}

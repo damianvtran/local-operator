@@ -1223,6 +1223,7 @@ def selected_model_row(
     session_id: str,
     peer_label: str,
     source: str = SOURCE_PEER,
+    observer_is_admin: bool = False,
 ) -> dict[str, Any]:
     """Selected access in the established readiness sentence/remedy register.
 
@@ -1290,6 +1291,18 @@ def selected_model_row(
     if state not in readings:
         state = "pending"
     detail, remedies = readings[state]
+    if state == "expired" and observer_is_admin and getattr(member, "role", "") == "admin":
+        import shlex
+
+        # The command runs as the BORROWER, not the observer: observing admin
+        # authority cannot make a drive/read borrower eligible to force refresh.
+        # Require its known member role as well; missing role fails closed. The
+        # owner's independent ADMIN/holder checks remain the final authority.
+        # Quote peer facts so a provider name cannot become shell syntax.
+        remedies = (
+            *remedies,
+            f"{peer_label}: `lop network credential refresh {shlex.quote(provider)} --json`",
+        )
     row = _capability_row(
         device_id=member.device_id,
         device_name=peer_label,
@@ -4731,6 +4744,7 @@ def _peer_checks(
             selector=selector,
             session_id=session_id,
             peer_label=peer_label,
+            observer_is_admin=getattr(record, "self_role", "") == "admin",
         )
         selected_row.update(row)
     rows.append(tooling_row(member, facts, peer_label=peer_label))

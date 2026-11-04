@@ -74,11 +74,12 @@ async def test_peer_passthrough_does_not_double_invoke_or_serialize_guard():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cooldown", [False, True])
-async def test_offline_tool_preserves_budget_and_cooldown(bound_runtime, cooldown):  # noqa: F811
+async def test_offline_tool_preserves_the_absolute_cap(bound_runtime, cooldown):  # noqa: F811
     runtime, _, _ = bound_runtime
     sink = []
     runtime.client = RecordingClient(sink)
-    count = reply_guard.COOLDOWN_AFTER if cooldown else reply_guard.BUDGET_POSTS
+    # ``cooldown`` now proves an agent-to-agent trigger no longer refuses early.
+    count = reply_guard.ABSOLUTE_POSTS
     if cooldown:
         reply_guard.record_trigger(
             runtime.config_dir,
@@ -93,5 +94,5 @@ async def test_offline_tool_preserves_budget_and_cooldown(bound_runtime, cooldow
     refused = await execute_bridge(
         runtime, {"op": "channel_post", "channel_id": A, "body": "denied"}
     )
-    assert refused["code"] == (reply_guard.CODE_COOLDOWN if cooldown else reply_guard.CODE_BUDGET)
+    assert refused["code"] == reply_guard.CODE_ABSOLUTE
     assert len(sink) == count
