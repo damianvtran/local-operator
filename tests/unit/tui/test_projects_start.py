@@ -989,8 +989,9 @@ async def test_the_app_creates_links_kicks_off_and_hands_off(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("omit_receipt", [False, True], ids=["receipt", "omission-control"])
 async def test_esc_while_pending_cancels_the_handoff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, omit_receipt: bool
 ) -> None:
     """Agent review F5 / UX: `esc` on `starting session …` used to switch anyway.
 
@@ -998,6 +999,8 @@ async def test_esc_while_pending_cancels_the_handoff(
     TAKEN somewhere, so no kickoff turn is sent on their behalf either, and the
     receipt names the id and the way in.
     """
+    import threading
+
     session = _ProjectSession()
     registry = _registry(tmp_path, "alpha")
     session.project_registry = registry
@@ -1005,6 +1008,27 @@ async def test_esc_while_pending_cancels_the_handoff(
     calls: list[str] = []
     notes: list[tuple[str, str]] = []
     release = asyncio.Event()
+    link_entered = asyncio.Event()
+    link_release = threading.Event()
+    loop = asyncio.get_running_loop()
+    link_session = app._link_started_session
+    run_worker = app.run_worker
+    producer_code = app._start_project_session_worker.__func__.__code__
+    started_workers: list[Any] = []
+
+    # Creation returning is not completion: the producer still awaits a thread
+    # before emitting its receipt. Hold that exact boundary, not a guessed sleep.
+    def controlled_link(*args: Any) -> Any:
+        loop.call_soon_threadsafe(link_entered.set)
+        if not link_release.wait(timeout=15):
+            raise AssertionError("the test did not release its held project link")
+        return link_session(*args)
+
+    def capture_worker(work: Any, *args: Any, **kwargs: Any) -> Any:
+        worker = run_worker(work, *args, **kwargs)
+        if getattr(work, "cr_code", None) is producer_code:
+            started_workers.append(worker)
+        return worker
 
     async def slow_create(cwd: str, target: StartTarget) -> str:
         await release.wait()
@@ -1018,39 +1042,82 @@ async def test_esc_while_pending_cancels_the_handoff(
         calls.append("resume")
 
     monkeypatch.setattr(app, "_create_project_session", slow_create)
+    monkeypatch.setattr(app, "_link_started_session", controlled_link)
+    monkeypatch.setattr(app, "run_worker", capture_worker)
     monkeypatch.setattr(app, "_kick_off_project_session", fake_kickoff)
     monkeypatch.setattr(app, "_resume_session", fake_resume)
+
     # The receipt is the APP's notice (the transcript's own row), not the
     # card's — recorded here so the wording can be asserted.
-    monkeypatch.setattr(app, "_notice", lambda text, kind="info": notes.append((text, kind)))
+    def capture_notice(text: str, kind: str = "info") -> None:
+        # The negative control permanently drops only the durable start receipt;
+        # worker completion alone must not make the original receipt oracle pass.
+        if not (omit_receipt and text.startswith(f"started {STARTED_ID}")):
+            notes.append((text, kind))
+
+    monkeypatch.setattr(app, "_notice", capture_notice)
 
     async with app.run_test(size=(100, 30)) as pilot:
-        await _boot(pilot, app)
-        view = await _open(pilot, app)
-        view.set_start_rows(_start_rows())
-        await pilot.press("s")
-        await pilot.pause()
-        card = view._start_card
-        assert card is not None
-        card.action_choose()
-        await pilot.pause()
-        assert card.pending, "the create did not enter its pending state"
-        await pilot.press("escape")
-        await pilot.pause()
-        assert view._start_card is None
-        release.set()
-        await _settle(pilot)
+        try:
+            await _boot(pilot, app)
+            view = await _open(pilot, app)
+            view.set_start_rows(_start_rows())
+            await pilot.press("s")
+            await pilot.pause()
+            card = view._start_card
+            assert card is not None
+            card.action_choose()
+            await pilot.pause()
+            assert card.pending, "the create did not enter its pending state"
+            await pilot.press("escape")
+            await pilot.pause()
+            assert view._start_card is None
+            release.set()
+            await asyncio.wait_for(link_entered.wait(), timeout=10)
+            assert len(started_workers) == 1
+            worker = started_workers[0]
+            assert worker.state.name == "RUNNING"
+            assert STARTED_ID not in " ".join(
+                text for text, _kind in notes
+            ), "the held link unexpectedly emitted its receipt"
+            print(f"ESC held: worker={worker.state.name}; receipt={notes!r}", flush=True)
+            link_release.set()
+            # Await the real producer's terminal result while the app is mounted.
+            # More pilot pauses cannot establish completion of asyncio.to_thread.
+            await asyncio.wait_for(worker.wait(), timeout=20)
+            assert worker.state.name == "SUCCESS"
+            print(f"ESC terminal: worker={worker.state.name}; receipt={notes!r}", flush=True)
 
-        assert calls == ["create"], f"a cancelled start still ran {calls}"
-        assert app._projects_view is not None, "a cancelled start closed the page"
-        # THE TRANSCRIPT keeps the long form: the durable record names the project.
-        receipt = " ".join(text for text, _kind in notes)
-        assert STARTED_ID in receipt and "/resume" in receipt and "linked to alpha" in receipt
-        # ...AND THE PAGE GETS THE ACTION (UX review round 2, U12; QA round 3, Q5):
-        # the settled page used to be byte-identical to the pre-start frame, and
-        # the page's copy has to survive a narrow footer, so it carries the
-        # command rather than the project's name.
-        assert view._notice == f"started {STARTED_ID} · /resume {STARTED_ID} opens it"
+            assert calls == ["create"], f"a cancelled start still ran {calls}"
+            assert app._projects_view is not None, "a cancelled start closed the page"
+            # THE TRANSCRIPT keeps the long form: the durable record names the project.
+            receipt = " ".join(text for text, _kind in notes)
+
+            def assert_receipt() -> None:
+                assert (
+                    STARTED_ID in receipt and "/resume" in receipt and "linked to alpha" in receipt
+                ), f"missing durable receipt for {STARTED_ID}: {receipt!r}"
+
+            if omit_receipt:
+                with pytest.raises(AssertionError, match="missing durable receipt"):
+                    assert_receipt()
+                print(
+                    "ESC omission control: original receipt oracle rejected after SUCCESS",
+                    flush=True,
+                )
+            else:
+                assert_receipt()
+            # ...AND THE PAGE GETS THE ACTION (UX review round 2, U12; QA round 3, Q5):
+            # the settled page used to be byte-identical to the pre-start frame, and
+            # the page's copy has to survive a narrow footer, so it carries the
+            # command rather than the project's name.
+            assert view._notice == f"started {STARTED_ID} · /resume {STARTED_ID} opens it"
+        finally:
+            # A failed oracle must not leave the executor thread held at teardown.
+            release.set()
+            link_release.set()
+            for worker in started_workers:
+                await asyncio.wait_for(worker.wait(), timeout=20)
 
     project = registry.get_project_by_name("alpha")
     assert project is not None and project.sessions == [STARTED_ID]

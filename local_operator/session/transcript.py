@@ -4893,6 +4893,7 @@ def replay_entries(
                 preserved_turn_payload,
                 replay_preserved_turns,
             )
+            from local_operator.compaction.tokens import invalidate_message_cache
 
             # The READ path sheds and caps too, or a session already poisoned
             # on disk stays poisoned across a restart no matter what the write
@@ -4921,6 +4922,9 @@ def replay_entries(
                 turn_id = turn.get("id")
                 if isinstance(turn_id, str) and turn_id:
                     message.id = turn_id
+                    # Same reuse of an id for rebuilt (text-only) content as
+                    # ``replayed_user_message``: drop the original's cached figure.
+                    invalidate_message_cache(message)
                 message.provider_payload = preserved_turn_payload(turn)
                 prefix.append(message)
         # The carried tier — asks still waiting and the newest decisions — rides

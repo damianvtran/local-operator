@@ -1,0 +1,8 @@
+{
+  "cli.monitor_help.monitor": "Kiểm tra các giám sát thường trực và hủy một giám sát trên phiên đã đóng",
+  "cli.monitor_help.status": "mọi giám sát trên máy này, sớm nhất trước",
+  "cli.monitor_help.json": "đầu ra máy đọc được",
+  "cli.monitor_help.cancel": "hủy một giám sát trên phiên không có runtime nào đang mở (phiên đang chạy tự đổi giám sát của nó từ bên trong)",
+  "cli.monitor_help.session": "id phiên mà giám sát thuộc về",
+  "cli.monitor_help.monitor_id": "id giám sát (m1, m2, …)"
+}

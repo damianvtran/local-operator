@@ -1,0 +1,133 @@
+{
+  "source_commit": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+  "context_sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724",
+  "locales": [
+    {
+      "locale": "fr",
+      "target_sha256": "87cb0f0affb5c0a98298ca1e09fd72287c53b605968af4f92ba194fc54e27ad2",
+      "records": [
+        {
+          "path": "i18n/audits/evidence/fr/wire.errors.session_host/fr31a/record.json",
+          "sha256": "b431ec2ce82402027c790ca8c41b563a93ab74dc797ee2a2a47592835ae8e648",
+          "auditor_session": "0a66628c58a2",
+          "model": "openai/gpt-6.1-sol"
+        },
+        {
+          "path": "i18n/audits/evidence/fr/wire.errors.session_host/h3222b/record.json",
+          "sha256": "832945c999a7b507c1bc977f1ed5f40ec51f50e929eb65c5e871cb7de6b7230b",
+          "auditor_session": "83a2be80f6af",
+          "model": "openai/gpt-6.1-sol"
+        }
+      ]
+    },
+    {
+      "locale": "es",
+      "target_sha256": "b27376785fe2c4bc4e3ca302e3f34097dad93bf483ccef5a921177ac6e8a00b8",
+      "records": [
+        {
+          "path": "i18n/audits/evidence/es/wire.errors.session_host/es31a/record.json",
+          "sha256": "6cf4a4912dd83950daaf7a4d6b099b754c97b9859f29b981a4e60cbdb8d050b3",
+          "auditor_session": "1436c962e633",
+          "model": "openai/gpt-6.1-sol"
+        },
+        {
+          "path": "i18n/audits/evidence/es/wire.errors.session_host/es3222b/record.json",
+          "sha256": "fecf09e9d4a5caa9c76470e5d6d67ecdf927933ed8f44b65d038ce47b744c604",
+          "auditor_session": "f784eae73c69",
+          "model": "openai/gpt-6.1-sol"
+        }
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "target_sha256": "4205cc6feda10279c524d78ff95c450bbc50981a48d13e37f82849d1705860d4",
+      "records": [
+        {
+          "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/host26b/record.json",
+          "sha256": "5ab1cb1b95def849fda8409c4b4500372c6e23d2b4b0140217847f0fed0cfcdf",
+          "auditor_session": "3d31f5998c79",
+          "model": "openai/gpt-6.1-sol"
+        },
+        {
+          "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/record.json",
+          "sha256": "ca98f97abd008ea7bd8f4bb43adb98b4e82a8b7f1f95aba5afe9b258e9dbc75f",
+          "auditor_session": "45153dd07ae1",
+          "model": "openai/gpt-6.1-sol"
+        }
+      ]
+    },
+    {
+      "locale": "hi",
+      "target_sha256": "9f9e90cfe7ef2633163f20bff9ab579e49f88b77f322eeb3e7854f208c92632d",
+      "records": [
+        {
+          "path": "i18n/audits/evidence/hi/wire.errors.session_host/h31-39a4b/record.json",
+          "sha256": "e3e5581bf46095093ece2f0540a1f07f54cd3ce449fee0fd20039263becd3da3",
+          "auditor_session": "39a4a8de4f1c",
+          "model": "openai/gpt-6.1-sol"
+        },
+        {
+          "path": "i18n/audits/evidence/hi/wire.errors.session_host/h31a/record.json",
+          "sha256": "946129950f96643704b123b6a2948adbf6ff3c4f49b79306a48f836a0d3b14ff",
+          "auditor_session": "b2f3bfde5529",
+          "model": "openai/gpt-6.1-sol"
+        }
+      ]
+    },
+    {
+      "locale": "ru",
+      "target_sha256": "232cdecfca4bd8018b47046cfc9ca0060980d476fb8fa01759ddb6b6d9192983",
+      "records": [
+        {
+          "path": "i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/record.json",
+          "sha256": "ae4f13edb432a4556a79b9654a96b2bc4e2042ddc395b6afa49537cd22136ec2",
+          "auditor_session": "af28bb46bcc2",
+          "model": "openai/gpt-6.1-sol"
+        },
+        {
+          "path": "i18n/audits/evidence/ru/wire.errors.session_host/host3222b/record.json",
+          "sha256": "edb15af176c7fc18cc2a4ab997daa0b7a44752fe5a52bdaf5ecca8f30fa5c4af",
+          "auditor_session": "df0e9229eed3",
+          "model": "openai/gpt-6.1-sol"
+        }
+      ]
+    },
+    {
+      "locale": "vi",
+      "target_sha256": "d1ce1cbd3daa26c04bf01122319e7e8adec63050477c8dd8bc84ff61f16003ba",
+      "records": [
+        {
+          "path": "i18n/audits/evidence/vi/wire.errors.session_host/261031-host-9d47b/record.json",
+          "sha256": "984fb3ac264d75d3a901744b2150b18ff750b3126662b07895871383ce4960b2",
+          "auditor_session": "9d47bf14cd92",
+          "model": "openai/gpt-6.1-sol"
+        },
+        {
+          "path": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/record.json",
+          "sha256": "968d6432ca37611f97e721a1dd1603d74f39597e5dafd2cc4463c20ce0e0c2fa",
+          "auditor_session": "393a054d09f7",
+          "model": "openai/gpt-6.1-sol"
+        }
+      ]
+    },
+    {
+      "locale": "ur",
+      "target_sha256": "311ea5428af42db26ff461969d40d5e0198907a5c21d24da643c11cf64c35622",
+      "records": [
+        {
+          "path": "i18n/audits/evidence/ur/wire.errors.session_host/hura1/record.json",
+          "sha256": "d5dcf98e7df8165f63b9b4d25016c6232d31a2656bcb4f03851406e74121cf37",
+          "auditor_session": "a8ce9efa0b57",
+          "model": "openai/gpt-6.1-sol"
+        },
+        {
+          "path": "i18n/audits/evidence/ur/wire.errors.session_host/u31h8b/record.json",
+          "sha256": "f246857a889fa91753e50fcd68daef2f8d3a8638183851b1ec35b90ba112a42b",
+          "auditor_session": "8a79664ef0c5",
+          "model": "openai/gpt-6.1-sol"
+        }
+      ]
+    }
+  ]
+}

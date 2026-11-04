@@ -144,7 +144,7 @@ describe("library asset detail", () => {
 			asset({ chat: { session_id: "bbbbbbbbbbbb", title: "asset chat", updated_at: 1 } }),
 		);
 		render(<LibraryAssetScreen assetId="la_0123456789abcdef" />);
-		await screen.findByText("chat: asset chat");
+		await screen.findByText("asset chat");
 		fireEvent.change(screen.getByLabelText("ask about this asset"), { target: { value: "what changed?" } });
 		fireEvent.click(screen.getByRole("button", { name: "ask" }));
 		await waitFor(() => expect(sendCommand).toHaveBeenCalledTimes(1));
@@ -244,4 +244,22 @@ describe("library asset detail", () => {
 		await waitFor(() => expect(getLibraryAsset).toHaveBeenCalledTimes(2));
 		expect(await screen.findByText("launch notes")).toBeTruthy();
 	});
+});
+
+// The generated chat: label is chrome, not evidence of the title's script.
+it.each([
+ ["API منصوبے کی پیش رفت اور اگلے مرحلے کی تفصیلی گفتگو", "rtl"],
+ ["Pure Latin identifying beginning and a long conversation title", "ltr"],
+ ["تحقیقاتی منصوبے کی پیش رفت اور اگلے مرحلے کی تفصیلی گفتگو", "rtl"],
+ ["2026-11-03 12345678901234567890", null],
+])("isolates the library chat title %s", async (title, direction) => {
+ getLibraryAsset.mockResolvedValue(asset({ chat: { session_id: "fixture-chat", title, updated_at: 1 } }));
+ render(<div dir="rtl"><LibraryAssetScreen assetId="la_0123456789abcdef" /></div>);
+ const name = await screen.findByText(title);
+ const label = screen.getByText("chat:");
+ expect(name.getAttribute("dir")).toBe(direction);
+ expect(name.className).toContain("truncate");
+ expect(label.parentElement).toBe(name.parentElement);
+ expect(label.hasAttribute("dir")).toBe(false);
+ expect(name.parentElement?.hasAttribute("dir")).toBe(false);
 });

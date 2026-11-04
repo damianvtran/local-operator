@@ -106,6 +106,9 @@ ECHO_POLICY = {
     # state and the band carries it from then on. Same rule as `/effort`, its
     # neighbour on the same request.
     "fast": False,
+    # Both spellings are session controls whose receipt names the durable state.
+    "radient": False,
+    "saver": False,
     # A setting, not words the model is told: the receipt names the theme now
     # in force, and the screen itself is wearing the change.
     "theme": False,
@@ -251,6 +254,8 @@ PROMPT_POLICY = {
     "model": False,
     "effort": False,
     "fast": False,
+    "radient": False,
+    "saver": False,
     "theme": False,
     # A VALUE (`auto` or a shipped locale), not a prompt: the handler reads it
     # or refuses it with the option list, so an inline engage splices-and-runs

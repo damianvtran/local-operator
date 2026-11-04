@@ -1,0 +1,165 @@
+{
+  "schema": 1,
+  "pr": 3349,
+  "scope": "Retention of original QA evidence and author provenance override; no new captures or verdicts",
+  "source_revisions": {
+    "english_control": "029c0ec7ade8be8bdb6625a5816b4e23fc0a2902",
+    "pre_fit_french": "dcdb0b280553861b72b225695497810d201ef890",
+    "fixed_french": "005d1eed1dbb1de84db78398ab188ec3df9b821d",
+    "compatible_test_only_head": "4472b530665c4ab40c5f3a2884f25fe2c25d48b9"
+  },
+  "fixture": "QA reports describe real OperatorApp/local_operator.tcss with synthetic FakeSession/_factory, isolated HOME/config/CWD, no live sessions/providers",
+  "model_provenance": "Apply qa-provenance-override-3349.json to immutable report Reviewer lines; actual served openai/gpt-6.1-sol",
+  "credential_pattern_scan": {
+    "method": "Strict private-key/access-token patterns over retained bytes; no OCR; no matches echoed",
+    "counts": {
+      "private_key": 0,
+      "github_token": 0,
+      "provider_key": 0,
+      "aws_access_key": 0,
+      "slack_token": 0
+    }
+  },
+  "files": [
+    {
+      "path": "pre-fit/compare-dark-60x20.png",
+      "source_relative_path": "native-evidence/compare-dark-60x20.png",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "54e98cc2c5429c2baadaebc3776b4a18cbe7d361a69b239f256fe8a17447813a",
+      "bytes": 207069,
+      "stage": "pre-fit",
+      "grid": "60x20"
+    },
+    {
+      "path": "pre-fit/compare-dark-80x24.png",
+      "source_relative_path": "native-evidence/compare-dark-80x24.png",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "1e458b3b313942860aaf95d9497c20a1d9c39627a0f0f3e6dfa300d6048b3959",
+      "bytes": 288883,
+      "stage": "pre-fit",
+      "grid": "80x24"
+    },
+    {
+      "path": "pre-fit/compare-dark-150x40.png",
+      "source_relative_path": "native-evidence/compare-dark-150x40.png",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "5955d85655c1bde701172c35ac7775ec2588c0a203f4f564c756422562c2d040",
+      "bytes": 105404,
+      "stage": "pre-fit",
+      "grid": "150x40"
+    },
+    {
+      "path": "pre-fit/compare-light-60x20.png",
+      "source_relative_path": "native-evidence/compare-light-60x20.png",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "a0f13b09d675b5982b374cb61a586c1bc0d890632d72d10a1a90e0f265431ead",
+      "bytes": 209720,
+      "stage": "pre-fit",
+      "grid": "60x20"
+    },
+    {
+      "path": "pre-fit/compare-light-80x24.png",
+      "source_relative_path": "native-evidence/compare-light-80x24.png",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "00dca5a4c21cb419648beff9542138aa2e3c6ca5d4be4cbee69a3a0ca8e9bbc8",
+      "bytes": 291612,
+      "stage": "pre-fit",
+      "grid": "80x24"
+    },
+    {
+      "path": "pre-fit/compare-light-150x40.png",
+      "source_relative_path": "native-evidence/compare-light-150x40.png",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "080d638e999abf383086e7ec9f63c653ea839879933705b8ebe8332da84e0d5c",
+      "bytes": 106430,
+      "stage": "pre-fit",
+      "grid": "150x40"
+    },
+    {
+      "path": "fixed/selected-comparison-60x20.png",
+      "source_relative_path": "native-r2/selected-comparison-60x20.png",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "cd1bcd8ea92210c26e895dd94d0d56f312bdd523e5eb47cc27d65416dc4216c7",
+      "bytes": 67984,
+      "stage": "fixed",
+      "grid": "60x20"
+    },
+    {
+      "path": "fixed/selected-comparison-80x24.png",
+      "source_relative_path": "native-r2/selected-comparison-80x24.png",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "f5fcce6bc6d157498f1d97e6133281ded91ba31ece92fcbe780c719368cae2d0",
+      "bytes": 94079,
+      "stage": "fixed",
+      "grid": "80x24"
+    },
+    {
+      "path": "fixed/selected-comparison-150x40.png",
+      "source_relative_path": "native-r2/selected-comparison-150x40.png",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "42b426da35a6b119131c195576bb73bbde40950723130331840a10aa3096b455",
+      "bytes": 232655,
+      "stage": "fixed",
+      "grid": "150x40"
+    },
+    {
+      "path": "fixed/editor-comparison-60x20.png",
+      "source_relative_path": "native-r2/editor-comparison-60x20.png",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "182e7a631a8e4f820cdb82df4274f005bc3fe7f03c35d6a84c365a45f5dd7c0e",
+      "bytes": 147042,
+      "stage": "fixed",
+      "grid": "60x20"
+    },
+    {
+      "path": "fixed/editor-comparison-80x24.png",
+      "source_relative_path": "native-r2/editor-comparison-80x24.png",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "543cd81f1f7c7df2e978026f6a3291571ee8066592f2e2597861358a09b33fad",
+      "bytes": 208585,
+      "stage": "fixed",
+      "grid": "80x24"
+    },
+    {
+      "path": "fixed/editor-comparison-150x40.png",
+      "source_relative_path": "native-r2/editor-comparison-150x40.png",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "6fa94b6e243d3e78d4a6b9577b977f5572038339ced030229863f64e5663a64e",
+      "bytes": 542450,
+      "stage": "fixed",
+      "grid": "150x40"
+    },
+    {
+      "path": "qa-provenance-override-3349.json",
+      "source_relative_path": "qa-provenance-override-3349.json",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "59ac5bd7eee02d72475296ff181e758d822a93b72dc922d4cfb4790404b35829",
+      "bytes": 5117,
+      "stage": "provenance"
+    },
+    {
+      "path": "qa-report-round1.md",
+      "source_relative_path": "qa-report-round1.md",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "0ab916d169a3af3a32fdfed0aa82ff6e5189c0b5b605982c615e8d9a55d0df83",
+      "bytes": 7081,
+      "stage": "matrix-receipt"
+    },
+    {
+      "path": "qa-native-supplement.md",
+      "source_relative_path": "qa-native-supplement.md",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "c976204cc32aa5703b49da767cc1751ef947a36e9df28ea111678607403b0be0",
+      "bytes": 9238,
+      "stage": "matrix-receipt"
+    },
+    {
+      "path": "qa-round2.md",
+      "source_relative_path": "qa-round2.md",
+      "source_session": "b65f5adc1dfb",
+      "sha256": "22bdcd5a3acd0e689a81bdba75c2a5cf1a402292a1fb635d52c06d8ebbd93d08",
+      "bytes": 7323,
+      "stage": "matrix-receipt"
+    }
+  ]
+}

@@ -86,7 +86,10 @@ class FakeHub:
         shown["body"] = self.texts[row["id"]] if row["id"] in self.admitted else None
         return shown
 
-    async def conversation_send(self, conversation_id: str, *, text: str, **_: Any) -> Any:
+    async def conversation_send(self, conversation_id: str, *, text: str, **kwargs: Any) -> Any:
+        guard = kwargs.get("pre_http_guard")
+        if guard is not None:
+            guard()
         return {"id": self.add(ME, text), "seq": len(self.rows)}
 
     async def conversation_messages(self, conversation_id: str, **_: Any) -> dict[str, Any]:

@@ -1,0 +1,28 @@
+{
+  "record_reference": "i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/record.json",
+  "record_sha256": "873decd5a5053891c42b5c2c87e0f0d4df5d9eb88348cc5e2b0684e97114aa79",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "af28bb46bcc2",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "bd43602aa8db",
+    "actual_model_source": "Runtime notices: primary anthropic/claude-sonnet-5-5 -> anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol after provider quota failures. All substantive audit review/validation under openai/gpt-6.1-sol.",
+    "fallback": true
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/report.md",
+      "sha256": "6ab4216cbed68f2715e16c92f76f90b34e125db0c58fff537dee9562d676e2c4"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/audit.log",
+      "sha256": "4cca59496c64150a31f9682f2a36448787fd78dffca4de056fc413fbb43e5319"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/ledger-proposal.json",
+      "sha256": "8b6816a0311215628dd7e6eaf2675a096ac568a0d1aaf7d3715ade8426ab32da"
+    }
+  ],
+  "ledger_write_executed": false,
+  "tracked_commit_created": false
+}

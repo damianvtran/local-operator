@@ -876,7 +876,7 @@ jobs:
       !cancelled() &&
       needs.changes.outputs.unit != 'false'
     runs-on: ubuntu-latest
-    # Keep five shards within the 20-job concurrency budget. PR #643 job
+    # Keep six shards within the 20-job concurrency budget. PR #643 job
     # 101250352578 reached 97% before GitHub cancelled it at the 15-minute
     # limit, so the ceiling carries setup and the long tail without dropping
     # tests, coverage, or the independent per-test/e2e watchdogs.
@@ -957,6 +957,10 @@ jobs:
     # the guard passes, so reweighting moves no runner's speed. More shards
     # would spend the 20-job concurrency budget. Weights, workers, partition,
     # and the per-test and stall watchdogs are unchanged.
+    # Six-shard weight repair: retain that 38-minute cap and every selected
+    # test/coverage path. Three complete attempt-bound CI runs supply per-file
+    # p75 weights; their LPT test-time sums are NOT wall-time margin evidence.
+    # See docs/ci-test-durations.md for provenance and post-change limits.
     timeout-minutes: 38
     strategy:
       fail-fast: false
@@ -964,7 +968,7 @@ jobs:
         # BOTH ends of `requires-python` on `main`, the minimum only on pull
         # requests.
         python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.12"]') || fromJSON('["3.12", "3.13"]') }}
-        shard: [0, 1, 2, 3, 4]
+        shard: [0, 1, 2, 3, 4, 5]
     env:
       # Seconds of no completed test before the controller reports which tests
       # are still in flight, and the per-item bound after which a worker dumps
@@ -1058,13 +1062,13 @@ jobs:
         # 8m46s. Risk was uncorrelated with what the author did.
         #
         # `--dist worksteal` in addopts cannot fix this: it rebalances within
-        # one pytest process, and this split happens across five machines
+        # one pytest process, and this split happens across six machines
         # before pytest starts. The full reasoning, the determinism argument,
         # and why a file missing from the manifest still runs are in
         # scripts/shard_tests.py.
         run: |
           python scripts/shard_tests.py \
-            --shard ${{ matrix.shard }} --total 5 --out shard_tests.txt
+            --shard ${{ matrix.shard }} --total 6 --out shard_tests.txt
 
       - name: Run test shard with coverage
         id: shard_pytest
@@ -1081,12 +1085,16 @@ jobs:
         # earlier one.
         env:
           LOCAL_OPERATOR_SHARD_MEMORY_DIR: ${{ runner.temp }}/lo-shard-memory/${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+        # Module invocation makes the checkout importable before -p resolves the
+        # ordering plugin without exporting PYTHONPATH=. to spawned interpreters.
+        # That relative entry would defeat their -P cwd-import isolation.
         # The six serial controls are deselected here (see SERIAL_CONTROLS above).
         # The `.coverage` rename is NOT done here any more: shard 0 appends the
         # serial run's data to this file first, so the rename moved to the
         # finalisation step below, after every pytest step of this job.
         run: |
-          pytest $(cat shard_tests.txt | tr '\n' ' ') $(printf -- '--deselect %s ' $SERIAL_CONTROLS) \
+          python -m pytest -p tests.ci_order_owned_first \
+            $(cat shard_tests.txt | tr '\n' ' ') $(printf -- '--deselect %s ' $SERIAL_CONTROLS) \
             --cov --cov-fail-under=0 --cov-report= \
             --junit-xml=junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
 
@@ -1201,16 +1209,21 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: junit-timings-${{ matrix.python-version }}-${{ matrix.shard }}
-          # Keep the timing XML contract intact. Only the two real-App proof
-          # tests publish this bounded, sanitized image/geometry allowlist;
-          # never upload arbitrary test scratch or an entire working tree.
+          name: junit-timings-${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          # Keep the timing XML and real-App proof contracts intact. Quiet-turn
+          # proof JSON is schema-filtered and capped at 96 KiB per file: no
+          # prompt/transcript bodies, secrets, or arbitrary fixture scratch.
+          # Native churn failure JSON is diagnostic-field-only and capped at
+          # 96 KiB; preserve it even when the original pytest tmp_path is gone.
+          # Never upload an entire test-artifact directory or working tree.
           path: |
             junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
             junit-serial-controls-${{ matrix.python-version }}-0.xml
             test-artifacts/tui-proof/**/*.svg
             test-artifacts/tui-proof/**/*.geometry.json
             test-artifacts/tui-proof/manifest.json
+            test-artifacts/quiet-proof/*.json
+            test-artifacts/process-proof/*.json
           # 7 days, not 1: post-hoc flake/review evidence reads must survive past
           # the next day (PR #2470: XML expired at ~24.5 h, forced a re-run).
           retention-days: 7
@@ -1691,6 +1704,7 @@ jobs:
         # tests were in it". Ordered as the partitioner ordered it.
         run: cat e2e_tests.txt
       - name: Run headless TUI end-to-end tests
+        id: e2e_shard_pytest
         # `-m e2e` overrides the `-m "not e2e"` in pyproject's addopts, which
         # keeps this stage out of the unit run: `faulthandler`'s timer is
         # process-global, so under xdist a `bounded` block would take a worker's
@@ -1713,6 +1727,32 @@ jobs:
           env -u NO_COLOR TERM=xterm-256color \
             python -m pytest $(cat e2e_tests.txt | tr '\n' ' ') -m e2e -n0 -q \
               --junit-xml=junit-e2e-${{ matrix.os }}-${{ matrix.shard }}.xml
+      - name: Darwin pin evidence (census + incident shape)
+        id: darwin_pin
+        # WHY THE DARWIN FILES LIVE IN THE TUI JOB: the sharded `test` job is
+        # `runs-on: ubuntu-latest` only, so the one platform these two files exist
+        # to measure -- macOS, where nobody had checked whether a group census
+        # still lists an unreaped zombie leader -- would never run them in CI.
+        # This is the only job with a macos runner, so the Darwin answer is
+        # measured here or nowhere.
+        #
+        # ONE step for both files, deliberately: this job is the freeze guard, and
+        # `tests/unit/test_ci_hygiene.py` allows it exactly one extra pytest
+        # invocation beyond the partitioned e2e run. One command keeps that
+        # invariant while still running both -- the probe proves the platform
+        # REPORTS the corpse, the incident shape runs the consequence: a real child
+        # that outlives its parent and a live grandchild that must be reclaimed.
+        #
+        # `-n0` because these fork and leave corpses on purpose. They FAIL rather
+        # than skipping when the shape cannot be produced: a green skip would
+        # defeat the measurement.
+        if: matrix.os == 'macos-latest'
+        timeout-minutes: 5
+        run: >
+          python -m pytest
+          tests/unit/scripts/test_owned_process_group_zombie_probe.py
+          tests/unit/scripts/test_run_bounded_incident_shape.py
+          -n0 -q
       - name: Upload e2e junit timings
         # `if: always()` for the FAILING case: a shard that fails an assertion
         # exits 1 and still writes the XML, with times for every test that ran.

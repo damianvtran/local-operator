@@ -508,9 +508,11 @@ async def test_hidden_cross_session_hides_peer_rows_from_the_route(
         ],
     )
 
-    response = await _find(harness, session_id, q="deploy")
-    assert response.status_code == 200, response.text
-    assert [hit["id"] for hit in response.json()["result"]["hits"]] == ["u1", "p1"]
+    # This cell tests terminal privacy semantics, not the allowed cold/partial
+    # first paint. Join the real publication just like adjacent hit-shape cells;
+    # a ready-but-wrong answer must still fail immediately, never be retried.
+    result = await _published_find_result(harness, session_id, q="deploy")
+    assert [hit["id"] for hit in result["hits"]] == ["u1", "p1"]
 
     hide_cross_session(True)
     result = (await _find(harness, session_id, q="deploy")).json()["result"]
@@ -523,6 +525,54 @@ async def test_hidden_cross_session_hides_peer_rows_from_the_route(
     hide_cross_session(False)
     result = (await _find(harness, session_id, q="green")).json()["result"]
     assert [hit["id"] for hit in result["hits"]] == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_hidden_cross_session_waits_for_real_publication(
+    harness: _Harness, hide_cross_session: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pin the privacy cell's readiness prerequisite, without retrying wrong hits.
+
+    Before this fix the unchanged cell fails on a legal building/partial first
+    paint on both PR and base. Hold the real worker until either that first
+    response returns (old path) or the publication helper joins it (fixed path).
+    No fake response, relaxed deadline, filter override or arbitrary sleep.
+    """
+    import threading
+
+    refresh = transcript_index.refresh_index
+    first_find = _find
+    published_find = _published_find_result
+    started, release = threading.Event(), threading.Event()
+    joined: list[str] = []
+
+    def held_refresh(*args: Any, **kwargs: Any) -> Any:
+        started.set()
+        assert release.wait(30), "test publication gate never released"
+        return refresh(*args, **kwargs)
+
+    async def release_after_first_paint(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await first_find(*args, **kwargs)
+        finally:
+            release.set()
+
+    async def join_publication(root: _Harness, session_id: str, **kwargs: Any) -> Any:
+        task, _ = transcript_index.start_refresh(root.root, session_id)
+        assert await asyncio.to_thread(started.wait, 5), "real index worker never started"
+        assert not task.done(), "barrier did not hold the real publication"
+        joined.append(session_id)
+        release.set()
+        return await published_find(root, session_id, **kwargs)
+
+    monkeypatch.setattr(transcript_index, "refresh_index", held_refresh)
+    monkeypatch.setitem(globals(), "_find", release_after_first_paint)
+    monkeypatch.setitem(globals(), "_published_find_result", join_publication)
+    try:
+        await test_hidden_cross_session_hides_peer_rows_from_the_route(harness, hide_cross_session)
+        assert len(joined) == 1
+    finally:
+        release.set()
 
 
 @pytest.mark.asyncio

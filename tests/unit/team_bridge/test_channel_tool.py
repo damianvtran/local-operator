@@ -141,7 +141,10 @@ class RecordingClient:
         thread_root_id: str | None = None,
         expected_account_id: str | None = None,
         mentions: Any = None,
+        pre_http_guard: Any = None,
     ) -> dict[str, Any]:
+        if pre_http_guard is not None:
+            pre_http_guard()
         self.calls.append(
             {
                 **({"expected_account_id": expected_account_id} if expected_account_id else {}),

@@ -374,10 +374,22 @@ def replayed_user_message(content: list[Content], entry_id: str | None) -> Messa
     ``first_kept_entry_id`` references it, so minting a fresh uuid here would
     make replay unable to find the cut point. A message with no originating
     entry keeps the model's default id.
+
+    The estimate cache is keyed on ``Message.id``, so reusing an id for NEW
+    content inherits the original message's cached figure. The case that
+    matters: a first user turn carrying an attachment is preserved by the
+    compaction pass as TEXT ONLY under the same id, and its old document
+    charge (hundreds of thousands of tokens) then kept refusing every later
+    request while the rebuilt message was a few lines. The rebuilt message is
+    new content, so the id's cached figure is dropped here, at the one place
+    every rebuild-under-a-reused-id goes through.
     """
+    from local_operator.compaction.tokens import invalidate_message_cache
+
     message = Message(role="user", content=content)
     if entry_id:
         message.id = entry_id
+        invalidate_message_cache(message)
     return message
 
 

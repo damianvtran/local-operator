@@ -1,0 +1,4 @@
+{
+  "tui.setup_cues.setup_placeholder": "输入{command}开始",
+  "tui.setup_cues.no_provider_cue": "先连接AI账户：输入{command}"
+}

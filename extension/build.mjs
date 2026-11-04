@@ -21,6 +21,9 @@ await build({
     worker: "src/worker.ts",
     "popup/popup": "src/popup/popup.ts",
     "options/options": "src/options/options.ts",
+    // The pairing TAB: a code-entry page that survives focus loss (the popup
+    // does not). See src/pair/pair.ts.
+    "pair/pair": "src/pair/pair.ts",
   },
   bundle: true,
   format: "esm",
@@ -80,6 +83,8 @@ await cp(resolve(root, "src/popup/first-paint.js"), resolve(dist, "popup/first-p
 await cp(resolve(root, "src/popup/popup.css"), resolve(dist, "popup/popup.css"));
 await cp(resolve(root, "src/options/options.html"), resolve(dist, "options/options.html"));
 await cp(resolve(root, "src/options/options.css"), resolve(dist, "options/options.css"));
+await cp(resolve(root, "src/pair/pair.html"), resolve(dist, "pair/pair.html"));
+await cp(resolve(root, "src/pair/pair.css"), resolve(dist, "pair/pair.css"));
 await cp(resolve(root, "icons"), resolve(dist, "icons"), { recursive: true });
 if (isStore) {
   const target = resolve(root, "local-operator-extension.zip");

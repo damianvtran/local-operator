@@ -1,0 +1,23 @@
+{
+  "wire.errors.sdk_spec.agent_identity_conflict": "agent_name và agent_id loại trừ lẫn nhau",
+  "wire.errors.sdk_spec.approval_callback_gate_required": "ApprovalPolicy.callback() yêu cầu một gate gọi được",
+  "wire.errors.sdk_spec.approval_declared_tools_empty": "ApprovalPolicy.declared() phải nêu ít nhất một công cụ; dùng ApprovalPolicy.refuse() cho phiên gắn kết chưa khai báo",
+  "wire.errors.sdk_spec.approval_handler_wrong_mode": "ApprovalPolicy.handler chỉ có nghĩa với chế độ ''callback'', không phải {mode}",
+  "wire.errors.sdk_spec.approval_tools_wrong_mode": "ApprovalPolicy.tools chỉ có nghĩa với chế độ ''declared'', không phải {mode}",
+  "wire.errors.sdk_spec.attach_fields_unsupported": "mode=''attach'' mở một trình xem cho spec.resume; nó không gắn nhóm, hồ sơ, công cụ, tên, mục tiêu hay chính sách phê duyệt — đó là phía chủ sở hữu. Chỉ đặt resume trên spec này (hoặc dùng mode=''own''). Các trường vi phạm: {fields}.",
+  "wire.errors.sdk_spec.attach_output_unsupported": "không thể đặt ràng buộc đầu ra trên phiên được gắn kèm; runtime sở hữu sẽ quyết định",
+  "wire.errors.sdk_spec.attach_resume_required": "mode=''attach'' cần spec.resume: trình xem gắn vào một id",
+  "wire.errors.sdk_spec.mode_invalid": "mode phải là ''own'' hoặc ''attach'', không phải {mode}",
+  "wire.errors.sdk_spec.output_format_invalid": "output_format phải là một trong {formats}",
+  "wire.errors.sdk_spec.output_retries_range": "output_retries phải nằm trong khoảng 0 đến 5",
+  "wire.errors.sdk_spec.output_retries_requires_format": "output_retries yêu cầu output_format",
+  "wire.errors.sdk_spec.output_schema_requires_format": "output_schema yêu cầu output_format",
+  "wire.errors.sdk_spec.resume_empty": "resume phải là id phiên hoặc \"@latest\", không phải chuỗi rỗng",
+  "wire.errors.sdk_spec.spawn_birth_effort_pair_required": "birth_effort cho phiên được spawn mới đi cùng mẫu khởi tạo và cần cặp hosting/model đi kèm; hãy nêu cả ba, hoặc mở phiên trong cùng tiến trình (open_session) để đặt mức khởi tạo mà không cần cặp mô hình.",
+  "wire.errors.sdk_spec.spawn_fields_unsupported": "spawn_session() không thể chuyển trạng thái sau khi mở tới runtime con mới; các trường không được hỗ trợ trên spec này: {fields}. Hãy mở phiên trong cùng tiến trình (open_session), gắn thứ bạn cần, dispose, rồi spawn_session() cùng id — resume sẽ khôi phục phần đã gắn; hoặc spawn mà không có các trường này.",
+  "wire.errors.sdk_spec.spawn_model_pair_required": "spawn_session() định tuyến hosting/model tới một runtime MỚI như một mẫu khởi tạo duy nhất; hãy nêu cả hai, hoặc không nêu gì (khi đó tiến trình con tự xác định mô hình từ cấu hình của gốc).",
+  "wire.errors.sdk_spec.spawn_output_unsupported": "spawn_session() không thể mang ràng buộc đầu ra ({fields}); hãy mở phiên bằng open_session(..., mode=''own'') rồi kích hoạt nó sau",
+  "wire.errors.sdk_spec.tools_empty": "tools phải nêu ít nhất một công cụ; để None để không bị hạn chế",
+  "wire.errors.sdk_spec.world_root_empty": "world_root phải là đường dẫn không rỗng khi được đặt",
+  "wire.errors.sdk_spec.yolo_approval_unreachable": "yolo=True khiến gate ApprovalPolicy.{approval_mode}() không thể tới được; hãy dùng ApprovalPolicy.auto() (hoặc bỏ yolo) thay thế"
+}

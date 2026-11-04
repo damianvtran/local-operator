@@ -8,6 +8,7 @@
  * the send button switches to the `steer` op (same action, different
  * command) and a stop button appears beside it.
  */
+import { contentDir } from "../lib/content-direction";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useFootFit } from "../lib/use-foot-fit";
@@ -298,7 +299,7 @@ function SlashSheet({
 								<span className="text-ink-dim"> …</span>
 							) : null}
 						</span>
-						<span className="min-w-0 flex-1 truncate text-body-sm text-ink-dim">
+						<span dir={contentDir(c.description)} className="min-w-0 flex-1 truncate text-body-sm text-ink-dim">
 							{c.description}
 						</span>
 					</button>
@@ -1043,9 +1044,17 @@ export function Composer({
 	}, [pid]);
 
 	const addFiles = async (files: Iterable<File>) => {
+		/* Nothing silent: a file that cannot be attached (not an image, or one
+		   the browser cannot decode — e.g. a HEIC this browser lacks a decoder
+		   for) is named in the composer's alert instead of vanishing. */
+		const failed: string[] = [];
 		for (const f of files) {
 			const img = await fileToImage(f);
 			if (img) setImages((cur) => [...cur, img]);
+			else failed.push(f.name || "file");
+		}
+		if (failed.length > 0) {
+			setError(`Couldn't attach ${failed.join(", ")}. Only images the browser can open are supported — try a JPEG or PNG.`);
 		}
 	};
 
@@ -1717,7 +1726,7 @@ export function Composer({
 					{retryPending ? (
 						<>
 							{retainedPreview ? (
-								<p className="mt-2 truncate text-body-sm text-ink-muted">{retainedPreview}</p>
+								<p dir={contentDir(retainedPreview)} className="mt-2 truncate text-body-sm text-ink-muted">{retainedPreview}</p>
 							) : null}
 							<button
 								type="button"
@@ -2018,7 +2027,7 @@ export function Composer({
 					   and keeps its full touch target at every level. */}
 					<button data-foot="model" type="button" onClick={onOpenModels} className={cn(COMPOSER_CHIP, foot.level === 3 ? "w-11 shrink-0" : "min-w-0 flex-1 truncate", "active:text-ink")}
 						aria-label={messageRuntime.t("relay.chrome.composer.model_label", { label: [projection.model_label, projection.effort].filter(Boolean).join(" · ") })}>
-						<span className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>
+						<span data-ltr className="truncate">{projection.model_label || "model"}{projection.effort ? ` · ${projection.effort}` : ""}</span>
 					</button>
 					<SessionStatus projection={projection} compact short={short} mode={foot.level >= 2 ? "hidden" : foot.level === 1 ? "short" : "full"} />
 				</div>

@@ -1,0 +1,27 @@
+{
+  "locale": "ru",
+  "namespace": "wire.settings.hub_defaults",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "RU-015",
+      "severity": "MINOR",
+      "namespace": "wire.settings.hub_defaults",
+      "key": "wire.settings.hub_defaults.model_default.note",
+      "english": "Hub merges use your current default model. The old hub model override is ignored.",
+      "current": "Слияния из хаба используют вашу текущую модель по умолчанию. Прежнее переопределение модели хаба игнорируется.",
+      "problem": "Glossary wave-2 kept-English set: hub `merge` stays Latin; the ru neighbour wire.settings.hub.description says «выполняется merge обновлений». «Слияния» names the same operation differently.",
+      "suggested": "Merge из хаба использует вашу текущую модель по умолчанию. Прежнее переопределение модели хаба игнорируется.",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    }
+  ]
+}

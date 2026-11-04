@@ -1,0 +1,6 @@
+{
+  "wire.errors.sdk_startup.attach_hosting_unconfigured": "{resume} को कोई लाइव रनटाइम सर्व नहीं कर रहा, और यह रूट एक शुरू नहीं कर सकता: {error} इस रूट के लिए होस्टिंग कॉन्फ़िगर करें (उसका config.yml), फिर id को spawn_session()/deliver() से एंगेज करें और रनटाइम होने पर अटैच करें।",
+  "wire.errors.sdk_startup.attach_runtime_missing": "{resume} को कोई लाइव रनटाइम सर्व नहीं कर रहा; इसे इसी प्रोसेस में चलाने के लिए mode=''own'' से खोलें, या पहले spawn_session()/deliver() से एंगेज करें और रनटाइम होने पर अटैच करें।",
+  "wire.errors.sdk_startup.profile_attach_failed": "प्रोफ़ाइल {profile} अटैच नहीं हो सकी",
+  "wire.errors.sdk_startup.tool_inventory_mismatch": "spec.tools {spec_tools} और ApprovalPolicy.declared({policy_tools}) अलग-अलग इन्वेंटरी नामित करते हैं; रन की पहुँच एक बार ही बताएँ"
+}

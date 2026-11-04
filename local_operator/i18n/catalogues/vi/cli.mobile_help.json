@@ -1,0 +1,17 @@
+{
+  "cli.mobile_help.mobile": "Truy cập điện thoại: điều khiển các phiên lop của máy này",
+  "cli.mobile_help.install": "Cài đặt daemon, mật khẩu và LaunchAgent",
+  "cli.mobile_help.status": "Tình trạng daemon, cổng kiểm soát truy cập và các phiên đang chạy",
+  "cli.mobile_help.daemon_action": "{action, select, start{Khởi động} stop{Dừng} restart{Khởi động lại} other{{action}}} daemon",
+  "cli.mobile_help.logs": "Theo dõi nhật ký của daemon và các runtime",
+  "cli.mobile_help.logs_lines": "Số dòng mỗi tệp (đọc tối đa hai tệp)",
+  "cli.mobile_help.logs_follow": "Theo dõi theo tên, để thấy cả nhật ký được tạo hoặc xoay vòng khi bạn đang xem (theo dõi gắn với descriptor sẽ bỏ lỡ cả hai)",
+  "cli.mobile_help.password": "Hiển thị hoặc xoay vòng mật khẩu cổng thông tin (portal)",
+  "cli.mobile_help.devices": "Liệt kê các thiết bị nhận push của máy tính này, hoặc thu hồi/hủy thu hồi một thiết bị",
+  "cli.mobile_help.devices_command": "list (mặc định), revoke <device_id>, hoặc unrevoke <device_id>",
+  "cli.mobile_help.devices_device_id": "device_id mà `lop mobile devices` liệt kê; bắt buộc với revoke/unrevoke",
+  "cli.mobile_help.devices_port": "cổng của daemon di động (mặc định: cổng mặc định của chính daemon)",
+  "cli.mobile_help.uninstall": "Gỡ LaunchAgent",
+  "cli.mobile_help.uninstall_purge": "Xóa cả mật khẩu",
+  "cli.mobile_help.serve": "Chạy daemon (tiền cảnh)"
+}

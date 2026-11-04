@@ -1977,7 +1977,9 @@ def _borrowed_listing_token(provider: str, *, base: Path | None = None) -> str:
 
         worker = threading.Thread(target=_run, daemon=True)
         worker.start()
-        worker.join(timeout=_LISTING_BORROW_JOIN_S)
+        from local_operator.model.deadline import remaining
+
+        worker.join(timeout=remaining(_LISTING_BORROW_JOIN_S))
         return outcome[0] if outcome else ""
     except Exception as exc:  # noqa: BLE001 - metadata is never worth a failed start
         logger.debug("could not borrow a %s token for the listing: %s", provider, exc)
@@ -3967,6 +3969,13 @@ class SessionStreamFn:
 
         self._auth_store = auth_store
         self._settings = settings
+        # Bound by Session after construction; keeping these on the stream lets
+        # every turn read the latest CLI/resolver state without rebuilding
+        # clients. Only the parent's spawn value lives here: the session choice
+        # and the agent pin are the SESSION's own fields, named (with this one)
+        # by ``saver/command.py::saver_choices`` — the two stream copies that
+        # nothing assigned are gone (review M1/m1).
+        self._saver_parent_value: bool | None = None
         self._session_id = session_id
         self._parent_session_id: str | None = None
         # The Anthropic response id of this conversation's last DIAGNOSED turn,
@@ -5304,6 +5313,22 @@ class SessionStreamFn:
             or not request.messages
         )
 
+    def bind_saver_session(self, session: Any) -> None:
+        """Read the owning session's live choice without sharing stream state.
+
+        Forks bind their own child session, so a parent's slash command cannot
+        silently change a child's upload decision.
+        """
+        self._saver_session = session
+
+    def _saver_choices(self) -> tuple[bool | None, bool | None, bool | None]:
+        from local_operator.saver.command import saver_choices
+
+        # The SESSION's three inputs are named in ONE place (review M1/m1): a
+        # second reader here once read a field nothing assigned, so this path
+        # spliced while `/saver status` reported off for the same session.
+        return saver_choices(getattr(self, "_saver_session", None), stream=self)
+
     async def _apply_saver(self, request: ChatRequest) -> ChatRequest:
         """Splice this conversation's Saver epochs into ``request``, or return it unchanged.
 
@@ -5358,8 +5383,23 @@ class SessionStreamFn:
         # gate instead of duplicating it: in LO1 `auto` is refused
         # (`auto_unavailable`) and `opt_in` has no session choice wired, so
         # neither reaches the network.
-        if not resolve_saver(self._settings, Availability(True, True)).on:
-            if mode == "opt_in":
+        session_choice, agent_pin, parent_value = self._saver_choices()
+
+        def resolved(best: Availability | None) -> Any:
+            return resolve_saver(
+                self._settings,
+                best,
+                session_choice=session_choice,
+                agent_pin=agent_pin,
+                parent_value=parent_value,
+            )
+
+        if not resolved(Availability(True, True)).on:
+            # The opt-out guard reads the SAME choice the resolver just used
+            # (review m1): it read a field nothing assigned, so `is not False`
+            # was always true and a user who typed `/saver off` still got the
+            # sign-out notice on every turn.
+            if mode == "opt_in" and session_choice is not False:
                 await self._saver_signed_out_notice()
             return request
         # The availability read is NEVER awaited on the turn (R-1/S-4/Q1): it
@@ -5369,7 +5409,16 @@ class SessionStreamFn:
         if availability is None or availability.expired():
             availability = start_availability_read()
             self._saver_availability_read = availability
-        decision = resolve_saver(self._settings, availability.result())
+        answered = availability.result()
+        owner = getattr(self, "_saver_session", None)  # unbound before Session binds it
+        if answered is not None and owner is not None:
+            # Publish what the read answered so the badge's cached view converges
+            # within one turn. Written as two attribute writes rather than a call
+            # into ``saver.command`` on purpose: this is the per-turn path, and an
+            # import there pulled the i18n runtime into it.
+            owner._saver_availability = answered
+            owner._saver_signed_in = answered.signed_in
+        decision = resolved(availability.result())
         if not decision.on:
             return request
         chain = self._ensure_saver_chain()
@@ -7956,6 +8005,7 @@ class SessionStreamFn:
                     cache_read_tokens=int(usage.cache_read_tokens),
                     cache_write_tokens=int(usage.cache_write_tokens),
                     cache_write_1h_tokens=int(getattr(usage, "cache_write_1h_tokens", 0)),
+                    openai_long_context=bool(getattr(usage, "openai_long_context", False)),
                     reasoning_tokens=int(getattr(usage, "reasoning_tokens", 0)),
                     context_tokens=int(context_tokens or 0),
                     component_chars=component_chars,
@@ -8112,7 +8162,7 @@ def create_stream_fn(
 def calculate_cost(
     model_info: ModelInfo,
     input_tokens: int,
-    output_tokens: int,
+    output_tokens: float,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
     *,
@@ -8198,6 +8248,16 @@ def _cache_tokens_are_inside_input(provider: str) -> bool:
     return not (definition is not None and definition.wire == "anthropic")
 
 
+# OpenAI's published >272k tier is model-specific, not a generic property of
+# OpenAI-compatible wire formats. Restrict inference to documented exact IDs and
+# dated snapshots; future and aggregator models must not inherit these prices.
+_OPENAI_LONG_CONTEXT_MODELS = re.compile(
+    r"^(?:gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
+    r"gpt-5\.6-sol|gpt-5\.6-terra|gpt-5\.6-luna|gpt-5\.5|gpt-5\.5-pro|"
+    r"gpt-5\.4|gpt-5\.4-pro)(?:-\d{4}-\d{2}-\d{2})?$"
+)
+
+
 def cost_for_usage(
     provider: str,
     model_info: ModelInfo,
@@ -8236,6 +8296,11 @@ def cost_for_usage(
     reported = _usage_cost(usage)
     if reported is not None:
         return reported
+    # Login flavours share their canonical provider's accounting, but retain
+    # unrelated aggregator identities so their pricing is never inferred here.
+    from local_operator.providers.registry import credential_provider_id
+
+    provider = credential_provider_id(provider)
     read = _usage_field(usage, "cache_read_tokens")
     written = _usage_field(usage, "cache_write_tokens")
     plain = _usage_field(usage, "input_tokens")
@@ -8244,14 +8309,38 @@ def cost_for_usage(
         # provider that reports more cached tokens than prompt tokens is
         # malformed rather than a reason to hand back a negative bill.
         plain = max(0, plain - read - written)
-    return calculate_cost(
-        model_info,
-        plain,
-        _usage_field(usage, "output_tokens"),
-        read,
-        written,
-        moment=tariff.moment_for(model_info, usage, moment),
-    )
+    output = float(_usage_field(usage, "output_tokens"))
+    if (
+        provider == "openai"
+        and bool(
+            usage.get("openai_long_context", False)
+            if isinstance(usage, Mapping)
+            else getattr(usage, "openai_long_context", False)
+        )
+        and _OPENAI_LONG_CONTEXT_MODELS.fullmatch(model_info.id)
+    ):
+        # The higher rates apply to the entire request, not just the excess.
+        # Scale token buckets rather than catalog rows to retain tariff handling.
+        plain *= 2
+        read *= 2
+        written *= 2
+        output *= 1.5
+    price_moment = tariff.moment_for(model_info, usage, moment)
+    cost = calculate_cost(model_info, plain, output, read, written, moment=price_moment)
+    if provider == "anthropic":
+        # Anthropic's receipt identifies the 1h subset; its documented price is
+        # 2x base, not the catalog's ordinary 5m write rate. A malformed subset
+        # cannot create more billed tokens than the total write count. Other
+        # providers and unknown duration remain on their existing quoted rate.
+        one_hour = min(written, _usage_field(usage, "cache_write_1h_tokens"))
+        write_rate = model_info.cache_writes_price or model_info.input_price
+        cost += (
+            one_hour
+            * (2 * model_info.input_price - write_rate)
+            * tariff.scale_for(model_info, price_moment)
+            / 1_000_000.0
+        )
+    return cost
 
 
 def _usage_cost(usage: Any) -> float | None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -749,3 +750,116 @@ def test_a_16_bit_greyscale_png_keeps_its_gradient():
     # The old clamp made every one of these 255.
     assert dark < mid < light < 255, (dark, mid, light)
     assert abs(dark - 50) <= 3 and abs(mid - 128) <= 3 and abs(light - 205) <= 3
+
+
+# -- size variants -------------------------------------------------------------
+
+
+def test_parse_size_is_strict():
+    assert agent_avatar.parse_size(None) is None
+    for size in agent_avatar.DERIVATIVE_SIZES:
+        assert agent_avatar.parse_size(str(size)) == size
+    for bad in ("", "65", "512", "64.0", "+64", " 64", "0x40", "\u0666\u0664", "064", "0128"):
+        with pytest.raises(ValueError):
+            agent_avatar.parse_size(bad)
+
+
+def test_a_jpeg_original_yields_jpeg_variants(tmp_path):
+    from types import SimpleNamespace
+
+    out = io.BytesIO()
+    Image.new("RGB", (512, 512), (30, 140, 220)).save(out, "JPEG", quality=90)
+    data = out.getvalue()
+    (tmp_path / agent_avatar.JPEG_NAME).write_bytes(data)
+    meta = SimpleNamespace(
+        sha256=hashlib.sha256(data).hexdigest(), mime="image/jpeg", filename="avatar.jpg"
+    )
+    body, mime, tag = agent_avatar.read_sized(tmp_path, meta, 128)
+    assert mime == "image/jpeg" and tag == f"{meta.sha256}-128"
+    assert Image.open(io.BytesIO(body)).format == "JPEG"
+    assert Image.open(io.BytesIO(body)).size == (128, 128)
+    assert (tmp_path / agent_avatar.derivative_name(meta.sha256, 128, mime)).name.endswith(
+        ".128.jpg"
+    )
+    # Unsized is the stored bytes and the bare sha, untouched.
+    assert agent_avatar.read_sized(tmp_path, meta, None) == (data, mime, meta.sha256)
+
+
+def test_a_variant_is_never_built_from_a_file_that_fails_read(tmp_path):
+    """The integrity rules of ``read`` gate a variant: a digest mismatch is not_found."""
+    from types import SimpleNamespace
+
+    out = io.BytesIO()
+    Image.new("RGB", (512, 512)).save(out, "PNG")
+    (tmp_path / agent_avatar.PNG_NAME).write_bytes(out.getvalue())
+    meta = SimpleNamespace(sha256="0" * 64, mime="image/png", filename="avatar.png")
+    with pytest.raises(agent_avatar.AvatarError) as caught:
+        agent_avatar.read_sized(tmp_path, meta, 64)
+    assert caught.value.reason == agent_avatar.NOT_FOUND
+    assert list(tmp_path.glob(".avatar.*")) == []
+
+
+def _png_original(tmp_path, color=(30, 140, 220)):
+    from types import SimpleNamespace
+
+    out = io.BytesIO()
+    Image.new("RGB", (512, 512), color).save(out, "PNG")
+    data = out.getvalue()
+    (tmp_path / agent_avatar.PNG_NAME).write_bytes(data)
+    return SimpleNamespace(
+        sha256=hashlib.sha256(data).hexdigest(), mime="image/png", filename="avatar.png"
+    )
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFOs only")
+def test_a_fifo_at_the_variant_name_is_a_miss_not_a_hang(tmp_path):
+    """Review F1: a writer-less FIFO must not block the open (and an executor thread)."""
+    import threading
+
+    meta = _png_original(tmp_path)
+    cache = tmp_path / agent_avatar.derivative_name(meta.sha256, 64, "image/png")
+    os.mkfifo(cache)
+    result: dict[str, Any] = {}
+
+    def run() -> None:
+        result["value"] = agent_avatar.read_sized(tmp_path, meta, 64)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=2.0)
+    if worker.is_alive():
+        # Unblock the stuck open so the daemon thread can exit, then fail.
+        with open(cache, "wb"):
+            pass
+        pytest.fail("read_sized blocked on a FIFO planted at the variant name")
+    body, mime, _tag = result["value"]
+    assert mime == "image/png" and Image.open(io.BytesIO(body)).size == (64, 64)
+    # Rebuilt over the FIFO: the atomic rename replaced it with a regular file.
+    assert cache.is_file() and not cache.is_fifo()
+
+
+def test_a_cached_variant_of_the_wrong_format_is_rebuilt(tmp_path):
+    """Review M1: a right-edge JPEG planted as ``.64.png`` is not served as PNG."""
+    meta = _png_original(tmp_path)
+    cache = tmp_path / agent_avatar.derivative_name(meta.sha256, 64, "image/png")
+    out = io.BytesIO()
+    Image.new("RGB", (64, 64), (0, 255, 0)).save(out, "JPEG")
+    cache.write_bytes(out.getvalue())
+    body, mime, _tag = agent_avatar.read_sized(tmp_path, meta, 64)
+    assert mime == "image/png" and Image.open(io.BytesIO(body)).format == "PNG"
+    assert Image.open(io.BytesIO(body)).convert("RGB").getpixel((32, 32)) == (30, 140, 220)
+
+
+def test_remove_derivatives_sweeps_orphaned_staging_temps(tmp_path):
+    """Review N2: a SIGKILL between write and rename must not strand a temp forever."""
+    meta = _png_original(tmp_path)
+    variant = agent_avatar.derivative_name(meta.sha256, 128, "image/png")
+    orphan = tmp_path / f"{variant}.4242.deadbeef.tmp"
+    orphan.write_bytes(b"partial")
+    # The PICTURE's own staging temp is not the cache's to delete.
+    picture_temp = tmp_path / ".avatar.png.4242.deadbeef.tmp"
+    picture_temp.write_bytes(b"photo")
+    agent_avatar.remove_derivatives(tmp_path)
+    assert not orphan.exists()
+    assert picture_temp.exists()
+    assert (tmp_path / agent_avatar.PNG_NAME).exists()

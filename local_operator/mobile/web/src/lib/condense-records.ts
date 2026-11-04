@@ -84,6 +84,9 @@ type Base = {
 	 * optional and the model's time readers answer null when it is absent.
 	 */
 	ts?: number;
+	/** Existing admitted media stays owned by its wire row, never a receipt count. */
+	images?: readonly unknown[];
+	videos?: readonly unknown[];
 };
 
 export type CondenseRecord =
@@ -125,7 +128,7 @@ export type CondenseRecord =
 	| (Base & { kind: "ask_timeout"; text: string; level: string });
 
 /** The receipt families the fold groups by (G6). */
-const RECEIPT_CUSTOM_TYPES = new Set(["job_result", "monitor_prompt", "hub_message"]);
+const RECEIPT_CUSTOM_TYPES = new Set(["job_result", "monitor_prompt", "hub_message", "team_bridge_message"]);
 
 /**
  * The stable identity of a row, across the live/replay boundary (G9).
@@ -208,6 +211,8 @@ export function toCondenseRecord(entry: TranscriptEntry): CondenseRecord | null 
 				id,
 				ts,
 				toolName: entry.tool_name,
+				images: entry.images,
+				videos: entry.videos,
 				phase: phaseOf(entry),
 				isError: entry.tool_state === "failed",
 				stopped: entry.tool_state === "interrupted",
@@ -226,7 +231,7 @@ export function toCondenseRecord(entry: TranscriptEntry): CondenseRecord | null 
 			   session_state and MCP warnings with real text stay visible. */
 			if (!entry.text.trim()) return null;
 			const severity = String(entry.details?.severity ?? "info");
-			const customType = entry.custom_type || "";
+			const customType = entry.custom_type || (typeof entry.details?.custom_kind === "string" ? entry.details.custom_kind : "");
 			if (customType === "wake_prompt" || entry.details?.notice_kind === "wake")
 				return { kind: "wake", id, ts, text: entry.text };
 			if (customType === "session_incident")

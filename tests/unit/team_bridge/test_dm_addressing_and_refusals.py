@@ -186,7 +186,10 @@ class DmClient:
         origin_session_id: str | None = None,
         thread_root_id: str | None = None,
         expected_account_id: str | None = None,
+        pre_http_guard: Any = None,
     ) -> Any:
+        if pre_http_guard is not None:
+            pre_http_guard()
         self.calls.append(
             {
                 "method": "conversation_send",
@@ -643,17 +646,17 @@ async def test_a_dm_post_spends_the_reply_guard_budget(
     client = DmClient([_member()])
     runtime = _runtime(client, config_dir=tmp_path)
 
-    for _ in range(reply_guard.BUDGET_POSTS):
+    for _ in range(reply_guard.ABSOLUTE_POSTS):
         assert (await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT)))["ok"] is True
     refused = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT))
 
     assert refused["ok"] is False
-    assert refused["code"] == reply_guard.CODE_BUDGET
-    # The structured answer an agent can act on instead of retrying.
-    assert "no_reply" in refused["next"] and refused["retry_after_s"] > 0
+    assert refused["code"] == reply_guard.CODE_ABSOLUTE
+    # The structured answer: keep the draft, retry once the window frees.
+    assert "retry after retry_after_s" in refused["next"] and refused["retry_after_s"] > 0
     # The refused post never reached the hub.
     sends = [call for call in client.calls if call["method"] == "conversation_send"]
-    assert len(sends) == reply_guard.BUDGET_POSTS
+    assert len(sends) == reply_guard.ABSOLUTE_POSTS
 
 
 @pytest.mark.asyncio
@@ -675,14 +678,14 @@ async def test_a_dm_the_hub_refuses_gives_the_budget_back(
 
     client = RefusingSend([_member()])
     runtime = _runtime(client, config_dir=tmp_path)
-    for _ in range(reply_guard.BUDGET_POSTS - 1):
+    for _ in range(reply_guard.ABSOLUTE_POSTS - 1):
         assert (await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT)))["ok"] is True
 
     client.fail_next = True
     failed = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT))
     assert failed["ok"] is False and refused_code(failed) == "post_failed"
 
-    # Five posts landed, so the sixth slot is still free.
+    # One fewer than the cap landed, so the last slot is still free.
     assert (await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT)))["ok"] is True
     assert (await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT)))["ok"] is False
 

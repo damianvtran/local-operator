@@ -1,0 +1,98 @@
+{
+  "locale": "ru",
+  "namespace": "wire.settings",
+  "audit_date": "2026-10-31",
+  "record_created_at": "2026-10-31T21:49:47.317902-04:00",
+  "audit_kind": "scoped_remediation_reaudit",
+  "source_audit_revision": "727e5b5b969da813e0cadf1fd1d9fbd1ae106665",
+  "compared_parent_revision": "64b11982191114f777e6eb6064919dafc7305c83",
+  "key_count": 825,
+  "reviewed_key_count": 13,
+  "unchanged_key_count_not_semantically_reaudited": 812,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "a89765333244",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "independence_basis": "Request explicitly identifies a different translator session; auditor did not write the translations and reviewed an immutable supplied head. Translator session ID not supplied.",
+    "translator_session": null,
+    "actual_model_source": "Host [model switch] message in this session: anthropic/claude-sonnet-5-5 -> anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider failure: quota. All substantive catalogue inspection, linguistic judgement and validation occurred after the final switch.",
+    "fallback_used": true
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+      "sha256": "4cb113ca6fc28e2cb2a6b24d3aa1a7ece1a6dca7292bcf19cb359998af44080d"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.context.json",
+      "sha256": "477f89b598d041c0e10427cafe4736ddd567303665aa702b1493b0685418e8d2"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+      "sha256": "548e7ff0e80b855fad357ca65b19cbc31306b0b70503f132347d1e9c71c278da"
+    }
+  },
+  "reference_hashes": [
+    {
+      "path": "i18n/style-guides/ru.md",
+      "sha256": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+    },
+    {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/wire.settings/reaudit-2026-10-31-fix/findings.json",
+      "sha256": "3aaa8268caeb0d9292f559c7bda26642c11d9e59faf767a1a6635f179e987be9",
+      "kind": "audit_notes_not_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.settings/reaudit-2026-10-31-fix/verdict.txt",
+      "sha256": "da7dff1a9c714a20d6beb9c644978d51609213aa4bacb54b0e9f1aec2a185fb0",
+      "kind": "audit_notes_not_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.settings/reaudit-2026-10-31-fix/audit.log",
+      "sha256": "03726e84154ab2737fa7b4ca1ebd864df5edf12d20666b0c4e1b992ab3acdc00",
+      "kind": "actual_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.settings/reaudit-2026-10-31-fix/verification.py.txt",
+      "sha256": "08d1e8713e746ea071ea7dd19741ea0ee68be35fae1c9da6dd8d2e7930351a89",
+      "kind": "executed_verification_source"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  },
+  "verification": {
+    "catalogue_validator": {
+      "command": "env -i HOME=<session-scratch>/isolated-home PATH=\"$PATH\" TERM=xterm-256color /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only",
+      "exit_code": 0,
+      "actual_output": "check.py: catalogue checks: 0 problem(s)"
+    },
+    "locale_parity": "Repository catalogue loader plus arguments_match used for all 825 keys; key order compared with both English and parent Russian file.",
+    "formatting": "Repository runtime.render_message used for each of the 13 changed values with empty params; all have empty argument tuples.",
+    "negative_controls": "Parent fails read <url> preservation; current head passes. Injected parameter mismatch rejected by arguments_match; missing format parameter rejected by runtime.",
+    "rig_correction": "First scoped verification attempt wrongly compared message_arguments empty tuple with {}; assertion failed. Corrected only the verification harness to expect (). Original failure and passing rerun retained in audit.log.",
+    "rendered_ui": "Not performed: this is a scoped linguistic/formatting audit, not a layout or flow test. Width measured using rich.cells.cell_len."
+  },
+  "ledger_row_appended": false,
+  "catalogue_modified": false,
+  "audit_notes_not_execution_log": [
+    "findings.json",
+    "verdict.txt"
+  ],
+  "retention": "Canonical repository evidence bundle; locally committed for manager pickup, not claimed merged to main."
+}

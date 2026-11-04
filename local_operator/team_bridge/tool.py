@@ -45,6 +45,12 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
   coordinate without flooding the channel (e.g. one QA-claim thread per item
   in #agents). Threads are one level: the root must be a channel-level message.
 
+  ``in_reply_to_message_id`` binds the exact admitted inbound message to this
+  conversation BEFORE lookup, budget or network I/O. Thread roots do not bind
+  replies. After actual bridge input dispatch in a run, supply this binding or
+  declare ``new_post: true`` intentionally. That declaration is model-supplied
+  intent, NOT semantic isolation, trusted authority, or duplicate suppression.
+
   ``to: {"name": …}`` DIRECTS the post at one member, and the name is resolved,
   never guessed: trimmed, case-insensitive, whole DISPLAY name only (no handle,
   no email, no substring), against THIS conversation's ACTIVE members — the
@@ -62,7 +68,15 @@ THE CHANNEL OPS work the conversation domain AS THIS SESSION'S AGENT:
 - **channel_history** — a bounded page of messages. The server admits bodies
   per (message, endpoint) screening; an agent sees the METADATA (sender, seq,
   hash) of messages it has not admitted, with ``body`` null, and only the
-  admitted bodies. There is intentionally no local body cache here. The one
+  admitted bodies. A null body also carries ``body_state`` so it is never read
+  as a blank message: ``held`` (screening has not released it; only a coarse
+  ``hold_class`` and ``held_for_s`` are shown), ``not_admitted``,
+  ``rejected`` (hub-supplied only, never derived here), or ``unavailable``
+  (the agent's own post could not be read back in this read: the read-back
+  failed, or the page held more own posts than one read fetches). It means this agent
+  has not been given that message; it is NOT an empty message and its content
+  must not be inferred. No body, hold code or category is ever shown.
+  There is intentionally no local body cache here. The one
   exception to ``body: null`` is a message THIS account authored: the hub never
   delivers it back for admission, so history and thread fetch its text per read
   (hash-verified, never stored) so a sender can read what it wrote.
@@ -123,6 +137,7 @@ import base64
 import hashlib
 import json
 import re
+import time
 import unicodedata
 import uuid
 from collections.abc import Mapping
@@ -272,6 +287,9 @@ class BridgeRuntime:
     #: a later boundary may re-admit it once the local gates hold (§36).
     admission: str = "pending"
     admission_note: str = ""
+    # Run-local dispatch evidence, never inferred from persisted conversation
+    # text. Remains true after owed cards clear; the session resets at boundaries.
+    bridge_input_presented: bool = False
     #: The ONE shared in-flight admission task (S-2): callers JOIN it instead
     #: of queueing their own fetch, and it is cancelled/discarded when the
     #: bound authority is revoked. Lazily created (no loop-bound default).
@@ -402,6 +420,14 @@ class BridgeToolParams(BaseModel):
     #: channel_post: reply in this root message's thread; channel_thread: the
     #: thread to read. A conversation message id (bcmsg_…).
     thread_root_id: str = ""
+    in_reply_to_message_id: str = Field(
+        default="",
+        description="Exact admitted inbound bcmsg_; not thread placement.",
+    )
+    new_post: bool = Field(
+        default=False,
+        description="Intent only; no semantic isolation or authority.",
+    )
     # dm: the person (account_id) or agent (endpoint_id, from `directory`).
     # Kept as plain strings so the shared pair-lane validator never reads them
     # as a `send` recipient; `to` reaches these same two fields through
@@ -1371,6 +1397,64 @@ def _channel_members_with_creator(
     return out
 
 
+def _validate_reply_destination(
+    runtime: BridgeRuntime, args: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Bind a declared reply before admission I/O, member lookup or budget.
+
+    A thread root is presentation, not evidence of which inbound delivery is
+    being answered. The explicit new-post escape hatch states intent only: a
+    model can misdeclare it, so this is not a semantic noninterference claim.
+    """
+    from .store import Store, StoreRefused
+
+    message_id = args.get("in_reply_to_message_id", "")
+    new_post = args.get("new_post", False)
+    if not isinstance(message_id, str) or not isinstance(new_post, bool):
+        return _error("reply binding needs a message id string and boolean new_post")
+    message_id = message_id.strip()
+    if message_id and new_post:
+        return _error(
+            "new_post contradicts in_reply_to_message_id; nothing was sent",
+            code="reply_binding_conflict",
+        )
+    if not message_id:
+        if runtime.bridge_input_presented and not new_post:
+            return _error(
+                "this run received bridge input: supply in_reply_to_message_id "
+                "or intentionally declare new_post; thread_root_id is not reply binding",
+                code="reply_binding_required",
+            )
+        return None
+    if _CONVERSATION_MESSAGE_ID.fullmatch(message_id) is None:
+        return _error("in_reply_to_message_id must be an admitted message id (bcmsg_…)")
+    try:
+        row = Store(Path(runtime.config_dir)).admitted_inbound_reservation_readonly(
+            runtime.owner,
+            in_reply_to_message_id=message_id,
+            designated_session=runtime.session_id,
+        )
+    except (StoreRefused, OSError, UnicodeDecodeError):
+        return _error(
+            "reply binding could not be verified; nothing was sent",
+            code="reply_binding_unavailable",
+        )
+    if row is None:
+        return _error(
+            "no unique current admitted reply binding; nothing was sent",
+            code="reply_binding_unavailable",
+        )
+    channel_id = args.get("channel_id", "")
+    if not isinstance(channel_id, str):
+        return _error("channel_post needs a conversation id (bcv_…)")
+    if row["conversation_id"] != channel_id.strip():
+        return _error(
+            "in_reply_to_message_id belongs to a different conversation; nothing was sent",
+            code="reply_destination_mismatch",
+        )
+    return None
+
+
 async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[str, Any]:
     """Run one tool op. Returns a JSON-ish dict; the AgentTool wrapper turns it
     into a ``ToolResult`` (and the honest error shape into ``is_error``)."""
@@ -1419,6 +1503,10 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
     fence = outbound_tool_fence(runtime) if op in OUTBOUND_OPS else owner_fence_refusal(runtime)
     if fence is not None:
         return _error(fence["error"], code=fence["code"])
+    if op == "channel_post":
+        refused = _validate_reply_destination(runtime, args)
+        if refused is not None:
+            return refused
     # Refuse unsupported destinations before even scheduling admission I/O.
     # The local authority fence keeps precedence; no invalid destination can
     # create an outbox intent, send a message, or trigger a status request.
@@ -1777,23 +1865,57 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 return _error(str(failure), code=failure.code)
             mentions = [member.mention()]
             recipient_account_id = member.account_id
+        # Member resolution awaited remote I/O after the early binding check.
+        # Revocation during that wait must refuse before even spending budget.
+        # Keep this cheap early refusal, then repeat at each actual pre-HTTP
+        # boundary below: OAuth/refresh may await after the tool's handoff.
+        fence = outbound_tool_fence(runtime)
+        if fence is not None:
+            return _error(fence["error"], code=fence["code"])
+        refused = _validate_reply_destination(runtime, args)
+        if refused is not None:
+            return refused
         # LOOP/COST GUARD (wake contract): every conversation message now wakes
         # its agent members, so two agents answering every wake would trade
         # posts for ever. Reserved LAST among the local checks (a malformed or
         # unresolvable call never spends budget) and BEFORE the wire write (a
         # concurrent post of the same endpoint sees the slot). Fail closed: a
         # guard that cannot read its state refuses rather than going silent.
-        try:
-            slot = reply_guard.reserve_post(
-                runtime.config_dir, endpoint_id=endpoint_id, conversation_id=channel_id
+        slot = None
+
+        class DispatchRefused(Exception):
+            def __init__(self, result: dict[str, Any]) -> None:
+                self.result = result
+
+        def pre_http_guard() -> None:
+            nonlocal slot
+            fence = outbound_tool_fence(runtime)
+            refusal = (
+                _error(fence["error"], code=fence["code"])
+                if fence is not None
+                else _validate_reply_destination(runtime, args)
             )
-        except reply_guard.ReplyGuardUnavailable:
-            return _error(
-                "the reply guard could not read its state; not posting",
-                code=reply_guard.CODE_UNAVAILABLE,
-            )
-        if isinstance(slot, reply_guard.Refusal):
-            return slot.as_result()
+            if refusal is not None:
+                raise DispatchRefused(refusal)
+            # Reserve only when the first physical attempt is authorized.
+            # Releasing an early slot would still consume the run counter;
+            # retries instead revalidate and reuse the same slot/client_ref.
+            if slot is None:
+                try:
+                    reserved = reply_guard.reserve_post(
+                        runtime.config_dir, endpoint_id=endpoint_id, conversation_id=channel_id
+                    )
+                except reply_guard.ReplyGuardUnavailable:
+                    raise DispatchRefused(
+                        _error(
+                            "the reply guard could not read its state; not posting",
+                            code=reply_guard.CODE_UNAVAILABLE,
+                        )
+                    ) from None
+                if isinstance(reserved, reply_guard.Refusal):
+                    raise DispatchRefused(reserved.as_result())
+                slot = reserved
+
         # ONE ref per CALL, minted before dispatch: the client's own 401 refresh
         # retry re-sends this exact body, so that retry is idempotent on the
         # server; a second tool call mints a second ref and is a second message.
@@ -1808,13 +1930,21 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 origin_session_id=runtime.session_id,
                 thread_root_id=thread_root_id or None,
                 mentions=mentions or None,
+                pre_http_guard=pre_http_guard,
             )
+        except DispatchRefused as failure:
+            if slot is not None:
+                reply_guard.release(
+                    runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=channel_id
+                )
+            return failure.result
         except Exception as failure:
             # The hub did not take it: the budget slot goes back. (The run
             # counter does not — see ``reply_guard.release``.)
-            reply_guard.release(
-                runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=channel_id
-            )
+            if slot is not None:
+                reply_guard.release(
+                    runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=channel_id
+                )
             return _error(f"the post did not confirm: {_failure_text(failure)}", code="post_failed")
         # ONE receipt shape for every conversation write (main's `_post_receipt`,
         # shared with `dm`), EXTENDED with the resolved recipient rather than
@@ -1895,6 +2025,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             restored = await _restore_own_bodies(
                 runtime, channel_id, result["messages"], endpoint_id
             )
+            await _annotate_body_state(runtime, result["messages"])
         else:
             restored = set()
         images = await _history_images(runtime, channel_id, result, endpoint_id, restored)
@@ -1943,6 +2074,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             if isinstance(replies, list):
                 thread_rows.extend(replies)
         restored = await _restore_own_bodies(runtime, channel_id, thread_rows, endpoint_id)
+        await _annotate_body_state(runtime, thread_rows)
         images = await _history_images(
             runtime, channel_id, {"messages": thread_rows}, endpoint_id, restored
         )
@@ -2082,6 +2214,130 @@ async def _restore_own_bodies(
     filled: set[str] = set()
     await asyncio.gather(*(fill(row) for row in wanted))
     return filled
+
+
+#: The closed ``body_state.state`` vocabulary an agent may be shown on a row
+#: whose ``body`` is null. ``unavailable`` is local-only (the agent's own post
+#: could not be read back in this read, whether the fetch failed or the row was
+#: past :data:`OWN_BODY_FETCH_MAX`); the other three may also arrive from the hub.
+_HUB_BODY_STATES = frozenset({"held", "rejected", "not_admitted"})
+_BODY_STATE_SINCE_MAX = 40
+#: ``since`` is a timestamp the model will read as one: only the ISO-8601 shape
+#: (``T`` separator, explicit zone) passes, so a hub string cannot smuggle prose
+#: through a field that looks like data. ASCII digits only (``re.ASCII``).
+_BODY_STATE_SINCE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})", re.ASCII
+)
+
+
+def _hub_body_state(value: Any) -> dict[str, str] | None:
+    """The hub's own ``body_state`` reduced to ``state`` (+ ``since``), or ``None``.
+
+    Forward-compatible wire shape: the hub knows what this machine cannot (a
+    rejection), so a well-formed value wins. Everything else on it — a reason,
+    a category, a label — is dropped, and a malformed value is ignored so the
+    local answer stands.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    state = value.get("state")
+    if not isinstance(state, str) or state not in _HUB_BODY_STATES:
+        return None
+    kept = {"state": state}
+    since = value.get("since")
+    if (
+        isinstance(since, str)
+        and len(since) <= _BODY_STATE_SINCE_MAX
+        and _BODY_STATE_SINCE.fullmatch(since) is not None
+    ):
+        kept["since"] = since
+    return kept
+
+
+async def _annotate_body_state(runtime: BridgeRuntime, rows: list[Any]) -> None:
+    """Say WHY a row's ``body`` is still null, in place (``body_state``).
+
+    WHY. An agent read ``body: null`` as a blank message. The hub sends it for a
+    message this endpoint has not been given: held in screening, or not
+    admitted. The agent must learn that, and nothing more.
+
+    WHAT IT NEVER DOES. It never fetches or returns another member's body, never
+    reads ``screening_receipts`` (so ``rejected`` can only come from the hub —
+    deriving it here would disclose moderation outcomes), and never emits the
+    hold code, categories or reasons: only a coarse class and an age. A row that
+    already has a body gets nothing, and a stray hub ``body_state`` on it is
+    removed.
+    """
+
+    import asyncio
+
+    pending: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("body") is not None:
+            row.pop("body_state", None)
+            continue
+        # Reduce (or drop) the hub's value on EVERY null-body row first: a row
+        # whose id is not a conversation message id still passes through this
+        # function, and must not carry a reason/category/long string onward.
+        reduced = _hub_body_state(row.get("body_state"))
+        if reduced is None:
+            row.pop("body_state", None)
+        else:
+            row["body_state"] = reduced
+        message_id = row.get("id")
+        if (
+            not isinstance(message_id, str)
+            or _CONVERSATION_MESSAGE_ID.fullmatch(message_id) is None
+        ):
+            continue  # no local state is ever derived for a non-conversation id
+        pending.append(row)
+    if not pending:
+        return
+
+    holds: dict[str, dict[str, Any]] = {}
+    if any(_hub_body_state(row.get("body_state")) is None for row in pending):
+        from .store import Store, StoreRefused
+
+        try:
+            holds = await asyncio.to_thread(
+                Store(Path(runtime.config_dir)).hold_states_readonly,
+                runtime.owner,
+                [row["id"] for row in pending],
+            )
+        except (StoreRefused, OSError):
+            holds = {}  # no hold information: the row reads not_admitted
+
+    own = getattr(runtime.owner, "account_id", "")
+    now = time.time()
+    for row in pending:
+        from_hub = _hub_body_state(row.get("body_state"))
+        if from_hub is not None:
+            row["body_state"] = from_hub
+            continue
+        hold = holds.get(row["id"])
+        sender = row.get("sender")
+        if hold is not None:
+            state: dict[str, Any] = {"state": "held", "hold_class": hold["hold_class"]}
+            created = hold.get("created_at")
+            if isinstance(created, (int, float)):
+                state["held_for_s"] = max(0, int(now - created))
+            row["body_state"] = state
+        elif (
+            own
+            and isinstance(sender, dict)
+            and sender.get("account_id") == own
+            and sender.get("kind") == "agent"
+        ):
+            # The owner's own agent post that is still null after the read-back
+            # pass: the fetch failed, or the row sat past OWN_BODY_FETCH_MAX and
+            # was never tried. Either way the text exists and is ours, it just
+            # could not be read back in THIS read.
+            row["body_state"] = {"state": "unavailable"}
+        else:
+            row["body_state"] = {"state": "not_admitted"}
 
 
 async def _history_images(
@@ -2274,7 +2530,8 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
             "relay request means dm, not 'forward this'); channel_post: rooms; "
             "send/reply: only to answer a pair-inbox (bmsg_) delivery. "
             "shared_*: conversations your owner shared with you. Cannot approve "
-            "or deny. More: read tool://bridge."
+            "or deny. The one channel for teammates; reply where it arrived. "
+            "More: read tool://bridge."
         ),
         parameters=BridgeToolParams.model_json_schema(),
         approval_tier="write",

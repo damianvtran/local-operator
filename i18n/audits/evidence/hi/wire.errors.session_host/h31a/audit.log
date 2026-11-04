@@ -1,0 +1,8 @@
+command: /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+cwd: /Users/damian/.local-operator/sessions/d2959affe186/scratchpad/host-copy-hi/validation-tree
+exit_code: 0
+stdout:
+check.py: catalogue checks: 0 problem(s)
+stderr:
+
+Independent assertions: committed source/context hashes match requested hashes; validation-tree bytes match committed source/context and candidate; valid JSON and exact 3-key parity; no ICU/placeholder/plural/markup branches in source or target; literal parity; no unexpected bidi controls, joiners, or Devanagari digits.

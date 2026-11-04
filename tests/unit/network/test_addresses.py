@@ -384,6 +384,7 @@ def test_a_stale_declared_private_address_is_skipped_with_the_reason(
     """The reported stale address is not published when the live table disproves it."""
     monkeypatch.setattr(addresses, "_interface_ipv4s", _table(("en0", _UP, "10.9.0.2")))
     monkeypatch.setattr(addresses, "_default_route_address", lambda: "10.9.0.2")
+    monkeypatch.setattr(relay, "_STALE_ADVERTISED_WARNED", set())
     settings = relay.NetworkSettings(port=4097, advertise_hosts=("172.20.13.239:4097",))
     caplog.set_level("WARNING", logger=relay.__name__)
 
@@ -392,6 +393,28 @@ def test_a_stale_declared_private_address_is_skipped_with_the_reason(
         "Skipping advertised address 172.20.13.239:4097: 172.20.13.239 is a private "
         "address absent from this host's live interface table."
     ]
+
+
+def test_a_stale_declared_address_warns_once_per_address_and_is_always_skipped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The skip runs on every refresh; the WARNING runs once per address per process.
+
+    Live log, 2026-11-02: 28k+ identical lines from one stale declaration. A second
+    distinct address still gets its own line, and the skip never relaxes.
+    """
+    monkeypatch.setattr(relay, "_STALE_ADVERTISED_WARNED", set())
+    monkeypatch.setattr(addresses, "_interface_ipv4s", _table(("en0", _UP, "10.9.0.2")))
+    monkeypatch.setattr(addresses, "_default_route_address", lambda: "10.9.0.2")
+    caplog.set_level("WARNING", logger=relay.__name__)
+    first = relay.NetworkSettings(port=4097, advertise_hosts=("172.20.13.239:4097",))
+    for _ in range(3):
+        assert relay.advertise_endpoints(first) == ["10.9.0.2:4097"]
+    assert len(caplog.messages) == 1 and "172.20.13.239:4097" in caplog.messages[0]
+    second = relay.NetworkSettings(port=4097, advertise_hosts=("192.168.0.242:4097",))
+    for _ in range(2):
+        assert relay.advertise_endpoints(second) == ["10.9.0.2:4097"]
+    assert len(caplog.messages) == 2 and "192.168.0.242:4097" in caplog.messages[1]
 
 
 @pytest.mark.parametrize(

@@ -1372,6 +1372,25 @@ async def test_the_opener_skips_a_harness_injected_first_row(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("human", [None, "Please investigate the tool warning"])
+async def test_the_opener_skips_legacy_recovery_messages(tmp_path, human):
+    from local_operator.harness.chrome_prompts import (
+        MISSING_ARGUMENTS_RECOVERY_PROMPT,
+        REPEATED_TOOL_ERRORS_RECOVERY_PROMPT,
+    )
+
+    transcript = Transcript(tmp_path / "s")
+    await transcript.append_messages(
+        [
+            Message.user(MISSING_ARGUMENTS_RECOVERY_PROMPT),
+            Message.user(REPEATED_TOOL_ERRORS_RECOVERY_PROMPT),
+        ]
+        + ([Message.user(human)] if human else [])
+    )
+    assert window(transcript).opener_text == (human or "")
+
+
+@pytest.mark.asyncio
 async def test_the_opener_still_takes_a_real_first_row(tmp_path):
     """Negative control: with nothing injected, the opener is the first row."""
     transcript = Transcript(tmp_path / "s")

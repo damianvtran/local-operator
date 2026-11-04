@@ -30,10 +30,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
-import os
-import tempfile
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -135,26 +131,9 @@ async def live_owners(
     instead; ``scan`` globs ``*.json`` and checks ``pid_alive``, so the
     records stay truthful for all of them.
     """
-    from local_operator.session.runtime import registry
+    from tests.sidebar_registry import rekey_session_registry
 
-    def publish(record: Any, root: Path | None = None, dirname: str = registry.RUN_DIRNAME) -> Path:
-        # ``dirname`` is the shared registry's namespace parameter (session
-        # records and the serve daemon's are one implementation now): accepted
-        # and passed through so this stub keeps the real signature, while the
-        # re-keying below — the reason the stub exists at all — is unchanged.
-        directory = registry.ensure_run_dir(root, dirname)
-        record.heartbeat_at = time.time()
-        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".x.", suffix=".tmp")
-        with os.fdopen(fd, "w") as handle:
-            json.dump(record.to_json(), handle)
-        target = directory / f"{record.pid}-{record.session_id}.json"
-        os.replace(tmp, target)
-        return target
-
-    monkeypatch.setattr(registry, "publish", publish)
-    monkeypatch.setattr(
-        registry, "unpublish", lambda pid, root=None, dirname=registry.RUN_DIRNAME: None
-    )
+    rekey_session_registry(monkeypatch)
 
     servers: dict[str, RuntimeServer] = {}
     handles: list[ServingSessionHandle] = []

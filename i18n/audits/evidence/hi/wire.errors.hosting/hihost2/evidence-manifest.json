@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "record_kind": "portable_evidence_manifest",
+  "audit_id": "hi-hosting-r1-786d3d9f",
+  "receipt": "receipt.json",
+  "report": "report.md",
+  "file_count": 2,
+  "files": [
+    {
+      "path": "record.json",
+      "bytes": 7828,
+      "sha256": "3155fa75ead4c450fdc1a2e1d555a2f7e8cefdc3eff15c40e290fbb21081953c",
+      "origin": "/Users/damian/.local-operator/sessions/786d3d9ff0bb/scratchpad/hosting-hi-audit-reader2/record.json"
+    },
+    {
+      "path": "report.md",
+      "bytes": 6891,
+      "sha256": "2ce97c3aa7887034a1d5d256e67124b7e4a1502a455c573ad3c2132647e2bffe",
+      "origin": "/Users/damian/.local-operator/sessions/786d3d9ff0bb/scratchpad/hosting-hi-audit-reader2/report.md"
+    }
+  ]
+}

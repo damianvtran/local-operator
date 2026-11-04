@@ -1,0 +1,63 @@
+{
+  "locale": "ru",
+  "namespace": "tui.app",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 2
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "RU-004",
+      "severity": "MINOR",
+      "namespace": "tui.app",
+      "key": "tui.app.config.needs_relaunch",
+      "english": "{names} {count, plural, one {needs} other {need}} a relaunch",
+      "current": "{names}: {count, plural, one {требуется} few {требуются} many {требуются} other {требуются}} перезапуск",
+      "problem": "few/many/other arms read «требуются перезапуск» — plural verb with a singular subject «перезапуск» is ungrammatical. The subject here is 'relaunch', not {names}.",
+      "suggested": "{names}: требуется перезапуск (no plural needed; or keep ICU with «требуется» in every arm)",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    },
+    {
+      "round": 1,
+      "id": "RU-005",
+      "severity": "MINOR",
+      "namespace": "tui.app",
+      "key": "tui.app.help.copy_note",
+      "english": "copies the highlighted range in the composer",
+      "current": "копирует выделенный фрагмент в поле ввода",
+      "problem": "«копирует выделенный фрагмент в поле ввода» reads as copying INTO the composer; English is copying the range that is highlighted in the composer.",
+      "suggested": "копирует фрагмент, выделенный в поле ввода",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    },
+    {
+      "round": 1,
+      "id": "RU-006",
+      "severity": "NIT",
+      "namespace": "tui.app",
+      "key": "tui.app.stop_all.already_leaving",
+      "english": "{shown} already leaving — asked again, then left alone",
+      "current": "{shown} уже завершаются — запрошено повторно, дальше не трогаем",
+      "problem": "Invariant plural «завершаются» gives «1 уже завершаются» at count 1.",
+      "suggested": "уже завершаются: {shown} — запрошено повторно, дальше не трогаем",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    },
+    {
+      "round": 2,
+      "id": "RU2-007",
+      "severity": "NIT",
+      "namespace": "tui.app",
+      "key": "tui.app.stop_all.already_leaving",
+      "english": "{shown} already leaving — asked again, then left alone",
+      "current": "уже завершаются: {shown} — запрошено повторно, дальше не трогаем",
+      "problem": "The changed value keeps the first-person «дальше не трогаем» ('we leave them alone'). The ru style guide prefers impersonal constructions.",
+      "suggested": "уже завершаются: {shown} — запрошено повторно, больше не трогаются",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ]
+}

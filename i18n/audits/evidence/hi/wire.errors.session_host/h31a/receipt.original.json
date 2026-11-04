@@ -1,0 +1,26 @@
+{
+  "record_reference": "i18n/audits/evidence/hi/wire.errors.session_host/h31a/record.json",
+  "staging_only": true,
+  "files": [
+    {
+      "path": "/Users/damian/.local-operator/sessions/b2f3bfde5529/scratchpad/hi-host-audit-a/record.json",
+      "planned_tracked_path": "i18n/audits/evidence/hi/wire.errors.session_host/h31a/record.json",
+      "sha256": "8cab186e7517de8c23452a13f2491f2dc14a41cd7022dc36f1f71b276c226421"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/b2f3bfde5529/scratchpad/hi-host-audit-a/report.md",
+      "planned_tracked_path": "i18n/audits/evidence/hi/wire.errors.session_host/h31a/report.md",
+      "sha256": "05ee3aca880fb8461327623416abee93404f1e65ed301be18e6faddbc7210f49"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/b2f3bfde5529/scratchpad/hi-host-audit-a/audit.log",
+      "planned_tracked_path": "i18n/audits/evidence/hi/wire.errors.session_host/h31a/audit.log",
+      "sha256": "65ac66daa721f4b6386105b952c4f5fe297d9c8e60b074cc8e94c0af69b0ef3e"
+    },
+    {
+      "path": "/Users/damian/.local-operator/sessions/b2f3bfde5529/scratchpad/hi-host-audit-a/ledger-proposal.json",
+      "planned_tracked_path": "i18n/audits/evidence/hi/wire.errors.session_host/h31a/ledger-proposal.json",
+      "sha256": "17179041316bb68928fd5242390962326576334945fd153434e7bef6520462b2"
+    }
+  ]
+}

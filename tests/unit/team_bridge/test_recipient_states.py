@@ -67,6 +67,7 @@ from local_operator.harness.types import (
 )
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
+from local_operator.team_bridge import card_projection
 from local_operator.team_bridge import pull as pull_mod
 from local_operator.team_bridge.client import BridgeRefusal
 from local_operator.team_bridge.connector import conversation as conversation_mod
@@ -620,7 +621,27 @@ async def test_mentioned_member_is_woken_with_a_card_that_says_mentioned(
     assert len(router.calls) == 1
     call = router.calls[0]
     assert call.session_id == "sess_a"
-    assert call.sender_display == {"sender_name": "Ada"}
+    # The legacy name still travels, but the typed display carriage is now
+    # additive. Keep an exact assertion so body/admission fields cannot silently
+    # leak into this metadata-only handoff; the model/context checks below must
+    # still prove the original card semantics rather than borrowing this object.
+    assert call.sender_display == {
+        "sender_name": "Ada",
+        "bridge_receipt": {
+            "v": 1,
+            "sender": {"name": "Ada", "kind": "human"},
+            "conversation": {"label": "#qa-coordination"},
+            "attachment_count": 0,
+        },
+        "bridge_receipt_source": {
+            "account_id": recipient.owner.account_id,
+            "tenant_id": recipient.owner.tenant_id,
+            "endpoint_id": recipient.owner.endpoint_id,
+            "conversation_id": CONVERSATION_ID,
+            "message_ids": [MESSAGE_ID],
+            "conversation_seq": 1,
+        },
+    }
     card = call.payload
     assert "Channel message · #qa-coordination · from Ada (human, same tenant)" in card
     assert BRIDGE_UNTRUSTED_CLAUSE in card
@@ -638,7 +659,7 @@ async def test_mentioned_member_is_woken_with_a_card_that_says_mentioned(
     # model receives the same fixed placeholder as every unhydrated card.
     requests = _card_requests(recipient)
     assert len(requests) == 1, "the wake must start exactly one turn"
-    assert "[team_bridge: delivery_pending]" in requests[0]
+    assert card_projection.PENDING_CARD in requests[0]
     assert "mention:" not in requests[0]
     assert "from Ada" not in requests[0]
     assert "<team-bridge-message" not in requests[0]
@@ -737,7 +758,7 @@ async def test_unmentioned_member_is_woken_exactly_when_the_setting_emits_a_row(
     # As in the mentioned fixture, no Session bridge runtime hydrates the
     # conversation reservation here. Wake/routing is proven, not body delivery:
     # no raw conversation envelope is model-visible without its admitted frame.
-    assert "[team_bridge: delivery_pending]" in requests[0]
+    assert card_projection.PENDING_CARD in requests[0]
     assert "mention:" not in requests[0]
     assert "from Ada" not in requests[0]
     assert "<team-bridge-message" not in requests[0]

@@ -1,0 +1,27 @@
+{
+  "locale": "vi",
+  "namespace": "tui.library",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-006",
+      "severity": "NIT",
+      "namespace": "tui.library",
+      "key": "tui.library.status_highlighted",
+      "english": "Highlighted",
+      "current": "Nổi bật",
+      "problem": "Style guide wave-2 records highlights → «điểm nhấn»; «Nổi bật» drifts from that term (same for detail_highlighted).",
+      "suggested": "Điểm nhấn",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    }
+  ]
+}

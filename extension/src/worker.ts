@@ -11,6 +11,7 @@ import { hitTest } from "./commands/hit-test";
 import { ancestors } from "./commands/ancestors";
 import { query } from "./commands/query";
 import { upload } from "./commands/upload";
+import { selectOptions } from "./commands/select";
 import { download } from "./commands/download";
 import { disabledCapabilities, hasConsentSwitch } from "./consent";
 import { BridgeCommandError, releaseAllSurfaces } from "./cdp";
@@ -50,6 +51,7 @@ const HANDLERS: Record<
   screenshot,
   click,
   type: typeText,
+  select: selectOptions,
   close,
   status,
   tabs,
@@ -681,6 +683,12 @@ async function connect(): Promise<void> {  // `connecting` guards the window bet
       // Handled here rather than by reconnecting, so the promoted install
       // starts serving immediately instead of after a dial.
       applyRole(frame.role ?? "driver", paired);
+    } else if (frame.event === "show_pairing") {
+      // `lop browser pair` just printed a code for this install. Put the
+      // pairing page in front so the person who reads the code in the chat
+      // finds the field already open in Chrome (see pair/pair.ts). The frame
+      // carries no code; only the person brings it.
+      if (!paired) guarded(() => openPairingTab("cli"), "open pairing tab");
     } else if (frame.event === "pair_result" && frame.ok) {
       fireAndForget(chrome.storage.local.set({ token: frame.token }), "token write");
     }
@@ -788,11 +796,58 @@ chrome.runtime.onStartup.addListener(() => {
   ensureReconnectAlarm();
   guarded(connect, "startup dial");
 });
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener((details) => {
   alive = true;
   ensureReconnectAlarm();
   guarded(connect, "install dial");
+  // A FRESH install opens the pairing page once, so a person who just added
+  // the extension from the store lands on "here is how to pair" instead of an
+  // icon hidden under Chrome's puzzle-piece menu. Not on update: an existing
+  // install that is already paired must not get a tab every release, and one
+  // that is not paired gets it from `lop browser pair` when the person asks.
+  if (details?.reason === "install") guarded(() => openPairingTab("install"), "open pairing tab");
 });
+
+// The popup's "Open in a tab" link: reuse the one pairing tab (review R5).
+// Only this extension's own pages can reach `runtime.onMessage` (no
+// externally_connectable), so no web page can drive it.
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (message?.event === "open_pairing_tab" && sender.id === chrome.runtime.id) {
+    guarded(() => openPairingTab("cli"), "open pairing tab");
+  }
+  return undefined;
+});
+
+/** Open (or bring forward) the pairing tab, `pair/pair.html`.
+ *
+ * WHY A TAB AND NOT THE POPUP. A Chrome action popup closes the moment focus
+ * leaves it — and reading the code in the chat or terminal IS leaving it. A
+ * normal extension page keeps the field, the typed digits and the result while
+ * the person switches windows (operator report, 2026-11-02).
+ *
+ * ONE TAB. An existing pairing tab is reused (focused within its window and
+ * asked to re-check, never reloaded — a reload loses typed digits) rather than stacking a new one
+ * per `lop browser pair` run. `active: true` within its window is deliberate
+ * here — unlike agent-driven tabs, this page exists for the person to type
+ * into, and it is opened only on a person's own request (`lop browser pair`)
+ * or install. The WINDOW is not raised: focus between applications stays the
+ * person's. */
+async function openPairingTab(reason: "cli" | "install"): Promise<void> {
+  const url = chrome.runtime.getURL("pair/pair.html");
+  // Filtered here rather than with `query({url})`: a chrome-extension:// URL
+  // is not a valid match-pattern scheme, so the filter form matches nothing.
+  const tab = (await chrome.tabs.query({})).find((entry) => entry.url?.startsWith(url));
+  if (tab?.id !== undefined) {
+    // Focus it, and ask it to re-check — never RELOAD it. A reload wiped the
+    // digits a person was in the middle of typing whenever `lop browser pair`
+    // ran again (measured in the real-Chrome E2E: the second run's nudge
+    // reloaded the tab mid-entry and the submit saw a 3-digit code).
+    await chrome.tabs.update(tab.id, { active: true });
+    fireAndForget(chrome.runtime.sendMessage({ event: "pairing_recheck" }), "pairing recheck");
+    return;
+  }
+  await chrome.tabs.create({ url: `${url}?from=${reason}`, active: true });
+}
 // Cold-start convergence: on every worker start (including a rewake from
 // suspension, when the globals have reset to their false initializers) the
 // top-level dial runs immediately, the alarm is (re)armed as the floor, and

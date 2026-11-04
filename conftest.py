@@ -232,6 +232,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -505,6 +506,207 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) ->
 # what this block exists to replace.
 _DEAD_WORKERS: list[tuple[str, str]] = []
 
+# How long the exit-status probe waits for a dead worker's process to be
+# reportable, and how often it looks while waiting. Both are measured rather than
+# guessed: on a worker that called ``os._exit(7)`` under ``-n1
+# --max-worker-restart=0``, this hook fires while ``Popen.returncode`` is still
+# ``None`` AND ``Popen.poll()`` returns ``None`` -- the worker's channel is already
+# closed, but its process has not been reaped yet. A single read would therefore
+# answer "alive" for every real death, which is the one result this diagnostic
+# exists to avoid reporting. The wait is bounded and only runs on the dead-worker
+# path, which is already failing the run.
+_EXIT_STATUS_DEADLINE_S = 0.5
+_EXIT_STATUS_INTERVAL_S = 0.02
+
+
+def _worker_process(node: object) -> object | None:
+    """The controller's ``subprocess.Popen`` for a local worker, or ``None``.
+
+    The attribute path is proved against the INSTALLED source, not guessed:
+    ``xdist/workermanage.py`` keeps the execnet gateway on ``node.gateway``;
+    ``execnet/gateway.py`` keeps its IO object on ``gateway._io``; and for a
+    worker running on this machine that IO is
+    ``execnet.gateway_io.Popen2IOMaster``, whose ``popen`` attribute is the
+    ``subprocess.Popen`` the controller itself started. Checked in execnet 2.1.2
+    in this repo's venv and in 1.9.0 upstream -- both spell it ``popen``, and
+    that is the only name assumed here: if a future release renames it the probe
+    degrades to ``unknown`` (the required answer) instead of lying.
+
+    A remote worker (``--tx ssh=``/``socket=``, or a proxy gateway) has no local
+    process at all, so any step above can be missing. ``None`` means "cannot
+    tell" and the caller reports it as ``unknown`` rather than dropping the
+    field: the difference between "no exit status" and "no such process" is
+    exactly what a reader of a dead-worker log needs to tell apart.
+
+    The ``spec.popen`` gate is not decoration. ``execnet.gateway_io.create_io``
+    gives an ``ssh``/``vagrant_ssh`` gateway the SAME ``Popen2IOMaster`` class, so
+    ``_io.popen`` there is the local ``ssh`` CLIENT -- reporting its exit status
+    as the worker's would be a confident lie, and the one thing worse than
+    ``unknown`` in a post-mortem is a wrong cause. Only a gateway whose spec says
+    it is a local popen has a process whose exit code is the worker's.
+    """
+    gateway = getattr(node, "gateway", None)
+    spec = getattr(gateway, "spec", None)
+    if not getattr(spec, "popen", False):
+        return None
+    return getattr(getattr(gateway, "_io", None), "popen", None)
+
+
+def _returncode_text(returncode: object) -> str:
+    """Render an exit status, naming the signal behind a signal death.
+
+    ``Popen`` reports a killed child as a negative return code (``-9``, ``-15``),
+    which is the shape an OOM kill or a process-group kill arrives in -- the two
+    cases this diagnostic exists for -- so the signal's name is spelled out
+    beside the number. An unexpected non-integer is rendered verbatim rather
+    than compared: a fake or a future Popen must not be able to make this raise.
+    """
+    if not isinstance(returncode, int):
+        return f"rc={returncode!r}"
+    if returncode < 0:
+        number = -returncode
+        try:
+            name = signal.Signals(number).name
+        except (ValueError, AttributeError):  # a signal this platform does not name
+            return f"rc={returncode} (signal {number})"
+        return f"rc={returncode} ({name})"
+    return f"rc={returncode}"
+
+
+def _await_exit_status(process: subprocess.Popen[bytes]) -> str:
+    """Best-effort exit status for a worker's process, bounded in time.
+
+    ``poll()`` reaps the child once it has exited, which is the controller's own
+    bookkeeping: execnet's ``Popen2IOMaster.wait`` reads the same ``Popen`` at
+    group termination and then returns the cached code, so nothing downstream can
+    observe a difference -- and the run's pass/fail is decided by
+    ``_fail_on_dead_workers`` from ``_DEAD_WORKERS``, never from this value.
+
+    ``alive`` after the deadline is an honest answer rather than a failure: a
+    worker whose channel closed while its process still runs (a hang, a wedged
+    child) is a real state, and naming it is what stops the line from implying an
+    exit code was ever seen.
+
+    Typed as a real ``subprocess.Popen`` on purpose, and the caller enforces it:
+    the deadline only bounds the LOOP, because it is checked between iterations.
+    It cannot bound a single ``poll()`` call, so an object whose ``poll`` blocks
+    would hold the controller for as long as it liked -- a review round measured
+    0.753 s from a process-shaped stub under a 0.5 s deadline. ``Popen.poll``
+    itself is documented and implemented as a non-blocking ``waitpid`` with
+    ``WNOHANG``, which is the property this wait relies on; no other object shape
+    gets to be polled, however plausible it looks.
+    """
+    deadline = time.monotonic() + _EXIT_STATUS_DEADLINE_S
+    while True:
+        returncode = process.returncode
+        if returncode is None:
+            returncode = process.poll()
+        if returncode is not None:
+            return f"exited {_returncode_text(returncode)}"
+        if time.monotonic() >= deadline:
+            return "alive"
+        time.sleep(_EXIT_STATUS_INTERVAL_S)
+
+
+def _dead_worker_exit_line(node: object) -> str:
+    """The ``DEAD WORKER EXIT:`` line, which NEVER raises and never decides.
+
+    Every failure mode collapses to ``unknown`` with its reason in parentheses: a
+    diagnostic that can fail the run it is diagnosing is worse than no diagnostic
+    at all, and a hook that raised here would change the exit status of a suite
+    it was only supposed to describe. The existing ``DEAD WORKER:`` message is
+    untouched and printed first, so greps and log expectations built on it keep
+    matching; this line sits beside it as the extra evidence.
+    """
+    worker = getattr(getattr(node, "gateway", None), "id", None) or "unknown worker"
+    try:
+        process = _worker_process(node)
+        if process is None:
+            return f"DEAD WORKER EXIT: {worker} unknown (no local process object)"
+        if not isinstance(process, subprocess.Popen):
+            # The deadline bounds the wait LOOP, not one call: a process-shaped
+            # object whose poll() blocks cannot be interrupted by it (review round
+            # 1 measured 0.753 s from a stub under a 0.5 s deadline). Only a real
+            # Popen has the non-blocking poll this probe is allowed to rely on, so
+            # anything else is reported without ever calling it.
+            kind = type(process).__name__
+            return (
+                f"DEAD WORKER EXIT: {worker} unknown "
+                f"(process object is {kind}, not a subprocess.Popen; not polled)"
+            )
+        return f"DEAD WORKER EXIT: {worker} pid {process.pid} {_await_exit_status(process)}"
+    except Exception as exc:  # see the docstring: unknown, never raise
+        reason = " ".join(str(exc).split()) or type(exc).__name__
+        return (
+            f"DEAD WORKER EXIT: {worker} unknown " f"(probe raised {type(exc).__name__}: {reason})"
+        )
+
+
+def _dead_worker_cgroup_line() -> str | None:
+    """Linux-only: the controller's cgroup OOM counters, or ``None``.
+
+    A worker is forked by the controller, so it inherits the controller's cgroup;
+    ``oom_kill`` and ``oom`` in that cgroup's ``memory.events`` are therefore the
+    counters an OOM kill of a worker would have incremented. They are cumulative
+    for the whole cgroup (on CI, the job), not per worker, which is why the line
+    names the file it read instead of implying a per-worker number.
+
+    Deliberately optional and silent on failure: there is no ``/proc`` on macOS, a
+    cgroup v1 host has no ``memory.events``, and a container may not expose it.
+    Unreadable means no line at all rather than an ``unknown`` one, because there
+    is nothing a reader could act on -- this line adds evidence where evidence is
+    available and stays quiet where it is not.
+    """
+    try:
+        cgroup = pathlib.Path("/proc/self/cgroup")
+        path: str | None = None
+        for line in cgroup.read_text(encoding="utf-8").splitlines():
+            if line.startswith("0::"):  # the cgroup v2 unified hierarchy
+                path = line.split("::", 1)[1].strip()
+                break
+        if not path:
+            return None
+        events = pathlib.Path("/sys/fs/cgroup", path.lstrip("/"), "memory.events")
+        counters: dict[str, int] = {}
+        for line in events.read_text(encoding="utf-8").splitlines():
+            name, _, value = line.partition(" ")
+            if name in {"oom", "oom_kill"}:
+                counters[name] = int(value)
+        if "oom_kill" not in counters or "oom" not in counters:
+            return None
+        return (
+            f"DEAD WORKER CGROUP: oom_kill={counters['oom_kill']} "
+            f"oom={counters['oom']} ({events})"
+        )
+    except Exception:  # optional evidence: absent is a valid answer
+        return None
+
+
+def _print_dead_worker_postmortem(node: object) -> None:
+    """Print the extra lines after the ``DEAD WORKER:`` message. Never raises.
+
+    Guarded step by step rather than once: the exit line is the load-bearing
+    evidence, so a cgroup read that fails must not be able to take it down, and a
+    failure building the exit line still has to leave an explicit ``unknown``
+    behind. The outer guard exists for the one thing none of them cover -- a
+    broken stderr -- and stays silent, because a diagnostic must never decide
+    anything.
+    """
+    try:
+        try:
+            exit_line = _dead_worker_exit_line(node)
+        except Exception as exc:  # the helper guards itself; this is belt and braces
+            exit_line = f"DEAD WORKER EXIT: unknown (reporter raised {type(exc).__name__})"
+        print(exit_line, file=sys.stderr, flush=True)
+        try:
+            cgroup_line = _dead_worker_cgroup_line()
+        except Exception:  # optional evidence: absent is a valid answer
+            cgroup_line = None
+        if cgroup_line is not None:
+            print(cgroup_line, file=sys.stderr, flush=True)
+    except Exception:  # a broken stderr must not become a broken run
+        return
+
 
 @pytest.hookimpl(optionalhook=True)
 def pytest_testnodedown(node: object, error: object | None) -> None:
@@ -540,6 +742,7 @@ def pytest_testnodedown(node: object, error: object | None) -> None:
         file=sys.stderr,
         flush=True,
     )
+    _print_dead_worker_postmortem(node)
 
 
 def _fail_on_dead_workers(session: pytest.Session, exitstatus: int) -> None:

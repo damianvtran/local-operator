@@ -1,0 +1,19 @@
+{
+  "wire.skill_adoption.preview_required": "Esta habilidad local necesita una vista previa del merge antes de poder vincularse. Ejecuta `lop skills pull` con el mismo ID de habilidad, ámbito y opciones, añadiendo `--dry-run`. Revisa ambos diffs y repite esas opciones con `--adopt-receipt <receipt> --yes` para confirmar.",
+  "wire.skill_adoption.preview_changed": "La habilidad local, la revisión del Hub o la política de vinculación cambió después de esta vista previa. Crea una nueva vista previa y revísala antes de aplicarla.",
+  "wire.skill_adoption.needs_choice": "No se pudo generar una versión consolidada de forma segura. Previsualiza una opción explícita: conservar la versión local y vincularla, o usar la versión del Hub con una copia de seguridad.",
+  "wire.skill_adoption.preview_title": "Revisa las instrucciones locales y las del Hub antes de vincular",
+  "wire.skill_adoption.confirm": "¿Aplicar esta adopción de habilidad ya revisada? [y/N] ",
+  "wire.skill_adoption.cancelled": "Cancelado. No se modificó la habilidad local.",
+  "wire.skill_adoption.dry_run_help": "Previsualizar la instalación o adopción sin modificar la habilidad local",
+  "wire.skill_adoption.receipt_help": "Aplicar esta vista previa de adopción ya revisada",
+  "wire.skill_adoption.strategy_help": "Elegir merge, keep-local o take-hub para la vista previa de adopción",
+  "wire.skill_adoption.no_llm_help": "No enviar el texto de la habilidad a un modelo de merge",
+  "wire.skill_adoption.backup_label": "Instantánea de la carpeta original: {path} (SHA-256 {hash})",
+  "wire.skill_adoption.receipt_label": "Recibo de la vista previa de adopción: {receipt}",
+  "wire.skill_adoption.no_apply": "Solo vista previa. No se instaló ni vinculó nada.",
+  "wire.skill_adoption.inherited_assets": "Los recursos locales se conservan sin enviarlos al modelo de merge.",
+  "wire.skill_adoption.yes_help": "Confirmar la vista previa de instalación o adopción revisada",
+  "wire.skill_adoption.alias_occupied": "Una habilidad local ya usa este nombre. Haz pull de la habilidad del Hub con --dry-run para revisar un merge de adopción, o elige otro nombre.",
+  "wire.skill_adoption.projection_unsupported": "La adopción revisada de una habilidad local existente aún no es compatible con esta plataforma. La habilidad local y su vínculo no se modificaron. Usa una plataforma compatible para la adopción; la instalación normal de habilidades del Hub sigue disponible."
+}

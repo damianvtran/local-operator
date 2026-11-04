@@ -268,6 +268,107 @@ describe("retainConfigStream", () => {
 	});
 });
 
+describe("config probe lifecycle", () => {
+	afterEach(() => {
+		vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals();
+		localStorage.clear(); Stream.instances = [];
+	});
+
+	it("times out silent headers, retries and preserves the draft without reloading", async () => {
+		vi.useFakeTimers(); vi.resetModules();
+		const fresh = await import("./store");
+		const reload = vi.fn(); vi.stubGlobal("location", { reload });
+		let signal: AbortSignal | undefined;
+		const fetchMock = vi.fn()
+			.mockImplementationOnce((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+				signal = init.signal!;
+				signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+			}))
+			.mockResolvedValueOnce(configOk()).mockImplementation(Stream.fetch);
+		vi.stubGlobal("fetch", fetchMock);
+		localStorage.setItem("lo-mobile-draft:probe-timeout", "keep");
+		const close = fresh.retainConfigStream();
+		try {
+			await vi.advanceTimersByTimeAsync(35_300); await settleStream();
+			expect(signal?.aborted).toBe(true);
+			expect(fetchMock).toHaveBeenCalledTimes(3);
+			expect(Stream.instances).toHaveLength(1);
+			expect(reload).not.toHaveBeenCalled();
+			expect(localStorage.getItem("lo-mobile-draft:probe-timeout")).toBe("keep");
+		} finally { close(); }
+	});
+
+	it("does not wait for body cancellation after capability headers arrive", async () => {
+		vi.useFakeTimers(); vi.resetModules();
+		const fresh = await import("./store");
+		const response = new Response("unread", { headers: { "content-type": "text/event-stream" } });
+		vi.spyOn(response.body!, "cancel").mockReturnValue(new Promise(() => {}));
+		const fetchMock = vi.fn().mockResolvedValueOnce(response).mockImplementation(Stream.fetch);
+		vi.stubGlobal("fetch", fetchMock);
+		const close = fresh.retainConfigStream();
+		try {
+			await settleStream();
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			expect(Stream.instances).toHaveLength(1);
+		} finally { close(); }
+	});
+
+	it.each(["online", "pageshow", "visibilitychange"])("replaces a silent probe after %s wakes the suspended page", async event => {
+		vi.useFakeTimers(); vi.resetModules();
+		const fresh = await import("./store");
+		const reload = vi.fn(); vi.stubGlobal("location", { reload });
+		let respond!: (response: Response) => void;
+		let signal: AbortSignal | undefined;
+		const fetchMock = vi.fn()
+			.mockImplementationOnce((_url: string, init: RequestInit) => {
+				signal = init.signal!;
+				return new Promise<Response>(resolve => { respond = resolve; });
+			})
+			.mockResolvedValueOnce(configOk()).mockImplementation(Stream.fetch);
+		vi.stubGlobal("fetch", fetchMock);
+		const close = fresh.retainConfigStream();
+		try {
+			// Wall time passes while the browser has suspended its timers. The wake
+			// must replace the old leg without waiting for the overdue deadline.
+			vi.setSystemTime(Date.now() + 20_001);
+			(event === "visibilitychange" ? document : window).dispatchEvent(new Event(event));
+			await settleStream();
+			expect(signal?.aborted).toBe(true);
+			expect(fetchMock).toHaveBeenCalledTimes(3);
+			expect(Stream.instances).toHaveLength(1);
+			// A fetch completion already queued before abort may still arrive.
+			// The replaced leg must not invalidate the new leg's private state.
+			localStorage.setItem("lo-mobile-draft:probe-replaced", "keep");
+			respond(new Response(null, { status: 401 })); await settleStream();
+			expect(reload).not.toHaveBeenCalled();
+			expect(localStorage.getItem("lo-mobile-draft:probe-replaced")).toBe("keep");
+			window.dispatchEvent(new Event("online")); await settleStream();
+			expect(fetchMock).toHaveBeenCalledTimes(3);
+		} finally { close(); }
+	});
+
+	it("aborts a disposed probe and ignores its late 401 before auth cleanup", async () => {
+		vi.useFakeTimers(); vi.resetModules();
+		const fresh = await import("./store");
+		const reload = vi.fn(); vi.stubGlobal("location", { reload });
+		let respond!: (response: Response) => void;
+		let signal: AbortSignal | undefined;
+		const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+			signal = init?.signal ?? undefined;
+			return new Promise<Response>(resolve => { respond = resolve; });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const close = fresh.retainConfigStream(); close();
+		localStorage.setItem("lo-mobile-draft:probe-disposed", "new draft");
+		respond(new Response(null, { status: 401 })); await settleStream();
+		expect.soft(signal?.aborted).toBe(true);
+		expect.soft(reload).not.toHaveBeenCalled();
+		expect.soft(localStorage.getItem("lo-mobile-draft:probe-disposed")).toBe("new draft");
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+});
+
 // An auth failure during capability negotiation is not a transient lack of
 // config-stream support. Concurrent probes/streams share one page-wide reload.
 it("config probe 401 clears private state once and stops before streaming", async () => {

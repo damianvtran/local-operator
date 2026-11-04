@@ -1,0 +1,45 @@
+Independent audit execution UTC: 2026-10-31T18:06:10.568687+00:00
+Source revision: 9c979a03d551020ce6ff1b16c8066aa69ce7bb2a
+Command: /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+CWD: /Users/damian/.local-operator/sessions/45153dd07ae1/scratchpad/zh-host-a1/validator-input
+Scope: minimal pinned validator/runtime, en+zh-CN wire.errors.session_host only; no full suite or full catalogue claim
+STDOUT:
+check.py: catalogue checks: 0 problem(s)
+STDERR:
+Exit code: 0
+
+Independent checks: duplicate-key-strict JSON; exact 3-key parity; no placeholders/plural/select/tag/backtick/format tokens; no control characters; product/path literal counts identical.
+Width measurement: Unicode East Asian Width W/F=2, combining=0, otherwise 1; no combining/control characters in targets. No source width hints.
+[
+  {
+    "key": "wire.errors.session_host.unsupported",
+    "characters": 44,
+    "terminal_cells": 88,
+    "maxCells": null,
+    "maxChars": null
+  },
+  {
+    "key": "wire.errors.session_host.unavailable",
+    "characters": 25,
+    "terminal_cells": 50,
+    "maxCells": null,
+    "maxChars": null
+  },
+  {
+    "key": "wire.errors.session_host.refused",
+    "characters": 71,
+    "terminal_cells": 107,
+    "maxCells": null,
+    "maxChars": null
+  }
+]
+Negative control: removed unavailable from isolated scratch target, ran same validator; restored exact original candidate bytes in finally.
+STDOUT:
+zh-CN/wire.errors.session_host: missing key 'wire.errors.session_host.unavailable'
+check.py: catalogue checks: 1 problem(s)
+STDERR:
+Exit code: 1
+Final restored-target rerun:
+check.py: catalogue checks: 0 problem(s)
+Exit code: 0
+Restored SHA256: 4205cc6feda10279c524d78ff95c450bbc50981a48d13e37f82849d1705860d4

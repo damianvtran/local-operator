@@ -1,0 +1,98 @@
+{
+  "locale": "vi",
+  "namespace": "wire.errors.session_host",
+  "audit_id": "vh31a1",
+  "audit_date": "2026-10-31",
+  "key_count": 3,
+  "source_audit_revision": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "pr": 3222,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "393a054d09f7",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "26368bfbce62",
+    "actual_model_source": "Session runtime model-switch notices: anthropic/claude-sonnet-5-5 -> anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol, provider quota fallback; all substantive audit work after final switch.",
+    "fallback_used": true
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "26368bfbce62",
+    "model": "openai/gpt-6.1-sol",
+    "identity_source": "Request and translator provenance.json; not independently inferred from candidate language"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "vi": {
+      "path": "local_operator/i18n/catalogues/vi/wire.errors.session_host.json",
+      "sha256": "d1ce1cbd3daa26c04bf01122319e7e8adec63050477c8dd8bc84ff61f16003ba",
+      "audited_candidate_path": "/Users/damian/.local-operator/sessions/26368bfbce62/scratchpad/host-copy-vi/wire.errors.session_host.json"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/report.md",
+      "draft_path": "/Users/damian/.local-operator/sessions/393a054d09f7/scratchpad/vi-host-a1/report.md",
+      "sha256": "47cb8717e2f736d5a533b811b8be12378ed1eae4b37f188d970bca6687601077"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/audit.log",
+      "draft_path": "/Users/damian/.local-operator/sessions/393a054d09f7/scratchpad/vi-host-a1/audit.log",
+      "sha256": "c9201e6898b851fa97da913e4999ed88ef987b5dc118d14b388f4542216c4e4c"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/mechanical.json",
+      "draft_path": "/Users/damian/.local-operator/sessions/393a054d09f7/scratchpad/vi-host-a1/mechanical.json",
+      "sha256": "946915d383a5953862126f7dbb07b2213bf9e922ad30faabc5c1b84158b10792"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/ledger-row.proposal.json",
+      "draft_path": "/Users/damian/.local-operator/sessions/393a054d09f7/scratchpad/vi-host-a1/ledger-row.proposal.json",
+      "sha256": "a768898ab11a3d729de0c1c9ad6b05629f3b878a3f999a970a56e37e15662bee"
+    },
+    {
+      "path": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/checks.py.txt",
+      "draft_path": "/Users/damian/.local-operator/sessions/393a054d09f7/scratchpad/vi-host-a1/verify.py",
+      "sha256": "0737319c160963cc8804f1831249aa44d8aa02b3669f7ec2663cf441ae56aa0c"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "audit_pass": 1,
+  "second_independent_high_visibility_pass": "pending; not performed or claimed by this record",
+  "findings_report": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/report.md",
+  "evidence_state": "DRAFT in session scratch, pending manager integration; not tracked or on main",
+  "intended_record_path": "i18n/audits/evidence/vi/wire.errors.session_host/vh31a1/record.json",
+  "actual_ledger_modified": false,
+  "audit_notes_not_execution_log": [
+    "report.md semantic reasoning and setup-timeout disclosure"
+  ],
+  "actual_execution_logs": [
+    "audit.log"
+  ],
+  "validation": {
+    "validator_command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/check.py",
+      "--catalogues-only"
+    ],
+    "cwd": "/Users/damian/.local-operator/sessions/26368bfbce62/scratchpad/host-copy-vi/validation-tree",
+    "exit_code": 0,
+    "stdout": "check.py: catalogue checks: 0 problem(s)",
+    "mechanical_keys_checked": 3,
+    "rendered_ui_exercised": false,
+    "no_mt_used": true
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

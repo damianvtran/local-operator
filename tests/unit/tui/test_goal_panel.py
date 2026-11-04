@@ -376,9 +376,9 @@ async def test_escape_closes_the_card_and_returns_focus() -> None:
     session = _armed()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
-        app._cmd_goal("", lambda body, kind="info": None)
-        await pilot.pause()
+        # Escape must close a card that really opened, not pass vacuously
+        # after /goal was rejected while the app was still adopting a session.
+        await _open_card(pilot, app, session)
         await pilot.press("escape")
         await pilot.pause()
         assert app.query_one(GoalPanel).is_open is False
@@ -388,12 +388,70 @@ async def test_escape_closes_the_card_and_returns_focus() -> None:
         session = _armed()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(width, 40)) as pilot:
-            await pilot.pause()
-            app._cmd_goal("", lambda body, kind="info": None)
-            await pilot.pause()
+            await _open_card(pilot, app, session)
             region = app.query_one(GoalPanel).region
             assert region.width <= width, f"{width}: card is {region.width} cells wide"
             assert region.height > 0
+
+
+@pytest.mark.asyncio
+async def test_open_card_waits_for_deliberately_delayed_adoption(monkeypatch) -> None:
+    session = _armed()
+    adoption = asyncio.Event()
+    second_pause = asyncio.Event()
+    proceed = asyncio.Event()
+    commands = []
+
+    async def factory() -> FakeSession:
+        await adoption.wait()
+        return await _factory(session)
+
+    app = OperatorApp(factory)
+    original = app._cmd_goal
+
+    def command(*args, **kwargs):
+        commands.append(app._session is session)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(app, "_cmd_goal", command)
+    async with app.run_test(size=(100, 40)) as pilot:
+
+        class ControlledPilot:
+            calls = 0
+
+            async def pause(self):
+                self.calls += 1
+                if self.calls == 2:
+                    second_pause.set()
+                    await proceed.wait()
+                await pilot.pause()
+
+        # The second scheduling checkpoint distinguishes the historical
+        # pause/command/pause sequence without a clock-based adoption delay.
+        opening = asyncio.create_task(_open_card(ControlledPilot(), app, session))
+        checkpoint = asyncio.create_task(second_pause.wait())
+        try:
+            done, _ = await asyncio.wait((opening, checkpoint), return_when=asyncio.FIRST_COMPLETED)
+            assert checkpoint in done, "readiness returned before adoption"
+            assert app._session is None
+            assert commands == [], "the command must not run against an unadopted fixture"
+            adoption.set()
+            proceed.set()
+            panel = await opening
+            assert commands == [True]
+            assert app._session is session
+            assert panel.is_open and panel.region.height > 0
+            await pilot.press("escape")
+            await pilot.pause()
+            assert panel.is_open is False
+            assert app.focused is not None
+        finally:
+            adoption.set()
+            proceed.set()
+            for task in (opening, checkpoint):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(opening, checkpoint, return_exceptions=True)
 
 
 # --- the findings that needed the REAL card ---------------------------------

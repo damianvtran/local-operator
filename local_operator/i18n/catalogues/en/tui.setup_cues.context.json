@@ -1,0 +1,13 @@
+{
+  "tui.setup_cues.setup_placeholder": {
+    "role": "composer placeholder",
+    "tone": "plain, imperative call to action",
+    "note": "Shown in the empty message box on first run, before any AI account is connected; it replaces the usual 'Message ...' hint. {command} is the slash command the user types, currently `/login radient` (a technical token, inserted verbatim, never translated). Single line; the box truncates it at its own width."
+  },
+  "tui.setup_cues.no_provider_cue": {
+    "role": "notice",
+    "tone": "plain, action first",
+    "maxCells": 74,
+    "note": "The ONE no-provider cue repeated on the setup splash, in the assistant's waiting view and in the refusal a send gets while no provider is connected. Action first, then the command. {command} is the slash command the user types, currently `/login radient` (verbatim). The splash paints it at terminal width minus 6, so it must render whole at 80 columns: at most 74 cells including the command, measured in terminal cells (CJK and Devanagari glyph widths count). The sentence may be lower-cased by code when it follows 'Not sent — ' in another message, so it must read naturally with its first letter lower-cased where the script has case."
+  }
+}

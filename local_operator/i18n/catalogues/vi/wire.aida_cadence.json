@@ -1,0 +1,4 @@
+{
+  "wire.aida_cadence.interval_hours.label": "Khoảng cách hỏi thăm (giờ)",
+  "wire.aida_cadence.interval_hours.help": "0 giữ giờ hỏi thăm cục bộ hằng ngày. 1–168 dùng số giờ đã trôi qua; 4 là hỏi thăm mỗi bốn giờ. Thay đổi vẫn giữ lần hỏi thăm đã đến hạn."
+}

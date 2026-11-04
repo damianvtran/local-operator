@@ -29,6 +29,9 @@ each decision was made (PROTOCOL.md A3).
 Every legit message in all 12 runs has at least 3 valid trials, so the later
 ≥3-valid-trial floors on both arms of the newly-blocked rule change no result.
 
-A `hold` block is not the same as a `bounce` block: read the false-block column split
-by disposition, and see
-[What a false block means over time](../../README.md#what-a-false-block-means-over-time).
+Read the false-block column split by disposition. These are pre-cache study results;
+the historical retry/re-draw interpretation is preserved in
+[What a false block means over time](../../README.md#what-a-false-block-means-over-time),
+alongside the dated **2026-10-31 retrospective clarification**: #3220 shipped in
+v0.94.2, and cached model-answer holds do not clear merely with elapsed time or retries.
+That later policy clarification does not rewrite these runs or adoption decisions.

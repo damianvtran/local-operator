@@ -52,6 +52,7 @@ import type {
 	PendingRequest,
 	SessionProjection,
 	SubagentRow,
+	TranscriptEntry,
 } from "./types";
 
 vi.mock("./api", () => ({
@@ -643,5 +644,53 @@ describe("column budget while a request is pending", () => {
 		// still explain the budget without fading the failure count itself.
 		expect((rosterHeader as HTMLButtonElement).disabled).toBe(true);
 		expect(rosterHeader.getAttribute("title")).toMatch(/answer it to reopen/);
+	});
+});
+
+function message(id: string, text: string): TranscriptEntry {
+	return {
+		id,
+		kind: "user",
+		text,
+		tool_call_id: "",
+		tool_name: "",
+		tool_state: "done",
+		final: true,
+		summary: "",
+		intent: "",
+		diff_added: 0,
+		diff_removed: 0,
+		elapsed_s: 0,
+		error: "",
+		details: {},
+	};
+}
+
+/** The transcript's own scroller: the only region in the column meant to scroll.
+    Selected by its horizontal-clip class because it carries no role or test
+    id — a SELECTOR, never the assertion. */
+function transcriptScroller(): HTMLElement {
+	const el = [...document.querySelectorAll<HTMLElement>(".lo-scroll")].find(
+		(node) => node.classList.contains("overflow-x-hidden"),
+	);
+	if (!el) throw new Error("transcript scroller not mounted");
+	return el;
+}
+
+describe("window scrolling", () => {
+	it("keeps the transcript's overscroll out of the document", () => {
+		slot = {
+			projection: projection({ transcript: [message("m1", "first")] }),
+			connected: true,
+		};
+		render(<SessionScreen sessionId="s1" />);
+
+		// The document contract itself (html/body overflow + overscroll) lives in
+		// `window-scroll.contract.test.ts`, which reads the stylesheet. THIS is
+		// the scroller's half: a drag that runs out of conversation stops there
+		// rather than chaining to the page behind it. It is an inline style, so
+		// it RESOLVES in happy-dom and deleting it fails here — the same reason
+		// `lib/column.ts` writes its caps inline.
+		expect(getComputedStyle(transcriptScroller()).overscrollBehaviorY).toBe("contain");
 	});
 });

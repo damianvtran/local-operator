@@ -54,7 +54,13 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.errors.agents",
         "wire.errors.auth",
         "wire.errors.desktop",
+        # Receipt-bound skill adoption owns its preview/consent vocabulary.
+        "wire.skill_adoption",
         "wire.errors.files",
+        # The owned "hosting is not configured" cause clause, composed INTO the
+        # startup refusals above: without its own key a locale that translates
+        # the frame still inherits that one English sentence mid-sentence.
+        "wire.errors.hosting",
         "wire.errors.media",
         # Agent profile pictures: the refusals `PUT /v1/agents/{id}/avatar` returns
         # (unsupported_type, too_large, too_many_pixels, undecodable, not_found,
@@ -63,6 +69,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.errors.agent_avatar",
         "wire.errors.sdk_spec",
         "wire.errors.sdk_startup",
+        # Host-start refusals cross the real cold-facade boundary; they must
+        # not be mistaken for a runtime reconnecting (#3222 R2-1/Q1).
+        "wire.errors.session_host",
         "wire.errors.settings",
         "wire.exec",
         "wire.incidents",
@@ -109,6 +118,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Its own namespace so no audited catalogue's hash moves; the
         # translation wave lands its seven locales in a follow-up.
         "wire.tool_rows.bridge",
+        # The sessions tool's own operator-visible stop receipts (agent review
+        # round 1 R2). Its own namespace, the `wire.host_speed` shape: the
+        # receipts are new copy, and adding them to a namespace fr/hi/vi CARRY
+        # would invalidate those locales' ledger rows.
+        "wire.sessions",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}

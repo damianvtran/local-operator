@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "hi",
+  "namespace": "cli.memory_help",
+  "source_sha256": "b3b63aeb9c1b27d3e686c2c6ab7378130577255ac5e999296a583cd5bf0c3a13",
+  "target_sha256": "8770aa9fd7e7597ba6af71a691eebbf44112cd86c3cd5510b065e658310ba585",
+  "hashes": {
+    "audit.log": "f423a51bdce8958f052336f128ef40ed973d2ee6fb6bbfd2abfe3fb0c16946fc",
+    "findings.json": "a12aaa9d82cc28c0447372d8c7f31cb1929537609021d44bc580f3bb6b331612",
+    "record.json": "8bb24b3c7e5042b5df4504a64c2958d62ec4d30bf33de4f32fb739f8af5881d5",
+    "report.md": "a5930da1423d80a127d013912c2f723f7ff16314861d7e23e30dbf76baf61c2f"
+  }
+}

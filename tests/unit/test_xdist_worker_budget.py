@@ -59,6 +59,9 @@ import importlib.util
 import os
 import pathlib
 import shutil
+import subprocess
+import sys
+import time
 import types
 
 import pytest
@@ -1072,17 +1075,102 @@ class _FakeSession:
         self.exitstatus = exitstatus
 
 
-def test_a_clean_node_down_is_not_a_death(hook_module: types.ModuleType) -> None:
+class _FakeGatewayWithIO(_FakeGateway):
+    """A gateway carrying the execnet IO shape, with an arbitrary process value.
+
+    ``spec.popen`` is set because that is what a local worker's spec says; the
+    probe refuses to read a process object through any other spec, since an ssh
+    gateway carries the same IO class holding its local ``ssh`` client.
+    """
+
+    def __init__(self, id_: str, process: object, *, popen: bool = True) -> None:
+        super().__init__(id_)
+        self._io = types.SimpleNamespace(popen=process)
+        self.spec = types.SimpleNamespace(popen=popen)
+
+
+class _GatewayNode:
+    """A node over any gateway-shaped object: a fake, or a real execnet gateway."""
+
+    def __init__(self, gateway: object) -> None:
+        self.gateway = gateway
+
+
+def _node_with_process(worker: str, process: object) -> _GatewayNode:
+    """A node whose gateway carries the IO shape the probe resolves.
+
+    A fake only pins the probe's own behaviour -- it cannot notice execnet moving
+    ``_io`` or renaming ``popen``, because it builds whatever shape the probe
+    expects. ``test_the_probe_resolves_the_installed_execnet_gateway_process``
+    asserts the same path against a REAL gateway and is what catches a rename;
+    the two are a pair, and neither's docstring claims the other's guarantee.
+    """
+    return _GatewayNode(_FakeGatewayWithIO(worker, process))
+
+
+def _exited_process(returncode: int = 7) -> subprocess.Popen[bytes]:
+    """A REAL, already-reaped child -- the input the probe actually accepts.
+
+    A fake cannot stand in for the resolved cases: the probe only polls a
+    ``subprocess.Popen`` (a process-shaped stub's ``poll`` could block), so the
+    exited and running cases use real children. They are children of the test
+    process, never xdist workers, and each is reaped here or by its caller.
+    """
+    process = subprocess.Popen(
+        [sys.executable, "-c", f"import sys; sys.exit({returncode})"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    process.wait()
+    return process
+
+
+def _running_process() -> subprocess.Popen[bytes]:
+    """A REAL child that stays alive until its caller ends it."""
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+class _BlockingPollStub:
+    """A process-SHAPED object whose ``poll()`` blocks past the whole deadline.
+
+    The review-round-1 hazard, made executable: the deadline is checked between
+    iterations, so it cannot interrupt a blocking call. If the probe ever stops
+    gating on ``isinstance(subprocess.Popen)``, this stub gets polled, the hook
+    call takes 0.75 s, and both the elapsed-time and ``polled`` assertions fail.
+    """
+
+    pid = 4242
+    returncode: int | None = None
+
+    def __init__(self) -> None:
+        self.polled = False
+
+    def poll(self) -> int | None:
+        self.polled = True
+        time.sleep(0.75)
+        return 7
+
+
+def test_a_clean_node_down_is_not_a_death(
+    hook_module: types.ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
     """``error=None`` is how xdist ends EVERY healthy worker, so it must stay silent.
 
     Getting this wrong is the expensive direction: a line per worker at the end of
     every green run is the kind of noise that gets a diagnostic deleted, and the
-    exit status would flip a passing suite to a failing one on every run.
+    exit status would flip a passing suite to a failing one on every run. The same
+    discipline covers the exit-status line added beside it: a healthy run must not
+    carry a ``DEAD WORKER EXIT:`` line for every worker that finished cleanly.
     """
     hook_module._DEAD_WORKERS.clear()
     hook_module.pytest_testnodedown(_FakeNode("gw0"), None)
 
     assert hook_module._DEAD_WORKERS == []
+    assert "DEAD WORKER EXIT:" not in capsys.readouterr().err
     session = _FakeSession(exitstatus=0)
     hook_module._fail_on_dead_workers(session, 0)
     assert session.exitstatus == 0
@@ -1166,3 +1254,292 @@ def test_a_dead_worker_does_not_relabel_a_run_that_already_failed(
 
     assert session.exitstatus == 1
     assert "DURING A PASSING RUN" not in capsys.readouterr().err
+
+
+def test_a_dead_worker_reports_its_process_exit_status(
+    hook_module: types.ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The exit code is the evidence the CI logs did not have.
+
+    A worker that dies by ``os._exit(7)`` -- or by an OOM kill, or a fired bound --
+    reaches xdist as nothing but a closed channel, so the pre-existing line can
+    only say `Not properly terminated`. The adjacent line is what turns that into
+    a cause a reader can act on, and it has to say the pid and ``rc=7`` rather than
+    ``alive``: the child is usually unreaped at hook time, so "no return code yet"
+    is the answer that would make the whole diagnostic useless.
+    """
+    process = _exited_process(7)
+    hook_module._DEAD_WORKERS.clear()
+    hook_module.pytest_testnodedown(_node_with_process("gw4", process), "Not properly terminated")
+
+    err = capsys.readouterr().err
+    assert "DEAD WORKER:" in err  # the message every existing grep matches
+    assert "DEAD WORKER EXIT:" in err
+    assert "gw4" in err and str(process.pid) in err and "rc=7" in err
+
+
+def test_a_dead_worker_still_running_is_reported_alive(
+    hook_module: types.ModuleType,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`alive` is a real answer and has to be said, not omitted or invented.
+
+    A worker whose channel closed while its process still runs is the hung-child
+    case, which an exit code would misrepresent. The deadline is zeroed so the
+    test does not pay the probe's real (bounded) wait, and so the assertion covers
+    the deadline branch rather than whatever this machine's fork timing happens to
+    be. A real running child is used because the probe only polls a real ``Popen``.
+    """
+    monkeypatch.setattr(hook_module, "_EXIT_STATUS_DEADLINE_S", 0.0)
+    process = _running_process()
+    try:
+        hook_module._DEAD_WORKERS.clear()
+        hook_module.pytest_testnodedown(
+            _node_with_process("gw5", process), "Not properly terminated"
+        )
+    finally:
+        process.kill()
+        process.wait()
+
+    err = capsys.readouterr().err
+    assert "DEAD WORKER EXIT:" in err
+    assert "gw5" in err and str(process.pid) in err and "alive" in err
+
+
+def test_a_dead_worker_without_a_process_object_is_reported_unknown(
+    hook_module: types.ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A remote or reshaped gateway has no local ``Popen`` -- say so explicitly.
+
+    ``--tx ssh=`` workers (and any gateway whose private shape changes) expose no
+    ``gateway._io.popen``. The field still has to appear, because a reader must be
+    able to tell "the probe could not look" from "the probe looked and the line was
+    dropped": those are different facts about the run.
+    """
+    hook_module._DEAD_WORKERS.clear()
+    hook_module.pytest_testnodedown(_FakeNode("gw6"), "Not properly terminated")
+
+    err = capsys.readouterr().err
+    assert "DEAD WORKER EXIT:" in err
+    assert "gw6" in err and "unknown" in err
+
+
+def test_a_process_shaped_object_is_never_polled_and_is_reported_unknown(
+    hook_module: types.ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The deadline bounds the WAIT, not one call -- so only a real Popen is polled.
+
+    Review round 1 measured this: a stub with a process's ``pid``/``returncode``/
+    ``poll`` held the controller for 0.753 s under a 0.5 s deadline, because the
+    deadline is only checked between iterations. The fix is not a wider deadline
+    (that would make a blocking object merely slower to hang on) but refusing the
+    call: ``Popen.poll`` is documented and implemented as ``waitpid(WNOHANG)``, and
+    no other object gets to be polled however process-shaped it looks.
+    """
+    stub = _BlockingPollStub()
+    started = time.monotonic()
+    hook_module._DEAD_WORKERS.clear()
+    hook_module.pytest_testnodedown(_node_with_process("gw7", stub), "Not properly terminated")
+    elapsed = time.monotonic() - started
+
+    err = capsys.readouterr().err
+    assert "DEAD WORKER EXIT:" in err and "unknown" in err
+    assert "not a subprocess.Popen" in err
+    assert stub.polled is False, "a process-shaped object must never be polled"
+    assert elapsed < 0.5, f"the hook spent {elapsed:.3f}s on a non-Popen object"
+
+
+def test_a_failing_exit_probe_is_unknown_and_never_raises(
+    hook_module: types.ModuleType,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe must not be able to fail the run it is only diagnosing.
+
+    ``_await_exit_status`` is the failure point (a ``Popen`` whose child was
+    reaped elsewhere is the realistic one), and the contract is that the hook
+    still returns, the pre-existing message is still printed, and the new line
+    says ``unknown`` with the exception named. A raised exception here would
+    change a run's exit status from a hook that is supposed to describe it.
+    """
+
+    def _exploding_probe(process: subprocess.Popen[bytes]) -> str:
+        raise OSError("No child processes")
+
+    monkeypatch.setattr(hook_module, "_await_exit_status", _exploding_probe)
+    hook_module._DEAD_WORKERS.clear()
+    hook_module.pytest_testnodedown(
+        _node_with_process("gw8", _exited_process()), "Not properly terminated"
+    )
+
+    err = capsys.readouterr().err
+    assert "DEAD WORKER:" in err
+    assert "DEAD WORKER EXIT:" in err and "unknown" in err and "OSError" in err
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGKILL does not exist on Windows")
+def test_a_signal_death_is_named_as_a_signal(
+    hook_module: types.ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An OOM or group kill arrives as ``-9``, and the NAME is the useful half.
+
+    ``Popen`` reports a killed child with a negative code, so ``rc=-9`` alone
+    reads like a quirk to anyone not holding the POSIX table. Naming SIGKILL is
+    the difference between "something exited" and "something killed it" -- the
+    exact question the incident this diagnostic comes from left open. The child
+    here is really killed, so this also pins the negative-return-code path against
+    the OS rather than against a hand-written ``-9``.
+    """
+    process = _running_process()
+    try:
+        process.kill()
+        process.wait()
+        assert process.returncode == -9
+        hook_module._DEAD_WORKERS.clear()
+        hook_module.pytest_testnodedown(
+            _node_with_process("gw9", process), "Not properly terminated"
+        )
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+    err = capsys.readouterr().err
+    assert "DEAD WORKER EXIT:" in err
+    assert "gw9" in err and "rc=-9" in err and "SIGKILL" in err
+
+
+def test_a_process_that_exits_after_the_first_look_is_reported_with_its_code(
+    hook_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`alive` must not be sticky: a later exit has to be picked up with its code.
+
+    This is the transition a real dying worker takes -- the hook usually fires
+    before the child is reaped -- and review round 1 asked for it explicitly.
+    Each call is single-shot here (zero deadline) so the test drives the loop
+    itself: the first look must say ``alive``, and once the child has exited the
+    same probe must return a code rather than repeating the first answer.
+    """
+    monkeypatch.setattr(hook_module, "_EXIT_STATUS_DEADLINE_S", 0.0)
+    process = _running_process()
+    status = ""
+    try:
+        assert hook_module._await_exit_status(process) == "alive"
+        process.terminate()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            status = hook_module._await_exit_status(process)
+            if status.startswith("exited rc="):
+                break
+            time.sleep(0.01)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+    assert status.startswith("exited rc="), status
+
+
+def test_an_ssh_gateway_process_is_not_reported_as_the_workers_exit(
+    hook_module: types.ModuleType, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The local ``ssh`` CLIENT is not the worker, and its exit code is a lie here.
+
+    ``execnet.gateway_io.create_io`` builds an ssh (and vagrant-ssh) gateway with
+    the SAME ``Popen2IOMaster`` as a local worker, so ``_io.popen`` exists for
+    those too -- but it is the ssh process on THIS machine. Reporting its rc as
+    the worker's would hand a reader a confident wrong cause, which is worse than
+    ``unknown``. The spec gate is what keeps that from happening, so it gets a
+    test of its own rather than riding on the "no process object" case.
+    """
+    hook_module._DEAD_WORKERS.clear()
+    hook_module.pytest_testnodedown(
+        _GatewayNode(_FakeGatewayWithIO("gw10", object(), popen=False)),
+        "Not properly terminated",
+    )
+
+    err = capsys.readouterr().err
+    assert "DEAD WORKER EXIT:" in err
+    assert "gw10" in err and "unknown" in err
+
+
+def test_the_probe_resolves_the_installed_execnet_gateway_process(
+    hook_module: types.ModuleType,
+) -> None:
+    """Assert the attribute path against REAL execnet, which is what a rename breaks.
+
+    The fake-based cases construct the shape the probe expects, so on their own
+    they can only fail when the probe changes -- not when execnet moves ``_io`` or
+    renames ``popen``. This builds a real popen gateway and requires the probe to
+    return that gateway's own ``Popen``; a rename makes it return ``None`` and the
+    assertion fails with the message below. The gateway is exited and its process
+    reaped in the ``finally``, so the test leaves no child behind.
+    """
+    execnet = pytest.importorskip("execnet")
+    group = execnet.Group()
+    gateway = group.makegateway("popen//id=probe")
+    popen = getattr(getattr(gateway, "_io", None), "popen", None)
+    try:
+        assert isinstance(popen, subprocess.Popen), (
+            "execnet no longer exposes gateway._io.popen as a subprocess.Popen; "
+            "the probe's attribute path has moved"
+        )
+        assert hook_module._worker_process(_GatewayNode(gateway)) is popen
+    finally:
+        # NOT `gateway.exit(); group.terminate()`. `exit()` unregisters the
+        # gateway, so a following `terminate()` finds an empty group and never
+        # runs its join/`_io.wait()` loop -- the loop that reaps the child. That
+        # pair was the teardown here and leaked the gateway process (review round
+        # 2, R3), so `terminate()` is called on the intact group instead.
+        group.terminate()
+    # Prove the child was REAPED, not merely that terminate() returned: only a
+    # collected wait sets `returncode`, and a reaped pid is no longer our child.
+    assert isinstance(popen, subprocess.Popen)
+    assert popen.returncode is not None, "the gateway's child was never reaped"
+    if sys.platform != "win32":
+        with pytest.raises(ChildProcessError):
+            os.waitpid(popen.pid, os.WNOHANG)
+
+
+def test_the_cgroup_line_reads_memory_events_or_stays_silent(
+    hook_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Linux-only cgroup capture is exercised here because this host has no /proc.
+
+    Two things need pinning where the platform cannot run the real thing: the
+    counter names are read from the cgroup's ``memory.events`` (``oom`` and
+    ``oom_kill``, cumulative for the cgroup), and anything unreadable produces no
+    line at all rather than an ``unknown`` one -- an absent optional line is the
+    documented behaviour on macOS and on cgroup v1, and a traceback or a stray
+    "unknown" there would be noise in every developer's log.
+    """
+    readable = {
+        "/proc/self/cgroup": "0::/ci/shared\n",
+        "/sys/fs/cgroup/ci/shared/memory.events": (
+            "low 0\nhigh 0\nmax 12\noom 3\noom_kill 1\noom_group_kill 0\n"
+        ),
+    }
+
+    class _FakePath:
+        """``read_text`` over a dict keyed by the path the helper would open."""
+
+        def __init__(self, *parts: object) -> None:
+            pieces = [str(part).strip("/") for part in parts if str(part).strip("/")]
+            self._key = "/" + "/".join(pieces)
+
+        def read_text(self, *, encoding: str) -> str:
+            assert encoding == "utf-8"
+            return readable[self._key]
+
+        def __str__(self) -> str:
+            return self._key
+
+    monkeypatch.setattr(hook_module, "pathlib", types.SimpleNamespace(Path=_FakePath))
+
+    assert hook_module._dead_worker_cgroup_line() == (
+        "DEAD WORKER CGROUP: oom_kill=1 oom=3 " "(/sys/fs/cgroup/ci/shared/memory.events)"
+    )
+
+    readable.clear()  # nothing readable at all: no /proc on macOS, no v2 cgroup
+    assert hook_module._dead_worker_cgroup_line() is None

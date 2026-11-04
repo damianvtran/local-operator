@@ -292,7 +292,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # account). Worded to cost no more than the old text: the child-kind
     # context budget had 2 billed tokens of headroom. The ``team`` entry moves by
     # the same -1 for its twin field; the same printed table measured both.
-    "agent": 1408,
+    # RE-MEASURED (PR #3143, Radient Saver pins): 1408 -> 1441 (+33). The new
+    # optional ``saver`` param (on | off | inherit) and its one-line
+    # description; the ``team`` twin field moves +32 in the same printed table.
+    "agent": 1441,
     # RE-MEASURED (ask/notify dedupe, asks/dedupe.py): 1079 -> 1078. The
     # restraint now says "decide, never for FYI" and "asking notifies: never
     # also `notify` it"; trims elsewhere in the same paragraph pay for it so
@@ -369,7 +372,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # name lives in dm's refusal, not in per-request schema prose. Measured by
     # this test's own printed table on the rebased head; the paired start-context
     # figure is in scripts/bench_context_budget.py.
-    "bridge": 1797,
+    # 1890 -> 1901 (2026-11-03): the one-channel clause in the description
+    # ("The one channel for teammates; reply where it arrived") — the incident
+    # fix for cross-channel fan-out to a teammate.
+    # 1901 -> 1951 (2026-11-03): body-state and long-hold alert wording, re-measured
+    # on the tree rebased onto the one-channel clause by this test's own printed value.
+    "bridge": 1962,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -387,7 +395,38 @@ MEASURED_TOKENS: dict[str, int] = {
     # 1801 -> 1803 (+2, review round 2 m2): "not expected in Chrome's <video>" replaces
     # "not Chrome's <video>", because Chrome playback was never tested. Measured by
     # this test's own print.
-    "browser": 1803,
+    # 1863 -> 1908 (+45, issue #3248): the `hover` op and the chord/selector
+    # wording on `press`. Measured by this test's own print.
+    # 1908 -> 1968 (+60, issue #3333): the `select` op, its native/ARIA
+    # operation and its host scope, after adding the one-line
+    # BrowserParams.options. Measured by this test's own print.
+    # 1968 -> 2094 (+126, agent-chosen recording size, RS1-RS5): the
+    # width=/height= bounds and the 4K cap arithmetic (about 150 s at 64 MiB,
+    # 75 s in a scratchpad) must be discoverable from the op the model calls;
+    # the measured cost table and the viewport-reflow caveat stay in
+    # `guide://browser`, which is where the reference detail belongs. The cap
+    # figures are a WORST CASE, not a typical rate, so that qualifier rides
+    # beside them (review round 1, m4). Both branches moved this one doc, and
+    # together they pushed it past the 8 KiB soft cap, so the op row and the
+    # note drop the host-only clause they each duplicated from the other
+    # (-5 tokens against the branch's own +131); the number below is measured
+    # on the rebased tree by this test's own print, not a sum of branch deltas.
+    # 2097 -> 2104 (+7, opt-in high-quality recording): `quality='high'` (H.264,
+    # plays in Chrome, costs more CPU) is the one fact a model must meet at the
+    # op, since the default AV1 clip is the lower-quality choice. To stay under the
+    # 8192-char soft cap (8188 chars before this change) the note drops the
+    # width/height bounds the param descriptions and the validator's refusal already
+    # carry, and the op row drops its width/height clause. The when-to-use guidance
+    # and the measured costs live in `guide://browser`. Measured by this test's
+    # own print.
+    # 2104 -> 2116 (+12, review M1 and m-A on the high-quality PR): the earlier
+    # "costs more CPU" was wrong against the measurements (whole-app CPU is LOWER
+    # for `high` on macOS arm64; what rises is main-process CPU and about
+    # 0.5-0.7 GB of RAM), so the note states the RAM cost and the tested
+    # playback instead. Measured by this test's own print; the doc is 8190 chars against
+    # the 8192 cap.
+    # No other tool's entry moved.
+    "browser": 2116,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
@@ -398,7 +437,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # `console_cleanup` in the console doc — the ONLY entry that moved. The two
     # new methods and the capacity/cleanup detail are the whole delta.
     "console": 1228,
-    "edit": 347,
+    # The ordered-hunks and anchor-line descriptions were shortened without
+    # changing their contract; this is the measured tool://edit cost (347 -> 326).
+    "edit": 326,
     "eval": 372,
     #: Media wave-2 edit lane (2026-10-10): the source paragraph now names
     #: the by-reference input (``source_attachment``) and the edit rungs;
@@ -498,7 +539,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # 350 -> 351 (video phase, 2026-10-10): the ``jobs`` description now says
     # "(task/bash/video)" — the video job type is a model-visible part of what
     # ``op='list'`` shows. One token, re-measured.
-    "jobs": 347,
+    # 347 -> 292: compressing the shared jobs description removes repetition,
+    # not operations or authority. Re-measured through render_tool_doc and
+    # count_text_tokens; every other canonical ledger entry is unchanged.
+    "jobs": 292,
     "list_variables": 54,
     # NEW (Library): the six-op catalog tool's reference — filters, tag and
     # provenance rules, and the read-tier rationale. Measured through this
@@ -522,7 +566,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # doc — the argumentless call's description plus the "when NOT to call
     # it" notes. Re-measured via this test's own print, and it is the ONLY
     # entry that moved: every other count above is byte-identical.
-    "no_reply": 109,
+    # PR #3318: 109 -> 121, measured by this test's canonical cl100k_base
+    # ruler. The first wrapper wording measured 148; trimming it saves 27
+    # tokens while keeping call-once/final-eval/stop and host-acceptance rules.
+    "no_reply": 121,
     # NEW (notifications inbox, docs/design/notifications-inbox.md §3.1): the
     # ``notify`` doc — its description plus the five-field schema rendered by
     # this file's own renderer. Re-measured via this test's print; it is the
@@ -631,7 +678,9 @@ MEASURED_TOKENS: dict[str, int] = {
     # the same printed table.
     # RE-MEASURED (F0, #3054): 1400 -> 1399 -- the ``scope`` default wording,
     # the same -1 as the agent twin.
-    "team": 1399,
+    # RE-MEASURED (PR #3143, Radient Saver pins): 1399 -> 1431 (+32), the
+    # per-slot ``saver`` member field; the same printed table as ``agent``.
+    "team": 1431,
     "team_delete": 86,
     "todo": 536,
     # NEW (video phase, 2026-10-10): the ``video_status`` doc — the cold-safe
@@ -674,7 +723,9 @@ MEASURED_TOKENS: dict[str, int] = {
 #: takes because both arms render the completed notes; ``task`` stays 764.
 #: RE-MEASURED (F0, #3054): agent 1394 -> 1393, the same -1 ``scope``-default
 #: wording as the canonical arm; ``task`` stays 764.
-TIER_ARM_TOKENS: dict[str, int] = {"agent": 1437, "task": 764}
+#: RE-MEASURED (PR #3143): agent 1437 -> 1470, the same +33 ``saver`` param
+#: as the canonical arm; ``task`` stays 764 (Saver is not a launch field).
+TIER_ARM_TOKENS: dict[str, int] = {"agent": 1470, "task": 764}
 
 
 async def _noop_execute(*_args: Any, **_kwargs: Any) -> ToolResult:

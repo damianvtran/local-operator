@@ -301,6 +301,16 @@ work, and that gap is the whole of this phase. The verdict is one command:
 lop network ready --peer <device> --json     # every member, when --peer is omitted
 ```
 
+For work in a particular repository, add `--repository-path <PEER_PATH>` and/or
+`--repository-url <CLONE_URL>`. The path belongs to the peer: `~/...` and relative
+paths resolve under that peer's home, never the viewer's cwd. Quote `~/...` in
+the local shell so that shell does not expand it before the CLI receives it.
+A URL alone lets
+the existing peer probe derive its destination name. Omitting both preserves
+the installed-project default. This is a read-only check, not a clone or grant;
+when no relay answers, the existing fallback says the peer was not asked and
+does not check the viewer's local checkout as a substitute.
+
 Its top-level `ok` is true only when every ADMISSION row and every still-gating
 EQUIPMENT row passes. When it is false the payload carries `code: "unhealthy"`
 and a `message` naming the failures, and every row carries its own `state`
@@ -903,6 +913,22 @@ Radient organization login is person-scoped: share it only to your own paired
 devices. If the borrowing device points at a local or staging hub, set
 `RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1` on that device: the check runs where
 the request is sent, so setting it on the owner does nothing.
+
+An already-granted borrower can explicitly ask its credential owner to refresh:
+`lop network credential refresh <provider> --json`, run ON THE BORROWER. This uses
+the existing broker grant request with `force_refresh=true`; only an admin device
+may force a refresh, and the owner still checks the existing share. It cannot
+create or restore a grant, change the account/scope/destination, or perform an
+interactive sign-in for the owner. Owner refusal codes (including
+`not_authorised` and `interactive_required`) remain refusal codes; a successful
+receipt contains no access or refresh material. Ordinary requests still resolve
+the owner automatically, so this is an explicit repair action, not something to
+run after every authentication failure. Readiness offers the command for an
+expired selected-model grant only when the observer and the borrowing peer are
+both known admins. Run it on that borrowing peer: an observer's admin authority
+does not travel with the command or authorize a drive/read peer to force refresh.
+For other or unknown borrower roles, readiness retains the normal next-request
+recovery guidance and does not offer the explicit force-refresh command.
 
 A granted share is learned by PULLING, never pushed. The owner's document changes
 when `lop network credential share` runs there; this device reads it on its next

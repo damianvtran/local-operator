@@ -534,7 +534,7 @@ def test_the_mesh_front_doors_are_in_the_sessions_and_peer_messaging_guides() ->
 
     The `sessions` guide must teach the remote ops — the union list with the
     holding device on each row, the no-mesh note, the tail-only peek and the
-    no-force stop — and peer-messaging must carry the `send` tool's `peer`
+    refused remote stop — and peer-messaging must carry the `send` tool's `peer`
     bullet and the loopback-only limit, so an agent reading the message
     protocol learns the mesh path exists instead of inventing one.
     """
@@ -546,7 +546,23 @@ def test_the_mesh_front_doors_are_in_the_sessions_and_peer_messaging_guides() ->
     assert "each remote row names the device that holds it" in flat
     assert "ONE note saying why no remote rows could be" in flat
     assert "`query`/`regex`/`digest` stay local" in flat
-    assert "`lop network sessions --stop <id> --force` is the escalation" in flat
+    # THE REMOTE STOP IS A REFUSAL, NOT AN ESCALATION. This cell used to require
+    # the sentence naming `lop network sessions --stop <id> --force`; the tool
+    # answers `stop` with a `peer` target by refusing outright — no idle-only,
+    # no-signal remote stop exists on the wire — so the guide now states the
+    # refusal and names the remedy (the operator, on that device). The `--force`
+    # line is an ABSENCE on purpose: an escalation named here again is exactly the
+    # drift this test exists to catch, and the tool has no such path to agree
+    # with.
+    assert "`stop` is ALWAYS REFUSED for a `peer` target" in flat
+    assert "nothing is sent and the operator stops it on that device" in flat
+    assert "--force" not in flat
+    # ...and the LOCAL front door states the same authority limit: it ends an idle
+    # session, never signals, and has no force option of its own — the escalation
+    # stays the operator's, in the CLI (`test_graceful_only_stop.py` proves the
+    # tool half of that sentence).
+    assert "`stop` ends an IDLE local session" in flat
+    assert "There is no force option" in flat
 
     messaging = resolver("guide://peer-messaging")
     assert messaging is not None
@@ -1000,3 +1016,34 @@ def test_credentials_guide_keeps_local_first_and_names_vault_only_for_teammates(
     # redaction guard runs must find nothing to mask in the new section.
     _, hits = scrub_shapes_with_hits(section)
     assert hits == []
+
+
+def test_browser_guide_makes_the_agent_give_the_pairing_code_first() -> None:
+    """The pairing step's wording is load-bearing, so it is pinned.
+
+    Observed 2026-11-02: the agent ran `lop browser pair`, left the code only in
+    a collapsed tool block, ran more commands, and three codes expired before
+    the person ever saw one; it also told the person to "open the popup, then
+    retry", which cannot work (the popup closes on focus loss and the CLI now
+    mints a code from any state). The guide must lead the pairing step with
+    "write the code in your reply immediately, before any other tool call",
+    name the 15-minute lifetime, and never send the person to the popup first.
+    """
+    from local_operator.browser_bridge.daemon import PAIR_TTL_S
+    from local_operator.browser_bridge.protocol import PAIR_ASK_PHRASE
+
+    guides = {guide.name: guide for guide in discover_guides()}
+    browser = make_guide_resolver(guides)("guide://browser")
+    assert browser is not None
+    step = browser[browser.index("### 4. Pair the extension") :]
+    step = step[: step.index("### 5.")]
+    first_paragraph = step.split("\n\n")[1]
+    assert "IMMEDIATELY" in first_paragraph and "before any other tool call" in first_paragraph
+    assert "Never leave it only in the tool output" in first_paragraph
+    assert "polling loop" in first_paragraph
+    assert f"{int(PAIR_TTL_S // 60)} minutes" in step
+    assert "2-minute" not in browser and "two minutes" not in browser
+    assert "**123456**" in step, "the example reply must show the code in bold"
+    assert f'"{PAIR_ASK_PHRASE}"' in step
+    assert "open the popup, then retry" in step  # quoted as the thing NOT to say
+    assert "Do NOT ask them to open\nthe extension popup first" in step

@@ -196,8 +196,19 @@ function Entry({ entry, pid, condensed = false }: { entry: TranscriptEntry; pid:
 		case "steer":
 			return (
 				<div className="flex min-w-0 justify-end">
-					<div className="max-w-[85%] rounded-md border border-hairline px-3 py-1 text-body-sm text-ink-muted break-words whitespace-pre-wrap">
-						{entry.text}
+					<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md border border-hairline px-3 py-1 text-body-sm text-ink-muted break-words">
+						{/* A steer can carry images exactly like a prompt (the composer
+						   sends them on the steer op while a turn runs). Rendering only
+						   the text left an image-only steer as an EMPTY bordered pill
+						   and hid the thumbnails of a captioned one. */}
+						{(entry.images ?? []).length > 0 ? (
+							<div className="flex flex-wrap gap-1.5">
+								{(entry.images ?? []).map((img) => (
+									<AttachmentImage key={img.index} pid={pid} entryId={entry.id} index={img.index} />
+								))}
+							</div>
+						) : null}
+						{entry.text ? <div className="whitespace-pre-wrap">{entry.text}</div> : null}
 					</div>
 				</div>
 			);
@@ -999,6 +1010,19 @@ export function Transcript({
 		<div
 			ref={node => { scrollRef.current = node; return scrollCue(node); }}
 			onScroll={onScroll}
+			/* THE TRANSCRIPT KEEPS ITS OWN MOMENTUM (the "two scroll bars"
+			   report). `overscroll-behavior-y: contain` stops a drag that reaches
+			   either end of the conversation from chaining to the document, which
+			   is where a thumb on the composer or a flick at the top edge used to
+			   move the whole page instead. The window is locked at the stylesheet
+			   level too (`styles/index.css`, html/body); this is the half that
+			   belongs to the scroller, so a future shell that forgets the lock
+			   still cannot turn a conversation swipe into a page scroll.
+
+			   Inline rather than a class for the reason `lib/column.ts` spells
+			   out: the vitest layer has no stylesheet, so only an inline style
+			   RESOLVES and a test can fail when the property is dropped. */
+			style={{ overscrollBehaviorY: "contain" }}
 			className={cn(
 				/* overflow-x-hidden as the backstop: break-words on the rows should
 				   wrap everything, but a table or pre that still overflows scrolls

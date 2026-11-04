@@ -41,7 +41,10 @@ from local_operator.compaction.thresholds import (
     CompactionSettings,
     resolve_threshold_percent,
 )
-from local_operator.compaction.tokens import estimate_messages_tokens
+from local_operator.compaction.tokens import (
+    document_render_excess,
+    estimate_messages_tokens,
+)
 from local_operator.harness.types import (
     AgentTool,
     AudioContent,
@@ -78,6 +81,7 @@ from local_operator.providers.documents import (
     document_budget_for_request,
     document_form,
     document_native_ok,
+    document_text_cap,
     fallback_document_text,
 )
 from local_operator.providers.failover import ProviderError
@@ -311,6 +315,12 @@ def _served_provider_name(value: Any) -> str | None:
     return trimmed
 
 
+def _reported_token_count(raw: Mapping[str, Any], key: str) -> bool:
+    """A missing or malformed counter is not an explicitly reported zero."""
+    value = raw.get(key)
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def _compat_cache_usage(raw_usage: Mapping[str, Any]) -> tuple[int | None, int]:
     """Normalize counters without mistaking an absent or malformed hit for zero."""
     details = raw_usage.get("prompt_tokens_details") or {}
@@ -334,6 +344,24 @@ def _compat_cache_usage(raw_usage: Mapping[str, Any]) -> tuple[int | None, int]:
             cache_read = parsed
             break
     return cache_read, _usage_token(details, "cache_write_tokens")
+
+
+def _openai_long_context_receipt(request: ChatRequest, url: str, input_tokens: int) -> bool:
+    """Only the actual first-party destination can establish a billable tier."""
+    from local_operator.model.configure import _OPENAI_LONG_CONTEXT_MODELS
+    from local_operator.providers.registry import credential_provider_id
+
+    return bool(
+        credential_provider_id(request.model.provider) == "openai"
+        and url
+        in {
+            "https://api.openai.com/v1/chat/completions",
+            "https://api.openai.com/v1/responses",
+            CODEX_RESPONSES_URL,
+        }
+        and input_tokens > 272_000
+        and _OPENAI_LONG_CONTEXT_MODELS.fullmatch(request.model.model_id)
+    )
 
 
 def _usd_cost(raw_usage: Mapping[str, Any] | None) -> float | None:
@@ -1725,7 +1753,13 @@ def _estimated_prompt_tokens(request: ChatRequest) -> tuple[int, int]:
 
     # The provider-bound estimate must measure the same raw tool row the wire
     # encoder will send; analytics and durable history keep using the receipt.
-    local = estimate_messages_tokens(request.wire_messages())
+    wire_messages = request.wire_messages()
+    # A document renders at most its share of the window, whatever its charge
+    # (``document_render_excess``); the refusal below must not rest on the
+    # window-blind figure the compaction trigger is happy to over-state.
+    local = estimate_messages_tokens(wire_messages) - document_render_excess(
+        wire_messages, request.model.context_window
+    )
 
     extra_chars = sum(len(block) for block in request.system_blocks)
     for tool in request.tools:
@@ -2200,6 +2234,7 @@ def _document_chat_part(
     block: DocumentContent,
     form: DocumentForm | None,
     budget: DocumentBudget | None = None,
+    text_cap: int | None = None,
 ) -> dict[str, Any]:
     """One document block as an OpenAI-COMPATIBLE chat content part.
 
@@ -2211,7 +2246,10 @@ def _document_chat_part(
 
     Ineligible payloads (no form, over a limit, non-PDF) become TEXT — the
     fallback extraction — never a skipped block: a provider that cannot read
-    the file must still receive what the file says.
+    the file must still receive what the file says. ``text_cap`` is the
+    window-aware character ceiling for that text (``document_text_cap``); it is
+    a separate argument because ``form`` is ``None`` exactly for the models
+    (text-only) whose small windows need it most.
     """
     if document_native_ok(block, form, budget=budget):
         data_url = f"data:{block.mime_type};base64,{block.data}"
@@ -2221,13 +2259,14 @@ def _document_chat_part(
             "type": "file",
             "file": {"filename": block.filename, "file_data": data_url},
         }
-    return {"type": "text", "text": fallback_document_text(block)}
+    return {"type": "text", "text": fallback_document_text(block, text_cap)}
 
 
 def _message_to_openai(
     message: Message,
     document_form_: DocumentForm | None = None,
     document_budget_: DocumentBudget | None = None,
+    document_text_cap_: int | None = None,
 ) -> dict[str, Any]:
     """Render one harness message into OpenAI chat-completions shape."""
     if message.role == "assistant" and message.tool_calls:
@@ -2284,7 +2323,9 @@ def _message_to_openai(
             # the parts array, because ``plain_only`` would otherwise join the
             # extraction into one string and lose the per-file framing.
             plain_only = False
-            parts.append(_document_chat_part(block, document_form_, document_budget_))
+            parts.append(
+                _document_chat_part(block, document_form_, document_budget_, document_text_cap_)
+            )
         elif isinstance(block, AudioContent):
             plain_only = False
             wire_format = stt_audio.format_for_model_wire(block.mime_type)
@@ -2377,6 +2418,7 @@ def _messages_to_openai_responses(
         doc_budget = document_budget_for_request(doc_form, request)
     else:
         doc_budget = document_budget_for_messages(doc_form, messages)
+    doc_text_cap = document_text_cap(model.context_window) if model is not None else None
     items: list[dict[str, Any]] = []
     for message in _without_unrenderable_tool_calls(messages):
         if model is not None:
@@ -2443,7 +2485,12 @@ def _messages_to_openai_responses(
                         }
                     )
                 else:
-                    content.append({"type": "input_text", "text": fallback_document_text(block)})
+                    content.append(
+                        {
+                            "type": "input_text",
+                            "text": fallback_document_text(block, doc_text_cap),
+                        }
+                    )
             elif isinstance(block, AudioContent):
                 # STRUCTURAL REFUSAL, not a silent drop: the Responses API
                 # describes text and image inputs, and audio input is a Chat
@@ -2947,6 +2994,23 @@ class OpenAICompatClient:
         affinity = str(uuid.uuid5(uuid.NAMESPACE_URL, f"local-operator:codex-cache:{key}"))
         return {"session-id": affinity, "thread-id": affinity}
 
+    def codex_turn_state_scope(
+        self, request: ChatRequest, api_key: str | None, oauth_access: "OAuthAccess | None"
+    ) -> tuple[str, str] | None:
+        """Only the built-in OAuth route may acquire or echo server turn state."""
+        if (
+            self._base_url != "https://api.openai.com/v1"
+            or request.model.provider not in {"openai", "openai-device"}
+            or not self._codex_responses_mode(oauth_access)
+        ):
+            return None
+        from local_operator.providers.replay import credential_scope
+
+        # Model switches may change the server's routing even within one turn.
+        return request.model.provider, (
+            credential_scope(api_key, oauth_access) + ":" + request.model.model_id
+        )
+
     def _grok_conv_headers(self, request: ChatRequest, url: str) -> dict[str, str]:
         """Keep one conversation on one xAI cache server via ``x-grok-conv-id``.
 
@@ -3271,6 +3335,7 @@ class OpenAICompatClient:
                 context_window=model.context_window,
             ),
             document_budget_,
+            document_text_cap(model.context_window),
         )
         native = replay_items(message, model, endpoint, "openai-chat", scope)
         if native:
@@ -3655,6 +3720,9 @@ class OpenAICompatClient:
                         completion_details = raw.get("completion_tokens_details") or {}
                         usage = Usage(
                             input_tokens=int(raw.get("prompt_tokens", 0)),
+                            openai_long_context=_openai_long_context_receipt(
+                                request, url, int(raw.get("prompt_tokens", 0))
+                            ),
                             output_tokens=int(raw.get("completion_tokens", 0)),
                             cache_read_tokens=cache_read if cache_read is not None else 0,
                             cache_write_tokens=cache_write,
@@ -3687,6 +3755,9 @@ class OpenAICompatClient:
                             at_ms=tariff.now_ms(),
                         )
                         usage._cache_read_reported = cache_read is not None
+                        usage._token_counts_reported = _reported_token_count(
+                            raw, "prompt_tokens"
+                        ) and _reported_token_count(raw, "completion_tokens")
                         yield StreamUsageEvent(usage=usage)
                     choices = chunk.get("choices") or []
                     if not choices:
@@ -3939,6 +4010,17 @@ class OpenAICompatClient:
         )
         headers = self._headers(api_key, oauth_access)
         headers.update(self._codex_affinity_headers(request, oauth_access, url))
+        turn_state = request._codex_turn_state
+        turn_generation = None
+        if turn_state is not None:
+            turn_scope = self.codex_turn_state_scope(request, api_key, oauth_access)
+            turn_state.observe_attempt(*(turn_scope or ("", "")))
+            turn_generation, token = turn_state.bind_endpoint(url)
+            if turn_scope is not None and url == CODEX_RESPONSES_URL:
+                if token is not None:
+                    headers["x-codex-turn-state"] = token
+            else:
+                turn_generation = None
         headers.update(self._grok_conv_headers(request, url))
         headers.update(self._radient_correlation_headers(request, url))
         usage: Usage | None = None
@@ -3954,6 +4036,98 @@ class OpenAICompatClient:
         # Output item/call ids -> normalized tool-call index.
         call_indexes: dict[str, int] = {}
         output_items: dict[int, dict[str, Any]] = {}
+        argument_parts: dict[int, list[str]] = {}
+        added_argument_snapshots: dict[int, str] = {}
+        added_argument_bytes = 0
+        output_call_indexes: dict[int, int] = {}
+        call_identities: dict[int, tuple[str, str, str]] = {}
+        finalized_arguments: set[int] = set()
+
+        def conflicting_call() -> ProviderError:
+            return ProviderError(
+                None,
+                "responses_tool_arguments_conflict",
+                retryable=False,
+                fail_closed=True,
+            )
+
+        def reconcile_arguments(index: int, arguments: Any) -> list[StreamToolCallDelta]:
+            """Final snapshots repeat deltas, but may be the ONLY argument source.
+
+            Append only a missing suffix. A contradictory snapshot cannot be
+            repaired with append-only deltas: fail closed before any pending
+            tool (especially a write) can execute with the wrong arguments.
+            """
+            if not isinstance(arguments, str):
+                return []
+            parts = argument_parts.setdefault(index, [])
+            streamed = "".join(parts)
+            if not arguments.startswith(streamed):
+                raise conflicting_call()
+            suffix = arguments[len(streamed) :]
+            if not suffix:
+                return []
+            envelope.charge(suffix)
+            parts.append(suffix)
+            return [StreamToolCallDelta(index=index, argument_delta=suffix)]
+
+        def reconcile_item(
+            item: Mapping[str, Any], output_index: int, *, final: bool = False
+        ) -> list[StreamToolCallDelta]:
+            nonlocal tool_call_count, added_argument_bytes
+            if item.get("type") != "function_call":
+                # A completed message/reasoning item cannot erase a call that
+                # already owns this output slot. Partial deltas are pending,
+                # not permission to execute a call contradicted by its final.
+                if output_index in output_call_indexes:
+                    raise conflicting_call()
+                return []
+            call_id = item.get("call_id") or item.get("id") or ""
+            item_id = item.get("id") or ""
+            index = call_indexes.get(call_id, call_indexes.get(item_id))
+            position_index = output_call_indexes.get(output_index)
+            if position_index is not None:
+                if index is not None and index != position_index:
+                    raise conflicting_call()
+                index = position_index
+            identity = (call_id, item_id, item.get("name") or "")
+            if index is not None and call_identities[index] != identity:
+                raise conflicting_call()
+            if final and not isinstance(item.get("arguments"), str):
+                raise conflicting_call()
+            events: list[StreamToolCallDelta] = []
+            if index is None:
+                index = tool_call_count
+                tool_call_count += 1
+                envelope.charge(item.get("name") or "")
+                events.append(StreamToolCallDelta(index=index, id=call_id, name=item.get("name")))
+                call_identities[index] = identity
+            output_call_indexes[output_index] = index
+            if final:
+                finalized_arguments.add(index)
+            if call_id:
+                call_indexes[call_id] = index
+            if item_id:
+                call_indexes[item_id] = index
+            arguments = item.get("arguments")
+            if final:
+                snapshot = added_argument_snapshots.get(index, "")
+                if not isinstance(arguments, str) or not arguments.startswith(snapshot):
+                    raise conflicting_call()
+                events.extend(reconcile_arguments(index, arguments))
+            elif isinstance(arguments, str) and arguments:
+                # The added item is a snapshot, not the first argument delta:
+                # providers may repeat its populated arguments in the stream.
+                # Keep the sources separate until a final snapshot reconciles
+                # them, so native replay and dispatch cannot disagree.
+                previous = added_argument_snapshots.get(index)
+                if previous is not None and previous != arguments:
+                    raise conflicting_call()
+                if previous is None:
+                    added_argument_bytes += len(arguments.encode("utf-8"))
+                    envelope.check(added_argument_bytes)
+                    added_argument_snapshots[index] = arguments
+            return events
 
         async with self._http.stream(
             "POST",
@@ -3966,6 +4140,8 @@ class OpenAICompatClient:
                 self._observe_responses_headers(response.headers)
                 self._observe_responses_error(response)
                 raise_for_status(response)
+            if turn_state is not None and turn_generation is not None:
+                turn_state.receive(turn_generation, response.headers.get("x-codex-turn-state"))
             self._observe_responses_headers(response.headers)
             async for data in _iter_sse_lines(response):
                 if data == "[DONE]":
@@ -3976,6 +4152,14 @@ class OpenAICompatClient:
                     continue
                 self._observe_responses_event(payload)
                 event_type = payload.get("type", "")
+                if terminal_stop is not None:
+                    # Completion closes generated output, not the transport's
+                    # metadata tail. Muse's subscription receipt arrives AFTER
+                    # response.completed and must reach the observer above;
+                    # late output deltas must not mutate pending calls.
+                    if event_type in ("response.failed", "error"):
+                        raise _openai_response_error(payload)
+                    continue
                 if event_type == "response.created":
                     # The Responses API names the turn as soon as it opens it.
                     # Capture the boundary HERE, not at ``response.completed``:
@@ -4001,17 +4185,10 @@ class OpenAICompatClient:
                     item = payload.get("item") or {}
                     if item.get("type") == "reasoning":
                         continue
-                    if item.get("type") == "function_call":
-                        index = tool_call_count
-                        tool_call_count += 1
-                        call_id = item.get("call_id") or item.get("id") or ""
-                        item_id = item.get("id") or ""
-                        if call_id:
-                            call_indexes[call_id] = index
-                        if item_id:
-                            call_indexes[item_id] = index
-                        envelope.charge(item.get("name") or "")
-                        yield StreamToolCallDelta(index=index, id=call_id, name=item.get("name"))
+                    for event in reconcile_item(
+                        item, int(payload.get("output_index", tool_call_count))
+                    ):
+                        yield event
                 elif event_type == "response.output_item.done":
                     item = payload.get("item")
                     if isinstance(item, dict):
@@ -4023,16 +4200,30 @@ class OpenAICompatClient:
                             )
                         )
                         output_items[index] = item
+                        for event in reconcile_item(item, index, final=True):
+                            yield event
+                elif event_type == "response.function_call_arguments.done":
+                    call_id = payload.get("call_id") or payload.get("item_id") or ""
+                    index = call_indexes.get(call_id)
+                    if index is not None:
+                        if not isinstance(payload.get("arguments"), str):
+                            raise conflicting_call()
+                        finalized_arguments.add(index)
+                        for event in reconcile_arguments(index, payload.get("arguments")):
+                            yield event
                 elif event_type == "response.function_call_arguments.delta":
                     call_id = payload.get("call_id") or payload.get("item_id") or ""
                     delta = payload.get("delta")
                     if delta:
                         envelope.charge(delta)
                         fallback_index = int(payload.get("output_index", 0) or 0)
-                        yield StreamToolCallDelta(
-                            index=call_indexes.get(call_id, fallback_index),
-                            argument_delta=delta,
+                        index = call_indexes.get(
+                            call_id, output_call_indexes.get(fallback_index, fallback_index)
                         )
+                        if index in finalized_arguments:
+                            raise conflicting_call()
+                        argument_parts.setdefault(index, []).append(delta)
+                        yield StreamToolCallDelta(index=index, argument_delta=delta)
                 elif event_type == "response.output_text.delta":
                     delta = payload.get("delta")
                     if delta:
@@ -4048,14 +4239,56 @@ class OpenAICompatClient:
                     response_obj = payload.get("response") or {}
                     if response_obj.get("id"):
                         provider_payload = {"id": response_obj["id"]}
-                    native = response_obj.get("output")
-                    if not isinstance(native, list) or not native:
-                        native = [output_items[index] for index in sorted(output_items)]
+                    expected_call_positions = set(output_call_indexes)
+                    explicit_output = "output" in response_obj
+                    if not explicit_output:
+                        # Compatible endpoints may omit the FIELD and rely on
+                        # item.done snapshots. An explicit [] is authoritative,
+                        # not an invitation to resurrect earlier pending calls.
+                        native_indexes = sorted(output_items)
+                        native = [output_items[index] for index in native_indexes]
+                    else:
+                        native = response_obj["output"]
+                        if not isinstance(native, list):
+                            raise conflicting_call()
+                        native_indexes = list(range(len(native)))
                     envelope.check(
                         _responses_output_bytes(
                             [item for item in native if isinstance(item, Mapping)]
                         )
                     )
+                    final_call_positions: set[int] = set()
+                    final_call_indices: set[int] = set()
+                    for output_index, item in zip(native_indexes, native):
+                        if isinstance(item, Mapping):
+                            for event in reconcile_item(item, output_index, final=True):
+                                yield event
+                            if item.get("type") == "function_call":
+                                index = output_call_indexes[output_index]
+                                if index in final_call_indices:
+                                    raise conflicting_call()
+                                final_call_indices.add(index)
+                                final_call_positions.add(output_index)
+                    if not explicit_output:
+                        # Legacy endpoints can omit final items as well as the
+                        # terminal field. Reconcile a populated added snapshot
+                        # with a separately streamed prefix without duplicating
+                        # either source; a shorter added snapshot stays partial.
+                        for index, snapshot in added_argument_snapshots.items():
+                            streamed = "".join(argument_parts.get(index, []))
+                            if snapshot.startswith(streamed):
+                                for event in reconcile_arguments(index, snapshot):
+                                    yield event
+                            elif not streamed.startswith(snapshot):
+                                raise conflicting_call()
+                    # Never dispatch survivors of an explicitly contradictory
+                    # batch. An absent field is not a membership assertion:
+                    # legacy delta-only streams and length truncation retain
+                    # their existing completion/partial-call handling.
+                    if explicit_output and not expected_call_positions.issubset(
+                        final_call_positions
+                    ):
+                        raise conflicting_call()
                     # Terminal output is authoritative; .done events cover
                     # compatible endpoints whose terminal omits output.
                     replay_text: list[str] = []
@@ -4113,6 +4346,9 @@ class OpenAICompatClient:
                         output_details = raw.get("output_tokens_details") or {}
                         usage = Usage(
                             input_tokens=int(raw.get("input_tokens", 0)),
+                            openai_long_context=_openai_long_context_receipt(
+                                request, url, int(raw.get("input_tokens", 0))
+                            ),
                             output_tokens=int(raw.get("output_tokens", 0)),
                             cache_read_tokens=_usage_token(details, "cached_tokens"),
                             cache_write_tokens=_usage_token(details, "cache_write_tokens"),
@@ -4129,6 +4365,9 @@ class OpenAICompatClient:
                             # call's own (see ``model/tariff.moment_for``).
                             at_ms=tariff.now_ms(),
                         )
+                        usage._token_counts_reported = _reported_token_count(
+                            raw, "input_tokens"
+                        ) and _reported_token_count(raw, "output_tokens")
                         yield StreamUsageEvent(usage=usage)
                     if event_type == "response.completed":
                         if refusal_parts:
@@ -4702,6 +4941,7 @@ class AnthropicClient:
         message: Message,
         document_form_: DocumentForm | None = None,
         document_budget_: DocumentBudget | None = None,
+        document_text_cap_: int | None = None,
     ) -> list[dict[str, Any]]:
         """Render one message's content blocks for the Anthropic wire.
 
@@ -4755,7 +4995,9 @@ class AnthropicClient:
                         }
                     )
                 else:
-                    blocks.append({"type": "text", "text": fallback_document_text(block)})
+                    blocks.append(
+                        {"type": "text", "text": fallback_document_text(block, document_text_cap_)}
+                    )
             elif isinstance(block, AudioContent):
                 # No audio input on this wire — the spec's capability flag for
                 # every Anthropic model stays false, so reaching here means a
@@ -4772,6 +5014,7 @@ class AnthropicClient:
         message: Message,
         document_form_: DocumentForm | None = None,
         document_budget_: DocumentBudget | None = None,
+        document_text_cap_: int | None = None,
     ) -> list[dict[str, Any]]:
         """Render a tool result's content as Anthropic blocks.
 
@@ -4779,7 +5022,9 @@ class AnthropicClient:
         image-only results survive; an empty result is backfilled because
         Anthropic 400s on empty ``tool_result`` content.
         """
-        blocks = AnthropicClient._message_blocks(message, document_form_, document_budget_)
+        blocks = AnthropicClient._message_blocks(
+            message, document_form_, document_budget_, document_text_cap_
+        )
         if not blocks:
             return [{"type": "text", "text": EMPTY_TOOL_RESULT_TEXT}]
         return blocks
@@ -4875,6 +5120,7 @@ class AnthropicClient:
             context_window=request.model.context_window,
         )
         doc_budget = document_budget_for_request(doc_form, request)
+        doc_text_cap = document_text_cap(request.model.context_window)
         messages: list[dict[str, Any]] = []
         wire_messages = request.wire_messages()
         # Radient Saver (contract §4): the rendered block that ENDS the frozen
@@ -4891,7 +5137,7 @@ class AnthropicClient:
             if _is_empty_assistant(message):
                 continue
             if message.role == "assistant" and message.tool_calls:
-                content = self._message_blocks(message, doc_form, doc_budget)
+                content = self._message_blocks(message, doc_form, doc_budget, doc_text_cap)
                 content.extend(
                     {
                         "type": "tool_use",
@@ -4908,7 +5154,9 @@ class AnthropicClient:
                     {
                         "type": "tool_result",
                         "tool_use_id": message.tool_call_id or "",
-                        "content": self._tool_result_blocks(message, doc_form, doc_budget),
+                        "content": self._tool_result_blocks(
+                            message, doc_form, doc_budget, doc_text_cap
+                        ),
                         **({"is_error": True} if message.is_error else {}),
                     }
                 ]
@@ -4921,7 +5169,7 @@ class AnthropicClient:
                 else:
                     messages.append({"role": "user", "content": content})
             else:
-                blocks = self._message_blocks(message, doc_form, doc_budget)
+                blocks = self._message_blocks(message, doc_form, doc_budget, doc_text_cap)
                 if not blocks:
                     # Every block was blank, so there is no content left to
                     # send — but the message still OCCUPIES A ROLE, and that is
@@ -5136,6 +5384,8 @@ class AnthropicClient:
         # property of the call (seconds of skew across a stream boundary cannot
         # change a window that is hours wide).
         usage = Usage(at_ms=tariff.now_ms())
+        input_reported = False
+        output_reported = False
         streamed_text = False
         block_index_to_call: dict[int, tuple[str, str]] = {}
         oauth = self._is_oauth(oauth_access)
@@ -5205,6 +5455,7 @@ class AnthropicClient:
                         cache_missed_tokens=missed_tokens,
                     )
                     raw_usage = (event.get("message") or {}).get("usage") or {}
+                    input_reported = _reported_token_count(raw_usage, "input_tokens")
                     usage.input_tokens = int(raw_usage.get("input_tokens", usage.input_tokens))
                     usage.cache_read_tokens = int(raw_usage.get("cache_read_input_tokens", 0))
                     usage.cache_write_tokens = int(raw_usage.get("cache_creation_input_tokens", 0))
@@ -5256,6 +5507,7 @@ class AnthropicClient:
                         stop_reason = str(delta["stop_reason"])
                     raw_usage = event.get("usage") or {}
                     if "output_tokens" in raw_usage:
+                        output_reported = _reported_token_count(raw_usage, "output_tokens")
                         usage.output_tokens = int(raw_usage["output_tokens"])
                 elif event_type == "error":
                     raise _anthropic_stream_error(event.get("error") or {})
@@ -5278,6 +5530,7 @@ class AnthropicClient:
             # line only needs to name the mechanism — and whether it cut a
             # partially-streamed answer or produced nothing at all (D1).
             error = _refusal_error("stop_reason=refusal", "", streamed_text=streamed_text)
+        usage._token_counts_reported = input_reported and output_reported
         yield StreamUsageEvent(usage=usage)
         yield StreamEndEvent(stop_reason=mapped, usage=usage, error=error)
 
@@ -5317,6 +5570,7 @@ class GoogleClient:
             context_window=request.model.context_window,
         )
         doc_budget = document_budget_for_request(doc_form, request)
+        doc_text_cap = document_text_cap(request.model.context_window)
         contents: list[dict[str, Any]] = []
         last_tool_result = False
         rendered_call_ids: dict[str, str | None] = {}
@@ -5360,7 +5614,7 @@ class GoogleClient:
                             {"inline_data": {"mime_type": block.mime_type, "data": block.data}}
                         )
                     else:
-                        parts.append({"text": fallback_document_text(block)})
+                        parts.append({"text": fallback_document_text(block, doc_text_cap)})
                 elif isinstance(block, AudioContent):
                     # Mirrors the image branch above, snake_case spelling and
                     # all: the REST API accepts ``inline_data``/``inlineData``
@@ -5657,6 +5911,9 @@ class GoogleClient:
                         # a time-of-use row is priced in (``model/tariff``).
                         at_ms=tariff.now_ms(),
                     )
+                    usage._token_counts_reported = _reported_token_count(
+                        raw_usage, "promptTokenCount"
+                    ) and _reported_token_count(raw_usage, "candidatesTokenCount")
 
         if usage is not None:
             yield StreamUsageEvent(usage=usage)

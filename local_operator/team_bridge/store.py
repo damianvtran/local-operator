@@ -2714,6 +2714,121 @@ class Store:
             },
         }
 
+    def hold_states_readonly(
+        self, owner: OwnerSnapshot, message_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Which of ``message_ids`` are held here, as a coarse class and a start time.
+
+        WHY THIS EXISTS. A history row for a message this endpoint never admitted
+        reads ``body: null``, which an agent took for a blank message. The tool
+        explains the null (``body_state``); a HELD message is the one case this
+        machine can say more about, and only this table knows it.
+
+        CONTENT LAW. Answers ``bare id -> {"hold_class", "created_at"}`` and
+        nothing else: the raw hold code, retry time, failure class and anything
+        else on the row stay here (:func:`delivery_hold_class` collapses the code
+        exactly as the delivery-state publisher does). It never reads
+        ``screening_receipts``: a reject is not derivable from this machine's
+        point of view without disclosing moderation detail, so the caller cannot
+        ask for it. Read-only over an EXISTING store, under the same live-owner
+        fence as :meth:`screening_status_readonly`; an absent store or a fenced
+        owner answers ``{}``.
+
+        KEYS. One SELECT, each row mapped through :func:`screening_hold_message_id`
+        so the bare and composite spellings of a message both match; the earliest
+        ``created_at`` wins when a message has both. A damaged ``created_at``
+        (non-numeric, non-finite) still reports the hold, with the other row's
+        time or ``None``.
+        """
+
+        wanted = {value for value in message_ids if isinstance(value, str)}
+        if not wanted:
+            return {}
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return {}
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return {}
+            rows = conn.execute(
+                "SELECT message_id, hold_code, created_at FROM screening_holds "
+                "WHERE owner_key = ?",
+                (_owner_key(owner),),
+            ).fetchall()
+        held: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            bare = screening_hold_message_id(str(row["message_id"]))
+            if bare not in wanted:
+                continue
+            created = _status_timestamp(row["created_at"])
+            prior = held.get(bare)
+            if prior is None:
+                held[bare] = {
+                    "hold_class": delivery_hold_class(row["hold_code"]),
+                    "created_at": created,
+                }
+            elif created is not None and (
+                prior["created_at"] is None or created < prior["created_at"]
+            ):
+                prior["created_at"] = created
+                prior["hold_class"] = delivery_hold_class(row["hold_code"])
+        return held
+
+    def long_holds_readonly(
+        self, owner: OwnerSnapshot, *, older_than_s: float, now: float | None = None
+    ) -> dict[str, Any]:
+        """How many CONVERSATION messages have been held longer than ``older_than_s``.
+
+        WHY THIS EXISTS. A held message is silent to the person it is for; the
+        long-hold alert (``hold_alert.py``) tells the owner once the oldest has
+        waited past their threshold. Answers
+        ``{"count"}`` and nothing else — no id, no code, no sender, no age (the
+        alert's content must move only when the count does).
+
+        WHAT COUNTS. Only conversation messages: the stored key is the composite
+        feed ref of a ``bcmsg_`` id, or the bare ``bcmsg_`` id (the screener's own
+        spelling). Pair ids (``bmsg_``) are not conversation messages. The two
+        owner-action waits — ``open_chief_of_staff`` and ``bridge_off`` — are
+        excluded because they have notices of their own and are not screening
+        delay. A message counts ONCE across its spellings, by its earliest
+        ``created_at``; a damaged ``created_at`` cell is skipped (an unknown age
+        is not evidence of an old hold).
+
+        Read-only over an EXISTING store under the live-owner fence, like
+        :meth:`screening_status_readonly`: an absent store or fenced owner answers
+        zero. ``now`` defaults to the wall clock.
+        """
+
+        from local_operator.team_bridge.engagement import HOLD_OPEN_CHIEF_OF_STAFF
+        from local_operator.team_bridge.types import is_conversation_message_id
+
+        empty: dict[str, Any] = {"count": 0}
+        cutoff = (time.time() if now is None else float(now)) - float(older_than_s)
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return empty
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return empty
+            rows = conn.execute(
+                "SELECT message_id, hold_code, created_at FROM screening_holds "
+                "WHERE owner_key = ?",
+                (_owner_key(owner),),
+            ).fetchall()
+        excluded = {HOLD_OPEN_CHIEF_OF_STAFF, "bridge_off"}
+        held: dict[str, float] = {}
+        for row in rows:
+            if row["hold_code"] in excluded:
+                continue
+            bare = screening_hold_message_id(str(row["message_id"]))
+            if not is_conversation_message_id(bare):
+                continue
+            created = _status_timestamp(row["created_at"])
+            if created is None:
+                continue
+            prior = held.get(bare)
+            if prior is None or created < prior:
+                held[bare] = created
+        return {"count": sum(1 for created in held.values() if created <= cutoff)}
+
     def designated_session_for_readonly(self, owner: OwnerSnapshot) -> str | None:
         """The designated CoS session id, read-only, under the same live fence.
 
@@ -2857,6 +2972,68 @@ class Store:
                     (_owner_key(owner), conversation_id, message_id),
                 ).fetchone()
             )
+
+    def admitted_inbound_reservation_readonly(
+        self,
+        owner: OwnerSnapshot,
+        *,
+        in_reply_to_message_id: str,
+        designated_session: str,
+    ) -> dict[str, str] | None:
+        """Exact reply destination under one read snapshot; never create/migrate.
+
+        The older LIMIT-1 conversation hint is guidance only. Authorization
+        requires uniqueness BEFORE checking redundant reservation bindings, so
+        a second damaged/stale candidate cannot silently select a destination.
+        Completed admissions remain answerable; retirement revokes this proof.
+        No body, labels, or mutable delivery state escapes this lookup.
+        """
+        if not designated_session or owner.enrollment_generation <= 0:
+            return None
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return None
+            conn.execute("BEGIN")
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return None
+            enrollments = conn.execute(
+                "SELECT designated_session, consent_version, consent_ref "
+                "FROM enrollments WHERE state = 'committed'"
+            ).fetchall()
+            if len(enrollments) != 1:
+                return None
+            enrollment = enrollments[0]
+            if (
+                enrollment["designated_session"] != designated_session
+                or not enrollment["consent_version"]
+                or not enrollment["consent_ref"]
+            ):
+                return None
+            rows = conn.execute(
+                "SELECT conversation_id, message_id, account_id, tenant_id, endpoint_id, "
+                "credential_id, canonical_base_url, enrollment_generation, "
+                "designated_session, consent_version, state FROM body_reservations "
+                "WHERE owner_key = ? AND message_id = ? LIMIT 2",
+                (_owner_key(owner), in_reply_to_message_id),
+            ).fetchall()
+            if len(rows) != 1:
+                return None
+            row = rows[0]
+            expected = {
+                "account_id": owner.account_id,
+                "tenant_id": owner.tenant_id,
+                "endpoint_id": owner.endpoint_id,
+                "credential_id": owner.credential_id,
+                "canonical_base_url": owner.canonical_base_url,
+                "enrollment_generation": owner.enrollment_generation,
+                "designated_session": designated_session,
+                "consent_version": enrollment["consent_version"],
+            }
+            if any(row[key] != value for key, value in expected.items()):
+                return None
+            if row["state"] not in ("pending", "claimed", "completed"):
+                return None
+            return {"conversation_id": row["conversation_id"], "message_id": row["message_id"]}
 
     def conversation_of_reserved_message(self, owner: OwnerSnapshot, message_id: str) -> str | None:
         """The ``bcv_`` id an ADMITTED conversation message belongs to, or None.

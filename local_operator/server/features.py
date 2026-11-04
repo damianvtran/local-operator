@@ -384,6 +384,9 @@ def static_feature_flags() -> dict[str, Any]:
         # every row would be invented client-side.
         "mcp_catalog": 2,
         "radient": 1,
+        # Human profile writes carry a durable login receipt and bounded image
+        # relay. Older daemons must not be mistaken for an editable account.
+        "account_profile": 1,
         # The organization surfaces on the Radient proxy (design §4.7):
         # the four closed operations `memberships.list`, `org_agents.list`,
         # `org_teams.list` and `org_team.get`, and the three frozen
@@ -521,6 +524,12 @@ def static_feature_flags() -> dict[str, Any]:
         # for a Team Bridge OS notification's image slot. Own key so a desktop
         # facing an older core keeps today's app icon instead of 404-probing.
         "team_bridge_notification_avatar": 1,
+        # `GET /v1/desktop/team-bridge/endpoints/{id}/avatar` (an agent's OWN
+        # published picture, closed and hash-pinned like the account relay) and
+        # `avatar_endpoint_id` on the notification-avatar route. Its own key: a
+        # desktop facing an older core keeps drawing the agent glyph instead of
+        # 404-probing a route that does not exist.
+        "team_bridge_endpoint_avatar": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key
@@ -1069,6 +1078,13 @@ def static_feature_flags() -> dict[str, Any]:
         # ADDITIVE; the key is how a renderer learns the editor's PUT exists before it
         # offers an upload that would 404/405 on an older backend. Absent: glyph only.
         "agent_avatar": 1,
+        # `?size=64|128|256` on `GET /v1/agents/{id}/avatar` (core and the phone
+        # relay): a LANCZOS-downscaled variant with an ETag of `"<sha>-<size>"`, so a
+        # client asks for the smallest variant >= CSS px x devicePixelRatio instead of
+        # the 512px original. Its own key, not a bump of `agent_avatar`: an older core
+        # ignores an unknown query and would silently serve the original, which is
+        # harmless, but a client must know to expect the sized ETag/body.
+        "agent_avatar_sizes": 1,
         # THE PER-SESSION FILE INDEX: `GET /v1/desktop/sessions/{id}/files` (the files this
         # conversation and its subagents produced: written, edited, command outputs,
         # screenshots, downloads, generated images/videos and Highlights callouts, derived

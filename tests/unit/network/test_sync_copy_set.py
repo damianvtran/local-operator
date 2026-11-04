@@ -287,13 +287,17 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     "local_operator/agent_avatar.py": (
-        2,
+        3,
         "``PNG_NAME``/``JPEG_NAME`` ('avatar.png', 'avatar.jpg'): an AGENT's picture, "
         "stored in the agent's own directory (<config>/agents/<id>/), never an entry of "
         "a session directory -- so no session copy carries it. The picture is also "
         "deliberately local-only on the mesh: the definitions mirror keeps the local "
         "row's own picture and a peer can neither set, replace nor clear it, and an "
-        "agent EXPORT drops it (``AgentRegistry._is_skipped_from_archive``)",
+        "agent EXPORT drops it (``AgentRegistry._is_skipped_from_archive``). "
+        "``_DERIVATIVE_PREFIX`` ('.avatar.') names the picture's size-variant CACHE "
+        "(``.avatar.<sha12>.<size>.<ext>``), which lives beside that picture in the "
+        "agent directory, never in a session directory, and is skipped by clone, "
+        "export and import through the same ``.avatar.`` prefix rule",
     ),
     "local_operator/notifications/store.py": (
         1,
@@ -308,6 +312,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "translated text -- machine state about ONE managed process, not a session entry. "
         "``ENV_LEASE_PATH`` is the nonsecret environment-variable NAME for that exact "
         "lease path, not a pathname or a translated/copyable session entry",
+    ),
+    "local_operator/session/runtime/session_host.py": (
+        4,
+        "``HOST_DIRNAME`` ('run/session-host'), ``SOCKET_NAME`` ('host.sock'), ``LOCK_NAME`` "
+        "('host.lock'), ``INSTALL_LOCK_NAME`` ('install.lock'): the session host's rendezvous "
+        "under the DEVICE-LEVEL run root (<config>/run/session-host/), beside run/mobile and "
+        "run/host and never an entry of a session directory. A live unix socket and an flock "
+        "election belong to THIS machine's launchd-owned process; ``install.lock`` serialises "
+        "THIS machine's cold-start installer ladder (review R-4) and is meaningless anywhere "
+        "else. A copy that carried any of them would hand a peer a path to a host that does "
+        "not exist there.",
     ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
     "local_operator/disk_pressure.py": (

@@ -901,25 +901,6 @@
     },
     {
       "locale": "ur",
-      "namespace": "wire.slash",
-      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
-      "translator": {
-        "agent": "i18n-translator (session e0c37577f3ce)",
-        "model": "radient/auto",
-        "date": "2026-10-29"
-      },
-      "auditor": {
-        "agent": "i18n-auditor (session 1ecfefb83d14; instance 1ecfefb83d14-slash2-ur)",
-        "model": "radient/auto",
-        "date": "2026-10-29",
-        "result": "passed",
-        "findings": 0
-      },
-      "status": "passed",
-      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 8 of 52 values rewritten by i18n-translator (session e0c37577f3ce) (actual model radient/auto; provider-quota fallback); round-1 audit 2f076e039aec-slash-ur rejected the shortened bytes (1B/0M/5m/4n) and round-2 independent audit 1ecfefb83d14-slash2-ur on the new bytes passed 0B/0M/3m/3n. target sha256 7c950b38d91902600488c29a5f13fbdaaf52f5fd8af69001fb9803e448a80959; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/ur/wire.slash/ur29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
-    },
-    {
-      "locale": "ur",
       "namespace": "cli.team_bridge",
       "source_sha256": "f029ae6953f2fce31d126e7315beaf120bc63da0fc7398fbc6b31413b962222f",
       "translator": {
@@ -2320,6 +2301,470 @@
       },
       "status": "passed",
       "note": "Status band command, review round 2 copy delta (notice drops the held-reading clause). Independent audit round 4: 0 finding(s) (none) applied verbatim; delta re-audit at these en bytes PASS, 0 unresolved blocker/major. Read route: git show HEAD blob at 6c1828881 and b5f6328d1 (read_public_copy unreachable: session cwd was a different repo). Same model family as translator (disclosed)."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "50b1205a23e1",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "a8ce9efa0b57",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/ur/wire.errors.session_host/hura1/record.json; i18n/audits/evidence/ur/wire.errors.session_host/u31h8b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.failures",
+      "source_sha256": "b2fdec07146b26ad5bb43f3acf3fa8f1ab527c4bf94d9065ca715c16be2eec44",
+      "target_sha256": "a48c6e12dcb2c9fea6d76233ec681b8805d89752903e1c89906197d9ec7dac4b",
+      "translator": {
+        "agent": "i18n-translator (session 6d443470fd42; instance fc9fad296b2f); disk replacement i18n-translator (session 61efc26064e2; instance 2af28e041da7)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cb928306d086; instance 940b970d0a81); independent of translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Clean independent audit of cli.failures, cli.group_help and tui.setup_cues (16 keys total); this row binds cli.failures at committed source/target bytes. Final severity counts: BLOCKER 0, MAJOR 0, MINOR 0, NIT 0. First pass (session 6c1c9ef5c2c3; instance 96788a2d0bbc) reviewed all 16 keys: one MAJOR UR-001 in cli.group_help.disk, other 15 clean. UR-001 fixed in c65fbaa580a, re-audited PASS by the bound second-pass auditor for disk only; unchanged first-pass coverage retained. Actual translator/auditor model openai/gpt-6.1-sol after provider-quota fallbacks, not the requested model. Auditor instance 940b970d0a81. Evidence: i18n/audits/evidence/ur/core-hardcoded-cli-slice1/record.json; passing receipt verdict-r2.txt."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.group_help",
+      "source_sha256": "b819cbdf879a9f0b6567f8a555eceec4d1c7210b8ddab9beb665e2c21e3b7e88",
+      "target_sha256": "36961f47e877ba8d2914c25ca7f959c7947040b59aa17ec2bcb000f0d024cbbb",
+      "translator": {
+        "agent": "i18n-translator (session 6d443470fd42; instance fc9fad296b2f); disk replacement i18n-translator (session 61efc26064e2; instance 2af28e041da7)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cb928306d086; instance 940b970d0a81); independent of translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Clean independent audit of cli.failures, cli.group_help and tui.setup_cues (16 keys total); this row binds cli.group_help at committed source/target bytes. Final severity counts: BLOCKER 0, MAJOR 0, MINOR 0, NIT 0. First pass (session 6c1c9ef5c2c3; instance 96788a2d0bbc) reviewed all 16 keys: one MAJOR UR-001 in cli.group_help.disk, other 15 clean. UR-001 fixed in c65fbaa580a, re-audited PASS by the bound second-pass auditor for disk only; unchanged first-pass coverage retained. Actual translator/auditor model openai/gpt-6.1-sol after provider-quota fallbacks, not the requested model. Auditor instance 940b970d0a81. Evidence: i18n/audits/evidence/ur/core-hardcoded-cli-slice1/record.json; passing receipt verdict-r2.txt."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.setup_cues",
+      "source_sha256": "9028bb3883b7f60d6fe7cdeac21495e307279ad3eb959b53bc62add500cedce0",
+      "target_sha256": "4c64e8d7fa1fdca6e45065678f2a3e01b3392eebc8ebe467da1ed6764646eef2",
+      "translator": {
+        "agent": "i18n-translator (session 6d443470fd42; instance fc9fad296b2f); disk replacement i18n-translator (session 61efc26064e2; instance 2af28e041da7)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session cb928306d086; instance 940b970d0a81); independent of translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Clean independent audit of cli.failures, cli.group_help and tui.setup_cues (16 keys total); this row binds tui.setup_cues at committed source/target bytes. Final severity counts: BLOCKER 0, MAJOR 0, MINOR 0, NIT 0. First pass (session 6c1c9ef5c2c3; instance 96788a2d0bbc) reviewed all 16 keys: one MAJOR UR-001 in cli.group_help.disk, other 15 clean. UR-001 fixed in c65fbaa580a, re-audited PASS by the bound second-pass auditor for disk only; unchanged first-pass coverage retained. Actual translator/auditor model openai/gpt-6.1-sol after provider-quota fallbacks, not the requested model. Auditor instance 940b970d0a81. Evidence: i18n/audits/evidence/ur/core-hardcoded-cli-slice1/record.json; passing receipt verdict-r2.txt."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.radient_saver",
+      "source_sha256": "b788556b5ee09248dc2691a8820d620879856f6f014680cd31bb91fc90d0f576",
+      "translator": {
+        "agent": "coder (radientdev; self-translated, no i18n-translator delegation)",
+        "model": "kimi/k3.1-pro (fallback after anthropic/claude-opus-5-5 and openai/gpt-6-astra quota failures)",
+        "date": "2026-10-29",
+        "scope": "the four values cleared on fc32046b15d plus the UX round's three (command.status.off, notice.disabled, notice.no_session) AND the seven `notice.gate_off` values added by the F-1 split in 85a73c19262 — all self-translated by the radientdev coder subagent on kimi/k3.1-pro, 2026-10-29, as recorded above; everything else keeps the previously cleared bytes recorded in `note`"
+      },
+      "auditor": {
+        "agent": "local-operator independent i18n auditor, six rounds, six sessions: round 1 28fad0ae283a, round 2 231831e5a20e, round 3 58095178da44, round 4 ad75043b9061 (cleared `fc32046b15d`), round 5 de2431862048 (NOT CLEARED: F-1, F-2), round 6 a3e52edde59b (cleared `0cebb079aeb..85a73c19262`, comment 6504078982)",
+        "model": "radient/auto on all six rounds; each disclosed the same provider-quota fallback chain from the pinned anthropic/claude-sonnet-5-5 through openai/gpt-6-astra and kimi/k3.1-pro",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0,
+        "note": "Round 6 (comment 6504078982) cleared this head: `notice.disabled` and `notice.gate_off` in all eight locales against sha256 b788556b…, with `command.status.off` and `notice.no_session` keeping round 5's clearance on unchanged bytes. Rounds 1-4 cleared the bytes at their own heads (round 4: 6497613448, `fc32046b15d`; round 5 was NOT CLEARED and issued no confirmation). `findings` is 0 for the state of this head because every finding across the six rounds is fixed: round 5's F-1 and F-2 in `85a73c19262`, and O-1, O-2, L-1..L-3 recorded as open minors/nits rather than blockers. The round-3 `mode.help` bytes remain unaudited; `second_audit` carries that obligation and `_shipped_locales()` never reads it."
+      },
+      "status": "passed",
+      "second_audit": {
+        "status": "pending",
+        "agent": "pending",
+        "model": "pending",
+        "date": null,
+        "scope": "round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)",
+        "note": "Second independent audit commissioned by the radientdev manager; it has NOT run. Auditor identity, model and date are deliberately unrecorded until it reports — this row is not a second-audit pass."
+      },
+      "note": " Prior translation of the 15 pre-existing keys: the `translator` agent on anthropic/claude-opus-5-5 produced the 14 values other than `mode.help`; `mode.help` itself was self-translated by the radientdev coder on that same model in round 3 (SA-2), 2026-10-28. AUDIT BOUNDARY, stated three times over because it is the fact this note exists for: (1) the 2026-10-28 independent audit covers only the PREVIOUS bytes; (2) the round-3 `mode.help` bytes still have NO independent audit — `second_audit` (`pending`, scope 'round-3 SA-2 remediation of wire.radient_saver.mode.help (PR #3078)') is that outstanding obligation, and `generate._shipped_locales()` reads only `status`/`source_sha256`, so the ship gate cannot see it and nothing here may be read as discharging it; (3) the clearance recorded below covers the nine `command.*` keys plus `notice.unknown_balance`, and nothing else. History pointer, so the dispositions stay in the written record rather than only in git: PR #3078's audit rounds raised SA-1 (major), the round-3 re-audit SA-2 (major), M-1..M-4, N-1, and code-review R6-2; all were remediated and the dispositions were relayed by the radientdev manager (the audit reports are not posted on the PR thread). R6-2 retired the unreachable `auto` choices, which is why this namespace carried 15 keys at that ref. THIS HEAD'S BYTES (PR #3143 round-2 remediation of the design, UX, code-review and QA findings) changed three values and ADDED one key — four in total: `command.usage`, `command.radient_description`, `command.disabled` and `notice.unknown_balance`. Self-translated by the radientdev coder subagent on kimi/k3.1-pro, 2026-10-29; the disclosed deviation from docs/I18N.md step 3 is that this ROLE cannot delegate — the radientdev coder's toolset has no `task` tool — not that no translator agent exists on this account. The namespace now carries 15 pre-existing + 12 command/notice keys = 27. (Counted from the English catalogue at this head, not carried forward: the F-1 split added `notice.gate_off`, so the figure moved from 26 to 27.) ROUND-2 UX BYTES (PR #3143, UX round 2 findings U2 and U11) changed two values and ADDED one key: `command.status.off` named the real gate, and `notice.disabled` named it until the F-1 split moved that instruction to `notice.gate_off`, and `notice.no_session` is new, for a command that reaches the shared entry point with no open conversation. Self-translated by the radientdev coder subagent on kimi/k3.1-pro, 2026-10-29, and NO independent audit of these three values has run. The clearance recorded below covers the PREVIOUS bytes (round 4, comment 6497613448) and must not be read as covering these; `second_audit` (pending) still carries the round-3 `mode.help` obligation, which no round has discharged. `status` is `pending-independent-audit` for exactly that reason: a `passed` row whose digest matched these bytes would assert an audit that does not exist."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.sessions",
+      "source_sha256": "ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a",
+      "translator": {
+        "agent": "coder (lopdev team) — PR #3102 i18n wave implementer",
+        "model": "radient/auto — actual; requested anthropic/claude-opus-5-5, moved by provider quota failures through openai/gpt-6-astra and kimi/k3.1-pro",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "translation-auditor (round 1, distinct session) + translation-auditor (round 2, a different session again) — neither is the translator",
+        "model": "round 1 radient/auto · round 2 radient/alpha — actual models, not the requested anthropic/claude-opus-5-5; see note for the fallback chain",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 7,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Two independent audits, as safety copy requires (docs/I18N.md, Add or extend a locale, step 3): round 1 by translation-auditor on radient/auto at b3b1c2aec56 — 5 pass / 2 reject (fr + vi majors) with 6 minors and 5 nits, all answered in the PR's round-1 remediation comment, fr and vi fixed at 6f3b8e3, TA9 (quoting of {name}) fixed at 9d4bed5; round 2 by a different translation-auditor session on radient/alpha at 9d4bed55040 — 7 PASS / 0 REJECT, 0 blocker, 1 minor, 6 nit, safety-copy gate closed for these nine keys. Both rounds' actual models are the fallback chain, not the requested anthropic/claude-opus-5-5 (gpt-6-astra → kimi/k3.1-pro → radient/auto | radient/alpha). Accepted, non-gating dispositions deferred to the locale work: F1 (hi 'idle': wire.sessions says निष्क्रिय, relay.chrome.session.subtitle.idle ships आइडल — hi-guide call), F2/F3 ({seconds} unit: zh-CN 秒 and vi giây are the shipped conventions, this wave keeps s), F4 (fr stop_self_refused repeats 'cette'), F5 (hi approval-line tails), F6 ('hold window' mechanism word reads as data retention; needs a glossary row + seven guides), F7 (ru style guide records «в простой», copy ships «в простое»). Evidence: i18n/audits/evidence/ur/wire.sessions/wsr2/. Unresolved blocker/major: 0. This row is fresh only at en source ad2c68cbc8dc98f81875b0c1b3960be4cdfed27113bc326ae26045d93d75585a; any English byte change lapses it."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.failure_details",
+      "source_sha256": "7dda49aa521bc226787d48077a3276de4e80a99c0488892cc60e99e142f33c99",
+      "target_sha256": "9f5cce97d320df7e4c4440c8e3e497eab4c4ad70973dad02e29bbae1bdbe4750",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "bd89f27b2221",
+        "model": "openai/gpt-6.1-sol"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "7cd298bc2ab1",
+        "model": "openai/gpt-6.1-sol",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.failure_details",
+      "source_sha256": "7dda49aa521bc226787d48077a3276de4e80a99c0488892cc60e99e142f33c99",
+      "target_sha256": "9f5cce97d320df7e4c4440c8e3e497eab4c4ad70973dad02e29bbae1bdbe4750",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "bd89f27b2221",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "7cd298bc2ab1",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-01",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Provenance supplied in ledger-assembly brief for PR #3307 head 5bc1b4b2336c85a13ad405466782995cf2aaf4dc; translator base b2750ae6540. Independent audit PASS, 0 findings, 17 keys. Context SHA-256 05eb64e49f9a898ff780e7529ffc96a78fcf676d9bbbca4bc068c62dd6d1828a. Assembly verified current source, target, context hashes and key parity. Dates are delegator-supplied dispatch/completion windows, not per-row timestamps. Target hash was verified during ledger assembly; this row does not assert the auditor published that hash. The delegator reports five slice-2 auditors did not publish target hashes; no locale-specific published-hash claim is made."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.slash",
+      "source_sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+      "translator": {
+        "agent": "i18n-translator (session e0c37577f3ce)",
+        "model": "radient/auto",
+        "date": "2026-10-29"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (session 1ecfefb83d14; instance 1ecfefb83d14-slash2-ur)",
+        "model": "radient/auto",
+        "date": "2026-10-29",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3088 width rewrite, re-audited at the committed bytes. 8 of 52 values rewritten by i18n-translator (session e0c37577f3ce) (actual model radient/auto; provider-quota fallback); round-1 audit 2f076e039aec-slash-ur rejected the shortened bytes (1B/0M/5m/4n) and round-2 independent audit 1ecfefb83d14-slash2-ur on the new bytes passed 0B/0M/3m/3n. target sha256 7c950b38d91902600488c29a5f13fbdaaf52f5fd8af69001fb9803e448a80959; en source unchanged (b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202). Evidence: i18n/audits/evidence/ur/wire.slash/ur29s2/record.json (receipt.json + verdicts copied verbatim). Previous rows for this pair described audits of the pre-rewrite values and are superseded."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.session_host",
+      "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+      "translator": {
+        "agent": "i18n-translator",
+        "session": "50b1205a23e1",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "session": "8a79664ef0c5",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-10-31",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Dual blind passes: i18n/audits/evidence/ur/wire.errors.session_host/hura1/record.json; i18n/audits/evidence/ur/wire.errors.session_host/u31h8b/record.json. Both pass, 0 findings; actual quota fallback model recorded."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.shell",
+      "source_sha256": "388f23d29d082106ccb706ed041f48238eca32a6cfaf6cfa05517ee8dc773a01",
+      "translator": {
+        "agent": "coder subagent e8f92ac9fa94 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 92826ef0767b (lopdev team, independent i18n auditor)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "relay.shell 64 keys read in full at this en hash. Fixes: countdown_days, countdown_hours and countdown_hour rendered the hour noun as a bare number with the plural گھنٹے, so 1 hour read '1 گھنٹے' — upgraded to the lossless number→plural form {hours, plural, one {# گھنٹہ} other {# گھنٹے}} (scripts/i18n/check.py arguments_match WHY note; matches relay.asks.duration.hours). دن/منٹ/سیکنڈ are invariant. Disposition (not changed): this namespace says ریفریش while tui.usage says تازہ for the same feature — ریفریش is an established loanword and consistent within relay.shell; reset is بحالی matching the namespace's existing relay.shell.usage.reset. آپ-imperative and ۔/، punctuation verified; Opus/Sonnet/Fable/Zread kept Latin. Rendered RTL/bidi, Nastaliq shaping and narrow-width layout not exercised; no rendered sign-off claimed. 0 blocker / 0 major unresolved."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.shell",
+      "source_sha256": "412c31bd9071bc06a886dd3144a350afa4c6cc0c89dedac696f7f38d5c30fc22",
+      "translator": {
+        "agent": "coder subagent 763f25259988 (lopdev team)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "reviewer subagent 2926722c72a8 (lopdev team, independent i18n auditor, round 2)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round 2 re-audit at this en hash: changed updated/reset/throttled, new keys refresh_ready, unlimited_generic, accounts_order, row_a11y_bare(_reset). Fix: accounts_order spelled 'سائن اِن' (zer); relay.shell reauth/reauth_short and relay.login use 'سائن ان', so aligned. Round-1 fix intact: countdown_hour/hours/days keep the one/other hour plural (گھنٹہ/گھنٹے). Urdu comma ، in row_a11y_bare_reset; throttled avoids 'حد'. 0 blocker / 0 major unresolved. No rendered RTL, Nastaliq or native-speaker pass claimed."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.browser",
+      "source_sha256": "5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24",
+      "translator": {
+        "agent": "translator (job 5d6bbe1050a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 54930f3283db, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "CLI-first browser pairing delta (14 keys rewritten/added, open_popup removed) at source_sha256 5ca92abc74be1e53d7b2e8f12cc1887e46bf816bb87b482c097bcaf4044a3e24; target catalogue_sha256 4e9abf18a0cd1f603a8de9d4f804b93b6cee43cd1900f8a8ddfb2beca15b8fdb. Independent audit PASS, 0B/0M/3m/1n; dispositions: T1-T4 applied verbatim (T1/T2: polite دیں per style guide). Zero unresolved blocker/major. Translator and auditor are separate sessions sharing the Claude model family (disclosed). Not verified: native-speaker review. Evidence: i18n/audits/evidence/ur/cli.browser/pair1/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.browser",
+      "source_sha256": "af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019",
+      "translator": {
+        "agent": "translator (job f364d94792a6, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "translation-auditor (job 68b1b726839c, session b2810af2074b)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "PR #3339 remediation delta: one new key (enter_each_code_icon) over the pair1-audited catalogue; source_sha256 af982af44462f3c59cfae6ca44246d27ea8d66d8dd7ea7c79d1a03a466303019, target catalogue_sha256 f1ea69b3906c503cc1900aae698f3a9c715b68a4f28deaa55940fd7d8b0bc8e7. Independent audit PASS, 0 findings. Not verified: native-speaker review. Evidence: i18n/audits/evidence/ur/cli.browser/pair2/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.hosting",
+      "source_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two independent sessions: 1b7a2a90c876, 25304c88781e)",
+        "model": "radient/auto (reader 1); anthropic/claude-sonnet-5-5 requested with served model unexposed (reader 2)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace wire.errors.hosting (1 key: the owned display cause the startup refusal splices into its {error} slot) authored at base 87ca846245b2 against frozen English sha256 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63. ur 'ہوسٹنگ پلیٹ فارم ترتیب نہیں دیا گیا۔' is a complete RTL sentence with a terminal full stop; no shaping, bidi-isolation or width claim is made here. Two independent readers, neither the translator nor the code author, both PASSED on these bytes with 0 blocker/major/minor/nit (sessions 1b7a2a90c876, 25304c88781e). Source-only assembly: no rendered, native-speaker, width, RTL or validator proof, and no activation, shipped or release claim. Evidence: i18n/audits/evidence/ur/wire.errors.hosting/ (bundles ['urhost1', 'urhost2'], frozen inputs under _inputs/)."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 d95074ef43b55db80caad9e5795c8fb7c5ce5903871d3ba5c350178ea1abaca7; context SHA-256 df0189becbf118ae9fa766395b412fe4d32a324cffd7587e87e392c255ed7a94. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 16c8665ea489fd9331e5828f69e4d954a2a6fd8704d8953839e274e584863245; context SHA-256 105c41ad6e03647b789d2f9dba474b2aa84fee4b050bbe11a95e7c2927246036. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "e809a3221b21b41951ef45200378d59f9a66dcda81c45c4b81119c1cbba360be",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported in this resumed delta",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "D3 independent delta audit: only wire.skill_adoption.preview_required changed; prior full audit retained with exact HEAD hash compatibility. Same ID/scope/options, preview/review/receipt confirmation verified. Target SHA-256 de620a9315a8240bb1b2d1963156124dbda2ba4d7c1f693fb2675086dd6168ed; context SHA-256 d24fe484fa7ce9758efc7135b95f2c8c0527a90cde9824b0c82f153779dfacef. Evidence: i18n/audits/skill-adoption-d3-5ad13f38d6e6.json. Unchanged translations retain initial openai/gpt-6.1-sol authorship; changed key translator anthropic/claude-opus-5-5. No aggregate generation or rendered/real-path QA claimed."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "e809a3221b21b41951ef45200378d59f9a66dcda81c45c4b81119c1cbba360be",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "Actual served model verified from transcript metadata; historical startup/fallback claims retained in superseded row.",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Metadata-only correction: prior runtime-label error; actual auditor and translator openai/gpt-6.1-sol. Same approved source/target and verdict; no re-audit or new independent round. Target SHA-256 de620a9315a8240bb1b2d1963156124dbda2ba4d7c1f693fb2675086dd6168ed. Evidence: i18n/audits/skill-adoption-model-correction-5ad13f38d6e6.json. Prior row retains historical labels."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "Actual served model verified from transcript metadata; historical startup/fallback claims retained in superseded row.",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Metadata-only correction: prior runtime-label error; actual auditor and translator openai/gpt-6.1-sol. Same approved source/target and verdict; no re-audit or new independent round. Target SHA-256 16c8665ea489fd9331e5828f69e4d954a2a6fd8704d8953839e274e584863245. Evidence: i18n/audits/skill-adoption-model-correction-5ad13f38d6e6.json. Prior row retains historical labels."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "5313b5455bb3b295e3fe78a5ea465a9e9d85c641927562bad93f58e0e5971f7b",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "identity_evidence": "Parent verified actual serving model; existing model_identity_correction applies",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 5fe45b9bb2f02e4639318d00d84a1f66603851fbf68b2e6c081ede475e7d444b; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor-r2b (task subagent, independent of translator)",
+        "session": "26723730f2f9",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Single independent audit at the current English bytes (not dual-blind; high-visibility copy may still need a second audit per docs/I18N.md). Re-verified the earlier plural-agreement major as fixed: long_hold.body now puts the verb in its own count plural ('1 پیغام ... روکا ہوا ہے' / '2, 5 پیغامات ... روکے ہوئے ہیں'); minutes arms are invariant (منٹ) by design. Checked: 4/4 keys present; ICU placeholder parity ({count},{minutes}); one/other CLDR arms rendered at counts 1, 2, 5 and minutes 60; backticked `lop team-bridge receiver status` byte-identical LTR island, no bidi control characters; NFC; آپ register; meaning preserved (held longer than N minutes, not reached the agent, cleared = none held longer than the threshold); 'روکا' consistent with cli.team_bridge ('روکا گیا'). 0 findings."
     }
   ]
 }

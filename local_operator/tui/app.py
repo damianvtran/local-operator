@@ -138,9 +138,10 @@ from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
+from local_operator.i18n.keys import tui_setup_cues as _setup_keys
 from local_operator.i18n.keys import tui_status_command as _sc_keys
 from local_operator.i18n.keys import tui_tags as _tag_keys
-from local_operator.i18n.text import tr
+from local_operator.i18n.text import register_refresh, tr
 from local_operator.logger import current_log_file
 
 # The `/mcp` verb helpers live with the verbs they serve, so the terminal and
@@ -611,6 +612,10 @@ _t_tags = tr("tui.tags")
 #: The queued-ask surfaces' own namespace (R5). Read through the binding at every
 #: use site, never copied: a language move re-materialises the catalogue.
 _t_asks = tr("tui.asks")
+#: First-run setup cues (the composer placeholder and the no-provider cue). Read
+#: through the binding at every use, never copied: ``_reload_setup_cues`` re-points
+#: the two module constants below on a live language move.
+_t_setup = tr("tui.setup_cues")
 #: Fixed-width, non-colour membership markers. Width is the point: six rows with
 #: `[x]`/`[ ]` line up in monochrome and in an ASCII fallback, where a bullet or
 #: a coloured dot would carry the only copy of the state.
@@ -3151,7 +3156,7 @@ CREDENTIAL_PLACEHOLDER = "Type or paste the secret… — masked; Enter chips it
 
 #: The composer's placeholder in the first-run setup state (see
 #: ``_composer_placeholder_for``).
-SETUP_PLACEHOLDER = f"Type {RECOMMENDED_LOGIN_COMMAND} to begin"
+SETUP_PLACEHOLDER = _t_setup(_setup_keys.setup_placeholder(command=RECOMMENDED_LOGIN_COMMAND))
 
 #: How often the ask surfaces re-derive their countdown while a row is present.
 #:
@@ -4601,7 +4606,22 @@ class TranscriptScreen(Screen[None]):
 #: for someone who may have no AI account at all (audit D1/U2/U4/Q3). The
 #: command comes from ``providers.login_catalog`` so the splash, the hints,
 #: the CLI and the README cannot recommend different providers again.
-AIDA_NO_PROVIDER_CUE = f"Connect an AI account first: type {RECOMMENDED_LOGIN_COMMAND}"
+AIDA_NO_PROVIDER_CUE = _t_setup(_setup_keys.no_provider_cue(command=RECOMMENDED_LOGIN_COMMAND))
+
+
+def _reload_setup_cues() -> None:
+    """Follow backend locale moves for the two first-run cue constants.
+
+    They are module constants (tests and the e2e harness import them by name), so
+    a language change has to re-materialise them; every use site reads the module
+    global at call time and therefore sees the moved text.
+    """
+    global SETUP_PLACEHOLDER, AIDA_NO_PROVIDER_CUE
+    SETUP_PLACEHOLDER = _t_setup(_setup_keys.setup_placeholder(command=RECOMMENDED_LOGIN_COMMAND))
+    AIDA_NO_PROVIDER_CUE = _t_setup(_setup_keys.no_provider_cue(command=RECOMMENDED_LOGIN_COMMAND))
+
+
+register_refresh(_reload_setup_cues)
 
 
 def bridge_decision_target(
@@ -13209,6 +13229,7 @@ class OperatorApp(App[None]):
             model_name=_model_name(session),
             effort=_effort_label(session),
             fast=_fast_label(session),
+            saver=_saver_label(session),
             # The active /agent profile and /team roster segments (U2). Read
             # defensively via getattr: an embedded-SDK or test double may not
             # expose these accessors, and a missing one must leave the segment
@@ -13590,6 +13611,7 @@ class OperatorApp(App[None]):
             ),
             effort=_effort_label(state),
             fast=_fast_label(state),
+            saver=_saver_label(state),
             agent_profile=str(getattr(state, "active_agent", "") or ""),
             team=self._team_band_text(str(getattr(state, "active_team", "") or "")),
             cwd=str(getattr(state, "cwd", "") or ""),
@@ -13862,6 +13884,7 @@ class OperatorApp(App[None]):
             model_name=_model_name(session),
             effort=_effort_label(session),
             fast=_fast_label(session),
+            saver=_saver_label(session),
             # The profile/team segments must survive the swap: takeover is a
             # transport rotation, not a conversation change, so the band may
             # not drop (and later re-add) segments the canonical state never
@@ -14465,7 +14488,10 @@ class OperatorApp(App[None]):
         for message in history:
             if getattr(message, "role", None) != "user":
                 continue
-            if is_harness_notice_row(message):
+            text = getattr(message, "text", "") or ""
+            if is_harness_notice_row(message) or (
+                isinstance(text, str) and is_harness_chrome(text)
+            ):
                 # A row the harness wrote — a stamped render of a
                 # ``CustomMessage`` (a failover model-switch notice, an
                 # incident), or a notice carried in from a compaction block —
@@ -14477,7 +14503,6 @@ class OperatorApp(App[None]):
                 # or with the elision notice's own prose, is the visible form of
                 # getting this wrong.
                 continue
-            text = getattr(message, "text", "") or ""
             if not isinstance(text, str) or not text.strip():
                 continue
             self._show_provisional_name(text)
@@ -19560,7 +19585,10 @@ class OperatorApp(App[None]):
                             remote = await AttachedSession.cold(
                                 concrete,
                                 config_dir=config_root,
-                                cwd=str(record.cwd or os.getcwd()),
+                                # A missing owner cwd is no opinion, not this
+                                # viewer's directory. Inventing one here can
+                                # supersede a recorded move when cold() engages.
+                                cwd=str(record.cwd or ""),
                                 takeover_factory=takeover_factory,
                             )
                             # Read by the engage that binds behind this paint,
@@ -44385,6 +44413,26 @@ class OperatorApp(App[None]):
             self._cmd_effort(arg, notice)
         elif command == "/fast":
             self._cmd_fast(arg, notice)
+        elif command in {"/saver", "/radient"}:
+            if command == "/radient":
+                word, _, rest = arg.partition(" ")
+                if word != "saver":
+                    from local_operator.i18n.keys import wire_radient_saver
+                    from local_operator.i18n.text import tr
+
+                    self._system_notice(
+                        str(tr("wire.radient_saver")(wire_radient_saver.command_usage())), "warning"
+                    )
+                    return
+                # A BARE NAMESPACE FORM REPORTS, IT NEVER TOGGLES (QA round 3, Q1).
+                # `/radient` accepts only `saver <value>`, and the picker completes
+                # it to a subject-less `/radient saver` — so two Enters on a bare
+                # `/radient` used to land on the bare-toggle path and turn a
+                # money-affecting feature ON from nothing but return keys. The
+                # alias may toggle when typed whole (`/saver`), because typing the
+                # whole word is the intent; the namespace needs its value said.
+                arg = (rest or "").strip() or "status"
+            self._cmd_saver(arg, notice)
         elif command == "/theme":
             self._cmd_theme(arg, notice)
         elif command == "/language":
@@ -46091,6 +46139,7 @@ class OperatorApp(App[None]):
                 model_name=_model_name(session),
                 effort=_effort_label(session),
                 fast=_fast_label(session),
+                saver=_saver_label(session),
                 context_window=_context_window(session),
             )
         # The access note answers "can I use the model I just switched to". On
@@ -46781,6 +46830,45 @@ class OperatorApp(App[None]):
             self._fast_choice = False
             return spec
         return spec.model_copy(update={"fast_mode": True})
+
+    def _cmd_saver(self, arg: str, notice: NoticeFn) -> None:
+        """Run the shared handler and publish ONLY after the journal write.
+
+        The handler is async because the write is. Painting the notice and the
+        band in the same tick as a scheduled write is what left both frontends
+        showing the pre-write state beside a notice claiming the new one
+        (review M2). The worker runs on this app's loop, so the notice, the
+        publish and the band update all land once the row exists.
+        """
+        if self._session is None:
+            # U11 (UX round 2): the worker dereferenced the session and killed the
+            # app with `AttributeError: 'NoneType' object has no attribute
+            # '_transcript'` — `/saver inherit` on the setup screen, `/saver off`
+            # on a signed-in but unbound session. The app already has ONE sentence
+            # for "no session yet", so this refuses with it instead of inventing a
+            # second wording.
+            self._system_notice(*self._no_session_notice())
+            return
+        self.run_worker(self._saver_command(arg, notice), thread=False, group="saver")
+
+    async def _saver_command(self, arg: str, notice: NoticeFn) -> None:
+        from dataclasses import dataclass
+
+        from local_operator.saver.command import saver_slash
+
+        @dataclass
+        class SaverNotice:
+            kind: str
+            text: str
+            style: str
+
+        result = await saver_slash(self._session, arg, SaverNotice)
+        self._system_notice(result.text, result.style)
+        # `_status` is built on mount; a slash that completes during teardown (or
+        # before the band exists) has no band to repaint, and the notice above is
+        # already the receipt, so skip the repaint rather than raise.
+        if self._status is not None:
+            self._status.update(saver=_saver_label(self._session))
 
     def _cmd_fast(self, arg: str, notice: NoticeFn) -> None:
         """``/fast`` — toggle fast mode; ``/fast on|off|status`` — set or report it.
@@ -49639,11 +49727,14 @@ class OperatorApp(App[None]):
         driver's single decision, so it cannot be applied on one host and
         forgotten on the other.
         """
-        from local_operator.session.goal_judge import owns_the_session
+        from local_operator.session.goal_judge import (
+            owns_the_session,
+            quiet_completion_accepted,
+        )
 
         source = self._interaction
         session: Any = self._session
-        if session is None or not owns_the_session(session):
+        if quiet_completion_accepted(message) or session is None or not owns_the_session(session):
             return
         if source.goal.judge_in_flight:
             return
@@ -52942,6 +53033,13 @@ class OperatorApp(App[None]):
             label = getattr(self._session, "model_label", "") or "this model"
             picker.set_notice("" if levels else _effort_unavailable(label))
             return
+        if message.command in {"saver", "radient"}:
+            # Same reason `/fast` states its list here: the words ARE the
+            # command's whole argument grammar, and showing a provider list
+            # instead is what made `/saver on` unrunnable (UX round 1, U1).
+            picker.set_choices(self._saver_argument_choices(message.command))
+            picker.set_notice("")
+            return
         if message.command == "aida":
             # THE RESERVED WORDS, not the provider fall-through (UX round 1,
             # U1). The fall-through is the provider vocabulary and is wrong for
@@ -52999,6 +53097,44 @@ class OperatorApp(App[None]):
         # above.
         if message.command == "login" and choices:
             picker.set_notice_rungs(LOGIN_ORDERING_NOTICE_RUNGS)
+
+    def _saver_argument_choices(self, command: str) -> list[ArgumentChoice]:
+        """The words ``/saver`` accepts, offered at BOTH spellings (UX U1).
+
+        These commands had no branch in ``on_argument_query_opened``, so the
+        handler fell through to the PROVIDER list `/login` offers: typing
+        ``/saver on`` opened 16 providers, ``on`` fuzzy-matched a row, and Enter
+        rewrote the buffer to ``/saver openrouter``. The documented enable form
+        could not be typed at all. The `/aida` branch above is the same fix.
+
+        ``status`` sorts FIRST so Enter under ``/radient`` (where the rows are
+        compound, because the command takes its subcommand first) picks the
+        read-only word: filling ``saver status`` and running it reports state
+        instead of spending credit, which is the right default for a control
+        that changes what leaves the machine.
+        """
+        words = ("status", "on", "off", "inherit")
+        described = {
+            "status": "report this session's state, nothing changes",
+            "on": "shorten this conversation's history from the next turn",
+            "off": "send this conversation's full history",
+            "inherit": "follow the global setting and the agent's designation",
+        }
+        if command == "radient":
+            # ONE ROW, the word the handler parses (the `/aida` shape). The
+            # compound rows this replaced (`saver on`, `saver status`, …) made the
+            # first Enter complete FOUR TOKENS the user never typed — measured as
+            # `/radient` + Enter silently becoming `/radient saver status` (UX
+            # round 2, U9) — and then a second Enter ran a word they had not
+            # chosen. Offering only `saver` keeps the completion equal to what was
+            # asked for; the four words are `/saver `'s list, one command away.
+            return [
+                ArgumentChoice(
+                    name="saver",
+                    description="Radient Saver for this session: status, on, off or inherit",
+                )
+            ]
+        return [ArgumentChoice(name=word, description=described[word]) for word in words]
 
     def on_refresh_argument_choices(self, message: RefreshArgumentChoices) -> None:
         """Refill an open argument list whose rows depend on a sub-slot.
@@ -64062,6 +64198,56 @@ def _read_stored_frontend_state(directory: Path, session_id: str) -> Any | None:
     except Exception:  # noqa: BLE001 — a cosmetic read must never fail an open
         logger.debug("stored frontend state unreadable for %s", session_id, exc_info=True)
         return None
+
+
+def _saver_label(subject: Any) -> str:
+    """The localized Saver badge, or "" when the NEXT REQUEST will not splice.
+
+    ONE RULE (design round 1, D1 + UX U4): the word is painted iff Saver is on
+    for this session, and off paints NOTHING rather than a reserved gap. The
+    reserved-gap version shipped a dim glyph with an empty value in every band
+    for every user, which is the one thing a band segment must not do — its
+    presence is the message.
+
+    TWO SHAPES, ONE ANSWER (review round 2, M2-2). A routed session is a
+    ``FrontendSessionState``: it carries no routing settings, no credential and
+    no live resolver attributes, so the only thing it can read is the published
+    ``saver_on`` — and the previous version ignored that field entirely,
+    which is how a routed badge came to paint an EMPTY label while the owner was
+    on. The owner shape has no such field and derives the same answer from
+    ``command.request_state``, the reading the publish itself uses, so parent and
+    follower cannot disagree.
+
+    NEVER PAINTS EMPTY: an empty or missing badge string returns "" instead of a
+    bare glyph, because a glyph with no word beside it is unreadable rather than
+    compact (the round-1 D1 defect at a different level).
+    """
+    # The parameter is deliberately not named ``session``: it holds either a real
+    # session or a ``FrontendSessionState``, and the host-read guard treats every
+    # ``session.member`` in this file as a duck-typed session read that has to be
+    # declared on one of the protocols. Naming it for what it is keeps the read
+    # typed (an isinstance against the concrete state class) instead of forcing a
+    # session-protocol declaration that would be false for both classes.
+    if subject is None:
+        return ""
+    from local_operator.i18n.keys import wire_radient_saver
+    from local_operator.i18n.text import tr
+    from local_operator.saver.command import request_state
+
+    word = str(tr("wire.radient_saver")(wire_radient_saver.command_badge())).strip()
+    if not word:
+        # A catalogue that lost the word must not leave a mark that says nothing.
+        return ""
+    # A ROUTED surface hands this function a ``FrontendSessionState``, which is
+    # where the owner's answer is published; the owner shape is a real session
+    # and is resolved locally. Typed as an isinstance rather than a duck probe so
+    # the read is checked against the field's own declaration (the protocol test
+    # treats an undeclared duck-typed read as a silent-None hazard).
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    if isinstance(subject, FrontendSessionState):
+        return word if subject.saver_on else ""
+    return word if request_state(subject).on else ""
 
 
 def _fast_label(session) -> str:

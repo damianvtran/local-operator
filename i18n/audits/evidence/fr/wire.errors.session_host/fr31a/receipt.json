@@ -1,0 +1,70 @@
+{
+  "record_reference": "i18n/audits/evidence/fr/wire.errors.session_host/fr31a/record.json",
+  "command": [
+    "/Users/damian/local-operator/.venv/bin/python",
+    "/Users/damian/.local-operator/sessions/829abca97a25/scratchpad/host-copy-fr/validation-tree/scripts/i18n/check.py",
+    "--catalogues-only"
+  ],
+  "cwd": "/Users/damian/.local-operator/sessions/0a66628c58a2/scratchpad/host-fr-audit-a",
+  "exit_code": 0,
+  "stdout": "check.py: catalogue checks: 0 problem(s)\n",
+  "stderr": "",
+  "validator_sha256": "98dee7f1112848163c7a3365c39668118caa4bfe13e3afee4b137478d0bf39fb",
+  "validation_tree_matches": {
+    "en": true,
+    "context": true,
+    "candidate": true,
+    "validator_committed_source": true
+  },
+  "mechanical_checks": [
+    {
+      "key": "wire.errors.session_host.unsupported",
+      "codepoints": 195,
+      "placeholders": [],
+      "plural_select": "not present; no category requirements applicable",
+      "markup": "none",
+      "nfc": true,
+      "format_controls": false,
+      "maxCells": null,
+      "maxChars": null
+    },
+    {
+      "key": "wire.errors.session_host.unavailable",
+      "codepoints": 129,
+      "placeholders": [],
+      "plural_select": "not present; no category requirements applicable",
+      "markup": "none",
+      "nfc": true,
+      "format_controls": false,
+      "maxCells": null,
+      "maxChars": null
+    },
+    {
+      "key": "wire.errors.session_host.refused",
+      "codepoints": 206,
+      "placeholders": [],
+      "plural_select": "not present; no category requirements applicable",
+      "markup": "none",
+      "nfc": true,
+      "format_controls": false,
+      "maxCells": null,
+      "maxChars": null
+    }
+  ],
+  "width_cells": {
+    "wire.errors.session_host.unsupported": 195,
+    "wire.errors.session_host.unavailable": 129,
+    "wire.errors.session_host.refused": 206
+  },
+  "translator_provenance_verified": true,
+  "style_guide_delta": "Working checkout removes only an unrelated relay.chrome width-exception paragraph. Pinned style guide verified against translator hash; applicable rules identical.",
+  "integration": {
+    "integrated_from_session": "0a66628c58a2",
+    "original_record_sha256": "d5b8427a4594b675dd3c9b48ac394fdb8211d1148ecb0d853757f57157c668c6",
+    "original_receipt_sha256": "f42bd05d3f43f76b8a267a36af7b814a20a65207624d6e70f4a2ec64ba337e34",
+    "canonical_record": "i18n/audits/evidence/fr/wire.errors.session_host/fr31a/record.json",
+    "canonical_translator_provenance": "i18n/audits/evidence/fr/wire.errors.session_host/fr31a/translator/provenance.json",
+    "retention": "Retained in this PR; not claimed merged or on main. Historical commands/cwd/scratch input paths are preserved as executed, not claimed tracked.",
+    "integration_judgment": "No new audit; semantic pass/finding facts copied from independent original records."
+  }
+}

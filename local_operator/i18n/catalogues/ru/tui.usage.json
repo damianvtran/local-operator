@@ -1,0 +1,23 @@
+{
+  "tui.usage.paid.continue": "включённая квота исчерпана; кредиты продолжат списываться",
+  "tui.usage.paid.family_caps": "лимиты семейств моделей по-прежнему действуют",
+  "tui.usage.paid.blocked": "Расходы недоступны",
+  "tui.usage.paid.eligibility_unknown": "Допустимость расходов неизвестна",
+  "tui.usage.paid.unlimited": "Платный лимит не ограничен",
+  "tui.usage.windows_count": "{count, plural, one {{shown} окно} few {{shown} окна} many {{shown} окон} other {{shown} окна}}",
+  "tui.usage.exhausted": "исчерпано: {value}",
+  "tui.usage.near_limit": "близко к лимиту: {value}",
+  "tui.usage.reported_balance": "{count, plural, one {{shown} сообщённый баланс} few {{shown} сообщённых баланса} many {{shown} сообщённых балансов} other {{shown} сообщённого баланса}}",
+  "tui.usage.not_reported": "не сообщено: {value}",
+  "tui.usage.unavailable": "  ·  использование недоступно",
+  "tui.usage.resets_in": ", сброс через {value}",
+  "tui.usage.no_windows": "  окна не сообщены",
+  "tui.usage.fetching": "загрузка…",
+  "tui.usage.title": "Использование",
+  "tui.usage.sign_in_expired": "вход истёк: {value}",
+  "tui.usage.stale": "устарело: {value}",
+  "tui.usage.refreshing": "обновление…",
+  "tui.usage.refresh_failed": "не удалось обновить — показаны последние известные значения",
+  "tui.usage.showing_prefix": "показано ",
+  "tui.usage.of_separator": " из "
+}

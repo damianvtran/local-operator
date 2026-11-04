@@ -995,7 +995,17 @@ def test_every_action_degrades_without_cmux(monkeypatch) -> None:
     )
     for action in builtin.BROWSER_ACTIONS:
         context = _ctx()
-        result = _run(forced, "t1", {"action": action, "url": "https://x.y"}, context)
+        # Key validation precedes backend admission; a valid press must reach
+        # the unavailable-host refusal rather than testing unsupported_key here.
+        args: dict[str, Any] = {"action": action, "url": "https://x.y"}
+        if action == "press":
+            args["key"] = "Tab"
+        if action == "select":
+            args.update(selector="#s", options=[0])
+        if action == "hover":
+            # Same rule: a well-formed target reaches the unavailable-host refusal.
+            args["selector"] = "#menu"
+        result = _run(forced, "t1", args, context)
         if action == "inspect_ownership":
             assert not result.is_error
             assert result.details == {"version": 1, "local_scope_missing": True}

@@ -1,0 +1,23 @@
+{
+  "tui.usage.paid.continue": "शामिल कोटा खत्म; क्रेडिट जारी रहेंगे",
+  "tui.usage.paid.family_caps": "मॉडल-फ़ैमिली सीमाएँ अब भी लागू हैं",
+  "tui.usage.paid.blocked": "खर्च उपलब्ध नहीं",
+  "tui.usage.paid.eligibility_unknown": "खर्च की पात्रता अज्ञात",
+  "tui.usage.paid.unlimited": "असीमित सशुल्क भत्ता",
+  "tui.usage.windows_count": "{count, plural, one {{shown} विंडो} other {{shown} विंडो}}",
+  "tui.usage.exhausted": "{value} समाप्त",
+  "tui.usage.near_limit": "{value} सीमा के निकट",
+  "tui.usage.reported_balance": "{count, plural, one {{shown} रिपोर्ट किया शेष} other {{shown} रिपोर्ट किए शेष}}",
+  "tui.usage.not_reported": "{value} रिपोर्ट नहीं",
+  "tui.usage.unavailable": "  ·  उपयोग उपलब्ध नहीं",
+  "tui.usage.resets_in": ", {value} में रीसेट",
+  "tui.usage.no_windows": "  कोई विंडो रिपोर्ट नहीं हुई",
+  "tui.usage.fetching": "लाया जा रहा है…",
+  "tui.usage.title": "उपयोग",
+  "tui.usage.sign_in_expired": "{value} साइन-इन समाप्त",
+  "tui.usage.stale": "{value} पुराना",
+  "tui.usage.refreshing": "रीफ़्रेश हो रहा है…",
+  "tui.usage.refresh_failed": "रीफ़्रेश विफल — अंतिम ज्ञात संख्याएँ दिख रही हैं",
+  "tui.usage.showing_prefix": "दिख रहे: ",
+  "tui.usage.of_separator": " / "
+}

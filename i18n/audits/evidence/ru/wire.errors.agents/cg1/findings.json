@@ -1,0 +1,27 @@
+{
+  "locale": "ru",
+  "namespace": "wire.errors.agents",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "RU-016",
+      "severity": "MINOR",
+      "namespace": "wire.errors.agents",
+      "key": "wire.errors.agents.team_pull_local_failure",
+      "english": "This team could not be pulled from this machine.",
+      "current": "Не удалось получить эту команду на этом компьютере.",
+      "problem": "Hub 'pull' is in the glossary's kept-English set; «получить» loses the operation name the user sees in commands (and is inconsistent with ru neighbours «через pull»).",
+      "suggested": "Не удалось выполнить pull этой команды на этом компьютере.",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    }
+  ]
+}

@@ -312,7 +312,7 @@ def test_nonblank_offer_has_the_same_search_and_fullmatch_meaning(
 
 def test_projection_only_rephrases_owned_nonblank_patterns() -> None:
     """Every affected field keeps its bounds; protocol/schema identities stay put."""
-    surface = ActionSurface(paste_text=True, drag=True)
+    surface = ActionSurface(paste_text=True, drag=True, modifiers=True)
     before = {model: model.model_json_schema() for model in surface.models}
     offered = action_tool_parameters(surface)["properties"]["actions"]["items"]["anyOf"]
     fields = {
@@ -476,7 +476,7 @@ def test_the_projection_keeps_every_other_action_field() -> None:
     for model in SURFACE.models:
         member = members[model.model_fields["kind"].default]
         declared = set(model.model_fields)
-        assert set(member["properties"]) == declared - {"observation_id"}
+        assert set(member["properties"]) == declared - {"observation_id", "modifiers"}
         required = {name for name, field in model.model_fields.items() if field.is_required()}
         assert set(member["required"]) >= required - {"observation_id"}
         assert "observation_id" not in member["required"]
@@ -1505,3 +1505,30 @@ def test_a_plus_joined_suggestion_is_always_an_accepted_chord(
     assert _joined_chord(sent) == chord
     if chord is not None:
         KeyAction(observation_id="o", keys=tuple(chord))
+
+
+@pytest.mark.parametrize(
+    "kind, fields",
+    [
+        ("click", {"x": 1, "y": 2}),
+        ("double_click", {"x": 1, "y": 2}),
+        ("drag", {"start_x": 1, "start_y": 2, "end_x": 3, "end_y": 4}),
+        ("scroll", {"x": 1, "y": 2, "delta_y": 1}),
+    ],
+)
+def test_tool_and_canonical_paths_refuse_explicit_empty_modifiers(kind, fields):
+    from local_operator.evaluation.runner.action_tool import _build_batch
+
+    observation = _observation(frames=(_frame("screen"),))
+    action = {"kind": kind, "frame_id": "screen", "modifiers": [], **fields}
+    with pytest.raises(ValueError, match="modifiers must not be empty"):
+        _build_batch({"actions": [action]}, observation)
+    batch_payload = dict(
+        protocol_version="1.0",
+        task_id=observation.task_id,
+        episode_id=observation.episode_id,
+        observation_id=observation.observation_id,
+        actions=[dict(action, observation_id=observation.observation_id)],
+    )
+    with pytest.raises(ValueError, match="modifiers must not be empty"):
+        ActionBatch.from_canonical_json(json.dumps(batch_payload).encode())

@@ -1,0 +1,27 @@
+{
+  "locale": "vi",
+  "namespace": "wire.errors.files",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 2,
+      "id": "R2-VI-003",
+      "severity": "MINOR",
+      "namespace": "wire.errors.files",
+      "key": "wire.errors.files.sign_auth",
+      "english": "A local access token or desktop bearer is required.",
+      "current": "Cần có mã truy cập cục bộ hoặc bearer của desktop.",
+      "problem": "Sweep (kept-English class): style guide kept-English list includes «token»; «access token» rendered «mã truy cập». Elsewhere this wave keeps «token» (tui.analytics.*, tui.import.preview_memory). Graded MINOR not MAJOR: «mã truy cập» is a common vi rendering for an auth access token, a different sense from the LLM token, and the meaning is intact. Still, the kept-English list names «token» without distinguishing senses.",
+      "suggested": "Cần có token truy cập cục bộ hoặc bearer của desktop.",
+      "disposition": "fixed (remediation core-fix2, session 053117b4ad36)"
+    }
+  ]
+}

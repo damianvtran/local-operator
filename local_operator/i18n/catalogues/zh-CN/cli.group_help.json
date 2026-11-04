@@ -1,0 +1,12 @@
+{
+  "cli.group_help.skills": "发布、拉取和同步Agent Hub技能（文档和文件包）",
+  "cli.group_help.skills_description": "技能包不得包含可执行文件（任何执行权限位都会导致拒绝），安装技能包不会运行代码。",
+  "cli.group_help.tunnel": "通过Radient远程访问本地智能体运行环境",
+  "cli.group_help.secret": "加密保存的长期机密，智能体无需逐次询问即可读取",
+  "cli.group_help.network": "网状网络：配对设备，跨设备操控会话",
+  "cli.group_help.disk": "磁盘空间管理工具：先测量，仅回收已证实可安全删除的内容",
+  "cli.group_help.operator": "操作者权限：用于放宽当前审批限制的密钥",
+  "cli.group_help.pair": "将手机配对为操作者设备：签名授权一次即可",
+  "cli.group_help.search": "配置和测试负载均衡网页搜索",
+  "cli.group_help.fetch": "配置和测试无界面网页抓取"
+}

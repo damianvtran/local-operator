@@ -16,7 +16,7 @@ Fourteen builtin skills are packaged inside Local Operator itself. They are rele
 - `systematic-debugging` — root-cause defects instead of guessing: reproduce, isolate, instrument boundaries, kill hypotheses.
 - `engineering-principles` — smallest change, subtract before adding, data structures before logic, idempotency.
 - `code-review` — diff-first review with severity classification and terminal verdicts.
-- `responding-to-review` — answer findings one at a time: verify, fix/reject/defer with evidence, one batched round.
+- `responding-to-review` — record a disposition for each finding: verify, fix/reject/defer with evidence, one batched round (not per-finding commit/review cycles).
 - `design-qa` — deterministic UI/UX checks (contrast, spacing, overlap, clipping, copy) plus judgement rules for the rest.
 - `frontend-design` — deliberate interface design: plan before pixels, avoid the generic default look, hold a quality floor.
 - `browser-qa` — exercise a web app through a real browser: recon, selectors, console errors, screenshot evidence.
@@ -55,6 +55,43 @@ Two environment knobs change the scan:
 - **Silence one**: a same-named copy with `hide: true` — your copy wins the name, direct `skill://` reads return it, and semantic selection excludes it, so the builtin never reaches a session. An `enabled: false` copy is ignored: it is dropped before it can claim the name, so the builtin stays loaded and no warning fires.
 - **Do not edit the packaged copy** — the next update replaces it.
 - The conflict warning is not an error: it names the shadowed file, the winner, and the rule. It is exactly what shadowing a builtin looks like.
+
+## Adopt a same-name Hub skill
+
+When a local folder already uses the Hub skill's name, preview adoption instead
+of moving the real folder or deleting it to make installation succeed:
+
+```bash
+lop skills pull <id> --org <tenant> --dry-run
+lop skills pull <id> --org <tenant> --adopt-receipt=<receipt> --yes
+```
+
+Write the receipt with `=`. Receipts minted by older versions could begin with
+`-` (about 1 in 64), which argparse reads as an option when the value is passed
+separately; the `=` form accepts every receipt, old or new.
+
+Use `--public` instead of `--org <tenant>` for a public Hub skill. Keep the
+same scope, alias, `--no-subscribe` policy and `--strategy` choice from preview
+through confirmation; changing them requires a new preview.
+
+Review both diffs before confirming the receipt. A complete folder snapshot is
+saved before any merge-model call; local assets are preserved but excluded from
+model input. Use `--no-llm` with an explicit `--strategy keep-local` or
+`--strategy take-hub` preview when skill text must not leave the machine. Review
+the chosen preview before applying it; a stale receipt requires a fresh preview.
+Never silently discard guidance or move the real folder. Adoption does not relax
+the Hub service's strict document schema.
+
+## Adoption platform boundary
+
+Reviewed adoption of an existing folder requires secure projection storage for
+local-only assets and legacy paths. macOS and Linux use descriptor-relative,
+no-follow operations. On Windows, adoption and existing projected-link operations
+fail closed before changing content, link or policy; ordinary strict Hub installs
+remain available when a retained-handle probe proves no projection exists. Do not
+bypass that capability refusal by moving folders or deleting projection metadata.
+A native Windows secure projection lifecycle is a separate owned follow-up; a
+simulated Windows API test is not native execution evidence.
 
 ## Author and improve skills
 

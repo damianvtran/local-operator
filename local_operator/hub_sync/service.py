@@ -3508,6 +3508,9 @@ def install_skill(
     dry_run: bool = False,
     form: str | None = None,
     reinstall: bool = False,
+    adoption_receipt: str | None = None,
+    adoption_strategy: Literal["merge", "keep-local", "take-hub"] = "merge",
+    allow_llm: bool = True,
 ) -> dict[str, Any]:
     """Install ONE remote skill as a new local link (UI ``hub.skillPull``).
 
@@ -3654,6 +3657,31 @@ def install_skill(
                 }
             )
             return {"reports": [payload], "link": row, "links": snapshot}
+
+        # Adoption is an explicit initial-link transition, not an exception in
+        # the ordinary storage ownership gate. BOTH preview and apply validate
+        # durable ownership before reading text or claiming that installation is
+        # possible; the old early dry-run returned a misleading would-install.
+        owner = prov.alias_owner(ctx.config_dir, "skill", alias)
+        if owner is not None and owner != local_id:
+            raise LinkError(
+                "origin-conflict", "managed alias belongs to another local skill origin"
+            )
+        destination = storage.path(alias)
+        if bundle is None and destination.exists():
+            from local_operator.hub_sync.skill_adoption_service import adopt_skill
+
+            return adopt_skill(
+                ctx,
+                resolved,
+                dry_run=dry_run,
+                confirm=confirm,
+                receipt=adoption_receipt,
+                strategy=adoption_strategy,
+                allow_llm=allow_llm,
+                subscribe=subscribe,
+                auto_push=auto_push,
+            )
 
         # 7b-bundle. The bundle preflight runs BEFORE any policy staging or
         #     download: a public first install must name the publisher and the
@@ -4118,6 +4146,13 @@ def subscribe_skill(
     # Same lease the install/apply paths take: creating the baseline is local
     # state a concurrent tick or install must not interleave with.
     with exclusive(ctx, wait_s=0.0):
+        # Subscription reserves a durable alias too. Another origin remains a
+        # conflict even when its directory is absent or between crash renames.
+        owner = prov.alias_owner(ctx.config_dir, "skill", alias)
+        if owner is not None and owner != local_id:
+            raise LinkError(
+                "origin-conflict", "managed alias belongs to another local skill origin"
+            )
         existing: prov.BaselineRecord | None = None
         for record in prov.iter_baselines(ctx.config_dir):
             if record.kind != "skill" or record.local_id != local_id:
@@ -4132,6 +4167,18 @@ def subscribe_skill(
                 )
             existing = record
             break
+
+        if existing is None or existing.content_state == "absent":
+            from local_operator.hub_sync.skill_adoption_service import _refusal
+            from local_operator.hub_sync.skill_storage import ManagedSkillStorage
+
+            if ManagedSkillStorage(ctx.config_dir).path(alias).exists():
+                # An authored copy is not ABSENT. Minting an absent baseline
+                # here falsely reports subscription success while every runner
+                # pull later CAS-refuses that same folder. Offer the exact same
+                # reviewed adoption as Download, retaining Subscribe intent;
+                # refuse before any baseline, policy or content mutation.
+                raise _refusal("alias-occupied", "review the occupying local skill first")
 
         if existing is None:
             record = replace(
@@ -5596,6 +5643,27 @@ def _canonical_remote(fields: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _same_content(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
+    """Whether two skill manifests carry the same CONTENT (not the same bytes).
+
+    Comparison is by ``fingerprint_snapshot`` after ``_canonical_for_compare``, so
+    for a document it is deliberately TOLERANT of exactly what the Hub's canonical
+    form changes on write: every text field and file body goes through
+    ``segment.norm`` -- CRLF/CR to LF, trailing spaces stripped per line, runs of
+    blank lines collapsed to one, and leading/trailing newlines trimmed (which is
+    how the Hub's single dropped terminal LF per file compares equal). A bundle
+    manifest is NOT tolerant: it compares by its exact tree hash.
+
+    Why that tolerance is safe for its callers (the manual-confirm reconciler and
+    the push replay's read-before-replay): both use equality only to decide that
+    "the Hub already serves what we sent", and both ALSO require that the Hub's
+    revision moved past the one the commit was conditioned on. An exact comparison
+    would call every clean landing "different" because the Hub rewrites the
+    spelling it returns. The residual risk -- a different writer producing
+    content that differs from ours ONLY by blank-line runs -- is the same
+    normalization the Hub itself applies, so such content is not distinct to it.
+    An unfingerprintable side proves no equality.
+    """
+
     try:
         return prov.fingerprint_snapshot(
             "skill", _canonical_for_compare("skill", a)
@@ -5723,7 +5791,7 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
     from local_operator.hub_sync.budget import OperationBudget
     from local_operator.hub_sync.outbound import project_outbound, refuses
     from local_operator.hub_sync.outbox import Outbox
-    from local_operator.hub_sync.push import push_item
+    from local_operator.hub_sync.push import org_skill_operation_id, push_item
 
     def changed(message: str) -> LinkError:
         return LinkError("publication-preview-changed", message)
@@ -5805,9 +5873,11 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
         # hub's current content. Anything else (a later edit, a different reviewed
         # proposal, a hub that moved elsewhere) falls through to the normal path,
         # which pushes once or refuses -- never reports a push that did not happen.
-        reconciled, landed_revision = _reconcile_landed_commit(
-            ctx, check, f"push-skill-{check.local_id}", receipt
+        operation_id = f"push-skill-{check.local_id}"
+        reconcile_id = (
+            org_skill_operation_id(operation_id) if identity.visibility == "org" else operation_id
         )
+        reconciled, landed_revision = _reconcile_landed_commit(ctx, check, reconcile_id, receipt)
         if reconciled is not None:
             _delete_publication_preview(ctx.config_dir, preview_receipt, PUSH_PREVIEW_DIR)
             return _push_answer(identity, check, reconciled)
@@ -5881,6 +5951,7 @@ def confirm_link_push(ctx: HubSyncContext, *, link_id: str, preview_receipt: str
                 ),
                 bundle_attested=not is_bundle or _capability_bundle(ctx.store().load(), identity),
                 bundle_upload=(bundle_upload_hook(ctx, identity, record) if is_bundle else None),
+                org_skill=identity.visibility == "org",
             )
         )
         record_push_outcome(ctx, check, outcome)

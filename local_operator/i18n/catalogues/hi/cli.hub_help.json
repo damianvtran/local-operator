@@ -1,0 +1,14 @@
+{
+  "cli.hub_help.hub": "Agent Hub अपडेट स्थिति",
+  "cli.hub_help.status": "दिखाएँ कि pull किए किन एजेंट और टीमों के हब अपडेट हैं",
+  "cli.hub_help.status_json": "डेस्कटॉप रूट पेलोड उत्सर्जित करें",
+  "cli.hub_help.links": "हर हब लिंक (स्वस्थ या नहीं) उसके स्रोत, दायरे और नीति के साथ सूचीबद्ध करें",
+  "cli.hub_help.links_json": "डेस्कटॉप लिंक पेलोड उत्सर्जित करें",
+  "cli.hub_help.link": "एक हब लिंक की स्वतंत्र नीति संपादित करें",
+  "cli.hub_help.link_set": "इस लिंक की subscribe और/या auto_push नीति सेट करें",
+  "cli.hub_help.link_set_link_id": "`lop hub links` से लिंक id",
+  "cli.hub_help.link_set_subscribe": "इस लिंक के लिए बिना निगरानी आवक सिंक्रनाइज़ेशन",
+  "cli.hub_help.link_set_auto_push": "इस लिंक के लिए बिना निगरानी जावक प्रकाशन",
+  "cli.hub_help.link_set_expected_revision": "वह नीति संशोधन जो आपने आख़िरी बार देखा (CAS); छोड़ने पर पहले नया पढ़ा जाता है",
+  "cli.hub_help.link_set_confirm_public_egress": "लिखे गए बदलाव PUBLIC मूल पर प्रकाशित करने की स्पष्ट सहमति"
+}

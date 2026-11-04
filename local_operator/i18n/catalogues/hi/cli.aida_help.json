@@ -1,0 +1,6 @@
+{
+  "cli.aida_help.aida": "Aida के प्रोफ़ाइल नोट: दर्ज करें कि उसे क्या याद रखना चाहिए",
+  "cli.aida_help.note": "system_prompt.md में 'About the operator' के अंतर्गत एक नोट जोड़ें",
+  "cli.aida_help.note_text": "दर्ज किया जाने वाला नोट; STDIN से पढ़ने के लिए छोड़ दें",
+  "cli.aida_help.note_description": "<config root>/system_prompt.md में, चिह्नित 'About the operator' खंड के भीतर, एक नोट दर्ज करें ताकि हर भावी सत्र और उप-एजेंट उसे देखे। फ़ाइल config root से हल होती है और कभी आर्गुमेंट नहीं होती; नोट में खंड मार्कर नहीं होने चाहिए। नोट STDIN से पढ़ने के लिए TEXT छोड़ दें (बहु-पंक्ति नोट को कोटिंग की ज़रूरत नहीं)।"
+}

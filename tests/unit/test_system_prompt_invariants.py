@@ -141,18 +141,18 @@ def test_a_finished_deliverable_is_named_and_never_denied(queued: str) -> None:
     attach. A live session wrote a PDF and said "I can't attach the file to
     chat" — the file was already shown under the answer."""
     assert "Deliverables surface themselves" in queued
-    assert "A file the turn wrote or named surfaces under your answer as a file callout" in queued
-    assert "name each deliverable and its path" in queued
-    assert "never say you cannot attach, send or share one" in queued
+    assert "Files written or named this turn appear as callouts under your answer" in queued
+    assert "name each deliverable and path" in queued
+    assert "never deny you can attach, send or share one" in queued
 
 
 def test_written_html_and_charts_are_never_denied(queued: str) -> None:
     """The counterweight to a denied file is what CAN be produced: a
     standalone HTML write renders as an inline preview on the desktop UI and
     a turn's structured numbers can be drawn as a graphic."""
-    assert "A standalone `.html` you write can render as an inline preview (desktop UI)" in queued
-    assert "a turn's structured numbers can be drawn as a graphic" in queued
-    assert "never deny a file or visual you can produce" in queued
+    assert "Standalone `.html` can preview inline (desktop UI)" in queued
+    assert "structured numbers can become a graphic" in queued
+    assert "Never deny a visual you can produce" in queued
 
 
 def test_peer_messaging_never_shells_out(queued: str) -> None:

@@ -14,6 +14,7 @@
  *   name is "untitled". Rows that matched only on their body are marked, or
  *   the hit would read as arbitrary.
  */
+import { contentDir } from "../lib/content-direction";
 import { useEffect, useRef, useState } from "react";
 import { resumeSession, searchSessions } from "../api";
 import { SessionTagLine } from "../components/session-tag-line";
@@ -72,7 +73,14 @@ export function PastSessionsScreen() {
 	};
 
 	return (
-		<div className="mx-auto flex min-h-full w-full max-w-[var(--lo-column-max,28rem)] flex-col">
+		// The column is BOUNDED and the list scrolls inside it: `#/past` used to
+		// rely on the document scrolling, which the shell no longer allows
+		// (`src/styles/index.css`, "the document is not a scroller"). A height
+		// FLOOR with no inner scroller left every row past the fold
+		// unreachable — 22 rows at 390x844 put the last one ~458px below the
+		// viewport. The `h-dvh` + inner `.lo-scroll` shape is the one every other
+		// bounded screen already uses (`screens/library.tsx`).
+		<div className="mx-auto flex h-dvh w-full max-w-[var(--lo-column-max,28rem)] flex-col overflow-hidden">
 			<header className="flex items-center gap-2 px-2 pt-[max(env(safe-area-inset-top),0.75rem)] pb-2">
 				<button
 					type="button"
@@ -97,7 +105,7 @@ export function PastSessionsScreen() {
 				/>
 			</div>
 
-			<main className="flex flex-1 flex-col gap-0.5 px-2 pb-3">
+			<main className="lo-scroll flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 pb-[max(env(safe-area-inset-bottom),0.75rem)]">
 				{resumeError ? (
 					<p className="px-2 pb-1 text-body-sm text-danger">
 						{resumeError}
@@ -120,7 +128,7 @@ export function PastSessionsScreen() {
 							className="flex items-center gap-2 rounded-sm px-2 py-1 active:bg-elevated"
 						>
 							<div className="min-w-0 flex-1">
-								<span className="block truncate text-body">
+								<span className="flex min-w-0 items-baseline text-body">
 									{/* A PREFIX, dim, ahead of the name — the same
 									   mark and the same position the TUI's /resume
 									   picker uses, because it is one fact on two
@@ -133,13 +141,17 @@ export function PastSessionsScreen() {
 									   title is kept beside it because it is the only
 									   thing saying what this branched from. */}
 									{s.forked ? (
-										<span className="me-1.5 text-meta text-ink-dim">
+										<span className="me-1.5 shrink-0 text-meta text-ink-dim">
 											[fork]
 										</span>
 									) : null}
-									{s.name || "untitled"}
+									{/* Generated markers stay in chrome direction; the name alone
+									   owns its script direction and truncation budget. */}
+									<span dir={contentDir(s.name || "untitled")} className="min-w-0 truncate">
+										{s.name || "untitled"}
+									</span>
 									{s.body_match ? (
-										<span className="ms-1.5 text-meta text-info">
+										<span className="ms-1.5 shrink-0 text-meta text-info">
 											in conversation
 										</span>
 									) : null}

@@ -1,0 +1,16 @@
+{
+  "locale": "es",
+  "namespace": "wire.errors.session_host",
+  "source_sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "056852035b33",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "actual_model_source": "host model-switch notice: temporary fallback for provider quota; anthropic/claude-sonnet-5-5 -> anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; translation reasoning and writing performed on openai/gpt-6.1-sol"
+  },
+  "status": "translated",
+  "context_sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724",
+  "target_sha256": "b27376785fe2c4bc4e3ca302e3f34097dad93bf483ccef5a921177ac6e8a00b8",
+  "note": "3 keys translated; independent audit pending. Session 056852035b33; actual openai/gpt-6.1-sol (provider-quota fallback). Source/context/target hashes and model history in supplied provenance.json. No audit approval claimed."
+}

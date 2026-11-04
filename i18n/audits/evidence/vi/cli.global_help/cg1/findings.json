@@ -1,0 +1,39 @@
+{
+  "locale": "vi",
+  "namespace": "cli.global_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-046",
+      "severity": "MINOR",
+      "namespace": "cli.global_help",
+      "key": "cli.global_help.yolo",
+      "english": "Auto-approve all tool executions (read/write/exec tiers) without prompting",
+      "current": "Tự động chấp thuận mọi lần thực thi công cụ (bậc read/write/exec) mà không hỏi",
+      "problem": "Glossary: approvals → «phê duyệt» (used 9× in vi neighbours and in this wave's own cli.exec_help.control/tools); 'chấp thuận' is a second, unglossed term for the same safety act, so the user sees two words for one gate.",
+      "suggested": "Tự động phê duyệt mọi lần thực thi công cụ (bậc read/write/exec) mà không hỏi",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-049",
+      "severity": "MINOR",
+      "namespace": "cli.global_help",
+      "key": "cli.global_help.hosting",
+      "english": "Hosting platform to use (radient, deepseek, openai, anthropic, ollama, kimi, alibaba, google, mistral, test, openrouter, xai, zai)",
+      "current": "Nền tảng lưu trữ sẽ dùng (radient, deepseek, openai, anthropic, ollama, kimi, alibaba, google, mistral, test, openrouter, xai, zai)",
+      "problem": "'nền tảng lưu trữ' means storage platform; 'hosting' here is the model provider (`--hosting`), which vi settings render 'Nhà cung cấp' (wire.settings.hosting.label). Wrong sense; same in global_help hosting/propagated_hosting/description, exec_worker_help hosting, credential_help credential.",
+      "suggested": "Nhà cung cấp sẽ dùng (radient, deepseek, …)",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    }
+  ]
+}

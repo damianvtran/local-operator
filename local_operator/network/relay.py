@@ -968,6 +968,66 @@ def _dial_candidates(member: MemberRecord) -> list[str]:
     return candidates
 
 
+def _reaches_own_listener(endpoint: str, own_port: int, listen_address: str = "0.0.0.0") -> bool:
+    """Whether dialling ``endpoint`` would connect to THIS relay's own listener.
+
+    THE SELF-RACE (2026-11-02, Mac ⇄ lop-remote-node-2). ``probe_candidates`` races
+    every candidate in parallel and takes the first connect. A peer row carrying an
+    address of THIS host on OUR listen port (a poisoned ``observed_endpoint`` —
+    there it was the Mac's own LAN ``10.0.2.169:4097``) is answered by our own
+    listener in well under a millisecond, so it beats the real peer's 15–100 ms WAN
+    leg on every round; the handshake then runs against ourselves (``self_link``)
+    and the real peer's connected socket is discarded. Reordering or serialising
+    the race does not help: whenever the self candidate is tried it answers. The
+    only fix is never to dial it.
+
+    The bound address matters as well as the port: a wildcard IPv4 listener
+    accepts every local IPv4 address, but a specific bind accepts only that
+    address. Two same-host relays can share a port on DISTINCT bound addresses;
+    neither is self merely because the interface table contains the other's IP.
+    Different ports stay dialable too. ``bind()`` records the effective port in
+    settings, including when the kernel chooses it for a configured zero.
+
+    The interface table is read NOW, on every call, never cached: sleep/wake and
+    network changes rewrite it, and an address that was a foreign host's an hour
+    ago can be ours after a Wi-Fi rejoin — that is exactly how the 2026-11-02 link
+    broke. An unreadable table (``interface_for_address`` → ``None``) filters
+    nothing: dropping a candidate on a guess could strand a reachable peer.
+    """
+    host, sep, port = str(endpoint or "").rpartition(":")
+    loopback = _is_loopback_endpoint(endpoint)
+    if not sep or not port.isdigit():
+        return loopback and listen_address == "0.0.0.0"
+    if int(port) != own_port:
+        return False
+    host = host.strip("[]").lower()
+    if listen_address != "0.0.0.0":
+        # No DNS lookup: the listener is AF_INET and the observation is an IP
+        # literal. Preserve the existing localhost spelling for same-host rigs.
+        bound = listen_address.lower()
+        return ("127.0.0.1" if host == "localhost" else host) == (
+            "127.0.0.1" if bound == "localhost" else bound
+        )
+    if loopback:
+        return True
+    return addresses.interface_for_address(host) is not None
+
+
+def _dialable_candidates(
+    member: MemberRecord, own_port: int, listen_address: str = "0.0.0.0"
+) -> list[str]:
+    """``_dial_candidates`` minus every address that would reach this relay itself.
+
+    The redial schedule, session/listing dial and doctor share this filter, so
+    "which candidates are us" has one answer even for a poisoned stored hint.
+    """
+    return [
+        endpoint
+        for endpoint in _dial_candidates(member)
+        if not _reaches_own_listener(endpoint, own_port, listen_address)
+    ]
+
+
 def _host_only(address: str) -> str:
     """``host`` of ``host:port`` (IPv6 brackets stripped); the input when unsplittable."""
     text = str(address or "")
@@ -1553,6 +1613,13 @@ def _own_relay_listen(root: Path | None) -> dict[str, Any]:
     return record.listen if isinstance(record.listen, dict) else {}
 
 
+#: Declared addresses ``advertise_endpoints`` has already warned about skipping in
+#: this process. Process-lifetime and never pruned: the set holds only the handful
+#: of addresses an operator declared, and a fresh process (an upgrade, a restart)
+#: should say it once again.
+_STALE_ADVERTISED_WARNED: set[str] = set()
+
+
 def advertise_endpoints(settings: NetworkSettings, *, declared: Sequence[str] = ()) -> list[str]:
     """Where peers should TRY to reach a device, in preference order.
 
@@ -1599,7 +1666,13 @@ def advertise_endpoints(settings: NetworkSettings, *, declared: Sequence[str] = 
         text = str(host or "").strip()
         reason = addresses.stale_declared_address_reason(text)
         if reason is not None:
-            logger.warning("Skipping advertised address %s: %s.", text, reason)
+            # Logged once per address per process: this runs on every advertisement
+            # refresh, and a stale declaration that outlives a network change
+            # repeated the same line 28k+ times in the live log, burying everything
+            # else. The skip itself still happens on every call.
+            if text not in _STALE_ADVERTISED_WARNED:
+                _STALE_ADVERTISED_WARNED.add(text)
+                logger.warning("Skipping advertised address %s: %s.", text, reason)
             continue
         add(text)
     live = _own_relay_listen(settings.root)
@@ -5943,10 +6016,20 @@ class RelayServer:
         is not written, because an ephemeral port is a closed door by the time anyone
         dials it (the reason ``_note_peer_endpoints`` refuses to write it at all).
 
-        Loopback sources are skipped (a same-host rig is not an address). Never raises.
+        Loopback sources are skipped (a same-host rig is not an address), and so is
+        any source that is one of THIS host's own interface addresses, read live:
+        a link arriving from our own address (a same-host forwarder, a hairpin NAT,
+        a peer relayed through this box) says nothing about where the member is,
+        and recording it is the poison behind the 2026-11-02 self-race — the Mac
+        held ``observed_endpoint = 10.0.2.169:4097``, its own LAN address, and
+        every dial reached its own listener first (``_reaches_own_listener``).
+        The field is only rewritten when the member dials IN, which a NAT'd peer
+        never does, so a bad value written here is never healed. Never raises.
         """
         host = _host_only(peer_addr)
         if not host or _is_loopback_endpoint(f"{host}:0"):
+            return
+        if addresses.interface_for_address(host) is not None:
             return
         ports = []
         for endpoint in declared or ():
@@ -6307,17 +6390,21 @@ class RelayServer:
 
         A dial-only device declares loopback (``advertise_endpoints``: "do not try
         to call me first"); on the default port that is OUR OWN listener, and a
-        redial there is a ``self_link`` row per attempt. Loopback on another port
-        stays (a same-host pair of relays, as every two-relay rig is).
+        redial there is a ``self_link`` row per attempt. Another port stays, as
+        does the same port on a different IP when our listener binds specifically.
+
+        A wildcard listener also accepts this host's own interface addresses on
+        our port: a poisoned ``observed_endpoint`` naming us would otherwise keep
+        this member "redialable" forever while every dial self-links.
         """
-        own_port = int(self.settings.port or 0)
-        keep: list[str] = []
-        for endpoint in _dial_candidates(member):
-            _host, _sep, port = endpoint.rpartition(":")
-            if _is_loopback_endpoint(endpoint) and (not port.isdigit() or int(port) == own_port):
-                continue
-            keep.append(endpoint)
-        return keep
+        # Prefer the socket's actual bind (including hostname resolution); settings
+        # are the pre-bind fallback used by admission checks and isolated rigs.
+        listener = getattr(self, "_listener", None)
+        if listener is not None:
+            host, port = listener.getsockname()[:2]
+        else:
+            host, port = self.settings.listen_address, int(self.settings.port or 0)
+        return _dialable_candidates(member, int(port), str(host))
 
     def _membership_loop(self) -> None:
         """The scheduled half of membership convergence, with no surface involved.
@@ -9184,10 +9271,9 @@ class RelayServer:
         which is why the move's step calls this method rather than reaching for
         ``_engage_locally`` beside it.
 
-        Both callers go through ``_engage_locally``, the single entry point every
-        engage path in the product uses (a viewer's first message, a wake,
-        ``lop exec``), so INV-1's guard and the lease arbitration that decides WHO
-        RUNS (``launch.engage_runtime``) apply here unchanged. A caller that arrives
+        Both callers go through ``_engage_locally``, which delegates to the
+        canonical ``launch.engage_runtime`` arbitration. INV-1's guard and the
+        transcript lease that decides WHO RUNS therefore apply here unchanged. A caller that arrives
         after a runtime already holds the lease therefore loses there — by joining
         the winner or by a sentence — rather than by a check of its own.
 
@@ -10304,10 +10390,12 @@ class RelayServer:
         two callers (create, engage) can put the sentence in their own frame
         without either of them inventing a second error vocabulary.
 
-        ``cwd`` defaults to this device's home when the caller supplied none —
-        §5.3 step 2: an omitted working directory means "the peer decides", and
-        the peer's decision is its own home rather than the requesting
-        device's path, which would not exist here.
+        ``cwd=""`` means "the peer decides" (§5.3 step 2), NOT an explicit
+        request for this device's home. Preserve that sentinel to the spawn
+        boundary: converting omission to HOME here destroys a recorded move,
+        because the resolver must honour a deliberate HOME request unchanged.
+        The spawn boundary chooses the recorded destination first, and home
+        only when no directory has been recorded or explicitly requested.
 
         ``initial_model`` is the BIRTH SAMPLE the desktop's draft chip already
         sends (``launch.WarmErrand.initial_model``), and a create that names an
@@ -10337,12 +10425,11 @@ class RelayServer:
             errand = WarmErrand(initial_model=initial_model)
         if not (self.root / "sessions" / session_id).is_dir():
             return f"{self._own_label()} does not hold a session {session_id}"
-        started = cwd or str(Path.home())
         try:
             asyncio.run(
                 engage(
                     session_id,
-                    started,
+                    cwd,
                     # Delivers nothing: warming is the whole job here, and the
                     # runtime materialises what it needs when real work arrives.
                     errand,
@@ -10918,7 +11005,10 @@ class RelayServer:
             member = record.member(device_id)
             if member is None or not member.active:
                 continue
-            candidates = _dial_candidates(member)
+            # Our own listener answers a self-addressed candidate before any real
+            # peer can (the self-race, ``_reaches_own_listener``), so those are
+            # dropped before the race rather than lost to it.
+            candidates = self._redial_candidates(member)
             if not candidates:
                 reason = "no_endpoint"
                 continue
@@ -14009,8 +14099,13 @@ class RelayServer:
                     "detail": "no_endpoint",
                 }
             ]
+        # Waiting for all sockets does not change the first-connect winner:
+        # doctor must exclude the same self-listener targets as ordinary dials.
+        # Keep a skipped row rather than pretending the discarded hint was tried.
+        candidates = self._redial_candidates(member)
+        skipped = [endpoint for endpoint in _dial_candidates(member) if endpoint not in candidates]
         probe = probe_candidates(
-            _dial_candidates(member),
+            candidates,
             deadline=deadline,
             connect_cap=PROBE_CONNECT_TIMEOUT_S,
             wait_all=True,
@@ -14035,7 +14130,18 @@ class RelayServer:
                 )
             else:
                 winner_row = self._handshake(record, member, probe.winner, probe.sock, remaining)
-        rows: list[dict[str, Any]] = []
+        rows: list[dict[str, Any]] = [
+            {
+                "check": "reachability",
+                "device_id": member.device_id,
+                "endpoint": endpoint,
+                "ok": True,
+                "code": "self_listener",
+                "detail": "not_attempted",
+                "observed": {"out_of_scope": True},
+            }
+            for endpoint in skipped
+        ]
         for attempt in probe.attempts:
             if attempt.endpoint == probe.winner and winner_row is not None:
                 rows.append(winner_row)

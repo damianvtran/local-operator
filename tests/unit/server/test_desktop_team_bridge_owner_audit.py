@@ -13,7 +13,9 @@ refusal mapping, contract projection, response headers and the app's
 from __future__ import annotations
 
 import json
+import logging
 import socket
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -274,6 +276,188 @@ def _q(extra: str = "") -> str:
     return f"?expected_account_id={OWNER}&tenant_id=org-a{extra}"
 
 
+@pytest.mark.parametrize(
+    "path,operation",
+    [
+        (BASE, "owner_audit_conversations"),
+        (f"{BASE}/{CID}/messages", "owner_audit_messages"),
+        (f"{BASE}/{CID}/messages/{ROOT}/replies", "owner_audit_replies"),
+        (
+            f"{BASE}/{CID}/messages/{MID}/attachments/{AID}",
+            "owner_audit_attachment",
+        ),
+    ],
+)
+@pytest.mark.parametrize("source", ["query", "upstream"])
+def test_owner_audit_refusal_logs_only_operation_and_status_class(
+    proxy, caplog, path, operation, source
+):
+    client, calls, state, _ = proxy
+    body_fragment = "private-message-fragment"
+    # Include sensitive values in the actual HTTP request; a future accidental
+    # request/exception dump must fail on the rendered record, not just its args.
+    if source == "upstream":
+        state["error"] = (404, "conversation_not_found")
+        suffix = ""
+        expected_status = 404
+    else:
+        suffix = "&unexpected=" + body_fragment
+        expected_status = 422
+    with caplog.at_level(logging.WARNING, logger=routes.__name__):
+        response = client.request("GET", path + _q(suffix), content=body_fragment.encode())
+    assert response.status_code == expected_status, response.text
+    assert response.headers["cache-control"] == _SERVED_CACHE_CONTROL
+    assert bool(calls) == (source == "upstream")
+    records = [record for record in caplog.records if record.name == routes.__name__]
+    assert len(records) == 1
+    record = records[0]
+    assert record.levelno == logging.WARNING
+    rendered = logging.Formatter("%(levelname)s %(message)s").format(record)
+    assert rendered == (f"WARNING owner-audit refusal operation={operation} status_class=4xx")
+    for forbidden in (
+        OWNER,
+        "org-a",
+        CID,
+        ROOT,
+        MID,
+        AID,
+        body_fragment,
+        response.json()["detail"]["code"],
+        str(expected_status),
+    ):
+        assert forbidden not in rendered
+    assert record.exc_info is None and record.stack_info is None
+
+
+def test_owner_audit_malformed_page_logs_status_class_without_body(proxy, caplog):
+    client, _calls, state, _ = proxy
+    fragment = "private-malformed-page-body"
+    state["override"] = {"conversations": [{"id": CID, "body": fragment}]}
+    with caplog.at_level(logging.WARNING, logger=routes.__name__):
+        response = client.get(BASE + _q())
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"]["code"] == "malformed_page"
+    records = [record for record in caplog.records if record.name == routes.__name__]
+    assert len(records) == 1
+    rendered = logging.Formatter("%(message)s").format(records[0])
+    assert rendered == ("owner-audit refusal operation=owner_audit_conversations status_class=5xx")
+    for forbidden in (OWNER, "org-a", CID, fragment, "malformed_page", "502"):
+        assert forbidden not in rendered
+
+
+@pytest.mark.parametrize("sink", ["broken_stream", "raising_handler"])
+@pytest.mark.parametrize("surface", ["query", "upstream", "malformed_page"])
+def test_owner_audit_failing_log_sink_preserves_refusal_without_sensitive_stderr(
+    proxy, monkeypatch, capfd, sink, surface
+):
+    client, _calls, state, _ = proxy
+    fragment = "private-refusal-body-marker"
+    if surface == "upstream":
+        state["error"] = (404, "conversation_not_found")
+        suffix = ""
+    elif surface == "malformed_page":
+        state["override"] = {"conversations": [{"id": CID, "body": fragment}]}
+        suffix = ""
+    else:
+        suffix = "&unexpected=" + fragment
+    path = BASE + _q(suffix)
+    original = client.get(path)
+    assert (
+        original.status_code
+        == {
+            "query": 422,
+            "upstream": 404,
+            "malformed_page": 502,
+        }[surface]
+    )
+    capfd.readouterr()
+    active_exceptions = []
+    emitted = threading.Event()
+
+    class BrokenStream:
+        def write(self, _text):
+            raise OSError("synthetic log sink failure")
+
+        def flush(self):
+            pass
+
+    class FailingHandler(logging.StreamHandler[BrokenStream]):
+        def emit(self, record):
+            active_exceptions.append(sys.exception())
+            try:
+                if sink == "raising_handler":
+                    raise OSError("synthetic log sink failure")
+                super().emit(record)
+            finally:
+                emitted.set()
+
+    # Keep logging's normal diagnostic enabled: catching warning() errors alone
+    # cannot stop StreamHandler.handleError from printing a chained exception.
+    monkeypatch.setattr(logging, "raiseExceptions", True)
+    logger = logging.getLogger(routes.__name__)
+    handler = FailingHandler(BrokenStream())
+    logger.addHandler(handler)
+    try:
+        refused = client.get(path)
+        assert emitted.wait(5), "detached refusal diagnostic never reached the sink"
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
+    assert refused.status_code == original.status_code, refused.text
+    assert refused.content == original.content
+    assert refused.headers["cache-control"] == original.headers["cache-control"]
+    assert active_exceptions == [None]
+    captured = capfd.readouterr()
+    for forbidden in (
+        original.json()["detail"]["code"],
+        str(original.status_code),
+        OWNER,
+        "org-a",
+        CID,
+        fragment,
+    ):
+        assert forbidden not in captured.err
+    if sink == "raising_handler":
+        assert captured.err == ""
+    else:
+        assert "--- Logging error ---" in captured.err
+
+
+@pytest.mark.parametrize("failure", ["no_loop", "scheduling_failure"])
+def test_owner_audit_skips_logging_when_it_cannot_detach(monkeypatch, caplog, failure):
+    from fastapi import HTTPException
+
+    def fail(*_args):
+        raise RuntimeError("synthetic scheduling failure")
+
+    if failure == "scheduling_failure":
+        monkeypatch.setattr(
+            routes.asyncio, "get_running_loop", lambda: SimpleNamespace(call_soon=fail)
+        )
+    refusal = HTTPException(422, {"code": "private-code"}, headers={"X-Synthetic": "preserved"})
+    with caplog.at_level(logging.WARNING, logger=routes.__name__):
+        with pytest.raises(HTTPException) as caught:
+            with routes._owner_audit_no_store("owner_audit_conversations"):
+                raise refusal
+    assert caught.value is refusal
+    assert refusal.status_code == 422 and refusal.detail == {"code": "private-code"}
+    assert refusal.headers == {
+        "X-Synthetic": "preserved",
+        "Cache-Control": routes.OWNER_AUDIT_CACHE_CONTROL,
+    }
+    assert not [record for record in caplog.records if record.name == routes.__name__]
+
+
+def test_owner_audit_logging_does_not_cover_success_or_other_routes(proxy, caplog):
+    client, _calls, _state, _ = proxy
+    with caplog.at_level(logging.WARNING, logger=routes.__name__):
+        assert client.get(BASE + _q()).status_code == 200
+        # The shared read-refusal helper must remain quiet for member routes.
+        response = client.get("/v1/desktop/team-bridge/unread?scope=account&tenant_id=org-a")
+    assert response.status_code == 422, response.text
+    assert not [record for record in caplog.records if record.name == routes.__name__]
+
+
 def test_list_forwards_to_the_owned_route_and_passes_the_221_row_through(proxy):
     client, calls, _state, _ = proxy
     response = client.get(BASE + _q("&limit=20&cursor=bcur_prev"))
@@ -385,7 +569,7 @@ def test_the_hubs_uniform_404_passes_through_with_no_store(proxy, path, code):
         (f"{BASE}/{CID}/messages", "&before_seq=-1"),
         (f"{BASE}/{CID}/messages", "&limit=ten"),
         (f"{BASE}/{CID}/messages", "&tenant_id=org-b"),  # repeated name
-        (f"{BASE}/{CID}/messages/{ROOT}/replies", "&before_seq=4"),
+        (f"{BASE}/{CID}/messages/{ROOT}/replies", "&before_seq=0"),
         (BASE, "&cursor=a&cursor=b"),
         (f"{BASE}/{CID}/messages/{MID}/attachments/{AID}", "&endpoint_id=bep-a"),
     ],
@@ -510,3 +694,72 @@ def test_the_contract_types_are_published_in_openapi() -> None:
     assert "agent_delivery_status" in message and "body" in message
     paths = set(schema["paths"])
     assert BASE in paths and f"{BASE}/{{conversation_id}}/messages" in paths
+
+
+@pytest.mark.parametrize("family", ["member", "owner"])
+def test_reply_backward_contract_real_http(proxy, family):
+    """Real desktop auth/client/HTTP/projection; only credentials and hub are synthetic."""
+    from urllib.parse import parse_qs, urlsplit
+
+    client, calls, state, _ = proxy
+    base = BASE if family == "owner" else "/v1/desktop/team-bridge/conversations"
+    path = f"{base}/{CID}/messages/{ROOT}/replies"
+    replies = [
+        _message("bcmsg_" + f"{seq:016d}", seq, "synthetic", thread_root_id=ROOT)
+        for seq in range(101, 151)
+    ]
+    state["override"] = {
+        "root": THREAD["root"],
+        "replies": replies,
+        "has_more": True,
+        "next_before_seq": 101,
+        "order": "desc",
+    }
+    first = client.get(path + _q("&order=desc&limit=50"))
+    assert first.status_code == 200, first.text
+    result = first.json()["result"]
+    assert len(result["replies"]) == 50 and result["order"] == "desc"
+    assert [row["seq"] for row in result["replies"]] == list(range(101, 151))
+    assert result["next_before_seq"] == 101
+    query = parse_qs(urlsplit(calls[-1][1]).query)
+    assert query == {"tenant_id": ["org-a"], "limit": ["50"], "order": ["desc"]}
+    # Empty terminal pages MUST retain the mode echo, not resemble an old hub.
+    state["override"] = {"root": THREAD["root"], "replies": [], "has_more": False, "order": "desc"}
+    older = client.get(path + _q("&before_seq=101&order=desc&limit=50"))
+    assert older.status_code == 200, older.text
+    assert older.json()["result"]["order"] == "desc"
+    assert older.json()["result"]["replies"] == []
+    assert "after_seq" not in parse_qs(urlsplit(calls[-1][1]).query)
+    for suffix in (
+        "&before_seq=0",
+        "&order=ASC",
+        "&after_seq=0&order=desc",
+        "&before_seq=101&order=asc",
+        "&before_seq=101&after_seq=0",
+        "&limit=101",
+    ):
+        before = len(calls)
+        response = client.get(path + _q(suffix))
+        assert response.status_code == 422, (suffix, response.text)
+        assert len(calls) == before
+    before = len(calls)
+    refused = client.get(
+        path + _q("&order=desc"),
+        headers={"authorization": "Bearer invalid-rig-only"},
+    )
+    assert refused.status_code == 401
+    assert len(calls) == before
+    print(
+        {
+            "family": family,
+            "first_status": first.status_code,
+            "rows": len(result["replies"]),
+            "order": result["order"],
+            "next_before": result["next_before_seq"],
+            "terminal_status": older.status_code,
+            "terminal_rows": 0,
+            "auth_status": refused.status_code,
+            "malformed_cases": 6,
+            "after_omitted": True,
+        }
+    )

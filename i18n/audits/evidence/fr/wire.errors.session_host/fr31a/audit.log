@@ -1,0 +1,3 @@
+$ /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/829abca97a25/scratchpad/host-copy-fr/validation-tree/scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit_code=0

@@ -651,6 +651,8 @@ class FakeClient:
         tenant_id=None,
         limit=None,
         after_seq=None,
+        before_seq=None,
+        order=None,
         endpoint_id=None,
         access=None,
         expected_account_id=None,
@@ -664,6 +666,10 @@ class FakeClient:
             "after_seq": after_seq,
             "endpoint_id": endpoint_id,
         }
+        if before_seq is not None:
+            FakeClient.behavior["last_replies_kwargs"]["before_seq"] = before_seq
+        if order is not None:
+            FakeClient.behavior["last_replies_kwargs"]["order"] = order
         return self._answer("conversation_replies")
 
     async def conversation_body(
@@ -3593,7 +3599,7 @@ async def test_conversation_replies_refuses_bad_input_before_io(api):
         f"{base}/bcv_abc12345/messages/nope/replies?{owner}",
         f"{root}?{owner}&after_seq=x",
         f"{root}?{owner}&after_seq=-1",
-        f"{root}?{owner}&before_seq=3",
+        f"{root}?{owner}&before_seq=0",
         # The threads capability promises a REQUIRED receipt: each of these
         # would otherwise be an unguarded thread read.
         root,
@@ -4415,3 +4421,32 @@ async def test_agent_notify_is_advertised_with_its_required_receipt():
         route.path for route in desktop_team_bridge.router.routes if isinstance(route, APIRoute)
     }
     assert "/v1/desktop/team-bridge/conversations/{conversation_id}/agent-notify" in paths
+
+
+async def test_conversation_replies_backward_window_and_conflicts(api):
+    client, _root, _d = api
+    base = "/v1/desktop/team-bridge/conversations/bcv_abc12345/messages/bcmsg_root0001/replies"
+    owner = "tenant_id=tnt_1&expected_account_id=acc_1"
+    FakeClient.behavior["conversation_replies"] = {
+        "root": {"id": "bcmsg_root0001"},
+        "replies": [],
+        "has_more": False,
+        "order": "desc",
+    }
+    response = await client.get(f"{base}?{owner}&order=desc&before_seq=81&limit=50")
+    assert response.status_code == 200, response.text
+    assert response.json()["result"]["order"] == "desc"
+    assert FakeClient.behavior["last_replies_kwargs"]["before_seq"] == 81
+    assert FakeClient.behavior["last_replies_kwargs"]["after_seq"] is None
+    for suffix in (
+        "order=DESC",
+        "before_seq=0",
+        "before_seq=4&after_seq=0",
+        "before_seq=4&order=asc",
+        "after_seq=0&order=desc",
+        "limit=101",
+    ):
+        before = FakeClient.calls
+        response = await client.get(f"{base}?{owner}&{suffix}")
+        assert response.status_code == 422, (suffix, response.text)
+        assert FakeClient.calls == before

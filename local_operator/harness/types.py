@@ -1275,6 +1275,8 @@ def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
     for field in ("at_ms", "billing_basis"):
         if data.get(field) is None:
             data.pop(field, None)
+    if not data.get("openai_long_context"):
+        data.pop("openai_long_context", None)
     return data
 
 
@@ -1322,6 +1324,9 @@ class Usage(BaseModel):
     # tiny field across hundreds of receipts breaks the bounded attach frame.
     # model_copy retains it; a serialized/replayed receipt safely becomes unknown.
     _cache_read_reported: bool | None = PrivateAttr(default=None)
+    # Live wire completeness is not a zero token count; keep it off bounded
+    # serialized frames, like cache evidence. Legacy/manual usage remains None.
+    _token_counts_reported: bool | None = PrivateAttr(default=None)
 
     @model_serializer(mode="wrap")
     def _serialize_usage_without_unset_stamp(
@@ -1334,6 +1339,10 @@ class Usage(BaseModel):
     # API-key traffic, so consumers cannot reconstruct this from its id later.
     billing_basis: str | None = None
 
+    # Only the actual public adapter can assert this per-call pricing tier;
+    # unknown legacy/gateway receipts stay false. Omitted when false to avoid
+    # adding bytes to every usage on the bounded attach frame.
+    openai_long_context: bool = False
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
@@ -2804,6 +2813,11 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     #: a synthetic end, or one produced by a pre-field build — keeps every
     #: existing reader's behaviour.
     notify: bool = True
+    #: Permission/request is not completion. The loop may nominate a settled
+    #: invocation; only the owning Session, after host continuations settle,
+    #: commits acceptance. Defaults never reconstruct authority on replay.
+    quiet_requested: bool = False
+    quiet_accepted: bool = False
 
 
 class ProviderTurnStartEvent(AgentEvent[Literal["provider_turn_start"]]):
@@ -4737,6 +4751,10 @@ class ChatRequest(BaseModel):
         ):
             raise OneTurnSecretScopeError("An armed one-turn secret request cannot be rewritten.")
         return candidate
+
+    # Shared only by the main turn's request clones; never serialized to a
+    # transcript, telemetry row, helper call or independent conversation.
+    _codex_turn_state: Any = PrivateAttr(default=None)
 
     _one_turn_secrets: dict[str, SecretStr] = PrivateAttr(default_factory=dict)
 

@@ -1,0 +1,4 @@
+{
+  "cli.login_status_help.login_status": "Список сохранённых учётных данных провайдеров и их состояние",
+  "cli.login_status_help.status_alias": "Псевдоним login-status: список сохранённых учётных данных провайдеров"
+}

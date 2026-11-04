@@ -5,15 +5,11 @@ description: "Allocate bounded engineering delivery, brief so a child can land, 
 
 # Bounded delivery
 
-Read this when allocating engineering work, planning costly evidence, or closing
-review rounds. `AGENTS.md` remains the repository authority for isolation,
-commands, security, merge and release gates. This policy changes allocation and
-scope, not the depth of validation or the operator's approval requirements.
-For this repository's public release copy, follow
-`.github/RELEASE_NOTES_TEMPLATE.md` and the release steps in `AGENTS.md`.
-The claim/bump PR's public-notes section and publication file follow that same
-contract; internal gate evidence remains in separate PR comments, never in
-user-facing release notes.
+For allocation, costly evidence and review convergence. AGENTS.md remains the
+authority for isolation, commands, security, merge/release and approvals; this
+changes scope/allocation, not validation depth. Public notes follow
+`.github/RELEASE_NOTES_TEMPLATE.md` and AGENTS.md, including claim/bump PR and
+publication file. Keep internal gate evidence out of user-facing notes.
 
 ## Allocate once, inspect narrowly
 
@@ -27,36 +23,32 @@ user-facing release notes.
   owner directly; do not broadcast a status hunt. One confirmed durable ACK
   means no unchanged resend or repeated approval request. Update only material deltas;
   verify completion from primary evidence, not an agent's assertion.
-- Prefer metadata and narrow indexes before reading logs or artifacts. Follow
-  a surprising first read one step further; cite the source of relayed results.
-  Root recovery restores the minimal prerequisite; cross-repository hardening
-  is a separate scope, not an incidental repair.
+- Prefer metadata/narrow indexes before logs. Verify surprising first reads one
+  step further; cite relayed sources. Root recovery restores only prerequisites;
+  cross-repository hardening is separate scope.
 
 ## Delegate so the child can land
 
-Measured: the median first write/edit lands on call 29;
-rediscovering a diagnosis you hold costs a child twice — budget, then the
-resume brief.
-
-- Briefs carry the change site (file:line), the failing behaviour, the
-  acceptance check; "investigate and fix X" redoes your work.
-- Coder-class children land early: first edit within ~10 tool calls; after ~40
-  with nothing landed, return the precise blocker, not more exploration.
-- A repeat "explored, nothing landed" gets a smaller brief — after ruling out
-  a harness cut-off (cut children end named).
+Briefs name file:line, failure and acceptance check; do not delegate rediscovery.
+Coder children edit within ~10 calls; after ~40 without an edit, return the
+blocker. A repeat "explored, nothing landed" needs a smaller brief after checking
+for a harness cut-off (cut children end named).
 
 ## Preflight before expensive dispatch
 
-Inventory the loaded briefs and source winners first; measure raw and loaded
-prompt budgets so clipping cannot masquerade as compliance. Write one test plan
-before native, browser or hardware lanes: changed surfaces, commands,
-dependencies, source/binary identity, isolation, expected outputs and at least
-one negative control; confirm the compiled artifact contains the changed source
-and the harness can observe success AND failure. A source-only test is not
-native execution proof. A setup failure stops costly dispatch: report the failed
-prerequisite and its bounded repair. Use the harness browser, never install a
-second browser stack; obey the isolated HOME/config, CMUX stripping and
-exact-process-group teardown rules in `AGENTS.md`.
+Measure raw/loaded prompt budgets and source winners so clipping cannot fake
+compliance. Before native/browser/hardware dispatch, plan changed surfaces,
+commands, dependencies, source/binary identity, isolation, expected outputs and a
+negative control. Verify compiled source identity and success/failure detection;
+source-only checks are not native proof. Failed setup stops dispatch: report the
+prerequisite and bounded repair. Use the harness browser, no second stack; follow
+AGENTS.md's HOME/config, CMUX stripping and exact-process-group teardown rules.
+
+## Worktrees
+
+Prefer `<repo>/.worktrees/<name>` sharing primary deps; sibling `../<repo>-<topic>` only with cloned deps.
+Never scratchpads, /tmp, `$HOME` top level. `git worktree remove` (clean only) once the PR merges or
+the lane closes; `scripts/worktree_janitor.py` lists stragglers.
 
 ## Never use a live peer as the revoke test
 
@@ -68,49 +60,85 @@ peer, and record it. Authorization to test is not authorization to delete.
 
 ## Spend coverage once
 
-Iterate with affected tests and lints, bounded and serial for heavy work. At the
-terminal frozen head require full coverage once: when CI runs the same suite,
-CI supplies that pass, not an additional local full suite. If CI omits a
-required surface, run that missing coverage with a bounded local or QA command
-and record it. A scoped pass is not a full pass; merge still waits for the
-required checks and independent review/QA. CI replaces duplicate automated
-coverage, never the independent real-path QA matrix. Resource holds forbid
-hold-class local gates, not the evidence requirement. Read CI asynchronously;
-investigate failures, including ones outside the slice.
+Iterate with targeted tests/lints; heavy runs bounded/serial. Full coverage once
+at the terminal head: when CI runs the same suite, use it, not a duplicate local
+run. Run omitted required surfaces bounded locally/in QA and record them. Scoped
+is not full coverage. Merge requires actual checks and independent review/QA;
+CI never replaces independent real-path QA. Resource holds forbid hold-class
+runs, not evidence. Review CI asynchronously; investigate even out-of-slice fails.
 
 ## Converge, do not restart
 
-Collect all initial code, QA, design and UX reports before ONE remediation
-commit. On round 2+ review the remediation delta and direct regression
-neighbors, with the previous head as a negative comparison when needed. Keep
-unchanged evidence when byte/source compatibility is proved. A model-header or
-provenance-only metadata correction is an addendum, not a reason to rerun the
-suite; a new executable or user-visible change is not metadata.
+Complete every applicable initial stream (code, independent real-path QA,
+design, UX, security) across its full in-scope surface before remediation.
+Early BLOCKER alerts must say incomplete. Review runs asynchronously with CI.
 
-A moved base is NOT a blind re-pin: post `scripts/rebase_proof.py`'s
-`### Rebase proof` (range-diff `=`, byte-identical patch, no file overlap).
-MECHANICAL keeps the last clean code and QA rounds; CI on the new head guards
-cross-file breaks. Otherwise run one `old-head..new-head` round on the files
-it names: if that proof fails, review and test the affected content. A test-
-or docs-only commit after a clean round needs an independent
-`<prev-head>..<head>` delta review; no QA unless a QA'd surface moved. Follow
-`AGENTS.md`'s SHA-freshness rules and the standing PR comment format. A genuine
-late BLOCKER/MAJOR with a demonstrated code path stays admissible; delta scope
-never waives correctness, security or regression risk. Fix real BLOCKER/MAJOR
-findings before merge; MINOR/NIT findings do not force another round.
+Manager collects all reports into ONE deduplicated severity/evidence ledger,
+triages conflicts and batches necessary clarifications before edits. Implementer
+verifies claims, then fixes accepted IDs in ONE coordinated pass, answering each
+with fixed SHA, rejection evidence, or deferral reason/location. Default ONE
+batched commit; separate commits need justified independently revertible safety
+or stream boundaries in the SAME round. No per-finding commit/review cycles.
+
+Follow up on `<previous_reviewed_head>..<new_head>` plus direct regression
+neighbors, never unchanged re-audits. Late BLOCKER/MAJOR needs a concrete code
+path/reproducer in changed/direct-neighbor scope. Retain evidence only with byte/source compatibility proof; backend response-shape
+changes may need rendered proof. Model-header/provenance-only addenda do not reset
+product/suites; executable/user-visible changes are not metadata.
+
+After two unsuccessful cycles, freeze severity/evidence ledger, root-transition/
+authority matrix (failing state, intended transition, authoritative owner/source)
+and exit criteria BEFORE more patches. An unknown persisting twice escalates to
+its owner. This checkpoint never waives unresolved BLOCKER/MAJOR or evidence gates.
+
+A moved base (rebase OR merge of main) is NOT a blind re-pin: post
+`scripts/rebase_proof.py`'s `### Rebase proof` (range-diff `=`, byte-identical
+patch, no file overlap). MECHANICAL keeps the last clean code and QA rounds; CI
+on the new head guards cross-file breaks. Otherwise run one `old-head..new-head`
+round on the files it names. Follow `AGENTS.md`'s SHA-freshness rules and PR
+comment format. Fix real BLOCKER/MAJOR before merge; delta scope never waives
+correctness, security or regression risk. MINOR/NIT do not force another round.
+
+## Review economy
+
+- **Context contract.** Every review/QA/design/UX brief carries the operator's
+  request (verbatim or close paraphrase), intent, acceptance criteria, explicit
+  non-goals, base..head and, round 2+, the prior-round ledger. Missing request:
+  ask once via hub, or state the assumed scope atop the round.
+- **Scope.** Judge the diff against the stated request. Pre-existing defects not
+  introduced or worsened are listed `out of scope — pre-existing` and never gate.
+  No redesigns or extra features. No speculative findings: without a code path
+  or repro a "might" is a lead, never BLOCKER/MAJOR.
+- **Waves.** All applicable streams run round 1 on the SAME pushed head and
+  report before remediation; ONE ledger, ONE remediation commit, ONE follow-up
+  wave on that delta. Target <= 2 waves; a third needs a named open BLOCKER/MAJOR.
+- **Minors.** Fold accepted MINOR/NIT into the same commit as the majors, or
+  defer them in the remediation comment. Never a commit just for minors after
+  all streams are terminal: that re-stales the head.
+- **Freshness.** A delta round is `### Agent review — round <N>`, `Scope:
+  <prev-head>..<head>`, by an independent reviewer. MECHANICAL rebase/merge of
+  main (`scripts/rebase_proof.py`) keeps rounds fresh on its proof; docs,
+  comments or tests need only a delta round. Executable code, minor fixes
+  included, needs a delta round plus QA if a QA'd surface moved.
+- **Hygiene.** Rounds only on pushed heads; one comment per stream per round; no
+  `re-pin`/`addendum` comments. Amend your own round (`gh api -X PATCH`) only
+  for provenance/typos, before any remediation reply; never change `Scope:`.
+- **Tone.** Collaborative: state the problem, evidence and a suggested fix; note
+  what works in a line. No retraction/correction theatre; disagree once, with
+  evidence, then settle.
+- **Stop.** Past 3 waves, or review-driven growth past ~2x the original diff,
+  the manager splits follow-on scope into a separate PR; an open BLOCKER/MAJOR
+  is never split out of the PR being merged.
 
 ## Model provenance
 
-Use supported fallback when available and disclose the actual served model,
-including a mid-round change. A model preference is not a new approval gate;
-never rewrite role/default model pins or tool permissions to work around it.
-Inability to execute the required independent round remains a blocker, not a
-reason to fabricate a verdict.
+Use supported fallback and disclose the actual served model, including changes.
+Preference is not an approval gate; never rewrite role/default pins or tools to
+work around it. A missing required independent round blocks; never invent one.
 
 ## Evidence and pilots
 
-Before shipping policy changes, run fresh-agent pilots against the loaded
-role/team boundary, including a genuine destructive/access escalation. Keep
-prompts and actual responses in session scratch with model provenance. Retain
-custom security, release, roster and approval policy when patching live
-overrides; back them up, read them back, never force-sync away local additions.
+Before shipping policy, run fresh-agent pilots at the loaded role/team boundary,
+including a genuine destructive/access escalation. Keep prompts, actual responses
+and model provenance in scratch. Preserve custom security/release/roster/approval
+policy in live overrides: back up and read back; never force-sync away additions.

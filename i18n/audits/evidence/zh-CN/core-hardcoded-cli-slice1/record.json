@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "audit_id": "core-hardcoded-cli-slice1",
+  "locale": "zh-CN",
+  "namespaces": [
+    "cli.failures",
+    "cli.group_help",
+    "tui.setup_cues"
+  ],
+  "audit_date": "2026-10-31",
+  "key_count": 16,
+  "tree_head_above_the_rewrite": "c65fbaa580ad9359031cc7367d8fb93db7b94a43",
+  "translator": {
+    "agent": "i18n-translator (session 9950d6b42e2e; instance fa5ae1da5116)",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "session": "9950d6b42e2e",
+    "instance": "fa5ae1da5116"
+  },
+  "auditor": {
+    "agent": "i18n-auditor (session c4272e32ee6c; instance 97c4ab5bc324); independent of translator",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "session": "c4272e32ee6c",
+    "instance": "97c4ab5bc324",
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  },
+  "sha256": {
+    "cli.failures": {
+      "en": "b2fdec07146b26ad5bb43f3acf3fa8f1ab527c4bf94d9065ca715c16be2eec44",
+      "target": "e8bcde98adcff2dd90d8229863aeb4e6137f235b580b307718e974b11ac46b3a",
+      "context": "b8f5e700bcdaf46fbeefc6c40269c7fe7cd4c91d7069f7f6dfcc8f813823b97d"
+    },
+    "cli.group_help": {
+      "en": "b819cbdf879a9f0b6567f8a555eceec4d1c7210b8ddab9beb665e2c21e3b7e88",
+      "target": "52593b7468fdda1e027d235806555552337350f09263c386cc52598e1580f619",
+      "context": "10ebe588116f331251985812a8a959aec5bf13cb2f9a57406aaadd01679b598c"
+    },
+    "tui.setup_cues": {
+      "en": "9028bb3883b7f60d6fe7cdeac21495e307279ad3eb959b53bc62add500cedce0",
+      "target": "b013c8e7e1ae3080e8b667d222e112847dec2329fa9c9e0fb764daaf31ae2f41",
+      "context": "96a124500c8c523e3d0e1fb5de9f8f486c4050441c81ea458b3d9f782cf4d6bc"
+    }
+  },
+  "verdict": "passed",
+  "note": "First pass (instance 0b44aad360bb) reviewed 15/16 keys clean but was incomplete due to cli.group_help.secret being redacted and uncommitted. Bound second pass PASS covers that key only; unchanged first-pass coverage retained. No full second-pass audit is claimed. All translators and auditors actually ran openai/gpt-6.1-sol after provider-quota fallbacks. Job instances supplied by manager registry; session identities from verbatim receipts.",
+  "evidence": {
+    "translator": "translator.md",
+    "verdict": "verdict-r2.txt"
+  }
+}

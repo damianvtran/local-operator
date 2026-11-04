@@ -72,6 +72,7 @@ from local_operator.harness.rows import (
     held_delivery_notice,
     is_ask_gate_divert_details,
     is_harness_chrome,
+    is_harness_injection,
     is_harness_notice_row,
     is_quiet_turn_call,
     is_quiet_turn_name,
@@ -141,6 +142,7 @@ from local_operator.session.frontend_state import (
     ACTIVITY_PHASE_RUNNING,
     ACTIVITY_PHASE_THINKING,
 )
+from local_operator.team_bridge.display_receipt import projected_display_receipt
 
 logger = logging.getLogger(__name__)
 
@@ -1786,6 +1788,11 @@ def fold_messages_to_entries(
                         # cycle at all (a job result or a monitor prompt does,
                         # a generic notice does not).
                         custom_type=message.custom_type,
+                        details=(
+                            projected_display_receipt(message.details or {})
+                            if message.custom_type == "team_bridge_message"
+                            else {}
+                        ),
                         # A session incident ENDS the turn. The relay paints no
                         # separate row for a ``completion_attention`` marker,
                         # so this flag is the only terminal fact some runs
@@ -2429,6 +2436,7 @@ class ProjectionFold:
                     sender=event.sender,
                     message_id=event.message_id,
                     custom_type=event.custom_type,
+                    display_details=event.details,
                 )
         elif isinstance(event, ToolExecutionEndEvent):
             # The live stream settles a call with a typed END EVENT; the
@@ -3043,6 +3051,7 @@ class ProjectionFold:
         sender: dict[str, Any] | None = None,
         message_id: str | None = None,
         custom_type: str | None = None,
+        display_details: dict[str, Any] | None = None,
     ) -> None:
         """Keep a NON-peer typed delivery visible as its own boundary row.
 
@@ -3065,7 +3074,13 @@ class ProjectionFold:
             return
         details: dict[str, Any] = {"notice_kind": "cross_session_boundary"}
         if isinstance(sender, dict) and sender:
-            details["sender"] = dict(sender)
+            details["sender"] = {
+                key: value
+                for key, value in sender.items()
+                if key not in ("bridge_receipt", "bridge_receipt_source")
+            }
+        if custom_type == "team_bridge_message" and display_details:
+            details.update(projected_display_receipt(display_details))
         if custom_type:
             details["custom_kind"] = _compact(custom_type, _NOTICE_CHARS)
         self._append(
@@ -3131,6 +3146,10 @@ class ProjectionFold:
         the thumbnails never appear for the sender.
         """
         if not isinstance(message, Message) or message.role != "user":
+            return False
+        # Mirror the history fold: a recovery event is model context, not a
+        # user message, even when replayed by an older unstamped producer.
+        if is_harness_injection(message) or is_harness_chrome(message.text):
             return False
         text = message.text
         refs = _image_refs(message)

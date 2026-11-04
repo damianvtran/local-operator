@@ -419,8 +419,13 @@ class RecordingClient:
         actor_endpoint_id: str = "",
         origin_session_id: str = "",
         thread_root_id: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
         **kwargs: Any,
     ) -> Mapping[str, Any]:
+        # Simulated dispatch must enforce the same guard before accepting
+        # egress, otherwise offline evaluation silently bypasses cost/refusal.
+        if pre_http_guard is not None:
+            pre_http_guard()
         self._sink.append(Egress(surface="channel_post", text=str(text), target=str(channel_id)))
         return {
             "message": {

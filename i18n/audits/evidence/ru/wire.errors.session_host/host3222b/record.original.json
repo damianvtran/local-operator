@@ -1,0 +1,87 @@
+{
+  "locale": "ru",
+  "namespace": "wire.errors.session_host",
+  "audit_id": "host3222b",
+  "audit_kind": "second_independent_semantic_audit",
+  "audit_date": "2026-10-31",
+  "key_count": 3,
+  "auditor": {
+    "agent": "i18n-auditor (lopdev, host-ru-audit-b)",
+    "session": "df0e9229eed3",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "bd43602aa8db",
+    "actual_model_source": "Host model-switch notices: anthropic/claude-sonnet-5-5 quota failure, temporary anthropic/claude-opus-5-5 switch, subsequent openai/gpt-6.1-sol quota fallback. Substantive input reading, semantic judgment, validation and artifacts performed under openai/gpt-6.1-sol. Initial design-qa skill read preceded switches."
+  },
+  "source_audit_revision": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "translator_provenance": {
+    "path": "/Users/damian/.local-operator/sessions/bd43602aa8db/scratchpad/host-copy-ru/provenance.json",
+    "sha256": "9fdc6a529cb445b5a696728797054d429e21794873d8c6ac24094bcffcb056ed"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "ru": {
+      "path": "local_operator/i18n/catalogues/ru/wire.errors.session_host.json",
+      "sha256": "232cdecfca4bd8018b47046cfc9ca0060980d476fb8fa01759ddb6b6d9192983",
+      "actual_input_path": "/Users/damian/.local-operator/sessions/bd43602aa8db/scratchpad/host-copy-ru/wire.errors.session_host.json"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/ru.md",
+      "sha256": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/wire.errors.session_host/host3222b/report.md",
+      "sha256": "8a3e1a53d05a7fe048d9719844f1b3905f7afc39a99d8dc5884ccb4239221fa1"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.errors.session_host/host3222b/audit.log",
+      "sha256": "24bdcbbf7c99039d0f869c1fe96ce8c9e972e2e51c36d1aba5a42c0e2a28f1c5"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.errors.session_host/host3222b/ledgerproposal.json",
+      "sha256": "09187761ed1af8c701bb8d19a0d1ce77946fca020622503332a1254dba760c3a"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "per_key_verdicts": {
+    "wire.errors.session_host.unsupported": {
+      "status": "passed",
+      "finding_ids": []
+    },
+    "wire.errors.session_host.unavailable": {
+      "status": "passed",
+      "finding_ids": []
+    },
+    "wire.errors.session_host.refused": {
+      "status": "passed",
+      "finding_ids": []
+    }
+  },
+  "audit_notes_not_execution_log": "report.md is semantic notes; audit.log is actual fresh validator execution plus independently executed mechanical assertions.",
+  "rendered_fit_proven": false,
+  "retention": {
+    "status": "scratch_pending_integrator_tracking",
+    "canonical_future_root": "i18n/audits/evidence/ru/wire.errors.session_host/host3222b",
+    "actual_scratch_root": "/Users/damian/.local-operator/sessions/df0e9229eed3/scratchpad/host-ru-audit-b",
+    "not_on_main": true
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

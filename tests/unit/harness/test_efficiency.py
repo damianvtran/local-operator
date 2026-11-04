@@ -272,6 +272,18 @@ async def test_exact_error_cycle_gets_one_recovery_then_a_bounded_stop():
         sum("Harness recovery notice" in m.text for m in state.messages if isinstance(m, Message))
         == 1
     )
+    from local_operator.harness.chrome_prompts import (
+        REPEATED_TOOL_ERRORS_RECOVERY_PROMPT,
+    )
+    from local_operator.harness.rows import is_harness_chrome
+
+    recovery = next(
+        m
+        for m in state.messages
+        if isinstance(m, Message) and m.text == REPEATED_TOOL_ERRORS_RECOVERY_PROMPT
+    )
+    assert recovery.provider_payload == {"harness_injected": True}
+    assert is_harness_chrome(recovery.text)
     terminal = next(e for e in reversed(events) if isinstance(e, AgentEndEvent))
     assert terminal.error and terminal.error.startswith("No progress:")
     assert len([m for m in state.messages if isinstance(m, Message) and m.role == "tool"]) == 6

@@ -1,0 +1,23 @@
+{
+  "wire.errors.sdk_spec.agent_identity_conflict": "agent_name и agent_id взаимоисключающие",
+  "wire.errors.sdk_spec.approval_callback_gate_required": "ApprovalPolicy.callback() требует вызываемый gate",
+  "wire.errors.sdk_spec.approval_declared_tools_empty": "ApprovalPolicy.declared() должен называть хотя бы один инструмент; для привязанной сессии без объявлений используйте ApprovalPolicy.refuse()",
+  "wire.errors.sdk_spec.approval_handler_wrong_mode": "ApprovalPolicy.handler имеет смысл только для режима ''callback'', а не {mode}",
+  "wire.errors.sdk_spec.approval_tools_wrong_mode": "ApprovalPolicy.tools имеет смысл только для режима ''declared'', а не {mode}",
+  "wire.errors.sdk_spec.attach_fields_unsupported": "mode=''attach'' открывает средство просмотра для spec.resume; он не подключает команды, профили, инструменты, имена, цели или политики одобрения — это сторона владельца. Задайте в этой спецификации только resume (или используйте mode=''own''). Недопустимые поля: {fields}.",
+  "wire.errors.sdk_spec.attach_output_unsupported": "принудительный формат вывода нельзя задать для подключённой сессии; решает рантайм-владелец",
+  "wire.errors.sdk_spec.attach_resume_required": "mode=''attach'' требует spec.resume: средство просмотра подключается к id",
+  "wire.errors.sdk_spec.mode_invalid": "mode должен быть ''own'' или ''attach'', а не {mode}",
+  "wire.errors.sdk_spec.output_format_invalid": "output_format должен быть одним из: {formats}",
+  "wire.errors.sdk_spec.output_retries_range": "output_retries должен быть от 0 до 5",
+  "wire.errors.sdk_spec.output_retries_requires_format": "output_retries требует output_format",
+  "wire.errors.sdk_spec.output_schema_requires_format": "output_schema требует output_format",
+  "wire.errors.sdk_spec.resume_empty": "resume должен быть id сессии или \"@latest\", а не пустой строкой",
+  "wire.errors.sdk_spec.spawn_birth_effort_pair_required": "birth_effort для новой порождённой сессии передаётся вместе с начальной выборкой и требует пару hosting/model; укажите все три или откройте сессию в процессе (open_session), чтобы задать начальный уровень без пары модели.",
+  "wire.errors.sdk_spec.spawn_fields_unsupported": "spawn_session() не может доставить состояние после открытия в новый дочерний рантайм; неподдерживаемые поля в этой спецификации: {fields}. Откройте сессию в процессе (open_session), подключите нужное, выполните dispose, затем вызовите spawn_session() с тем же id — resume восстановит подключение; либо порождайте без этих полей.",
+  "wire.errors.sdk_spec.spawn_model_pair_required": "spawn_session() передаёт hosting/model в НОВЫЙ рантайм как одну начальную выборку; укажите оба или ни одного (тогда дочерний процесс определит модель из конфигурации корня).",
+  "wire.errors.sdk_spec.spawn_output_unsupported": "spawn_session() не может нести принудительный формат вывода ({fields}); откройте сессию через open_session(..., mode=''own'') и задействуйте её потом",
+  "wire.errors.sdk_spec.tools_empty": "tools должен называть хотя бы один инструмент; оставьте None, чтобы не ограничивать",
+  "wire.errors.sdk_spec.world_root_empty": "world_root, если задан, должен быть непустым путём",
+  "wire.errors.sdk_spec.yolo_approval_unreachable": "yolo=True делает недостижимым gate ApprovalPolicy.{approval_mode}(); используйте ApprovalPolicy.auto() (или уберите yolo)"
+}
