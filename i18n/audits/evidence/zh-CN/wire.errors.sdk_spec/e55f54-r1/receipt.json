@@ -1,0 +1,77 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.errors.sdk_spec",
+  "audit_date": "2026-11-03",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "e55f54b6a26e",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_coder_session": "eae0961e4e78",
+    "actual_model_source": "Own completed payload.usage; model-provenance.json",
+    "actual_usage_at_ms": 1793719936469,
+    "fallback": "Observed openai/gpt-6.1-sol differs from initial Anthropic header; no exact chain inferred."
+  },
+  "record_reference": "record.json",
+  "current_report_verdict": {
+    "status": "passed",
+    "scope": "staged catalogue linguistic/mechanical only",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/en.json",
+      "sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/context.json",
+      "sha256": "8735964058f901e1d97527801eb88f5a36585f0d7713c1e21f7f98ebaa55418e"
+    },
+    "zh-CN": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/wire.errors.sdk_spec.json",
+      "sha256": "0ff78d9cecbb7c024a284abc694f1a3d9e21bc283c464cba5ae42b2a227c76ad"
+    },
+    "style": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/zh-CN.style.md",
+      "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+    },
+    "glossary": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "artifacts": {
+    "record.json": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-spec-zh-CN-r1/record.json",
+      "sha256": "0a0c7753245980ed680ad5ef134ca1b13017d9711f914d8a7f3875cd77cf559b"
+    },
+    "report.md": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-spec-zh-CN-r1/report.md",
+      "sha256": "13eb44a42120b28469f2dcb6f86540a63620a785d7b7861f6c18cbb1a03b7bf8"
+    },
+    "audit.log": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-spec-zh-CN-r1/audit.log",
+      "sha256": "27d337a0a0b18dd7628bcde41428cf8bf77d93d42908ecf098a00336004ce1c2"
+    },
+    "validate.py.txt": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-spec-zh-CN-r1/validate.py.txt",
+      "sha256": "035916eb480a8482ee0ffa44f043013aa6b6498d832dcd6eadeea72e731be5a2"
+    },
+    "input-hashes.json": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-spec-zh-CN-r1/input-hashes.json",
+      "sha256": "da5b172f4135343a8e7a42f72d7120cf9f688aabe63727f878c513a1ffbceffd"
+    },
+    "model-provenance.json": {
+      "path": "/Users/damian/.local-operator/sessions/e55f54b6a26e/scratchpad/sdk-spec-zh-CN-r1/model-provenance.json",
+      "sha256": "dc85f41e041a56324923774bb90dfc1ef18704d2505dba73546d38b540fd0564"
+    }
+  }
+}

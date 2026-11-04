@@ -170,6 +170,15 @@ def outcome_word(row: Mapping[str, Any], *, short: bool = False) -> str | None:
         return _t(_k.outcome_short_awaiting_acceptance())
     if short and outcome == "unconfirmed":
         return _t(_k.outcome_short_unconfirmed())
+    if outcome == "skipped":
+        # The reply guard's skipped double send (#3377 round 3, m-1). It reuses
+        # the already-translated "not posted" word rather than new copy: a new
+        # key in this namespace moves its en hash and un-ships all seven audited
+        # locales until a translation wave re-audits it (measured: shipped set
+        # -> en only). The untranslated ``duplicate`` code follows, as refused
+        # and failed codes do; the narrow form is the bare word.
+        word = _t(_k.outcome_short_inbox_only())
+        return f"{word} · {code}" if code and not short else word
     if outcome == "inbox_only":
         return _t(_k.outcome_inbox_only())
     if outcome == "refused":
@@ -212,7 +221,9 @@ def render_bridge_row(
     settled, live, failed_verb = keys if keys is not None else _UNKNOWN_VERBS
     if running:
         verb = _t(live())
-    elif outcome in _FAILED_OUTCOMES or (failed and outcome is None):
+    elif outcome in _FAILED_OUTCOMES or outcome == "skipped" or (failed and outcome is None):
+        # A skipped double send was not posted, so the settled verb ("Posted
+        # in") would claim a post that never left (#3377 round 3, m-1).
         verb = _t(failed_verb())
     else:
         verb = _t(settled())

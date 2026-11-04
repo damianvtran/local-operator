@@ -2814,6 +2814,46 @@
     },
     {
       "locale": "vi",
+      "namespace": "wire.errors.hosting",
+      "source_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two independent sessions: 54cb9d3782eb, 6431174917d4)",
+        "model": "radient/auto (served model not disclosed by the route)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace wire.errors.hosting (1 key: the owned display cause the startup refusal splices into its {error} slot) authored at base 87ca846245b2 against frozen English sha256 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63. vi 'Chưa cấu hình nhà cung cấp nào.' states the unconfigured condition without restating the remedy or naming a provider. Two independent readers, neither the translator nor the code author, both PASSED on these bytes with 0 blocker/major/minor/nit (sessions 54cb9d3782eb, 6431174917d4). Source-only assembly: no rendered, native-speaker, width, RTL or validator proof, and no activation, shipped or release claim. Evidence: i18n/audits/evidence/vi/wire.errors.hosting/ (bundles ['vihost1', 'vihost2'], frozen inputs under _inputs/)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.errors.sdk_startup",
+      "source_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "translator": {
+        "agent": "i18n-translator, remedy session 15986c0af719",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two fresh independent sessions: ebf74725105d, 7188e3347110)",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Target catalogue_sha256 7c9a6bfb0907dc38d2b22e8dfb808f61852479b1d8d9b10b7ad8c7c8c99ef95e supersedes ac6858150eb6e5d0856bafa729764e61d400fd6bdf3504d4b2ffa4cbb4300abd at the unchanged English source 5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd: one value reworded (wire.errors.sdk_startup.attach_hosting_unconfigured — the English loanword replaced by the native provider term), the other three values byte-identical to the superseded file. Two fresh independent readers, neither the translator nor the code author, PASSED 0 blocker/major; reader 1 filed 2 nits and reader 2 confirmed 1 pre-existing nit outside this delta (tool inventory wording), none gating and none fixed here. The previous row for this namespace stays as history. Source-only: no rendered, native or width proof. Evidence: i18n/audits/evidence/vi/wire.errors.sdk_startup/ (bundles vistfix1, vistfix2)."
+    },
+    {
+      "locale": "vi",
       "namespace": "wire.skill_adoption",
       "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
       "translator": {
@@ -2943,6 +2983,68 @@
       },
       "status": "passed",
       "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 246cb7cc5e497811b8f201ef40246627336ec460e72ac47c5721cd570f986049; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 4,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 2 major, 2 minor (V1, V2, V3, V4), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/vi/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor-b (task subagent, independent of translator)",
+        "session": "2d9d6b78802f",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Single independent audit (not dual-blind; high-visibility safety copy may still need a second independent audit per docs/I18N.md). Checked: 4/4 keys present; ICU placeholder parity ({count},{minutes}); vi plural 'other' only, rendered at 1 and 60; backticked `lop team-bridge receiver status` byte-identical; NFC; held/not-given-to-agent/not-deleted meaning preserved; wording consistent with cli.team_bridge ('Tin nhắn tác nhân', 'Sàng lọc', 'bị giữ'). 0 findings."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor-r2b (task subagent, independent of translator)",
+        "session": "26723730f2f9",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Single independent audit at the current English bytes (supersedes the row for the old hash; not dual-blind; high-visibility copy may still need a second audit per docs/I18N.md). Checked: 4/4 keys present; ICU placeholder parity ({count},{minutes}); vi plural 'other' only, rendered at counts 1, 2, 5 and minutes 60; backticked `lop team-bridge receiver status` byte-identical; NFC, no bidi controls; meaning preserved (held for more than N minutes and has not reached the agent; cleared = no message held longer than the threshold; nothing implied deleted); wording consistent with cli.team_bridge ('Tin nhắn tác nhân', 'bị giữ'). 0 findings."
     }
   ]
 }

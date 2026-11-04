@@ -627,11 +627,13 @@ class FakeClient:
         agent_label=None,
         thread_root_id=None,
         attachment_ids=None,
+        files=None,
         mentions=None,
         access=None,
         expected_account_id=None,
     ):
         FakeClient.behavior["last_send_attachment_ids"] = attachment_ids
+        FakeClient.behavior["last_send_files"] = files
         FakeClient.behavior["last_send_mentions"] = mentions
         FakeClient.behavior["last_send"] = {
             "conversation_id": conversation_id,

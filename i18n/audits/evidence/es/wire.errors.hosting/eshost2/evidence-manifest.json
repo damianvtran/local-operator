@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "record_kind": "portable_evidence_manifest",
+  "audit_id": "es-wh2-f1",
+  "receipt": "receipt.json",
+  "report": "report.md",
+  "file_count": 4,
+  "files": [
+    {
+      "path": "audit.log",
+      "bytes": 2075,
+      "sha256": "05b3f7bf6001610abf37e87fbb370e52cd0ea9e437866224bfc8bb73a7b1634e",
+      "origin": "/Users/damian/.local-operator/sessions/425221b9b2c6/scratchpad/i18n-audits/es/wire.errors.hosting/es-wh2-f1/audit.log"
+    },
+    {
+      "path": "record.json",
+      "bytes": 7830,
+      "sha256": "0a581144daaf43d6a7ae0e7c0c993c291c772b57707a0e3bd22549e5fb095848",
+      "origin": "/Users/damian/.local-operator/sessions/425221b9b2c6/scratchpad/i18n-audits/es/wire.errors.hosting/es-wh2-f1/record.json"
+    },
+    {
+      "path": "record.sha256.txt",
+      "bytes": 487,
+      "sha256": "cf30fb6603a06408bdc28f87df36ad17d180292daae82d9c7f3fac48a4cdb3d9",
+      "origin": "/Users/damian/.local-operator/sessions/425221b9b2c6/scratchpad/i18n-audits/es/wire.errors.hosting/es-wh2-f1/record.sha256.txt"
+    },
+    {
+      "path": "report.md",
+      "bytes": 5361,
+      "sha256": "0f061200d60d6dce4cb323663a2472094a48909290cc4bd1e94661b2b979900e",
+      "origin": "/Users/damian/.local-operator/sessions/425221b9b2c6/scratchpad/i18n-audits/es/wire.errors.hosting/es-wh2-f1/report.md"
+    }
+  ]
+}

@@ -1,0 +1,122 @@
+{
+  "record_kind": "independent_audit_record_not_ledger_row",
+  "immutable": true,
+  "locale": "fr",
+  "namespace": "wire.errors.hosting",
+  "audit_id": "frhosting-r1-c44e0f808e48",
+  "audit_date": "2026-11-03",
+  "round": 1,
+  "scope": "one key: wire.errors.hosting.not_configured (display copy only)",
+  "key_count": 1,
+  "base_commit": "87ca846245b2",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "c44e0f808e48",
+    "model_requested": "radient/auto",
+    "served_route": {
+      "provider": "radient",
+      "model_id": "auto",
+      "source": "own completed assistant usage in this session's transcript (latest row: message 6acf7c22bb4c4dd5b1e9ef1e722755a3)"
+    },
+    "served_underlying_model": "UNKNOWN",
+    "actual_model_source": "The route exposes only the opaque label radient/auto; the underlying model is not disclosed and no fallback is inferred or claimed.",
+    "independent_from_translator_session": "7b2ba4ed501d",
+    "independent_from_coder": "94dcef624dec",
+    "read_other_reader_verdict": false,
+    "self_translation": false
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9"
+    },
+    "target": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/hosting-fr/wire.errors.hosting.json",
+      "sha256": "83432e2af01eff5982e4d7a0fca57ebb2223626b0d5713c136d60bb6bec8aa69"
+    },
+    "worktree_source_copy": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "note": "byte-identical to the staged English source"
+    },
+    "author_record": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/hosting-fr/record.json",
+      "note": "read as the author's staging notes, not as audit evidence"
+    }
+  },
+  "values": {
+    "en": "Hosting platform is not configured.",
+    "fr": "La plateforme d’hébergement n’est pas configurée."
+  },
+  "verdict": {
+    "status": "passed",
+    "result": "clean",
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "native_assessment": {
+    "condition": "The French names the owned condition exactly: the hosting platform is not configured. It adds no remedy, path, config.yml, spawn_session()/deliver() or dynamic detail; the surrounding refusal keeps that work.",
+    "sentence": "Complete declarative statement with its own capital and terminal period, suitable for splicing after the frame's colon. Capitalisation after a colon introducing a full sentence is correct French.",
+    "mood": "Indicative state (n’est pas configurée), not an instruction; no imperative or added advice.",
+    "agreement": "Feminine agreement with plateforme (configurée); correct.",
+    "terminology": "plateforme d’hébergement matches the shipped French corpus for --hosting: cli.global_help.hosting \"Plateforme d’hébergement à utiliser\", cli.exec_worker_help.hosting \"Plateforme d’hébergement à forcer\", cli.credential_help.credential \"plateformes d’hébergement\". The Vietnamese reader's provider-term choice in vi is not a rule for fr; the actual English source says hosting platform and the French corpus settles the rendering.",
+    "punctuation": "Two U+2019 apostrophes, no ASCII apostrophe, no added punctuation, terminal period retained, no edge whitespace.",
+    "english_leakage": "none in the value; no mixed-language fragment"
+  },
+  "mechanical": {
+    "json_parses": true,
+    "key_parity_and_order": true,
+    "placeholders": "none in either language; braces absent",
+    "icu_arguments": 0,
+    "cldr_applicability": "N/A with reason: no plural/select arguments, so there are no CLDR categories to require",
+    "nfc": true,
+    "cf_characters": 0,
+    "manual_bidi_controls": 0,
+    "edge_whitespace": false,
+    "terminal_period": true,
+    "capitalised": true,
+    "characters": 49,
+    "width": "no maxCells in the sidecar; no cell or terminal geometry measured or claimed"
+  },
+  "advisories": [
+    {
+      "id": "ADV-1",
+      "severity": "advisory",
+      "text": "The English sentence is also the legacy session_factory.HostingNotConfiguredError text, which stays English by contract. This audit covers the display key only; it does not claim the exception string is localized, and the caller/API shape is unchanged."
+    },
+    {
+      "id": "ADV-2",
+      "severity": "advisory",
+      "text": "The French does not repeat the surrounding refusal's remedy, which is exactly the sidecar's instruction; any future frame must keep supplying it."
+    }
+  ],
+  "holds": {
+    "native_rendered": "NOT RUN",
+    "pseudo_localization": "NOT RUN",
+    "rtl": "NOT APPLICABLE to French; no RTL claim",
+    "real_consumer_renderer": "separate future proof for the consumer that splices this clause",
+    "base_absence": "Namespace absence at base 87ca846245b2 is the manager/author's statement; this pass ran no git command and does not re-prove it. The worktree copy was hash-verified byte-identical to the staged English source.",
+    "activation_release": "not claimed; no ledger, generated or baseline change"
+  },
+  "limitations": [
+    "Strict source-only pass: no bash, process, subprocess, test, scanner, generation, formatter, project import, app/native run, install or CI.",
+    "Only stdlib json/hashlib/unicodedata were used, for hashing, parity and character facts.",
+    "No rendered or executed proof of the startup refusal; passing this linguistic audit is not whole-page or product English-free clearance."
+  ],
+  "preservation": {
+    "tui_r1_r2_records_untouched": true,
+    "other_bundles_untouched": true,
+    "repo_or_ledger_edits": false,
+    "pr_or_comment": false
+  }
+}
