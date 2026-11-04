@@ -14,15 +14,27 @@
 #
 # WHAT THIS DELIBERATELY DOES NOT DO. It never cancels a run that has STARTED
 # (`status: queued` only, re-read immediately before the write), and never
-# touches `main` or `release-next-*` (a gate that can be cancelled is not a
-# gate). For a pull-request run the PULL REQUEST's head is authoritative: if it
-# still points at the run's commit the run is kept at any age -- that is the
-# fork-PR case, where the fork's branch 404s here forever. A moved head makes
-# the run superseded, with the branch tip only corroborating. An UNKNOWN read
-# failure (5xx, network) keeps the run; only a CONFIRMED absence (404) may put
-# it past the abandonment bound. Every rule, and the measurement behind it, is in
-# `scripts/reap_superseded_runs.py`'s docstring; the safety rules each have a
-# test in `tests/unit/test_reap_superseded_runs.py`.
+# touches `release-next-*` (a gate that can be cancelled is not a gate). For a
+# pull-request run the PULL REQUEST's head is authoritative: if it still points
+# at the run's commit the run is kept at any age -- that is the fork-PR case,
+# where the fork's branch 404s here forever. A moved head makes the run
+# superseded, with the branch tip only corroborating. An UNKNOWN read failure
+# (5xx, network) keeps the run; only a CONFIRMED absence (404) may put it past
+# the abandonment bound.
+#
+# `main` IS eligible, narrowly, and that reverses the rule this file shipped
+# with. Only a queued `push` run whose commit is PROVEN an ancestor of the
+# current `main` tip and which NO TAG POINTS AT may be cancelled (rules 2a-2d in
+# the script). The blanket rule existed because a `main` run is the post-merge
+# CI record for a merge commit; the measurements that overrode it are that
+# `ci.yml`'s per-SHA group for `main` means a superseded queued run is never
+# evicted (it just holds a runner slot), that 38 runs were queued against a
+# 20-job pool, and that two of the sixteen ancestors cancelled by hand were the
+# commits v0.91.0 and v0.91.1 were tagged on -- which is why the tag list is
+# read, and why an unreadable tag list keeps every `main` run. Every rule, and
+# the measurement behind it, is in `scripts/reap_superseded_runs.py`'s
+# docstring; the safety rules each have a test in
+# `tests/unit/test_reap_superseded_runs.py`.
 #
 # Cheap and idempotent by construction: it reads the live queue, re-derives
 # every decision, and its only write is a cancel of a run it decided is

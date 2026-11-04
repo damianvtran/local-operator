@@ -2891,6 +2891,89 @@
     },
     {
       "locale": "es",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 1 major, 0 minor (E1), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/es/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-a, task subagent)",
+        "session": "886288cfe273",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_alert at source hash cb3fcf96f055: key set and ICU placeholder/plural-structure parity with en, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical, safety meaning (count, held longer than threshold, agent NOT given the messages, no deletion/review claim, cleared text does not claim delivery), 'Agent messages' title and 'held' wording against the locale's cli.team_bridge catalogue and glossary/style guide. 0 blocker / 0 major / 0 minor. one/many/other present and correct; 'retenido' and 'Filtrado' match cli.team_bridge. Single independent audit pass; no cross-model second audit."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-r2a, task subagent)",
+        "session": "3c5e5fe61f9b",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent re-audit (not the translator; supersedes the row at the old English hash) of cli.team_bridge_alert at source hash f433a71daee9: key set and ICU placeholder/plural-structure parity with en for all 4 keys, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical in long_hold.body, meaning ('held for more than N minutes and has not reached your agent'; cleared = no message held longer than the threshold; no delivery, deletion or review claim), 'Agent messages' title wording and 'held' term against the locale's cli.team_bridge catalogue, glossary and style guide; every key rendered with the repo formatter. 0 blocker / 0 major / 0 minor. one/many/other present and correct (1 mensaje lleva retenido / 5 mensajes llevan retenidos / 1.000.000 de mensajes llevan retenidos; 1 minuto / 5 minutos / de minutos); 'retenido' and the 'Mensajes de agentes:' title wording match cli.team_bridge; tu register per es.md. Single independent audit pass; no cross-model second audit."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.tool_rows.bridge.skipped",
+      "source_sha256": "e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865",
+      "translator": {
+        "agent": "coder (PR #3417 implementer); retranslation i18n-translator (task subagent of this auditor) (c9f77e05a801)",
+        "session": "62d5b457bcf6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev team)",
+        "session": "3dcc5dbc44d0",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent current-byte audit: i18n/audits/evidence/es/wire.tool_rows.bridge.skipped/rg6a1/record.json. 1M/0m/0n (ES-RG6-1), 0 unresolved blocker/major; 1 key(s) retranslated. Composed row+expanded checked; no native/rendered claim."
+    },
+    {
+      "locale": "es",
       "namespace": "wire.notification_sound",
       "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
       "translator": {
@@ -5793,6 +5876,89 @@
       },
       "status": "passed",
       "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 21c69011c26caa9a4b797b84f39768909a736357d5f2dc04c09163b61e5f8745; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 1 major, 2 minor (F1, F2, F3), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/fr/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-a, task subagent)",
+        "session": "886288cfe273",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_alert at source hash cb3fcf96f055: key set and ICU placeholder/plural-structure parity with en, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical, safety meaning (count, held longer than threshold, agent NOT given the messages, no deletion/review claim, cleared text does not claim delivery), 'Agent messages' title and 'held' wording against the locale's cli.team_bridge catalogue and glossary/style guide. 0 blocker / 0 major / 2 minor. Plural one/many/other present and correct (many = 'de messages'/'de minutes'). Minors: (1) both titles use a plain space before ':' where fr.md requires U+202F and cli.team_bridge titles use it; (2) held is 'retenu' here but 'en attente' in cli.team_bridge.status.screening_held (the tui.notices.stopped_session_held key also uses 'retenu'); 'retenu' is the clearer safety wording, so not blocking. Passed with minors outstanding. Single independent audit pass; no cross-model second audit."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-r2a, task subagent)",
+        "session": "3c5e5fe61f9b",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent re-audit (not the translator; supersedes the row at the old English hash) of cli.team_bridge_alert at source hash f433a71daee9: key set and ICU placeholder/plural-structure parity with en for all 4 keys, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical in long_hold.body, meaning ('held for more than N minutes and has not reached your agent'; cleared = no message held longer than the threshold; no delivery, deletion or review claim), 'Agent messages' title wording and 'held' term against the locale's cli.team_bridge catalogue, glossary and style guide; every key rendered with the repo formatter. 0 blocker / 0 major / 1 minor. one/many/other present and correct (many = 'de messages'/'de minutes'; 1 000 000 de messages renders correctly); U+202F before ':' present in both titles; verb agreement correct (est retenu / sont retenus). Minor: held is 'retenu' here but 'en attente' in cli.team_bridge.status.screening_held (tui.notices also uses 'retenu'); 'retenu' is the clearer wording for a message that has not reached the agent, so not blocking. Passed with 1 minor outstanding. Single independent audit pass; no cross-model second audit."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.tool_rows.bridge.skipped",
+      "source_sha256": "e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865",
+      "translator": {
+        "agent": "coder (PR #3417 implementer)",
+        "session": "62d5b457bcf6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev team)",
+        "session": "3dcc5dbc44d0",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent current-byte audit: i18n/audits/evidence/fr/wire.tool_rows.bridge.skipped/rg6a1/record.json. 0M/0m/1n (FR-RG6-1), 0 unresolved blocker/major. Composed row+expanded checked; no native/rendered claim."
     },
     {
       "locale": "fr",
@@ -8774,6 +8940,68 @@
       },
       "status": "passed",
       "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 fe67b95fb7f80fd3ee3926a1990ad39d45325d8dffb5b8848773cc5062ee13a3; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 1 major, 1 minor (H1, H2), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/hi/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor-r2b (task subagent, independent of translator)",
+        "session": "26723730f2f9",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Single independent audit at the current English bytes (not dual-blind; high-visibility copy may still need a second audit per docs/I18N.md). Re-verified the earlier plural-agreement major as fixed: long_hold.body now puts the verb in its own count plural ('1 संदेश ... रोका गया है' / '2, 5 संदेश ... रोके गए हैं'); minutes arms are invariant (मिनट). Checked: 4/4 keys present; ICU placeholder parity ({count},{minutes}); one/other CLDR arms rendered at counts 1, 2, 5 and minutes 60; backticked `lop team-bridge receiver status` byte-identical; NFC, nukta kept (ज़्यादा, काफ़ी); आप register; meaning preserved (held longer than N minutes, not reached the agent, cleared = none held longer than the threshold); 'रोका गया' and 'एजेंट संदेश' consistent with cli.team_bridge. 0 findings."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.tool_rows.bridge.skipped",
+      "source_sha256": "e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865",
+      "translator": {
+        "agent": "coder (PR #3417 implementer); retranslation i18n-translator (task subagent of this auditor) (c9f77e05a801)",
+        "session": "62d5b457bcf6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev team)",
+        "session": "3dcc5dbc44d0",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent current-byte audit: i18n/audits/evidence/hi/wire.tool_rows.bridge.skipped/rg6a1/record.json. 1M/1m/0n (HI-RG6-1,HI-RG6-2), 0 unresolved blocker/major; 2 key(s) retranslated. Composed row+expanded checked; no native/rendered claim."
     },
     {
       "locale": "hi",
@@ -11776,6 +12004,89 @@
     },
     {
       "locale": "ru",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 1 major, 0 minor (R1), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/ru/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-a, task subagent)",
+        "session": "886288cfe273",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_alert at source hash cb3fcf96f055: key set and ICU placeholder/plural-structure parity with en, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical, safety meaning (count, held longer than threshold, agent NOT given the messages, no deletion/review claim, cleared text does not claim delivery), 'Agent messages' title and 'held' wording against the locale's cli.team_bridge catalogue and glossary/style guide. 0 blocker / 0 major / 0 minor. one/few/many/other present; verb and genitive minute forms agree in every arm (1 сообщение задержано, 2 сообщения задержаны, 5 сообщений задержано; более 1 минуты/2 минут/5 минут); 'задержано' and 'Фильтрация' match cli.team_bridge. Single independent audit pass; no cross-model second audit."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-r2a, task subagent)",
+        "session": "3c5e5fe61f9b",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent re-audit (not the translator; supersedes the row at the old English hash) of cli.team_bridge_alert at source hash f433a71daee9: key set and ICU placeholder/plural-structure parity with en for all 4 keys, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical in long_hold.body, meaning ('held for more than N minutes and has not reached your agent'; cleared = no message held longer than the threshold; no delivery, deletion or review claim), 'Agent messages' title wording and 'held' term against the locale's cli.team_bridge catalogue, glossary and style guide; every key rendered with the repo formatter. 0 blocker / 0 major / 0 minor. one/few/many/other present; verb and genitive agree in every arm (1 сообщение задержано / 2 сообщения задержаны / 5 сообщений задержано / 21 сообщение задержано / 22 сообщения задержаны; более 1 минуты / 2 минут / 5 минут / 21 минуты; дольше + genitive in cleared.body); 'задержано' matches cli.team_bridge; lowercase-вы rule not triggered; no space before ':' per ru.md. Single independent audit pass; no cross-model second audit."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.tool_rows.bridge.skipped",
+      "source_sha256": "e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865",
+      "translator": {
+        "agent": "coder (PR #3417 implementer); retranslation i18n-translator (task subagent of this auditor) (c9f77e05a801)",
+        "session": "62d5b457bcf6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev team)",
+        "session": "3dcc5dbc44d0",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent current-byte audit: i18n/audits/evidence/ru/wire.tool_rows.bridge.skipped/rg6a1/record.json. 1M/1m/0n (RU-RG6-1,RU-RG6-2), 0 unresolved blocker/major; 2 key(s) retranslated. Composed row+expanded checked; no native/rendered claim."
+    },
+    {
+      "locale": "ru",
       "namespace": "wire.notification_sound",
       "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
       "translator": {
@@ -14554,6 +14865,68 @@
       },
       "status": "passed",
       "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 5fe45b9bb2f02e4639318d00d84a1f66603851fbf68b2e6c081ede475e7d444b; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 2 major, 1 minor (U1, U2, U3), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/ur/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor-r2b (task subagent, independent of translator)",
+        "session": "26723730f2f9",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Single independent audit at the current English bytes (not dual-blind; high-visibility copy may still need a second audit per docs/I18N.md). Re-verified the earlier plural-agreement major as fixed: long_hold.body now puts the verb in its own count plural ('1 پیغام ... روکا ہوا ہے' / '2, 5 پیغامات ... روکے ہوئے ہیں'); minutes arms are invariant (منٹ) by design. Checked: 4/4 keys present; ICU placeholder parity ({count},{minutes}); one/other CLDR arms rendered at counts 1, 2, 5 and minutes 60; backticked `lop team-bridge receiver status` byte-identical LTR island, no bidi control characters; NFC; آپ register; meaning preserved (held longer than N minutes, not reached the agent, cleared = none held longer than the threshold); 'روکا' consistent with cli.team_bridge ('روکا گیا'). 0 findings."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.tool_rows.bridge.skipped",
+      "source_sha256": "e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865",
+      "translator": {
+        "agent": "coder (PR #3417 implementer); retranslation i18n-translator (task subagent of this auditor) (c9f77e05a801)",
+        "session": "62d5b457bcf6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev team)",
+        "session": "3dcc5dbc44d0",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent current-byte audit: i18n/audits/evidence/ur/wire.tool_rows.bridge.skipped/rg6a1/record.json. 1M/1m/0n (UR-RG6-1,UR-RG6-2), 0 unresolved blocker/major; 2 key(s) retranslated. Composed row+expanded checked; no native/rendered claim."
     },
     {
       "locale": "ur",
@@ -17577,6 +17950,89 @@
     },
     {
       "locale": "vi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 4,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 2 major, 2 minor (V1, V2, V3, V4), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/vi/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor-b (task subagent, independent of translator)",
+        "session": "2d9d6b78802f",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Single independent audit (not dual-blind; high-visibility safety copy may still need a second independent audit per docs/I18N.md). Checked: 4/4 keys present; ICU placeholder parity ({count},{minutes}); vi plural 'other' only, rendered at 1 and 60; backticked `lop team-bridge receiver status` byte-identical; NFC; held/not-given-to-agent/not-deleted meaning preserved; wording consistent with cli.team_bridge ('Tin nhắn tác nhân', 'Sàng lọc', 'bị giữ'). 0 findings."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor-r2b (task subagent, independent of translator)",
+        "session": "26723730f2f9",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Single independent audit at the current English bytes (supersedes the row for the old hash; not dual-blind; high-visibility copy may still need a second audit per docs/I18N.md). Checked: 4/4 keys present; ICU placeholder parity ({count},{minutes}); vi plural 'other' only, rendered at counts 1, 2, 5 and minutes 60; backticked `lop team-bridge receiver status` byte-identical; NFC, no bidi controls; meaning preserved (held for more than N minutes and has not reached the agent; cleared = no message held longer than the threshold; nothing implied deleted); wording consistent with cli.team_bridge ('Tin nhắn tác nhân', 'bị giữ'). 0 findings."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.tool_rows.bridge.skipped",
+      "source_sha256": "e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865",
+      "translator": {
+        "agent": "coder (PR #3417 implementer)",
+        "session": "62d5b457bcf6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev team)",
+        "session": "3dcc5dbc44d0",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent current-byte audit: i18n/audits/evidence/vi/wire.tool_rows.bridge.skipped/rg6a1/record.json. 0M/0m/0n (none), 0 unresolved blocker/major. Composed row+expanded checked; no native/rendered claim."
+    },
+    {
+      "locale": "vi",
       "namespace": "wire.notification_sound",
       "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
       "translator": {
@@ -20241,6 +20697,108 @@
       },
       "status": "passed",
       "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 936eec9d7ec1cf185590e1a87fe2544997bad62b0e9867417012054668101e77; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 0 major, 1 minor (Z1), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/zh-CN/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-a, task subagent)",
+        "session": "886288cfe273",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_alert at source hash cb3fcf96f055: key set and ICU placeholder/plural-structure parity with en, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical, safety meaning (count, held longer than threshold, agent NOT given the messages, no deletion/review claim, cleared text does not claim delivery), 'Agent messages' title and 'held' wording against the locale's cli.team_bridge catalogue and glossary/style guide. 0 blocker / 0 major / 2 minor. other-only plural correct. Minors: (1) spaces around digits/placeholders ('有 # 条', '超过 {minutes…}') against the zh-CN.md no-space rule (the catalogue has ~50 existing keys with the same pattern); (2) long_hold.body '被暂扣已超过' is slightly stiff, '已被暂扣超过' reads more natural. '暂扣' matches cli.team_bridge. Passed with minors outstanding. Single independent audit pass; no cross-model second audit."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-r2a, task subagent)",
+        "session": "3c5e5fe61f9b",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent re-audit (not the translator; supersedes the row at the old English hash) of cli.team_bridge_alert at source hash f433a71daee9: key set and ICU placeholder/plural-structure parity with en for all 4 keys, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical in long_hold.body, meaning ('held for more than N minutes and has not reached your agent'; cleared = no message held longer than the threshold; no delivery, deletion or review claim), 'Agent messages' title wording and 'held' term against the locale's cli.team_bridge catalogue, glossary and style guide; every key rendered with the repo formatter. 0 blocker / 0 major / 1 minor. other-only plural correct; no spaces around digits/placeholders; classifier 条 for messages; full-width punctuation; no full stop on titles; '暂扣' matches cli.team_bridge. Minor: '详情请运行' uses 请 although the English says 'Run' not 'please' (zh-CN.md reserves 请 for the English 'please'); the shipped catalogue elsewhere uses bare 运行 (e.g. '然后运行`lop …`'); suggest '详情：运行`lop team-bridge receiver status`。'. Passed with 1 minor outstanding. Single independent audit pass; no cross-model second audit."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.errors.sdk_spec",
+      "source_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "21/21 initial catalogue-only contribution; translator7fce46e29bee and independent readers e55f54b6a26e /6433b7a5b3e9, actual openai/gpt-6.1-sol from retained completed usage provenance; both PASS zero findings. Both readers/source/context/target bound in i18n/audits/evidence/zh-CN/wire.errors.sdk_spec/integration-binding.json; originals retained unchanged. Legacy SDK exception contract is VALID: existing producers still explicitly English; factory args/str/attrs/defaults unchanged. No present UI path or native-fit cap claimed; no native/pseudo/RTL execution. This is namespace completeness, NOT SDK exception localization or whole-UI English-free proof."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.tool_rows.bridge.skipped",
+      "source_sha256": "e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865",
+      "translator": {
+        "agent": "coder (PR #3417 implementer)",
+        "session": "62d5b457bcf6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev team)",
+        "session": "3dcc5dbc44d0",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent current-byte audit: i18n/audits/evidence/zh-CN/wire.tool_rows.bridge.skipped/rg6a1/record.json. 0M/0m/0n (none), 0 unresolved blocker/major. Composed row+expanded checked; no native/rendered claim."
     },
     {
       "locale": "zh-CN",

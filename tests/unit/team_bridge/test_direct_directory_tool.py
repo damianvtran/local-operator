@@ -236,10 +236,12 @@ async def test_dm_resolves_a_current_agent_and_posts_as_runtime_identity(runtime
     # guard's own state and nothing else (no pair-inbox row, no transcript, no
     # session directory). The assertion that used to demand an EMPTY config dir
     # predated the guard; it is narrowed rather than dropped so the protection it
-    # was providing is kept (QA round 2).
+    # was providing is kept (QA round 2). The guard's per-install digest key
+    # (reply guard round 1, S-3) is part of that same state.
     assert sorted(p.name for p in Path(runtime.config_dir).iterdir()) == ["team_bridge"]
     assert sorted(p.name for p in (Path(runtime.config_dir) / "team_bridge").iterdir()) == [
-        "reply_guard.sqlite3"
+        "reply_guard.key",
+        "reply_guard.sqlite3",
     ]
 
 

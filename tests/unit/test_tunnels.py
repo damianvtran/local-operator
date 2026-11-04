@@ -172,9 +172,9 @@ async def test_real_proof_authenticates_relay_without_leaking_cloud_headers(
 # are lowercased, so an entry spelled the way the header is actually written
 # matches nothing at all.
 #
-# This module is read-only in this slice: the additive change §4 rule 2 names (add
-# the two device headers) is its own row in the ADR's §7 with its own QA cell, so
-# nothing here edits `gateway.py`.
+# The additive change §4 rule 2 names (forward the two device headers) is the
+# third cell: they reach the local-operator relay, and no other harness, and an
+# unlisted header is still stripped.
 # ---------------------------------------------------------------------------
 
 
@@ -250,13 +250,16 @@ def test_the_gateway_allowlist_matches_lowercase_and_only_lowercase(
     # first patch's lowercase entry and the two halves would stop being the same
     # experiment with one difference.
     shipped = gateway_module._REQUEST_HEADERS
-    incoming = Headers({"X-Lop-Device": "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f"})
+    # A probe header nothing else forwards: ``x-lop-device`` itself now crosses
+    # to the local-operator relay by its own rule, so it can no longer show the
+    # allowlist's case behaviour in isolation.
+    incoming = Headers({"X-Lop-Probe": "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f"})
 
-    monkeypatch.setattr(gateway_module, "_REQUEST_HEADERS", shipped | {"x-lop-device"})
-    assert "x-lop-device" in _gateway_headers(connection, incoming), "the lowercase spelling works"
+    monkeypatch.setattr(gateway_module, "_REQUEST_HEADERS", shipped | {"x-lop-probe"})
+    assert "x-lop-probe" in _gateway_headers(connection, incoming), "the lowercase spelling works"
 
-    monkeypatch.setattr(gateway_module, "_REQUEST_HEADERS", shipped | {"X-Lop-Device"})
-    assert "x-lop-device" not in _gateway_headers(
+    monkeypatch.setattr(gateway_module, "_REQUEST_HEADERS", shipped | {"X-Lop-Probe"})
+    assert "x-lop-probe" not in _gateway_headers(
         connection, incoming
     ), "an entry spelled the way the header is written on the wire matches nothing at all"
 
@@ -265,6 +268,99 @@ def test_the_gateway_allowlist_matches_lowercase_and_only_lowercase(
     assert all(
         entry == entry.lower() for entry in shipped
     ), "an allowlist entry in any other case is dead code that reads as a boundary"
+
+
+def test_the_device_headers_reach_the_relay_and_nothing_else_does(connection) -> None:
+    """``X-Lop-Device`` + ``X-Lop-Device-Key`` cross to the local-operator relay only.
+
+    Without them a phone on the Radient route can never prove which device it is,
+    so the relay's per-device writes (``note_credential``, the custom-sound cache
+    report) silently move nothing. They go to the relay that verifies them and to
+    no other harness, and an unlisted ``x-lop-*`` header is still stripped, so the
+    change is two names and not a prefix rule.
+    """
+    from starlette.datastructures import Headers
+
+    from local_operator.mobile import push_devices
+    from local_operator.tunnels import gateway as gateway_module
+
+    incoming = Headers(
+        {
+            push_devices.DEVICE_HEADER: "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f",
+            push_devices.DEVICE_KEY_HEADER: "device-key-sentinel-41ab",
+            "x-lop-other": "not-forwarded",
+            push_devices.OPERATOR_KEY_HEADER: "operator-key-sentinel-9c1f",
+        }
+    )
+    rebuilt = _gateway_headers(connection, incoming)
+    assert rebuilt["x-lop-device"] == "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f"
+    assert rebuilt["x-lop-device-key"] == "device-key-sentinel-41ab"
+    assert "x-lop-other" not in rebuilt
+    assert "operator-key-sentinel-9c1f" not in rebuilt.values()
+    # Not in the shared allowlist: another harness is never handed the key.
+    assert not {"x-lop-device", "x-lop-device-key"} & gateway_module._REQUEST_HEADERS
+    other = dict(connection["tunnel"]["harnesses"][0], id="opencode")
+    gateway = Gateway(connection, Mock(), mobile_password="private-local-password")
+    assert "x-lop-device-key" not in gateway.headers(incoming, HOST, other)
+
+
+@pytest.mark.asyncio
+async def test_a_phone_through_the_gateway_records_its_own_credential(
+    connection, signing_key
+) -> None:
+    """The real path: gateway → real relay app → ``note_credential`` moves the row.
+
+    Before the device headers crossed, this request authenticated (the gateway
+    injects the computer's cookie) and recorded nothing, so a phone on the Radient
+    route never had ``last_authenticated_at``. The registry is read back, not
+    the response, because the evaluation never changes a response.
+    """
+    from local_operator.mobile import push_devices
+    from local_operator.mobile.auth import sign_cookie
+    from local_operator.mobile.daemon import MobileDaemon, build_app
+    from local_operator.paths import config_dir
+
+    install_id = "9f5d1d6e-6b1a-4c6e-9b3a-7a1c2f3d4e5f"
+    daemon = MobileDaemon(password="origin-only-password", dial_registrants=False)
+    app = build_app(daemon)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as relay:
+        # Registration over the direct route (the key is minted here).
+        direct = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://127.0.0.1",
+            cookies={COOKIE_NAME: sign_cookie("origin-only-password")},
+        )
+        async with direct:
+            registered = (
+                await direct.post(
+                    "/api/push/register",
+                    json={
+                        "platform": "ios",
+                        "token": "synthetic-token",
+                        "environment": "sandbox",
+                        "app_version": "1.0.0 (1)",
+                        "install_id": install_id,
+                    },
+                )
+            ).json()
+        assert "last_authenticated_at" not in push_devices.list_devices(config_dir())["devices"][0]
+
+        gateway = Gateway(connection, relay, mobile_password="origin-only-password")
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=gateway.app()), base_url="https://" + HOST
+        ) as phone:
+            response = await phone.get(
+                "/api/push/devices",
+                headers={
+                    PROOF_HEADER: proof(signing_key, target="/api/push/devices"),
+                    push_devices.DEVICE_HEADER: install_id,
+                    push_devices.DEVICE_KEY_HEADER: registered["device_key"],
+                },
+            )
+    assert response.status_code == 200
+    row = push_devices.list_devices(config_dir())["devices"][0]
+    assert row["credential_live"] is True and isinstance(row["last_authenticated_at"], int)
+    assert registered["device_key"] not in response.text, "the key is never echoed back"
 
 
 @pytest.mark.asyncio

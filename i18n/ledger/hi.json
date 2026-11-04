@@ -2947,6 +2947,68 @@
     },
     {
       "locale": "hi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 1 major, 1 minor (H1, H2), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/hi/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor-r2b (task subagent, independent of translator)",
+        "session": "26723730f2f9",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Single independent audit at the current English bytes (not dual-blind; high-visibility copy may still need a second audit per docs/I18N.md). Re-verified the earlier plural-agreement major as fixed: long_hold.body now puts the verb in its own count plural ('1 संदेश ... रोका गया है' / '2, 5 संदेश ... रोके गए हैं'); minutes arms are invariant (मिनट). Checked: 4/4 keys present; ICU placeholder parity ({count},{minutes}); one/other CLDR arms rendered at counts 1, 2, 5 and minutes 60; backticked `lop team-bridge receiver status` byte-identical; NFC, nukta kept (ज़्यादा, काफ़ी); आप register; meaning preserved (held longer than N minutes, not reached the agent, cleared = none held longer than the threshold); 'रोका गया' and 'एजेंट संदेश' consistent with cli.team_bridge. 0 findings."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.tool_rows.bridge.skipped",
+      "source_sha256": "e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865",
+      "translator": {
+        "agent": "coder (PR #3417 implementer); retranslation i18n-translator (task subagent of this auditor) (c9f77e05a801)",
+        "session": "62d5b457bcf6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev team)",
+        "session": "3dcc5dbc44d0",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent current-byte audit: i18n/audits/evidence/hi/wire.tool_rows.bridge.skipped/rg6a1/record.json. 1M/1m/0n (HI-RG6-1,HI-RG6-2), 0 unresolved blocker/major; 2 key(s) retranslated. Composed row+expanded checked; no native/rendered claim."
+    },
+    {
+      "locale": "hi",
       "namespace": "wire.notification_sound",
       "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
       "translator": {

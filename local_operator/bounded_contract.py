@@ -566,6 +566,15 @@ def supervise_direct(
                         from local_operator.memory_guard import unsignalled_line
 
                         report(f"[run_bounded] {unsignalled_line(unsignalled)}")
+                    # Review M1 (PR #3372): this is the path every macOS run
+                    # takes, so the "never silent" disclosure for a live escaped
+                    # pid no parentage source could prove ours (not signalled)
+                    # must be printed here too, not only on cleanup-required.
+                    unverified = getattr(guard, "unverified", None)
+                    if unverified:
+                        from local_operator.memory_guard import unverified_line
+
+                        report(f"[run_bounded] {unverified_line(unverified)}")
                     if escalating is None:
                         outcome.wrapper_exit_code = 128 + signal.SIGKILL
                         outcome.termination_cause = "memory-policy"
