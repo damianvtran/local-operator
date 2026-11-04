@@ -10,6 +10,26 @@ from __future__ import annotations
 from ..messages import Msg
 
 
+def cli_add_help() -> Msg:
+    return Msg("wire.notification_sound.cli.add.help", {})
+
+
+def cli_add_keep_loudness_help() -> Msg:
+    return Msg("wire.notification_sound.cli.add.keep_loudness.help", {})
+
+
+def cli_add_name_help() -> Msg:
+    return Msg("wire.notification_sound.cli.add.name.help", {})
+
+
+def cli_add_select_help() -> Msg:
+    return Msg("wire.notification_sound.cli.add.select.help", {})
+
+
+def cli_add_source_help() -> Msg:
+    return Msg("wire.notification_sound.cli.add.source.help", {})
+
+
 def cli_doctor_help() -> Msg:
     return Msg("wire.notification_sound.cli.doctor.help", {})
 
@@ -34,6 +54,26 @@ def cli_preview_volume_help() -> Msg:
     return Msg("wire.notification_sound.cli.preview.volume.help", {})
 
 
+def cli_remove_help() -> Msg:
+    return Msg("wire.notification_sound.cli.remove.help", {})
+
+
+def cli_remove_id_help() -> Msg:
+    return Msg("wire.notification_sound.cli.remove.id.help", {})
+
+
+def cli_rename_help() -> Msg:
+    return Msg("wire.notification_sound.cli.rename.help", {})
+
+
+def cli_rename_id_help() -> Msg:
+    return Msg("wire.notification_sound.cli.rename.id.help", {})
+
+
+def cli_rename_name_help() -> Msg:
+    return Msg("wire.notification_sound.cli.rename.name.help", {})
+
+
 def description() -> Msg:
     return Msg("wire.notification_sound.description", {})
 
@@ -54,6 +94,61 @@ def enabled_label() -> Msg:
     return Msg("wire.notification_sound.enabled.label", {})
 
 
+def error_attachment_missing(*, digest: str) -> Msg:
+    return Msg("wire.notification_sound.error.attachment_missing", {"digest": digest})
+
+
+def error_builtin_readonly(*, id: str) -> Msg:
+    return Msg("wire.notification_sound.error.builtin_readonly", {"id": id})
+
+
+def error_limit_reached(*, limit: str) -> Msg:
+    return Msg("wire.notification_sound.error.limit_reached", {"limit": limit})
+
+
+def error_name_empty() -> Msg:
+    return Msg("wire.notification_sound.error.name_empty", {})
+
+
+def error_name_long(*, limit: str) -> Msg:
+    return Msg("wire.notification_sound.error.name_long", {"limit": limit})
+
+
+def error_not_found(*, id: str) -> Msg:
+    return Msg("wire.notification_sound.error.not_found", {"id": id})
+
+
+def error_silent(*, file: str) -> Msg:
+    return Msg("wire.notification_sound.error.silent", {"file": file})
+
+
+def error_store_failed(*, where: str) -> Msg:
+    return Msg("wire.notification_sound.error.store_failed", {"where": where})
+
+
+def error_too_large(*, file: str, limit_mb: str) -> Msg:
+    return Msg("wire.notification_sound.error.too_large", {"file": file, "limit_mb": limit_mb})
+
+
+def error_too_long(*, file: str, seconds: str, limit: str) -> Msg:
+    return Msg(
+        "wire.notification_sound.error.too_long",
+        {"file": file, "seconds": seconds, "limit": limit},
+    )
+
+
+def error_undecodable(*, file: str) -> Msg:
+    return Msg("wire.notification_sound.error.undecodable", {"file": file})
+
+
+def error_unsupported_codec(*, file: str) -> Msg:
+    return Msg("wire.notification_sound.error.unsupported_codec", {"file": file})
+
+
+def error_unsupported_format(*, file: str) -> Msg:
+    return Msg("wire.notification_sound.error.unsupported_format", {"file": file})
+
+
 def id_choice_system_description() -> Msg:
     return Msg("wire.notification_sound.id.choice.system.description", {})
 
@@ -64,6 +159,10 @@ def id_help() -> Msg:
 
 def id_label() -> Msg:
     return Msg("wire.notification_sound.id.label", {})
+
+
+def removed_selection_reset(*, default: str) -> Msg:
+    return Msg("wire.notification_sound.removed.selection_reset", {"default": default})
 
 
 def sound_airy_whistle() -> Msg:

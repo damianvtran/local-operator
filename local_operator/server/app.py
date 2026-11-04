@@ -75,6 +75,7 @@ from local_operator.server.routes import (
     i18n,
     jobs,
     models,
+    notification_sounds,
     schedules,
     settings,
     speech,
@@ -870,7 +871,11 @@ def _legacy_desktop_gated(path: str, method: str) -> bool:
 @app.middleware("http")
 async def managed_desktop_boundary(request: Request, call_next):
     path = request.url.path
-    sensitive = path.startswith(("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/"))
+    # `/v1/notification-sounds` beside `/v1/settings` (design §3.4): its list
+    # reflects the selection, which a cache must not hold past a settings edit.
+    sensitive = path.startswith(
+        ("/v1/auth/", "/v1/settings", "/v1/mcp", "/v1/desktop/", "/v1/notification-sounds")
+    )
     legacy_control = _legacy_desktop_gated(path, request.method)
     # Managed posture — the desktop app's env capability OR an accepted claim
     # (`server/desktop.py`). A claim that turned the routers on but left this
@@ -1031,6 +1036,11 @@ app.include_router(desktop_notifications.router)
 # desktop family rather than beside `desktop_profiles` because the preference
 # is renderer state, not a session or catalogue surface.
 app.include_router(desktop_preferences.router)
+# Notification sounds (`features.notification_sounds`): the built-in and custom
+# sound list, rendered audio, and add/rename/remove of the user's own sounds.
+# Its own `/v1/notification-sounds` prefix shares nothing with the desktop
+# family above, and it carries `require_desktop` on the router itself.
+app.include_router(notification_sounds.router)
 
 # Install the loop-local work fence before lifespan publishes its reload
 # capability. It drains real request bodies, not just endpoint construction;

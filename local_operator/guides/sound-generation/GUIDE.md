@@ -241,4 +241,28 @@ once at creation); the model itself does not need the bytes.
 
 Do not re-save generated audio to disk unless the user asks for a file — the
 attachment IS the delivery, and a copy on disk is a second copy the session
-does not own.
+does not own. The one exception is below: a sound the user wants as their
+notification sound goes into lop's own sound store, not a path you pick.
+
+## Notification sounds
+
+When the user wants a generated clip as their notification sound, hand its
+attachment digest (from `details.artifacts`) to lop; never copy the file
+yourself:
+
+```sh
+lop sound add <digest> --name "Brass ping" --select
+```
+
+That decodes and validates the clip, trims silence, matches its loudness to the
+built-in sounds (`--keep-loudness` skips that), stores it under
+`<config>/sounds/custom/` and selects it. Without `--select`, select it later
+with the `setting` tool: `notifications.sound.id` = the `custom-…` id that
+`add` printed (`lop sound list` shows every id). `lop sound preview <id>` plays
+it; `lop sound rename <id> <name>` and `lop sound remove <id>` manage it.
+
+Keep clips short: up to 10 seconds after silence is trimmed (longer is refused,
+never cut), 10 MB, 50 sounds. WAV, FLAC, MP3 and OGG Vorbis are accepted; Opus
+and M4A are not, so request `mp3` or `wav` output. Removing the selected sound
+puts Soft pulse back. Sound on/off and volume are `notifications.sound.enabled`
+and `notifications.sound.volume`.

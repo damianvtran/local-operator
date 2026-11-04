@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,26 @@ def add_parser(
         help=help_text(_ns.cli_preview_volume_help(), help_locale),
     )
     verbs.add_parser("doctor", help=help_text(_ns.cli_doctor_help(), help_locale), parents=parents)
+    add = verbs.add_parser("add", help=help_text(_ns.cli_add_help(), help_locale), parents=parents)
+    add.add_argument("source", help=help_text(_ns.cli_add_source_help(), help_locale))
+    add.add_argument("--name", default=None, help=help_text(_ns.cli_add_name_help(), help_locale))
+    add.add_argument(
+        "--select", action="store_true", help=help_text(_ns.cli_add_select_help(), help_locale)
+    )
+    add.add_argument(
+        "--keep-loudness",
+        action="store_true",
+        help=help_text(_ns.cli_add_keep_loudness_help(), help_locale),
+    )
+    rename = verbs.add_parser(
+        "rename", help=help_text(_ns.cli_rename_help(), help_locale), parents=parents
+    )
+    rename.add_argument("sound_id", help=help_text(_ns.cli_rename_id_help(), help_locale))
+    rename.add_argument("name", help=help_text(_ns.cli_rename_name_help(), help_locale))
+    remove = verbs.add_parser(
+        "remove", help=help_text(_ns.cli_remove_help(), help_locale), parents=parents
+    )
+    remove.add_argument("sound_id", help=help_text(_ns.cli_remove_id_help(), help_locale))
 
 
 def _say(text: str = "") -> None:
@@ -98,7 +119,18 @@ def main(args: argparse.Namespace) -> int:
         return preview_command(args.sound_id, getattr(args, "volume", None))
     if verb == "doctor":
         return doctor_command()
-    _err("usage: lop sound {list,preview,doctor}")
+    if verb == "add":
+        return add_command(
+            args.source,
+            name=getattr(args, "name", None),
+            select=bool(getattr(args, "select", False)),
+            keep_loudness=bool(getattr(args, "keep_loudness", False)),
+        )
+    if verb == "rename":
+        return rename_command(args.sound_id, args.name)
+    if verb == "remove":
+        return remove_command(args.sound_id)
+    _err("usage: lop sound {list,preview,doctor,add,rename,remove}")
     return 2
 
 
@@ -117,6 +149,15 @@ def list_command() -> int:
         _say(f"{mark} {entry.id:17} {name:20} {entry.duration_s:.2f}s{default}")
     mark = "*" if selected == sound.SYSTEM_SOUND_ID else " "
     _say(f"{mark} {sound.SYSTEM_SOUND_ID:17} {labels.get(sound.SYSTEM_SOUND_ID, '')}")
+    from local_operator.notifications import custom_sounds
+
+    custom = custom_sounds.list_sounds()
+    if custom:
+        _say()
+        _say("your sounds (lop sound rename <id> <name> | lop sound remove <id>):")
+    for row in custom:
+        mark = "*" if row.id == selected else " "
+        _say(f"{mark} {row.id:17} {row.name:20} {row.duration_s:.2f}s")
     _say()
     volume = stored.effective_volume
     _say(
@@ -127,8 +168,109 @@ def list_command() -> int:
         _say(f"note: {problem}")
     _say(
         "change it: lop config edit notifications.sound.id <id>   "
-        "try one: lop sound preview <id>"
+        "try one: lop sound preview <id>   add yours: lop sound add <file> --select"
     )
+    return 0
+
+
+#: An attachment digest as the content-addressed store names it
+#: (``session/attachments.py`` ``_DIGEST_CHARS``: 32 hex). A 64-hex full
+#: SHA-256 is accepted too and cut to the store's length, because an agent
+#: that hashed the bytes itself will hold the long form.
+_DIGEST_RE = re.compile(r"^[0-9a-f]{32}(?:[0-9a-f]{32})?$")
+
+
+def _read_source(source: str) -> tuple[bytes, str] | int:
+    """``(bytes, label)`` for a path or an attachment digest, or an exit code.
+
+    A digest-shaped argument that is not an existing file is read through
+    ``AttachmentStore.get_bytes``, which re-checks the content against its
+    digest, so the agent path (``generate_sound_effect`` -> ``lop sound add
+    <digest>``) needs no filesystem guessing. A path is read at most
+    ``MAX_INPUT_BYTES + 1`` bytes: one byte over is enough to refuse, and
+    reading a multi-GB file to learn it is too big is the memory the cap
+    exists to bound.
+    """
+    from local_operator.notifications import custom_sounds
+
+    path = Path(source).expanduser()
+    if _DIGEST_RE.fullmatch(source) and not path.exists():
+        from local_operator.session.attachments import AttachmentStore
+
+        found = AttachmentStore().get_bytes(source[:32])
+        if found is None:
+            _err(str(_ns.error_attachment_missing(digest=source).envelope()["text"]))
+            return 1
+        return found[0], source[:32]
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(custom_sounds.MAX_INPUT_BYTES + 1)
+    except OSError as error:
+        _err(f"could not read {source}: {error.strerror or error}")
+        return 1
+    return raw, path.name
+
+
+def _select(sound_id: str) -> None:
+    """Write ``notifications.sound.id`` through the one settings funnel."""
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.paths import config_dir
+
+    settings_io.write_setting(
+        ConfigManager(config_dir()), settings_io.BY_KEY["notifications.sound.id"], sound_id
+    )
+
+
+def add_command(source: str, *, name: str | None, select: bool, keep_loudness: bool) -> int:
+    from local_operator.notifications import custom_sounds
+
+    read = _read_source(source)
+    if isinstance(read, int):
+        return read
+    raw, label = read
+    try:
+        row = custom_sounds.add(raw, source_name=label, name=name, keep_loudness=keep_loudness)
+    except custom_sounds.SoundRejected as refusal:
+        _err(f"{refusal.text} ({refusal.code})")
+        return 1
+    loudness = "kept its own loudness" if not row.normalized else "loudness matched"
+    _say(f'added {row.id}  "{row.name}"  {row.duration_s:.2f}s, {loudness}')
+    if select:
+        try:
+            _select(row.id)
+        except (ValueError, OSError) as error:
+            _err(f"added, but could not select it: {error}")
+            return 1
+        _say(f"selected: notifications.sound.id = {row.id}")
+    else:
+        _say(f"use it: lop config edit notifications.sound.id {row.id}")
+    return 0
+
+
+def rename_command(sound_id: str, name: str) -> int:
+    from local_operator.notifications import custom_sounds
+
+    try:
+        row = custom_sounds.rename(sound_id, name)
+    except custom_sounds.SoundRejected as refusal:
+        _err(f"{refusal.text} ({refusal.code})")
+        return 1
+    _say(f'renamed {row.id} to "{row.name}"')
+    return 0
+
+
+def remove_command(sound_id: str) -> int:
+    from local_operator.notifications import custom_sounds
+
+    try:
+        removal = custom_sounds.remove(sound_id)
+    except custom_sounds.SoundRejected as refusal:
+        _err(f"{refusal.text} ({refusal.code})")
+        return 1
+    _say(f'removed {removal.sound.id}  "{removal.sound.name}"')
+    if removal.selection_reset:
+        _say(removal.reset_text())
     return 0
 
 
@@ -177,7 +319,7 @@ def preview_command(sound_id: str, volume: int | None) -> int:
     if sound_id == sound.SYSTEM_SOUND_ID:
         _say("`system` means lop plays nothing; your terminal or OS plays its own sound.")
         return 0
-    entry = sound.builtin(sound_id)
+    entry = sound.playable(sound_id)
     if entry is None:
         _err(f"unknown sound {sound_id!r}; choose one of: {', '.join(sound.sound_ids())}")
         return 2
@@ -198,7 +340,8 @@ def preview_command(sound_id: str, volume: int | None) -> int:
             "a preview still plays (set LOCAL_OPERATOR_NO_SOUND=1 to mute it)"
         )
     _say(f"playing {sound_id} at volume {level:g} (gain {amplitude:.2f})")
-    code = play.play(entry.path, amplitude, sound_id=entry.id, sha256=entry.sha256, leg="preview")
+    playable_id, path, sha = entry
+    code = play.play(path, amplitude, sound_id=playable_id, sha256=sha, leg="preview")
     if code != 0:
         _err("could not play the sound: no audio device answered (see `lop sound doctor`)")
     return code

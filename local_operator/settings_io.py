@@ -1442,6 +1442,14 @@ def _notification_sound_choices() -> tuple[Choice, ...]:
         for sound in builtin_sounds()
     ]
     choices.append(Choice(SYSTEM_SOUND_ID, SYSTEM_SOUND_ID, _t(_ns.id_choice_system_description())))
+    # The user's own sounds (`lop sound add`, the desktop's Add sound). Read at
+    # call time like the catalog, so `lop config edit` and the `setting` tool
+    # accept a sound the moment it is added, and refuse it once it is removed.
+    # The description is the user's own name for it: user content, never
+    # translated (design §1.2).
+    from local_operator.notifications import custom_sounds
+
+    choices.extend(Choice(row.id, row.id, row.name) for row in custom_sounds.list_sounds())
     return tuple(choices)
 
 
