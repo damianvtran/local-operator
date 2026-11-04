@@ -92,7 +92,7 @@ Pulling and pushing **skills**: a skill link pulls through the managed skill sto
 
 A same-name local folder is not permission to overwrite it. Run
 `lop skills pull <id> --org <tenant> --dry-run`, review both diffs, then apply that preview with
-`lop skills pull <id> --org <tenant> --adopt-receipt <receipt> --yes`. The preview snapshots the
+`lop skills pull <id> --org <tenant> --adopt-receipt=<receipt> --yes`. The preview snapshots the
 complete original folder before calling a merge model; local assets are preserved
 without being sent to that model. For no model egress, preview with `--no-llm`
 and an explicit `--strategy keep-local` or `--strategy take-hub`, then review and
