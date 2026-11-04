@@ -2889,6 +2889,48 @@
       },
       "status": "passed",
       "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 23414f9d449c4c71755683c181511f092e534b4ea5983ec1adcb099237e6dd74; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-a, task subagent)",
+        "session": "886288cfe273",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_alert at source hash cb3fcf96f055: key set and ICU placeholder/plural-structure parity with en, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical, safety meaning (count, held longer than threshold, agent NOT given the messages, no deletion/review claim, cleared text does not claim delivery), 'Agent messages' title and 'held' wording against the locale's cli.team_bridge catalogue and glossary/style guide. 0 blocker / 0 major / 0 minor. one/many/other present and correct; 'retenido' and 'Filtrado' match cli.team_bridge. Single independent audit pass; no cross-model second audit."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-r2a, task subagent)",
+        "session": "3c5e5fe61f9b",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent re-audit (not the translator; supersedes the row at the old English hash) of cli.team_bridge_alert at source hash f433a71daee9: key set and ICU placeholder/plural-structure parity with en for all 4 keys, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical in long_hold.body, meaning ('held for more than N minutes and has not reached your agent'; cleared = no message held longer than the threshold; no delivery, deletion or review claim), 'Agent messages' title wording and 'held' term against the locale's cli.team_bridge catalogue, glossary and style guide; every key rendered with the repo formatter. 0 blocker / 0 major / 0 minor. one/many/other present and correct (1 mensaje lleva retenido / 5 mensajes llevan retenidos / 1.000.000 de mensajes llevan retenidos; 1 minuto / 5 minutos / de minutos); 'retenido' and the 'Mensajes de agentes:' title wording match cli.team_bridge; tu register per es.md. Single independent audit pass; no cross-model second audit."
     }
   ]
 }
