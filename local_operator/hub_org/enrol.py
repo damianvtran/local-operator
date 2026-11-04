@@ -15,23 +15,23 @@ list routes carry no ETag, so the floor is the cost bound). A machine with zero
 links still enrols: the runner calls this BEFORE its ``no-linked-items`` early
 return.
 
-SAFETY. Automatic runs use ``on_conflict="adopt-link"`` and ``auto_push=False``.
-An unlinked local copy sharing a name with an org item is backed up and LINKED
-(subscribed), never silently overwritten: identical content needs nothing
-more, differing content goes through the existing reconcile path, and when no
-merge is possible the local content stays linked so drift shows in
-``skills sync --check``. That closes the failure the operator saw — skills on
-disk with no hub link drifting where no check could see them. What was adopted
-is recorded under ``last_enrol`` in the gate record so ``lop hub org`` can show
-it. Hub-wins adopt stays an explicit ``lop hub org pull`` choice. A brand-new organization — one
+SAFETY. Automatic runs use ``on_conflict="adopt-link"``, ``allow_llm=False``
+and ``auto_push=False``. An unlinked local copy sharing a name with an org
+item is backed up and LINKED (subscribed) with its content byte-unchanged:
+identical content reads up-to-date, differing content is
+``kept-local-linked`` (the hub revision is its baseline, so the drift shows as
+local-only in ``sync --check``). An automatic run never merges, never calls a
+model (no tokens spent unasked) and never writes authored bytes; merging is the
+explicit ``lop hub org pull --on-conflict reconcile``, hub-wins the explicit
+``--on-conflict adopt``. A local item that already follows a different hub
+item (``linked-elsewhere``) is left alone. That closes the failure the operator
+saw — skills on disk with no hub link drifting where no check could see them.
+What was adopted is recorded under ``last_enrol`` in the gate record so
+``lop hub org`` can show it. A brand-new organization — one
 absent from ``seen`` — is a full first enrol. ``seen`` advances only for items
 that did not fail, so a transient failure retries at the next floor.
 Single-flight under the gate's lock: a loser skips. Every entry point is
 never-raising and blocking work stays off any event loop.
-
-CONTRACT WITH SLICE A. ``list_catalogue`` (``hub_org.catalogue``) and
-``pull_all`` (``hub_org.pull``) are imported lazily and GUARDED: until they
-exist on this install an enrol is a no-op, never an error.
 """
 
 from __future__ import annotations
@@ -43,6 +43,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from local_operator.hub_org import eligibility as el
+from local_operator.hub_org.catalogue import list_catalogue
+from local_operator.hub_org.pull import pull_all
 from local_operator.hub_org.settings import auto_enrol_enabled
 
 logger = logging.getLogger(__name__)
@@ -53,21 +55,6 @@ CATALOGUE_FLOOR_SECONDS = 60 * 60
 KINDS: tuple[str, ...] = ("agent", "skill", "team")
 #: Outcomes that must NOT mark an item seen, so the next floor retries it.
 _RETRY_OUTCOMES = frozenset({"failed"})
-
-
-def _slice_a() -> tuple[Any, Any] | None:
-    """``(list_catalogue, pull_all)``, or ``None`` before slice A is installed."""
-
-    # Slice A's modules, resolved by name so this file type-checks and imports
-    # on a branch/install that predates them (an absent module = no-op enrol).
-    import importlib
-
-    try:
-        list_catalogue = importlib.import_module("local_operator.hub_org.catalogue").list_catalogue
-        pull_all = importlib.import_module("local_operator.hub_org.pull").pull_all
-    except (ImportError, AttributeError):
-        return None
-    return list_catalogue, pull_all
 
 
 def _field(item: Any, name: str) -> Any:
@@ -99,27 +86,43 @@ def last_enrol(config_dir: Path) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+class BoundaryThread(threading.Thread):
+    """The background boundary, with an event set once the GATE refresh is done.
+
+    WHY. A CLI-only ``lop login radient`` returns as soon as the credential is
+    committed, and interpreter exit kills a daemon thread, so the gate used to
+    open only at the next TUI/daemon start (agent review R3). The login caller
+    waits on :attr:`gate_refreshed` for a short bound -- the memberships read
+    only, never the catalogue pull that follows, which stays in the background.
+    """
+
+    def __init__(self, config_dir: Path, boundary: str, *, force: bool) -> None:
+        super().__init__(name=f"hub-org-enrol-{boundary}", daemon=True)
+        self.gate_refreshed = threading.Event()
+        self._args = (Path(config_dir), boundary, force)
+
+    def run(self) -> None:
+        config_dir, boundary, force = self._args
+        run_boundary(config_dir, boundary, force=force, refreshed=self.gate_refreshed)
+
+
 def on_boundary(
     config_dir: Path, boundary: str, *, force: bool = False, background: bool = True
-) -> threading.Thread | None:
+) -> BoundaryThread | None:
     """Refresh the gate, then enrol new items. Never raises.
 
     ``background`` (the default) runs the whole thing on a daemon thread and
     returns it, so a login route or daemon lifespan never waits on the network;
-    ``False`` runs inline (the hub runner, which is already on a worker).
+    ``False`` runs inline (the hub runner, which is already on a worker). A
+    caller that needs the gate answer before it exits waits on the thread's
+    ``gate_refreshed`` event (:class:`BoundaryThread`).
     """
 
     if not background:
         run_boundary(config_dir, boundary, force=force)
         return None
     try:
-        thread = threading.Thread(
-            target=run_boundary,
-            args=(Path(config_dir), boundary),
-            kwargs={"force": force},
-            name=f"hub-org-enrol-{boundary}",
-            daemon=True,
-        )
+        thread = BoundaryThread(Path(config_dir), boundary, force=force)
         thread.start()
         return thread
     except Exception:  # noqa: BLE001 - a thread that cannot start costs only the enrol
@@ -127,11 +130,25 @@ def on_boundary(
         return None
 
 
-def run_boundary(config_dir: Path, boundary: str, *, force: bool = False) -> None:
-    """The boundary body: gate refresh, then :func:`sync_new_items`. Never raises."""
+def run_boundary(
+    config_dir: Path,
+    boundary: str,
+    *,
+    force: bool = False,
+    refreshed: threading.Event | None = None,
+) -> None:
+    """The boundary body: gate refresh, then :func:`sync_new_items`. Never raises.
+
+    ``refreshed`` is set as soon as the gate refresh has finished (or failed),
+    before the enrol starts.
+    """
 
     try:
-        orgs = el.refresh(Path(config_dir), boundary=boundary, force=force)
+        try:
+            orgs = el.refresh(Path(config_dir), boundary=boundary, force=force)
+        finally:
+            if refreshed is not None:
+                refreshed.set()
         if orgs and auto_enrol_enabled(Path(config_dir)):
             sync_new_items(Path(config_dir), orgs)
     except Exception:  # noqa: BLE001 - see module docstring
@@ -145,10 +162,6 @@ def sync_new_items(config_dir: Path, orgs: Iterable[el.OrgRef] | None = None) ->
     orgs = list(el.eligible_orgs(config_dir) if orgs is None else orgs)
     if not orgs:
         return
-    seam = _slice_a()
-    if seam is None:
-        return
-    list_catalogue, pull_all = seam
     with el.refresh_lock(config_dir) as held:
         if not held:
             return
@@ -160,7 +173,7 @@ def sync_new_items(config_dir: Path, orgs: Iterable[el.OrgRef] | None = None) ->
             if isinstance(stamp, (int, float)) and stamp > now:
                 continue
             try:
-                _enrol_org(config_dir, org, record, list_catalogue, pull_all)
+                _enrol_org(config_dir, org, record)
             except Exception as exc:  # noqa: BLE001 - one org never stops the next
                 if getattr(exc, "code", None) == "team_plan_required" or (
                     getattr(exc, "status_code", None) == 403
@@ -177,8 +190,6 @@ def _enrol_org(
     config_dir: Path,
     org: el.OrgRef,
     record: dict[str, Any],
-    list_catalogue: Any,
-    pull_all: Any,
 ) -> None:
     resolved = el.person_client(config_dir)
     if resolved is None:
@@ -195,7 +206,8 @@ def _enrol_org(
 
     # Linked items belong to the runner (its subscription keeps them current),
     # so only ABSENT items and unlinked same-name CONFLICTS are handed to the
-    # pull, the latter to be adopt-linked (see the module docstring).
+    # pull, the latter to be adopt-linked (see the module docstring). A
+    # ``linked-elsewhere`` row follows another hub item and is never handed over.
     wanted = [i for i in items if not _is_seen(i) and _field(i, "local") in ("absent", "conflict")]
     retry: set[tuple[Any, Any]] = set()
     adopted: list[dict[str, Any]] = []
@@ -210,7 +222,8 @@ def _enrol_org(
             subscribe=True,
             auto_push=False,
             on_conflict="adopt-link",
-            allow_llm=True,
+            # Unattended: no model call, no tokens spent without consent (R4).
+            allow_llm=False,
         )
         for outcome in getattr(report, "items", None) or []:
             if _field(outcome, "outcome") in _RETRY_OUTCOMES:

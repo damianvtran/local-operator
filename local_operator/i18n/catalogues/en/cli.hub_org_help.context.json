@@ -17,7 +17,7 @@
   "cli.hub_org_help.org_flag": {
     "role": "lop CLI help text",
     "tone": "terse, operator-facing, describes a flag or command",
-    "note": "help for --org; tenant id is an identifier"
+    "note": "help for --org; accepts the organization's name, a unique prefix of it, or its tenant id (an identifier)"
   },
   "cli.hub_org_help.kind": {
     "role": "lop CLI help text",

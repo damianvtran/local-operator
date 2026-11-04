@@ -16,6 +16,13 @@ THE ``local`` COLUMN is a classification, never a write:
   A naive pull would mint ``coder-2`` (agents/teams) or hit the skill
   ``alias-occupied`` refusal. :mod:`hub_org.pull` routes these through
   ``on_conflict``; ``lop hub org`` reports them as "unlinked local copies".
+- ``linked-elsewhere``: a local row/folder holds the same NAME but already
+  follows a DIFFERENT hub item (a baseline, or an agent's ``hub:`` tag, naming
+  another hub id: a public pull, or another organization's). It is never
+  adopted, retagged or merged: re-pointing it would split one link across two
+  hubs (the tag says one, the baseline the other, since ``write_baseline``
+  refuses to change a recorded hub id) and replace content the operator chose
+  to follow from elsewhere. Reported only, so the clash stays visible.
 - ``absent``: a plain pull creates it.
 
 Names are compared casefolded. That is the registries' own collision rule, so
@@ -34,7 +41,7 @@ from pathlib import Path
 from typing import Any, Iterable, Literal, Sequence
 
 Kind = Literal["agent", "team", "skill"]
-LocalState = Literal["linked", "conflict", "absent"]
+LocalState = Literal["linked", "conflict", "linked-elsewhere", "absent"]
 
 #: The pull order: rosters name agents, so agents land before teams.
 #: ``pull_all`` reuses it.
@@ -175,7 +182,12 @@ class _LocalIndex:
 
     linked: dict[tuple[str, str], str]  # (kind, hub_id) -> local name/alias
     linked_ids: dict[tuple[str, str], str]  # (kind, hub_id) -> local id
-    names: dict[tuple[str, str], tuple[str, str]]  # (kind, casefold name) -> (name, id)
+    #: UNLINKED local rows only: (kind, casefold name) -> (name, id). A row that
+    #: follows any hub item is never a candidate for adoption.
+    names: dict[tuple[str, str], tuple[str, str]]
+    #: Local rows already linked to SOME hub item: (kind, casefold name) ->
+    #: (name, id, hub_id). Consulted only when the org item is not that hub id.
+    elsewhere: dict[tuple[str, str], tuple[str, str, str]] = field(default_factory=dict)
 
 
 def local_index(
@@ -192,13 +204,29 @@ def local_index(
     config_dir = Path(config_dir)
     linked: dict[tuple[str, str], str] = {}
     linked_ids: dict[tuple[str, str], str] = {}
+    # (kind, local id or skill alias) -> the hub id that row already follows.
+    followed: dict[tuple[str, str], str] = {}
     for record in prov.iter_baselines(config_dir):
         if not record.hub_id:
             continue
         key = (record.kind, record.hub_id)
         linked[key] = record.local_alias or record.local_id
         linked_ids[key] = record.local_id
+        followed[(record.kind, record.local_id)] = record.hub_id
+        if record.kind == "skill" and record.local_alias:
+            followed[("skill", record.local_alias.casefold())] = record.hub_id
     names: dict[tuple[str, str], tuple[str, str]] = {}
+    elsewhere: dict[tuple[str, str], tuple[str, str, str]] = {}
+
+    def index_name(kind: str, name: str, row_id: str, follows: str | None) -> None:
+        if not name:
+            return
+        key = (kind, name.casefold())
+        if follows:
+            elsewhere.setdefault(key, (name, row_id, follows))
+        else:
+            names.setdefault(key, (name, row_id))
+
     if agent_registry is None:
         from local_operator.agents import AgentRegistry
 
@@ -206,20 +234,20 @@ def local_index(
     from local_operator.agents import hub_origin
 
     for agent in agent_registry.list_agents():
-        name = str(agent.name or "")
-        if name:
-            names.setdefault(("agent", name.casefold()), (name, agent.id))
         # A row pulled before baselines existed still carries its ``hub:`` tag,
         # and ``agents sync`` already tracks it, so it is linked, not a conflict.
         origin = hub_origin(agent)
         if origin and ("agent", origin) not in linked_ids:
             linked_ids[("agent", origin)] = agent.id
+        index_name(
+            "agent", str(agent.name or ""), agent.id, followed.get(("agent", agent.id)) or origin
+        )
     if team_registry is None:
         from local_operator.teams import TeamRegistry
 
         team_registry = TeamRegistry(config_dir)
     for team in team_registry.list_teams():
-        names.setdefault(("team", team.name.casefold()), (team.name, team.id))
+        index_name("team", team.name, team.id, followed.get(("team", team.id)))
     skills_root = config_dir / "skills"
     try:
         entries = list(skills_root.iterdir()) if skills_root.is_dir() else []
@@ -229,16 +257,17 @@ def local_index(
         # Dot entries are staging/aside folders, never skills (discovery skips them too).
         if entry.name.startswith(".") or not entry.is_dir():
             continue
-        names.setdefault(("skill", entry.name.casefold()), (entry.name, entry.name))
+        index_name("skill", entry.name, entry.name, followed.get(("skill", entry.name.casefold())))
     # Linked local ids resolve to their display name for the agent/team arms.
+    by_row = {
+        (kind, row[1]): row[0]
+        for table in (names, elsewhere)
+        for (kind, _folded), row in table.items()
+    }
     for (kind, hub_id), local_id in list(linked_ids.items()):
-        if kind == "skill":
-            continue
-        for (k, _folded), (name, row_id) in names.items():
-            if k == kind and row_id == local_id:
-                linked[(kind, hub_id)] = name
-                break
-    return _LocalIndex(linked=linked, linked_ids=linked_ids, names=names)
+        if kind != "skill" and (kind, local_id) in by_row:
+            linked[(kind, hub_id)] = by_row[(kind, local_id)]
+    return _LocalIndex(linked=linked, linked_ids=linked_ids, names=names, elsewhere=elsewhere)
 
 
 def classify(
@@ -249,9 +278,13 @@ def classify(
     key = (kind, hub_id)
     if key in index.linked:
         return "linked", index.linked[key], index.linked_ids.get(key)
-    hit = index.names.get((kind, name.casefold())) if name else None
+    folded = name.casefold() if name else ""
+    hit = index.names.get((kind, folded)) if name else None
     if hit is not None:
         return "conflict", hit[0], hit[1]
+    other = index.elsewhere.get((kind, folded)) if name else None
+    if other is not None:
+        return "linked-elsewhere", other[0], other[1]
     return "absent", None, None
 
 

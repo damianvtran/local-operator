@@ -10,26 +10,26 @@ Your Radient organization shares agents, teams and skills through its private Ag
 
 ## Look
 
-- `lop hub org` (alias `lop hub org list`): the catalogue per organization, with a `local` column — `linked` (followed), `conflict` (a local item has the same name but no link), `absent` (not here yet). It also lists *unlinked local copies* and what the last automatic run adopted. `--org <tenant>`, `--kind agent|team|skill` (repeatable), `--json`.
-- Agent tool, mid-session: `agent(op='org_list', org?, kinds?, query?)`.
+- `lop hub org` (alias `lop hub org list`): the catalogue per organization, with a `local` column — `linked` (followed), `conflict` (a local item has the same name but no link), `linked-elsewhere` (a local item has the same name but already follows a different hub item; left alone), `absent` (not here yet). It also lists *unlinked local copies* and what the last automatic run adopted. `--org <name, prefix or tenant id>`, `--kind agent|team|skill` (repeatable), `--json`.
+- Agent tool, mid-session: `agent(op='org_list', org?, kinds?, query?)` — `kinds` is comma-separated (`agent,skill`), `query` filters names and descriptions.
 
 ## Pull
 
 - `lop hub org pull` prints the plan (counts and conflicts) and changes nothing; add `--yes` to run it. `--kind`, `--name <id-or-name>` (repeatable) narrow it. With several organizations, `--org` is required.
-- Agent tool: `agent(op='org_pull', org?, kinds?, names?, on_conflict?)` — always subscribes; never auto-pushes.
+- Agent tool: `agent(op='org_pull', org?, kinds?, name?, on_conflict?)` — `name` is ONE hub id, name or unique name prefix (the result names the id it resolved to; an ambiguous prefix is refused with the candidates); `kinds` is comma-separated. Always subscribes; never auto-pushes.
 - Order is agents → skills → teams (team rosters name agents). Re-running is safe: linked items are left to the update runner; nothing is duplicated.
 - New links are subscribed: updates arrive the same way as for any hub-pulled item (`guide://agents`, "Agent Hub: pull, push, update").
 
 ## Same name, no link: `--on-conflict`
 
-- `adopt-link` (default): back up the local copy under `hub/backups/`, link it (subscribed, no auto-push). Identical content: done. Different: reconciled through the normal hub merge; if no merge is possible the local content stays linked, so the drift shows in `lop skills sync --check` / `lop hub status` instead of hiding. Never overwrites silently.
+- `adopt-link` (default): back up the local copy under `hub/backups/`, then link it (subscribed, no auto-push) without changing a byte of it. Identical content: `identical`. Different: `kept-local-linked` — the hub version is recorded as the link's baseline, so the difference shows as `local-only` in `lop skills sync --check` / `lop agents sync --check` instead of hiding. Never merges, never calls a model.
 - `adopt`: hub wins, after the same backup.
-- `reconcile`: merge now (spends model tokens); a merge that needs a person is reported, not forced.
+- `reconcile`: merge the two copies now (may spend model tokens); a merge that needs a person is reported, not forced. Only on explicit request — CLI `--on-conflict reconcile`, tool call with `confirm_replace=true`.
 - `skip`: leave it; the exact command to resolve it is printed.
 
 Pick `adopt-link` unless the user says the org copy should replace theirs (`adopt`). Report the backup paths you were given.
 
 ## Automatic enrolment
 
-- On sign-in, daemon start and the hub update tick (at most hourly per organization), new organization items are pulled and same-name local copies are adopt-linked. It never auto-pushes and never uses hub-wins.
+- On sign-in, daemon start and the hub update tick (at most hourly per organization), new organization items are pulled and same-name local copies are adopt-linked (content kept as it is). It never merges, never calls a model, never auto-pushes and never uses hub-wins.
 - Turn it off: `lop config edit hub.org.auto_enrol false` (or `/settings` → Organization Agent Hub). Already-linked items keep following `hub.auto_update.*`.

@@ -165,11 +165,11 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="org_pull",
                 blurb=(
-                    "Radient Team only: pull them all (or one by name/id) and subscribe; "
-                    "re-runs never duplicate. on_conflict for a same-named unlinked "
-                    "local copy: adopt-link (default: back up, link, keep its content, "
-                    "merge only when it settles) | skip | adopt (hub wins, backed up) | "
-                    "reconcile (model merge); adopt/reconcile need confirm_replace=true."
+                    "Radient Team only: pull them all (or one: name= id, name or unique "
+                    "prefix) and subscribe; re-runs never duplicate. on_conflict for a "
+                    "same-named unlinked local copy: adopt-link (default: back up, link, "
+                    "content unchanged, never merges) | skip | adopt (hub wins, backed up) "
+                    "| reconcile (model merge); adopt/reconcile need confirm_replace=true."
                 ),
                 fields=("org", "kinds", "name", "on_conflict"),
                 gated=True,

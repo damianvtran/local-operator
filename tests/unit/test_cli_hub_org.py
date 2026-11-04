@@ -80,7 +80,14 @@ def test_ineligible_invocation_prints_the_one_sentence(_isolated: Path, capsys) 
     rc = hub_org_cli.command(args, _isolated)
     err = capsys.readouterr().err
     assert rc == 1
+    # Signed out (no record): the cause and the way forward (UX review U5).
     assert err.strip() == (
+        "Organization catalogues are a Radient Team feature; you’re not signed in to "
+        "Radient (lop login radient)."
+    )
+    _seed(_isolated, [])  # signed in, no team plan
+    assert hub_org_cli.command(args, _isolated) == 1
+    assert capsys.readouterr().err.strip() == (
         "Organization catalogues are a Radient Team feature; this account isn’t in a "
         "team-plan organization."
     )
@@ -190,4 +197,105 @@ def test_teams_search_public_output_is_unchanged_when_ineligible(
     assert cli.teams_search_command(args, _isolated) == 0
     eligible = capsys.readouterr().out
     assert eligible.startswith(ineligible.rstrip("\n").split("showing page")[0])
-    assert "[org: Minerva] minerva-support — id t2" in eligible
+    # The public header/footer stay, and the org rows are their own block (D2/Q4).
+    assert "showing page 1 of 1" in eligible
+    assert "Minerva (organization)" in eligible
+    assert "minerva-support — id t2" in eligible
+    assert eligible.index("showing page") < eligible.index("Minerva (organization)")
+
+    query = cli.build_cli_parser().parse_args(["teams", "search", "support"])
+    assert cli.teams_search_command(query, _isolated) == 0
+    searched = capsys.readouterr().out
+    assert "No public team matches 'support'." in searched
+    assert "minerva-support — id t2" in searched
+
+
+def test_empty_plan_does_not_ask_for_yes(_isolated: Path, member_hub, capsys) -> None:
+    args = cli.build_cli_parser().parse_args(["hub", "org", "pull"])
+    assert hub_org_cli.command(args, _isolated) == 0
+    out = capsys.readouterr().out
+    assert "Everything is already linked" in out and "--yes" not in out
+
+
+def test_plan_names_what_yes_does_to_a_conflict(_isolated: Path, member_hub, capsys) -> None:
+    member_hub.skills[SKILL_ID] = _skill_doc("deploys", "x\n")
+    (_isolated / "skills" / "deploys").mkdir(parents=True)
+    args = cli.build_cli_parser().parse_args(["hub", "org", "pull"])
+    assert hub_org_cli.command(args, _isolated) == 0
+    assert "conflict → adopt-link" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("ref", ["Minerva", "minerva", "Min", TENANT])
+def test_org_flag_accepts_a_name_prefix_or_id(_isolated: Path, member_hub, capsys, ref) -> None:
+    member_hub.skills[SKILL_ID] = _skill_doc("deploys", "x\n")
+    args = cli.build_cli_parser().parse_args(["hub", "org", "--org", ref])
+    assert hub_org_cli.command(args, _isolated) == 0
+    assert f"Minerva ({TENANT})" in capsys.readouterr().out
+
+
+def test_unknown_org_exits_non_zero_with_the_choices(_isolated: Path, member_hub, capsys) -> None:
+    for argv in (["hub", "org", "--org", "Acme"], ["hub", "org", "pull", "--org", "Acme"]):
+        assert hub_org_cli.command(cli.build_cli_parser().parse_args(argv), _isolated) == 1
+        err = capsys.readouterr().err
+        assert "matches “Acme”" in err and TENANT in err
+
+
+def test_pull_yes_prints_each_item_as_it_lands(
+    _isolated: Path, member_hub, monkeypatch, capsys
+) -> None:
+    member_hub.skills[SKILL_ID] = _skill_doc("deploys", "x\n")
+    from local_operator.hub_org import pull as pull_mod
+
+    real = pull_mod.pull_all
+    seen: dict[str, Any] = {}
+
+    def spy(*a: Any, **k: Any) -> Any:
+        seen["progress"] = k.get("progress")
+        return real(*a, **k)
+
+    monkeypatch.setattr(pull_mod, "pull_all", spy)
+    args = cli.build_cli_parser().parse_args(["hub", "org", "pull", "--yes"])
+    assert hub_org_cli.command(args, _isolated) == 0
+    assert callable(seen["progress"])
+    out = capsys.readouterr().out
+    assert out.count("deploys") == 1 and "pulled" in out
+
+
+def test_adopt_link_via_the_cli_keeps_the_local_bytes(_isolated: Path, member_hub) -> None:
+    """U1 through the real CLI path: the default --on-conflict, model allowed."""
+    member_hub.skills[SKILL_ID] = _skill_doc("deploys", "Hub body.\n")
+    folder = _isolated / "skills" / "deploys"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: deploys\ndescription: mine\n---\n\nMine.\n", encoding="utf-8"
+    )
+    before = (folder / "SKILL.md").read_bytes()
+    args = cli.build_cli_parser().parse_args(["hub", "org", "pull", "--yes", "--json"])
+    assert hub_org_cli.command(args, _isolated) == 0
+    assert (folder / "SKILL.md").read_bytes() == before
+
+
+def test_last_sync_time_is_humanized(_isolated: Path, member_hub, capsys) -> None:
+    stamp = time.mktime((2026, 11, 4, 9, 30, 0, 0, 0, -1))
+
+    def write(data: dict[str, Any]) -> None:
+        data["last_enrol"] = {TENANT: {"at": stamp, "pulled": 2, "adopted": []}}
+
+    eligibility.update_record(_isolated, write)
+    args = cli.build_cli_parser().parse_args(["hub", "org"])
+    assert hub_org_cli.command(args, _isolated) == 0
+    out = capsys.readouterr().out
+    assert "Last automatic sync: 2026-11-04 09:30, 2 items pulled" in out
+
+
+def test_local_column_aligns_ids_and_drops_a_repeated_name(
+    _isolated: Path, member_hub, capsys
+) -> None:
+    member_hub.skills[SKILL_ID] = _skill_doc("a-very-long-skill-name-indeed", "x\n")
+    member_hub.skills["55555555-5555-4555-8555-555555555555"] = _skill_doc("b", "y\n")
+    (_isolated / "skills" / "a-very-long-skill-name-indeed").mkdir(parents=True)
+    args = cli.build_cli_parser().parse_args(["hub", "org"])
+    assert hub_org_cli.command(args, _isolated) == 0
+    rows = [line for line in capsys.readouterr().out.splitlines() if " skill " in line]
+    assert len(rows) == 2 and " as " not in "".join(rows)
+    assert len({line.rindex(" ") for line in rows}) == 1

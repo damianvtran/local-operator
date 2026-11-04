@@ -28,7 +28,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from local_operator.i18n.keys import cli_hub_org as _ho
 from local_operator.i18n.keys import cli_hub_org_help as _hh
@@ -102,18 +102,74 @@ def add_parser(subparsers: Any, *, parent_parser: Any, help_locale: str, config_
 # -- shared resolution ---------------------------------------------------------------------
 
 
+def match_org(orgs: Sequence[Any], declared: str) -> Any | None:
+    """The ONE eligible org ``declared`` names: tenant id, exact name, or unique prefix.
+
+    WHY. People know their organization's NAME, not its tenant id, and an id
+    that matched nothing used to be sent to the hub anyway, so `lop hub org
+    --org Acme` printed a 404 and exited 0 (UX review U6). The precedence is
+    the item rule's (:func:`hub_org.catalogue.resolve_reference`): exact id,
+    exact casefolded name, then a unique prefix of the name or id. Only
+    ELIGIBLE orgs are candidates: a tenant outside the gate is never addressed.
+    """
+
+    needle = declared.strip()
+    folded = needle.casefold()
+    for org in orgs:
+        if org.tenant_id == needle:
+            return org
+    exact = [o for o in orgs if o.tenant_name.casefold() == folded]
+    if len(exact) == 1:
+        return exact[0]
+    prefixed = [
+        o
+        for o in orgs
+        if folded
+        and (o.tenant_name.casefold().startswith(folded) or o.tenant_id.startswith(needle))
+    ]
+    return prefixed[0] if len(prefixed) == 1 else None
+
+
 def resolve_tenant(config_dir: Path, declared: str | None) -> tuple[str | None, list[Any]]:
-    """``(tenant, orgs)``: the declared one, the sole eligible one, or None (ambiguous)."""
+    """``(tenant, orgs)``: the org ``declared`` names, the sole eligible one, or None.
+
+    None with a ``declared`` value means it matched no eligible org (or several);
+    None without one means the account has several and must choose.
+    """
 
     from local_operator.hub_org.eligibility import eligible_orgs
 
     orgs = eligible_orgs(config_dir)
-    tenant = (declared or "").strip()
-    if tenant:
-        return tenant, orgs
+    wanted = (declared or "").strip()
+    if wanted:
+        match = match_org(orgs, wanted)
+        return (match.tenant_id if match is not None else None), orgs
     if len(orgs) == 1:
         return orgs[0].tenant_id, orgs
     return None, orgs
+
+
+def signed_out(config_dir: Path) -> bool:
+    """Whether the closed gate is closed because no Radient account is signed in.
+
+    Read from the gate record, with no network: a refresh with no person
+    behind it writes ``account_id: null`` (and no record exists before the
+    first sign-in). Used only to pick the ineligible sentence (UX review U5).
+    """
+
+    from local_operator.hub_org.eligibility import read_record
+
+    try:
+        record = read_record(config_dir)
+    except Exception:  # noqa: BLE001 - an unreadable record reads as signed out
+        return True
+    return not (record or {}).get("account_id")
+
+
+def ineligible_text(config_dir: Path) -> str:
+    """The one direct sentence for a closed gate, matched to its cause."""
+
+    return _t(_ho.ineligible_signed_out() if signed_out(config_dir) else _ho.ineligible())
 
 
 def _gate_or_refresh(config_dir: Path) -> bool:
@@ -126,8 +182,22 @@ def _gate_or_refresh(config_dir: Path) -> bool:
     refresh(config_dir, boundary="explicit", force=True)
     if is_eligible(config_dir):
         return True
-    print(_t(_ho.ineligible()), file=sys.stderr)
+    print(ineligible_text(config_dir), file=sys.stderr)
     return False
+
+
+def _tenant_or_refuse(config_dir: Path, declared: str | None) -> tuple[str | None, list[Any]]:
+    """``resolve_tenant``, printing the refusal (and the eligible orgs) when it is None."""
+
+    tenant, orgs = resolve_tenant(config_dir, declared)
+    if tenant is None:
+        if (declared or "").strip():
+            print(_t(_ho.unknown_org(ref=str(declared).strip())), file=sys.stderr)
+            for org in orgs:
+                print(f"  {org.tenant_id}  {org.tenant_name}  ({org.role})", file=sys.stderr)
+        else:
+            _print_orgs(orgs)
+    return tenant, orgs
 
 
 def _print_orgs(orgs: Sequence[Any]) -> None:
@@ -192,13 +262,8 @@ def _client(base_dir: Path) -> Any:
 
 
 def _last_enrol(config_dir: Path) -> dict[str, Any]:
-    try:
-        # Slice B's module; absent until that PR lands, so an ImportError is "no record".
-        from local_operator.hub_org.enrol import (  # type: ignore[import-not-found]
-            last_enrol,
-        )
-    except ImportError:
-        return {}
+    from local_operator.hub_org.enrol import last_enrol
+
     try:
         value = last_enrol(config_dir)
     except Exception:  # noqa: BLE001 - a status read never fails the listing
@@ -217,7 +282,13 @@ def list_command(args: argparse.Namespace, base_dir: Path) -> int:
     config_dir = ConfigManager(base_dir).config_dir
     if not _gate_or_refresh(config_dir):
         return 1
-    tenant, orgs = resolve_tenant(config_dir, getattr(args, "org", None))
+    declared = getattr(args, "org", None)
+    if (declared or "").strip():
+        tenant, orgs = _tenant_or_refuse(config_dir, declared)
+        if tenant is None:
+            return 1
+    else:
+        tenant, orgs = resolve_tenant(config_dir, None)
     targets = [tenant] if tenant else [o.tenant_id for o in orgs]
     client = _client(base_dir)
     if client is None:
@@ -233,9 +304,12 @@ def list_command(args: argparse.Namespace, base_dir: Path) -> int:
     names = {o.tenant_id: o.tenant_name for o in orgs}
     for target, body in payload.items():
         print(f"{names.get(target, target)} ({target})")
-        for item in body["items"]:
-            local = item["local"] + (f" as {item['local_name']}" if item["local_name"] else "")
-            print(f"  {item['kind']:<5}  {item['name']:<36}  {local:<24}  {item['hub_id']}")
+        locals_ = [_local_cell(item) for item in body["items"]]
+        # The column is as wide as its widest cell, so the ids always line up
+        # (design review D3: a fixed 24-cell pad overflowed on long names).
+        width = max((len(cell) for cell in locals_), default=0)
+        for item, local in zip(body["items"], locals_):
+            print(f"  {item['kind']:<5}  {item['name']:<36}  {local:<{width}}  {item['hub_id']}")
         for kind, cause in body["errors"].items():
             print("  " + _t(_ho.list_failed(kind=kind, cause=cause)))
         unlinked = [i["name"] for i in body["items"] if i["local"] == "conflict"]
@@ -245,9 +319,42 @@ def list_command(args: argparse.Namespace, base_dir: Path) -> int:
         if enrol:
             pulled = enrol.get("pulled")
             count = len(pulled) if isinstance(pulled, list) else int(pulled or 0)
-            print("  " + _t(_ho.last_enrol(at=str(enrol.get("at") or ""), pulled=count)))
+            print("  " + _t(_ho.last_enrol(at=_local_time(enrol.get("at")), pulled=count)))
             _print_adopted(enrol.get("adopted") or [], indent="    ")
     return 0
+
+
+def _local_cell(item: Mapping[str, Any]) -> str:
+    """``local`` plus ``as <name>`` only when the local name differs from the hub name.
+
+    The repeat cost an agent reading every row a few tokens for nothing (D3).
+    """
+
+    local = str(item.get("local") or "")
+    local_name = str(item.get("local_name") or "")
+    if local_name and local_name != str(item.get("name") or ""):
+        local += f" as {local_name}"
+    return local
+
+
+def _local_time(stamp: Any) -> str:
+    """The last automatic sync as local ``YYYY-MM-DD HH:MM`` (design review D1).
+
+    A wall-clock time rather than a relative age: it is locale-neutral inside a
+    translated sentence and does not go stale in a pasted transcript.
+    """
+
+    import time
+
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(stamp)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "?"
+
+
+def _outcome_line(item: Any) -> str:
+    detail = f"  {item.detail}" if item.detail else ""
+    return f"  {item.kind:<5}  {item.name:<36}  {item.outcome}{detail}"
 
 
 def _print_adopted(adopted: Sequence[Any], *, indent: str = "  ") -> None:
@@ -269,9 +376,8 @@ def pull_command(args: argparse.Namespace, base_dir: Path) -> int:
     config_dir = manager.config_dir
     if not _gate_or_refresh(config_dir):
         return 1
-    tenant, orgs = resolve_tenant(config_dir, getattr(args, "org", None))
+    tenant, _orgs = _tenant_or_refuse(config_dir, getattr(args, "org", None))
     if tenant is None:
-        _print_orgs(orgs)
         return 1
     client = _client(base_dir)
     if client is None:
@@ -303,17 +409,37 @@ def pull_command(args: argparse.Namespace, base_dir: Path) -> int:
         # The plan: a read, no writes. Printing what WOULD happen first is the
         # same contract as every other preview here; --yes applies it.
         result = cat.catalogue_result(client, tenant, kinds, config_dir=config_dir)
-        todo = [i for i in result.items if i.local != "linked" and (not names or i.hub_id in names)]
+        on_conflict = getattr(args, "on_conflict", "adopt-link")
+        chosen = [i for i in result.items if not names or i.hub_id in names]
+        todo = [i for i in chosen if i.local in ("absent", "conflict")]
+        # Shown so the preview explains why a same-named item will be left
+        # alone, but never counted as work (it follows another hub item).
+        elsewhere = [i for i in chosen if i.local == "linked-elsewhere"]
         conflicts = [i for i in todo if i.local == "conflict"]
         if as_json:
             print(
-                json.dumps({"plan": [i.to_json() for i in todo], "errors": result.errors}, indent=2)
+                json.dumps(
+                    {
+                        "plan": [i.to_json() for i in todo + elsewhere],
+                        "on_conflict": on_conflict,
+                        "errors": result.errors,
+                    },
+                    indent=2,
+                )
             )
             return 0
-        for item in todo:
-            print(f"  {item.kind:<5}  {item.name:<36}  {item.local}")
-        print(_t(_ho.plan(count=len(todo), conflicts=len(conflicts))))
-        return 0
+        for item in todo + elsewhere:
+            # A conflict row names what --yes will do with it (UX review U1).
+            action = f" → {on_conflict}" if item.local == "conflict" else ""
+            print(f"  {item.kind:<5}  {item.name:<36}  {_local_cell(item.to_json())}{action}")
+        for kind, cause in result.errors.items():
+            print("  " + _t(_ho.list_failed(kind=kind, cause=cause)))
+        if not todo:
+            # Nothing to apply, so no "re-run with --yes" (UX review U7).
+            print(_t(_ho.plan_empty()))
+        else:
+            print(_t(_ho.plan(count=len(todo), conflicts=len(conflicts))))
+        return 1 if result.errors else 0
     report = pull_all(
         manager,
         tenant,
@@ -324,13 +450,13 @@ def pull_command(args: argparse.Namespace, base_dir: Path) -> int:
         on_conflict=getattr(args, "on_conflict", "adopt-link"),
         allow_llm=not getattr(args, "no_llm", False),
         client=client,
+        # One line per item as it lands, so a large org is never minutes of a
+        # blank terminal (UX review U4); --json prints once, at the end.
+        progress=None if as_json else (lambda item: print(_outcome_line(item), flush=True)),
     )
     if as_json:
         print(json.dumps(report.to_json(), indent=2))
     else:
-        for item in report.items:
-            detail = f"  {item.detail}" if item.detail else ""
-            print(f"  {item.kind:<5}  {item.name:<36}  {item.outcome}{detail}")
         for kind, cause in report.errors.items():
             print("  " + _t(_ho.list_failed(kind=kind, cause=cause)))
         _print_adopted(report.adopted)

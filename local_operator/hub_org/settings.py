@@ -5,13 +5,15 @@ path, so the registry carries a literal default and
 ``tests/unit/test_settings_io.py::_consumer_defaults`` imports THIS constant to
 pin that the two cannot drift (AGENTS.md "Adding a configuration key").
 
-WHY ON BY DEFAULT. The operator asked that agents "pull the org's latest teams,
-agents and skills and subscribe automatically to stay up to date". Auto-enrol
-only ever runs for a Radient Team member (:mod:`.eligibility`), only adds items
-the machine does not have (conflicts are skipped, never overwritten) and never
-auto-pushes, so the default costs an ineligible user nothing and an eligible
-one gets the catalogue without asking. Turning it off stops new-item pulls
-only; already-linked items keep following ``hub.auto_update.*``.
+WHY ON BY DEFAULT. The operator asked that agents "pull the org's latest
+teams, agents and skills and subscribe automatically to stay up to date".
+Auto-enrol only ever runs for a Radient Team member (:mod:`.eligibility`),
+pulls items the machine does not have, links a same-named unlinked local copy
+WITHOUT changing its content (``kept-local-linked``: no merge, no model call),
+leaves a copy that follows another hub item alone, and never auto-pushes, so
+the default costs an ineligible user nothing and an eligible one gets the
+catalogue without asking. Turning it off stops new-item pulls only;
+already-linked items keep following ``hub.auto_update.*``.
 
 The path is a genuinely NESTED tuple read through ``get_nested_value`` /
 ``read_config_values`` — never the flat dotted accessor, which would look up a

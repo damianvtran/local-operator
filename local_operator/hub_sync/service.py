@@ -3491,6 +3491,60 @@ def _resolve_remote_skill(
     return _ResolvedRemoteSkill(source, alias, identity, canonical, revision, document, client)
 
 
+#: The dot-prefixed sibling a bundle adoption moves the operator's folder to
+#: while the hub tree is installed (``install_skill``): ``.adopt-<alias>-<hex>``.
+_ADOPT_ASIDE_PREFIX = ".adopt-"
+
+
+def recover_bundle_adoption_asides(config_dir: Path) -> list[str]:
+    """Settle bundle adoptions a crash interrupted mid-move; returns the aliases touched.
+
+    WHY. A bundle adoption moves the live folder to ``.adopt-<alias>-<hex>``
+    (skill discovery skips dot entries), installs the hub tree, then deletes
+    the aside. The org auto-enrol runs that on a daemon thread, which
+    interpreter exit can stop between the move and either the restore or the
+    delete (agent review R3), leaving the operator's skill invisible. Two
+    states are possible and each has one safe answer:
+
+    - ``<alias>`` is ABSENT: the install never committed, so the aside IS the
+      operator's folder. Move it back.
+    - ``<alias>`` is PRESENT and owned by a hub link: the install committed and
+      the durable ``hub/backups/skill-adopt-*`` snapshot taken BEFORE the move
+      is the restore point, exactly as on the success path. Drop the aside.
+
+    Anything else (an unowned folder reappeared beside an aside) is left
+    untouched for a person. CALLER HOLDS the hub update lease (``exclusive``),
+    the same lease the move runs under, so a live adoption is never mistaken
+    for a crashed one. Never raises.
+    """
+
+    root = Path(config_dir) / "skills"
+    touched: list[str] = []
+    try:
+        entries = sorted(root.iterdir()) if root.is_dir() else []
+    except OSError:
+        return touched
+    for aside in entries:
+        name = aside.name
+        if not name.startswith(_ADOPT_ASIDE_PREFIX) or not aside.is_dir() or aside.is_symlink():
+            continue
+        alias, sep, suffix = name[len(_ADOPT_ASIDE_PREFIX) :].rpartition("-")
+        if not sep or not alias or len(suffix) != 12:
+            continue
+        live = root / alias
+        try:
+            if not live.exists():
+                os.replace(aside, live)
+                touched.append(alias)
+                logger.warning("restored skill %r from an interrupted hub adoption", alias)
+            elif prov.alias_owner(config_dir, "skill", alias) is not None:
+                shutil.rmtree(aside, ignore_errors=True)
+                touched.append(alias)
+        except OSError:
+            logger.warning("could not settle interrupted adoption %s", aside, exc_info=True)
+    return touched
+
+
 def install_skill(
     ctx: HubSyncContext,
     *,
@@ -3602,6 +3656,9 @@ def install_skill(
             raise LinkError(
                 getattr(error, "code", "") or "local-concurrent-edit", str(error)
             ) from None
+        # A bundle adoption a crash stopped mid-move is settled under this same
+        # lease before the alias is inspected (see the helper).
+        recover_bundle_adoption_asides(ctx.config_dir)
 
         # 7b. Already-linked / replay arm BEFORE any write: a deterministic id
         #     that already exists is THIS install's own earlier attempt (or a
@@ -4066,7 +4123,9 @@ def install_skill(
                 occupying_path: Path | None = None
                 if bundle_adoption is not None:
                     occupying_path = Path(bundle_adoption["occupying"])
-                    aside = occupying_path.with_name(f".adopt-{alias}-{secrets.token_hex(6)}")
+                    aside = occupying_path.with_name(
+                        f"{_ADOPT_ASIDE_PREFIX}{alias}-{secrets.token_hex(6)}"
+                    )
                     os.replace(occupying_path, aside)
                 try:
                     transaction = ManagedBundleStorage(ctx.config_dir).apply(

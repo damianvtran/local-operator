@@ -247,6 +247,15 @@ def test_names_filter_accepts_ids_and_names(rig) -> None:
     assert _outcomes(report) == {"agent:coder": "pulled"}
 
 
+def test_progress_reports_each_item_as_it_lands(rig) -> None:
+    hub = rig["hub"]
+    hub.agents[AGENT_ID] = {"name": "coder", "description": "", "text": "x"}
+    hub.skills[SKILL_ID] = _skill_doc("deploys", "y\n")
+    seen: list[str] = []
+    report = rig["run"](progress=lambda item: seen.append(f"{item.kind}:{item.name}"))
+    assert seen == list(_outcomes(report))
+
+
 # -- agent/team conflicts -----------------------------------------------------------------
 
 
@@ -265,25 +274,140 @@ def test_adopt_link_identical_agent_links_in_place_with_a_backup(rig) -> None:
     assert not [a for a in rig["agents"].list_agents() if a.name == "coder-2"]
 
 
-def test_adopt_link_differing_without_a_model_keeps_local_and_links(rig, monkeypatch) -> None:
+def _agent_bytes(rig, local_id: str) -> tuple[str, str]:
+    agents = rig["agents"]
+    return agents.get_agent_system_prompt(local_id), agents.get_agent(local_id).description or ""
+
+
+@pytest.mark.parametrize("allow_llm", [True, False])
+def test_adopt_link_differing_agent_keeps_local_bytes_and_links_to_the_hub_revision(
+    rig, monkeypatch, allow_llm: bool
+) -> None:
+    """U1/R4: adopt-link never merges, with or without a model allowed."""
     rig["hub"].agents[AGENT_ID] = {"name": "coder", "description": "d", "text": "Hub text."}
     local = _local_agent(rig["agents"], "coder", "My own text.", "d")
+    before = _agent_bytes(rig, local.id)
+
+    def no_merge(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("adopt-link must never reach the merge path")
+
+    monkeypatch.setattr(svc, "apply_items", no_merge)
+    report = rig["run"](allow_llm=allow_llm)
+
+    assert _outcomes(report) == {"agent:coder": "adopt-linked"}, report.to_json()
+    assert report.adopted[0]["result"] == "kept-local-linked"
+    assert _agent_bytes(rig, local.id) == before
+    record = prov.read_baseline(rig["root"], "agent", local.id)
+    assert record is not None and record.hub_id == AGENT_ID
+    # The HUB revision is the baseline, so the untouched copy reads local-only.
+    assert record.fields["instructions"] == "Hub text."
+    backups = list((rig["root"] / "hub" / "backups").glob(f"agent-{local.id}-*.json"))
+    assert len(backups) == 1 and report.adopted[0]["backup"]
+    checks = svc.check_items(svc.sync_context(rig["manager"]), kinds=("agent",))
+    assert [c.classification.state for c in checks if c.classification] == ["local-only"]
+
+
+def test_adopt_link_differing_team_keeps_local_bytes(rig, monkeypatch) -> None:
+    rig["hub"].teams[TEAM_ID] = {
+        "id": TEAM_ID,
+        "tenant_id": TENANT,
+        "name": "lopdev",
+        "description": "hub",
+        "manager": "manager",
+        "members": [],
+        "instructions": "Hub brief.",
+        "project": "",
+    }
+    local = rig["teams"].create_team(
+        TeamEditFields(
+            name="lopdev", description="mine", manager="manager", instructions="My brief."
+        )
+    )
+    monkeypatch.setattr(svc, "apply_items", lambda *_a, **_k: pytest.fail("merged"))
+
+    report = rig["run"]()
+
+    assert _outcomes(report) == {"team:lopdev": "adopt-linked"}, report.to_json()
+    assert report.adopted[0]["result"] == "kept-local-linked"
+    team = rig["teams"].get_team(local.id)
+    assert (team.instructions, team.description) == ("My brief.", "mine")
+    record = prov.read_baseline(rig["root"], "team", local.id)
+    assert record is not None and record.hub_id == TEAM_ID
+    assert record.fields["instructions"] == "Hub brief." and record.identity is not None
+
+
+# -- R1: a same-named local row linked to a DIFFERENT hub item --------------------------
+
+PUBLIC_ID = "99999999-9999-4999-8999-999999999999"
+
+
+def test_agent_linked_to_the_public_hub_is_never_retargeted(rig) -> None:
+    """The reviewer's probe: public-pulled ``coder`` vs an org ``coder``."""
+    rig["hub"].agents[AGENT_ID] = {"name": "coder", "description": "d", "text": "Org text."}
+    local = _local_agent(rig["agents"], "coder", "Public text.", "d")
+    rig["agents"]._stamp_hub_provenance(rig["agents"].get_agent(local.id), PUBLIC_ID)
+    prov.record_agent_baseline(
+        rig["root"],
+        local_id=local.id,
+        hub_id=PUBLIC_ID,
+        instructions="Public text.",
+        description="d",
+        tenant_id=None,
+    )
+    tags_before = list(rig["agents"].get_agent(local.id).tags or [])
+
+    for on_conflict in ("adopt-link", "adopt", "reconcile"):
+        report = rig["run"](allow_llm=False, on_conflict=on_conflict)
+        assert _outcomes(report) == {"agent:coder": "linked-elsewhere"}, report.to_json()
+        assert not report.adopted
+
+    assert rig["agents"].get_agent_system_prompt(local.id).strip() == "Public text."
+    assert list(rig["agents"].get_agent(local.id).tags or []) == tags_before
+    record = prov.read_baseline(rig["root"], "agent", local.id)
+    assert record is not None and record.hub_id == PUBLIC_ID
+    assert not list((rig["root"] / "hub" / "backups").glob(f"agent-{local.id}-*.json"))
+    assert [a.name for a in rig["agents"].list_agents()] == ["coder"]
+
+
+def test_agent_with_only_a_public_hub_tag_is_linked_elsewhere(rig) -> None:
+    """A pre-baseline pull carries just the ``hub:`` tag; it still follows that item."""
+    rig["hub"].agents[AGENT_ID] = {"name": "coder", "description": "d", "text": "Org text."}
+    local = _local_agent(rig["agents"], "coder", "Public text.", "d")
+    rig["agents"]._stamp_hub_provenance(rig["agents"].get_agent(local.id), PUBLIC_ID)
 
     report = rig["run"](allow_llm=False)
 
-    assert report.adopted and report.adopted[0]["kind"] == "agent"
-    assert report.adopted[0]["result"] in {"kept-local-linked", "reconciled"}
-    assert (
-        rig["agents"].get_agent_system_prompt(local.id).strip()
-        in {
-            "My own text.",
-        }
-        or report.adopted[0]["result"] == "reconciled"
+    assert _outcomes(report) == {"agent:coder": "linked-elsewhere"}, report.to_json()
+    assert prov.read_baseline(rig["root"], "agent", local.id) is None
+
+
+def test_team_linked_to_the_public_hub_is_never_retargeted(rig) -> None:
+    rig["hub"].teams[TEAM_ID] = {
+        "id": TEAM_ID,
+        "tenant_id": TENANT,
+        "name": "lopdev",
+        "description": "org",
+        "manager": "manager",
+        "members": [],
+        "instructions": "Org brief.",
+        "project": "",
+    }
+    local = rig["teams"].create_team(
+        TeamEditFields(
+            name="lopdev", description="pub", manager="manager", instructions="Public brief."
+        )
     )
-    record = prov.read_baseline(rig["root"], "agent", local.id)
-    assert record is not None and record.hub_id == AGENT_ID
-    backups = list((rig["root"] / "hub" / "backups").glob(f"agent-{local.id}-*.json"))
-    assert backups
+    prov.record_team_pull(
+        rig["root"], rig["teams"].get_team(local.id), {"id": PUBLIC_ID}, tenant_id=""
+    )
+
+    report = rig["run"](allow_llm=False)
+
+    assert _outcomes(report) == {"team:lopdev": "linked-elsewhere"}, report.to_json()
+    assert rig["teams"].get_team(local.id).instructions == "Public brief."
+    record = prov.read_baseline(rig["root"], "team", local.id)
+    assert record is not None and record.hub_id == PUBLIC_ID
+    assert [t.name for t in rig["teams"].list_teams()] == ["lopdev"]
 
 
 def test_adopt_agent_hub_wins_and_writes_a_backup(rig) -> None:
@@ -374,6 +498,87 @@ def test_document_skill_identical_is_adopt_linked(rig) -> None:
     assert report.adopted[0]["result"] == "identical"
     assert report.adopted[0]["backup"]
     assert any(r.kind == "skill" and r.hub_id == SKILL_ID for r in prov.iter_baselines(rig["root"]))
+
+
+@pytest.mark.parametrize("allow_llm", [True, False])
+def test_document_skill_adopt_link_differing_keeps_every_byte(rig, allow_llm: bool) -> None:
+    """U1: the reviewer's concatenation case (`description: Acme writing stylemine`)."""
+    hub_doc = _skill_doc("acme-style", "Hub body for acme-style.")
+    hub_doc["description"] = "Acme writing style"
+    hub_doc["files"][0][
+        "content"
+    ] = "---\nname: acme-style\ndescription: Acme writing style\n---\n\nHub body for acme-style."
+    rig["hub"].skills[SKILL_ID] = hub_doc
+    folder = rig["root"] / "skills" / "acme-style"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: acme-style\ndescription: mine\n---\n\nMy style.", encoding="utf-8"
+    )
+    before = (folder / "SKILL.md").read_bytes()
+
+    report = rig["run"](allow_llm=allow_llm)
+
+    assert _outcomes(report) == {"skill:acme-style": "adopt-linked"}, report.to_json()
+    assert report.adopted[0]["result"] == "kept-local-linked"
+    assert (folder / "SKILL.md").read_bytes() == before
+    # One adopt, one snapshot, and the report names it (U8).
+    snapshots = list((rig["root"] / "hub" / "backups").glob("skill-adopt-acme-style-*"))
+    assert len(snapshots) == 1
+    assert Path(report.adopted[0]["backup"]) == snapshots[0]
+    record = next(r for r in prov.iter_baselines(rig["root"]) if r.hub_id == SKILL_ID)
+    assert record.recorded_by == "adopt-keep-local"
+    checks = svc.check_items(svc.sync_context(rig["manager"]), kinds=("skill",))
+    assert [c.classification.state for c in checks if c.classification] == ["local-only"]
+
+
+def test_auto_enrol_adopt_link_keeps_every_byte_through_the_real_pull(rig, monkeypatch) -> None:
+    """U1 on the unattended path: real ``enrol.sync_new_items`` → real ``pull_all``."""
+    from local_operator.hub_org import eligibility as el
+    from local_operator.hub_org import enrol
+
+    hub = rig["hub"]
+    hub.skills[SKILL_ID] = _skill_doc("acme-style", "Hub body for acme-style.")
+    hub.agents[AGENT_ID] = {"name": "coder", "description": "d", "text": "Hub text."}
+    folder = rig["root"] / "skills" / "acme-style"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: acme-style\ndescription: mine\n---\n\nMy style.", encoding="utf-8"
+    )
+    skill_before = (folder / "SKILL.md").read_bytes()
+    local = _local_agent(rig["agents"], "coder", "My own text.", "d")
+    agent_before = _agent_bytes(rig, local.id)
+    monkeypatch.setattr(el, "person_client", lambda *_a, **_k: (hub, "acct"))
+    monkeypatch.setattr(
+        "local_operator.hub_org.client.build_org_client",
+        lambda _m: SimpleNamespace(client=hub),
+    )
+    monkeypatch.setattr(svc, "apply_items", lambda *_a, **_k: pytest.fail("enrol merged"))
+
+    enrol.sync_new_items(rig["root"], [OrgRef(TENANT, "Minerva", "member")])
+
+    assert (folder / "SKILL.md").read_bytes() == skill_before
+    assert AgentRegistry(rig["root"]).get_agent_system_prompt(local.id) == agent_before[0]
+    rows = enrol.last_enrol(rig["root"])[TENANT]["adopted"]
+    adopted = {row["name"]: row["result"] for row in rows}
+    assert adopted == {"acme-style": "kept-local-linked", "coder": "kept-local-linked"}
+
+
+def test_interrupted_bundle_adoption_is_restored_on_the_next_run(rig, tmp_path) -> None:
+    """R3: a crash between the move-aside and the install leaves `.adopt-*`."""
+    _bundle(tmp_path, rig["hub"], "# Hub body\n")
+    skills = rig["root"] / "skills"
+    aside = skills / ".adopt-pdf-forms-0123456789ab"
+    aside.mkdir(parents=True)
+    (aside / "SKILL.md").write_text(
+        "---\nname: pdf-forms\ndescription: mine\n---\n\n# My body\n", encoding="utf-8"
+    )
+
+    report = rig["run"]()
+
+    # The folder is back, and it is treated as the unlinked copy it is.
+    assert not aside.exists()
+    assert "My body" in (skills / "pdf-forms" / "SKILL.md").read_text()
+    assert _outcomes(report) == {"skill:pdf-forms": "needs-review"}, report.to_json()
 
 
 def test_document_skill_adopt_takes_hub_with_snapshot(rig) -> None:

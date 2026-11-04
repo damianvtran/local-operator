@@ -42,11 +42,26 @@
   "cli.hub_org.last_enrol": {
     "role": "lop CLI output",
     "tone": "plain, operator-facing",
-    "note": "{at} is an ISO timestamp"
+    "note": "{at} is a local date and time (YYYY-MM-DD HH:MM) of the last automatic sync"
   },
   "cli.hub_org.list_failed": {
     "role": "lop CLI output",
     "tone": "plain, operator-facing",
     "note": "{kind} is agent/team/skill (identifier), {cause} a server error line"
+  },
+  "cli.hub_org.ineligible_signed_out": {
+    "role": "lop CLI output",
+    "tone": "plain, operator-facing",
+    "note": "The ONLY sentence shown to a signed-out user: a direct answer, never an up-sell. `Radient Team` is a plan name; `lop login radient` is a command, keep both verbatim. Sibling of cli.hub_org.ineligible (signed in, no team plan)"
+  },
+  "cli.hub_org.unknown_org": {
+    "role": "lop CLI output",
+    "tone": "plain, operator-facing",
+    "note": "followed by a list of the user's eligible organizations; {ref} is what the user passed to --org (a name or tenant id); --org is a flag token"
+  },
+  "cli.hub_org.plan_empty": {
+    "role": "lop CLI output",
+    "tone": "plain, operator-facing",
+    "note": "dry-run summary when nothing is left to pull: every organization item is already linked on this machine"
   }
 }

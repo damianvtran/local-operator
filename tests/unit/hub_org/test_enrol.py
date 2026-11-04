@@ -4,8 +4,8 @@ Pins the contract in ``hub_org.enrol``: gated by the Radient Team record,
 single-flight, a 60-minute per-org listing floor, only unseen items handed to
 ``pull_all`` with ``on_conflict="adopt-link"`` and no auto-push, ``failed``
 items retried, the setting's off switch, the adopted report recorded for
-``lop hub org``, and the sign-in hook firing exactly once per login. Slice A's
-``list_catalogue``/``pull_all`` are stubbed through the guarded seam.
+``lop hub org``, and the sign-in hook firing exactly once per login.
+``list_catalogue``/``pull_all`` are stubbed on the module.
 """
 
 from __future__ import annotations
@@ -90,7 +90,8 @@ def cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _wire(monkeypatch: pytest.MonkeyPatch, hub: Hub) -> None:
-    monkeypatch.setattr(enrol, "_slice_a", lambda: (hub.list_catalogue, hub.pull_all))
+    monkeypatch.setattr(enrol, "list_catalogue", hub.list_catalogue)
+    monkeypatch.setattr(enrol, "pull_all", hub.pull_all)
 
 
 def test_first_enrol_pulls_everything_with_adopt_link(cfg: Path, monkeypatch) -> None:
@@ -103,6 +104,8 @@ def test_first_enrol_pulls_everything_with_adopt_link(cfg: Path, monkeypatch) ->
     (call,) = hub.pulls
     assert call["names"] == ["a1", "s1"]
     assert call["on_conflict"] == "adopt-link"
+    # Unattended: never a model merge (design review U1, agent review R4).
+    assert call["allow_llm"] is False
     assert call["subscribe"] is True and call["auto_push"] is False
     record = _record(cfg)
     assert record["seen"]["t-1"] == {"agent": ["a1"], "skill": ["s1"]}
@@ -183,12 +186,6 @@ def test_setting_default_on(cfg: Path, monkeypatch) -> None:
     assert len(hub.pulls) == 1
 
 
-def test_missing_slice_a_is_a_no_op(cfg: Path, monkeypatch) -> None:
-    monkeypatch.setattr(enrol, "_slice_a", lambda: None)
-    enrol.sync_new_items(cfg)  # no raise
-    assert "t-1" not in (_record(cfg).get("seen") or {})
-
-
 def test_team_plan_required_closes_the_gate(cfg: Path, monkeypatch) -> None:
     class Refused(Exception):
         status_code = 403
@@ -236,6 +233,56 @@ def test_radient_sign_in_fires_the_boundary_once_and_logout_clears(
         store.upsert_credential("radient", {"api_key": "synthetic", "type": "api_key"})
         store.delete_credentials_for_provider("radient")
         assert not el.record_path(tmp_path).exists()
+    finally:
+        store.close()
+
+
+def test_desktop_account_removal_closes_the_gate(tmp_path: Path) -> None:
+    """R2: ``DELETE /v1/auth/accounts/{id}`` takes the same close as `lop logout`."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from local_operator.providers.auth_store import AuthStore
+    from local_operator.server.desktop import require_desktop
+    from local_operator.server.routes import auth as auth_routes
+
+    store = AuthStore(db_path=tmp_path / "auth.db")
+    try:
+        row = store.upsert_credential("radient", {"api_key": "[redacted]", "type": "api_key"})
+        el.record_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+        el.record_path(tmp_path).write_text("{}")
+        app = FastAPI()
+        app.include_router(auth_routes.router)
+        app.dependency_overrides[require_desktop] = lambda: None
+        app.dependency_overrides[auth_routes.get_desktop_auth] = lambda: type(
+            "H", (), {"store": store}
+        )()
+        response = TestClient(app).delete(f"/v1/auth/accounts/{row.id}")
+        assert response.status_code == 200, response.text
+        assert not el.record_path(tmp_path).exists()
+    finally:
+        store.close()
+
+
+def test_cli_login_waits_for_the_gate_refresh_only(tmp_path: Path, monkeypatch) -> None:
+    """R3: the gate refresh is awaited (bounded); the enrol stays in the background."""
+    import threading
+
+    from local_operator.providers.auth_store import AuthStore
+
+    release_enrol = threading.Event()
+    order: list[str] = []
+    monkeypatch.setattr(el, "refresh", lambda *a, **k: order.append("refresh") or [ORG])
+    monkeypatch.setattr(enrol, "auto_enrol_enabled", lambda _c: True)
+    monkeypatch.setattr(
+        enrol, "sync_new_items", lambda *_a: (order.append("enrol"), release_enrol.wait(5))
+    )
+    store = AuthStore(db_path=tmp_path / "auth.db")
+    try:
+        store._org_hub_boundary("sign-in")
+        assert store.wait_org_hub_gate(5) is True
+        assert order[0] == "refresh"
+        release_enrol.set()
     finally:
         store.close()
 

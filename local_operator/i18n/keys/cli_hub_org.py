@@ -26,6 +26,10 @@ def ineligible() -> Msg:
     return Msg("cli.hub_org.ineligible", {})
 
 
+def ineligible_signed_out() -> Msg:
+    return Msg("cli.hub_org.ineligible_signed_out", {})
+
+
 def last_enrol(*, at: str, pulled: int | float) -> Msg:
     return Msg("cli.hub_org.last_enrol", {"at": at, "pulled": pulled})
 
@@ -42,8 +46,16 @@ def plan(*, count: int | float, conflicts: int | float) -> Msg:
     return Msg("cli.hub_org.plan", {"count": count, "conflicts": conflicts})
 
 
+def plan_empty() -> Msg:
+    return Msg("cli.hub_org.plan_empty", {})
+
+
 def resolved(*, ref: str, hub_id: str) -> Msg:
     return Msg("cli.hub_org.resolved", {"ref": ref, "hub_id": hub_id})
+
+
+def unknown_org(*, ref: str) -> Msg:
+    return Msg("cli.hub_org.unknown_org", {"ref": ref})
 
 
 def unlinked_copies(*, names: str) -> Msg:

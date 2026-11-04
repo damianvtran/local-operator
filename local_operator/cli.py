@@ -13225,7 +13225,15 @@ def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
             print(_json.dumps({"checks": rows}, indent=2))
             return 0
         for row in rows:
-            reason = row.get("error_class") or row.get("outcome") or ""
+            # ``local-only`` is the drift a kept-local link exists to show (the
+            # org hub's adopt-link, QA Q3): the pull verdict is up-to-date, so
+            # without the classification the line read `up-to-date up-to-date`.
+            reason = (
+                row.get("error_class")
+                or ("local-only" if row.get("classification") == "local-only" else "")
+                or row.get("outcome")
+                or ""
+            )
             print(f"{row.get('name')}: {row.get('outcome')} {reason}".rstrip())
         return 0
     report = svc.apply_items(
@@ -15553,16 +15561,32 @@ def _print_public_team_rows(records: "list[dict[str, Any]]") -> None:
 
 
 def _print_org_team_rows(records: "list[dict[str, Any]]") -> None:
-    """Org teams after the public tree: one line each, labelled by organization."""
+    """Org teams after the public answer: one titled tree per organization.
+
+    The same shape as :func:`_print_public_team_rows` (design review D2) so the
+    two scopes read as two blocks, not one list with a stray tail. The block is
+    cyan, the public one green, so the scope is visible at a glance.
+    """
+    by_org: dict[str, list[dict[str, Any]]] = {}
     for record in records:
         label = str(record.get("scope") or "org:").partition(":")[2]
-        description = _clip_line(record.get("description"), 60)
-        print(
-            # i18n: ignore data row (org name, team name, id, description); the
-            # `[org: ...]` label mirrors the scope token in the JSON payload
-            f"[org: {label}] {record.get('name', '?')} — id {record.get('id', '?')}"
-            + (f" — {description}" if description else "")
-        )
+        by_org.setdefault(label, []).append(record)
+    for label, rows in by_org.items():
+        # i18n: ignore data rows (org name, team name, id, description); the
+        # tree frame mirrors the public block's, whose copy is not keyed either
+        print(f"\n\033[1;36m╭─ {label} (organization) ─────────────────────────\033[0m")
+        for index, record in enumerate(rows):
+            is_last = index == len(rows) - 1
+            branch = "└──" if is_last else "├──"
+            spine = "│  " if is_last else "│ │"
+            print(
+                f"\033[1;36m│ {branch} {record.get('name', '?')} "
+                f"— id {record.get('id', '?')}\033[0m"
+            )
+            description = _clip_line(record.get("description"), 72)
+            if description:
+                print(f"\033[1;36m{spine}   • {description}\033[0m")
+        print("\033[1;36m╰──────────────────────────────────────────────\033[0m")
 
 
 def teams_search_command(args: argparse.Namespace, base_dir: Path) -> int:
@@ -15604,11 +15628,8 @@ def teams_search_command(args: argparse.Namespace, base_dir: Path) -> int:
                 [{**row, "scope": "public"} for row in found] + org_rows if org_rows else found
             )
             return 0
-        if org_rows:
-            if found:
-                _print_public_team_rows(found)
-            _print_org_team_rows(org_rows)
-            return 0
+        # The public answer prints exactly as it does for an ineligible account;
+        # org rows, when any, follow it as their own block (D2/Q4).
         if not found:
             if complete:
                 print(f"\n\033[1;33mNo public team matches '{query}'.\033[0m")
@@ -15617,10 +15638,13 @@ def teams_search_command(args: argparse.Namespace, base_dir: Path) -> int:
                     f"\n\033[1;33mNo public team matches '{query}' in the pages read; the "
                     "listing walk stopped at its bound, so a match may exist past it.\033[0m"
                 )
-            return 0
-        teams_label = "team matches" if len(found) == 1 else "teams match"
-        print(f"\n\033[1;33m{len(found)} public {teams_label} '{query}':\033[0m")
-        _print_public_team_rows(found)
+        else:
+            teams_label = "team matches" if len(found) == 1 else "teams match"
+            print(f"\n\033[1;33m{len(found)} public {teams_label} '{query}':\033[0m")
+            _print_public_team_rows(found)
+        # Org rows AFTER the unchanged public answer (header included, D2/Q4).
+        if org_rows:
+            _print_org_team_rows(org_rows)
         return 0
 
     try:
@@ -15645,19 +15669,17 @@ def teams_search_command(args: argparse.Namespace, base_dir: Path) -> int:
         _print_payload(envelope)
         return 0
     records = [row for row in (envelope.get("records") or []) if isinstance(row, dict)]
-    if not records and not org_rows:
+    if records:
+        _print_public_team_rows(records)
+        print(
+            f"showing page {envelope.get('page', '?')} of {envelope.get('total_pages', '?')} "
+            f"({envelope.get('total_records', '?')} teams)"
+        )
+    else:
         print("\n\033[1;33mNo public teams on this page.\033[0m")
-        return 0
+    # Org rows AFTER the unchanged public answer, footer included (D2/Q4).
     if org_rows:
-        if records:
-            _print_public_team_rows(records)
         _print_org_team_rows(org_rows)
-        return 0
-    _print_public_team_rows(records)
-    print(
-        f"showing page {envelope.get('page', '?')} of {envelope.get('total_pages', '?')} "
-        f"({envelope.get('total_records', '?')} teams)"
-    )
     return 0
 
 

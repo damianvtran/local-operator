@@ -15,17 +15,26 @@ runner's/``sync``'s job, so there is no second update path.
 
 CONFLICTS (an unlinked local copy with the org item's name), ``on_conflict``:
 
-- ``adopt-link`` (default; automatic runs too): back the local copy up, link
-  it subscribed, and leave content alone when it is identical. When it
-  differs, reconcile through the EXISTING merge path; if that cannot settle it
-  (no model, a refusal), keep the local content and keep the link, so the drift
-  shows in ``sync --check`` instead of silently going stale (the Minerva-skills
-  incident: unlinked copies drifted with nothing to see them). Never
-  overwrites authored work.
+- ``adopt-link`` (default; automatic runs too): back the local copy up ONCE
+  and link it subscribed WITHOUT writing a byte of its content. Identical
+  content is ``identical``. Differing content is ``kept-local-linked``: the
+  baseline is the HUB revision, so the check classifies the copy
+  ``local-only`` and ``sync --check`` shows the drift instead of it going
+  stale unseen (the Minerva-skills incident: unlinked copies drifted with
+  nothing to see them). adopt-link NEVER merges and never calls a model: a
+  baseline-less two-way merge concatenates differing lines (design review U1:
+  ``description: Acme writing stylemine``), and authored work must not change
+  without an explicit command (design note §5/§8).
 - ``adopt``: hub wins. The local copy is backed up under ``hub/backups/`` first.
-- ``reconcile``: the existing LLM merge (``apply_items(acknowledge_unknown_baseline)``
+- ``reconcile``: the existing merge (``apply_items(acknowledge_unknown_baseline)``
   for agents/teams, the reviewed skill adoption ``merge`` strategy for skills).
+  Only ever an explicit choice: ``--on-conflict reconcile`` on the CLI, or a
+  ``confirm_replace=true`` tool call. Automatic runs never reach it.
 - ``skip``: report ``conflict-skipped`` with the command that resolves it.
+
+A local item with the org item's name that already follows a DIFFERENT hub
+item is ``linked-elsewhere`` (:mod:`hub_org.catalogue`): reported, never
+retagged, linked or merged, under every ``on_conflict``.
 
 AUTO-PUSH is off unless the caller asks AND the member is an org owner/admin
 AND the service's own ``push_eligibility`` agrees. An ineligible request is
@@ -57,7 +66,7 @@ _PUSH_ROLES = frozenset({"owner", "admin"})
 
 #: Outcomes, stable on the wire (slice B's enrol retries ``failed`` only).
 #: already-linked | pulled | adopted | adopt-linked | reconciled |
-#: conflict-skipped | needs-review | failed
+#: conflict-skipped | linked-elsewhere | needs-review | failed
 
 
 @dataclass(frozen=True)
@@ -226,7 +235,13 @@ def _local_team_fields(run: _Run, local_id: str) -> dict[str, Any]:
     )
 
 
-def _remote_identical(run: _Run, item: CatalogueItem, local: dict[str, Any]) -> bool:
+def _remote_fields(run: _Run, item: CatalogueItem) -> dict[str, Any]:
+    """The hub's fields for ``item``, normalised exactly as the sync check reads them.
+
+    They become the BASELINE of a kept-local link, so they must fingerprint the
+    way ``hub_sync.check`` fingerprints the remote side; otherwise an
+    unchanged hub would read as moved and the link would never settle.
+    """
     from local_operator.hub_sync import provenance as prov
 
     if item.kind == "agent":
@@ -236,26 +251,43 @@ def _remote_identical(run: _Run, item: CatalogueItem, local: dict[str, Any]) -> 
         instructions, description = _fetch_hub_profile(
             run.client, item.hub_id, with_credential=True
         )
-        remote = {"instructions": norm(instructions), "description": norm(description)}
-        return prov.fingerprint_fields("agent", remote) == prov.fingerprint_fields("agent", local)
+        return {"instructions": norm(instructions), "description": norm(description)}
     document = _fetch_team(run, item.hub_id)
-    remote = prov.team_fields(
+    return prov.team_fields(
         description=str(document.get("description") or ""),
         manager=str(document.get("manager") or ""),
         members=document.get("members"),
         instructions=str(document.get("instructions") or ""),
         project=str(document.get("project") or ""),
     )
-    return prov.fingerprint_team(remote) == prov.fingerprint_team(local)
 
 
-def _link_row(run: _Run, item: CatalogueItem, local_id: str, recorded_by: str) -> None:
+def _same(kind: str, local: dict[str, Any], remote: dict[str, Any]) -> bool:
+    from local_operator.hub_sync import provenance as prov
+
+    fingerprint = prov.fingerprint_fields
+    return fingerprint(kind, local) == fingerprint(kind, remote)  # type: ignore[arg-type]
+
+
+def _link_row(
+    run: _Run,
+    item: CatalogueItem,
+    local_id: str,
+    recorded_by: str,
+    baseline: dict[str, Any] | None = None,
+) -> None:
     """Link an existing local agent/team to ``item`` with the given baseline basis.
 
+    ``baseline`` None records the LOCAL fields (``adopt``: local == remote was
+    just proved, or the ``adopt-unknown`` link an explicit merge starts from).
+    ``baseline`` = the hub's fields is the keep-local link: the ancestor is
+    the hub revision, so the check classifies the untouched local copy
+    ``local-only`` and the drift is visible rather than silently stale.
     ``adopt-unknown`` (``prov.UNKNOWN_BASELINE``) is the ``teams link`` shape:
-    the link exists but vouches for no ancestor, so every sync is the
-    conservative two-way merge and a hub deletion can never read as a local
-    one. ``adopt`` is only written when local == remote was just proved.
+    the link vouches for no ancestor, so every sync is the conservative
+    two-way merge and a hub deletion can never read as a local one.
+
+    Only tags and the baseline record are written; the row's content is not.
     """
 
     from local_operator.hub_sync import provenance as prov
@@ -266,16 +298,24 @@ def _link_row(run: _Run, item: CatalogueItem, local_id: str, recorded_by: str) -
         # what makes the link visible to the check; the baseline record written
         # next is what the check reads first (it outranks the tag's hash).
         run.agents._stamp_hub_provenance(agent, item.hub_id)
+        fields = baseline or {
+            "instructions": run.agents.get_agent_system_prompt(local_id),
+            "description": run.agents.get_agent(local_id).description or "",
+        }
         prov.record_agent_baseline(
             run.config_dir,
             local_id=local_id,
             hub_id=item.hub_id,
-            instructions=run.agents.get_agent_system_prompt(local_id),
-            description=run.agents.get_agent(local_id).description or "",
+            instructions=str(fields.get("instructions") or ""),
+            description=str(fields.get("description") or ""),
             tenant_id=run.tenant,
             recorded_by=recorded_by,
             origin=run.origin(),
         )
+        return
+    if baseline is not None:
+        record = prov.make_record("team", local_id, item.hub_id, run.tenant, baseline, recorded_by)
+        prov.attach_origin(run.config_dir, record, run.origin())
         return
     prov.record_team_pull(
         run.config_dir,
@@ -308,14 +348,27 @@ def _conflict_row(
         if item.kind == "agent"
         else _local_team_fields(run, local_id)
     )
-    if on_conflict == "adopt-link" and _remote_identical(run, item, local):
+    if on_conflict == "adopt-link":
+        # Never a merge, never a model (module docstring): one backup, then a
+        # link whose baseline is the hub's revision. The local row is not
+        # written, so identical content reads up-to-date and differing content
+        # reads local-only to the check.
+        remote = _remote_fields(run, item)
+        identical = _same(item.kind, local, remote)
         backup = prov.write_backup(
             run.config_dir, item.kind, local_id, local, "org-adopt-link"  # type: ignore[arg-type]
         )
-        _link_row(run, item, local_id, "adopt")
+        _link_row(
+            run,
+            item,
+            local_id,
+            "adopt" if identical else "adopt-keep-local",
+            baseline=None if identical else remote,
+        )
+        result = "identical" if identical else "kept-local-linked"
         return (
-            PullOutcome(item.kind, item.hub_id, item.name, "adopt-linked", "identical", backup),
-            _adopted(item, local_name, "identical", backup),
+            PullOutcome(item.kind, item.hub_id, item.name, "adopt-linked", result, backup),
+            _adopted(item, local_name, result, backup),
         )
     _link_row(run, item, local_id, prov.UNKNOWN_BASELINE)
     if on_conflict == "adopt":
@@ -327,28 +380,16 @@ def _conflict_row(
             PullOutcome(item.kind, item.hub_id, item.name, outcome, _merge_detail(merged), backup),
             _adopted(item, local_name, "hub-wins", backup) if outcome == "adopted" else None,
         )
-    # adopt-link (differing) and reconcile share the merge; they differ only in
-    # what an unsettled merge means. ``reconcile`` asked for a merge and reports
-    # it as needing review. ``adopt-link`` keeps the link so the drift is
-    # visible to ``sync --check`` (its whole point).
-    backup = prov.write_backup(
-        run.config_dir, item.kind, local_id, local, "org-adopt-link"  # type: ignore[arg-type]
-    )
+    # ``reconcile``: the explicit merge. ``apply_one`` writes its own pre-apply
+    # backup (``prov.write_backup``) before it changes anything, so this path
+    # adds none of its own: one restore point per adopt (UX review U8).
     merged = _apply(run, item, local_name, acknowledge_unknown_baseline=True)
     settled = merged is not None and merged.applied
-    backup = getattr(merged, "backup", None) or backup
-    if settled:
-        outcome = "reconciled"
-        result = "reconciled"
-    elif on_conflict == "adopt-link":
-        outcome = "adopt-linked"
-        result = "kept-local-linked"
-    else:
-        outcome = "needs-review"
-        result = None
+    backup = getattr(merged, "backup", None)
+    outcome = "reconciled" if settled else "needs-review"
     return (
         PullOutcome(item.kind, item.hub_id, item.name, outcome, _merge_detail(merged), backup),
-        _adopted(item, local_name, result, backup) if result else None,
+        _adopted(item, local_name, "reconciled", backup) if settled else None,
     )
 
 
@@ -460,16 +501,20 @@ def _skill_conflict(
             "--on-conflict adopt --yes` takes the hub copy (your folder is backed up)",
         )
 
-    strategy = {"adopt": "take-hub", "reconcile": "merge", "adopt-link": "merge"}[on_conflict]
+    if on_conflict == "adopt-link":
+        # ``keep-local`` links WITHOUT touching authored bytes (the adoption
+        # service writes no document for it) and records the HUB revision as
+        # the baseline, so `skills sync --check` reports the drift as
+        # local-only. One preview, so one ``skill-adopt-*`` snapshot (U8).
+        # Whether the sides were identical is the classification the adoption
+        # itself just recorded on the link: none (equal) or local-only.
+        kept = _adopt_document(run, item, "keep-local", subscribe)
+        drift = ((kept.get("link") or {}).get("pull") or {}).get("classification")
+        result_name = "kept-local-linked" if drift else "identical"
+        return done("adopt-linked", result_name, _skill_backup(kept), result_name)
+    strategy = {"adopt": "take-hub", "reconcile": "merge"}[on_conflict]
     result = _adopt_document(run, item, strategy, subscribe)
     if result.get("_needs_choice"):
-        if on_conflict == "adopt-link":
-            # Keep-local links WITHOUT touching authored bytes; the baseline is
-            # the hub revision, so `skills sync --check` reports the drift.
-            kept = _adopt_document(run, item, "keep-local", subscribe)
-            return done(
-                "adopt-linked", "kept-local-linked", _skill_backup(kept) or _skill_backup(result)
-            )
         return done(
             "needs-review",
             None,
@@ -545,6 +590,9 @@ def _apply_policy(
 
 
 def _wanted(item: CatalogueItem, names: Sequence[str] | None) -> bool:
+    """Exact hub id or exact name. Callers holding user input resolve it first
+    (:func:`hub_org.catalogue.resolve_reference`: id, name, unique prefix) and
+    pass the resolved ids, so a prefix never reaches this filter."""
     if not names:
         return True
     folded = {str(n).strip().casefold() for n in names}
@@ -596,6 +644,7 @@ def pull_all(
         team_registry=team_registry,
         allow_llm=allow_llm,
     )
+    _settle_interrupted_adoptions(run)
     items: list[PullOutcome] = []
     adopted: list[dict[str, Any]] = []
     errors: dict[str, str] = {}
@@ -619,6 +668,7 @@ def pull_all(
             if outcome.outcome not in (
                 "already-linked",
                 "conflict-skipped",
+                "linked-elsewhere",
                 "failed",
                 "needs-review",
             ):
@@ -639,12 +689,41 @@ def pull_all(
     return OrgPullReport(items=tuple(items), adopted=tuple(adopted), errors=errors)
 
 
+def _settle_interrupted_adoptions(run: _Run) -> None:
+    """Restore a skill an earlier, interrupted bundle adoption hid, before indexing.
+
+    Without this the catalogue would read the hidden folder's alias as absent
+    for one run. Zero wait on the lease: a busy lease means a live install,
+    which settles its own move, and ``install_skill`` recovers again anyway.
+    """
+    from local_operator.hub_sync import service as svc
+
+    try:
+        with svc.exclusive(run.ctx, wait_s=0.0):
+            svc.recover_bundle_adoption_asides(run.config_dir)
+    except Exception:  # noqa: BLE001 - HubBusy or I/O: the per-item install retries it
+        logger.debug("adoption recovery skipped", exc_info=True)
+
+
 def _one(
     run: _Run, item: CatalogueItem, *, on_conflict: OnConflict, subscribe: bool
 ) -> tuple[PullOutcome, dict[str, Any] | None]:
     try:
         if item.local == "linked":
             return PullOutcome(item.kind, item.hub_id, item.name, "already-linked"), None
+        if item.local == "linked-elsewhere":
+            # Never adopted under any ``on_conflict`` (module docstring).
+            return (
+                PullOutcome(
+                    item.kind,
+                    item.hub_id,
+                    item.name,
+                    "linked-elsewhere",
+                    f"the local {item.kind} {item.local_name!r} already follows another hub "
+                    "item; left as it is",
+                ),
+                None,
+            )
         if item.local == "absent":
             if item.kind == "agent":
                 return _pull_agent(run, item), None

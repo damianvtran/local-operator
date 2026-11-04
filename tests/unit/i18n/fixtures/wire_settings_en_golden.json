@@ -373,7 +373,7 @@
  "wire.settings.hub_org_auto_enrol.choice.false.label": "off",
  "wire.settings.hub_org_auto_enrol.choice.true.description": "add new items automatically",
  "wire.settings.hub_org_auto_enrol.choice.true.label": "on",
- "wire.settings.hub_org_auto_enrol.help": "Pull new org agents, teams and skills and keep them subscribed.",
+ "wire.settings.hub_org_auto_enrol.help": "Pull new organization agents, teams and skills and keep them subscribed.",
  "wire.settings.hub_org_auto_enrol.label": "Add new organization items",
  "wire.settings.keymap.description": "Keys for starting and resuming conversations. Press enter on a row, then press the key you want.",
  "wire.settings.keymap.title": "Hotkeys",

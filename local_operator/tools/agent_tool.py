@@ -1932,11 +1932,18 @@ async def _op_org(
 
     config_dir = _org_config_dir(context)
     if not _org_eligible(config_dir):
+        from local_operator.hub_org.cli import signed_out
+
+        # Model-facing (English by design): the cause decides the remedy (U5).
+        cause = (
+            "you're not signed in to Radient (the user runs `lop login radient`)"
+            if config_dir is None or signed_out(config_dir)
+            else "this account isn't in a team-plan organization"
+        )
         return _error(
             tool_call_id,
             "agent",
-            "Organization catalogues are a Radient Team feature; this account isn't in a "
-            "team-plan organization.",
+            f"Organization catalogues are a Radient Team feature; {cause}.",
         )
     assert config_dir is not None
     kinds = tuple(k.strip() for k in (params.kinds or "agent,skill,team").split(",") if k.strip())
@@ -1962,7 +1969,12 @@ async def _op_org(
     tenant, orgs = resolve_tenant(config_dir, params.org or None)
     if tenant is None:
         listed = ", ".join(f"{o.tenant_id} ({o.tenant_name})" for o in orgs)
-        return _error(tool_call_id, "agent", f"several organizations; pass org= one of: {listed}")
+        lead = (
+            f"no eligible organization matches org={params.org!r}"
+            if (params.org or "").strip()
+            else "several organizations"
+        )
+        return _error(tool_call_id, "agent", f"{lead}; pass org= one of: {listed}")
     registry = _registry(context)
     if params.op == "org_pull" and getattr(registry, "session_registry", None) is not None:
         from local_operator.profile_scope import (
@@ -1978,7 +1990,7 @@ async def _op_org(
         )
         if authorized_by is None:
             return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
-    names = [params.name] if params.name and params.name.strip() else None
+    ref = (params.name or "").strip()
     query = (params.query or "").strip().casefold()
 
     def run() -> str:
@@ -2020,6 +2032,31 @@ async def _op_org(
                 )
             lines += [f"{k} list failed: {c}" for k, c in result.errors.items()]
             return "\n".join(lines) or "the organization shares nothing of these kinds yet"
+        header: list[str] = []
+        names: list[str] | None = None
+        if ref:
+            # The CLI's rule, not a second one (UX review U2, QA Q1): exact id,
+            # exact name, then a unique prefix; an ambiguous prefix REFUSES
+            # with the candidates rather than guessing. The chosen id is named.
+            items = cat.list_catalogue(
+                client, tenant, kinds, config_dir=config_dir, agent_registry=account
+            )
+            try:
+                item = cat.resolve_reference(items, ref)
+            except cat.ReferenceError_ as error:
+                if not error.candidates:
+                    scope = "/".join(kinds)
+                    return f"error: no {scope} item in organization {tenant} matches {ref!r}."
+                listed = "; ".join(
+                    f"{c.kind} {c.name} (id {c.hub_id})" for c in error.candidates[:_ORG_ROW_CAP]
+                )
+                return (
+                    f"error: {ref!r} is ambiguous; pass name= one of these ids or a longer "
+                    f"name: {listed}"
+                )
+            names = [item.hub_id]
+            if item.hub_id != ref:
+                header.append(f"resolved {ref!r} → {item.kind} {item.name} (id {item.hub_id})")
         report = pull_all(
             manager,
             tenant,
@@ -2031,8 +2068,8 @@ async def _op_org(
             client=client,
             agent_registry=account,
         )
-        lines = [
-            f"{i.kind} {i.name}: {i.outcome}" + (f" ({i.detail})" if i.detail else "")
+        lines = header + [
+            f"{i.kind} {i.name} id={i.hub_id}: {i.outcome}" + (f" ({i.detail})" if i.detail else "")
             for i in report.items
         ]
         lines += [
