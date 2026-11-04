@@ -1,4 +1,4 @@
-"""The ``deliver`` pin's call-time notice (bash/eval): one line, only when a pin is refused.
+"""The ``deliver`` pin's call-time notice (bash): one line, only when a pin is refused.
 
 WHY AT CALL TIME. A pin is the agent saying "show this under my answer". The row's
 ``withheld`` notice tells the OPERATOR when that failed, but only after the turn; the agent
@@ -27,12 +27,12 @@ _REASON_TEXT: Final[Mapping[str, str]] = {
 #: Names listed per reason before ``+N``; the line must stay one short line.
 _NAMES_SHOWN: Final = 3
 
-#: The ``deliver`` field's schema description, shared by bash and eval so the two tools
-#: advertise one contract. Kept to one line: the schema rides every request.
-#: The schema rides EVERY request of every session (the start-context budget guard), so
-#: this is the shortest wording that still says what a pin does; path forms live in
-#: guide://highlights.
-DELIVER_DESCRIPTION: Final = "Files to show under your answer."
+#: The ``deliver`` field's schema description. The schema rides EVERY request of every
+#: session and the start-context budget guard has ~50 tokens to spare on the child arm,
+#: so the pin is advertised on ``bash`` only, in the shortest wording that still says what
+#: it does; path forms and the eval route (name the file in the answer) live in
+#: guide://highlights. ``items`` stays: strict-schema providers reject a bare array.
+DELIVER_DESCRIPTION: Final = "Files to show."
 
 
 def _deny_prefixes() -> tuple[str, ...]:
@@ -99,7 +99,7 @@ def refusal_line(
 
 
 def with_deliver_notice(execute: Any, tool: str) -> Any:
-    """Wrap a bash/eval ``execute`` so a refused ``deliver`` pin adds the one-line notice.
+    """Wrap the bash ``execute`` so a refused ``deliver`` pin adds the one-line notice.
 
     Checked AFTER the call: a pin routinely names the file the same command creates. A
     background call is skipped -- its files do not exist yet when the job id returns, and a
