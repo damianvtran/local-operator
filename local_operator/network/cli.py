@@ -2891,7 +2891,13 @@ def _cmd_credential_inherit(args: argparse.Namespace) -> int:
         return _emit(args, {"ok": True, **report}, [*report["lines"], report["scope"]])
     if getattr(args, "request_approval", False):
         requested = inheritance.request(
-            record.network_id, identity.device_id, device, provider, account=account, org=org
+            record.network_id,
+            identity.device_id,
+            device,
+            provider,
+            account=account,
+            org=org,
+            filed_by_session=_env_filing_session(),
         )
         return _emit(
             args,
@@ -3035,7 +3041,12 @@ def _cmd_credential(args: argparse.Namespace) -> int:
 
         if getattr(args, "request_approval", False):
             requested = finite_share.request(
-                record.network_id, identity.device_id, device, key, scope
+                record.network_id,
+                identity.device_id,
+                device,
+                key,
+                scope,
+                filed_by_session=_env_filing_session(),
             )
             return _emit(
                 args,
@@ -9903,6 +9914,33 @@ def _host_key_for_request(host: str, user: str, given: str) -> str:
     return found.host_key_fp
 
 
+def _env_filing_session() -> str:
+    """The audit-only ``LOCAL_OPERATOR_SESSION_ID`` a tool child inherits, or ``""``.
+
+    For the credential request factories, whose own ``--session`` flag is the lend's
+    TARGET scope and must never be read as attribution (nor this as a target).
+    """
+    from local_operator.secrets.access import session_id
+
+    return session_id() or ""
+
+
+def _filing_session(args: argparse.Namespace) -> str:
+    """The session an approvals request/withdraw is filed FROM: ``--session``, else
+    the ``LOCAL_OPERATOR_SESSION_ID`` a tool child inherits, else ``""``.
+
+    ATTRIBUTION ONLY (``secrets.access.SESSION_ID_ENV``: audit, never authority).
+    It names who asked on the card and is the key ``withdraw`` matches against the
+    filer, which is exactly the store's documented, device-local notion of "the
+    requester" — the same value an explicit ``--session`` always supplied. It
+    grants, signs and approves nothing, and the credential ``--session`` flags (a
+    lend's TARGET scope) do not read it. An explicit flag wins; an empty env is the
+    legacy empty attribution, unchanged.
+    """
+    explicit = str(getattr(args, "session", "") or "")
+    return explicit or _env_filing_session()
+
+
 def _cmd_approvals_request(args: argparse.Namespace) -> int:
     """File the onboarding request: the card an operator will be asked to sign."""
     from local_operator.network.onboard_approvals import request_device
@@ -9919,7 +9957,7 @@ def _cmd_approvals_request(args: argparse.Namespace) -> int:
         role=args.role,
         credential_ref=args.credential_ref,
         request_id=args.request_id,
-        session_id=args.session,
+        session_id=_filing_session(args),
         surface="cli",
         unattended=not args.no_unattended,
         grants=(tuple(args.grant) if args.grant else None),
@@ -10020,7 +10058,7 @@ def _cmd_approvals_withdraw(args: argparse.Namespace) -> int:
     record = approval_store.withdraw(
         args.approval,
         requested_by={
-            "session_id": args.session,
+            "session_id": _filing_session(args),
             "device_id": asked_by_device,
             "surface": "cli",
         },

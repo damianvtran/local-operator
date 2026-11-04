@@ -88,6 +88,7 @@ from local_operator.tools.builtin import (
     _safe_cwd,
     _text,
     _validation_error,
+    session_id_env_injection,
     spill_truncate,
 )
 from local_operator.tools.confinement import confinement_of
@@ -373,6 +374,13 @@ def _session_key(context: ToolContext | None) -> str:
     if context is None:
         return "no-context"
     return context.session_id or f"ctx-{id(context):x}"
+
+
+def _session_id_of(context: ToolContext | None) -> str:
+    """The context's REAL session id, or ``""`` — never :func:`_session_key`'s
+    ``ctx-``/``no-context`` fallback, which names a kernel, not a session."""
+    raw = getattr(context, "session_id", "") if context is not None else ""
+    return raw if isinstance(raw, str) else ""
 
 
 def _session_dir_of(context: ToolContext | None) -> str | None:
@@ -679,6 +687,7 @@ async def _spawn(
     session_key: str = "",
     scratchpad_dir: str | None = None,
     managed: bool = False,
+    session_id: str = "",
 ) -> _Kernel:
     """Start a worker with platform-native process-tree ownership.
 
@@ -773,6 +782,10 @@ async def _spawn(
                 # inherits the environment for its whole life, so an inherited
                 # path would outlive the session that set it.
                 **scratchpad_env_injection(ensure_scratchpad_dir(scratchpad_dir)),
+                # Audit attribution for a `lop` the cell runs, on the bash
+                # tool's three arms. The worker is per session, so the id is
+                # this kernel's own for its whole life.
+                **session_id_env_injection(session_id),
             },
         )
         spawn_options["env"] = env
@@ -1078,7 +1091,12 @@ async def _run_in_background(
             "attached; re-run without background.",
         )
     try:
-        kernel = await _spawn(_safe_cwd(context), _session_key(context), scratchpad_dir_of(context))
+        kernel = await _spawn(
+            _safe_cwd(context),
+            _session_key(context),
+            scratchpad_dir_of(context),
+            session_id=_session_id_of(context),
+        )
     except OSError as exc:
         return _error(tool_call_id, "eval", f"failed to start Python kernel: {exc}")
 
@@ -1349,6 +1367,7 @@ async def execute_eval(
                 key,
                 scratchpad_dir_of(context),
                 managed=_kernel_is_managed(context),
+                session_id=_session_id_of(context),
             )
         except OSError as exc:
             _ACTIVE_KERNELS.discard(key)

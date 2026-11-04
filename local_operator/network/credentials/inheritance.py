@@ -351,6 +351,7 @@ def request(
     account: str = "",
     org: str = "",
     root: Path | None = None,
+    filed_by_session: str = "",
 ) -> dict[str, Any]:
     """File the card for operator signature. Writes ONLY the request record."""
     provider = provider.strip().lower()
@@ -400,7 +401,13 @@ def request(
     result = approvals.create_request(
         kind=approvals.KIND_DEVICE_ONBOARD,
         request_id=approvals.new_request_id(),
-        requested_by={"device_id": owner, "session_id": "", "surface": "cli"},
+        # Attribution stamped BEFORE the digest is computed, shape-pinned
+        # (``approvals.filing_session``) as the finite factory does; never authority.
+        requested_by={
+            "device_id": owner,
+            "session_id": approvals.filing_session(filed_by_session),
+            "surface": "cli",
+        },
         device={
             "device_id": recipient,
             "name": _plain(subject["member"].name),
