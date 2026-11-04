@@ -1064,8 +1064,18 @@ def serialize_serving(pairs: "Sequence[tuple[str, str]] | None") -> str | None:
     return json.dumps(sorted([str(p), str(m)] for p, m in set(pairs))) if pairs else None
 
 
+def _owner_release_sha256() -> str:
+    from local_operator.team_bridge.hold_release import OWNER_RELEASE_SHA256
+
+    return OWNER_RELEASE_SHA256
+
+
 def receipt_authority(
-    owner: OwnerSnapshot, policy: Mapping[str, Any], receipt: Mapping[str, Any]
+    owner: OwnerSnapshot,
+    policy: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    release: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None, str]:
     """The PURE authority checks a stored receipt must pass (S-RSA-3).
 
@@ -1076,6 +1086,18 @@ def receipt_authority(
     shown. A second copy of these checks is how the two drift apart, and the
     drift is the defect this slice exists to close: one surface admitting a
     receipt the other holds.
+
+    OWNER-RELEASE RECEIPTS (B4b DESIGN §3.2 step 6; DECISIONS D7, S-8). A receipt
+    whose template is ``hold_release.OWNER_RELEASE_SHA256`` was not written by
+    the screening model, so the template/model equality with the published
+    policy cannot hold for it. It skips ONLY that equality, and ONLY when the
+    caller supplies the message's ``release`` row with ``verified`` computed in
+    THIS process by a cryptographic check against the operator anchor
+    (``hold_release.verify_row``; never a stored flag) and naming the same body,
+    envelope and word. Without that it is DAMAGE (``proof_corrupt``): this is
+    the one place a mistake would turn a hold into an allow (DESIGN §9.4).
+    Revision, epoch and creator generation are still enforced, exactly as for a
+    model verdict, so re-enrolment makes both kinds stale the same way.
 
     ALL of them are required. The PUBLISHED policy must still equal the
     receipt's own template/model/admission_revision AND its epoch, because a
@@ -1098,7 +1120,19 @@ def receipt_authority(
     never rendered to a caller: the machine-readable half stays the closed code.
     """
 
-    if (
+    if receipt.get("template_sha256") == _owner_release_sha256():
+        word = "deliver" if receipt.get("verdict") == "allow" else "discard"
+        if not (
+            isinstance(release, Mapping)
+            and release.get("verified") is True
+            and release.get("word") == word
+            and release.get("body_sha256") == receipt.get("body_sha256")
+            and release.get("envelope_digest") == receipt.get("envelope_digest")
+        ):
+            return None, RECEIPT_CORRUPT, "owner-release receipt without a verified release"
+        if policy.get("revision") != receipt.get("admission_revision"):
+            return None, RECEIPT_STALE, ""
+    elif (
         policy.get("template_sha256") != receipt.get("template_sha256")
         or receipt.get("model") not in policy_serving_models(policy)
         or policy.get("revision") != receipt.get("admission_revision")
@@ -2836,12 +2870,29 @@ class Store:
                 "WHERE owner_key = ?",
                 (_owner_key(owner),),
             ).fetchall()
+            # B4b DESIGN §2.4: a work-scope hold has its OWN per-message notice,
+            # so it leaves this count ONLY once that notice was actually
+            # recorded (``notified_at``). A refused notice keeps it here, so no
+            # held message can be invisible to both alerts.
+            try:
+                noticed = {
+                    str(r["message_id"])
+                    for r in conn.execute(
+                        "SELECT message_id FROM work_scope_decisions WHERE owner_key = ? "
+                        "AND notified_at IS NOT NULL",
+                        (_owner_key(owner),),
+                    ).fetchall()
+                }
+            except sqlite3.OperationalError:
+                noticed = set()  # a store that predates B4b has no such notice
         excluded = {HOLD_OPEN_CHIEF_OF_STAFF, "bridge_off"}
         held: dict[str, float] = {}
         for row in rows:
             if row["hold_code"] in excluded:
                 continue
             bare = screening_hold_message_id(str(row["message_id"]))
+            if bare in noticed:
+                continue
             if not is_conversation_message_id(bare):
                 continue
             created = _status_timestamp(row["created_at"])
@@ -3720,6 +3771,14 @@ class Store:
                     "receipt": dict(receipt_row) if receipt_row is not None else None,
                     "intent": intent,
                     "hold": dict(hold_row) if hold_row is not None else None,
+                    # B4b: read only for an owner-release receipt, and verified
+                    # cryptographically here, in-process (never a stored flag).
+                    "release": (
+                        self._verified_release(conn, key, message_id)
+                        if receipt_row is not None
+                        and receipt_row["template_sha256"] == _owner_release_sha256()
+                        else None
+                    ),
                 }
             return snapshot
 
@@ -7329,3 +7388,377 @@ class Store:
                 (_owner_key(owner),),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    # -- B4b owner release (hold_release.py; DESIGN §3.3, DECISIONS D4/D7) -----
+    #
+    # Two ADDITIVE tables, created on first use like the answer cache and the
+    # budget episodes (``IF NOT EXISTS`` under the caller's write lock): an
+    # older binary sharing this state file never names them, no schema stamp
+    # moves, and an absent table reads as "no decision, no release" — the state
+    # every message had before B4b. Neither stores a body, label or reason.
+    #
+    # ``work_scope_decisions``: the screener's decision for ONE converted hold,
+    # written at decision time (D4: eligibility comes from the hop that ANSWERED
+    # and is never recomputed from the session or default model later). Kept
+    # apart from ``screening_holds`` because a receipt commit deletes the hold
+    # row (S-7: the audit must survive the release), and the hold row's
+    # composite key spellings are the connector's business.
+    #
+    # ``owner_releases``: the signed, write-once Deliver/Discard record.
+
+    _WORK_SCOPE_DDL = (
+        "CREATE TABLE IF NOT EXISTS work_scope_decisions ("
+        "owner_key TEXT NOT NULL, message_id TEXT NOT NULL, "
+        "conversation_id TEXT NOT NULL DEFAULT '', "
+        "body_sha256 TEXT NOT NULL, envelope_digest TEXT NOT NULL, "
+        "hold_code TEXT NOT NULL, screener_provider TEXT NOT NULL, "
+        "screener_model TEXT NOT NULL, template_sha256 TEXT NOT NULL, "
+        "prompt_version TEXT NOT NULL, categories TEXT NOT NULL, "
+        "policy_epoch INTEGER NOT NULL, creator_generation INTEGER NOT NULL, "
+        "sender_digest TEXT NOT NULL DEFAULT '', eligible INTEGER NOT NULL, "
+        "ineligible_reason TEXT, created_at REAL NOT NULL, "
+        "notified_at REAL, cleared_at REAL, "
+        "PRIMARY KEY (owner_key, message_id))",
+        "CREATE TABLE IF NOT EXISTS owner_releases ("
+        "owner_key TEXT NOT NULL, message_id TEXT NOT NULL, "
+        "conversation_id TEXT NOT NULL, body_sha256 TEXT NOT NULL, "
+        "envelope_digest TEXT NOT NULL, hold_code TEXT NOT NULL, "
+        "screener_provider TEXT NOT NULL, screener_model TEXT NOT NULL, "
+        "template_sha256 TEXT NOT NULL, categories TEXT NOT NULL, "
+        "word TEXT NOT NULL, decided_at REAL NOT NULL, account_id TEXT NOT NULL, "
+        "key_id TEXT NOT NULL, signature TEXT NOT NULL, surface TEXT NOT NULL, "
+        "creator_generation INTEGER NOT NULL, outcome TEXT NOT NULL, outcome_at REAL, "
+        "PRIMARY KEY (owner_key, message_id))",
+    )
+
+    @classmethod
+    def _ensure_work_scope_tables(cls, conn: sqlite3.Connection) -> None:
+        for statement in cls._WORK_SCOPE_DDL:
+            conn.execute(statement)
+
+    def record_work_scope_decision(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        conversation_id: str = "",
+        body_sha256: str,
+        envelope_digest: str,
+        screener_provider: str,
+        screener_model: str,
+        template_sha256: str,
+        prompt_version: str,
+        categories: Sequence[str],
+        policy_epoch: int,
+        sender_digest: str,
+        now: float,
+    ) -> dict[str, Any]:
+        """Write the decision row ONCE; a re-drive keeps the first (eligibility is fixed).
+
+        Eligibility is computed HERE, in the same write transaction as the
+        per-sender budget count, so two passes cannot both spend the last unit.
+        """
+
+        from local_operator.team_bridge import hold_release as hr
+
+        key = _owner_key(owner)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_work_scope_tables(conn)
+            existing = conn.execute(
+                "SELECT * FROM work_scope_decisions WHERE owner_key = ? AND message_id = ?",
+                (key, message_id),
+            ).fetchone()
+            if existing is not None:
+                return dict(existing)
+            reason: str | None = None
+            if not hr.eligible_screener(screener_provider, screener_model):
+                reason = hr.INELIGIBLE_SCREENER
+            else:
+                spent = conn.execute(
+                    "SELECT COUNT(*) FROM work_scope_decisions WHERE owner_key = ? "
+                    "AND sender_digest = ? AND eligible = 1 AND created_at > ?",
+                    (key, sender_digest, float(now) - hr.SENDER_BUDGET_WINDOW_S),
+                ).fetchone()[0]
+                if int(spent) >= hr.SENDER_BUDGET:
+                    reason = hr.INELIGIBLE_BUDGET
+            conn.execute(
+                "INSERT INTO work_scope_decisions (owner_key, message_id, conversation_id, "
+                "body_sha256, "
+                "envelope_digest, hold_code, screener_provider, screener_model, "
+                "template_sha256, prompt_version, categories, policy_epoch, "
+                "creator_generation, sender_digest, eligible, ineligible_reason, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    key,
+                    message_id,
+                    conversation_id,
+                    body_sha256,
+                    envelope_digest,
+                    hr.WORK_SCOPE_HOLD,
+                    screener_provider,
+                    screener_model,
+                    template_sha256,
+                    prompt_version,
+                    json.dumps(sorted(categories)),
+                    int(policy_epoch),
+                    owner.enrollment_generation,
+                    sender_digest,
+                    0 if reason else 1,
+                    reason,
+                    float(now),
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM work_scope_decisions WHERE owner_key = ? AND message_id = ?",
+                (key, message_id),
+            ).fetchone()
+            return dict(row)
+
+    def _work_scope_rows(self, sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
+        """Read-only over an EXISTING store; an absent table reads empty."""
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return []
+            try:
+                return [dict(row) for row in conn.execute(sql, params).fetchall()]
+            except sqlite3.OperationalError:
+                return []
+
+    def work_scope_decision(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
+        rows = self._work_scope_rows(
+            "SELECT * FROM work_scope_decisions WHERE owner_key = ? AND message_id = ? "
+            "AND creator_generation = ?",
+            (_owner_key(owner), message_id, owner.enrollment_generation),
+        )
+        return rows[0] if rows else None
+
+    def work_scope_decisions(self, owner: OwnerSnapshot) -> list[dict[str, Any]]:
+        return self._work_scope_rows(
+            "SELECT * FROM work_scope_decisions WHERE owner_key = ? AND creator_generation = ? "
+            "ORDER BY created_at",
+            (_owner_key(owner), owner.enrollment_generation),
+        )
+
+    def _mark_work_scope(self, owner: OwnerSnapshot, message_id: str, column: str, now: float):
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_work_scope_tables(conn)
+            conn.execute(
+                f"UPDATE work_scope_decisions SET {column} = ? WHERE owner_key = ? "
+                "AND message_id = ?",
+                (float(now), _owner_key(owner), message_id),
+            )
+
+    def mark_work_scope_notified(self, owner: OwnerSnapshot, message_id: str, *, now: float):
+        self._mark_work_scope(owner, message_id, "notified_at", now)
+
+    def mark_work_scope_cleared(self, owner: OwnerSnapshot, message_id: str, *, now: float):
+        self._mark_work_scope(owner, message_id, "cleared_at", now)
+
+    def standing_work_scope_notices(self, owner: OwnerSnapshot) -> int:
+        rows = self._work_scope_rows(
+            "SELECT COUNT(*) AS n FROM work_scope_decisions WHERE owner_key = ? "
+            "AND notified_at IS NOT NULL AND cleared_at IS NULL",
+            (_owner_key(owner),),
+        )
+        return int(rows[0]["n"]) if rows else 0
+
+    def unnotified_work_scope_holds(self, owner: OwnerSnapshot) -> int:
+        rows = self._work_scope_rows(
+            "SELECT COUNT(*) AS n FROM work_scope_decisions WHERE owner_key = ? "
+            "AND eligible = 1 AND notified_at IS NULL AND cleared_at IS NULL",
+            (_owner_key(owner),),
+        )
+        return int(rows[0]["n"]) if rows else 0
+
+    def screening_hold_rows(self, owner: OwnerSnapshot) -> list[dict[str, Any]]:
+        """Every hold row for the LIVE owner, read-only (the B4b holds list).
+
+        Metadata only — stored key, code, creation time. An absent store or a
+        fenced owner reads empty, and nothing is created.
+        """
+
+        with self._connect_readonly() as conn:
+            if conn is None:
+                return []
+            if self._live_generation(conn, owner) != owner.enrollment_generation:
+                return []
+            return [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT message_id, hold_code, created_at FROM screening_holds "
+                    "WHERE owner_key = ?",
+                    (_owner_key(owner),),
+                ).fetchall()
+            ]
+
+    def _verified_release(
+        self, conn: sqlite3.Connection, key: str, message_id: str
+    ) -> dict[str, Any] | None:
+        """The release row with ``verified`` computed NOW against the anchor (S-8)."""
+
+        from local_operator.team_bridge import hold_release as hr
+
+        try:
+            row = conn.execute(
+                "SELECT * FROM owner_releases WHERE owner_key = ? AND message_id = ?",
+                (key, message_id),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if row is None:
+            return None
+        release = dict(row)
+        spki, _key_id = hr.anchor_spki(self.config_dir)
+        release["verified"] = hr.verify_row(release, spki)
+        return release
+
+    def owner_release(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
+        """The release row for this message under the LIVE generation, or ``None``."""
+
+        rows = self._work_scope_rows(
+            "SELECT * FROM owner_releases WHERE owner_key = ? AND message_id = ? "
+            "AND creator_generation = ?",
+            (_owner_key(owner), message_id, owner.enrollment_generation),
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        row["owner_key"] = _owner_key(owner)
+        return row
+
+    def record_owner_release(self, owner: OwnerSnapshot, row: Mapping[str, Any]) -> dict[str, Any]:
+        """WRITE-ONCE per (owner, message). Same word again → the existing row;
+        the other word → ``already_decided``. The caller verified the signature."""
+
+        key = _owner_key(owner)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_work_scope_tables(conn)
+            existing = conn.execute(
+                "SELECT * FROM owner_releases WHERE owner_key = ? AND message_id = ?",
+                (key, row["message_id"]),
+            ).fetchone()
+            if existing is not None:
+                if existing["word"] != row["word"]:
+                    raise StoreRefused("already_decided", "this hold was already decided")
+                return dict(existing)
+            columns = (
+                "message_id", "conversation_id", "body_sha256", "envelope_digest",
+                "hold_code", "screener_provider", "screener_model", "template_sha256",
+                "categories", "word", "decided_at", "account_id", "key_id", "signature",
+                "surface",
+            )  # fmt: skip
+            conn.execute(
+                "INSERT INTO owner_releases (owner_key, creator_generation, outcome, "
+                + ", ".join(columns)
+                + ") VALUES (?,?,?,"
+                + ",".join("?" for _ in columns)
+                + ")",
+                (key, owner.enrollment_generation, "pending", *(row[c] for c in columns)),
+            )
+            return dict(
+                conn.execute(
+                    "SELECT * FROM owner_releases WHERE owner_key = ? AND message_id = ?",
+                    (key, row["message_id"]),
+                ).fetchone()
+            )
+
+    def set_owner_release_outcome(
+        self, owner: OwnerSnapshot, message_id: str, outcome: str, *, now: float
+    ) -> None:
+        """``admitted`` | ``rejected`` | ``refused:<closed code>``; first terminal wins."""
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_work_scope_tables(conn)
+            conn.execute(
+                # Only a non-final outcome moves: ``admitted``/``rejected`` are
+                # terminal and a late replay must not rewrite them.
+                "UPDATE owner_releases SET outcome = ?, outcome_at = ? WHERE owner_key = ? "
+                "AND message_id = ? AND (outcome = 'pending' OR outcome LIKE 'refused:%')",
+                (outcome[:64], float(now), _owner_key(owner), message_id),
+            )
+
+    def commit_owner_release(
+        self,
+        owner: OwnerSnapshot,
+        message_id: str,
+        *,
+        receipt: ScreeningReceipt,
+        envelope_digest: str,
+        expected_epoch: int,
+    ) -> None:
+        """Commit an owner-release receipt: ``finish_screening``'s fences, no attempt.
+
+        Live owner and generation, the policy epoch captured before the
+        consume, write-once per message. NOT the attempt check: a release spends
+        no screening budget, so there is no reserved attempt to name (DESIGN
+        §3.2 step 4). The receipt's template is ``OWNER_RELEASE_SHA256`` and its
+        admission revision is the live policy's, so every downstream fence that
+        reads the epoch and generation treats it exactly as a model verdict.
+        Deletes the message's hold rows, as a receipt commit does.
+        """
+
+        try:
+            receipt.validated()
+        except TeamBridgeTypeError as error:
+            raise StoreRefused("invalid_receipt", str(error)) from error
+        key = _owner_key(owner)
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            policy = conn.execute(
+                "SELECT epoch, revision FROM screening_policy WHERE owner_key = ?", (key,)
+            ).fetchone()
+            if policy is None or int(policy["epoch"]) != int(expected_epoch):
+                raise StoreRefused("policy_stale", "accepted policy changed before the release")
+            existing = conn.execute(
+                "SELECT verdict, template_sha256, body_sha256 FROM screening_receipts "
+                "WHERE owner_key = ? AND message_id = ?",
+                (key, message_id),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["verdict"] != receipt.verdict
+                    or existing["template_sha256"] != receipt.template_sha256
+                    or existing["body_sha256"] != receipt.body_sha256
+                ):
+                    raise StoreRefused("write_once_conflict", message_id)
+            else:
+                conn.execute(
+                    "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
+                    "template_sha256, prompt_version, model, verdict, categories, "
+                    "envelope_digest, admission_revision, policy_epoch, "
+                    "creator_generation, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        key,
+                        message_id,
+                        receipt.body_sha256,
+                        receipt.template_sha256,
+                        receipt.prompt_version,
+                        receipt.model,
+                        receipt.verdict,
+                        json.dumps(sorted(receipt.categories)),
+                        envelope_digest,
+                        str(policy["revision"]),
+                        int(expected_epoch),
+                        owner.enrollment_generation,
+                        time.time(),
+                    ),
+                )
+            conn.execute(
+                "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
+                (key, message_id),
+            )

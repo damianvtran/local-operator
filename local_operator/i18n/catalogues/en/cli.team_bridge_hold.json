@@ -1,0 +1,10 @@
+{
+  "cli.team_bridge_hold.held.title": "Agent messages: a message is waiting for your review",
+  "cli.team_bridge_hold.held.body": "A message to your agent was held because it may be asking your agent to take on new work. Open Agent messages to deliver or discard it.",
+  "cli.team_bridge_hold.more.title": "Agent messages: more messages are waiting for your review",
+  "cli.team_bridge_hold.more.body": "{count, plural, one {# more held message is} other {# more held messages are}} waiting for your review. Open Agent messages to see them.",
+  "cli.team_bridge_hold.delivered.title": "Agent messages: you delivered a held message",
+  "cli.team_bridge_hold.delivered.body": "You let your agent read the held message.",
+  "cli.team_bridge_hold.discarded.title": "Agent messages: you discarded a held message",
+  "cli.team_bridge_hold.discarded.body": "You discarded the held message. The sender was told it wasn't delivered."
+}

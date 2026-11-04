@@ -181,6 +181,125 @@
         "wire.settings.account_policy.reset_soonest.description",
         "wire.settings.account_policy.reset_soonest.label"
       ]
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.team_bridge_hold",
+      "reason": "New in B4b S1 (feature off by default): es renders the English fallback until the translator lane runs, before the setting defaults on (slice S3a).",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-02-28",
+      "missing": [
+        "cli.team_bridge_hold.delivered.body",
+        "cli.team_bridge_hold.delivered.title",
+        "cli.team_bridge_hold.discarded.body",
+        "cli.team_bridge_hold.discarded.title",
+        "cli.team_bridge_hold.held.body",
+        "cli.team_bridge_hold.held.title",
+        "cli.team_bridge_hold.more.body",
+        "cli.team_bridge_hold.more.title"
+      ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.team_bridge_hold",
+      "reason": "New in B4b S1 (feature off by default): fr renders the English fallback until the translator lane runs, before the setting defaults on (slice S3a).",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-02-28",
+      "missing": [
+        "cli.team_bridge_hold.delivered.body",
+        "cli.team_bridge_hold.delivered.title",
+        "cli.team_bridge_hold.discarded.body",
+        "cli.team_bridge_hold.discarded.title",
+        "cli.team_bridge_hold.held.body",
+        "cli.team_bridge_hold.held.title",
+        "cli.team_bridge_hold.more.body",
+        "cli.team_bridge_hold.more.title"
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.team_bridge_hold",
+      "reason": "New in B4b S1 (feature off by default): hi renders the English fallback until the translator lane runs, before the setting defaults on (slice S3a).",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-02-28",
+      "missing": [
+        "cli.team_bridge_hold.delivered.body",
+        "cli.team_bridge_hold.delivered.title",
+        "cli.team_bridge_hold.discarded.body",
+        "cli.team_bridge_hold.discarded.title",
+        "cli.team_bridge_hold.held.body",
+        "cli.team_bridge_hold.held.title",
+        "cli.team_bridge_hold.more.body",
+        "cli.team_bridge_hold.more.title"
+      ]
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.team_bridge_hold",
+      "reason": "New in B4b S1 (feature off by default): ru renders the English fallback until the translator lane runs, before the setting defaults on (slice S3a).",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-02-28",
+      "missing": [
+        "cli.team_bridge_hold.delivered.body",
+        "cli.team_bridge_hold.delivered.title",
+        "cli.team_bridge_hold.discarded.body",
+        "cli.team_bridge_hold.discarded.title",
+        "cli.team_bridge_hold.held.body",
+        "cli.team_bridge_hold.held.title",
+        "cli.team_bridge_hold.more.body",
+        "cli.team_bridge_hold.more.title"
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge_hold",
+      "reason": "New in B4b S1 (feature off by default): ur renders the English fallback until the translator lane runs, before the setting defaults on (slice S3a).",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-02-28",
+      "missing": [
+        "cli.team_bridge_hold.delivered.body",
+        "cli.team_bridge_hold.delivered.title",
+        "cli.team_bridge_hold.discarded.body",
+        "cli.team_bridge_hold.discarded.title",
+        "cli.team_bridge_hold.held.body",
+        "cli.team_bridge_hold.held.title",
+        "cli.team_bridge_hold.more.body",
+        "cli.team_bridge_hold.more.title"
+      ]
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.team_bridge_hold",
+      "reason": "New in B4b S1 (feature off by default): vi renders the English fallback until the translator lane runs, before the setting defaults on (slice S3a).",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-02-28",
+      "missing": [
+        "cli.team_bridge_hold.delivered.body",
+        "cli.team_bridge_hold.delivered.title",
+        "cli.team_bridge_hold.discarded.body",
+        "cli.team_bridge_hold.discarded.title",
+        "cli.team_bridge_hold.held.body",
+        "cli.team_bridge_hold.held.title",
+        "cli.team_bridge_hold.more.body",
+        "cli.team_bridge_hold.more.title"
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge_hold",
+      "reason": "New in B4b S1 (feature off by default): zh-CN renders the English fallback until the translator lane runs, before the setting defaults on (slice S3a).",
+      "owner": "i18n-translator lane",
+      "payoff": "2027-02-28",
+      "missing": [
+        "cli.team_bridge_hold.delivered.body",
+        "cli.team_bridge_hold.delivered.title",
+        "cli.team_bridge_hold.discarded.body",
+        "cli.team_bridge_hold.discarded.title",
+        "cli.team_bridge_hold.held.body",
+        "cli.team_bridge_hold.held.title",
+        "cli.team_bridge_hold.more.body",
+        "cli.team_bridge_hold.more.title"
+      ]
     }
   ]
 }

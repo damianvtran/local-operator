@@ -3881,3 +3881,165 @@ async def owner_audit_attachment(
         if mime == _OWNER_AUDIT_FILE_MIME:
             headers["Content-Disposition"] = 'attachment; filename="attachment.bin"'
         return Response(content=data, media_type=mime, headers=headers)
+
+
+# -- B4b held messages (HUMAN-ONLY decision) ----------------------------------
+#
+# Operator decision a-3f46 (B4b DESIGN §3, §7.1; DECISIONS Amendment 1). The
+# receiving person sees which conversation messages this machine is holding,
+# and may Deliver or Discard the ONE releasable kind: a screening decision
+# naming exactly ``new_work_request``, made by an allowlisted screener. The
+# writes sign a write-once local record and NEVER call the hub; the connector
+# consumes the record on its next pass (``server/utils/desktop_team_bridge_holds``).
+#
+# GATES. The router's desktop bearer (the chief of staff's ``bash`` has none);
+# the captured-owner receipt ``expected_account_id`` on every call, checked
+# against the SIGNED-IN account and the committed owner by the read slice's
+# resolver; the operator key's signature; and ``team_bridge.hold_release``
+# (off by default: the list answers ``enabled: false`` and writes refuse with
+# ``hold_release_off``). Every answer is ``private, no-store``.
+
+#: Machine codes → status for the hold routes. A code not listed is a bug here.
+_HOLD_REFUSALS: dict[str, tuple[int, str]] = {
+    "hold_release_off": (409, "releasing held messages is turned off on this machine"),
+    "hold_not_releasable": (409, "this message can't be delivered or discarded from here"),
+    "snapshot_stale": (409, "this message changed since you saw it; reload and try again"),
+    "already_decided": (409, "this message was already delivered or discarded"),
+    "deliver_expired": (409, "this message is too old to deliver; you can still discard it"),
+    "release_signing_unavailable": (
+        409,
+        "the operator key didn't sign; set up operator authority or try again",
+    ),
+    "state_unavailable": (409, STATE_UNREADABLE),
+    "invalid_request": (422, "the request is malformed"),
+}
+
+HOLDS_QUERY_PARAMS = frozenset({"expected_account_id"})
+
+
+class TeamBridgeHoldDecision(_Strict):
+    """Deliver/Discard body. ``body_sha256`` is the hash of the body the card showed."""
+
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    conversation_id: str = Field(min_length=1, max_length=128)
+    body_sha256: str = Field(min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def _grammar(self) -> "TeamBridgeHoldDecision":
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        if not re.fullmatch(CONVERSATION_ID_PATTERN, self.conversation_id):
+            raise ValueError("conversation_id is outside the accepted grammar")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.body_sha256):
+            raise ValueError("body_sha256 must be a lowercase sha256 hex")
+        return self
+
+
+def _raise_hold(code: str) -> NoReturn:
+    status, message = _HOLD_REFUSALS.get(code, (409, "the held-message request was refused"))
+    raise HTTPException(status, {"code": code, "message": message})
+
+
+async def _hold_owner(config_manager: ConfigManager, expected_account_id: str) -> Any:
+    """The committed owner the captured account names, or the read slice's refusal."""
+
+    from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+    from local_operator.team_bridge.read_context import (
+        ReadRefused,
+        resolve_read_context,
+    )
+
+    try:
+        context = await resolve_read_context(
+            config_manager.config_dir, expected_account_id=expected_account_id
+        )
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
+    except ReadRefused as exc:
+        _raise_read(exc.code)
+    return context.owner
+
+
+@router.get("/v1/desktop/team-bridge/holds", response_model=CRUDResponse[Any])
+async def list_holds(
+    request: Request,
+    response: Response,
+    expected_account_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """This machine's held conversation messages: ids, times, kind, ``releasable``.
+
+    No body, label, category or reason: the renderer joins the owner-audit page
+    for sender and body (DESIGN §7.1).
+    """
+
+    response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
+    if set(request.query_params) - HOLDS_QUERY_PARAMS or not is_account_id(
+        expected_account_id or ""
+    ):
+        _raise_read("invalid_request")
+    owner = await _hold_owner(config_manager, str(expected_account_id))
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+
+    payload = await asyncio.to_thread(holds.list_holds, config_manager.config_dir, owner)
+    return reply(payload)
+
+
+async def _decide_hold(
+    request: Request,
+    response: Response,
+    message_id: str,
+    body: TeamBridgeHoldDecision,
+    config_manager: ConfigManager,
+    word: str,
+) -> CRUDResponse[Any]:
+    response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
+    _refuse_write_scope(request)
+    if request.query_params or not re.fullmatch(_CONVERSATION_MESSAGE_ID, message_id):
+        _raise_hold("invalid_request")
+    owner = await _hold_owner(config_manager, body.expected_account_id)
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+
+    try:
+        # Off the loop: the signer may wait for a presence gesture.
+        payload = await asyncio.to_thread(
+            holds.decide,
+            config_manager.config_dir,
+            owner,
+            message_id=message_id,
+            conversation_id=body.conversation_id,
+            body_sha256=body.body_sha256,
+            word=word,
+            account_id=body.expected_account_id,
+        )
+    except holds.HoldRefused as refusal:
+        _raise_hold(refusal.code)
+    return reply(payload)
+
+
+@router.post("/v1/desktop/team-bridge/holds/{message_id}/deliver", response_model=CRUDResponse[Any])
+async def deliver_hold(
+    request: Request,
+    response: Response,
+    message_id: str,
+    body: TeamBridgeHoldDecision,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Sign the person's Deliver: their agent may read this held message (only read it)."""
+
+    return await _decide_hold(request, response, message_id, body, config_manager, "deliver")
+
+
+@router.post("/v1/desktop/team-bridge/holds/{message_id}/discard", response_model=CRUDResponse[Any])
+async def discard_hold(
+    request: Request,
+    response: Response,
+    message_id: str,
+    body: TeamBridgeHoldDecision,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Sign the person's Discard: the sender is told it was not delivered."""
+
+    return await _decide_hold(request, response, message_id, body, config_manager, "discard")

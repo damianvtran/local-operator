@@ -1260,6 +1260,8 @@ class ScreenChainRunner:
         self._hops = list(hops)
         self._factory = factory
         self._built: list[Any] = []
+        #: Set by :meth:`acall` to the hop that answered (B4b D4); ``""`` until then.
+        self.served_provider = ""
         self._job: AdmissionJob | None = None
 
     @property
@@ -1382,6 +1384,11 @@ class ScreenChainRunner:
                 last_failure = failure
                 continue
             if actual is not None:
+                # B4b D4: the provider of the hop that ANSWERED, read by the
+                # pipeline for release eligibility. A model id alone cannot
+                # tell the direct Anthropic route from a re-seller serving the
+                # same id, and eligibility is keyed on the (provider, model) pair.
+                self.served_provider = hop.provider
                 return reply, actual
             unevidenced = (reply, actual)
         if last_failure is None:
