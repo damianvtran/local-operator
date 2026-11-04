@@ -51,7 +51,9 @@ sys.path.insert(0, str(ROOT))
 import pytest  # noqa: E402
 
 from local_operator.team_bridge import screening  # noqa: E402
-from local_operator.team_bridge.connector import conversation as conversation_mod  # noqa: E402
+from local_operator.team_bridge.connector import (  # noqa: E402
+    conversation as conversation_mod,
+)
 from local_operator.team_bridge.connector import loop as loop_mod  # noqa: E402
 from local_operator.team_bridge.connector import wake as wake_mod  # noqa: E402
 from local_operator.team_bridge.store import Store  # noqa: E402
