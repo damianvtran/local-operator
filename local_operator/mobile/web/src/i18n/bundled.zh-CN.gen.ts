@@ -251,6 +251,15 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.health.reconnecting_detail": "\u6b64\u624b\u673a\u4e0e\u7535\u8111\u7684\u8fde\u63a5\u5df2\u65ad\u5f00\uff0c\u6b63\u5728\u4e0d\u65ad\u5c1d\u8bd5\u91cd\u8fde\u3002\u4f1a\u8bdd\u53ef\u80fd\u4ecd\u5728\u7535\u8111\u4e0a\u8fd0\u884c\uff1b\u91cd\u65b0\u8fde\u4e0a\u4e4b\u524d\uff0c\u53d1\u9001\u6d88\u606f\u53ef\u80fd\u4f1a\u5931\u8d25\u3002",
     },
   },
+  "relay.highlights": {
+    "zh-CN": {
+      "relay.highlights.withheld.line": "{count, plural, other {# \u4e2a\u6587\u4ef6\u672a\u663e\u793a}}\uff1a{reasons}",
+      "relay.highlights.withheld.reason.missing": "\u6587\u4ef6\u5df2\u4e0d\u5b58\u5728",
+      "relay.highlights.withheld.reason.outside": "\u4e0d\u5728\u5141\u8bb8\u7684\u4f4d\u7f6e",
+      "relay.highlights.withheld.reason.sensitive": "\u654f\u611f\u6587\u4ef6",
+      "relay.highlights.withheld.reason.too_large": "\u6587\u4ef6\u8fc7\u5927\u65e0\u6cd5\u9884\u89c8",
+    },
+  },
   "relay.library": {
     "zh-CN": {
       "relay.library.count": "{count, plural, other {#\u9879\u8d44\u6e90}}",

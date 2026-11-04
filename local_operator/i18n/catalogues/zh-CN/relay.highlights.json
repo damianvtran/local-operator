@@ -3,5 +3,5 @@
   "relay.highlights.withheld.reason.outside": "不在允许的位置",
   "relay.highlights.withheld.reason.sensitive": "敏感文件",
   "relay.highlights.withheld.reason.missing": "文件已不存在",
-  "relay.highlights.withheld.reason.too_large": "文件过大，无法预览"
+  "relay.highlights.withheld.reason.too_large": "文件过大无法预览"
 }

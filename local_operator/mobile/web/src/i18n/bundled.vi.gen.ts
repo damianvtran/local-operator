@@ -251,6 +251,15 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.health.reconnecting_detail": "\u0110i\u1ec7n tho\u1ea1i n\u00e0y \u0111\u00e3 m\u1ea5t k\u1ebft n\u1ed1i v\u1edbi m\u00e1y t\u00ednh c\u1ee7a b\u1ea1n v\u00e0 \u0111ang li\u00ean t\u1ee5c th\u1eed l\u1ea1i. Phi\u00ean c\u00f3 th\u1ec3 v\u1eabn \u0111ang ch\u1ea1y \u1edf \u0111\u00f3; g\u1eedi tin nh\u1eafn c\u00f3 th\u1ec3 kh\u00f4ng th\u00e0nh c\u00f4ng cho \u0111\u1ebfn khi k\u1ebft n\u1ed1i tr\u1edf l\u1ea1i.",
     },
   },
+  "relay.highlights": {
+    "vi": {
+      "relay.highlights.withheld.line": "{count, plural, other {# t\u1ec7p kh\u00f4ng \u0111\u01b0\u1ee3c hi\u1ec3n th\u1ecb}}: {reasons}",
+      "relay.highlights.withheld.reason.missing": "t\u1ec7p kh\u00f4ng c\u00f2n t\u1ed3n t\u1ea1i",
+      "relay.highlights.withheld.reason.outside": "n\u1eb1m ngo\u00e0i v\u1ecb tr\u00ed \u0111\u01b0\u1ee3c ph\u00e9p",
+      "relay.highlights.withheld.reason.sensitive": "t\u1ec7p nh\u1ea1y c\u1ea3m",
+      "relay.highlights.withheld.reason.too_large": "qu\u00e1 l\u1edbn \u0111\u1ec3 xem tr\u01b0\u1edbc",
+    },
+  },
   "relay.library": {
     "vi": {
       "relay.library.count": "{count, plural, other {# t\u00e0i nguy\u00ean}}",
