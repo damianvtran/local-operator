@@ -1,0 +1,45 @@
+AUDIT rg6a1 locale=es date=2026-11-04T11:22:25Z checkout_head=287c53e0a267f85119c26f3eaa1f4245794fef1d (+ uncommitted remediation of this audit)
+COMMAND env -i HOME=<isolated> PATH=/usr/bin:/bin ~/local-operator/.venv/bin/python recheck.py.txt es
+STDOUT:
+SHA256 en local_operator/i18n/catalogues/en/wire.tool_rows.bridge.skipped.json e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865
+SHA256 context local_operator/i18n/catalogues/en/wire.tool_rows.bridge.skipped.context.json c726ec8a9c1d0f5a9bc8d77096c24b16dc78ed6a9622ecb2edfaf44e2875ca51
+SHA256 es local_operator/i18n/catalogues/es/wire.tool_rows.bridge.skipped.json b8fd20c52703571e96f66caff60527609d82a4e2ea5bc070bdb5686d7a998056
+PASS key_parity 3 keys
+PASS icu_parse wire.tool_rows.bridge.skipped.expanded
+PASS arguments wire.tool_rows.bridge.skipped.expanded ()
+PASS render_identity wire.tool_rows.bridge.skipped.expanded
+PASS nfc wire.tool_rows.bridge.skipped.expanded
+PASS no_bidi_or_cf wire.tool_rows.bridge.skipped.expanded
+CELLS wire.tool_rows.bridge.skipped.expanded 86 (en 78; sidecar maxCells: none declared)
+PASS icu_parse wire.tool_rows.bridge.skipped.verb.channel_post
+PASS arguments wire.tool_rows.bridge.skipped.verb.channel_post ()
+PASS render_identity wire.tool_rows.bridge.skipped.verb.channel_post
+PASS nfc wire.tool_rows.bridge.skipped.verb.channel_post
+PASS no_bidi_or_cf wire.tool_rows.bridge.skipped.verb.channel_post
+CELLS wire.tool_rows.bridge.skipped.verb.channel_post 22 (en 15; sidecar maxCells: none declared)
+PASS icu_parse wire.tool_rows.bridge.skipped.verb.dm
+PASS arguments wire.tool_rows.bridge.skipped.verb.dm ()
+PASS render_identity wire.tool_rows.bridge.skipped.verb.dm
+PASS nfc wire.tool_rows.bridge.skipped.verb.dm
+PASS no_bidi_or_cf wire.tool_rows.bridge.skipped.verb.dm
+CELLS wire.tool_rows.bridge.skipped.verb.dm 15 (en 18; sidecar maxCells: none declared)
+ROW channel_post ['conversation_label']: Publicación omitida en #general · Approved. · sin publicar · duplicate
+PASS row_uses_skip_verb channel_post
+EXPANDED channel_post headline='Publicación omitida en #general' outcome='No se publicó: se acababa de enviar un mensaje idéntico, así que esta copia se omitió.'
+PASS expanded_sentence channel_post
+ROW channel_post [fallback target]: Publicación omitida en una conversación · Approved. · sin publicar · duplicate
+PASS row_uses_skip_verb channel_post
+EXPANDED channel_post headline='Publicación omitida en una conversación' outcome='No se publicó: se acababa de enviar un mensaje idéntico, así que esta copia se omitió.'
+PASS expanded_sentence channel_post
+ROW dm ['conversation_label']: Envío omitido a Maya · Approved. · sin publicar · duplicate
+PASS row_uses_skip_verb dm
+EXPANDED dm headline='Mensaje directo a Maya' outcome='No se publicó: se acababa de enviar un mensaje idéntico, así que esta copia se omitió.'
+PASS expanded_sentence dm
+ROW dm [fallback target]: Envío omitido a un mensaje directo · Approved. · sin publicar · duplicate
+PASS row_uses_skip_verb dm
+EXPANDED dm headline='Mensaje directo a un compañero de equipo' outcome='No se publicó: se acababa de enviar un mensaje idéntico, así que esta copia se omitió.'
+PASS expanded_sentence dm
+SUMMARY es PASS
+
+STDERR:
+EXIT 0

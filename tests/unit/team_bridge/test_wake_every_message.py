@@ -692,7 +692,7 @@ def test_the_fail_open_warning_matches_the_cause() -> None:
     )
     assert broken == (
         "reply guard state is broken (reply guard key is damaged); posted without "
-        "duplicate/run tracking — tell the operator"
+        "duplicate/run tracking — do not resend or retry; report this to the operator"
     )
 
 
@@ -1319,7 +1319,10 @@ def test_an_unusable_guard_never_stops_a_post_and_the_model_is_told(
         assert text.endswith("warning: reply guard busy; posted without duplicate/run tracking")
     else:
         assert "warning: reply guard state is broken (" in text
-        assert text.endswith("posted without duplicate/run tracking — tell the operator")
+        assert text.endswith(
+            "posted without duplicate/run tracking — do not resend or retry; "
+            "report this to the operator"
+        )
     print(f"\n{breakage}: model sees {text!r}")
 
 
@@ -1446,12 +1449,14 @@ def test_an_out_of_range_run_count_never_fails_a_delivered_post(
     assert len(hub.agent_posts()) == 1
 
 
-@pytest.mark.parametrize("op", ["channel_post", "dm"])
 def test_an_advisory_fault_after_delivery_is_never_a_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, op: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """S-11, structural: whatever the notice bookkeeping raises after the hub
-    accepted the post, the post is reported as posted (both call sites)."""
+    accepted the post, the post is reported as posted. The DM call site has its
+    own end-to-end twin through a real ``dm`` (round 5, m-C:
+    ``test_an_advisory_fault_after_a_delivered_dm_is_never_a_failure``); a
+    ``[dm]`` case here only called the helper."""
 
     from local_operator.team_bridge import tool as tool_mod
 
@@ -1465,9 +1470,8 @@ def test_an_advisory_fault_after_delivery_is_never_a_failure(
     runtime = _runtime(hub, a, tmp_path)
     advice = tool_mod._agent_run_advice(runtime, "bep_a", CONV, {"id": "bcmsg_x"}, guard_busy=False)
     assert advice is None
-    if op == "channel_post":
-        result = _post(runtime, body="landed")
-        assert result["ok"] is True and len(hub.agent_posts()) == 1
+    result = _post(runtime, body="landed")
+    assert result["ok"] is True and len(hub.agent_posts()) == 1
 
 
 def test_a_busy_guard_is_not_asked_again_for_the_notice(
@@ -2225,3 +2229,107 @@ def test_a_group_settled_before_its_flush_is_an_outcome_not_a_silence(
         coalescer.flush_due(deliver=never, owner_filter=owner, config_dir=config_dir)
     )
     assert again == []
+
+
+# -- #3377 deferred follow-ups (RG5 / RG7) ------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["", "mixed", "unknown"])
+def test_an_unknown_sender_classifies_as_agent_chatter(tmp_path: Path, kind: str) -> None:
+    """Round 2, S-5: a hub from before ``sender_kind`` records every sender as
+    ``unknown``; only a positively human trigger is exempt from the agent-to-agent
+    classification. Classification only: the post is never refused."""
+
+    now = 1_000_000.0
+    _trigger(tmp_path, kind, now)
+    slot = _reserve(tmp_path, now + 1, body="hello")
+    assert isinstance(slot, reply_guard.Reservation) and slot.agent_to_agent
+    # A stale unknown trigger explains nothing, like a stale agent one.
+    stale = _reserve(tmp_path, now + reply_guard.TRIGGER_TTL_S + 2, body="later")
+    assert isinstance(stale, reply_guard.Reservation) and not stale.agent_to_agent
+
+
+def test_a_human_trigger_is_still_the_only_exemption(tmp_path: Path) -> None:
+    now = 1_000_000.0
+    _trigger(tmp_path, "human", now)
+    slot = _reserve(tmp_path, now + 1, body="hello")
+    assert isinstance(slot, reply_guard.Reservation) and not slot.agent_to_agent
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "reply guard key is damaged",
+        "reply guard key is unreadable or unwritable",
+        "reply guard state file is unreadable or unwritable",
+        "reply guard state directory is unreadable or unwritable",
+    ],
+)
+def test_a_permanent_guard_failure_says_stop_and_report(reason: str) -> None:
+    """Round 2, S-6: a permanent failure never recovers, so the line tells the
+    agent the post landed, not to resend or retry, and to report it — never a
+    wait-and-retry that would wake it every few seconds for ever."""
+
+    text = reply_guard.unavailable_warning(reply_guard.ReplyGuardUnavailable(reason))
+    assert text.endswith("do not resend or retry; report this to the operator")
+    assert reason in text and "posted without" in text
+    assert not re.search(r"\d+\s*s\b|retry in|resumes|arm a wake", text)
+    # The transient class keeps asking nothing of anyone.
+    busy = reply_guard.unavailable_warning(
+        reply_guard.ReplyGuardUnavailable("reply guard state is busy", transient=True)
+    )
+    assert "report" not in busy and "retry" not in busy
+
+
+def test_no_guard_result_states_a_retry_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2, S-7: a stated delay longer than ``TRIGGER_TTL_S`` was not the
+    earliest admit time it claimed. With no ceiling left, no guard outcome may
+    state a retry time at all — not the skip, not a run warning, not the
+    unusable-state lines, and not through the real tool."""
+
+    clock = Clock()
+    monkeypatch.setattr(time, "time", clock)
+    a = _owner("a", 1)
+    hub = Hub(members=("bep_a",))
+    _rig(monkeypatch, hub, {})
+    runtime = _runtime(hub, a, tmp_path)
+    results = [_post(runtime, body=f"part {index}") for index in range(1, 11)]
+    clock.now += 1
+    results.append(_post(runtime, body="part 10"))  # the exact double send
+    assert results[-1]["skipped"] is True
+    texts = [str(result.get("warning") or "") for result in results]
+    texts += [
+        reply_guard.unavailable_warning(reply_guard.ReplyGuardUnavailable("x", transient=True)),
+        reply_guard.unavailable_warning(reply_guard.ReplyGuardUnavailable("x")),
+    ]
+    assert all("retry_after_s" not in result for result in results)
+    assert sum(bool(text) for text in texts) >= 5  # 5th, 10th, the skip, both unusable
+    for text in texts:
+        assert not re.search(r"retry (in|after)|try again in|resumes in|\bwait\b", text), text
+
+
+def test_a_dropped_advisory_fault_logs_its_class_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Security round 5, n-3: the swallowed post-delivery fault leaves one DEBUG
+    line naming the exception class — never its message, which may carry
+    hub-supplied values."""
+
+    from local_operator.team_bridge import tool as tool_mod
+
+    def explode(*args: Any, **kwargs: Any) -> Any:
+        raise OverflowError("SENTINEL-body-text 10**30")
+
+    monkeypatch.setattr(tool_mod.reply_guard, "agent_run_warning", explode)
+    a = _owner("a", 1)
+    hub = Hub(members=("bep_a",))
+    _rig(monkeypatch, hub, {})
+    runtime = _runtime(hub, a, tmp_path)
+    with caplog.at_level(logging.DEBUG, logger=tool_mod.__name__):
+        result = _post(runtime, body="landed")
+    assert result["ok"] is True and "warning" not in result
+    lines = [r.getMessage() for r in caplog.records if r.name == tool_mod.__name__]
+    assert "bridge: agent-run advice dropped code=OverflowError" in lines
+    assert not any("SENTINEL" in line or "landed" in line for line in lines)

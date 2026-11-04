@@ -283,7 +283,13 @@ def test_a_signal_to_the_wrapper_reaches_the_group(reap_markers, forwarded):
 
     assert returncode == 128 + forwarded, f"rc={returncode}, stderr={stderr!r}"
     assert f"signal {forwarded}" in stderr
-    assert _wait_until_gone(token) == [], "a signalled wrapper left its group running"
+    # STDERR IN THE MESSAGE: CI keeps only the assertion, and #3368 CI job
+    # 126130789160 failed here with rc 143 and no visible cause -- the wrapper's
+    # own `... refused: <reason>` line is what separates a churn refusal from a
+    # deadline one, and without it the failure could only be argued about.
+    assert (
+        _wait_until_gone(token) == []
+    ), f"a signalled wrapper left its group running; stderr={stderr!r}"
 
 
 def test_a_child_killed_by_someone_else_reports_128_plus_the_signal(reap_markers):
@@ -813,3 +819,94 @@ def test_a_setuid_escaped_descendant_is_disclosed_not_failed_closed():
     assert "fail closed" not in result.stderr
     assert "not readable by this account" in result.stderr
     assert result.stderr.count("not readable by this account") == 1  # once
+
+
+#: QA's f4 shape from PR #3369: the leader hogs memory in-group while a
+#: setsid'd child execs setuid ``top -l 0`` (runs forever). The child writes its
+#: pid first so the test can reap it by exact pid whatever the wrapper did, and
+#: points fds 0-2 at /dev/null BEFORE the exec: QA saw a surviving ``top``
+#: holding the captured pipe turn the run into a pipe-EOF hang.
+_SETUID_TOP_BREACH_CODE = """
+import os, sys, time
+pidfile = sys.argv[1]
+child = os.fork()
+if child == 0:
+    os.setsid()
+    null = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(null, fd)
+    open(pidfile, "w").write(str(os.getpid()))
+    os.execv("/usr/bin/top", ["top", "-l", "0"])
+while not os.path.exists(pidfile):
+    time.sleep(0.05)
+time.sleep(1.0)  # let the census see the exec'd top before the breach
+buf = bytearray(200 * 1024 * 1024)
+for i in range(0, len(buf), 4096):
+    buf[i] = 1
+time.sleep(60)
+"""
+
+
+@pytest.mark.skipif(
+    not os.path.exists("/usr/bin/top") or sys.platform != "darwin",
+    reason="setuid top is the macOS EPERM case",
+)
+def test_a_setuid_escaped_descendant_at_a_breach_is_killed_or_named(tmp_path):
+    """QA Q2 on PR #3369: a setuid escaped ``top`` present at a memory stop was
+    skipped before any signal (its fork-free parentage read refuses) and
+    outlived the stop with no line at all. It must now be killed, or at worst
+    named in the stop output — never silent — and the wrapper must return
+    within its bound."""
+    pidfile = tmp_path / "top.pid"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_")}
+    env.pop("LOCAL_OPERATOR_RESOLVED_MEMORY_MB", None)
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(WRAPPER),
+                *CONTRACT_ARGS,
+                "--memory-mb",
+                "120",
+                "--timeout",
+                "30",
+                "--",
+                sys.executable,
+                "-c",
+                _SETUID_TOP_BREACH_CODE,
+                str(pidfile),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+            check=False,
+        )
+        elapsed = time.monotonic() - started
+        assert result.returncode == 137, result.stderr
+        assert "MEMORY LIMIT EXCEEDED" in result.stderr
+        assert elapsed < 30, (elapsed, result.stderr)
+        top = int(pidfile.read_text())
+        deadline = time.monotonic() + 5
+        alive = True
+        while time.monotonic() < deadline:
+            try:
+                os.kill(top, 0)
+            except ProcessLookupError:
+                alive = False
+                break
+            time.sleep(0.05)
+        named = str(top) in result.stderr and (
+            "could not verify" in result.stderr or "could not signal" in result.stderr
+        )
+        assert not alive or named, f"setuid top {top} survived silently:\n{result.stderr}"
+        # On this host the parent listing verifies it, so it is actually killed.
+        assert f"SIGKILL to escaped descendant(s) {top}" in result.stderr, result.stderr
+        assert not alive
+    finally:
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass

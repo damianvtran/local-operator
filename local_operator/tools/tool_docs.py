@@ -806,6 +806,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "- WHICH LANE: `dm`/`channel_post` are visible in Team Bridge and "
             "auditable; `send`/`reply` are the legacy pair inbox, invisible in "
             "the UI. One path per intent — do not answer a DM with `send`.\n"
+            "- IMAGES: no base64 in bodies; `attachments` if hub allows.\n"
             "- WHICH SESSION: any session with this tool may collaborate, but "
             "`take_up`/`ack`/`send`/`reply`, `channels` and `shared_*` belong to "
             "the account's chief-of-staff session. Getting `not_designated` "

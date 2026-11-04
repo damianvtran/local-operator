@@ -1,0 +1,83 @@
+{
+  "status": "translated_staged_only_not_audited",
+  "locale": "zh-CN",
+  "namespace": "wire.errors.sdk_spec",
+  "key_count": 21,
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "target_absent_at_pinned_commit": true,
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7fce46e29bee",
+    "actual_served_model": "openai/gpt-6.1-sol",
+    "actual_model_source": "own completed assistant turn usage in transcript.jsonl",
+    "usage_at_ms": 1793714110813,
+    "fallback_disclosure": "openai/gpt-6.1-sol observed in own completed-turn usage; initial anthropic header differs; fallback used, exact upstream fallback chain not inferred"
+  },
+  "inputs": {
+    "local_operator/i18n/catalogues/en/wire.errors.sdk_spec.json": {
+      "snapshot": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/en.json",
+      "sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855"
+    },
+    "local_operator/i18n/catalogues/en/wire.errors.sdk_spec.context.json": {
+      "snapshot": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/context.json",
+      "sha256": "8735964058f901e1d97527801eb88f5a36585f0d7713c1e21f7f98ebaa55418e"
+    },
+    "i18n/style-guides/zh-CN.md": {
+      "snapshot": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/zh-CN.style.md",
+      "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+    },
+    "i18n/glossary.md": {
+      "snapshot": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    "target": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/wire.errors.sdk_spec.json",
+      "sha256": "0ff78d9cecbb7c024a284abc694f1a3d9e21bc283c464cba5ae42b2a227c76ad"
+    }
+  },
+  "caller_proof": {
+    "own_pinned_excerpts": [
+      "spec.callers.txt",
+      "sdk.callers.txt"
+    ],
+    "observed": "SessionSpec/ApprovalPolicy validation and open_session/spawn_session refusal producers explicitly render locale=\"en\" before constructing SessionSpecError. No producers edited.",
+    "architect_assessment": "/Users/damian/Documents/LocalOperator/Reports/i18n-sdk-contract-assessment-2026-11-03-3ef6295a5545.md",
+    "architect_source": "architect session 96042fdf7d41, openai/gpt-6.1-sol; assessment only, not implementation",
+    "sink_claim_scope": "Architect found no current desktop/mobile SDK sink; this translator did not independently re-audit all client sinks."
+  },
+  "contract_caveat": "English/context remain unmodified. Context pins English exception strings and requires caller-contract migration. Catalogue packet does not localize existing SDK exceptions, change SessionSpecError ValueError inheritance/args/str, or activate any catalogue. No producer/API/sidecar migration authorized.",
+  "glossary_proposals": {
+    "approval gate": "审批函数 for callable validation; preserves that callback gate must be callable, not merely present",
+    "output enforcement": "输出约束",
+    "attached session": "附接的会话 (viewer relationship, not transfer of ownership)",
+    "profile": "配置档案 (conceptual prose only; identifiers untouched)",
+    "birth sample": "创建时的参数快照",
+    "hosting/model pair": "hosting/model参数对; technical names kept English",
+    "dispose": "dispose retained as API operation, with 释放会话 for meaning"
+  },
+  "translation_decisions": [
+    "agent_name/agent_id mutual exclusion retained.",
+    "Declared policy still requires at least one named tool; refuse is the remedy for undeclared bound sessions.",
+    "Callback and declared mode restrictions remain distinct; mode arguments already repr-quoted and not requoted.",
+    "Attach remains viewer-only; only resume is set, ownership and output control stay with owner runtime.",
+    "Output retry range 0..5 and schema/retry dependencies on output_format preserved.",
+    "Spawn remedies retain in-process open, attachment, dispose, same-ID respawn and resume restoration order.",
+    "hosting/model must be both present or both absent; birth_effort new-spawn requirement explicitly names all three.",
+    "All identifiers, quoted mode literals, API names and placeholders preserved; no added 请 because English has no please."
+  ],
+  "mechanical_validation": {
+    "status": "PASS",
+    "command": "node --max-old-space-size=256 /Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-sdk-spec-0e7cde33/validate.mjs",
+    "exit_code": 0,
+    "log": "mechanical.log",
+    "details": "mechanical-validation.json",
+    "negative_control_count": 8,
+    "note": "Parser-AST opaque interpolation smoke only, not production rendering."
+  },
+  "native_fit": "Translator supplied native prose; source has no width caps. Rendered fit NOT RUN.",
+  "pseudo": "NOT RUN",
+  "RTL": "NOT RUN",
+  "production_renderer": "NOT RUN",
+  "independent_audit": "NOT RUN; first and second independent readers follow",
+  "scope": "Only this scratch bundle created. No repo edits, commits, ledger changes, activation, startup keys, prior policy packet or UI packet modifications."
+}

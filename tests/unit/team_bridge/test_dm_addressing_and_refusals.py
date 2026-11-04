@@ -698,5 +698,29 @@ async def test_a_dm_the_hub_refuses_is_not_recorded(
     assert fifth["ok"] is True and "warning" in fifth
 
 
+@pytest.mark.asyncio
+async def test_an_advisory_fault_after_a_delivered_dm_is_never_a_failure(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3377 round 5, m-C: the DM call site's own end-to-end twin of the S-11
+    test. A real ``dm`` through ``execute_bridge``; the post-delivery notice
+    bookkeeping raises; the DM still reports ok, went out once, and carries no
+    warning — a delivered message reported as failed would invite a second copy."""
+
+    from local_operator.team_bridge import tool as tool_mod
+
+    def explode(*args: Any, **kwargs: Any) -> Any:
+        raise OverflowError("bookkeeping fault")
+
+    monkeypatch.setattr(tool_mod.reply_guard, "agent_run_warning", explode)
+    client = DmClient([_member()])
+    runtime = _runtime(client, config_dir=tmp_path)
+    sent = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, body="landed"))
+    assert sent["ok"] is True and "warning" not in sent and not sent.get("skipped"), sent
+    assert sent["destination_type"] == "conversation_dm"
+    sends = [call for call in client.calls if call["method"] == "conversation_send"]
+    assert [call["text"] for call in sends] == ["landed"]
+
+
 def refused_code(outcome: dict[str, Any]) -> str:
     return str(outcome.get("code") or "")
