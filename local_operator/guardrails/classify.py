@@ -29,6 +29,7 @@ from __future__ import annotations
 import enum
 import fnmatch
 import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -316,6 +317,14 @@ def _high_reason(path: str, target: Target, prot: _Protected) -> str | None:
                 return "overwrites a file inside the local-operator state root"
         return None
     if target.glob_children and not target.glob_all:
+        # R3-2: a children-glob directly in a home or in the state root
+        # (``~/D*``, ``~/[A-Z]*``, ``Doc*`` at cwd $HOME) can match the
+        # user's top-level data. R2-5 only lowered it from CRITICAL; it is
+        # judged, unless the pattern is file-shaped (``*.log``) at a home.
+        if path in prot.state_roots:
+            return "a glob over the state root's top-level entries"
+        if path in prot.homes and not _file_shaped(target.pattern):
+            return "a glob over the home directory's top-level entries"
         # Q2: ``rm *.log`` removes matching CHILDREN; the directory survives.
         for state in prot.state_roots:
             if _under(path, state):
@@ -393,6 +402,20 @@ def _rank(target: Target, prot: _Protected) -> RankedTarget:
     if target.selected:
         return RankedTarget(target, Risk.LOW, "find with a selecting predicate")
     return RankedTarget(target, Risk.LOW, "ordinary path")
+
+
+#: ``*.log``, ``build-*.tmp``: a last component that ends in a literal
+#: extension. Such a glob matches files by type, not the user's directories.
+_FILE_SHAPED_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+
+
+def _file_shaped(pattern: str | None) -> bool:
+    if not pattern:
+        return False
+    last = pattern.rstrip("/").rsplit("/", 1)[-1]
+    # The extension itself must be literal (``*.log``); ``*.[ch]``/``*.*`` are
+    # not file-shaped. ``_FILE_SHAPED_RE`` already admits only alphanumerics.
+    return bool(_FILE_SHAPED_RE.search(last))
 
 
 def _is_work_tree(path: str) -> bool:

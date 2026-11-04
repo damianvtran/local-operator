@@ -1005,7 +1005,7 @@ _INTERPRETER_CODE_FLAGS = {
     "osascript": ("-e",),
 }
 #: A pipe from one of these into a shell runs text fetched at run time.
-_NETWORK_FETCH_RE = re.compile(r"(?<![\w.-])(curl|wget|fetch|http|nc|ncat)(?![\w-])")
+_NETWORK_FETCH_RE = re.compile(r"curl|wget|fetch|http|https|nc|ncat|aria2c|xh")
 _INTERPRETER_DELETE_RE = re.compile(
     r"\b(rmtree|os\.remove|os\.unlink|os\.rmdir|removedirs|\.unlink\(|\.rmdir\(|"
     r"unlinkSync|rmSync|rmdirSync|File\.delete|FileUtils\.rm|unlink\s*\(|"
@@ -1020,11 +1020,41 @@ def _in_place_edit(name: str, args: list[Expanded]) -> bool:
         if t.startswith("--in-place"):
             return True
         if t.startswith("-") and not t.startswith("--"):
-            if name == "perl" and "i" in t[1:]:
-                return True
-            if name != "perl" and t.startswith("-i"):
+            # R3-3: ``i`` anywhere in a short cluster (``-Ei``, ``-ni``, ``-pi``).
+            if "i" in t[1:]:
                 return True
     return False
+
+
+@dataclass
+class _Feed:
+    """What reaches a pipeline stage's stdin from the stages before it."""
+
+    #: Heredoc/herestring bodies bound to upstream stages (R3-1).
+    bodies: list[str] = field(default_factory=list)
+    #: The upstream stages' raw text, nearest last (R3-4).
+    stages: list[str] = field(default_factory=list)
+
+
+def _herestring_texts(segment: str) -> list[str]:
+    """The (expanded-free) text of every ``<<<`` word in ``segment``."""
+    _words, redirects = scan(segment)
+    out: list[str] = []
+    for op, raw in redirects:
+        if op == "<<<":
+            out.append("".join(p.text for p in raw.parts))
+    return out
+
+
+def _stage_program(stage: str) -> str | None:
+    """A stage's program name after wrapper peeling (``sudo``, ``timeout 30``…)."""
+    words, _ = scan(_strip_grouping(stage))
+    texts = ["".join(p.text for p in w.parts) for w in words]
+    while texts and _ASSIGN_RE.match(texts[0]):
+        texts = texts[1:]
+    peeled = [Expanded(text=t) for t in texts]
+    peeled, _fed = _peel_wrappers(peeled)
+    return os.path.basename(peeled[0].text) if peeled else None
 
 
 def _fd_redirect_merge(pieces: list[tuple[str, bool, str]]) -> list[tuple[str, bool, str]]:
@@ -1090,6 +1120,10 @@ class _Walker:
         # bodies are dealt out to segments by counting the openers in each.
         pending_bodies = list(_heredoc_bodies(command))
         pieces = _fd_redirect_merge(_split(command))
+        # R3-1: what each pipeline stage writes to its stdout is the NEXT
+        # stage's stdin. A heredoc/herestring bound to an upstream stage
+        # (``cat <<EOF | bash``) is therefore the script a pipe-fed shell runs.
+        upstream_bodies: list[str] = []
         groups: list[_Snapshot] = []
         for index, (text, piped, op) in enumerate(pieces):
             # R4: a subshell ``( … )``, any pipeline stage and a ``&`` job run in
@@ -1119,12 +1153,23 @@ class _Walker:
             while end + 1 < len(pieces) and pieces[end + 1][1]:
                 end += 1
             pipeline = " | ".join(p[0] for p in pieces[start : end + 1])
+            if not piped:
+                upstream_bodies = []
+            feed = _Feed(
+                bodies=list(upstream_bodies),
+                stages=[p[0] for p in pieces[start:index]],
+            )
             if isolated:
                 snap = self._save()
-                self._segment(text, depth, heredocs, stdin_piped=piped, pipeline=pipeline)
+                self._segment(
+                    text, depth, heredocs, stdin_piped=piped, pipeline=pipeline, feed=feed
+                )
                 self._restore(snap)
             else:
-                self._segment(text, depth, heredocs, stdin_piped=piped, pipeline=pipeline)
+                self._segment(
+                    text, depth, heredocs, stdin_piped=piped, pipeline=pipeline, feed=feed
+                )
+            upstream_bodies = upstream_bodies + heredocs + _herestring_texts(text)
             for _ in range(closes):
                 if groups:
                     self._restore(groups.pop())
@@ -1138,6 +1183,7 @@ class _Walker:
         *,
         stdin_piped: bool = False,
         pipeline: str = "",
+        feed: _Feed | None = None,
     ) -> None:
         text = _strip_grouping(text)
         if not text:
@@ -1210,11 +1256,20 @@ class _Walker:
         args = words[1:]
         if name in _SHELL_C_WORDS:
             self._shell(
-                args, depth, text, heredocs or [], herestrings, stdin_piped, pipeline or text
+                args,
+                depth,
+                text,
+                heredocs or [],
+                herestrings,
+                stdin_piped,
+                pipeline or text,
+                feed,
             )
             return
         if name in ("source", "."):
-            self._source(args, depth, text, heredocs or [], herestrings, stdin_piped, pipeline)
+            self._source(
+                args, depth, text, heredocs or [], herestrings, stdin_piped, pipeline, feed
+            )
             return
         if name == "perl" and _in_place_edit(name, args):
             self._in_place(name, args)
@@ -1304,19 +1359,24 @@ class _Walker:
             if t == "--":
                 files.extend(args[k + 1 :])
                 break
+            if t.startswith("--expression=") or t.startswith("--file="):
+                # R3-3: the joined long form carries its script in the same word.
+                script_by_flag = True
+                k += 1
+                continue
             if t.startswith("-") and len(t) > 1:
                 cluster = t.lstrip("-")
+                # A short cluster ending in a script-taking letter consumes the
+                # next word: sed ``e``/``f``; perl ``e``/``E`` (``-E`` is
+                # sed's extended-regex flag, not a script).
+                script_letters = ("e", "E") if name == "perl" else ("e", "f")
                 takes_script = t in ("-e", "-f", "--expression", "--file") or (
-                    not t.startswith("--") and cluster[-1:] in ("e", "E", "f")
+                    not t.startswith("--") and cluster[-1:] in script_letters
                 )
                 if takes_script:
                     script_by_flag = True
                     k += 2
                     continue
-                k += 1
-                continue
-            if t.startswith("--expression=") or t.startswith("--file="):
-                script_by_flag = True
                 k += 1
                 continue
             files.append(args[k])
@@ -1343,6 +1403,7 @@ class _Walker:
         herestrings: list[str],
         stdin_piped: bool,
         pipeline: str = "",
+        feed: _Feed | None = None,
     ) -> None:
         """A shell word: walk its ``-c`` script, or whatever feeds its stdin.
 
@@ -1402,16 +1463,36 @@ class _Walker:
         self._walk_stdin_bodies(heredocs, herestrings, depth)
         if heredocs or herestrings:
             return
-        self._unseen_script(segment, stdin_piped, pipeline)
+        self._piped_script(segment, stdin_piped, pipeline, feed, depth)
+
+    def _piped_script(
+        self, segment: str, stdin_piped: bool, pipeline: str, feed: _Feed | None, depth: int
+    ) -> None:
+        """A shell whose script is a pipe or a file (R3-1, R3-4)."""
+        if stdin_piped and feed is not None and feed.bodies:
+            # Upstream heredoc/herestring text IS the script: walk it.
+            self._walk_stdin_bodies(feed.bodies, [], depth)
+            return
+        self._unseen_script(segment, stdin_piped, pipeline, feed)
 
     def _walk_stdin_bodies(self, heredocs: list[str], herestrings: list[str], depth: int) -> None:
         for body in list(herestrings) + list(heredocs):
             self._isolated_walk(body, depth + 1)
 
-    def _unseen_script(self, segment: str, stdin_piped: bool, pipeline: str) -> None:
+    def _unseen_script(
+        self, segment: str, stdin_piped: bool, pipeline: str, feed: _Feed | None = None
+    ) -> None:
         """Record a shell running text this command does not contain — if it matters."""
         haystack = pipeline if stdin_piped else segment
-        fetched = stdin_piped and _NETWORK_FETCH_RE.search(pipeline)
+        # R3-4: a fetch is a PROGRAM upstream (``curl …``, ``timeout 30 wget``),
+        # not a word in an argument (``cat ncat.log``, ``echo http://x``).
+        fetched = (
+            stdin_piped
+            and feed is not None
+            and any(
+                _NETWORK_FETCH_RE.fullmatch(_stage_program(stage) or "") for stage in feed.stages
+            )
+        )
         if _DELETE_WORD_RE.search(haystack) or fetched:
             self.result.opaque_reasons.append(
                 "shell reads a script from stdin or a file (not resolved)"
@@ -1426,6 +1507,7 @@ class _Walker:
         herestrings: list[str],
         stdin_piped: bool,
         pipeline: str,
+        feed: _Feed | None = None,
     ) -> None:
         """``source``/``.``: process substitutions were already walked as
         commands; a ``/dev/stdin`` source reads its heredoc/herestring or pipe."""
@@ -1444,7 +1526,7 @@ class _Walker:
         if target in ("/dev/stdin", "-", "/dev/fd/0"):
             self._walk_stdin_bodies(heredocs, herestrings, depth)
             if not (heredocs or herestrings):
-                self._unseen_script(segment, stdin_piped, pipeline or segment)
+                self._piped_script(segment, stdin_piped, pipeline or segment, feed, depth)
 
     def _interpreter(self, name: str, args: list[Expanded]) -> None:
         """Q3 (v1 hardening): an interpreter one-liner whose code calls a delete."""
