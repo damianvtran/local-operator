@@ -115,6 +115,10 @@ HOLD_CODES = (
     "retry_later",
     "write_once_conflict",
     "schema_damaged",
+    # A stored receipt the cache would serve failed its authority checks
+    # (#3420 N-1). Fail-closed and never re-screened behind: re-screening would
+    # bill again for a verdict nobody can read.
+    "proof_corrupt",
     # Not a screening outcome: the connector's wait for the owner to SEND a
     # message to a never-used chief-of-staff session whose accepted consent does not allow a
     # card to engage it (team_bridge.engagement). Listed so the owner's surface
@@ -788,6 +792,12 @@ _HOLD_FOR_COMMIT = {
     "unknown_attempt": "retry_later",
 }
 
+#: A refused cache-hit adoption (``Store.adopt_cached_receipt``) -> its hold.
+#: The commit mapping, plus damaged proof under its own name (#3420 N-1).
+#: Every refusal holds; none admits. Anything unlisted reads as the policy
+#: having moved, which is what an outdated source row means.
+_HOLD_FOR_ADOPT = {**_HOLD_FOR_COMMIT, "proof_corrupt": "proof_corrupt"}
+
 
 def _persist_hold(
     store: Store,
@@ -1209,13 +1219,16 @@ def _screen_prepare(
                 admission_revision=snapshot.admission_revision,
                 envelope_digest=envelope.envelope_digest,
             )
-        except StoreRefused:
+        except StoreRefused as failure:
             # The consumption could not be LINEARIZED (an interleaved writer
             # or damaged store left the authority unverified): this is a
             # refusal exactly like a stale policy — never a silent cache
-            # miss that lets a stale caller re-screen behind the change.
-            _persist_hold(store, owner, message_id, "policy_stale")
-            return ScreenResult("hold", hold_code="policy_stale")
+            # miss that lets a stale caller re-screen behind the change. A
+            # DAMAGED receipt keeps its own name (#3420 N-1): ``policy_stale``
+            # told the owner a policy moved when the stored proof was broken.
+            code = "proof_corrupt" if failure.code == "proof_corrupt" else "policy_stale"
+            _persist_hold(store, owner, message_id, code)
+            return ScreenResult("hold", hold_code=code)
         if cached is not None and not snapshot.matches_live(policy):
             _persist_hold(store, owner, message_id, "policy_stale")
             return ScreenResult("hold", hold_code="policy_stale")
@@ -1237,6 +1250,9 @@ def _screen_prepare(
                 store.adopt_cached_receipt(
                     owner,
                     message_id,
+                    # The exact row the hit authorized (#3420 R1-M1): the copy
+                    # and the verdict returned below are that one row.
+                    source_message_id=cached["source_message_id"],
                     body_sha256=envelope.body_sha256,
                     template_sha256=snapshot.template_sha256,
                     model=snapshot.default_model,
@@ -1244,7 +1260,7 @@ def _screen_prepare(
                     envelope_digest=envelope.envelope_digest,
                 )
             except StoreRefused as failure:
-                code = _HOLD_FOR_COMMIT.get(failure.code, "policy_stale")
+                code = _HOLD_FOR_ADOPT.get(failure.code, "policy_stale")
                 _persist_hold(store, owner, message_id, code)
                 return ScreenResult("hold", hold_code=code)
             receipt = ScreeningReceipt(

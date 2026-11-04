@@ -3373,3 +3373,35 @@ def test_a_pair_hold_redriven_from_a_stale_claim_keeps_the_addressed_tier(
         )
     due = store.due_screening_holds(owner, now=clock.now + 7200, limit=8)
     assert due[0]["message_id"] == "bmsg_1"
+
+
+def test_a_parked_pair_row_is_redriven_ahead_of_an_ambient_backlog(tmp_path, monkeypatch) -> None:
+    """#3420 R1-m1 = QA Q-1: the stale-claim park itself is a pair row, so it
+    carries the addressed tier from the start. It was written with no tier and
+    ranked last until its first re-drive, which a due ambient backlog of 8 or
+    more never let it reach."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    _wire_spine(monkeypatch, tmp_path, disposition="hold")
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    store.claim(
+        owner, "bmsg_1", "sess_cos", "connector:dead-owner", expiry=clock.now + wake_mod.CLAIM_TTL_S
+    )
+    _one_pending_ref(store, owner)
+    _iterate(owner, tmp_path)
+    with store._connect() as conn:  # noqa: SLF001 — test introspection
+        parked = conn.execute(
+            "SELECT hold_code, tier FROM screening_holds WHERE message_id = ?", ("bmsg_1",)
+        ).fetchone()
+    assert tuple(parked) == (loop_mod.HOLD_STALE_CLAIM, store_mod.Store.SCREENING_TIER_ADDRESSED)
+    clock.now += wake_mod.CLAIM_TTL_S + loop_mod.STALE_CLAIM_MARGIN_S + 1
+    for index in range(10):
+        store.persist_hold(
+            owner, f"bmsg_amb{index}", "budget_exhausted", retry_at=clock.now - 5, tier=0
+        )
+    retried = _iterate(owner, tmp_path)
+    actions = {o["message_id"]: o["action"] for o in retried["retries"]["outcomes"]}
+    assert actions.get("bmsg_1") == "hold", "re-driven in the first pass"

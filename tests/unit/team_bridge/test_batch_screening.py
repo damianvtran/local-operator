@@ -1094,3 +1094,99 @@ def test_the_retry_pass_spends_its_slots_on_messages_not_duplicate_rows(
     retired = [o["message_id"] for o in result["outcomes"] if o["action"] == "retired"]
     assert sorted(retired) == sorted(r.message_id for r in refs), "bare rows still retired"
     assert store.due_screening_holds(owner, now=time.time() + 10_000, limit=50) == []
+
+
+def _outdate_the_first_receipt(store: Store, owner: Any, case: str) -> Any:
+    """Leave a same-content receipt that is no longer current (#3420 R1-M1).
+
+    ``relogin``: a new enrollment generation. ``flipflop``: the policy moves
+    away and back, so the epoch advances while template/model/revision return.
+    Returns the owner to screen as afterwards.
+    """
+
+    import dataclasses
+
+    from local_operator.team_bridge.store import OwnerReceipt
+
+    if case == "relogin":
+        owner = dataclasses.replace(owner, enrollment_generation=2)
+        store.commit_enrollment(owner, OwnerReceipt("bridge_consent_v1", "ref-2"))
+        return owner
+    fields = dict(version=Policy.screening_version, template_sha256=Policy.template_sha256)
+    store.publish_screening_policy(owner, default_model="qa/other", revision="rev-2", **fields)
+    store.publish_screening_policy(
+        owner, default_model=Policy.default_model, revision=Policy.admission_revision, **fields
+    )
+    return owner
+
+
+@pytest.mark.parametrize("case", ["relogin", "flipflop"])
+def test_an_outdated_twin_receipt_never_shadows_the_current_cache_hit(
+    tmp_path: Path, case: str
+) -> None:
+    """#3420 R1-M1 = security S-1a: the cache hit and the receipt it records
+    must be the SAME row. ``bmsg_9`` sorts after ``bmsg_1`` by primary key but
+    was written first; once it is outdated, the hit served the current
+    ``bmsg_1`` while the adoption copied the oldest row, ``bmsg_9``, found it
+    stale and held the third ``ack`` ``policy_stale`` on every pass."""
+
+    store, owner = _setup(tmp_path)
+    runner = BatchRunner(lambda p: deliver_everything(p, default_model="")[0])
+    _single(owner, tmp_path, runner, _item(body="ack", message_id="bmsg_9"))
+    owner = _outdate_the_first_receipt(store, owner, case)
+    _single(owner, tmp_path, runner, _item(body="ack", message_id="bmsg_1"))
+    assert len(runner.calls) == 2, "the outdated row is a miss: one fresh screen"
+    for _ in range(3):
+        result = _single(owner, tmp_path, runner, _item(body="ack", message_id="bmsg_5"))
+        assert (result.disposition, result.hold_code) == ("deliver", None)
+    assert len(runner.calls) == 2, "a cache hit, never re-billed"
+    own = store.receipt_for_message(owner, "bmsg_5")
+    current = store.receipt_for_message(owner, "bmsg_1")
+    assert own is not None and current is not None
+    assert own["policy_epoch"] == current["policy_epoch"]
+    assert store.screening_hold(owner, "bmsg_5") is None
+
+
+def test_the_verdict_acted_on_is_the_verdict_recorded(tmp_path: Path) -> None:
+    """#3420 security S-1b: with two CURRENT rows for one content key, the
+    result and the message's own receipt came from different rows (a
+    ``bounce`` returned, an ``allow`` recorded). One row decides both."""
+
+    from local_operator.team_bridge.store import _owner_key
+
+    store, owner = _setup(tmp_path)
+    runner = BatchRunner(lambda p: deliver_everything(p, default_model="")[0])
+    _single(owner, tmp_path, runner, _item(body="ack", message_id="bmsg_9"))
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        # A second current row with the other verdict, sorting FIRST by key but
+        # written LATER: only reachable by a direct write (S-1b's own note).
+        conn.execute(
+            "INSERT INTO screening_receipts SELECT owner_key, 'bmsg_0', body_sha256, "
+            "template_sha256, prompt_version, model, 'reject', '[\"spam\"]', envelope_digest, "
+            "admission_revision, policy_epoch, creator_generation, created_at + 1, "
+            "rendered_template_sha256 FROM screening_receipts "
+            "WHERE owner_key = ? AND message_id = 'bmsg_9'",
+            (_owner_key(owner),),
+        )
+    result = _single(owner, tmp_path, runner, _item(body="ack", message_id="bmsg_5"))
+    own = store.receipt_for_message(owner, "bmsg_5")
+    assert own is not None and result.receipt is not None
+    assert own["verdict"] == result.receipt.verdict
+    assert result.disposition == ("deliver" if own["verdict"] == "allow" else "bounce")
+
+
+def test_a_corrupt_cached_receipt_holds_as_damaged_proof(tmp_path: Path) -> None:
+    """#3420 security N-1: a cached receipt that fails its authority checks
+    holds, fail-closed, under its own name. It was reported ``policy_stale``,
+    which told the owner a policy changed when the proof was damaged."""
+
+    store, owner = _setup(tmp_path)
+    runner = BatchRunner(lambda p: deliver_everything(p, default_model="")[0])
+    _single(owner, tmp_path, runner, _item(body="ack", message_id="bmsg_1"))
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        conn.execute("UPDATE screening_receipts SET categories = '[\"spam\"]'")
+    result = _single(owner, tmp_path, runner, _item(body="ack", message_id="bmsg_2"))
+    assert (result.disposition, result.hold_code) == ("hold", "proof_corrupt")
+    assert result.hold_code in screening.HOLD_CODES
+    assert store.receipt_for_message(owner, "bmsg_2") is None
+    assert len(runner.calls) == 1, "damaged proof is never re-screened behind"

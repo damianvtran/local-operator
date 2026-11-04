@@ -494,6 +494,7 @@ async def retry_due_holds(
                         message_id,
                         STALE_CLAIM_REDRIVE_CODE,
                         retry_at=now + RETRY_BASE_S,
+                        tier=_parked_tier(message_id),
                     )
             except StoreRefused:
                 # Fenced or unreadable: the row stays as it is. A re-drive
@@ -683,6 +684,25 @@ def _stale_claim_disposition(
     return "retire", None
 
 
+def _parked_tier(hold_key: str) -> int | None:
+    """The tier a stale-claim park writes: ADDRESSED for a pair row, else none.
+
+    A pair message is addressed to this agent by construction, so its park
+    ranks there from the moment it is written (#3420 R1-m1 = QA Q-1). Written
+    with no tier, it ranked last until its first re-drive, and a due ambient
+    backlog of ``RETRY_BATCH_LIMIT`` or more kept it from ever reaching one.
+    A conversation ref gets ``None``: its handler stamps the tier the message
+    really has, and ``persist_hold``'s ``COALESCE`` keeps any tier already on
+    the row.
+    """
+
+    from local_operator.team_bridge.store import Store
+
+    if _conversation_hold_ref(hold_key) is not None:
+        return None
+    return Store.SCREENING_TIER_ADDRESSED
+
+
 def _park_stale_claim(
     store: Any, owner: Any, hold_key: str, claim_id: str, outcome: dict[str, Any]
 ) -> None:
@@ -710,7 +730,14 @@ def _park_stale_claim(
         return  # released in between: the holder's own outcome stands
     retry_at = due_at if due_at is not None else now + STALE_CLAIM_MARGIN_S
     try:
-        store.persist_hold(owner, hold_key, HOLD_STALE_CLAIM, retry_at=retry_at, keep_existing=True)
+        store.persist_hold(
+            owner,
+            hold_key,
+            HOLD_STALE_CLAIM,
+            retry_at=retry_at,
+            keep_existing=True,
+            tier=_parked_tier(hold_key),
+        )
     except StoreRefused:
         pass  # fenced owner: the next live generation owns its own rows
     logger.info("bridge connector parked: stage=claim code=%s", HOLD_STALE_CLAIM)

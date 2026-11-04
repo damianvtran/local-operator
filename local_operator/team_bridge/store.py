@@ -5041,6 +5041,7 @@ class Store:
         owner: OwnerSnapshot,
         message_id: str,
         *,
+        source_message_id: str,
         body_sha256: str,
         template_sha256: str,
         model: str,
@@ -5060,13 +5061,21 @@ class Store:
         id, the reservation held the message ``receipt_unavailable``; every
         retry hit the cache again and wrote nothing, so it was held forever.
 
-        WHAT. In ONE write transaction: the live owner, the source receipt
-        found by the exact cache key, and :func:`receipt_authority` against
-        the published policy, the same checks
-        :meth:`consume_screening_receipt` makes. The source's verdict,
-        provenance and epoch are then copied under ``message_id``, and that
-        message's bare hold row is cleared, as :meth:`finish_screening` does
-        for a fresh verdict.
+        WHAT. In ONE write transaction: the live owner, then the EXACT row the
+        cache hit authorized (``source_message_id``, which
+        :meth:`consume_screening_receipt` returns), still carrying the cache
+        key, re-checked by :func:`receipt_authority` against the published
+        policy. Its verdict, provenance and epoch are copied under
+        ``message_id``, and that message's bare hold row is cleared, as
+        :meth:`finish_screening` does for a fresh verdict.
+
+        WHY BY ID (#3420 R1-M1 = S-1a, S-1b). Looking the source up by content
+        alone picked a row of its own (the oldest). Receipts are never deleted,
+        so once a re-login or a policy round trip had outdated an older twin,
+        the hit served the current row while this copied the outdated one,
+        refused it, and held the message ``policy_stale`` on every pass. With
+        two current rows of different verdicts, the verdict acted on and the
+        verdict recorded could differ. Naming the row makes them one row.
 
         FAIL-CLOSED. Write-once per message: an existing receipt for
         ``message_id`` must carry the same verdict tuple (an idempotent
@@ -5085,11 +5094,21 @@ class Store:
             policy = conn.execute(
                 "SELECT * FROM screening_policy WHERE owner_key = ?", (key,)
             ).fetchone()
+            # The named row, AND still the cache key: an id alone could point at
+            # a receipt for other bytes.
             source = conn.execute(
-                "SELECT * FROM screening_receipts WHERE owner_key = ? AND body_sha256 = ? "
-                "AND template_sha256 = ? AND model = ? AND admission_revision = ? "
-                "AND envelope_digest = ? ORDER BY created_at LIMIT 1",
-                (key, body_sha256, template_sha256, model, admission_revision, envelope_digest),
+                "SELECT * FROM screening_receipts WHERE owner_key = ? AND message_id = ? "
+                "AND body_sha256 = ? AND template_sha256 = ? AND model = ? "
+                "AND admission_revision = ? AND envelope_digest = ?",
+                (
+                    key,
+                    str(source_message_id),
+                    body_sha256,
+                    template_sha256,
+                    model,
+                    admission_revision,
+                    envelope_digest,
+                ),
             ).fetchone()
             if policy is None or source is None:
                 raise StoreRefused("policy_stale", "the cached verdict is gone")
@@ -5921,36 +5940,49 @@ class Store:
                 ).fetchone()
                 if policy is None:
                     return None
-                row = conn.execute(
-                    "SELECT verdict, model, prompt_version, template_sha256, body_sha256, "
-                    "categories, envelope_digest, admission_revision, policy_epoch, "
-                    "creator_generation FROM screening_receipts "
+                # EVERY row for the content key, in ONE deterministic order
+                # (#3420 R1-M1 = S-1a). Receipts are never deleted, so a row
+                # outdated by a re-login or a policy round trip stays beside
+                # the current one. Reading only the first row by primary key
+                # (random hub ids) made the answer depend on id order, and
+                # :meth:`adopt_cached_receipt` then copied a DIFFERENT row. The
+                # first current row in this order is the hit, and its
+                # ``message_id`` is returned so the copy is that exact row.
+                rows = conn.execute(
+                    "SELECT message_id, verdict, model, prompt_version, template_sha256, "
+                    "body_sha256, categories, envelope_digest, admission_revision, "
+                    "policy_epoch, creator_generation FROM screening_receipts "
                     "WHERE owner_key = ? AND body_sha256 = ? AND template_sha256 = ? "
-                    "AND model = ? AND admission_revision = ? AND envelope_digest = ?",
+                    "AND model = ? AND admission_revision = ? AND envelope_digest = ? "
+                    "ORDER BY created_at, message_id",
                     (key, body_sha256, template_sha256, model, admission_revision, envelope_digest),
-                ).fetchone()
-                if row is None:
-                    return None
-                # The checks themselves live in ONE pure function (S-RSA-3),
-                # shared with the read slice's proof snapshot: this call site
-                # supplies the two rules that are about BEHAVIOUR here — a stale
-                # receipt is a miss (the caller may screen), a corrupt one is a
-                # typed refusal (a caller that re-screened behind it would
-                # DOUBLE-BILL the account for a verdict nobody can read).
-                # ``dict(...)`` because these are ``sqlite3.Row`` objects: they
-                # index but do not ``.get``, and the shared function takes mappings
-                # exactly as the read path's own decoded rows do.
-                decoded, damage, note = receipt_authority(owner, dict(policy), dict(row))
-                if damage == RECEIPT_CORRUPT:
-                    # ``note`` is the specific damaged field (R-8): this path
-                    # raised a sentence per field before the checks moved into
-                    # the shared function, and a triaging operator keeps it.
-                    raise StoreRefused(
-                        "proof_corrupt", note or "the stored receipt failed its authority checks"
-                    )
-                if decoded is None:
-                    return None
-                return decoded
+                ).fetchall()
+                hit: dict[str, Any] | None = None
+                for row in rows:
+                    # The checks themselves live in ONE pure function (S-RSA-3),
+                    # shared with the read slice's proof snapshot: this call site
+                    # supplies the two rules that are about BEHAVIOUR here — a stale
+                    # receipt is a miss (the caller may screen), a corrupt one is a
+                    # typed refusal (a caller that re-screened behind it would
+                    # DOUBLE-BILL the account for a verdict nobody can read).
+                    # ``dict(...)`` because these are ``sqlite3.Row`` objects: they
+                    # index but do not ``.get``, and the shared function takes mappings
+                    # exactly as the read path's own decoded rows do.
+                    decoded, damage, note = receipt_authority(owner, dict(policy), dict(row))
+                    if damage == RECEIPT_CORRUPT:
+                        # ``note`` is the specific damaged field (R-8): this
+                        # path raised a sentence per field before the checks
+                        # moved into the shared function, and a triaging
+                        # operator keeps it. ANY damaged candidate refuses,
+                        # whatever its position: order must not decide whether
+                        # damaged proof is noticed (fail-closed).
+                        raise StoreRefused(
+                            "proof_corrupt",
+                            note or "the stored receipt failed its authority checks",
+                        )
+                    if decoded is not None and hit is None:
+                        hit = dict(decoded, source_message_id=row["message_id"])
+                return hit
         except sqlite3.Error as error:
             # An interleaved writer that could not take the lock (or any
             # engine-level failure) leaves the authority UNVERIFIED, which is
