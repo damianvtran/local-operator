@@ -30,28 +30,40 @@ gone, and the only outputs are:
   The post is delivered either way; the warning is advice, not a gate.
 * **An exact double send is skipped** (``skipped: true``, still ``ok``) — the
   one case the operator named. The same endpoint posting a byte-identical body
-  to the same conversation within ``DUPLICATE_WINDOW_S`` (10 s) of the
+  to the same conversation, the same THREAD and the same addressees (the
+  resolved mention set, sorted) within ``DUPLICATE_WINDOW_S`` (10 s) of the
   previous copy, with no new inbound message in between, is an accidental
   double send (a retried tool call, a model emitting the call twice). EXACT,
   not case/whitespace-folded as the round-1 rule was: a skip is the only path
   that drops a post, so its predicate must be the narrowest one; a changed
-  word, case or spacing is a deliberate edit and posts. The "no new inbound in
-  between" clause keeps "Yes." answering two different questions 3 s apart
-  from being eaten. The result says what was skipped and that different text
-  posts normally. The stored value is an HMAC-SHA256 under a random
-  per-install key (``reply_guard.key``, 0600, beside the database), never the
-  body: a plain hash of "approved" or "yes" would be recoverable with a small
-  dictionary (review round 1, S-3).
+  word, case or spacing is a deliberate edit and posts, and so is "Done." to a
+  second thread or "Approved." to a second person (review round 3, M-1: two
+  questions coalesced into one wake share one trigger time, so the
+  "no new inbound" clause alone could not tell those apart). The "no new
+  inbound in between" clause keeps "Yes." answering two different questions
+  3 s apart from being eaten. The stored value is an HMAC-SHA256 of that
+  (body, thread, addressees) tuple under a random per-install key
+  (``reply_guard.key``, 0600, beside the database), never the body: a plain
+  hash of "approved" or "yes" would be recoverable with a small dictionary
+  (review round 1, S-3). The skip matches a RESERVED row, not a confirmed one:
+  if the earlier call then fails at the hub, its row is released but the
+  skipped call has already answered (review round 3, m-2). Confirming rows
+  would need the skipped call to wait on its sibling's outcome, so instead the
+  skip never claims delivery — it says "identical to a message you sent Ns
+  ago … not posted (if that send failed, resend with changed text)".
 
-The bound on two agents answering each other for ever is the SERVER's wake
-brake (agent-server ``internal/models/bridge_conversation.go``,
-``BridgeConversationAgentRunSoftCap`` = 4 / ``HardCap`` = 8, verified at
-2bc821f6): it never refuses a send, but past 4 consecutive agent messages an
-agent-sent message wakes only agents it addresses, and from 8 on it wakes no
-agent until a human posts or the run idles 10 minutes. Plus the wake card's
-own "no_reply unless it asks you directly" line for agent chatter. A hub that
-predates the brake has no bound on such a loop; that is the operator's
-accepted trade for never losing a reply.
+WHAT BOUNDS AN AGENT LOOP NOW (review round 3, S-8). Nothing on this client,
+by the operator's decision of 2026-11-03. On the server, agent-server #294
+removes the agent-run wake caps; what remains is the S-2 per-recipient ROOM
+wake budget (20 wakes per endpoint per conversation and 40 per endpoint, per
+10 min), and it covers only UNADDRESSED posts in a group or channel. A DM
+loop, or a loop where each agent @-mentions or replies in a thread the other
+follows, is unbounded in time by design: it costs 3,600 / (seconds per turn)
+posts an hour until one agent ends its turn with ``no_reply``, which the wake
+card's ``expect:`` line asks for on agent chatter. The client's part is
+advisory: the one-sided run warning above, and #294's ``agent_wake`` notice
+surfaced as a ``warning`` once per threshold (:func:`agent_run_warning`) so a
+back-and-forth pair is told to be brief too.
 
 WHO WRITES WHAT. Two processes share this state: the connector (which knows
 what woke the agent) records each delivered wake's TRIGGER — sender kind and
@@ -67,25 +79,34 @@ session can run different builds), and they run inside the same IMMEDIATE
 transaction as the decision, so two processes opening an old file at once
 cannot both try the same ``ALTER`` (review round 1, m1). Rows an older build
 wrote — ``runs.cooldown_until``, its ``posts`` — are never a reason to refuse:
-nothing here refuses on counts.
+nothing here refuses at all.
 
-FAIL CLOSED, AND SAY WHICH KIND (review round 2, S-6). If the file or the
-digest key cannot be opened, created or written, the post is not sent: the
-bookkeeping is part of the post, and a silently skipped record would make the
-duplicate memory lie. That is a broken install, not a limit, and the answer
-depends on the cause. A BUSY/LOCKED database (another process mid-write, an
-upgrade) clears in seconds: ``reply_guard_unavailable`` with
-``retry_after_s`` = 5. Anything else — a damaged or unreadable key, a file or
-directory the agent cannot read or write, a corrupt database — never recovers
-on its own: ``reply_guard_broken`` with no retry time, telling the agent to
-report it to the operator rather than wake every 5 s for ever. The trigger side
-still fails OPEN (``record_trigger`` never raises), a pre-existing asymmetry.
+FAIL OPEN, WITH A WARNING (review round 3, m-3; supersedes round 2's S-6
+refusals). With no count left to enforce, this state is advisory bookkeeping:
+the duplicate memory and the run count. A refusal when it cannot be read would
+therefore only DROP messages — round 2 refused every post on a damaged key or
+a corrupt file until the operator repaired it, and QA showed the model never
+even read the retry guidance. So :func:`reserve_post` still raises
+``ReplyGuardUnavailable`` (classified ``transient`` for BUSY/LOCKED, otherwise
+broken), and the tool POSTS ANYWAY with :func:`unavailable_warning` in the
+result: "reply guard busy; posted without duplicate/run tracking", or "reply
+guard state is broken (<reason>); posted without duplicate/run tracking — tell
+the operator". That post has no duplicate skip and no run count; the cost is at
+most one accidental double send. The trigger side fails open too
+(``record_trigger`` never raises); if a trigger is lost under a lock, an
+identical short answer to that unrecorded question within 10 s can be skipped
+(review round 3, S-10 — a narrow, pre-existing asymmetry, deferred).
+
+ROWS AN OLDER BUILD WROTE never count towards the run warning (review round 3,
+QA Q5): only rows with ``tracked = 1`` (written by this build) are counted, so
+the first post after an upgrade does not warn "Posted 140 messages".
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import math
 import os
 import secrets
@@ -95,15 +116,23 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 #: One-sided run warnings (module docstring): at 5, at 10, then every 10.
 RUN_WARN_FIRST = 5
 RUN_WARN_SECOND = 10
 RUN_WARN_EVERY = 10
-#: An exact body re-sent by the same endpoint within this many seconds, with no
-#: new inbound in between, is an accidental double send and is skipped.
+#: An exact body re-sent by the same endpoint to the same conversation, thread
+#: and addressees within this many seconds, with no new inbound in between, is
+#: an accidental double send and is skipped.
 DUPLICATE_WINDOW_S = 10.0
+#: agent-server #294's ``agent_wake.consecutive_agent_messages`` thresholds at
+#: which the tool adds a warning: 8 (the run at which the server starts
+#: sending the notice even when senders alternate), 10, then every 10. Levels,
+#: not exact counts: in a back-and-forth each agent sees every OTHER value
+#: (8, 10, 12 … or 9, 11, 13 …), so an equality test would miss half of them.
+AGENT_RUN_WARN_FIRST = 8
+AGENT_RUN_WARN_EVERY = 10
 
 #: Classification of a post for an OLDER build sharing this file (it reads the
 #: ``agent_to_agent`` and ``human_prompted`` columns); this build decides
@@ -114,11 +143,6 @@ HUMAN_TRIGGER_TTL_S = 600.0
 #: Rows older than this are dropped. A one-sided run is counted over what is
 #: retained, so a day bounds the table while covering any real monologue.
 _RETAIN_S = 86_400.0
-#: The retry hint on a TRANSIENT ``reply_guard_unavailable`` (busy/locked file).
-UNAVAILABLE_RETRY_S = 5
-
-CODE_UNAVAILABLE = "reply_guard_unavailable"
-CODE_BROKEN = "reply_guard_broken"
 
 _BUSY_TIMEOUT_S = 5.0
 _KEY_BYTES = 32
@@ -146,11 +170,19 @@ CREATE TABLE IF NOT EXISTS posts (
     at REAL NOT NULL,
     agent_to_agent INTEGER NOT NULL,
     human_prompted INTEGER NOT NULL DEFAULT 0,
-    body_hash TEXT
+    body_hash TEXT,
+    tracked INTEGER NOT NULL DEFAULT 0
 )""",
     """
 CREATE INDEX IF NOT EXISTS posts_by_conversation
     ON posts (endpoint_id, conversation_id, at)""",
+    """
+CREATE TABLE IF NOT EXISTS agent_run_notices (
+    endpoint_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    level INTEGER NOT NULL,
+    PRIMARY KEY (endpoint_id, conversation_id)
+)""",
     """
 CREATE TABLE IF NOT EXISTS runs (
     endpoint_id TEXT NOT NULL,
@@ -163,10 +195,12 @@ CREATE TABLE IF NOT EXISTS runs (
 
 
 class ReplyGuardUnavailable(RuntimeError):
-    """The guard's state could not be read or written (fail closed).
+    """The guard's state could not be read or written.
 
-    ``transient`` is True only for a busy/locked database, which clears in
-    seconds; every other cause is a broken install that will not (S-6).
+    The tool posts anyway (module docstring, FAIL OPEN) and reports it with
+    :func:`unavailable_warning`. ``transient`` is True only for a busy/locked
+    database, which clears in seconds; every other cause is a broken install
+    the operator has to repair, so only that warning asks for them (S-6).
     """
 
     def __init__(self, reason: str, *, transient: bool = False) -> None:
@@ -205,6 +239,11 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         # NULL on rows an older build wrote: those posts simply take no part in
         # the duplicate check, which is the harmless direction (they post).
         conn.execute("ALTER TABLE posts ADD COLUMN body_hash TEXT")
+    if "tracked" not in columns:
+        # 0 on every row an older build wrote, so those rows never count towards
+        # the run warning (round 3, QA Q5: the first post after an upgrade
+        # warned "Posted 140 messages" from the previous build's history).
+        conn.execute("ALTER TABLE posts ADD COLUMN tracked INTEGER NOT NULL DEFAULT 0")
     trigger_columns = {row[1] for row in conn.execute("PRAGMA table_info(triggers)")}
     if "directed" not in trigger_columns:
         # A DIAGNOSTIC record, not a read path: no query reads this column back
@@ -213,19 +252,27 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE triggers ADD COLUMN directed INTEGER NOT NULL DEFAULT 0")
 
 
-def body_hash(body: str, *, key: bytes) -> str:
-    """HMAC-SHA256 of the EXACT body (no case or whitespace folding).
+def body_hash(
+    body: str, *, key: bytes, thread_root_id: str = "", addressees: Iterable[str] = ()
+) -> str:
+    """HMAC-SHA256 of the EXACT body plus where it went (thread, addressees).
 
     Exact because the duplicate rule is a skip — the one path that drops a
     post — so only a byte-identical re-send counts as a double send; any edit
-    is deliberate and posts. Keyed so the stored digest of a short reply cannot
-    be reversed with a dictionary (S-3). The digest is all that is ever stored:
-    the guard file must never hold message content. A round-1 build stored
-    FOLDED digests; they simply never equal an exact one, which only means an
-    upgrade-time re-send posts (the harmless direction).
+    is deliberate and posts. The thread root and the addressee set are part of
+    the digested input (round 3, M-1): "Done." to two threads, or "Approved."
+    to two people, are two messages. Addressees are de-duplicated, stripped and
+    sorted, so the order a caller listed them in cannot make a re-send look
+    new. The tuple is JSON-encoded so no body can forge another field's
+    boundary. Keyed so the stored digest of a short reply cannot be reversed
+    with a dictionary (S-3). The digest is all that is ever stored: the guard
+    file must never hold message content. Digests an earlier build stored
+    never equal these, which only means an upgrade-time re-send posts.
     """
 
-    return hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()
+    targets = sorted({str(item).strip() for item in addressees if str(item).strip()})
+    encoded = json.dumps([body, thread_root_id.strip(), targets], ensure_ascii=False)
+    return hmac.new(key, encoded.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def key_path(config_dir: Path | str) -> Path:
@@ -239,10 +286,9 @@ def _digest_key(config_dir: Path | str) -> bytes:
     ``mkstemp``) and published with ``os.link``, which fails if the name exists.
     Two processes racing on first use therefore never see a half-written key,
     and the loser adopts the winner's key, so both compute the same digests. A
-    key of the wrong size is damage, not something to overwrite: refusing keeps
-    the rule honest (fail closed, like the database), and it is PERMANENT, so
-    the agent is told to report it rather than retry (S-6). The key is never
-    logged.
+    key of the wrong size is damage, not something to overwrite: the post goes
+    out untracked and the warning asks for the operator, because the damage is
+    PERMANENT (S-6). The key is never logged.
     """
 
     path = key_path(config_dir)
@@ -289,59 +335,47 @@ class Skipped:
     """An exact double send within ``DUPLICATE_WINDOW_S``: not posted, not an error."""
 
     seconds_ago: int
+    in_thread: bool = False
 
     @property
     def warning(self) -> str:
+        # Says "not posted" ONCE (round 3, n-2: it is billed on every skip) and
+        # never claims the earlier copy was delivered (m-2): it may still be in
+        # flight, and if it failed its row is released, so a resend posts.
+        where = "in this thread" if self.in_thread else "here"
         return (
-            f"Skipped as a duplicate of the message you sent {self.seconds_ago}s ago; "
-            "it was not posted. Sending different text posts normally."
+            f"Skipped: identical to a message you sent {self.seconds_ago}s ago {where}; "
+            "not posted. If that send failed, send it again or change the text."
         )
 
     def as_result(self, conversation_id: str) -> dict[str, Any]:
-        # ``ok``: nothing went wrong, the message is already in the conversation.
-        # Reporting an error here would invite the very retry being skipped.
+        # ``ok``: nothing went wrong. Reporting an error here would invite the
+        # very retry being skipped. The tool appends ``warning`` to the text
+        # the model reads, so ``content`` names only the destination.
         return {
             "ok": True,
             "skipped": True,
             "state": "skipped",
             "conversation_id": conversation_id,
             "warning": self.warning,
-            "content": f"not posted to {conversation_id}: {self.warning}",
+            "content": f"duplicate send to {conversation_id}",
         }
 
 
-def unavailable_result(failure: ReplyGuardUnavailable) -> dict[str, Any]:
-    """The fail-closed answer, split by whether waiting can fix it (S-6).
+def unavailable_warning(failure: ReplyGuardUnavailable) -> str:
+    """The one-line warning for a post that went out WITHOUT the guard (m-3).
 
-    Round 1, m3: a refusal must never read as "drop it", so both arms say the
-    post was NOT sent and to keep the draft. Round 2, S-6: only a busy file is
-    worth a timed retry; telling an agent to retry a damaged key every 5 s
-    would buy up to 720 wasted turns an hour, so a permanent failure carries no
-    retry time and says to tell the operator.
+    Busy clears on its own, so it asks nothing of anyone. Broken does not, so it
+    names the cause and asks for the operator — once per post, never a retry
+    loop, because the post itself already went out.
     """
 
     if failure.transient:
-        return {
-            "ok": False,
-            "code": CODE_UNAVAILABLE,
-            "error": f"not sent — {failure.reason}",
-            "retry_after_s": UNAVAILABLE_RETRY_S,
-            "next": (
-                f"NOT sent. Keep your draft and post it again in {UNAVAILABLE_RETRY_S}s; "
-                "the guard's state file was busy and this clears on its own"
-            ),
-        }
-    return {
-        "ok": False,
-        "code": CODE_BROKEN,
-        "error": f"not sent — {failure.reason}; the reply guard state is broken",
-        "next": (
-            "NOT sent. Keep your draft and tell the operator: the reply guard state "
-            "(team_bridge/reply_guard.sqlite3 / reply_guard.key in the Local Operator "
-            "config directory) is broken on this machine and will not recover on its "
-            "own. Do not retry until they have fixed it"
-        ),
-    }
+        return "reply guard busy; posted without duplicate/run tracking"
+    return (
+        f"reply guard state is broken ({failure.reason}); posted without "
+        "duplicate/run tracking — tell the operator"
+    )
 
 
 def guard_path(config_dir: Path | str) -> Path:
@@ -468,6 +502,8 @@ def reserve_post(
     endpoint_id: str,
     conversation_id: str,
     body: str | None = None,
+    thread_root_id: str = "",
+    addressees: Iterable[str] = (),
     now: float | None = None,
 ) -> Reservation | Skipped:
     """Record one post. Never refuses on counts. Raises ``ReplyGuardUnavailable``.
@@ -475,15 +511,25 @@ def reserve_post(
     Returns :class:`Skipped` only for an exact double send (module docstring);
     otherwise a :class:`Reservation`, whose ``warning`` is set on the posts that
     cross a one-sided-run threshold. ``body`` feeds the double-send check
-    (digested under the per-install key, so a key that cannot be read or
-    created fails closed); ``None`` (a caller that has no body) skips that
-    check only. The slot is recorded BEFORE the post goes out (so a concurrent
-    post sees it) and must be given back through :func:`release` when the hub
-    did not accept the post.
+    together with ``thread_root_id`` and ``addressees`` (the resolved mention
+    account ids), digested under the per-install key; ``None`` (a caller that
+    has no body) skips that check only. Raises when the state is unusable; the
+    caller posts anyway (module docstring, FAIL OPEN). The slot is recorded
+    BEFORE the post goes out (so a concurrent post sees it) and must be given
+    back through :func:`release` when the hub did not accept the post.
     """
 
     now = time.time() if now is None else now
-    digest = body_hash(body, key=_digest_key(config_dir)) if body is not None else None
+    digest = (
+        body_hash(
+            body,
+            key=_digest_key(config_dir),
+            thread_root_id=thread_root_id,
+            addressees=addressees,
+        )
+        if body is not None
+        else None
+    )
     with _connect(config_dir) as conn:
         trigger = conn.execute(
             "SELECT at, sender_kind FROM triggers WHERE endpoint_id = ? AND conversation_id = ?",
@@ -505,21 +551,26 @@ def reserve_post(
             # message, not an accident. A trigger at the same instant came first
             # (the connector records it before the wake), so it does not count.
             if previous is not None and (inbound_at is None or inbound_at <= float(previous)):
-                return Skipped(seconds_ago=max(0, math.floor(now - float(previous))))
+                return Skipped(
+                    seconds_ago=max(0, math.floor(now - float(previous))),
+                    in_thread=bool(thread_root_id.strip()),
+                )
 
         # The one-sided run: this endpoint's posts since the latest inbound (a
         # post at the same instant as the trigger came after it), this one
-        # included. With no trigger at all, everything retained counts.
+        # included. With no trigger at all, everything retained counts — but
+        # only rows THIS build wrote (``tracked``), never an older build's (Q5).
         since = inbound_at if inbound_at is not None else now - _RETAIN_S
         before = conn.execute(
-            "SELECT COUNT(*) FROM posts WHERE endpoint_id = ? AND conversation_id = ? AND at >= ?",
+            "SELECT COUNT(*) FROM posts WHERE endpoint_id = ? AND conversation_id = ? "
+            "AND at >= ? AND tracked = 1",
             (endpoint_id, conversation_id, since),
         ).fetchone()[0]
 
         cursor = conn.execute(
             "INSERT INTO posts "
-            "(endpoint_id, conversation_id, at, agent_to_agent, human_prompted, body_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "(endpoint_id, conversation_id, at, agent_to_agent, human_prompted, body_hash, "
+            "tracked) VALUES (?, ?, ?, ?, ?, ?, 1)",
             (
                 endpoint_id,
                 conversation_id,
@@ -536,6 +587,65 @@ def reserve_post(
             agent_to_agent=agent_to_agent,
             warning=_run_warning(int(before) + 1),
         )
+
+
+def _agent_run_level(count: int) -> int:
+    """The highest notice threshold ``count`` has reached: 0, 8, 10, 20, 30, …"""
+
+    if count < AGENT_RUN_WARN_FIRST:
+        return 0
+    if count < AGENT_RUN_WARN_EVERY:
+        return AGENT_RUN_WARN_FIRST
+    return count - count % AGENT_RUN_WARN_EVERY
+
+
+def agent_run_warning(
+    config_dir: Path | str, *, endpoint_id: str, conversation_id: str, notice: Any
+) -> str | None:
+    """The one-line warning for agent-server #294's ``agent_wake`` notice, or None.
+
+    WHY (review round 3, I-1). The one-sided run warning resets on every
+    inbound message, so two agents taking turns never see it — 0 warnings in
+    8,640 measured alternating posts. The server counts the conversation's
+    consecutive agent messages and returns ``agent_wake`` on an agent's own
+    send answer once that run reaches 8 (or the sender has posted 3 in a row).
+    This turns it into the operator's "warning instead of an error" for the
+    back-and-forth case, once per threshold crossing (8, 10, 20, …), never on
+    every post. The level reached is remembered per endpoint and conversation,
+    and it resets when the server reports a run below 8 (a person spoke, or ten
+    idle minutes). ADDITIVE: an older server sends no ``agent_wake``, ``notice``
+    is then None and nothing changes. Best effort: unusable guard state returns
+    None rather than a second warning about bookkeeping.
+    """
+
+    if not isinstance(notice, dict):
+        return None
+    count = notice.get("consecutive_agent_messages")
+    if not isinstance(count, int) or isinstance(count, bool):
+        return None
+    level = _agent_run_level(count)
+    try:
+        with _connect(config_dir) as conn:
+            row = conn.execute(
+                "SELECT level FROM agent_run_notices WHERE endpoint_id = ? AND conversation_id = ?",
+                (endpoint_id, conversation_id),
+            ).fetchone()
+            seen = int(row[0]) if row is not None else 0
+            conn.execute(
+                "INSERT INTO agent_run_notices (endpoint_id, conversation_id, level) "
+                "VALUES (?, ?, ?) ON CONFLICT(endpoint_id, conversation_id) DO UPDATE SET "
+                "level = excluded.level",
+                (endpoint_id, conversation_id, level),
+            )
+    except ReplyGuardUnavailable:
+        return None
+    # A lower level than remembered is a NEW run (the server's count reset).
+    if level == 0 or level == seen:
+        return None
+    return (
+        f"{count} consecutive agent messages in this conversation; "
+        "be brief and avoid repeating yourself."
+    )
 
 
 def release(
@@ -558,22 +668,22 @@ def release(
 
 
 __all__ = [
-    "CODE_BROKEN",
-    "CODE_UNAVAILABLE",
+    "AGENT_RUN_WARN_EVERY",
+    "AGENT_RUN_WARN_FIRST",
     "DUPLICATE_WINDOW_S",
     "HUMAN_TRIGGER_TTL_S",
     "RUN_WARN_EVERY",
     "RUN_WARN_FIRST",
     "RUN_WARN_SECOND",
     "TRIGGER_TTL_S",
-    "UNAVAILABLE_RETRY_S",
     "ReplyGuardUnavailable",
     "Reservation",
     "Skipped",
     "body_hash",
     "guard_path",
     "key_path",
-    "unavailable_result",
+    "agent_run_warning",
+    "unavailable_warning",
     "record_trigger",
     "release",
     "reserve_post",

@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import re
 import time
@@ -422,12 +421,72 @@ def test_an_exact_double_send_within_ten_seconds_is_skipped(tmp_path: Path) -> N
     assert isinstance(skipped, reply_guard.Skipped)
     result = skipped.as_result(CONV)
     assert result["ok"] is True and result["skipped"] is True
+    # n-2: "not posted" once; m-2: never claims the earlier copy was delivered.
     assert result["warning"] == (
-        "Skipped as a duplicate of the message you sent 3s ago; it was not posted. "
-        "Sending different text posts normally."
+        "Skipped: identical to a message you sent 3s ago here; not posted. "
+        "If that send failed, send it again or change the text."
     )
+    assert result["warning"].count("not posted") == 1
     # 11 s after the only POSTED copy (the skip records nothing): posts.
     assert isinstance(_reserve(tmp_path, now + 11, body="Approved."), reply_guard.Reservation)
+
+
+def test_the_same_text_to_another_thread_or_addressee_is_not_a_double_send(
+    tmp_path: Path,
+) -> None:
+    """Round 3, M-1, the reviewer's reproduction: two questions coalesced into
+    one wake share a trigger time (100.0 and 100.2), so "Done." to thread A at
+    104 and "Done." to thread B at 106 both follow it. The second was skipped;
+    the thread and the addressees are now part of the double-send key."""
+
+    _trigger(tmp_path, "agent", 100.0)
+    _trigger(tmp_path, "agent", 100.2)
+    thread_a = reply_guard.reserve_post(
+        tmp_path,
+        endpoint_id="bep_a",
+        conversation_id=CONV,
+        body="Done.",
+        thread_root_id="bcmsg_threadA",
+        now=104.0,
+    )
+    thread_b = reply_guard.reserve_post(
+        tmp_path,
+        endpoint_id="bep_a",
+        conversation_id=CONV,
+        body="Done.",
+        thread_root_id="bcmsg_threadB",
+        now=106.0,
+    )
+    assert isinstance(thread_a, reply_guard.Reservation)
+    assert isinstance(thread_b, reply_guard.Reservation), thread_b
+    # The same thread again IS the double send, and says "in this thread".
+    again = reply_guard.reserve_post(
+        tmp_path,
+        endpoint_id="bep_a",
+        conversation_id=CONV,
+        body="Done.",
+        thread_root_id="bcmsg_threadB",
+        now=107.0,
+    )
+    assert isinstance(again, reply_guard.Skipped) and "in this thread" in again.warning
+
+    # Addressees: "Approved." to Alice, then to Bob, posts; Alice again (listed
+    # in another order, with stray spaces) is the double send.
+    def to(*who: str, at: float) -> Any:
+        return reply_guard.reserve_post(
+            tmp_path,
+            endpoint_id="bep_a",
+            conversation_id=CONV,
+            body="Approved.",
+            addressees=who,
+            now=at,
+        )
+
+    assert isinstance(to("agent:acct_alice", at=108.0), reply_guard.Reservation)
+    assert isinstance(to("agent:acct_bob", at=108.5), reply_guard.Reservation)
+    assert isinstance(to(" agent:acct_alice", at=109.0), reply_guard.Skipped)
+    assert isinstance(to("agent:acct_bob", "agent:acct_alice", at=109.2), reply_guard.Reservation)
+    assert isinstance(to("agent:acct_alice", "agent:acct_bob", at=109.4), reply_guard.Skipped)
 
 
 def test_different_text_within_a_second_posts(tmp_path: Path) -> None:
@@ -478,6 +537,8 @@ def test_only_a_keyed_digest_of_the_body_is_stored(tmp_path: Path) -> None:
     finally:
         conn.close()
     assert rows == [(reply_guard.body_hash("approved", key=key),)]
+    # The thread and addressees change the digest (M-1); nothing else is stored.
+    assert reply_guard.body_hash("approved", key=key, thread_root_id="bcmsg_t") != rows[0][0]
     assert hashlib.sha256(b"approved").hexdigest() not in dump
     assert "approved" not in dump
     # Each install draws its own key, so equal bodies do not match across files.
@@ -529,6 +590,46 @@ def test_an_old_build_cool_down_row_does_not_refuse(tmp_path: Path) -> None:
     assert isinstance(slot, reply_guard.Reservation), slot
 
 
+def test_an_older_builds_posts_never_count_towards_the_run_warning(tmp_path: Path) -> None:
+    """Round 3, QA Q5: the first post after an upgrade warned "Posted 140
+    messages" because the previous build's rows counted. Only rows this build
+    wrote (``tracked``) count, so the run starts at 1."""
+
+    import sqlite3
+
+    path = reply_guard.guard_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    now = 1_000_000.0
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript("""
+            CREATE TABLE posts (id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL, at REAL NOT NULL, agent_to_agent INTEGER NOT NULL,
+                human_prompted INTEGER NOT NULL DEFAULT 0, body_hash TEXT);
+            """)
+        conn.executemany(
+            "INSERT INTO posts (endpoint_id, conversation_id, at, agent_to_agent, body_hash) "
+            "VALUES ('bep_a', ?, ?, 1, NULL)",
+            [(CONV, now - 600 + 4 * i) for i in range(139)],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    warned = []
+    for index in range(1, 6):
+        slot = _reserve(tmp_path, now + index, body=f"after upgrade {index}")
+        assert isinstance(slot, reply_guard.Reservation)
+        if slot.warning:
+            warned.append((index, slot.warning))
+    assert warned == [
+        (
+            5,
+            "Posted 5 messages in this conversation with no reply; "
+            "be brief and avoid repeating yourself.",
+        )
+    ]
+
+
 def test_a_released_slot_is_neither_counted_nor_a_duplicate(tmp_path: Path) -> None:
     now = 1_000_000.0
     _trigger(tmp_path, "agent", now)
@@ -540,7 +641,7 @@ def test_a_released_slot_is_neither_counted_nor_a_duplicate(tmp_path: Path) -> N
     assert isinstance(retry, reply_guard.Reservation) and retry.warning is None
 
 
-def test_an_unreadable_state_dir_fails_closed_as_broken(tmp_path: Path) -> None:
+def test_an_unreadable_state_dir_is_classed_broken(tmp_path: Path) -> None:
     # A FILE where the state directory belongs: the guard cannot open its db.
     (tmp_path / "team_bridge").write_text("not a directory")
     with pytest.raises(reply_guard.ReplyGuardUnavailable) as caught:
@@ -548,7 +649,7 @@ def test_an_unreadable_state_dir_fails_closed_as_broken(tmp_path: Path) -> None:
     assert caught.value.transient is False
 
 
-def test_a_damaged_or_unreadable_key_fails_closed_as_broken(tmp_path: Path) -> None:
+def test_a_damaged_or_unreadable_key_is_classed_broken(tmp_path: Path) -> None:
     reply_guard.key_path(tmp_path).parent.mkdir(parents=True)
     reply_guard.key_path(tmp_path).write_bytes(b"short")
     with pytest.raises(reply_guard.ReplyGuardUnavailable) as caught:
@@ -561,9 +662,9 @@ def test_a_damaged_or_unreadable_key_fails_closed_as_broken(tmp_path: Path) -> N
     assert caught.value.transient is False
 
 
-def test_a_locked_state_file_is_transient(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A writer holding the file past the busy timeout: retry in 5 s, not "broken"."""
-
+def test_a_locked_state_file_is_classed_transient(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import sqlite3
 
     monkeypatch.setattr(reply_guard, "_BUSY_TIMEOUT_S", 0.05)
@@ -579,25 +680,57 @@ def test_a_locked_state_file_is_transient(tmp_path: Path, monkeypatch: pytest.Mo
     assert caught.value.transient is True
 
 
-def test_fail_closed_guidance_matches_the_cause() -> None:
-    """S-6: only a busy file says "retry in 5 s"; a broken one says tell the operator."""
+def test_the_fail_open_warning_matches_the_cause() -> None:
+    """Round 3, m-3: never a refusal. Busy asks nothing; broken asks for the operator."""
 
-    busy = reply_guard.unavailable_result(
+    busy = reply_guard.unavailable_warning(
         reply_guard.ReplyGuardUnavailable("reply guard state is busy", transient=True)
     )
-    assert busy["ok"] is False and busy["code"] == reply_guard.CODE_UNAVAILABLE
-    assert busy["retry_after_s"] == reply_guard.UNAVAILABLE_RETRY_S
-    assert "Keep your draft" in busy["next"] and "5s" in busy["next"]
-
-    broken = reply_guard.unavailable_result(
+    assert busy == "reply guard busy; posted without duplicate/run tracking"
+    broken = reply_guard.unavailable_warning(
         reply_guard.ReplyGuardUnavailable("reply guard key is damaged")
     )
-    assert broken["ok"] is False and broken["code"] == reply_guard.CODE_BROKEN
-    assert "retry_after_s" not in broken
-    assert "Keep your draft" in broken["next"]
-    assert "tell the operator" in broken["next"] and "broken" in broken["error"]
-    for result in (busy, broken):
-        assert "no_reply" not in json.dumps(result)
+    assert broken == (
+        "reply guard state is broken (reply guard key is damaged); posted without "
+        "duplicate/run tracking — tell the operator"
+    )
+
+
+def test_the_agent_run_notice_warns_once_per_threshold(tmp_path: Path) -> None:
+    """Round 3, I-1: #294's ``agent_wake`` notice becomes a warning at 8, 10, 20 …
+
+    In a back-and-forth each agent sees every OTHER run value, so thresholds
+    are levels: this agent sees 8, 10, 12 … 22 and is warned at 8, 10 and 20.
+    A run that falls below 8 (a person spoke) re-arms it; an older server's
+    absent field changes nothing.
+    """
+
+    def notice(count: int | None) -> str | None:
+        payload = (
+            None
+            if count is None
+            else {"unanswered_messages": 1, "consecutive_agent_messages": count}
+        )
+        return reply_guard.agent_run_warning(
+            tmp_path, endpoint_id="bep_a", conversation_id=CONV, notice=payload
+        )
+
+    seen = {count: notice(count) for count in range(2, 24, 2)}
+    assert [count for count, warning in seen.items() if warning] == [8, 10, 20]
+    assert seen[8] == (
+        "8 consecutive agent messages in this conversation; be brief and avoid repeating yourself."
+    )
+    assert notice(None) is None and notice(3) is None  # old server / a person spoke
+    assert notice(8) is not None, "a new run warns again"
+    assert (
+        reply_guard.agent_run_warning(
+            tmp_path,
+            endpoint_id="bep_a",
+            conversation_id=CONV,
+            notice={"consecutive_agent_messages": True},
+        )
+        is None
+    )
 
 
 def test_the_digest_key_survives_a_creation_race(tmp_path: Path) -> None:
@@ -1055,8 +1188,7 @@ def test_channel_post_never_refuses_on_count_and_warns_once(
     warned = [index for index, result in enumerate(results, 1) if "warning" in result]
     assert warned == [5, 10]
     assert results[4]["warning"].startswith("Posted 5 messages in this conversation")
-    assert results[4]["content"].endswith(f"warning: {results[4]['warning']}")
-    assert "warning" not in results[5]["content"]
+    assert "warning" not in results[5]
 
 
 def test_the_model_reads_the_warning_and_the_skip_in_the_tool_result(
@@ -1086,8 +1218,16 @@ def test_the_model_reads_the_warning_and_the_skip_in_the_tool_result(
 
         return asyncio.run(run())
 
+    from local_operator.harness.types import Message
+    from local_operator.providers.clients import AnthropicClient
+
+    def provider_text(result: Any) -> str:
+        # The text the PROVIDER receives (QA round 3, Q-1): details never reach it.
+        blocks = AnthropicClient._tool_result_blocks(Message.tool_result(result))
+        return "\n".join(block["text"] for block in blocks if block.get("type") == "text")
+
     texts = [call(f"status {index}") for index in range(1, 6)]
-    rendered = [result.content[0].text for result in texts]
+    rendered = [provider_text(result) for result in texts]
     assert all(not result.is_error for result in texts)
     assert "warning:" not in rendered[3]
     assert rendered[4].endswith(
@@ -1097,10 +1237,115 @@ def test_the_model_reads_the_warning_and_the_skip_in_the_tool_result(
     print(f"\n5th post, model sees: {rendered[4]!r}")
     skipped = call("status 5")
     assert not skipped.is_error
-    text = skipped.content[0].text
-    assert "not posted" in text and "1s ago" in text and "different text" in text
+    text = provider_text(skipped)
+    assert "not posted" in text and "1s ago" in text and "change the text" in text
     print(f"double send, model sees: {text!r}")
     assert len(hub.agent_posts()) == 5
+
+
+class _NoticeClient(ToolClient):
+    """A #294 hub: the send answer carries ``agent_wake`` once the run is long."""
+
+    run = 0
+
+    async def conversation_send(self, conversation_id: str, *, text: str, **kwargs: Any):
+        answer = await super().conversation_send(conversation_id, text=text, **kwargs)
+        if self.run:
+            answer["agent_wake"] = {
+                "unanswered_messages": 1,
+                "consecutive_agent_messages": self.run,
+            }
+        return answer
+
+
+@pytest.mark.parametrize(
+    "breakage",
+    ["locked", "damaged_key", "unreadable_key", "unwritable_dir", "corrupt_db"],
+)
+def test_an_unusable_guard_never_stops_a_post_and_the_model_is_told(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, breakage: str
+) -> None:
+    """Round 3, m-3: fail OPEN. Every class of unusable guard state posts, and
+    the provider text carries the one-line warning (Q-1). Busy asks nothing of
+    anyone; every broken class asks the model to tell the operator."""
+
+    import sqlite3
+
+    from local_operator.harness.types import Message, ToolContext
+    from local_operator.providers.clients import AnthropicClient
+    from local_operator.team_bridge.tool import build_bridge_tool
+
+    a = _owner("a", 1)
+    hub = Hub(members=("bep_a",))
+    _rig(monkeypatch, hub, {})
+    config = tmp_path / "cfg"
+    state = config / "team_bridge"
+    holder = None
+    if breakage == "locked":
+        monkeypatch.setattr(reply_guard, "_BUSY_TIMEOUT_S", 0.05)
+        _reserve(config, 1.0, body="seed")
+        holder = sqlite3.connect(reply_guard.guard_path(config), isolation_level=None)
+        holder.execute("BEGIN IMMEDIATE")
+    elif breakage == "damaged_key":
+        state.mkdir(parents=True)
+        reply_guard.key_path(config).write_bytes(b"short")
+    elif breakage == "unreadable_key":
+        state.mkdir(parents=True)
+        reply_guard.key_path(config).mkdir()  # a directory where the key file belongs
+    elif breakage == "unwritable_dir":
+        config.mkdir()
+        state.write_text("a file where the state directory belongs")
+    else:
+        state.mkdir(parents=True)
+        reply_guard.guard_path(config).write_bytes(b"this is not a sqlite database" * 64)
+    tool = build_bridge_tool(ToolContext(bridge_runtime=_runtime(hub, a, config)))
+    assert tool is not None
+    try:
+        args = {"op": "channel_post", "channel_id": CONV, "body": "the approval"}
+
+        async def run() -> Any:
+            return await tool.execute("call_b", args, None, None, ToolContext())
+
+        result = asyncio.run(run())
+    finally:
+        if holder is not None:
+            holder.execute("ROLLBACK")
+            holder.close()
+    blocks = AnthropicClient._tool_result_blocks(Message.tool_result(result))
+    text = "\n".join(block["text"] for block in blocks if block.get("type") == "text")
+    assert not result.is_error and result.details["ok"] is True
+    assert len(hub.agent_posts()) == 1, "posted despite the guard"
+    if breakage == "locked":
+        assert text.endswith("warning: reply guard busy; posted without duplicate/run tracking")
+    else:
+        assert "warning: reply guard state is broken (" in text
+        assert text.endswith("posted without duplicate/run tracking — tell the operator")
+    print(f"\n{breakage}: model sees {text!r}")
+
+
+def test_the_server_agent_run_notice_reaches_the_model_once_per_threshold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 3, I-1: a back-and-forth pair never trips the one-sided warning, so
+    #294's ``agent_wake`` notice is surfaced instead, once per threshold."""
+
+    a = _owner("a", 1)
+    hub = Hub(members=("bep_a",))
+    _rig(monkeypatch, hub, {})
+    runtime = _runtime(hub, a, tmp_path)
+    client = _NoticeClient(hub, a.endpoint_id)
+    runtime.client = cast(TeamBridgeClient, client)
+    warnings = {}
+    for run in (0, 6, 8, 9, 10, 12):
+        client.run = run
+        _trigger(tmp_path, "agent", time.time() + run)  # alternating: a new inbound each time
+        result = _post(runtime, body=f"turn {run}")
+        assert result["ok"] is True
+        warnings[run] = result.get("warning")
+    assert {run for run, warning in warnings.items() if warning} == {8, 10}
+    assert warnings[8] == (
+        "8 consecutive agent messages in this conversation; be brief and avoid repeating yourself."
+    )
 
 
 def test_channel_post_skips_an_exact_double_send(
@@ -1206,10 +1451,20 @@ def _converse(
     return hub, wakes, refusals
 
 
-def test_two_reply_to_everything_agents_stop_under_the_server_caps(
+def test_a_simulated_pre_294_hub_with_agent_run_caps_ends_the_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Pins only what a hub WITH the agent-run caps did: prod before #294.
+
+    agent-server #294 deletes those caps, so this is not the bound after it
+    deploys: from then on only the S-2 room budget remains, and it covers
+    unaddressed group/channel posts only — DM and mention loops are unbounded
+    by operator decision (review round 3, S-8; reply_guard's docstring). The
+    client refuses nothing either way.
+    """
+
     hub, wakes, refusals = _converse(tmp_path, monkeypatch, caps=True)
+    assert refusals == []
     posts = hub.agent_posts()
     # The server's soft cap stops agent→agent fan-out at a run of 4; the posts
     # that run produced are the whole conversation.
@@ -1225,8 +1480,9 @@ def test_on_an_old_hub_the_client_never_refuses_an_agent_loop(
     """Operator, 2026-11-03: no client cap on agent replies. An OLD hub with no
     wake brake fans every message to every agent, so two reply-to-everything
     agents keep going; the client delivers every post (none refused, none
-    skipped: each answers a new message) and the bound is the server's brake
-    (the test above). This pins the accepted trade rather than hiding it.
+    skipped: each answers a new message). After #294 a DM or addressed loop
+    has no server bound either; this pins the accepted trade rather than
+    hiding it.
     """
 
     hub, wakes, refusals = _converse(

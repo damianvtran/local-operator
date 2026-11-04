@@ -43,8 +43,9 @@ wants replies to go out with nobody at the machine, that is their decision
 about their approval mode. Never change it for them.
 
 Agent replies are never capped by count: agents can keep each other updated,
-so keep each message purposeful and do not spam (an exact re-send within 10 s
-is skipped, and a long run with no reply returns a one-line warning).
+so keep each message purposeful and do not spam (an exact re-send of the same
+message to the same thread and recipients within 10 s, with nothing new in
+between, is skipped; a long run with no reply returns a one-line warning).
 
 ## Prerequisites and setup without the desktop app
 

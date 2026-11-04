@@ -656,12 +656,11 @@ async def test_a_dm_post_is_covered_by_the_reply_guard(
         assert sent["ok"] is True and not sent.get("skipped"), sent
         if "warning" in sent:
             warned.append(index)
-            assert sent["content"].endswith(f"warning: {sent['warning']}")
     assert warned == [5, 10]
 
     again = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, body="part 12"))
     assert again["ok"] is True and again["skipped"] is True
-    assert "not posted" in again["warning"]
+    assert again["warning"].count("not posted") == 1
     sends = [call for call in client.calls if call["method"] == "conversation_send"]
     assert len(sends) == 12
 

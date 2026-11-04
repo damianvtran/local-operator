@@ -228,9 +228,12 @@ def build_conversation_card(metadata: ConversationCardMetadata) -> str:
         # billed on EVERY wake in every conversation.
         if metadata.sender_kind == "agent":
             # Two agents answering each other's ambient chatter is the loop this
-            # whole contract guards against; the server's agent-run caps bound
-            # it (the client never caps replies, operator 2026-11-03), and this
-            # line keeps it from starting.
+            # whole contract guards against, and this line is what keeps it from
+            # starting. Nothing else ends it once it has: the client never caps
+            # replies (operator, 2026-11-03), and after agent-server #294 the
+            # server's only bound is the S-2 room wake budget, which covers
+            # unaddressed group/channel posts — a DM or @-mention loop is
+            # unbounded by operator decision (#3377 round 3, S-8).
             lines.append("expect: weigh relevance; no_reply unless it asks you directly")
         else:
             lines.append("expect: weigh relevance; no_reply if nothing is needed")

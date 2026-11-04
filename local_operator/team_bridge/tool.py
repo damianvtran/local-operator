@@ -1067,16 +1067,21 @@ async def _direct_message(
     # only an exact double send skipped and a one-line warning on a long
     # one-sided run. Reserved AFTER every local refusal (a malformed or
     # unreachable target records nothing) and BEFORE the write (a concurrent
-    # post of this endpoint sees the slot).
+    # post of this endpoint sees the slot). Unusable guard state never stops
+    # the DM (round 3, m-3): it goes out untracked, with a warning. No
+    # addressees: the DM's conversation id already names its recipient.
+    slot: reply_guard.Reservation | reply_guard.Skipped | None = None
+    guard_warning: str | None = None
     try:
         slot = reply_guard.reserve_post(
             runtime.config_dir,
             endpoint_id=endpoint_id,
             conversation_id=conversation_id,
             body=text,
+            thread_root_id=thread_root_id,
         )
     except reply_guard.ReplyGuardUnavailable as failure:
-        return reply_guard.unavailable_result(failure)
+        guard_warning = reply_guard.unavailable_warning(failure)
     if isinstance(slot, reply_guard.Skipped):
         return slot.as_result(conversation_id)
     try:
@@ -1092,9 +1097,10 @@ async def _direct_message(
         )
     except Exception as failure:
         # The hub did not take it: the slot goes back (``reply_guard.release``).
-        reply_guard.release(
-            runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=conversation_id
-        )
+        if slot is not None:
+            reply_guard.release(
+                runtime.config_dir, slot, endpoint_id=endpoint_id, conversation_id=conversation_id
+            )
         return _error(
             f"the DM {conversation_id} opened but the post did not confirm: "
             f"{_failure_text(failure)}",
@@ -1125,8 +1131,17 @@ async def _direct_message(
                 receipt[
                     "content"
                 ] += f"; recipient agent is {state} (its owner must accept before it is woken)"
-    # Last, so the warning line follows the whole receipt sentence.
-    return _with_run_warning(receipt, slot)
+    return _with_warnings(
+        receipt,
+        guard_warning,
+        slot.warning if slot is not None else None,
+        reply_guard.agent_run_warning(
+            runtime.config_dir,
+            endpoint_id=endpoint_id,
+            conversation_id=conversation_id,
+            notice=_agent_wake_notice(result),
+        ),
+    )
 
 
 # -- owner-shared conversations (the chief-of-staff read grant) --------------
@@ -1326,21 +1341,63 @@ def _post_receipt(
     return receipt
 
 
-def _with_run_warning(
-    receipt: dict[str, Any], slot: reply_guard.Reservation | None
-) -> dict[str, Any]:
-    """Attach the reply guard's one-sided-run warning to a successful receipt.
+def _with_warnings(receipt: dict[str, Any], *warnings: str | None) -> dict[str, Any]:
+    """Attach the post's warnings to a successful receipt as ONE ``warning`` field.
 
-    One optional ``warning`` line, absent on all but the threshold posts: the
-    token-cheap nudge that replaced the count refusals (operator, 2026-11-03).
-    Also appended to ``content``, because that string is what the tool result
-    renders to the model; ``details`` alone would never be read.
+    Each is one line and absent on all but the posts that cross a threshold:
+    the token-cheap nudges that replaced the count refusals (operator,
+    2026-11-03) — the one-sided run, #294's agent run, and a post that went out
+    without the reply guard. One line per warning, newline-joined, absent when
+    there are none. The tool's renderer (:func:`_model_notes`) puts every line
+    into the text the provider receives; ``details`` alone is never read.
     """
 
-    if slot is not None and slot.warning:
-        receipt["warning"] = slot.warning
-        receipt["content"] = f"{receipt['content']}\nwarning: {slot.warning}"
+    lines = [warning for warning in warnings if warning]
+    if lines:
+        receipt["warning"] = "\n".join(lines)
     return receipt
+
+
+def _agent_wake_notice(result: Any) -> Any:
+    """agent-server #294's ``agent_wake`` from a send answer, or None (older server).
+
+    Read from the same view :func:`_posted_message` reads (the unwrapped
+    message view, or a proxy's nested ``message``), so the two never disagree
+    about which object the hub answered.
+    """
+
+    if not isinstance(result, dict):
+        return None
+    nested = result.get("message")
+    view: dict[str, Any] = nested if isinstance(nested, dict) else result
+    return view.get("agent_wake")
+
+
+def _model_notes(outcome: dict[str, Any]) -> str:
+    """Guidance lines the MODEL must read, appended to the tool result's text.
+
+    WHY (review round 3, QA Q-1). A bridge result reaches the provider as its
+    text block only: ``details`` rides ``provider_payload``, which every wire
+    builder is structurally unable to send, and an error result rendered only
+    ``error``. So a ``next`` instruction or a ``retry_after_s`` the model needed
+    was never seen, and the round-1 success-path fix (appending the run warning
+    to ``content``) was one call site's patch. This is the one place: every
+    ``warning`` line on any result, and ``next`` / ``retry_after_s`` on an
+    error, become ``warning:`` / ``next:`` / ``retry_after_s:`` lines.
+    """
+
+    lines: list[str] = []
+    warning = outcome.get("warning")
+    if isinstance(warning, str) and warning.strip():
+        lines.extend(f"warning: {line}" for line in warning.splitlines() if line.strip())
+    if outcome.get("ok") is not True:
+        hint = outcome.get("next")
+        if isinstance(hint, str) and hint.strip():
+            lines.append(f"next: {hint.strip()}")
+        retry = outcome.get("retry_after_s")
+        if isinstance(retry, int) and not isinstance(retry, bool):
+            lines.append(f"retry_after_s: {retry}")
+    return "\n".join(lines)
 
 
 def _full_body_text(result: Any) -> str | None:
@@ -1887,16 +1944,23 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # is skipped, and a long one-sided run adds a one-line ``warning``.
         # Reserved LAST among the local checks (a malformed or unresolvable call
         # records nothing) and BEFORE the wire write (a concurrent post of the
-        # same endpoint sees the slot). Fail closed only when the guard's state
-        # is unreadable: a broken install, not a limit.
-        slot = None
+        # same endpoint sees the slot). Unusable guard state never stops the
+        # post (round 3, m-3): it goes out untracked, with a warning. The
+        # thread and the addressees are part of the duplicate key (M-1).
+        slot: reply_guard.Reservation | None = None
+        guard_warning: str | None = None
+        guarded = False
+        addressees = [
+            f"{m.get('kind', '')}:{m.get('account_id', '')}:{m.get('endpoint_id', '')}"
+            for m in mentions
+        ]
 
         class DispatchRefused(Exception):
             def __init__(self, result: dict[str, Any]) -> None:
                 self.result = result
 
         def pre_http_guard() -> None:
-            nonlocal slot
+            nonlocal slot, guard_warning, guarded
             fence = outbound_tool_fence(runtime)
             refusal = (
                 _error(fence["error"], code=fence["code"])
@@ -1908,16 +1972,20 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             # Reserve only when the first physical attempt is authorized.
             # Retries revalidate and reuse the same slot/client_ref, so a
             # transport retry never counts as a second post (or a duplicate).
-            if slot is None:
+            if not guarded:
+                guarded = True
                 try:
                     reserved = reply_guard.reserve_post(
                         runtime.config_dir,
                         endpoint_id=endpoint_id,
                         conversation_id=channel_id,
                         body=params.body,
+                        thread_root_id=thread_root_id,
+                        addressees=addressees,
                     )
                 except reply_guard.ReplyGuardUnavailable as failure:
-                    raise DispatchRefused(reply_guard.unavailable_result(failure)) from None
+                    guard_warning = reply_guard.unavailable_warning(failure)
+                    return
                 if isinstance(reserved, reply_guard.Skipped):
                     # Not a failure: the identical message is already posted.
                     # Raised only to stop the wire write; the result is ``ok``.
@@ -1964,7 +2032,17 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             thread_root_id=thread_root_id,
             mention_account_id=recipient_account_id,
         )
-        return _with_run_warning(receipt, slot)
+        return _with_warnings(
+            receipt,
+            guard_warning,
+            slot.warning if slot is not None else None,
+            reply_guard.agent_run_warning(
+                runtime.config_dir,
+                endpoint_id=endpoint_id,
+                conversation_id=channel_id,
+                notice=_agent_wake_notice(result),
+            ),
+        )
 
     if params.op == "react":
         channel_id = params.channel_id.strip()
@@ -2359,6 +2437,11 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
                 )
             else:
                 content = f"bridge {args.get('op')}: {outcome.get('state', 'ok')}"
+            notes = _model_notes(outcome)
+            if notes and not peer_receipt:
+                # A peer receipt is already the whole outcome as JSON, warning
+                # included; every other shape gets the lines appended (Q-1).
+                content = f"{content}\n{notes}"
             # N1: the served §11.3 guidance is ADVISORY — appended when a
             # status snapshot carried one; its absence degrades advice only.
             client = getattr(runtime, "client", None)
@@ -2398,7 +2481,15 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         return ToolResult(
             tool_call_id=tool_call_id,
             tool_name="bridge",
-            content=[TextContent(text=str(outcome.get("error") or "refused"))],
+            content=[
+                TextContent(
+                    text="\n".join(
+                        part
+                        for part in (str(outcome.get("error") or "refused"), _model_notes(outcome))
+                        if part
+                    )
+                )
+            ],
             details=outcome,
             is_error=True,
         )
