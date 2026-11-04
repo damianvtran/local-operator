@@ -67,19 +67,126 @@ def check_space(volume, compressed):
         )
 
 
-def block_paid_coding():
+# The container metering closure: the shared desktop meter/edge/classifier
+# bytes PLUS every coding-lane file on the paid container path. The zero-paid
+# container S4 (egress denial, gold isolation, oracle=edge parity) is valid only
+# for these exact bytes; any change invalidates its record.
+CONTAINER_CLOSURE = (
+    "../meter_proxy.py",
+    "../lop_edge.py",
+    "../radient_meter/classifier.py",
+    "../radient_meter/json_types.py",
+    "../radient_meter/model.py",
+    "../radient_meter/sse_stream.py",
+    "adapters.py",
+    "bench_verifier.py",
+    "driver.py",
+    "egress.py",
+    "gate_relay.py",
+    "gold_probe.py",
+    "lop_launch.py",
+)
+
+
+def container_closure_hashes():
+    return {name: digest(HERE / name) for name in CONTAINER_CLOSURE}
+
+
+def container_evidence(args):
+    """Return the record digest iff a container S4 record matches these bytes.
+
+    The record is an explicit CLI argument (``--coding-edge-evidence``), like
+    every other frozen artifact: the hold is decided before ANY environment
+    lookup, so no credential is touched on a refused run.
+
+    Same shape as runner_v2.lop_edge_preflight (R4 F11): the record names an
+    evidence artifact in its own directory whose bytes must still hash to the
+    recorded digest, so the record is not self-attesting.
+    """
+    raw = getattr(args, "coding_edge_evidence", None)
+    if not raw:
+        return None
+    path = Path(raw)
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    rel = record.get("evidence_path")
+    base = path.resolve().parent
+    artifact = (base / rel).resolve() if isinstance(rel, str) and rel else None
+    if (
+        record.get("container_s4_passed") is not True
+        or record.get("lop_head") != SOURCE_REVISION
+        or record.get("files") != container_closure_hashes()
+        or artifact is None
+        or not artifact.is_relative_to(base)
+        or not artifact.is_file()
+        or digest(artifact) != record.get("evidence_sha256")
+    ):
+        return None
+    return record["evidence_sha256"]
+
+
+def block_paid_coding(args):
     # Hash-matching JSON proves byte identity, not executable or wire behavior.
     # Keep this hold before even auth-presence checks, including direct callers.
-    raise ValueError(
-        "HARDBLOCK PAID CODING: executable/runtime and retained capture admission "
-        "implementation pending; "
-        "paid Local Operator blocked: classifier reservation/accounting validation pending"
+    # It lifts only for a container S4 record bound to the exact closure bytes.
+    if container_evidence(args) is None:
+        raise ValueError(
+            "HARDBLOCK PAID CODING: no zero-paid container S4 record "
+            "(--coding-edge-evidence) matches the current metering closure"
+        )
+
+
+def gold_digests(task_dir):
+    """SHA-256 of every host-side solution/ and tests/ file (hashes only, never bytes)."""
+    task_dir = Path(task_dir)
+    digests = sorted(
+        {digest(p) for sub in ("solution", "tests") for p in (task_dir / sub).rglob("*") if p.is_file()}
     )
+    if not digests:
+        raise ValueError("task has no solution/tests files to guard")
+    return digests
+
+
+def container_plan(run_id, harness, image, *, meter_port, bridge_port, edge=None):
+    """Harbor arguments that put one paid trial behind the gate (egress.py).
+
+    ``edge`` (LoP only) is ``{"port": int, "env": dict, "ca_dir": Path}`` from
+    the host lop_edge; its loopback proxy URL is rewritten to the gate host on
+    the SAME port, so the gate relays exactly the edge. Returns ``ports`` (the
+    gate map), ``env`` (``--ae`` entries) and ``urls`` for the adapters.
+    """
+    import egress
+    from urllib.parse import urlsplit
+
+    ports = [meter_port, bridge_port] + ([edge["port"]] if edge else [])
+    urls = {
+        "anthropic": egress.gate_url(meter_port, f"/r/{run_id}"),
+        "codex": egress.gate_url(bridge_port, "/v1"),
+    }
+    env = {}
+    if harness == "local-operator":
+        if not edge:
+            raise ValueError("LoP runs only behind its host edge")
+        child = dict(edge["env"])
+        proxy = urlsplit(child["HTTPS_PROXY"])
+        if proxy.hostname != "127.0.0.1" or proxy.port != edge["port"]:
+            raise ValueError("edge announced an unexpected proxy address")
+        gated = child["HTTPS_PROXY"].replace(f"@127.0.0.1:{edge['port']}", f"@{egress.GATE_SERVICE}:{edge['port']}")
+        for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+            child[key] = gated
+        for key in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+            child[key] = egress.CA_TARGET
+        env.update(child)
+    elif edge:
+        raise ValueError("only LoP is metered through the edge")
+    return {"ports": ports, "env": env, "urls": urls, "image": image}
 
 
 def preflight(args):
     """Fail closed before credentials, artifact reads or dispatch side effects."""
-    block_paid_coding()
+    block_paid_coding(args)
     for value in (
         args.total_budget_usd,
         args.trial_budget_usd,
@@ -207,10 +314,10 @@ def preflight(args):
     # attestation cannot conjure an absent reservation/accounting path, and
     # disabling Radient would change the treatment. Hold paid LOP dispatch
     # until that separate gate has executable, independently validated code.
-    if "local-operator" in harnesses:
-        raise ValueError(
-            "paid Local Operator blocked: classifier reservation/accounting validation pending"
-        )
+    # The edge meters classifier traffic on the shared ledger; that path is
+    # admitted only by the container S4 record (block_paid_coding above).
+    if "local-operator" in harnesses and container_evidence(args) is None:
+        raise ValueError("paid Local Operator blocked: no container edge evidence")
     for harness in harnesses:
         if harness not in HARNESS:
             raise ValueError("unknown harness")
@@ -299,7 +406,7 @@ def stop(proc):
 @contextmanager
 def lane_services(args):
     """Own only lane guard/bridge; external meter and translator are never killed."""
-    block_paid_coding()
+    block_paid_coding(args)
     import socket
 
     for port in (8788, 8789):
@@ -369,21 +476,90 @@ def wire_rows(log, run_id):
 
 
 def run_trial(args, harness, task):
-    block_paid_coding()
+    block_paid_coding(args)
     run_id = f"coding__{harness}__{task['task8']}__r{args.rep}"
     job = args.output / "jobs" / run_id
     if job.exists() or (args.request_log.exists() and wire_rows(args.request_log, run_id)):
         raise ValueError("refusing reused run ID")
     cls, version = HARNESS[harness]
-    base = args.container_guard_url.rstrip("/")
-    url = f"{base}/r/{run_id}"
+    import egress
+    from urllib.parse import urlsplit
+
+    # Inside the container every host service is reached ONLY via the gate,
+    # on the same port number it listens on at the host (egress.py).
+    meter_port = urlsplit(args.meter_url).port
+    edge = start_edge(args, run_id) if harness == "local-operator" else None
+    try:
+        plan = container_plan(
+            run_id, harness, args.image, meter_port=meter_port, bridge_port=8789,
+            edge=edge and {"port": edge["port"], "env": edge["env"], "ca_dir": edge["ca_dir"]},
+        )
+        return _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge)
+    finally:
+        stop_edge(edge)
+
+
+def start_edge(args, run_id):
+    """Host-side lop_edge for one LoP trial; the bearer goes in on stdin only.
+
+    The real Radient bearer comes from the driver's own environment and is
+    never forwarded: run_trial's Harbor env is an allowlist without it.
+    """
+    token = os.environ.get("BENCH_RADIENT_BEARER", "")
+    if not token:
+        raise ValueError("BENCH_RADIENT_BEARER required on the host for the LoP edge")
+    run_dir = args.output / "edge" / run_id
+    proc = owned_process(
+        [sys.executable, str(HERE.parent / "lop_edge.py")],
+        cwd=HERE.parent, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, text=True, start_new_session=True,
+    )
+    config = {"run_id": run_id, "run_dir": str(run_dir), "meter_base": args.meter_url.rstrip("/")}
+    if os.environ.get("BENCH_DECISIONS_URL"):  # zero-paid rig fixture only
+        config["decisions_url"] = os.environ["BENCH_DECISIONS_URL"]
+    proc.stdin.write(json.dumps({**config, "radient_token": token}) + "\n")
+    proc.stdin.flush()
+    line = proc.stdout.readline()
+    if not line:
+        stop(proc)
+        raise ValueError("lop_edge exited during startup")
+    announced = json.loads(line)
+    return {"proc": proc, "port": announced["port"], "env": announced["env"], "ca_dir": run_dir}
+
+
+def stop_edge(edge):
+    if not edge:
+        return
+    proc = edge["proc"]
+    try:
+        proc.stdin.close()  # edge settles or latches in-flight work, then exits
+        proc.wait(timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    stop(proc)
+
+
+def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge):
+    import egress
+
+    support = args.output / "support" / run_id
+    support.mkdir(parents=True)
+    for name in egress.SUPPORT_FILES:
+        shutil.copy(HERE / name, support / name)
+    override = egress.write_override(
+        args.output / "support" / (run_id + ".compose.json"),
+        egress.compose_override(run_id, plan["ports"], plan["image"], support, args.toolchain),
+    )
+    url = plan["urls"]["anthropic"]
+    base = url.rsplit("/r/", 1)[0]
     mounts = [
         {
             "type": "bind",
             "source": str(args.toolchain.resolve()),
             "target": "/opt/bench",
             "read_only": True,
-        }
+        },
+        *egress.support_mounts(support, edge and edge["ca_dir"]),
     ]
     argv = [
         args.harbor,
@@ -411,6 +587,10 @@ def run_trial(args, harness, task):
         "--skip-credential-checks",
         "--mounts",
         json.dumps(mounts),
+        "--extra-docker-compose",
+        str(override),
+        "--verifier-import-path",
+        "bench_verifier:BenchVerifier",
         "--ae",
         "PATH=/opt/bench/node/bin:/root/.local/bin:/usr/local/sbin:/usr/local/bin:"
         "/usr/sbin:/usr/bin:/sbin:/bin",
@@ -426,6 +606,8 @@ def run_trial(args, harness, task):
             "--ae",
             "ANTHROPIC_API_KEY=benchmark-dummy",
         ]
+    for key, value in plan["env"].items():  # LoP edge env (dummy key, gate proxy)
+        argv += ["--ae", f"{key}={value}"]
     if harness == "claude-code":
         argv += ["--ae", "ENABLE_TOOL_SEARCH=true", "--effort", "high"]
     if harness == "codex-best":
@@ -436,7 +618,7 @@ def run_trial(args, harness, task):
             "model_providers": {
                 "bench": {
                     "name": "bench",
-                    "base_url": base + "/codex/v1",
+                    "base_url": plan["urls"]["codex"],
                     "env_key": "OPENAI_API_KEY",
                     "wire_api": "responses",
                 }
@@ -444,7 +626,7 @@ def run_trial(args, harness, task):
         }
         argv += [
             "--base-url",
-            base + "/codex/v1",
+            plan["urls"]["codex"],
             "--api-key-name",
             "OPENAI_API_KEY",
             "--api-format",
@@ -461,7 +643,14 @@ def run_trial(args, harness, task):
         for k, v in os.environ.items()
         if k in {"PATH", "HOME", "LANG", "TMPDIR", "DOCKER_HOST", "DOCKER_CONTEXT"}
     }
-    env.update(PYTHONPATH=str(HERE), CODING_MODEL=args.model)
+    # Harbor-process-only inputs for the pre-inference and verifier checks:
+    # hashes and port numbers, never task bytes or credentials.
+    env.update(
+        PYTHONPATH=str(HERE),
+        CODING_MODEL=args.model,
+        BENCH_GOLD_DIGESTS=",".join(gold_digests(args.task_root / task["name"])),
+        BENCH_GATE_PORTS=",".join(str(p) for p in plan["ports"]),
+    )
     started, disk_stop = time.time(), False
     with (args.output / (run_id + ".log")).open("x") as stream:
         proc = owned_process(
@@ -536,6 +725,7 @@ def parser():
     ap.add_argument("--subset", type=Path, default=HERE / "subset.json")
     ap.add_argument("--disk-volume", type=Path, default=Path.cwd())
     ap.add_argument("--harbor", default="harbor")
+    ap.add_argument("--coding-edge-evidence", type=Path)
     ap.add_argument("--execute", action="store_true")
     return ap
 
@@ -562,6 +752,10 @@ def main():
                 )
                 if tomllib.loads(replacement)["environment"]["docker_image"] != image:
                     raise ValueError("task image cannot be pinned safely")
+                args.image = image  # the gate reuses it: no second image pull
+                # The ONLY pull on this path: explicit, digest-pinned, behind a
+                # fresh disk gate. Compose services carry pull_policy: never.
+                check_space(args.disk_volume, task["hub_tag_full_size_bytes"])
                 subprocess.run(["docker", "pull", "--platform", "linux/amd64", image], check=True)
                 try:
                     config.write_text(replacement)

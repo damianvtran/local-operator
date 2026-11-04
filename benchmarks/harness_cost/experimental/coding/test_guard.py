@@ -227,7 +227,8 @@ class GuardTests(unittest.TestCase):
             },
         }
         with patch.object(driver, "frozen", side_effect=[prereg, {"frozen": True}, wire, oracle]):
-            with self.assertRaisesRegex(ValueError, "classifier reservation/accounting"):
+            # No container S4 record: the hold refuses before reading anything.
+            with self.assertRaisesRegex(ValueError, "HARDBLOCK PAID CODING"):
                 driver.preflight(args)
 
     def test_entrypoints_refuse_implicit_dispatch(self):

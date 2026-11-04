@@ -9,8 +9,15 @@ container; none of the host user's instructions, skills, MCP or credentials are
 copied. The task's cwd and instruction are left unchanged.
 
 Local Operator is pinned to released v0.94.22 (500883ef) and is metered only
-through the per-run edge (../lop_edge.py), which this container path lacks; its
-launcher therefore refuses (fail closed) and no endpoint shim is uploaded.
+through the per-run host edge (../lop_edge.py), reached via the bench gate
+(egress.py); its launcher (lop_launch.py, mounted read-only) refuses any other
+environment or source. No endpoint shim exists.
+
+Every adapter ends install() with ``_preinference_checks``: before the first
+model request, gold_probe.py proves no solution/test bytes are visible and the
+egress fence holds (only the gate's listed ports connect). Both inputs come
+from the Harbor process's own environment (set by driver.py), never from --ae,
+so neither reaches the agent nor Harbor's persisted job config.
 
 Harbor 0.25.0 already supports Claude Code, Codex, OpenCode and Hermes. We reuse
 those adapters' run paths except OpenCode v2, whose Go-release CLI differs from
@@ -116,6 +123,44 @@ VERSIONS = {
 }
 
 
+SUPPORT = "/opt/bench-support"
+PROBE_PYTHON = "/opt/bench/python/cpython-3.14-linux-x86_64-gnu/bin/python3.14"
+
+
+async def _preinference_checks(agent, environment) -> None:
+    """Gold isolation + egress fence, as root, before any model request.
+
+    Without driver-provided inputs (BENCH_GOLD_DIGESTS, BENCH_GATE_PORTS) this
+    refuses: a paid trial must never start without both proofs. The JSON
+    results are kept on the host beside the agent logs.
+    """
+    digests = os.environ.get("BENCH_GOLD_DIGESTS", "")
+    ports = os.environ.get("BENCH_GATE_PORTS", "")
+    if not digests or not ports or not all(p.isdigit() for p in ports.split(",")):
+        raise ValueError("BENCH_GOLD_DIGESTS and BENCH_GATE_PORTS are required before inference")
+    results = {}
+    for check, args in (
+        ("isolation", digests.split(",")),
+        ("egress", ports.split(",")),
+    ):
+        result = await environment.exec(
+            command=shlex.join([PROBE_PYTHON, f"{SUPPORT}/gold_probe.py", check, *args]),
+            user="root",
+        )
+        results[check] = (result.stdout or "").strip().splitlines()[-1:]
+        if result.return_code != 0:
+            _write_preinference(agent, results)
+            raise RuntimeError(f"pre-inference {check} check failed")
+    _write_preinference(agent, results)
+
+
+def _write_preinference(agent, results) -> None:
+    logs = getattr(agent, "logs_dir", None)
+    if logs is not None:
+        Path(logs).mkdir(parents=True, exist_ok=True)
+        (Path(logs) / "bench-preinference.json").write_text(json.dumps(results, indent=1) + "\n")
+
+
 async def _link(agent, environment, binary: str, name: str) -> None:
     """Publish a pinned executable into the empty container user's local bin."""
     await agent.exec_as_agent(
@@ -131,6 +176,7 @@ class FrozenClaudeCode(ClaudeCode):
 
     async def install(self, environment):
         await _link(self, environment, "/opt/bench/claude/bin/claude", "claude")
+        await _preinference_checks(self, environment)
 
 
 class FrozenCodex(Codex):
@@ -145,6 +191,7 @@ class FrozenCodex(Codex):
         # Codex's built-in run command uses the bare binary; make it available
         # without borrowing the host PATH or changing any task Python binary.
         await self.exec_as_root(environment, 'ln -s "$HOME/.local/bin/codex" /usr/local/bin/codex')
+        await _preinference_checks(self, environment)
 
 
 class FrozenHermes(Hermes):
@@ -158,6 +205,7 @@ class FrozenHermes(Hermes):
 
     async def install(self, environment):
         await _link(self, environment, "/opt/bench/hermes/hermes-agent/.venv/bin/hermes", "hermes")
+        await _preinference_checks(self, environment)
 
     @with_prompt_template
     async def run(self, instruction, environment, context):
@@ -203,6 +251,7 @@ class OpenCodeV2(OpenCode):
 
     async def install(self, environment):
         await _link(self, environment, "/opt/bench/opencode/bin/opencode", "opencode")
+        await _preinference_checks(self, environment)
 
     @with_prompt_template
     async def run(self, instruction, environment, context):
@@ -251,8 +300,24 @@ class _Native(BaseInstalledAgent):
         )
 
 
+# The edge's child environment, rewritten for the container: proxy host is the
+# gate (same edge port), CA is the read-only mount. The driver passes these to
+# the agent via --ae; lop_launch.py refuses any other shape.
+EDGE_ENV_KEYS = (
+    "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
+    "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "RADIENT_API_KEY",
+)
+
+
+def _edge_env(agent) -> dict[str, str]:
+    env = {k: v for k in EDGE_ENV_KEYS if (v := agent._get_env(k))}
+    if "HTTPS_PROXY" not in env:
+        raise ValueError("LoP needs the edge environment (HTTPS_PROXY via the bench gate)")
+    return env
+
+
 class LocalOperator(_Native):
-    """Released v0.94.22; the uploaded launcher refuses until an edge exists here."""
+    """Released v0.94.22 behind the host edge; the read-only launcher checks it all."""
 
     PIN = VERSIONS["local-operator"]
 
@@ -261,10 +326,15 @@ class LocalOperator(_Native):
         return "local-operator"
 
     async def install(self, environment):
+        # Import from the frozen overlay, not the venv's own (unreleased
+        # candidate) install; lop_launch.py re-verifies RECORD hashes at run.
         await self.exec_as_agent(
-            environment, "/opt/bench/lop/bin/python -c 'import local_operator'", timeout_sec=120
+            environment,
+            "PYTHONPATH=/opt/bench/lop-baseline-500883ef /opt/bench/lop/bin/python "
+            "-c 'import local_operator'",
+            timeout_sec=120,
         )
-        await self._upload_support(environment, ["lop_launch.py"])
+        await _preinference_checks(self, environment)
 
     @with_prompt_template
     async def run(self, instruction, environment, context):
@@ -272,7 +342,7 @@ class LocalOperator(_Native):
             environment,
             [
                 "/opt/bench/lop/bin/python",
-                "/tmp/bench-support/lop_launch.py",
+                f"{SUPPORT}/lop_launch.py",
                 "exec",
                 "--hosting",
                 "anthropic",
@@ -283,6 +353,7 @@ class LocalOperator(_Native):
                 instruction,
             ],
             {
+                **_edge_env(self),
                 "ANTHROPIC_API_KEY": "bench-dummy",
                 "LOCAL_OPERATOR_CONFIG_DIR": "/tmp/bench-lop",
                 "LOCAL_OPERATOR_NO_NOTIFICATIONS": "1",
@@ -302,6 +373,7 @@ class Omp(_Native):
 
     async def install(self, environment):
         await self.exec_as_agent(environment, "/opt/bench/omp/bin/omp --version", timeout_sec=120)
+        await _preinference_checks(self, environment)
 
     @with_prompt_template
     async def run(self, instruction, environment, context):
@@ -387,6 +459,7 @@ class Dsh(_Native):
             + shlex.quote(config)
             + " > /tmp/bench-support/dsh-anthropic.yml",
         )
+        await _preinference_checks(self, environment)
 
     @with_prompt_template
     async def run(self, instruction, environment, context):

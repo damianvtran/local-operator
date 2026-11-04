@@ -52,9 +52,10 @@ opencode, lop, omp, dsh, hermes). All host paths are CLI/env configurable.
 
 Local Operator is pinned to released v0.94.22,
 `500883ef56ca504325ffd80c5b90bf2435d00e3f`, run unmodified. It is metered only
-through the per-run TLS edge (`../lop_edge.py`), which this container path does
-not have, so `lop_launch.py` here refuses to start (fail closed) and no
-endpoint shim exists. A matching source/runtime attestation is still mandatory.
+through the per-run TLS edge (`../lop_edge.py`) on the host, reached from the
+task container through the bench gate (`egress.py`, see STATUS.md); no endpoint
+shim exists. A matching source/runtime attestation is still mandatory, and paid
+dispatch needs a container S4 record bound to `driver.CONTAINER_CLOSURE`.
 
 A separately operated meter must accept `/r/<run_id>/v1/messages`, authenticate
 upstream using **`OPENROUTER_API_KEY` from its environment**, enforce the explicitly

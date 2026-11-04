@@ -1,5 +1,26 @@
 # Coding lane status — 2026-11-03
 
+## Container metering path (implemented; container S4 pending)
+
+* **Egress:** `main` joins only a run-owned `internal: true` Docker network (no
+  route, no external DNS). A `bench-gate` container (same digest-pinned task
+  image, frozen-toolchain Python, `gate_relay.py`) on that network plus an uplink
+  relays a fixed port map to the host meter (`/r/<run_id>`), Codex bridge and
+  LoP edge. Rejected: host-gateway + host firewall (Docker Desktop's VM traffic
+  never crosses host `pf`). Compose services use `pull_policy: never`; rigs use
+  `egress.require_no_implicit_pull` (`--pull never`; `--platform` only with it).
+* **LoP:** `lop_launch.py` (read-only mount) requires `HTTPS_PROXY` =
+  `bench-gate:<edge port>` with run identity, the read-only run CA, the edge's
+  dummy `RADIENT_API_KEY`, and the `lop-baseline-500883ef` overlay (direct_url
+  commit, RECORD hashes, import origins) before importing `local_operator.cli`.
+* **Gold isolation:** before inference `gold_probe.py isolation` checks that no
+  container file has the bytes of any host `solution/`/`tests/` file (hashes
+  only), `/solution` and `/tests` are absent, and `/logs/verifier` is empty;
+  `egress` checks the fence. `bench_verifier.BenchVerifier` repeats isolation,
+  proves quiescence (kills and records survivors; refuses on a second failure),
+  attaches the uplink, then runs Harbor's stock verifier unchanged.
+
+
 ## Historical source status, not new validation
 
 An **unverified private report** claims 21/30 accepted Terminal-Bench 2.1
@@ -11,8 +32,11 @@ host disk figures or host Python version. External frozen oracle evidence is
 mandatory before dispatch; the public task list does not establish passes.
 
 Local Operator is pinned to released v0.94.22
-(`500883ef56ca504325ffd80c5b90bf2435d00e3f`); on this container path its launcher
-refuses until a per-run metering edge exists here. No source rebuild,
+(`500883ef56ca504325ffd80c5b90bf2435d00e3f`) and runs here only behind the
+host-side per-run edge, reached through the bench gate (`egress.py`). Paid
+dispatch stays HARDBLOCKED until a zero-paid container S4 record
+(`--coding-edge-evidence`) matches the exact container metering closure
+(`driver.CONTAINER_CLOSURE`); that S4 has not run yet (disk gate). No source rebuild,
 paid task-container pilot, finalized preregistration or final toolwire validation
 was completed by this port.
 

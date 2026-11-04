@@ -49,8 +49,8 @@
     },
     {
       "path": "experimental/EXPERIMENTAL-MANIFEST.json",
-      "bytes": 9496,
-      "sha256": "a304891b3174669073991483be50d6bd29c9fe9c86a9c4620e469a2f1e9bb7d4"
+      "bytes": 10210,
+      "sha256": "c84e24f28c54be464a8597591ae2b273f8804e30d81b47d1cc9a916b1c99e0f7"
     },
     {
       "path": "experimental/LOP-EDGE-VERIFICATION.md",
@@ -144,8 +144,8 @@
     },
     {
       "path": "experimental/coding/README.md",
-      "bytes": 10271,
-      "sha256": "29a6ce0e848288bc5412d663739d634063317d45b33fab6209ea7da686e4ef00"
+      "bytes": 10351,
+      "sha256": "941c4fc411359a59a1cebd9d36f14d1c2f0c82e2619138de9fc4f23b7b894e9c"
     },
     {
       "path": "experimental/coding/SOURCE_MAP.md",
@@ -154,8 +154,8 @@
     },
     {
       "path": "experimental/coding/STATUS.md",
-      "bytes": 3059,
-      "sha256": "d8a88badb73b6d86f05e1d074724dd8e0585be6c9e6fdb6f0561d3d0247457c7"
+      "bytes": 4673,
+      "sha256": "e74e96c9b8381c5afc6153f98f22ffdb73d3ec86910fceb07ce0e3d40e84354e"
     },
     {
       "path": "experimental/coding/THIRD_PARTY_NOTICES.md",
@@ -164,8 +164,13 @@
     },
     {
       "path": "experimental/coding/adapters.py",
-      "bytes": 15458,
-      "sha256": "348d5d8833d777c14a8fd872c53fd72bbfc92dc7632d0ab312b9d633b82d217f"
+      "bytes": 18682,
+      "sha256": "37316e5ca1e3aa28ef07d36d8b4b68eb1b179f7216c329989eff8c0bc129e131"
+    },
+    {
+      "path": "experimental/coding/bench_verifier.py",
+      "bytes": 4768,
+      "sha256": "8e028813f69eac5fcc7afa0f23f765458b11c9754fe0cec5da2683d4c0b76d31"
     },
     {
       "path": "experimental/coding/budget_guard.py",
@@ -184,13 +189,28 @@
     },
     {
       "path": "experimental/coding/driver.py",
-      "bytes": 23400,
-      "sha256": "0d6cb247e822e471e9b97fa94e976842365e13469f5ecef7a4334d396fc6046a"
+      "bytes": 31459,
+      "sha256": "8aedeac7e614a115b58c2bf9b290b8221e1ff042b13a4c8a31f64270710bff4f"
+    },
+    {
+      "path": "experimental/coding/egress.py",
+      "bytes": 8456,
+      "sha256": "d08382ddafdbb06fa4d65d633884fd6995c49e8e7db50c856cff8bd11611f778"
+    },
+    {
+      "path": "experimental/coding/gate_relay.py",
+      "bytes": 3305,
+      "sha256": "7dfd8a2df96264fc835fe0e76abeda4ae965353ff39a51793345060d5f288837"
+    },
+    {
+      "path": "experimental/coding/gold_probe.py",
+      "bytes": 6158,
+      "sha256": "174fa9819a436e409cbc40356633b34efd04034ed3bcc54bf942a687c110101e"
     },
     {
       "path": "experimental/coding/lop_launch.py",
-      "bytes": 1134,
-      "sha256": "745e5fbd4ae5ba5f522facdc022102befbf36bcc337f0210846bb878a35cdb58"
+      "bytes": 7523,
+      "sha256": "bb72308d5b4d81cc0d60a9bada0579f5a73a05572d96246bdb62f1da52483237"
     },
     {
       "path": "experimental/coding/oracle_sweep.py",
@@ -214,13 +234,18 @@
     },
     {
       "path": "experimental/coding/test_guard.py",
-      "bytes": 10543,
-      "sha256": "27e27347e47ba4cbc569bb9f6a955e28a4f8a6fefd47ac3958f2b6729d32e95c"
+      "bytes": 10611,
+      "sha256": "3483e8fe0dfebdc6a5f459979530a407895b275b4d11d36a56aef338ba5bbb47"
     },
     {
       "path": "experimental/coding/test_guard_asgi.py",
       "bytes": 2618,
       "sha256": "59863cca976bcc2c2616242d10d5adf28b62579dce984f8a7cc91edbdb25e317"
+    },
+    {
+      "path": "experimental/coding/test_lop_container.py",
+      "bytes": 16846,
+      "sha256": "8741dd9f39dfe323c2b386dc733c3b891022f19a9494822d43ecbf8c5324d4ea"
     },
     {
       "path": "experimental/evaluate.py",
