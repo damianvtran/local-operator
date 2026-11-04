@@ -312,6 +312,13 @@ heavy = json.loads(sys.argv[1])
 async def main():
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(160, 48)) as pilot:
+        # `_construct_session` awaits the threaded `warm_session_imports()` BEFORE
+        # the factory, and `_session` is only adopted after it, so a bound
+        # session is the app's own "prewarm finished" signal. Snapshotting
+        # earlier races the warm thread (the `mcp` warm pulls in starlette) and
+        # misattributes its imports to a tick; a sleep would only move the race.
+        while app._session is None:
+            await pilot.pause()
         await pilot.pause()
         booted = {m for m in heavy if m in sys.modules}
         app._poll_tunnel_park()

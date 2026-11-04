@@ -1,0 +1,213 @@
+{
+  "kind": "translation_audit",
+  "record_version": 2,
+  "audit_id": "ruh-r2a1",
+  "locale": "ru",
+  "namespace": "wire.errors.hosting",
+  "key_count": 1,
+  "audit_date": "2026-11-03",
+  "status": "passed",
+  "round": "R2",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "findings_by_severity": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "note": "No finding raised. Term matches the shipped ru corpus exactly; sentence shape, capitalisation and terminal full stop unchanged from R1."
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "ac46f9462716",
+    "requested_model": "radient/auto",
+    "served_model": "UNKNOWN",
+    "served_model_reason": "the route exposes only `radient/auto`; no underlying provider/model is inferred and no fallback is claimed",
+    "actual_model_source": "session model header `Model: radient/auto` as served by the harness; no separate served-model field was exposed to this session",
+    "independent_from_translator_session": true,
+    "translator_session": "06e83e0ae0f9",
+    "independence_note": "Fresh reader: did not translate this key, did not author or read any prior reader report on it, and read no other new reader's report before forming this verdict.",
+    "reader_passes_in_this_record": 1,
+    "two_reader_requirement": "not satisfied by this record alone; a second independent pass (high-visibility group) is still outstanding"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9"
+    },
+    "ru": {
+      "path": "/Users/damian/.local-operator/sessions/06e83e0ae0f9/scratchpad/hosting-ru-r2/target/ru/wire.errors.hosting.json",
+      "sha256": "38478ec0af7bdcb739dcd1bbbd82c8c50345e9869c2b21921f9a46d4bab1737a"
+    },
+    "ru_r1_identifier_only": {
+      "path": "/Users/damian/.local-operator/sessions/06e83e0ae0f9/scratchpad/hosting-ru/target/ru/wire.errors.hosting.json",
+      "sha256": "6fe2a88318b042c082047f0ac4b6a76c88d68957a1053f75ce9c0617efd0317d",
+      "role": "identity of the superseded bytes, re-hashed here; not audited as current"
+    },
+    "author_record": {
+      "path": "/Users/damian/.local-operator/sessions/06e83e0ae0f9/scratchpad/hosting-ru-r2/record.json",
+      "sha256": "1b9876bb90059fd2e037f57394df6edbaf7f401f313a9095dc6ae080755e4684",
+      "role": "R2 translator record; its claims were checked against the corpus, not trusted"
+    }
+  },
+  "artifacts": {
+    "report": {
+      "path": "/Users/damian/.local-operator/sessions/ac46f9462716/scratchpad/i18n/audits/ru/wire.errors.hosting/ruh-r2a1/report.md",
+      "sha256": "8fad20ce9bd75e2fc7245647e41189cc44075659fd8617c730f1f038c82b717b"
+    },
+    "record": {
+      "path": "/Users/damian/.local-operator/sessions/ac46f9462716/scratchpad/i18n/audits/ru/wire.errors.hosting/ruh-r2a1/record.json",
+      "sha256": "self-excluded"
+    }
+  },
+  "source_delta": {
+    "key": "wire.errors.hosting.not_configured",
+    "from": "Платформа хостинга не настроена.",
+    "to": "Платформа размещения не настроена.",
+    "change": "one word: «хостинга» → «размещения»; capitalisation, terminal full stop and sentence shape unchanged",
+    "en": "Hosting platform is not configured.",
+    "measured": "difflib opcodes over old vs new: replace 'р'/'хостинг' + delete 'змещения'; no other edit"
+  },
+  "verdict_basis": {
+    "mechanical": {
+      "valid_json": true,
+      "key_parity_en": true,
+      "key_parity_r1": true,
+      "placeholders": "none",
+      "icu": "N/A — zero ICU arguments; no plural/select/number, so ru one/few/many/other has nothing to express",
+      "nfc": true,
+      "control_format_bidi": "none",
+      "double_space": false,
+      "initial_capital": true,
+      "terminal_full_stop": true,
+      "chars": 34,
+      "utf8_bytes": 64,
+      "max_cells_declared": null
+    },
+    "accuracy": "condition-only clause preserved; no omission/addition/negation change; no remedy restated",
+    "register": "impersonal, sentence case, вы-neutral, no padding — matches i18n/style-guides/ru.md",
+    "terminology": "«платформа размещения» is the shipped ru rendering of EN «hosting platform»; «провайдер» stays a separate noun (wire.settings.hosting.label)",
+    "frame_fit": "lands after a colon in wire.errors.sdk_startup.attach_hosting_unconfigured and is followed by the frame's own remedy sentence; capital + period correct there",
+    "fit": "no maxCells/maxChars declared; no fit or overflow claim made; +1 char vs EN",
+    "rtl": "N/A — ru is LTR Cyrillic"
+  },
+  "corpus_correction_confirmed": {
+    "claim_in_author_record": "R1's zero-match grep read the main checkout; the owned worktree tree holds six matching lines, all «размещени», zero «хостинг»",
+    "verified_here": {
+      "owned_worktree_tree": "~/.local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/ru — 6 matching lines in 4 files, 6× «размещени», 0× «хостинг»",
+      "main_checkout_tree": "~/local-operator/local_operator/i18n/catalogues/ru — 0 matching lines",
+      "method": "pure-stdlib line scan of every *.json in each tree; matches are the scanner's own count, not an estimate"
+    },
+    "examples_checked": [
+      "cli.credential_help.json:3",
+      "cli.exec_worker_help.json:5",
+      "cli.global_help.json:5",
+      "cli.global_help.json:8",
+      "cli.global_help.json:16",
+      "wire.errors.sdk_startup.json:2"
+    ],
+    "result": "author record's correction is accurate as written; its example strings and line numbers match the tree"
+  },
+  "legacy_exceptions_unchanged": {
+    "session_factory": "session_factory.py:816 still raises HostingNotConfiguredError(\"Hosting platform is not configured.\")",
+    "sdk": "sdk.py:604-607 documents the exception's English text as by-contract",
+    "runtime_launch": "session/runtime/launch.py:1021 keeps its own English actionable text",
+    "claimed_change": "display copy only; no exception, caller or SDK frame edited"
+  },
+  "ship_state": {
+    "namespace_in_worktree_index": false,
+    "index_probe": "pure-stdlib byte scan of .git/worktrees/startup-owned-copy/index for wire.errors.hosting.json and .context.json → absent",
+    "head_ref": "refs/heads/fix/startup-refusal-owned-copy",
+    "shipped": false,
+    "ledger_row_written": false,
+    "reason_no_ledger": "manager's source-only override: no repo/ledger edits, no validator, no tests, no build/install/render",
+    "canonical_path_when_committed": "i18n/audits/evidence/ru/wire.errors.hosting/ruh-r2a1/"
+  },
+  "audit_notes_not_execution_log": [
+    "report.md prose, including rejected alternatives and register judgements"
+  ],
+  "execution_log_actual": [
+    {
+      "seq": 1,
+      "tool": "eval (pure stdlib hashlib)",
+      "observed": "sha256 of en, context, R2 ru, R1 ru and author record; en/context/R2 match the declared hashes; R1 matches its identity hash"
+    },
+    {
+      "seq": 2,
+      "tool": "grep tool",
+      "observed": "ru catalogue scan: 6 lines / 4 files matching hosting terms, all «размещени»"
+    },
+    {
+      "seq": 3,
+      "tool": "read",
+      "observed": "i18n/style-guides/ru.md (103 lines) read in full; formality, plurals, punctuation, width rules noted; i18n/glossary.md contains no hosting/platform entry"
+    },
+    {
+      "seq": 4,
+      "tool": "grep tool",
+      "observed": "session_factory.py:816 English exception text; sdk.py:602-627 ownership test and localised substitution; launch.py:1021 sibling English text"
+    },
+    {
+      "seq": 5,
+      "tool": "eval (pure stdlib json/unicodedata/re)",
+      "observed": "JSON valid, key parity, NFC true, no control/format/bidi chars, 34 chars, capital + single terminal period, no placeholders, difflib one-word delta"
+    },
+    {
+      "seq": 6,
+      "tool": "bash (read-only)",
+      "observed": "sdk.py:596-640 frame composition, confirming colon splice"
+    },
+    {
+      "seq": 7,
+      "tool": "eval (pure stdlib index byte scan)",
+      "observed": "new namespace absent from worktree git index; HEAD fix/startup-refusal-owned-copy"
+    }
+  ],
+  "not_run": [
+    "repo catalogue validator / check.py",
+    "project imports",
+    "tests",
+    "generator/scanner/typecheck/build",
+    "TUI or desktop render",
+    "pseudo-localisation",
+    "native-speaker review",
+    "measurement of maxCells"
+  ],
+  "original_lost_evidence": {
+    "status": "none",
+    "original_path": null,
+    "expected_original_sha256": null
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "r1_preservation": {
+    "r1_packet": "/Users/damian/.local-operator/sessions/06e83e0ae0f9/scratchpad/hosting-ru",
+    "r1_target_sha256": "6fe2a88318b042c082047f0ac4b6a76c88d68957a1053f75ce9c0617efd0317d",
+    "unmodified": true,
+    "reader_reports_present": false,
+    "note": "The R1 packet visible to me contains record.json and the target only; no reader report files were read, altered or endorsed. R1 is input history, not evidence for this verdict."
+  },
+  "scope": {
+    "this_record": "one key, one locale, one word, plus the author record's delta",
+    "not_done": [
+      "audited no other catalogue or namespace",
+      "did not edit any repo or ledger file",
+      "no shipped or locale-clearance claim",
+      "no claim on R1 findings or their truth"
+    ],
+    "not_claimed": [
+      "no native-speaker status",
+      "no pseudo-localisation or fit/overflow conclusion",
+      "no runtime, render or activation proof"
+    ]
+  },
+  "glossary_note": "«платформа размещения» is already shipped; the translator's proposal to record it is reinforcement of a settled term, which this pass supports. «провайдер» remains the separate noun for provider."
+}

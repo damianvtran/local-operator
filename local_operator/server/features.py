@@ -1078,6 +1078,13 @@ def static_feature_flags() -> dict[str, Any]:
         # ADDITIVE; the key is how a renderer learns the editor's PUT exists before it
         # offers an upload that would 404/405 on an older backend. Absent: glyph only.
         "agent_avatar": 1,
+        # `?size=64|128|256` on `GET /v1/agents/{id}/avatar` (core and the phone
+        # relay): a LANCZOS-downscaled variant with an ETag of `"<sha>-<size>"`, so a
+        # client asks for the smallest variant >= CSS px x devicePixelRatio instead of
+        # the 512px original. Its own key, not a bump of `agent_avatar`: an older core
+        # ignores an unknown query and would silently serve the original, which is
+        # harmless, but a client must know to expect the sized ETag/body.
+        "agent_avatar_sizes": 1,
         # THE PER-SESSION FILE INDEX: `GET /v1/desktop/sessions/{id}/files` (the files this
         # conversation and its subagents produced: written, edited, command outputs,
         # screenshots, downloads, generated images/videos and Highlights callouts, derived

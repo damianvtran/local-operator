@@ -806,6 +806,10 @@ def add_parser(
     ready.add_argument("--peer", default="", help="One device (a name or id), or every member")
     ready.add_argument("--model", default="", help="Also check this selected provider/model")
     ready.add_argument("--session", default="", help="Session context for the selected model")
+    # These are task identity fields in the existing readiness contract. Keep
+    # paths literal: HOME/cwd resolution belongs to the peer, not this viewer.
+    ready.add_argument("--repository-path", default="", metavar="PEER_PATH")
+    ready.add_argument("--repository-url", default="", metavar="CLONE_URL")
     ready.add_argument("--json", action="store_true")
 
     # `lop network update <peer>`: the single-peer half of mesh rolling updates
@@ -8724,6 +8728,13 @@ def _cmd_ready(args: argparse.Namespace) -> int:
     """
     from local_operator.network import readiness as readiness_mod
 
+    repository = {
+        "path": str(getattr(args, "repository_path", "") or ""),
+        "url": str(getattr(args, "repository_url", "") or ""),
+    }
+    # Omission preserves the installed-project default and the older request
+    # shape. Never infer the viewer's checkout/cwd as a peer repository path.
+    context: dict[str, Any] = {"repository": repository} if any(repository.values()) else {}
     live = _relay_call(
         "peer_readiness",
         peer=args.peer,
@@ -8731,6 +8742,7 @@ def _cmd_ready(args: argparse.Namespace) -> int:
         session_id=getattr(args, "session", ""),
         timeout=_listing_timeout(),
         allow_no_answer=True,
+        **context,
     )
     payload = live if live is not None else _ready_locally(args)
     checks = list(payload.get("checks") or [])

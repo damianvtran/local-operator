@@ -196,8 +196,19 @@ function Entry({ entry, pid, condensed = false }: { entry: TranscriptEntry; pid:
 		case "steer":
 			return (
 				<div className="flex min-w-0 justify-end">
-					<div className="max-w-[85%] rounded-md border border-hairline px-3 py-1 text-body-sm text-ink-muted break-words whitespace-pre-wrap">
-						{entry.text}
+					<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md border border-hairline px-3 py-1 text-body-sm text-ink-muted break-words">
+						{/* A steer can carry images exactly like a prompt (the composer
+						   sends them on the steer op while a turn runs). Rendering only
+						   the text left an image-only steer as an EMPTY bordered pill
+						   and hid the thumbnails of a captioned one. */}
+						{(entry.images ?? []).length > 0 ? (
+							<div className="flex flex-wrap gap-1.5">
+								{(entry.images ?? []).map((img) => (
+									<AttachmentImage key={img.index} pid={pid} entryId={entry.id} index={img.index} />
+								))}
+							</div>
+						) : null}
+						{entry.text ? <div className="whitespace-pre-wrap">{entry.text}</div> : null}
 					</div>
 				</div>
 			);

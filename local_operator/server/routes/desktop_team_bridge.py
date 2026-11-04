@@ -81,9 +81,11 @@ every ``lop serve`` boot, and the desktop_radient rule (a module-scope httpx was
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import re
 import unicodedata
+import urllib.parse
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -153,6 +155,15 @@ _ATTACHMENT_ID = re.compile(ATTACHMENT_ID_PATTERN)
 #: ``client.ATTACHMENT_MAX_BYTES`` / ``ATTACHMENT_MIME_TYPES`` by a test.
 _ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024
 _ATTACHMENT_SERVABLE = {"image/png", "image/jpeg"}
+#: Generic-file upload bound (``client.FILE_MAX_BYTES``, the hub's 25 MiB
+#: transport cap), spelled here for the same boot-path reason and pinned equal by
+#: a test. File mode streams up to this many bytes and refuses one more, so this
+#: loopback route never holds more than one file and never reaches the hub with
+#: a body the hub would only answer 413.
+_FILE_MAX_BYTES = 25 * 1024 * 1024
+#: ``files`` on an immediate send: the hub's combined images+files bound
+#: (``BridgeFileMaxPerMessage``); ``client._file_ids`` enforces the sum.
+_FILE_IDS = Field(default=None, min_length=1, max_length=10)
 #: An agent endpoint id in a desktop PATH: the client's own grammar
 #: (``client._ENDPOINT_ID``; the hub mints ``bep_`` + 32 hex), spelled here for
 #: the same boot-path reason as ``_ACCOUNT_ID`` and pinned equal by
@@ -650,6 +661,7 @@ async def status(
         attachments_capability,
         consent_for_display,
         default_on_in_force,
+        files_capability,
         get_status_discipline,
         selected_tenant_id,
         surface_projection,
@@ -770,7 +782,7 @@ async def status(
         # ``attachment_ids``), so it passes through the client's ONE capability
         # reading (review R1-06) — malformed/disabled/no usable type is
         # removed, never forwarded for the UI to second-guess. Absent = off.
-        "status": _status_with_attachments(check.payload, attachments_capability),
+        "status": _status_with_attachments(check.payload, attachments_capability, files_capability),
         "consent": (
             {"version": consent[0], "text": consent[1], "source": consent[2]}
             if consent is not None
@@ -1409,6 +1421,18 @@ def _validate_attachment_ids(ids: list[str] | None) -> None:
         raise ValueError("attachment_ids must be distinct batt_ ids")
 
 
+def _validate_file_ids(ids: list[str] | None, image_ids: list[str] | None) -> None:
+    # The image rule, plus the hub's two cross-list refusals: an id in both
+    # lists, and more than ten items across both (``BridgeFileMaxPerMessage``).
+    if not ids:
+        return
+    _validate_attachment_ids(ids)
+    if set(ids) & set(image_ids or ()):
+        raise ValueError("an id may not be in both attachment_ids and files")
+    if len(ids) + len(image_ids or ()) > 10:
+        raise ValueError("at most 10 images and files per message")
+
+
 def _validate_schedule_time(value: str) -> None:
     # Keep the moving 1-minute/120-day window authoritative on the server, whose
     # clock will also fire the message; only reject malformed wire dates here.
@@ -1663,6 +1687,12 @@ class ConversationSendIn(ConversationOwnerIn):
     #: Staged uploads to bind to this message, in display order. Forwarded only
     #: when present, so a text-only send is the unchanged pre-attachment wire.
     attachment_ids: list[str] | None = _ATTACHMENT_IDS
+    #: Staged GENERIC files (``?mode=file`` uploads) to bind, in display order.
+    #: Same id grammar as ``attachment_ids`` (the hub mints both ``batt_``) and
+    #: forwarded only when present. Deliberately NOT on ``ScheduledCreateIn``:
+    #: the hub's schedule ``Reserve`` is image-only, so ``_Strict`` refuses a
+    #: scheduled ``files`` here rather than letting it fire as text alone.
+    files: list[str] | None = _FILE_IDS
     #: Reply in this root message's thread (agent-server threads). Held to the
     #: minted message-id grammar here so a malformed id never reaches the hub;
     #: the hub owns the real rule (same conversation, root not a reply).
@@ -1678,9 +1708,10 @@ class ConversationSendIn(ConversationOwnerIn):
     @model_validator(mode="after")
     def _content(self) -> "ConversationSendIn":
         _validate_attachment_ids(self.attachment_ids)
+        _validate_file_ids(self.files, self.attachment_ids)
         _validate_mentions(self.mentions)
-        if not self.body and not self.attachment_ids:
-            raise ValueError("a message needs body or attachment_ids")
+        if not self.body and not self.attachment_ids and not self.files:
+            raise ValueError("a message needs body, attachment_ids or files")
         # A THREADED send (``thread_root_id`` present) REQUIRES the captured-owner
         # receipt, because it is a thread MUTATION and ``team_bridge_threads``
         # promises the guard on the thread surface, the same promise the replies
@@ -2715,6 +2746,7 @@ async def send_conversation_message(
                 agent_label=body.agent_label,
                 thread_root_id=body.thread_root_id,
                 attachment_ids=body.attachment_ids,
+                files=body.files,
                 # ``or None``: the client adds the key only for a non-empty
                 # list, so an undirected send keeps today's exact wire.
                 mentions=[m.model_dump(exclude_none=True) for m in body.mentions] or None,
@@ -2723,25 +2755,42 @@ async def send_conversation_message(
     )
 
 
-def _status_with_attachments(payload: Any, read_capability: Any) -> Any:
-    """``payload`` with ``attachments`` replaced by its normalized reading.
+def _status_with_attachments(
+    payload: Any, read_capability: Any, read_files: Any | None = None
+) -> Any:
+    """``payload`` with ``attachments`` (and ``files``) replaced by their normalized readings.
 
     Copies rather than mutates: the payload is the discipline's cached
     last-good answer shared by every caller.
+
+    ``files`` follows the same rule through ``read_files``
+    (``client.files_capability``): the hub serves the block whenever its
+    attachment service is wired, ``enabled: false`` in every deployment today,
+    and a renderer must not have to second-guess a raw block — so anything but a
+    usable version-1, enabled block is REMOVED. ``read_files=None`` leaves the
+    key alone (callers that predate files).
     """
 
-    if not isinstance(payload, dict) or "attachments" not in payload:
+    if not isinstance(payload, dict):
+        return payload
+    normalize_files = read_files is not None and "files" in payload
+    if "attachments" not in payload and not normalize_files:
         return payload
     out = dict(payload)
-    capability = read_capability(payload)
-    if capability is None:
-        out.pop("attachments", None)
-    else:
-        out["attachments"] = capability
+    for key, reader in (("attachments", read_capability), ("files", read_files)):
+        if key not in payload or reader is None:
+            continue
+        capability = reader(payload)
+        if capability is None:
+            out.pop(key, None)
+        else:
+            out[key] = capability
     return out
 
 
-def _attachment_query(request: Request) -> tuple[str | None, str]:
+def _attachment_query(
+    request: Request, extra: frozenset[str] = frozenset()
+) -> tuple[str | None, str]:
     """The attachment routes' accepted query names, closed and validated.
 
     Closed-table like every route here: ``scope`` (and anything else) is
@@ -2759,7 +2808,8 @@ def _attachment_query(request: Request) -> tuple[str | None, str]:
     any bytes move.
     """
 
-    if set(request.query_params) - {"tenant_id", "expected_account_id"}:
+    # ``extra``: names one route validates itself (the upload's ``mode``).
+    if set(request.query_params) - {"tenant_id", "expected_account_id", *extra}:
         _raise_read("invalid_request")
     tenants = request.query_params.getlist("tenant_id")
     if len(tenants) > 1 or (tenants and (not tenants[0].strip() or len(tenants[0]) > 128)):
@@ -2774,12 +2824,59 @@ def _attachment_query(request: Request) -> tuple[str | None, str]:
     return (tenants[0] if tenants else None), expected[0]
 
 
+def _upload_query(request: Request) -> tuple[str | None, str, str]:
+    """The upload route's closed query: the attachment table plus ``mode``.
+
+    ``mode`` is closed to ``image`` (the default when absent) and ``file``; a
+    repeated or unknown value is refused, never mapped to the image path, so a
+    renderer that asked for file mode can never silently stage an image.
+    """
+
+    modes = request.query_params.getlist("mode")
+    if len(modes) > 1 or (modes and modes[0] not in ("image", "file")):
+        _raise_read("invalid_request")
+    mode = modes[0] if modes else "image"
+    tenant_id, expected = _attachment_query(request, frozenset({"mode"}))
+    return tenant_id, expected, mode
+
+
+def _upload_file_name(request: Request) -> str | None:
+    """The renderer's percent-encoded ``X-Bridge-File-Name``, decoded, or ``None``.
+
+    Strict on purpose: the hub decodes with Go's ``url.PathUnescape`` and
+    refuses malformed escapes and invalid UTF-8 as ``attachment_invalid``, so
+    the same refusal is made here BEFORE a 25 MiB body is read. ``unquote``
+    (not ``unquote_plus``) keeps a literal ``+`` a plus, as the hub does.
+    """
+
+    values = request.headers.getlist("x-bridge-file-name")
+    if not values:
+        return None
+    raw = values[0]
+    invalid = HTTPException(
+        422, {"code": "attachment_invalid", "message": "The file name is invalid."}
+    )
+    if len(values) > 1 or len(raw) > 1024 or _MALFORMED_ESCAPE.search(raw):
+        raise invalid
+    try:
+        return urllib.parse.unquote(raw, encoding="utf-8", errors="strict") or None
+    except UnicodeDecodeError:
+        raise invalid from None
+
+
+#: A ``%`` not followed by two hex digits: Go's ``PathUnescape`` refuses it,
+#: Python's ``unquote`` would pass it through, so it is refused explicitly.
+_MALFORMED_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+
+
 def _require_attachment_id(attachment_id: str) -> None:
     if _ATTACHMENT_ID.fullmatch(attachment_id) is None:
         _raise_read("invalid_request")
 
 
-async def _bounded_upload(request: Request) -> bytes:
+async def _bounded_upload(
+    request: Request, limit: int = _ATTACHMENT_MAX_BYTES, noun: str = "image"
+) -> bytes:
     """Read the raw upload body, refusing past the hub's ceiling.
 
     Streamed and counted rather than ``await request.body()``: a declared
@@ -2789,27 +2886,31 @@ async def _bounded_upload(request: Request) -> bytes:
     forwarded once and dropped with the request.
     """
 
+    # ``limit``/``noun``: file mode reads the same way under its own 25 MiB
+    # bound; the image call keeps its defaults, so its refusals are unchanged.
+    too_large = {"code": "attachment_too_large", "message": f"The {noun} is too large."}
     declared = request.headers.get("content-length")
     if declared is not None:
         try:
-            if int(declared) > _ATTACHMENT_MAX_BYTES:
-                raise HTTPException(
-                    413, {"code": "attachment_too_large", "message": "The image is too large."}
-                )
+            if int(declared) > limit:
+                raise HTTPException(413, too_large)
         except ValueError:
             _raise_read("invalid_request")
-    chunks: list[bytes] = []
+    # ``BytesIO`` rather than a chunk list + ``b"".join``: the join held the
+    # list AND a second full copy at once (~2x a 25 MiB file, review F2), and a
+    # ``bytearray`` copied out to ``bytes`` peaks the same. ``getvalue()`` on an
+    # unshared BytesIO hands back its buffer without copying (tracemalloc
+    # peak, 25 MiB of 64 KiB chunks: join 50.0 MiB, bytearray 50.2, BytesIO 25.3).
+    buffer = io.BytesIO()
     size = 0
     async for chunk in request.stream():
         size += len(chunk)
-        if size > _ATTACHMENT_MAX_BYTES:
-            raise HTTPException(
-                413, {"code": "attachment_too_large", "message": "The image is too large."}
-            )
-        chunks.append(chunk)
+        if size > limit:
+            raise HTTPException(413, too_large)
+        buffer.write(chunk)
     if not size:
-        raise HTTPException(422, {"code": "attachment_invalid", "message": "The image is empty."})
-    return b"".join(chunks)
+        raise HTTPException(422, {"code": "attachment_invalid", "message": f"The {noun} is empty."})
+    return buffer.getvalue()
 
 
 @router.post(
@@ -2827,20 +2928,49 @@ async def upload_conversation_attachment(
     The body is the raw image (any declared Content-Type is ignored, exactly
     as the hub ignores it). The answer is the hub's ``{attachment: {...}}``
     descriptor, passed through; the bytes are never kept here.
+
+    ``?mode=file`` stages a GENERIC file instead (agent-server S3a file mode),
+    answered with the hub's ``{file: {...}}``. The display name rides the
+    ``X-Bridge-File-Name`` request header, already percent-encoded by the
+    renderer exactly as the hub expects, so it never appears in this route's
+    URL and therefore never in an access log line. It is decoded once here
+    (strictly: malformed escapes or non-UTF-8 are refused) only to hand the
+    client a plain string to re-encode; it is never logged.
     """
 
     _require_conversation_id(conversation_id)
-    tenant_id, expected_account_id = _attachment_query(request)
-    data = await _bounded_upload(request)
+    tenant_id, expected_account_id, mode = _upload_query(request)
+    # ORDER (review F4, informational): query -> name -> bounded body read ->
+    # client. The captured-owner receipt is compared in the client, after the
+    # body is read, so a wrong-account upload is buffered locally (at most the
+    # cap) before its 409. Nothing reaches the hub — that is the guarantee —
+    # and the image route has always had the same order.
+    name: str | None = None
+    if mode == "file":
+        name = _upload_file_name(request)
+        data = await _bounded_upload(request, _FILE_MAX_BYTES, "file")
+    else:
+        data = await _bounded_upload(request)
     client = _conversation_client(config_manager)
-    result = await _conversation_reply(
+    upload = (
         client.upload_attachment(
+            conversation_id,
+            data,
+            tenant_id=tenant_id,
+            expected_account_id=expected_account_id,
+            mode="file",
+            name=name,
+        )
+        if mode == "file"
+        # The image call is spelled exactly as before so its wire cannot drift.
+        else client.upload_attachment(
             conversation_id,
             data,
             tenant_id=tenant_id,
             expected_account_id=expected_account_id,
         )
     )
+    result = await _conversation_reply(upload)
     return CRUDResponse(status=201, message="Attachment staged.", result=result)
 
 
