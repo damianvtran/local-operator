@@ -16,6 +16,7 @@ lives in ``test_push_wire_contract.py``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -915,14 +916,42 @@ def test_a_custom_sound_never_rides_a_silenced_banner() -> None:
         completion_payload(**{**COMPLETION_INPUT, "sound": SOUND_NONE}, sound_custom=CUSTOM_STEM)
 
 
-def test_the_reserved_custom_sound_name_is_the_phones_file_stem() -> None:
-    """``c_<sha16>``, underscore: the wire value IS the phone's file name stem.
+def test_the_custom_sound_name_is_the_phones_file_stem() -> None:
+    """``c_<sha16>``, lowercase, underscore: the wire value IS the phone's file stem.
 
-    Android ``res/raw`` names allow no hyphen and expo-notifications applies one
-    ``sounds:`` list to both platforms (M1 prebuild), so a hyphenated wire value
-    would need a second, cloud-side rename; the underscore makes iOS
-    ``aps.sound = "<sound_custom>.wav"`` the identity.
+    Android ``res/raw`` names must match ``[a-z][a-z0-9_]*`` and expo-notifications
+    applies one ``sounds:`` list to both platforms (M1 prebuild), so a hyphen or
+    an uppercase hex digit would need a second, cloud-side rename; with this shape
+    iOS ``aps.sound = "<sound_custom>.wav"`` is the identity. The cloud splices the
+    value into ``aps.sound`` and a channel id, so the freeze pins the SHAPE
+    (``custom_pattern``), not only ``str`` (review round 3, m1).
+
+    The rule is derived here from real bytes, not read from the prose: the name of
+    a WAV is ``"c_" + sha256(bytes).hexdigest()[:16]``, it matches the filed
+    pattern, and it is a legal ``res/raw`` stem; near-misses are refused.
     """
-    for name in ("emit-completion.json", "emit-digest.json"):
-        custom = _fixture(name)["sound_values"]["custom"]
-        assert custom.startswith("c_<sha256[:16]>"), custom
+    raw_name = re.compile(r"^[a-z][a-z0-9_]*$")
+    wav = b"RIFF\x24\x00\x00\x00WAVEfmt "  # any bytes: the rule is over content
+    name = "c_" + hashlib.sha256(wav).hexdigest()[:16]
+    for fixture_name in ("emit-completion.json", "emit-digest.json"):
+        values = _fixture(fixture_name)["sound_values"]
+        pattern = re.compile(values["custom_pattern"])
+        assert values["custom_pattern"] == r"^c_[0-9a-f]{16}$", fixture_name
+        assert values["custom"].startswith("c_<sha256[:16]>"), values["custom"]
+        assert pattern.fullmatch(name) and raw_name.fullmatch(name), name
+        for bad in (name.replace("c_", "c-"), name.upper(), name[:-1], name + "0", "c_" + "g" * 16):
+            assert not pattern.fullmatch(bad), bad
+
+
+def test_no_filed_push_shape_carries_a_hyphenated_ios_file_name() -> None:
+    """Every filed push note uses the bundled file name, never ``"<id>.wav"``.
+
+    The phone bundles ``<id with - → _>.wav`` (``soft_pulse.wav``), so a fixture
+    that told S7 ``aps.sound = "<id>.wav"`` would make every built-in play the iOS
+    default (review round 3, M1). Mirrors the mobile ADR verifier's check so the
+    two contract homes cannot disagree on that literal again.
+    """
+    for path in sorted(FIXTURES.glob("*.json")):
+        text = path.read_text(encoding="utf-8")
+        assert '"<id>.wav' not in text and "soft-pulse.wav" not in text, path.name
+        assert "c-<sha256" not in text, path.name
