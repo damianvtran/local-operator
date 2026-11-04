@@ -1,0 +1,5 @@
+{
+  "wire.errors.session_host.unsupported": "Máy tính này không thể chạy dịch vụ quản lý phiên nền, nên phiên chưa được khởi động. Hãy dùng máy tính có trình quản lý dịch vụ nền được hỗ trợ.",
+  "wire.errors.session_host.unavailable": "Dịch vụ quản lý phiên nền không phản hồi, nên phiên chưa được khởi động. Hãy đợi một lát rồi thử lại.",
+  "wire.errors.session_host.refused": "Dịch vụ quản lý phiên nền từ chối khởi động phiên này. Phiên chưa được khởi động. Hãy kiểm tra logs/session-host.log trong thư mục cấu hình Local Operator trước khi thử lại."
+}

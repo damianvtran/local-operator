@@ -263,6 +263,86 @@ def _decode_spki(encoded: str) -> bytes | None:
     return devices.decode_spki(encoded)
 
 
+def approve_pair_request(root: Path, approval_id: str, code: str) -> int:
+    """The interim human surface for a phone-filed typed approval.
+
+    This is NOT the generic CLI approver. It prints the op's own disclosure, checks
+    the phone's SAS through its persistent receipt path, then pins both digests for
+    ``approve_and_apply``. The generic approver stays refused because it has no code.
+
+    A card whose decision is ALREADY SIGNED takes the engine's retry shape instead
+    (C3 QA round 1, Q2): ``desktop_approval.apply`` is retryable from ``failed``, and
+    re-signing would refuse a card the apply itself accepts. So a dismissed install
+    prompt, or a post-signature refusal, is finished by re-running the same command;
+    the code is not asked for again because the acknowledgement is already recorded.
+    """
+    import sys
+
+    from local_operator.network import approvals
+    from local_operator.network.credentials import desktop_approval
+    from local_operator.network.types import MeshRefusal
+    from local_operator.operator import pair_op
+
+    try:
+        record = approvals.load_record(approval_id, root=root)
+        if record.get("kind") != approvals.KIND_OPERATOR_DEVICE_PAIR:
+            raise MeshRefusal(
+                "pair_operation_mismatch",
+                "That id is not a phone pairing request. Nothing was approved.",
+            )
+        for line in pair_op.card_lines(record):
+            print(line)
+        # Re-reading and displaying the card is the explicit retry after a dismissed
+        # OS prompt; it clears the engine's cancel latch without changing the record.
+        desktop_approval.refetched([approval_id])
+        facts = pair_op.disclosure(record)
+        digest = desktop_approval.disclosure_digest(facts)
+        state = str(record.get("state") or "")
+        if state == approvals.STATE_REQUESTED:
+            # Wrong codes are charged here, BEFORE the typed engine can reach a signer;
+            # a correct code leaves exactly the acknowledgement the store guard requires.
+            pair_op.check_ack(approval_id, code=code, root=root)
+            outcome = desktop_approval.approve_and_apply(
+                root,
+                approval_id,
+                op=pair_op.OP,
+                request_digest=str(record["request_digest"]),
+                disclosure_digest_=digest,
+            )
+        elif state in (approvals.STATE_APPROVED, approvals.STATE_FAILED):
+            print("This pairing is already approved; finishing the install.")
+            applied = desktop_approval.apply(
+                root,
+                approval_id,
+                op=pair_op.OP,
+                request_digest=str(record["request_digest"]),
+                disclosure_digest_=digest,
+            )
+            outcome = {
+                "signed": {"key_id": str((record.get("signature") or {}).get("key_id") or "")},
+                "applied": {"ok": True},
+                "state": applied["state"],
+            }
+        else:
+            raise MeshRefusal(
+                "approval_decision_conflict",
+                f"This pairing request is {state!r}, so there is nothing left to approve or "
+                "install. Ask the phone to start pairing again.",
+            )
+    except MeshRefusal as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"Pairing decision signed with {outcome['signed']['key_id']}.")
+    if outcome.get("applied", {}).get("ok"):
+        print("Phone paired on this computer. It can now approve and loosen requests.")
+        return 0
+    print(
+        outcome.get("applied", {}).get("message", "The phone was not installed."),
+        file=sys.stderr,
+    )
+    return 1
+
+
 def describe_devices(args: argparse.Namespace) -> int:
     """``lop operator devices`` — paired phones, pending requests, and revocation.
 
@@ -285,20 +365,139 @@ def describe_devices(args: argparse.Namespace) -> int:
     this verb is exactly as host-side-only as ``--revoke`` is: the phone has no
     reach into either.
     """
-    from local_operator.operator.handlers import install_anchor
+    from local_operator.operator.handlers import (
+        ADMIT_NO_SELECTION,
+        PURPOSE_ADMIT_DEVICE,
+        confirm_devices,
+        install_anchor,
+    )
 
     root = config_dir()
     revoke = str(getattr(args, "revoke", "") or "")
     authorise = str(getattr(args, "authorise", "") or "")
+    approve = str(getattr(args, "approve", "") or "")
+    confirm = bool(getattr(args, "confirm", False))
+    code = str(getattr(args, "code", "") or "")
+    if code:
+        if not approve or confirm or revoke or authorise:
+            print("--code requires only --approve APPROVAL_ID", file=sys.stderr)
+            return 2
+        return approve_pair_request(root, approve, code)
 
     paired = devices.list_devices(root)
     pending = devices.list_pending(root)
+
+    # THE RULE, STATED ON THE VERB THAT LISTS PHONES. A host whose anchor predates
+    # the rule (the migration guard) still admits a device certificate WITHOUT it
+    # being listed, and a bare table of ids reads as a list of confirmed phones — so
+    # the rule is printed here, and every row below is judged by the same answer,
+    # including the `state` column. Read once so the preamble and the rows cannot
+    # disagree.
+    from local_operator.operator.trust import (
+        admission_enforced,
+        admission_sentence,
+        anchor_bytes,
+        load_anchor,
+        open_device_ids,
+    )
+
+    loaded = load_anchor()
+    usable_anchor = loaded.anchor if loaded.usable else None
+    enforcing = bool(usable_anchor is not None and admission_enforced(usable_anchor))
+    # A PRESENCE HOST EXEMPTS THE LIST BEFORE THE MARKER IS READ
+    # (`trust.device_is_admitted`), so the row state has to read it too: on such a
+    # host an unlisted phone IS admitted, and a row calling it `unconfirmed` would
+    # describe a refusal this host does not make (agent review round 1, m1).
+    presence = bool(usable_anchor is not None and usable_anchor.presence)
+    anchor_listed = set(open_device_ids(usable_anchor)) if usable_anchor else set()
+
+    if approve or confirm:
+        selected = (
+            [approve]
+            if approve
+            else [device.device_id for device in paired if device.device_id in anchor_listed]
+        )
+        if confirm and not selected:
+            selected = [device.device_id for device in paired]
+        print_only = bool(getattr(args, "print_only", False))
+        # The gesture sentence is printed by `_admission_install`, right before the
+        # prompt and only once one can happen (design round 2, D8).
+        code = confirm_devices(
+            root,
+            selected,
+            print_only=print_only,
+            sudo_secret=str(getattr(args, "sudo_secret", "") or ""),
+        )
+        if code == ADMIT_NO_SELECTION:
+            # A bad selection is a USAGE error, and this verb exited 2 for it before
+            # the per-cause codes existed (agent review round 3, m5) — the same status
+            # argparse gives a bad flag. Kept, so a script reading it is not broken.
+            return 2
+        if code != 0:
+            return code
+        if print_only:
+            # NOTHING WAS CONFIRMED, so no receipt (agent review round 3, m4): the
+            # install command above is the whole output, and a receipt after it read
+            # as a claim about a write that has not happened.
+            return 0
+        # `--confirm` SELECTS THE PHONES ALREADY LISTED, so on a host whose list is
+        # already marked it changes nothing — and the receipt still claimed a
+        # confirmation while a phone this computer had never confirmed stayed refused
+        # (agent review round 2, m3). Ask the anchor again and name the verb that
+        # actually confirms a phone.
+        reloaded = load_anchor()
+        # `--approve <id>` names its phone, so only `--confirm`'s implicit selection
+        # can change nothing while another phone stays unconfirmed (agent review
+        # round 3, m4): `--approve X` with Y unconfirmed printed "Nothing needed
+        # confirming" about the X it had just confirmed.
+        unconfirmed = [
+            device.device_id
+            for device in paired
+            if not approve
+            and reloaded.usable
+            and reloaded.anchor is not None
+            and admission_enforced(reloaded.anchor)
+            and not reloaded.anchor.presence
+            and device.device_id not in open_device_ids(reloaded.anchor)
+        ]
+        changed = not (
+            usable_anchor is not None
+            and reloaded.usable
+            and reloaded.anchor is not None
+            and anchor_bytes(reloaded.anchor) == anchor_bytes(usable_anchor)
+        )
+        if unconfirmed:
+            # TRUE IN BOTH CASES (agent review round 3, m4): a `--confirm` that did
+            # write (a pre-rule anchor gaining its marker) confirmed something, so it
+            # cannot lead with "Nothing needed confirming".
+            print(
+                (
+                    "Confirmed the phones already on this computer's list. "
+                    if changed
+                    else "Nothing needed confirming: the phones already on this "
+                    "computer's list were confirmed before this run. "
+                )
+                + "To confirm "
+                + ", ".join(unconfirmed)
+                + ", run "
+                + " or ".join(
+                    f"`lop operator devices --approve {device_id}`" for device_id in unconfirmed
+                )
+                + " (it asks for your approval)."
+            )
+            return 0
+        print(
+            "Confirmed on this computer. These phones will also be trusted on any "
+            "computer that joins this one later; computers that joined earlier keep "
+            "their own list."
+        )
+        return 0
 
     if revoke:
         if not _stage_anchor_revocation(root, revoke, revoked=True):
             print(
                 "no installed operator anchor to record a revocation in — set up operator "
-                "authority on this machine first (the anchor staged earlier is not "
+                "authority on this computer first (the anchor staged earlier is not "
                 "trusted until the install step lands it)",
                 file=sys.stderr,
             )
@@ -317,12 +516,13 @@ def describe_devices(args: argparse.Namespace) -> int:
         from local_operator.operator.trust import ANCHOR_REFRESH_S
 
         print(
-            f"revoked {revoke}. Revocation lives in the anchor; until the install step "
-            "above completes it has not taken effect. Once installed, a session already "
-            f"running picks it up within {int(ANCHOR_REFRESH_S)}s and a new one at once. "
+            f"Removed on this computer. It can no longer approve here. Your other "
+            "computers keep trusting this phone until their list changes — if the phone "
+            "is lost or stolen, revoke it there too, or bring this computer's list to "
+            f"them again. A running session picks this up within {int(ANCHOR_REFRESH_S)}s. "
             "To bring this device back, run "
-            f"`{devices.AUTHORISE_COMMAND.format(device_id=revoke)}` (needs the same "
-            "install step)."
+            f"`{devices.AUTHORISE_COMMAND.format(device_id=revoke)}` (this asks for your "
+            "approval)."
         )
 
     if authorise and not bool(getattr(args, "print_only", False)):
@@ -357,9 +557,14 @@ def describe_devices(args: argparse.Namespace) -> int:
                     "device."
                 )
             else:
-                print(f"nothing recorded a revocation of {authorise} on this machine.")
+                print(f"nothing recorded a revocation of {authorise} on this computer.")
         elif staged:
-            code = install_anchor(root, print_only=False)
+            code = install_anchor(
+                root,
+                print_only=False,
+                purpose=PURPOSE_ADMIT_DEVICE,
+                sudo_secret=str(getattr(args, "sudo_secret", "") or ""),
+            )
             if code != 0:
                 return code
             from local_operator.operator.trust import ANCHOR_REFRESH_S
@@ -447,7 +652,7 @@ def describe_devices(args: argparse.Namespace) -> int:
 
         if not recorded_here and not recorded_in_anchor:
             print(
-                f"preview: nothing recorded a revocation of {authorise} on this machine, "
+                f"preview: nothing recorded a revocation of {authorise} on this computer, "
                 f"so `{command}` would have nothing to lift and no privileged step "
                 "would be needed."
             )
@@ -455,7 +660,7 @@ def describe_devices(args: argparse.Namespace) -> int:
             print(
                 f"preview: `{command}` would clear the local revocation record — "
                 f"{authorise} could pair again — and do nothing else: there is no usable "
-                "installed operator anchor on this machine, so no anchor statement would "
+                "installed operator anchor on this computer, so no anchor statement would "
                 f"be written and no privileged step would be needed. Run `{command}` "
                 "without --print-only to do exactly that, and ask Local Operator to set "
                 "up operator authority if you expected an anchor here."
@@ -498,18 +703,56 @@ def describe_devices(args: argparse.Namespace) -> int:
                 # then repeating the fact and naming no route at all. So: no call, one
                 # remedy, in the right order, and the remedy is the route that exists.
                 print(
-                    "There is no staged anchor statement to install, so there is no "
-                    f"privileged command to print yet: run `{command}` without "
-                    "--print-only and it writes the statement and takes that step itself."
+                    "There is nothing waiting to install yet, so there is no command to "
+                    f"print: run `{command}` without --print-only and it writes the "
+                    "change and asks for your approval itself."
                 )
 
+    # THE RULE, STATED ON THE VERB THAT LISTS PHONES — and stated on a host with NO
+    # phones as well: that is the migration state this rule is about, and it was the
+    # one host the line was hidden from (agent review round 1, n3). ONE sentence
+    # shared with `lop operator status` (`trust.admission_sentence`), so the two
+    # verbs cannot describe the same rule differently.
+    print(f"phone admission        : {admission_sentence(usable_anchor)}")
+    if usable_anchor is not None and not presence and not enforcing:
+        # THE ROUTE, UNDER THE STATE IT ENDS (design round 1, D6). The migration
+        # sentence is the ruled §4 wording and says nothing about HOW; the listing is
+        # the whole discovery path (`status` prints the same line and no command), so
+        # the verb that ends the state is named here, under it, in the same listing.
+        print(
+            "                         run `lop operator devices --confirm` (it asks "
+            "for your approval)"
+        )
     for device in paired:
         expires = time.strftime("%Y-%m-%d", time.localtime(device.not_after))
-        state = "revoked" if _anchor_revokes(root, device.device_id) else "active"
+        # THREE STATES RATHER THAN TWO, because the runtime now asks three questions of
+        # a stored certificate: revoked, "listed and admitted", and "good certificate
+        # this computer has not confirmed" — which on an enforcing host is REFUSED. A
+        # row that said `active` for the third state would be the one reading a human
+        # takes from this listing ("my phone can act") and it would be wrong. On a host
+        # that does not enforce, the same certificate IS admitted, so the label follows
+        # the host's rule rather than the device's wishes — see the line above.
+        if _anchor_revokes(root, device.device_id):
+            state = "revoked"
+        elif enforcing and not presence and device.device_id not in anchor_listed:
+            state = "unconfirmed"
+        else:
+            state = "active"
         print(
             f"  {device.device_id}  {device.name or '(unnamed)':<20} "
             f"{state:<8} expires {expires}  scopes {','.join(device.scope)}"
         )
+        if state == "unconfirmed":
+            # THE REMEDY, ON THE ROW THAT NEEDS IT (agent review round 2, m1). The
+            # revoked row three lines below carries its command; this one printed the
+            # state alone, and `--approve` — the only verb that clears it — was
+            # discoverable from `--help` alone. Being unconfirmed here is exactly the
+            # state a person meets after a plant or a re-join.
+            print(
+                f"    it cannot act here until it is confirmed: run "
+                f"`lop operator devices --approve {device.device_id}` (it asks for "
+                "your approval)"
+            )
     # A REVOKED DEVICE KEEPS ITS ROW (UX round 10, U1). It had none: the revocation
     # clears the certificate, so it cannot be in `paired`, and nothing printed the
     # anchor-only revocations — which left the id every remedy names readable nowhere
@@ -521,7 +764,8 @@ def describe_devices(args: argparse.Namespace) -> int:
             continue
         print(
             f"  {device_id}  {'':<20} {'revoked':<8} certificate cleared — "
-            f"`{devices.AUTHORISE_COMMAND.format(device_id=device_id)}` brings it back"
+            f"`{devices.AUTHORISE_COMMAND.format(device_id=device_id)}` brings this "
+            "device back, then pair the phone again"
         )
     for row in pending:
         print(
@@ -538,14 +782,32 @@ def _stage_anchor_revocation(root: Path, device_id: str, *, revoked: bool) -> bo
 
     Rebuilt from the installed anchor rather than from a fresh statement, so the
     operator's key, label and creation time survive; only the revocation list is
-    added to. Un-revoking DROPS the entry rather than writing ``"revoked": False``
-    — the list is a list of things that are revoked, and an entry that says
-    "present, but not revoked" is a shape a future reader has to know to read.
+    added to. Un-revoking on a host that does not require its list DROPS the entry
+    rather than writing ``"revoked": False`` — the list is a list of things that are
+    revoked, and an entry that says "present, but not revoked" is a shape a future
+    reader has to know to read.
+
+    BUT UNDER AN ENFORCING ANCHOR, DROPPING THE ENTRY LEAVES THE PHONE UNLISTED,
+    which the admission predicate refuses (agent review round 1, M1). The two
+    callers then both break: the revoked row promises ``--authorise`` "brings it
+    back", and the relay tells the human to "allow this phone again, then pair this
+    phone again" — while a re-pair mints the same derived id and meets
+    ``operator_device_unconfirmed``, a loop with no exit. So the un-revoke LISTS the
+    device: ``{"device_id": id}`` with no ``revoked`` key is exactly the shape the
+    confirm flow writes for a phone the human kept, and it is what the predicate
+    reads as admitted.
+
+    THE DERIVED-ID INVARIANT IS UNTOUCHED BY THAT: only the id the verb was given is
+    written, and ``device_is_admitted`` still requires ``device_id ==
+    key_id_for(spki)``, so listing an id cannot admit a statement carrying somebody
+    else's key. On a host that does not require its list the entry is still dropped:
+    the guard state has no list to keep, and adding one would be a policy this verb
+    has no business adopting.
     """
     from dataclasses import replace
 
     from local_operator.operator.handlers import stage_anchor
-    from local_operator.operator.trust import load_anchor
+    from local_operator.operator.trust import admission_enforced, load_anchor
 
     loaded = load_anchor()
     if not loaded.usable or loaded.anchor is None:
@@ -560,6 +822,8 @@ def _stage_anchor_revocation(root: Path, device_id: str, *, revoked: bool) -> bo
             entries.append({"device_id": device_id, "revoked": True})
     else:
         entries = [entry for entry in entries if entry.get("device_id") != device_id]
+        if admission_enforced(loaded.anchor):
+            entries.append({"device_id": device_id})
     stage_anchor(root, replace(loaded.anchor, devices=tuple(entries)))
     return True
 

@@ -1,0 +1,11 @@
+{
+  "wire.settings.hub_defaults.agents.help": "Desactivado pausa las actualizaciones; activado suscribe los nuevos.",
+  "wire.settings.hub_defaults.agents.label": "Autoactualizar agentes/habil.",
+  "wire.settings.hub_defaults.agents.off.description": "pausar las actualizaciones de todos los vínculos de agentes y habilidades",
+  "wire.settings.hub_defaults.agents.on.description": "suscribir nuevos vínculos de agentes y habilidades",
+  "wire.settings.hub_defaults.model_default.note": "Los merges del hub usan tu modelo predeterminado actual. La antigua anulación del modelo del hub se ignora.",
+  "wire.settings.hub_defaults.teams.help": "Por defecto para vínculos nuevos; los existentes mantienen su política.",
+  "wire.settings.hub_defaults.teams.label": "Suscribir vínculos de equipo",
+  "wire.settings.hub_defaults.teams.off.description": "pausar las actualizaciones entrantes de los nuevos vínculos de equipo",
+  "wire.settings.hub_defaults.teams.on.description": "suscribir nuevos vínculos de equipo"
+}

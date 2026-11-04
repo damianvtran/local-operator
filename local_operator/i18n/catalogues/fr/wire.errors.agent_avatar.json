@@ -1,0 +1,9 @@
+{
+  "wire.errors.agent_avatar.empty_body": "Aucune image n’a été envoyée. Envoyez les octets de l’image dans le corps de la requête.",
+  "wire.errors.agent_avatar.imaging_unavailable": "Les images nécessitent la prise en charge des images, qui n’est pas installée. Réinstallez Local Operator avec l’extra images.",
+  "wire.errors.agent_avatar.not_found": "Cet agent n’a pas d’image.",
+  "wire.errors.agent_avatar.too_large": "Cette image est trop volumineuse. Choisissez une image de moins de {limit_mib} Mo.",
+  "wire.errors.agent_avatar.too_many_pixels": "Cette image comporte trop de pixels. Choisissez une image de moins de {limit_mp} mégapixels.",
+  "wire.errors.agent_avatar.undecodable": "Impossible de lire cette image. Le fichier est peut-être endommagé.",
+  "wire.errors.agent_avatar.unsupported_type": "Impossible d’utiliser cette image. Choisissez une image PNG, JPEG, WebP, GIF ou HEIC."
+}

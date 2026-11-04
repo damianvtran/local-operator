@@ -56,7 +56,7 @@ from textual.widgets import Static
 from local_operator import keymap as keymap_mod
 from local_operator import settings_io
 from local_operator.i18n.keys import tui_small as _x
-from local_operator.i18n.text import register_refresh, tr, tr_record
+from local_operator.i18n.text import active_locale, register_refresh, tr, tr_record
 from local_operator.settings_io import Kind, Section, Setting
 from local_operator.team_bridge import availability as bridge_availability
 from local_operator.tui import theme as theme_mod
@@ -167,6 +167,14 @@ _DESKTOP_HOTKEY_DETAIL = (
 #: the row states only where it IS set. What remains is the instruction the
 #: enter refusal elaborates.
 _HOLD_HOTKEY_DETAIL = "Global shortcut for the desktop app — set it in the app."
+
+#: Recording is delivered only to the focused desktop main window, not globally.
+#: Keep this distinct from Quick Send's genuinely global registration.
+#: 60 cells, down from 81: the old sentence clipped at 80x24 and at 100x30 it
+#: crowded both the key path and the off-default riders out of the row. The
+#: constraint it must still carry is twofold — it records speech-to-text, and
+#: it is a shortcut for the focused desktop window, not a global registration.
+_RECORDING_HOTKEY_DETAIL = "Desktop speech-to-text shortcut — set it here or in the app."
 
 #: The `enter` refusal on such a row. The affordance must not ARM — a
 #: listening frame whose every completion the validator refuses reads as a
@@ -1325,6 +1333,12 @@ class SettingsView(Vertical):
             # read there.
             len(settings_io.SETTINGS),
             len(settings_io.SECTIONS),
+            # The registry's copy is re-materialised in place on a locale move,
+            # so the row list built under one locale must not survive into the
+            # next: the row COUNT is often identical and every other key here
+            # can be too, which would paint the old language until a mutator
+            # happened to change something (QA round 1, Q2).
+            active_locale(),
             bridge_availability.section_visible(
                 bridge_availability.BRIDGE_SECTION, self._manager.config_dir
             ),
@@ -3780,6 +3794,11 @@ class SettingsView(Vertical):
             self._suggest_index,
             self._suggest_dismissed,
             theme_mod.get_theme_epoch(),
+            # The same reason as the theme epoch: the registry's strings were
+            # re-materialised in place by the locale move, and nothing else in
+            # this token necessarily changed, so without the locale the cached
+            # strips would keep painting the previous language.
+            active_locale(),
             self._list_width(),
             # The two suggestion catalogues, by CONTENT rather than by length.
             # `load()` replaces both lists wholesale, and a same-length swap
@@ -4533,10 +4552,10 @@ class SettingsView(Vertical):
         # round 1, D1): 8.62:1 dark / 7.18:1 light, where `faint` is 1.97:1
         # dark and `dim` 3.77:1 light. Every other row keeps the established
         # faint/dim ladder; this is the H1 surface's own ink, not a token
-        # change. Resolved LAZILY: the bridge rows are its only consumers, and
-        # an unconditional resolve here would add one semantic_color lookup to
-        # EVERY detail paint — exactly the per-paint cost the repaint guards
-        # bound.
+        # change. Resolved LAZILY: the bridge rows and the recording row are its
+        # only consumers, and an unconditional resolve here would add one
+        # semantic_color lookup to EVERY detail paint — exactly the per-paint
+        # cost the repaint guards bound.
         bridge_ink: Style | None = None
 
         def _bridge_ink() -> Style:
@@ -4765,6 +4784,17 @@ class SettingsView(Vertical):
                 else Style(color=theme_mod.semantic_color("dim"))
             )
             bridge_row = row.setting.section == bridge_availability.BRIDGE_SECTION
+            # THE RECORDING ROW SHARES THE BRIDGE ROWS' INK, for their measured
+            # reason: painted `faint` (#4a4539 on #14110c) its required sentence
+            # measures 1.97:1 dark / 2.08:1 light, under the 4.5:1 normal-text
+            # floor, and at >=120 cols it is the rung that survives beside the
+            # clause and key — so the low-contrast ink landed on exactly the
+            # copy no other text on the row can imply. Only the help part's ink
+            # moves; the shed ladder's rung ORDER is untouched.
+            recording_row = (
+                row.setting.hotkey_scope == "desktop"
+                and row.setting.key == "keymap.start_recording"
+            )
             if bridge_row:
                 # The `default: —` clause shares the line with the H1
                 # explanation when both fit, so it rides the same accessible
@@ -4785,6 +4815,8 @@ class SettingsView(Vertical):
                     if keymap_mod.capturable_in_terminal(row.setting.key)
                     else _HOLD_HOTKEY_DETAIL
                 )
+                if recording_row:
+                    help_text = _RECORDING_HOTKEY_DETAIL
             # THE SHED LADDER, one rule for every row (design round 3, D12):
             # the key path sheds first; the state clause is never shed while
             # anything else remains; help sheds after the key. Walked top to
@@ -4818,7 +4850,7 @@ class SettingsView(Vertical):
             # dark / 7.18:1 light — where `faint` measures 1.97:1 dark and
             # 2.08:1 light, both under the 4.5:1 normal-text floor. Scoped to
             # these rows only.
-            help_style = _bridge_ink() if bridge_row else faint
+            help_style = _bridge_ink() if (bridge_row or recording_row) else faint
             help_part = (help_text, help_style, False)
             # THE HELP ALONE TAKES `dim`, NOT `faint` (design round 2, D5). The
             # rule is stated eight lines up for the state clause — a clause that

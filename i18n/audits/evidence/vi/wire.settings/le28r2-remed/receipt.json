@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2-remed",
+  "locale": "vi",
+  "namespace": "wire.settings",
+  "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+  "target_sha256": "3d20e38f5af04ee8040c680cbf4b6697822ff5f4872454495f51c615955e4b14",
+  "hashes": {
+    "findings.json": "d035920efd771c9d189f247ef6e1ebed56b3de7df5a50ff69a469bdadccd47b4",
+    "record.json": "2262b2a7ed6edbb68aab6bc719ab24bbb063235ffcc11ccb5fa6dda3f3d1caf5",
+    "report.md": "ff0dda001ff555470ede1c5e9c08bebda618a1e8b6cb24a0ec5aa315de090212",
+    "route-receipt.json": "cd5e5b9bbee233372625f439004e96a066f30a628998f9862d6bf8e1b8fd14e1"
+  }
+}

@@ -1,0 +1,184 @@
+{
+  "schema": 1,
+  "audit_id": "w6a1",
+  "audit_round": 1,
+  "locale": "es",
+  "namespace": "tui.import",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "Target es catalogue is UNTRACKED at this revision (git status: '??'), so HEAD does not bind its bytes. The audit binds to the exact on-disk target sha256 recorded in input_hashes.target and re-printed by checks.py on every run.",
+  "key_count": {
+    "en": 87,
+    "target": 87,
+    "context": 0
+  },
+  "verdict": "changes_requested",
+  "result": "changes_requested — 0 blocker, 1 major, 2 minor, 3 nit",
+  "verdict_reason": "All 87 keys read, then every destructive and data-loss-adjacent key re-read in a second pass. preview_confirm, preview_confirm_metadata and both narrow forms keep the past-negative and the future-negative distinct, exactly as the English does; rerun_hint names all three source behaviours (unchanged skipped, grown resumed, rewritten new copy) under the preserved safety claim; the read-only source claim, the nothing-can-be-imported explanation and the concurrent-import guard all survive. No blocker. One major blocks: the assembled sessions-state hint row measures 80 cells against the view's own documented 76-cell row at 80x24, so the trailing esc hint is clipped; two compliant rewrites measure 75 and 76 cells.",
+  "verdict_scope": "changes_requested is driven solely by I1 (overflow). I2, I3 and N1-N3 are recorded and do not independently block.",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), es-tui-audit-b",
+    "session_or_instance": "60db1cb280ee",
+    "model": "radient/auto",
+    "model_note": "Model AS ACTUALLY RUN: radient/auto. The session opened on anthropic/claude-sonnet-5-5 and hit consecutive provider failures (quota) — openai/gpt-6-astra, then kimi/k3.1-pro, then radient/auto. The glossary/style-guide reading happened before the first switch; all catalogue reading, all mechanical checks and every judgement in this record were performed under radient/auto. No primary-model audit claim is made, and no provider/model was pinned by the auditor.",
+    "date": "2026-10-30",
+    "independence": "I authored none of this copy and repaired none of it. I read the English source, the style guide and glossary, the shipped es TUI catalogues, and the widget that consumes these keys (harness_import_view.py); I compared the Spanish against the runtime parser, the real message renderer and rich.cells.cell_len. I edited no catalogue, sidecar, ledger, allowance or generated file."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.import.json",
+      "revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+      "sha256": "932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.import.json",
+      "sha256": "ffb39975f8a17571c316e9a2f2c2ff7657011732769136ee3e4d537cc400a422",
+      "tracked": false
+    },
+    "context": null
+  },
+  "context_sidecar": {
+    "present": false,
+    "path_expected": "local_operator/i18n/catalogues/en/tui.import.context.json",
+    "consequence": "No per-key role/tone notes and no maxCells budgets exist for this namespace. Register was judged against shipped es TUI copy and the consumer widget; widths were judged against the widget's own documented row budget, not against an absent per-key hint. The absence is not attributed to the translator."
+  },
+  "findings": [
+    {
+      "id": "I1",
+      "key": "tui.import.hint_select / hint_preview / all_none / hint_move / hint_back",
+      "severity": "major",
+      "current": "↑↓ mover · space seleccionar · a todas/ninguna · enter vista previa · esc volver",
+      "english": "↑↓ move · space select · a all/none · enter preview · esc back",
+      "measured_cells": {
+        "es_row": 80,
+        "en_row": 62,
+        "documented_budget": 76
+      },
+      "problem": "The assembled sessions-state hint row is 80 cells against the 76-cell row the view documents at 80x24 ('The hint row still fits at 80x24 (76 cells)'), and show_move keeps all five hints at width >= 74, so nothing sheds. The row cannot fit and the trailing hint (esc volver, the way out) is clipped on the screen's main state. English fits at 62.",
+      "suggested": "↑↓ mover · space elegir · a todas/ninguna · enter vista previa · esc volver",
+      "suggested_cells": 75,
+      "alternative": "↑↓ mover · space seleccionar · a todo/nada · enter vista previa · esc volver (76 cells, exactly at the limit)",
+      "gate": true
+    },
+    {
+      "id": "I2",
+      "key": "tui.import.hint_list",
+      "severity": "minor",
+      "current": "lista",
+      "english": "list",
+      "problem": "Every other hint label is an infinitive (volver, cancelar, confirmar, importar, mover, abrir, recargar, seleccionar), matching the guide's action-label rule and shipped tui.viewer precedent ('r recargar · o abrir externamente · esc cerrar'). 'lista' names a thing. In the result state it is painted beside 'esc volver', so one row reads noun + verb. hint_preview ('vista previa') has the same shape but is not flagged: the preview noun is used consistently across this catalogue, so it reads as the screen, not as a broken label.",
+      "suggested": "listar",
+      "gate": false
+    },
+    {
+      "id": "I3",
+      "key": "tui.import.error_source",
+      "severity": "minor",
+      "note": "identifier corrected in finding body below",
+      "current": "Selecciona al menos una sesión con espacio antes de previsualizar.",
+      "english": "Select at least one session with space before previewing.",
+      "problem": "'con espacio' reads first as 'with room' in Spanish; the referent is the space bar (the hint row names it 'space'). This is the message a blocked user uses to unblock themselves, so ambiguity costs a failed attempt.",
+      "suggested": "Selecciona al menos una sesión con la tecla espacio antes de previsualizar.",
+      "gate": false
+    },
+    {
+      "id": "N1",
+      "key": "tui.import.result_memory",
+      "severity": "nit",
+      "current": "memoria importada: {imported} · omitidos: {skipped} · ocultados: {redactions}",
+      "english": "{imported} memory imported · {skipped} skipped · {redactions} redactions",
+      "problem": "'ocultados' reads as 'hidden ones'; what happened is content scrubbed for safety, which Spanish expresses as 'censurados' or 'redactados'. The count and the fact are right, so this is wording, not a misstatement.",
+      "suggested": "censurados",
+      "gate": false
+    },
+    {
+      "id": "N2",
+      "key": "tui.import.selected_count",
+      "severity": "nit",
+      "current": "seleccionadas: {count}",
+      "english": "{count} selected",
+      "problem": "preview_narrow renders the same fact as '{count} seleccionadas', so one screen shows two shapes; and the count sits last, where _detail_text's truncate_cells would eat it, while the English leads with the number.",
+      "suggested": "{count} seleccionadas",
+      "gate": false
+    },
+    {
+      "id": "N3",
+      "key": "tui.import.metadata_only_explain",
+      "severity": "nit",
+      "current": "Puede que el harness haya eliminado el rollout.",
+      "english": "The harness may have removed the rollout.",
+      "problem": "'rollout' is the Codex artefact's own name and is correctly kept as a machine term, but a Spanish reader outside Codex must decode it from context. Recorded, not required to change.",
+      "suggested": "leave as is, or 'el volcado de sesión'",
+      "gate": false
+    }
+  ],
+  "checks": {
+    "script": "i18n/audits/evidence/es/tui.import/w6a1/checks.py",
+    "result": "PASS — all checks clean, every negative control tripped",
+    "exit_code": 0,
+    "families": [
+      "key parity (no added/dropped/duplicate keys, all values str)",
+      "ICU parse of every target value",
+      "argument name/kind/order tuple identical to EN",
+      "Spanish CLDR plural categories: exactly one/many/other, no few/zero/two",
+      "no empty branch; no branch lossier than its English counterpart",
+      "real render at 0/1/2/1e6/2e6/1.5e6: 0 takes other, 1 takes one, 1e6 takes many, 1.5e6 takes other",
+      "protected machine tokens byte-identical (backtick spans, --flags, <source>, [id], /import, →)",
+      "no budget assertions: this namespace has no context sidecar, so width is checked separately from the assembled hint row",
+      "negation parity (no dropped or added negation)",
+      "glossary terms and the guide's punctuation rules",
+      "no prose byte-identical to English"
+    ],
+    "semantic_assertions": [
+      "preview_confirm: nothing has been imported, and Enter performs the import",
+      "preview_confirm_metadata: nothing will be imported",
+      "preview_narrow and preview_narrow_metadata: both states kept in narrow form",
+      "rerun_hint: unchanged sources skipped, grown resumed, rewritten given a new copy, all under the 'safe' claim",
+      "metadata_only_explain: nothing can be imported, and why",
+      "result_memory: imported, skipped and redacted counted apart",
+      "subtitle: the source stays read-only",
+      "forbidden: a past-import claim in preview_confirm, a data-loss claim in rerun_hint, a copy claim for the read-only source"
+    ],
+    "negative_controls": 11,
+    "negative_controls_caught": 11,
+    "cell_len_source": "rich.cells.cell_len (the function the TUI measures rows with)"
+  },
+  "audit_notes_not_execution_log": "The prose above and in report.md is judgement, not evidence of execution. The executed commands and their real output are in audit.log; the script that produced them is checks.py in this bundle.",
+  "display_side_risk": "No value was displayed as a redaction marker. The catalogue is a plain JSON file in this worktree, read directly as a file.",
+  "limitations": [
+    "No English context sidecar exists for this namespace; register was judged against shipped TUI copy and the consumer widget, and widths against the widget's documented row budget instead of per-key maxCells.",
+    "LLM semantic judgement; no native-speaker attestation (not a gate under the programme).",
+    "No rendered TUI frames were captured. I1 is arithmetic over the exact strings the widget concatenates plus the view's own stated 76-cell row; a rendered frame at 80x24 would confirm the clipped tail if the finding is disputed.",
+    "The target catalogue is untracked at the audited revision; the binding is to its on-disk sha256, which a later edit would invalidate.",
+    "This is a first-round audit of this namespace by this auditor; it is not a corroboration of an earlier round."
+  ],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "finding_ids": [
+      "I1",
+      "I2",
+      "I3",
+      "N1",
+      "N2",
+      "N3"
+    ],
+    "blocker_major_finding_ids": [
+      "I1"
+    ]
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.import/w6a1/report.md",
+      "sha256": "9f96a8f35a381464bae7d6f24e4fc26e03102ddb419e6de1ede7577b66fdd91f"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.import/w6a1/audit.log",
+      "sha256": "136db9d16f53144a6a176edace532f45b7ffa9acf0bbc90806ff927e8d1f5d97"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.import/w6a1/checks.py",
+      "sha256": "0f8b5c0971834c53c4ecefeb50a5f411e78579d06cebc52d7075205b0dd9a1fd"
+    }
+  ]
+}

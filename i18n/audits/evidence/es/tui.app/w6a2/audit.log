@@ -1,0 +1,186 @@
+AUDIT LOG — es / tui.app / w6a2 (ROUND 2)
+date:         2026-10-30
+auditor:      independent translation auditor (lopdev team), i18n-auditor role; session 7fa3a39af5d9
+model:        radient/auto — the model ACTUALLY running this audit. The session header named
+              anthropic/claude-sonnet-5-5, but provider quota failures moved the session through
+              openai/gpt-6-astra and kimi/k3.1-pro to radient/auto before any work was done, so
+              nothing here is claimed for the primary model. record.json carries the chain.
+independence: authored none of this copy and repaired none of it; wrote no catalogue, sidecar,
+              ledger, allowance or generated file. This round's rules forbid git writes and any
+              edit to catalogues, sidecars, the ledger or the allowance; only this evidence
+              directory was written.
+
+Worktree: /Users/damian/lo-i18n-es
+Branch:   feat/i18n-es-tui   (the task brief said `tui-wip`; the checkout is on feat/i18n-es-tui, and this log
+          records what is actually checked out)
+Probe interpreter: /Users/damian/local-operator/.venv/bin/python
+  This checkout has no .venv; that interpreter supplies rich.cells.cell_len, the ruler the repo
+  itself measures text width with. Nothing was installed for this audit, and checks.py also
+  carries a local cell-width fallback for a machine without rich.
+
+THIS IS AN EXECUTION LOG, NOT NOTES. Every block below is captured output of the command above it.
+
+=== 1. revision and identity of the exact inputs =================================
+$ git rev-parse HEAD
+b925c2e11be36653dfe88ac78f627bc2531427df
+$ git rev-parse --abbrev-ref HEAD
+feat/i18n-es-tui
+$ git status --porcelain -- <the three es targets>
+?? local_operator/i18n/catalogues/es/tui.app.json
+?? local_operator/i18n/catalogues/es/tui.hub_links.json
+?? local_operator/i18n/catalogues/es/tui.usage.json
+$ sha256 (en / context / es) for this namespace
+7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875  local_operator/i18n/catalogues/en/tui.app.json
+a840ac61e3c1e1178825257c1b9ebaa6ebfef500df4f3a29e8c463b50eef42fa  local_operator/i18n/catalogues/en/tui.app.context.json
+6afd01d6d0aff0b21827da64e6b525dc9e42ef7071cf4767ca0a46f6f14250b5  local_operator/i18n/catalogues/es/tui.app.json
+
+NOTE: the es targets are UNTRACKED at this revision, so HEAD does not bind their bytes; the
+sha256 above is the binding identity, and the probe re-reads the same three files and prints
+their digests at the top of section 3 from independent code.
+
+=== 2. the repository's own validator (repo-wide) =================================
+$ python3 scripts/i18n/check.py
+advisory: local_operator/update.py: 57 literal(s) against a ceiling of 53
+advisory: local_operator/web_fetch/tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+check.py: ok — 191 file(s) scanned, 2348 literal(s) at or below the baseline, catalogues consistent; 51 advisory finding(s) (report-only until activated)
+exit 0
+
+WHAT IT PROVES / DOES NOT: check.py rejects a plural selector outside the locale's set and a
+plural without "other", but does not require the locale's full category set (an es plural missing
+"many" passes it) and never looks at what a branch RENDERS. Section A of the probe adds both.
+
+=== 3. the probe — full three-namespace run (this bundle is the tui.app section) =====
+$ /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.hub_links/w6a2/checks.py
+cell ruler: rich.cells.cell_len
+geometry: help ceiling 74 | stop_all budget 70 | panel 32..104 (margin 4) | padding 4 | scrollbar 1 | floor body 31 at 40 cols
+input digests:
+  en  7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb  local_operator/i18n/catalogues/en/tui.hub_links.json
+  es  f3bde8f887ec44c2ab4b1fd79ac0d227fdb96561d3c4b992076157f6bc239c76  local_operator/i18n/catalogues/es/tui.hub_links.json
+  ctx 9b81676163337d8a93e38138909dbd4801f8edd8416075c6efb994f9870c682e  local_operator/i18n/catalogues/en/tui.hub_links.context.json
+  en  7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875  local_operator/i18n/catalogues/en/tui.app.json
+  es  6afd01d6d0aff0b21827da64e6b525dc9e42ef7071cf4767ca0a46f6f14250b5  local_operator/i18n/catalogues/es/tui.app.json
+  ctx a840ac61e3c1e1178825257c1b9ebaa6ebfef500df4f3a29e8c463b50eef42fa  local_operator/i18n/catalogues/en/tui.app.context.json
+  en  5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b  local_operator/i18n/catalogues/en/tui.usage.json
+  es  e2ab2abd3d581eb5c093cb3148b4beede61a3ed518b9b9de39c3361309c01a48  local_operator/i18n/catalogues/es/tui.usage.json
+  ctx bf599f5f161087b890e1e24434a03209fee286b865173af6b578da3133b6ef19  local_operator/i18n/catalogues/en/tui.usage.context.json
+
+=== tui.hub_links — 56 en / 56 es / 55 context ===
+PASS A1 key parity — 56 keys, identical set
+PASS A2 ICU arguments — every key keeps its argument names and types
+PASS A3 CLDR coverage — 0 plural message(s): one/many/other, no few/zero, no empty branch
+PASS A4 per-branch rendering — 0 plural(s) render one/other/many with their arguments
+PASS A5 code spans — every backticked literal is byte-identical to en
+PASS A6 literal tokens — 3 literal(s) intact
+PASS A7 typography — spacing, NBSP, dashes, ellipsis and quote marks preserved
+PASS B1 hint.failed maxCells — worst 46 ≤ 48 (reason unsupported-precondition)
+FAIL C1 HL-1 revision_moved — current 'Este vínculo cambió mientras lo revisabas. Vuelve a abrir el diálogo y confirma la versión más reciente.': says `diálogo`, a surface that exists nowhere in the es catalogue; names no witnessed re-arm target (expected one of ('prompt', 'confirmación'))
+PASS C2 HL-2 baseline_unknown — the ambiguous pronoun is named
+PASS C3 HL-4 action.pull — infinitive + kept-English `pull`, per the es guide amendment
+
+=== tui.app — 46 en / 46 es / 46 context ===
+PASS A0 name_width — 20 cells, longest ['/credential, /cred', '/settings, /config']
+PASS A1 key parity — 46 keys, identical set
+PASS A2 ICU arguments — every key keeps its argument names and types
+PASS A3 CLDR coverage — 6 plural message(s): one/many/other, no few/zero, no empty branch
+PASS A4 per-branch rendering — 6 plural(s) render one/other/many with their arguments
+PASS A5 code spans — every backticked literal is byte-identical to en
+PASS A6 literal tokens — 17 literal(s) intact
+PASS A7 typography — spacing, NBSP, dashes, ellipsis and quote marks preserved
+PASS B2 /help 74-cell rows — 74 ceiling at 80 cols; composed: paste_note 68, skill_note 73, cmd_paste_note 72, copy_note 65, copy_note_more 74, model_saved_note 64
+PASS B3 stop_all qualifier — 57 ≤ 70 cells at a two-digit count
+PASS C4 APP-1 toggle agreement — `{label} activada`/`desactivada` agree with both labels ([('búsqueda web', 'f'), ('consulta web', 'f')])
+PASS C5 APP-2 settled heading — `objetivos finalizados`, matching tui.small's `finalizados`
+PASS C6 APP-3/5 help copy — three rows carry the asked-for wording, indicative mood
+PASS C7 APP-4 count neutrality — impersonal form; one and many both parse
+
+=== tui.usage — 21 en / 21 es / 21 context ===
+PASS A1 key parity — 21 keys, identical set
+PASS A2 ICU arguments — every key keeps its argument names and types
+PASS A3 CLDR coverage — 2 plural message(s): one/many/other, no few/zero, no empty branch
+PASS A4 per-branch rendering — 2 plural(s) render one/other/many with their arguments
+PASS A5 code spans — every backticked literal is byte-identical to en
+PASS A6 literal tokens — 2 literal(s) intact
+PASS A7 typography — spacing, NBSP, dashes, ellipsis and quote marks preserved
+PASS B4 usage title row — counters 27 ≤ 31 floor; composed es 42 ≤ en 45
+EXC  B5 paid annotation width — tui.usage.paid.family_caps: 55 cells clips at 40 cols (body 31) where en 31 fits (accepted width exception)
+EXC  B5 paid annotation width — tui.usage.paid.family_caps: 55 cells clips at 60 cols (body 51) where en 31 fits (accepted width exception)
+EXC  B5 paid annotation width — tui.usage.paid.eligibility_unknown: 37 cells clips at 40 cols (body 31) where en 27 fits (accepted width exception)
+FAIL B5 paid annotation width — tui.usage.paid.continue: 54 cells clips at 60 cols (body 51) where en 44 fits
+PASS C8 US-1 paid.continue — aligned to relay.shell; still states that access continues
+FAIL C9 US-2/3 count neutrality — tui.usage.sign_in_expired: `{value} caducadas` reads `1 caducadas` at a count of one (agreement error); the three counters mix shapes ({'tui.usage.exhausted': 'label', 'tui.usage.stale': 'label', 'tui.usage.sign_in_expired': 'count-first'}); the title row reads '2 caducadas  · obsoletas: 1'
+
+=== D — negative controls (a check that cannot fail proves nothing) ===
+CTRL ok   [A1] drop a key → fail (expected fail)
+CTRL ok   [A2] rename {value} to {amount} → fail (expected fail)
+CTRL ok   [A3] drop the `many` branch → fail (expected fail)
+CTRL ok   [A3] add an illegal `few` branch → fail (expected fail)
+CTRL ok   [A5] shorten a backticked command → fail (expected fail)
+CTRL ok   [B2] pad a /help row to 75 → fail (expected fail)
+CTRL ok   [C1] restore w6a1's `el aviso` → fail (expected fail)
+CTRL ok   [C9] restore `{value} agotadas` → fail (expected fail)
+CTRL ok   [B5] lengthen an accepted paid note past the 60-col body → fail (expected fail)
+CTRL ok   [C8] claim that billing stops on exhaustion → fail (expected fail)
+CTRL ok   [B2] legitimate rewording of an unchanged row (intended pass) → pass (expected pass)
+controls: 11/11 behaved as required
+
+=== summary ===
+tui.hub_links: 1 failing check(s)
+  - C1 HL-1 revision_moved: current 'Este vínculo cambió mientras lo revisabas. Vuelve a abrir el diálogo y confirma la versión más reciente.': says `diálogo`, a surface that exists nowhere in the es catalogue; names no witnessed re-arm target (expected one of ('prompt', 'confirmación'))
+tui.app: 0 failing check(s)
+tui.usage: 2 failing check(s)
+  - B5 paid annotation width: tui.usage.paid.continue: 54 cells clips at 60 cols (body 51) where en 44 fits
+  - C9 US-2/3 count neutrality: tui.usage.sign_in_expired: `{value} caducadas` reads `1 caducadas` at a count of one (agreement error); the three counters mix shapes ({'tui.usage.exhausted': 'label', 'tui.usage.stale': 'label', 'tui.usage.sign_in_expired': 'count-first'}); the title row reads '2 caducadas  · obsoletas: 1'
+total failing checks: 3
+
+=== 4. supplementary measurements, captured ======================================
+# /help rows: composed = name_width (registry-derived 20) + description
+tui.app.help.paste_note            en  51+20= 71   es  48+20= 68
+tui.app.help.skill_note            en  42+20= 62   es  53+20= 73
+tui.app.help.cmd_paste_note        en  54+20= 74   es  52+20= 72
+tui.app.help.copy_note             en  44+20= 64   es  45+20= 65
+tui.app.help.copy_note_more        en  51+20= 71   es  54+20= 74
+tui.app.help.model_saved_note      en  39+20= 59   es  44+20= 64
+
+# /stop all qualifier at a two-digit count (parenthesised row)
+57 '(12 ya saliendo — se volvió a pedir y no se insistió más)'
+
+# usage mixed-state title row (expired=2, stale=1, age "2m ago")
+en: counters=28 '2 sign-in expired  · 1 stale'
+    full=45 'Usage  2m ago  · 2 sign-in expired  · 1 stale'
+es: counters=27 '2 caducadas  · obsoletas: 1'
+    full=42 'Uso  2m ago  · 2 caducadas  · obsoletas: 1'
+
+# the same row at one expired window (the agreement state)
+   current     : '1 caducadas'
+   proposed    : 'caducadas: 1'
+   proposed row: 'caducadas: 2  ·  obsoletas: 1' 29 cells; floor body = 31
+
+# paid annotations: composed = TIER_INDENT 2 + note; body(columns)=columns-9 for columns>=36
+  terminal 40: panel 36, body 31
+  terminal 60: panel 56, body 51
+  terminal 80: panel 76, body 71
+tui.usage.paid.continue              en  44  es  54
+tui.usage.paid.family_caps           en  31  es  55
+tui.usage.paid.eligibility_unknown   en  27  es  37
+tui.usage.paid.unlimited             en  26  es  30
+tui.usage.paid.blocked               en  19  es  21
+  truncation of paid.continue at a 51-cell body: 'Asignación incluida agotada; continuará con crédit…' 51
+
+# footer tally (UsageStats.describe joins parts with " · ")
+67 '5 ventanas · agotadas: 1 · 1 cerca del límite · 2 saldos informados'
+66 '5 ventanas · 1 agotadas · 1 cerca del límite · 2 saldos informados'
+
+# terminal widths at which each paid note stops clipping
+tui.usage.paid.continue: composes 54; needs a 63-column terminal
+tui.usage.paid.family_caps: composes 55; needs a 64-column terminal
+relay.shell.usage.continue: 'Asignación incluida agotada; continuará con créditos.'
+
+=== 5. es catalogue term counts (the terms this round turns on) ==================
+diálogo occurrence: local_operator/i18n/catalogues/es/tui.hub_links.json tui.hub_links.refusal.revision_moved
+diálogo occurrences across 95 es catalogue files: 1
+prompt occurrences: 38 in 36 values
+
+=== 6. scope of this log =========================================================
+Not run here, and therefore not claimed: the repo's pytest suites, the catalogue generators, and
+any rendered TUI frame. Widths are computed with rich.cells.cell_len against the ceilings the
+source documents, not photographed. No ledger, catalogue, sidecar or allowance was written.

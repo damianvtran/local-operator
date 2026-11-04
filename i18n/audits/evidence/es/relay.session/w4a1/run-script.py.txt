@@ -1,0 +1,149 @@
+"""es W4 / w4a1 — namespace audit run: prints the evidence the bundle logs.
+
+Usage: python3 w4a1_run.py <namespace>
+Read-only on the repository. Writes nothing itself; the caller tees stdout into
+the bundle's audit.log, so the log is produced by execution, not transcribed.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import platform
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+REPO = Path("/Users/damian/lo-i18n-es")
+sys.path.insert(0, str(REPO))
+from local_operator.i18n import format as fmt  # noqa: E402
+from local_operator.i18n import runtime as rt  # noqa: E402
+
+CAT = REPO / "local_operator/i18n/catalogues"
+COUNTS = [0, 1, 2, 21, 1_000_000, 1_500_000]
+NS = sys.argv[1]
+assert NS in {"relay.shell", "relay.session"}, NS
+
+
+def sh(*args: str) -> str:
+    return subprocess.run(args, cwd=REPO, capture_output=True, text=True).stdout.strip()
+
+
+def sha(p: Path) -> str:
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def walk_sig(src: str):
+    nodes = rt.parse_message(src)
+    out = []
+    stack = [nodes]
+    while stack:
+        for node in stack.pop():
+            if type(node).__name__ == "_Arg":
+                entry = [node.name, node.kind, node.skeleton]
+                if node.kind in ("plural", "select"):
+                    entry.append([n for n, _ in node.parts])
+                out.append(tuple(entry))
+                for _, sub in node.parts:
+                    stack.append(sub)
+    return out
+
+
+def main() -> None:
+    en = json.loads((CAT / "en" / f"{NS}.json").read_text())
+    es = json.loads((CAT / "es" / f"{NS}.json").read_text())
+    print(f"# w4a1 audit run — {NS}")
+    print(f"run_at_utc: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}")
+    print(f"host: {platform.node()} / {platform.platform()}")
+    print(f"python: {sys.version.split()[0]}")
+    print(f"repo: {REPO}   branch: {sh('git','rev-parse','--abbrev-ref','HEAD')}")
+    print(f"HEAD: {sh('git','rev-parse','HEAD')}")
+    print("tracked_state (target):")
+    print("  " + (sh("git", "status", "--porcelain", "--",
+                    *[f"local_operator/i18n/catalogues/es/{NS}.json"]) or "clean"))
+    print("tracked_state (en + sidecar):")
+    print("  " + (sh("git", "status", "--porcelain", "--",
+                    f"local_operator/i18n/catalogues/en/{NS}.json",
+                    f"local_operator/i18n/catalogues/en/{NS}.context.json") or "clean"))
+    print("\n## input hashes (sha256)")
+    for label, p in (("en", CAT / "en" / f"{NS}.json"),
+                     ("en.context", CAT / "en" / f"{NS}.context.json"),
+                     ("es", CAT / "es" / f"{NS}.json")):
+        print(f"  {label:11} {sha(p)}  {p.relative_to(REPO)}")
+    print(f"\n## key parity: en={len(en)} es={len(es)} "
+          f"missing={sorted(set(en)-set(es))} extra={sorted(set(es)-set(en))}")
+
+    print("\n## ICU signature diff (en -> es)")
+    diffs = 0
+    for key in en:
+        a, b = walk_sig(en[key]), walk_sig(es[key])
+        if a != b:
+            diffs += 1
+            print(f"  {key}\n    en: {a}\n    es: {b}")
+    print(f"  signature_diffs={diffs}")
+
+    print("\n## plural categories selectable in es:",
+          list(fmt.plural_categories("es")))
+    cats_used = set()
+    for key, value in es.items():
+        for entry in walk_sig(value):
+            if entry[1] == "plural":
+                cats_used |= set(entry[3])
+    print("  categories_used_by_target:", sorted(cats_used))
+    print("  illegal_for_es:", sorted(cats_used - set(fmt.plural_categories("es"))))
+
+    print("\n## rendered values")
+    for key, value in es.items():
+        params: dict = {}
+        if "{count" in value:
+            continue
+        if "{value" in value:
+            continue
+        if key.endswith(("usage.row", "usage.row_family")):
+            continue
+        print(f"  {key} = {rt.render_message(value, {}, 'es')!r}")
+
+    if NS == "relay.shell":
+        print("\n## plural branches rendered (unit labels, count -> text)")
+        for key in ("relay.shell.usage.unit_credits", "relay.shell.usage.unit_tokens",
+                    "relay.shell.usage.unit_requests"):
+            row = {c: rt.render_message(es[key], {"count": c}, "es") for c in COUNTS}
+            print(f"  {key}: {row}")
+        print("\n## composed rows, exactly usage-sheet.tsx's path")
+        for unit_kind in ("credits", "tokens", "requests", "usd", "percent", "unknown"):
+            for remaining in (True, False):
+                for c in COUNTS:
+                    unit = None
+                    if unit_kind in ("credits", "tokens", "requests"):
+                        unit = rt.render_message(es[f"relay.shell.usage.unit_{unit_kind}"],
+                                                 {"count": c}, "es")
+                    elif unit_kind == "usd":
+                        unit = rt.render_message(es["relay.shell.usage.unit_usd"], {}, "es")
+                    if unit_kind == "percent":
+                        value = rt.render_message(
+                            es["relay.shell.usage.remaining_percent" if remaining
+                               else "relay.shell.usage.used_percent"], {"value": c / 100}, "es")
+                    elif unit is not None:
+                        value = rt.render_message(
+                            es["relay.shell.usage.remaining" if remaining
+                               else "relay.shell.usage.used"], {"value": c, "unit": unit}, "es")
+                    else:
+                        value = rt.render_message(
+                            es["relay.shell.usage.remaining_unknown_unit" if remaining
+                               else "relay.shell.usage.used_unknown_unit"], {"value": c}, "es")
+                    print(f"  {unit_kind:8} {'remaining' if remaining else 'used':9} {c:>9} -> {value}")
+        print("\n## timestamp keys")
+        when = datetime(2026, 10, 11, 9, 0)
+        print("  reset =", rt.render_message(es["relay.shell.usage.reset"], {"value": when}, "es"))
+        print("  as_of =", rt.render_message(es["relay.shell.usage.as_of"], {"value": when}, "es"))
+        print("  fraction =", rt.render_message(es["relay.shell.usage.fraction"], {"value": 0.29}, "es"))
+        print("  row =", rt.render_message(
+            es["relay.shell.usage.row"],
+            {"label": "L", "window": "W", "value": "V"}, "es"))
+        print("  row_family =", rt.render_message(
+            es["relay.shell.usage.row_family"],
+            {"label": "L", "family": "fam", "window": "W", "value": "V"}, "es"))
+
+
+if __name__ == "__main__":
+    main()

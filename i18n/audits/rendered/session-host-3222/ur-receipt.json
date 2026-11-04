@@ -1,0 +1,10 @@
+{
+  "locale": "ur",
+  "forced_english_fallback": false,
+  "error": "پس منظر میں چلنے والے سیشن ہوسٹ نے یہ سیشن شروع کرنے سے انکار کر دیا۔ سیشن شروع نہیں ہوا۔ دوبارہ کوشش کرنے سے پہلے اپنے Local Operator کنفیگریشن فولڈر میں logs/session-host.log دیکھیں۔",
+  "css_path": "local_operator.tcss",
+  "screen_size": [
+    100,
+    32
+  ]
+}

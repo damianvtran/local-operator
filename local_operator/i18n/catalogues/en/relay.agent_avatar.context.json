@@ -1,0 +1,20 @@
+{
+  "relay.agent_avatar.alt": {
+    "role": "phone relay agent picture",
+    "tone": "plain",
+    "maxCells": 48,
+    "note": "Accessible name (alt text) of an agent's round profile picture on the phone (chat header, session list). {name} is the agent's display name. Short noun phrase, no period."
+  },
+  "relay.agent_avatar.change": {
+    "role": "phone relay agent picture",
+    "tone": "plain",
+    "maxCells": 48,
+    "note": "Accessible label of the control on the agent's picture in the phone chat header; activating it explains where the picture can be changed. {name} is the agent's display name. Imperative, no period. Same meaning as the desktop app's pencil overlay label."
+  },
+  "relay.agent_avatar.desktop_hint": {
+    "role": "phone relay agent picture",
+    "tone": "plain",
+    "maxCells": 48,
+    "note": "Transient snackbar shown on the phone when the person taps or long-presses an agent's picture in the chat header: the phone app has no picture editor, the desktop app's Agents page does. No period (snackbar line). 'desktop app' = the Local Operator desktop application."
+  }
+}

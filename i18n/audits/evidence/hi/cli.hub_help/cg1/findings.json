@@ -1,0 +1,27 @@
+{
+  "locale": "hi",
+  "namespace": "cli.hub_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "HI-025",
+      "severity": "NIT",
+      "namespace": "cli.hub_help",
+      "key": "cli.hub_help.link_set_expected_revision",
+      "english": "The policy revision you last saw (CAS); omitted reads it fresh first",
+      "current": "आपकी अंतिम देखी नीति संशोधन (CAS); छोड़ने पर पहले उसे नया पढ़ा जाता है",
+      "problem": "Gender agreement: संशोधन is masculine; \"आपकी अंतिम देखी नीति संशोधन\" reads ungrammatical.",
+      "suggested": "\"वह नीति संशोधन जो आपने आख़िरी बार देखा (CAS); छोड़ने पर पहले नया पढ़ा जाता है\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    }
+  ]
+}

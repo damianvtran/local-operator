@@ -72,10 +72,12 @@ from local_operator.evaluation.adapters.supervisor import (
 from local_operator.evaluation.evidence.models import (
     ActionBatchPayload,
     AgentStopPayload,
+    AuxiliaryUsageCostPayload,
     BudgetCommitmentPayload,
     CancelPayload,
     CleanupPayload,
     ContextCompactionPayload,
+    CostCoveragePayload,
     EnvironmentStepPayload,
     ErrorPayload,
     EvidenceManifest,
@@ -124,7 +126,12 @@ from local_operator.evaluation.receipts import (
     commit_budget,
     reconcile_budget,
 )
-from local_operator.evaluation.runner.completion import CompletionGate, finish_claim
+from local_operator.evaluation.runner.completion import (
+    CHALLENGE_DIAGNOSTIC_CODES,
+    ChallengeKind,
+    CompletionGate,
+    finish_claim,
+)
 from local_operator.evaluation.runner.guards import (
     RECENT_TURNS_WINDOW,
     EpisodeGuard,
@@ -138,6 +145,7 @@ from local_operator.evaluation.runner.secrets import (
     SecretResolver,
     StaticSecretResolver,
 )
+from local_operator.evaluation.runner.step_budget import enforced_position
 
 # Cleanup kinds are a closed vocabulary in ``lifecycle.CleanupAction``. A worker
 # session is the one resource the parent always knows exists before the adapter
@@ -340,8 +348,15 @@ class EpisodeConfig:
     declaration is always accepted and the gate can never drive an episode to a
     model failure. Turning the gate off is a campaign's control arm rather than
     an operator preference -- it changes what the model is asked, so a run has
-    to record which arm produced it -- and a non-``done`` finish is never
-    challenged, because there is no completion in it to confirm.
+    to record which arm produced it -- and a non-``done`` finish is not
+    challenged by it, because there is no completion in it to confirm.
+
+    ``premature_terminal_gate`` is the second, separate rule: a ``failed`` or
+    ``infeasible`` finish declared before ANY batch has executed is challenged
+    once (fixed budget of one, independent of ``completion_challenges``) with a
+    neutral re-ask, and the re-declared finish is accepted unchanged. ON by
+    default for the same reason -- the second declaration always ends the
+    episode, so the worst case is one extra cycle -- and off is a control arm.
 
     They are ON by default rather than opt-in because the path is unreachable
     unless an adapter explicitly raises ``ObservationPhaseError``: an adapter
@@ -418,6 +433,7 @@ class EpisodeConfig:
     execution_overhead_seconds_per_action: float = 0.0
     completion_gate: bool = True
     completion_challenges: int = 1
+    premature_terminal_gate: bool = True
 
     def __post_init__(self) -> None:
         rate = self.execution_overhead_seconds_per_action
@@ -532,6 +548,16 @@ def _rejection_streak_ceiling(config: EpisodeConfig) -> int:
     if config.max_decision_retries <= 0 or config.max_rejection_streak <= 0:
         return 1
     return max(config.max_decision_retries + 2, config.max_rejection_streak)
+
+
+class _DispatchBudgetStop(Exception):
+    """Stop between paid calls without claiming a provider or model failure."""
+
+    def __init__(self, observation_id: str, reason: str) -> None:
+        super().__init__(reason)
+        self.observation_id = observation_id
+        self.reason = reason
+        self.attempts = 0
 
 
 class _Cancelled(Exception):
@@ -694,6 +720,7 @@ class EpisodeRunner:
             client=model,
             enabled=config.completion_gate,
             challenges=config.completion_challenges,
+            premature=config.premature_terminal_gate,
         )
         self._responder = responder if responder is not None else NullUserResponder()
         self._responder_override = responder is not None
@@ -719,6 +746,7 @@ class EpisodeRunner:
         self._rescue_launches = 0
 
         self._writer: EvidenceWriter | None = None
+        self._cancel_evidence_failure: _EvidenceFailure | None = None
         # Whether ``begin_finalization`` has RETURNED. It decides which
         # abandonment reason is legal for a failure outside the handled paths:
         # a scored intent that already committed ``finalization_start`` can
@@ -744,6 +772,21 @@ class EpisodeRunner:
         self._last_request_id: str | None = None
         self._usage_totals: dict[str, int] = {}
         self._provider_cost_micros = 0
+        self._provider_cost_known = True
+        from local_operator.evaluation.receipts import CappedAllowance
+        from local_operator.evaluation.runner.dispatch_account import DispatchAccount
+
+        cap = next(
+            (
+                a.value
+                for a in spec.budget.allowances
+                if isinstance(a, CappedAllowance) and a.resource == "provider_usd_micros"
+            ),
+            None,
+        )
+        self._dispatch_account = DispatchAccount(
+            max_cost_micros=cap, max_cycle_cost_micros=config.max_cycle_cost_micros
+        )
         self._model_cycles = 0
         self._guest_actions = 0
         self._simulator_turns = 0
@@ -752,6 +795,13 @@ class EpisodeRunner:
         # the pinned one is not comparable against runs that kept it.
         self._served_routes: set[tuple[str, str, str]] = set()
         self._steps_taken = 0
+        # The terminal claim a gate refused as-a-claim and asked the model to
+        # re-check (last one wins: at most one challenge per rule can fire, and
+        # the model may answer a premature challenge with a ``done`` claim that
+        # the other rule then challenges). Consulted by the stop handlers when
+        # the re-decide never produces an accepted batch -- see
+        # ``_settle_on_challenged_claim``.
+        self._challenged_finish: ActionBatch | None = None
         self._truncated = False
         self._last_step_terminated = False
         self._finalization_id = f"final-{spec.episode_id}"
@@ -955,6 +1005,28 @@ class EpisodeRunner:
             return await self._execute(handshake)
         except _EvidenceFailure as error:
             return await self._abandon_for_evidence(str(error), error)
+        except asyncio.CancelledError as cancel:
+            # Preserve cancellation as the outward result even when evidence
+            # failed. The writer is still open here; abandonment is synchronous
+            # so a canceled task cannot lose it at another suspension point.
+            if self._cancel_evidence_failure is not None:
+                self._discard_orphaned_artifacts(writer)
+                reason = (
+                    "ambiguous_finalization"
+                    if self._finalization_begun
+                    else "infrastructure_failure"
+                )
+                try:
+                    writer.abandon(reason, "evidence-write-failed")
+                except (EvidenceError, OSError):
+                    cancel.add_note("Evidence abandonment failed; the bundle remains unsealed.")
+                raise cancel from self._cancel_evidence_failure
+            if not self._finalization_begun:
+                # Cancellation can escape from a replaced _execute or another
+                # pre-finalization boundary. Preserve the existing synchronous
+                # abandonment terminal rather than leaving the journal open.
+                await self._abandon_after_unexpected_failure(cancel)
+            raise
         except BaseException as error:
             # EVERY remaining escape. The handled paths above are inside
             # ``_execute``, so an exception that reaches here was raised BY one
@@ -1016,13 +1088,25 @@ class EpisodeRunner:
         try:
             await self._reset_and_observe()
             await self._step_loop()
+        except _DispatchBudgetStop as stop:
+            self._truncated = True
+            self._truncation_reason = stop.reason
+            return await self._finalize_agent_stop(
+                handshake,
+                reason="budget_exhausted",
+                observation_id=stop.observation_id,
+                attempts=stop.attempts,
+                detail=stop.reason,
+                failure_kind=None,
+            )
         except _AskUnanswered as stop:
             # An unanswered ask after environment work is an agent stop, not a
             # cancellation: the steps already bought are gradable state, and
             # voiding them because no human answered would throw away paid
             # work exactly like the decision-exhaustion case below. Before any
             # step there is nothing to grade, so the pre-existing cancellation
-            # path stands (nothing was paid for except model calls).
+            # path stands (nothing was paid for except model calls) -- UNLESS a
+            # terminal claim is already waiting on its re-check (below).
             if self._steps_taken > 0:
                 return await self._finalize_agent_stop(
                     handshake,
@@ -1032,6 +1116,8 @@ class EpisodeRunner:
                     detail=f"ask-user was not answered (ask {stop.ask_id})",
                     failure_kind=None,
                 )
+            if self._settle_on_challenged_claim():
+                return await self._finalize_scored(handshake)
             return await self._finalize_cancelled(str(stop) or "cancelled")
         except _Cancelled as cancel:
             return await self._finalize_cancelled(str(cancel) or "cancelled")
@@ -1041,7 +1127,12 @@ class EpisodeRunner:
             # episode scores like a truncation instead of sealing unscored and
             # voiding every step it already paid for. At zero steps there is
             # no environment work to grade, so the unscored model-failure
-            # path is the honest outcome.
+            # path is the honest outcome -- UNLESS a gate is waiting on the
+            # model's re-check of a terminal claim it already made
+            # (``_settle_on_challenged_claim``): that claim is the episode's
+            # declaration, and sealing unscored here would drop an episode out
+            # of the scored set for the treatment arm only, biasing an A/B
+            # denominator.
             if self._steps_taken > 0:
                 return await self._finalize_agent_stop(
                     handshake,
@@ -1051,8 +1142,17 @@ class EpisodeRunner:
                     detail=_diagnostic(failure, self._redactions),
                     failure_kind="model",
                 )
+            if self._settle_on_challenged_claim():
+                return await self._finalize_scored(handshake)
             return await self._finalize_failure(failure)
         except _EvidenceFailure:
+            raise
+        except asyncio.CancelledError:
+            if self._cancel_evidence_failure is None:
+                try:
+                    await self._finalize_cancelled("cancelled")
+                except _EvidenceFailure as error:
+                    self._cancel_evidence_failure = error
             raise
         except EvidenceError as error:
             # A writer error is never an episode failure: the journal itself is
@@ -1135,6 +1235,14 @@ class EpisodeRunner:
                 self._truncated = True
                 self._truncation_reason = self._truncation_reason or "max-steps"
                 return
+            # The model is shown its position on the SAME counter the check
+            # above enforces, read here -- immediately before the decision --
+            # so a cap changed mid-run is stated as the value now in force.
+            # The builder renders each turn once, so a re-decide of this turn
+            # (a rejection, a challenge) cannot restate a different number.
+            self._turns[-1] = self._turns[-1].model_copy(
+                update={"step_budget": enforced_position(self._steps_taken, self._config.max_steps)}
+            )
             decision = await self._decide(current)
             batch = decision.action_batch
             # The tolerated sibling fields ride the turn, and the update always
@@ -1156,13 +1264,17 @@ class EpisodeRunner:
             self._turns[-1] = self._turns[-1].model_copy(update=turn_update)
             terminal = _terminal_kind(batch)
             if terminal == "finish":
-                # A ``done`` declaration is refused-as-a-claim ONCE (see
-                # ``runner.completion``). The second one is always accepted, so
-                # the branch below is reached for the answer that ends the
-                # episode -- the identical first claim, or an action that
-                # closes the gap the model found when it looked again.
-                if self._completion_gate.should_challenge(finish_claim(batch)):
-                    await self._challenge_completion(batch)
+                # A ``done`` declaration -- or a ``failed``/``infeasible`` one
+                # made before ANY batch executed -- is refused-as-a-claim ONCE
+                # (see ``runner.completion``). The second one is always
+                # accepted, so the branch below is reached for the answer that
+                # ends the episode -- the identical first claim, or an action
+                # the model chose when asked again.
+                kind = self._completion_gate.should_challenge(
+                    finish_claim(batch), executed_steps=self._steps_taken
+                )
+                if kind is not None:
+                    await self._challenge_completion(batch, kind)
                     continue
                 self._append_batch(batch, terminal="finish")
                 return
@@ -1173,7 +1285,7 @@ class EpisodeRunner:
             if self._last_step_terminated:
                 return
 
-    async def _challenge_completion(self, batch: ActionBatch) -> None:
+    async def _challenge_completion(self, batch: ActionBatch, kind: ChallengeKind) -> None:
         """Refuse this turn's end, and ask the model to check its own claim.
 
         NOTHING MOVES. The observation is unchanged and the turn does not close,
@@ -1187,10 +1299,50 @@ class EpisodeRunner:
         Evidence first, re-prompt second: the challenge is a conversation turn
         the model was shown, so a bundle sealed by a failure during the next
         call still says what was asked of it.
+
+        The claim is armed for settlement HERE, after the client has accepted
+        the turn and the challenge is durable: from this point the episode has a
+        declaration outstanding, and if the re-decide never yields an accepted
+        batch the claim is what the episode ends on (see
+        ``_settle_on_challenged_claim``). Arming before the client answered
+        would settle on a claim the model was never asked about.
         """
 
-        text = await self._completion_gate.challenge(batch, self._turns)
-        self._append_model_error("completion-challenged", text)
+        text = await self._completion_gate.challenge(batch, self._turns, kind)
+        self._append_model_error(CHALLENGE_DIAGNOSTIC_CODES[kind], text)
+        self._challenged_finish = batch
+
+    def _settle_on_challenged_claim(self) -> bool:
+        """Seal the challenged claim as this episode's terminal, if one is open.
+
+        WHY THIS EXISTS. A gate refuses a terminal claim as-a-claim, so the
+        episode does not end on it. Every path back to a decision can also END
+        instead -- the corrective-retry ceiling, the empty-truncation retreats,
+        an ask nobody answers -- and at zero executed steps those handlers had
+        nothing to grade, so they sealed the episode UNSCORED (``model_failure``
+        or a cancellation). With the gate off the same model ends scored on the
+        very declaration the gate refused, so the gate alone could move an
+        episode out of the scored set: the treatment arm would carry a smaller
+        denominator in an A/B campaign, which is a bias, not a cosmetic
+        difference.
+
+        So the claim stands as the declaration: it is appended as the terminal
+        ``action_batch`` -- nothing has moved since it was made, which is
+        exactly why the observation it names is still the current one, and why
+        a bundle sealed here still ends once -- and the episode is scored on it
+        like the accepted second declaration would have been. Both rules are
+        covered, because both refuse a claim without ending the episode.
+
+        Zero executed steps is the only case this may decide: once a step has
+        landed the existing handlers already grade the state reached, and a
+        claim made before that step is not what the environment ended on.
+        """
+
+        claim = self._challenged_finish
+        if claim is None or self._steps_taken > 0:
+            return False
+        self._append_batch(claim, terminal="finish")
+        return True
 
     async def _decide(self, observation: Observation) -> Any:
         """Ask the model until it returns a usable batch, within the retry bounds.
@@ -1250,6 +1402,10 @@ class EpisodeRunner:
         while True:
             try:
                 return await self._decide_once(observation)
+            except _DispatchBudgetStop as stop:
+                # A blocked dispatch is not itself a decision attempt.
+                stop.attempts = attempts
+                raise
             except _DecisionRejection as rejection:
                 attempts += 1
                 if empty_truncations < MAX_EMPTY_TRUNCATION_RETRIES and self._retreat(rejection):
@@ -1313,6 +1469,62 @@ class EpisodeRunner:
             return False
         return lower() is not None
 
+    def _record_blocked_auxiliary(self, account: Any) -> None:
+        """Seal real summary work without inventing a decision request or reply."""
+        while account.completed_auxiliary:
+            charge = account.completed_auxiliary[0]
+            usage = charge.usage
+            self._append(
+                "auxiliary_usage_cost",
+                AuxiliaryUsageCostPayload(
+                    auxiliary_id=f"aux-{uuid.uuid4().hex[:12]}",
+                    purpose=charge.purpose,
+                    previous_request_id=self._last_request_id,
+                    route=self._spec.requested_route,
+                    provider_request_id=charge.provider_request_id,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    reasoning_tokens=usage.reasoning_tokens,
+                    cache_read_tokens=usage.cache_read_tokens,
+                    cache_write_tokens=usage.cache_write_tokens,
+                    cost_microusd=charge.cost_micros,
+                    cost_known=charge.cost_known,
+                ),
+            )
+            self._provider_cost_micros += charge.cost_micros
+            self._provider_cost_known = self._provider_cost_known and charge.cost_known
+            for name in (
+                "input_tokens",
+                "output_tokens",
+                "reasoning_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+            ):
+                self._usage_totals[name] = self._usage_totals.get(name, 0) + getattr(usage, name)
+            # Only acknowledge after the evidence append succeeded.
+            account.completed_auxiliary.pop(0)
+        record = account.compaction
+        if record is not None:
+            artifact = (
+                self._publish(record.summary_text.encode("utf-8"), media_type="text/plain")
+                if record.summary_text
+                else None
+            )
+            self._append(
+                "context_compaction",
+                ContextCompactionPayload(
+                    compaction_id=f"compaction-{self._model_cycles}-{uuid.uuid4().hex[:12]}",
+                    previous_request_id=self._last_request_id,
+                    strategy=record.strategy,
+                    tokens_before=record.tokens_before,
+                    tokens_after=record.tokens_after,
+                    frames_dropped=record.frames_dropped,
+                    messages_before=record.messages_before,
+                    messages_after=record.messages_after,
+                    summary_artifact=artifact,
+                ),
+            )
+
     async def _decide_once(self, observation: Observation) -> Any:
         """One model call, writing request/response/usage in that exact order.
 
@@ -1334,12 +1546,32 @@ class EpisodeRunner:
         # by a provider failure, and the verifier requires every request to
         # carry its response and usage before any terminal (verify.py:760) --
         # so recording it eagerly would make the failure path unsealable.
+        from contextlib import nullcontext
+
+        from local_operator.evaluation.runner.dispatch_account import DispatchBlocked
+
+        account = self._dispatch_account
+        account.start_cycle()
+        binder = getattr(self._model, "bind_dispatch_account", None)
+        binding = binder(account) if binder is not None else nullcontext()
         rejected: DecisionRejected | None = None
         aborted: BaseException | None = None
         try:
-            decision = await self._model.decide(
-                observation, tuple(self._turns), action_surface=self._action_surface
-            )
+            with binding:
+                decision = await self._model.decide(
+                    observation, tuple(self._turns), action_surface=self._action_surface
+                )
+        except DispatchBlocked as error:
+            self._record_blocked_auxiliary(account)
+            raise _DispatchBudgetStop(observation.observation_id, str(error)) from error
+        except asyncio.CancelledError:
+            try:
+                self._record_blocked_auxiliary(account)
+            except _EvidenceFailure as error:
+                # Keep the snapshot unacknowledged and cancellation primary;
+                # the outer writer boundary records truthful abandonment.
+                self._cancel_evidence_failure = error
+            raise
         except _EvidenceFailure:
             raise
         except DecisionRejected as error:
@@ -1354,6 +1586,13 @@ class EpisodeRunner:
                 ContextUnrecoverableError,
                 ProviderStreamAbortedError,
             )
+
+            # When a later compaction or context operation fails, the already
+            # paid summary has no decision receipt to carry it. The aborted
+            # stream path below DOES carry its folded summary, so recording it
+            # separately there would double count the same call.
+            if account.completed_auxiliary and not isinstance(error, ProviderStreamAbortedError):
+                self._record_blocked_auxiliary(account)
 
             # The client could not fit the context into the window even after
             # pruning, summarising, and shedding stale observations. That is
@@ -1525,6 +1764,15 @@ class EpisodeRunner:
                 cost_microusd=decision.cost_micros,
             ),
         )
+        # A companion record preserves old usage event hashes and distinguishes
+        # a known subtotal from a provider call that could not be priced.
+        self._append(
+            "cost_coverage",
+            CostCoveragePayload(request_id=request_id, cost_known=decision.cost_known),
+        )
+        # Normal decision usage already includes any summary: acknowledge its
+        # pending snapshots only after the usage and coverage events are durable.
+        account.completed_auxiliary.clear()
         self._model_cycles += 1
         self._last_request_id = request_id
         self._recent_costs.append(decision.cost_micros)
@@ -1536,6 +1784,7 @@ class EpisodeRunner:
             )
         )
         self._provider_cost_micros += decision.cost_micros
+        self._provider_cost_known = self._provider_cost_known and decision.cost_known
         for name in (
             "input_tokens",
             "output_tokens",
@@ -1857,6 +2106,7 @@ class EpisodeRunner:
             max_steps=self._config.max_steps,
             model_cycles=self._model_cycles,
             provider_cost_micros=self._provider_cost_micros,
+            provider_cost_known=self._provider_cost_known,
             elapsed_ms=max(0, _now_ms() - self._started_ms),
             usage_totals=dict(self._usage_totals),
             recent_turns=recent,
@@ -1950,7 +2200,7 @@ class EpisodeRunner:
         self,
         handshake: Handshake,
         *,
-        reason: Literal["model_failure", "ask_unanswered"],
+        reason: Literal["model_failure", "ask_unanswered", "budget_exhausted"],
         observation_id: str,
         attempts: int,
         detail: str,
@@ -2317,13 +2567,19 @@ class EpisodeRunner:
         unavailable: set[str] = (
             {"cloud_usd_micros", "instance_milliseconds"} if self._rescue_required else set()
         )
+        if not self._provider_cost_known:
+            unavailable.add("provider_usd_micros")
         usage: list[Usage] = []
         for resource, value in measured.items():
             if resource in unavailable:
                 usage.append(
                     UnavailableUsage(
                         resource=resource,  # pyright: ignore[reportArgumentType]
-                        reason="worker terminated before usage could be measured",
+                        reason=(
+                            "provider cost could not be determined"
+                            if resource == "provider_usd_micros"
+                            else "worker terminated before usage could be measured"
+                        ),
                     )
                 )
             else:

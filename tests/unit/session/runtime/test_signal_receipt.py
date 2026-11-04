@@ -368,3 +368,143 @@ def test_an_unattributed_verdict_without_the_clause_is_unchanged(
     assert verdict is not None
     _cause, detail = verdict
     assert "was no longer running" not in detail
+
+
+# --- the sender arm: what the capture adds, and what it may never say ----------
+
+
+def _captured(**overrides: Any) -> dict[str, Any] | None:
+    facts: dict[str, Any] = {"signo": 15, "pid": 66213, "uid": 501, "code": 0}
+    facts.update(overrides)
+    return facts
+
+
+def test_without_a_capture_the_sender_stays_exactly_as_it_was(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No capture is not a new fact: the persisted shape must be the old one, byte for byte.
+
+    ``sender`` is written into ``runtime-signal.json`` and into every exec ledger
+    arrival row, and readers downstream (the renderer, the attention reader) key
+    off these three fields. "The sensor was not armed on this platform" and "the
+    sensor did not exist when this receipt was written" have to be
+    indistinguishable.
+    """
+    from local_operator import siginfo
+
+    monkeypatch.setattr(siginfo, "take", lambda number: None)
+    assert signal_receipt.sender_facts(15) == {
+        "state": "unavailable",
+        "reason": "no-siginfo",
+        "could_be": "same-uid-or-root",
+    }
+
+
+def test_a_captured_sender_is_named_with_pid_uid_and_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_operator import siginfo
+
+    monkeypatch.setattr(siginfo, "take", lambda number: _captured())
+    assert signal_receipt.sender_facts(15) == {
+        "state": "known",
+        "reason": "siginfo",
+        "pid": 66213,
+        "uid": 501,
+        "code": 0,
+    }
+
+
+def test_a_kernel_delivery_is_not_process_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``si_pid == 0`` means "the kernel sent this", and it is recorded as such.
+
+    The distinction is the whole reason this arm exists: rendering it as ``pid 0``
+    would name the kernel as if it were a process, and folding it into
+    ``no-siginfo`` would throw away the fact that the capture DID happen.
+    """
+    from local_operator import siginfo
+
+    monkeypatch.setattr(siginfo, "take", lambda number: _captured(pid=0, uid=0))
+    assert signal_receipt.sender_facts(15) == {
+        "state": "unavailable",
+        "reason": "kernel-originated",
+    }
+
+
+@pytest.mark.parametrize(
+    "facts",
+    [
+        _captured(pid=-1),  # not a pid
+        _captured(pid=True),  # a bool is not a pid
+        _captured(pid="66213"),  # nor is a string
+        {"signo": 15},  # a capture with no pid at all
+        None,
+    ],
+)
+def test_an_implausible_capture_falls_back_to_unavailable(
+    monkeypatch: pytest.MonkeyPatch, facts: Any
+) -> None:
+    """A wrong pid is worse than no pid, so a capture that cannot be trusted names nobody."""
+    from local_operator import siginfo
+
+    monkeypatch.setattr(siginfo, "take", lambda number: facts)
+    assert signal_receipt.sender_facts(15) == {
+        "state": "unavailable",
+        "reason": "no-siginfo",
+        "could_be": "same-uid-or-root",
+    }
+
+
+def test_the_receipt_on_disk_carries_the_named_sender(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The durable artifact, not just the returned dict: ``runtime-signal.json`` names the pid.
+
+    This is the file a later boot, an incident review or another device reads, so
+    the sender has to reach IT — a capture that only lived in the return value
+    would be gone with the process.
+    """
+    from local_operator import siginfo
+
+    monkeypatch.setattr(siginfo, "take", lambda number: _captured(pid=os.getpid()))
+    receipt = _record(tmp_path)
+    on_disk = registry.read_signal_receipt(tmp_path)
+
+    assert receipt is not None and on_disk is not None
+    expected = {
+        "state": "known",
+        "reason": "siginfo",
+        "pid": os.getpid(),
+        "uid": 501,
+        "code": 0,
+    }
+    assert on_disk["signals"][0]["sender"] == expected
+    assert receipt["signals"][0]["sender"] == expected
+
+
+def _built_receipt() -> dict[str, Any]:
+    """A one-signal receipt built by the production builder (so ``sender_facts`` ran)."""
+    entry = signal_receipt.build_signal(
+        "SIGTERM",
+        15,
+        at=time.time(),
+        in_flight=None,
+        action="stop",
+        marker=None,
+        covered=False,
+    )
+    return {"v": 1, "signals": [entry], "count": 1}
+
+
+def test_the_log_line_names_the_sender_when_there_is_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``describe`` is the one-line log suffix: it names the pid rather than shrugging."""
+    from local_operator import siginfo
+
+    monkeypatch.setattr(siginfo, "take", lambda number: None)
+    assert "sender=unavailable" in signal_receipt.describe(_built_receipt())
+
+    monkeypatch.setattr(siginfo, "take", lambda number: _captured(pid=66213, uid=501))
+    named = signal_receipt.describe(_built_receipt())
+    assert "sender=pid 66213 (uid 501)" in named, named

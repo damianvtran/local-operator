@@ -1,0 +1,23 @@
+{
+  "tui.usage.paid.continue": "Asignación incluida agotada; continuará con créditos",
+  "tui.usage.paid.family_caps": "siguen aplicándose los límites por familia de modelos",
+  "tui.usage.paid.blocked": "Gasto no disponible",
+  "tui.usage.paid.eligibility_unknown": "Elegibilidad para gasto desconocida",
+  "tui.usage.paid.unlimited": "Asignación de pago ilimitada",
+  "tui.usage.windows_count": "{count, plural, one {{shown} ventana} many {{shown} de ventanas} other {{shown} ventanas}}",
+  "tui.usage.exhausted": "agotadas: {value}",
+  "tui.usage.near_limit": "{value} cerca del límite",
+  "tui.usage.reported_balance": "{count, plural, one {{shown} saldo informado} many {{shown} de saldos informados} other {{shown} saldos informados}}",
+  "tui.usage.not_reported": "{value} sin informar",
+  "tui.usage.unavailable": "  ·  uso no disponible",
+  "tui.usage.resets_in": ", se reinicia en {value}",
+  "tui.usage.no_windows": "  sin ventanas informadas",
+  "tui.usage.fetching": "obteniendo…",
+  "tui.usage.title": "Uso",
+  "tui.usage.sign_in_expired": "caducadas: {value}",
+  "tui.usage.stale": "obsoletas: {value}",
+  "tui.usage.refreshing": "actualizando…",
+  "tui.usage.refresh_failed": "error al actualizar — se muestran los últimos datos conocidos",
+  "tui.usage.showing_prefix": "mostrando ",
+  "tui.usage.of_separator": " de "
+}

@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "audit_id": "w3-a2",
+  "audit_round": 1,
+  "locale": "es",
+  "namespace": "wire.errors.auth",
+  "audit_date": "2026-10-29",
+  "audited_revision": "66da866475f3e74553196a3167c18c6125141844",
+  "audited_revision_note": "Branch feat/i18n-es-wire-errors at HEAD 66da866475f3e74553196a3167c18c6125141844; target local_operator/i18n/catalogues/es/wire.errors.auth.json is UNTRACKED (git status ??), so the verdict binds its on-disk sha256, not a committed target revision.",
+  "key_count": 12,
+  "verdict": "passed",
+  "result": "clean",
+  "verdict_reason": "All 12 English and Spanish keys compared. Every message preserves the same authentication cause, failure direction, retryability and remedy; both pure {error} refusals are correct opaque passthroughs. Neutral tú and glossary/register comparisons are consistent; exact placeholders and machine tokens survive. No findings.",
+  "auditor": {
+    "agent": "translation-auditor (es-w3-auditor-b, lopdev team)",
+    "session_or_instance": "600fd4a56564",
+    "model": "kimi/k3.1-pro",
+    "model_fallback_notice": "Actual auditor is kimi/k3.1-pro. The session began on anthropic/claude-sonnet-5-5, then provider quota failures selected openai/gpt-6-astra and subsequently kimi/k3.1-pro; this record names the model completing the audit, not the requested primary model.",
+    "date": "2026-10-29",
+    "independence": "Independent delegated auditor; authored none of the English or Spanish catalogue content. No catalogue, sidecar, ledger, allowance, generated file or git state was edited."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.auth.json",
+      "revision": "d6781d2567c65a7cc51e797883eaeea3fde1be68",
+      "sha256": "9d48edaa61269239e132201224c1c7d6cf89ef198598f0ec6c99c1f3ade542f6"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/wire.errors.auth.json",
+      "sha256": "5e23604abad61cc486b8d7764f09cfd882f9afd2a32248ea1efbf5d28d9f7ad3"
+    },
+    "context": null,
+    "context_absence_reason": "No English role/tone/width context sidecar exists for wire.errors.auth; none was invented. Register was judged only against the style guide and shipped Spanish wire.errors.desktop, wire.errors.settings, wire.errors.notifications and wire.exec copy."
+  },
+  "findings": [],
+  "check_output": {
+    "command": "python3 /Users/damian/.local-operator/sessions/600fd4a56564/scratchpad/audit_es_w3a2.py",
+    "exit_code": 0,
+    "summary": "keys en=12 es=12; missing=[] extra=[]; placeholder parity 12/12 PASS; ICU plural nodes=0; disallowed categories=[]; dropped-placeholder negative control PASS; FAILURES=[]",
+    "full_output": "audit.log"
+  },
+  "reader_evidence": {
+    "prescribed_route": "cd /Users/damian/lo-i18n-es && lop exec --run-in \"$PWD\" \"Use read_public_copy with path='local_operator/i18n/catalogues/en/wire.errors.auth.json' and key='<key>'\"",
+    "result": "Worktree-local reader returned account_not_found, auth_refusal and key_not_accepted; requests for some other keys timed out. Exact full source and target bytes were then read directly and hashed. No display-redacted value was used as the basis for a semantic conclusion.",
+    "risk": "A value that displays as a redaction marker is not evidence of the underlying copy. The sanctioned reader cannot read the untracked Spanish target or nonexistent sidecars; that limitation is recorded, not bypassed as a claimed reader result."
+  },
+  "limitations": [
+    "No English context sidecar exists, so no maxCells or rendered width contract was inferred; character lengths were measured only to inspect relative expansion.",
+    "Static semantic and mechanical catalogue audit; no native-speaker attestation, rendered-layout certification or release eligibility claim.",
+    "No repo-wide tests were run; the bounded read-only check covered only the two assigned namespaces."
+  ]
+}

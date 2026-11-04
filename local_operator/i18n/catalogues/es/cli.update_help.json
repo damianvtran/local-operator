@@ -1,0 +1,8 @@
+{
+  "cli.update_help.update": "Actualizar esta instalación desde PyPI. No es el script lop-update, que recompila el runtime global desde un checkout local de git.",
+  "cli.update_help.check": "Mostrar la versión instalada y la de PyPI; no instalar",
+  "cli.update_help.from_snapshot": "Instalar un árbol de código fuente local (un directorio o una ref de git del repositorio actual) en su propia generación de instalación. En macOS, una ref que coincide exactamente con una versión publicada instala el wheel publicado de PyPI — la única compilación que incluye el agente de claves de macOS —; cualquier otra ref se compila desde el código fuente.",
+  "cli.update_help.allow_downgrade": "Permitir que --from-snapshot instale una compilación ANTERIOR a la actual (una reversión deliberada, registrada en el marcador de instalación). Sin --from-snapshot se rechaza en la ruta de PyPI, que solo instala versiones más nuevas; los flags de refresh tienen prioridad.",
+  "cli.update_help.no_services": "No pasar los daemons `lop serve` a la nueva compilación; los daemons supervisados sí se reparan. Usar solo cuando algo más vaya a iniciar esos daemons, p. ej., un script que controle su lanzamiento.",
+  "cli.update_help.no_roll": "No poner en cola un despliegue mesh para esta actualización, diga lo que diga `network.rollout_on_update`; `lop network update` aún permite hacerlo manualmente."
+}

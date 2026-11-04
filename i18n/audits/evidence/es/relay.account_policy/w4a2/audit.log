@@ -1,0 +1,109 @@
+# Audit log — es / relay.account_policy / round 1 (`w4a2`)
+
+Auditor: translation-auditor (lopdev team), session 8eb3b9c9a687, lane es-w4-auditor-b
+Model: radient/auto (self-reported). Primary was anthropic/claude-sonnet-5-5; three
+provider-failure switches fired on quota before any catalogue was read (openai/gpt-6-astra,
+kimi/k3.1-pro, radient/auto). Disclosed fallback, not the pinned primary.
+Date: 2026-10-29. Read-only: no catalogue, sidecar, ledger, allowance, guide or git state touched.
+
+## 1. Orientation
+
+    cd ~/lo-i18n-es && git rev-parse HEAD
+    -> 183f7a0537e4cee42fd82f25a21fe52953a81bdf  (branch feat/i18n-es-wire-errors)
+    git status --porcelain
+    -> ?? local_operator/i18n/catalogues/es/relay.account_policy.json
+       ?? local_operator/i18n/catalogues/es/relay.library.json
+       ?? local_operator/i18n/catalogues/es/relay.login.json   (+ 3 other lanes' untracked files)
+
+The three targets are UNTRACKED, so HEAD cannot pin them. Every binding in record.json is to
+the on-disk sha256, recomputed by checks.py. I left the other lanes' untracked files alone and
+created nothing outside my own evidence directories.
+
+## 2. References read before judging
+
+- `i18n/style-guides/es.md` — tu address; infinitive action labels; sentence case; neutral Spanish;
+  settled words incl. `ajustes`, `equipo (team)`, `habilidad`; plurals one/many/other; width band
+  15-25%; `caché` amendment.
+- `i18n/glossary.md` — line 59 `relay -> relé` (translate, identifiers stay); line 63 `team -> equipo`;
+  line 65 `device -> dispositivo`; plus the rule that a kept-vs-translated name
+  is decided by FORM (prose translates, identifiers stay).
+- `local_operator/i18n/catalogues/en/relay.account_policy.json` and `en/relay.account_policy.context.json` — read in full.
+- `local_operator/i18n/catalogues/es/relay.account_policy.json` — read in full.
+- For relay.account_policy additionally: the SHIPPED `es/wire.settings.account_policy.json`, to test
+  for a second rendering of the account-policy option labels.
+
+Note on the sidecars: they carry `role`, `tone` and `note` only. **No `maxCells` is declared** in
+any of the three (grep count 0), unlike `relay.chrome.context.json` (80 declarations) or
+`relay.ask.context.json` (11), so width was judged against the shipped relay corpus instead.
+
+## 3. Mechanical pass
+
+    python3 i18n/audits/evidence/es/relay.account_policy/w4a2/checks.py
+
+This script is part of the evidence and reproduces every structural claim below. It writes
+nothing and exits non-zero if any check fails.
+
+    exit 0 — ALL CHECKS PASS (40 assertions)
+    INFO  'computer' rendered as 'equipo' in: ['title', 'saved', 'unavailable', 'scope', 'rejected']
+    INFO  English 'relay' kept in: ['relay.account_policy.unavailable']
+    PASS  no second rendering of shipped account-policy labels :: []
+    PASS  no policy-option vocabulary at all :: []
+
+Two further probes outside the script, both value-only (JSON keys excluded so the namespace prefix
+could not contaminate the count):
+
+    python3 - <<'EOF'   # every es value mentioning 'computer', paired with its es rendering
+    EOF
+    -> 17 en values mention "computer".
+       11 ship as 'máquina' (relay.health x4, relay.chrome, relay.notifications x2, mobile.setup x2,
+          cli.mobile_help, wire.settings.account_policy.error.write_failed)
+        5 ship as 'equipo' — every one of them in relay.account_policy
+        1 pre-existing outlier: wire.errors.notifications.store_full ('Este equipo')
+
+    python3 - <<'EOF'   # census of ICU plural categories across the whole es catalogue
+    EOF
+    -> 58 plural messages: 57 carry {one, many, other}; 1 carries {one, other}.
+
+
+## 4. Semantic pass
+
+Read the English and the Spanish namespace by namespace against the sidecar roles. Judged
+accuracy, idiom, register, glossary consistency, placeholder/ICU integrity, plurals, width.
+The findings and their reasoning are in `record.json` (structured) and `report.md` (prose).
+
+- `error` / `rejected` / `load_error` / `unavailable` are four DIFFERENT promises and stay distinct
+  in Spanish. `error` = unconfirmed (no claim of failure), `rejected` = not saved, `load_error` =
+  could not load, `unavailable` = capability missing with a remedy. Checked against the sidecar
+  notes, not only against the English.
+- No account-policy option label and no policy vocabulary appears here at all, so the "second
+  rendering" risk the brief names does not materialise: this is chrome only.
+- Terminology: 'enrutamiento de cuentas' is byte-identical to the shipped
+  `wire.settings.account_policy.error.unavailable`; 'ajustes' matches the settled settings term.
+- Register: tu throughout (Comprueba, Actualiza, vuelve, recarga); action labels are infinitives
+  (Volver, Reintentar, Guardar política). No usted, no vosotros.
+- Width: paragraphs 90-115 cells against a shipped relay corpus whose longest string is 758 and
+  whose health detail strings run 176-206; the two >35% short-label jumps (back 4->6, saving 7->10)
+  are percentage inflation on very short strings, not overflow. No maxCells to test against.
+- Separately judged and left as findings: 'computer -> equipo' (major, term collision with team and
+  drift from seven shipped strings in this same UI) and 'relay -> relay' (minor, glossary line 59
+  says relé and the catalogue already ships 'este relé').
+
+## 5. Judgement
+
+**FAILED** — 13 keys read, 1 major, 1 minor, 1 nit.
+
+Gates on the major: `computer` is rendered `equipo`, the word this locale uses for *team*, on the
+one screen whose whole message is that these settings belong to this computer alone. Seven shipped
+strings in the same phone UI say `máquina` for the same object, and the shipped sibling
+`wire.settings.account_policy.error.write_failed` says `esta máquina`. Fix by adopting `máquina`
+here; a locale-wide decision to use `equipo` for computers would have to rewrite those seven strings
+and would still collide with glossary line 63, so it is the more expensive path and is above this
+lane's authority.
+
+Not gating: the untranslated `relay` (minor, glossary line 59) and the shortened `Guardar política`
+(nit, faithful to the English "Save policy"). The four state promises are correct as written.
+
+## 6. Writes
+
+- `record.json`, `report.md`, `audit.log`, `checks.py` in this directory. Nothing else.
+- No file in the worktree was deleted, moved or renamed.

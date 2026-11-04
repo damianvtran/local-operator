@@ -124,9 +124,14 @@ import contextvars
 import json
 import logging
 import os
+import re
+import threading
 import time
+import zlib
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
+from contextlib import contextmanager
+from copy import copy as _shallow_copy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator
@@ -136,6 +141,7 @@ from local_operator.session import open_trace
 from local_operator.session.runtime.engagement import TRANSCRIPT_FILENAME
 
 if TYPE_CHECKING:
+    from local_operator.session.index_read_model import FrameSelection
     from local_operator.session.transcript import TranscriptPage
 
 logger = logging.getLogger(__name__)
@@ -845,6 +851,11 @@ class TranscriptIndex:
     source_projection_facts: list[dict[str, Any]] = field(default_factory=list)
     source_views: SourceProjectionViews = field(init=False, repr=False)
     version: int = TRANSCRIPT_INDEX_VERSION
+    # Process-only identity of the JSON FD that supplied naming+source facts.
+    # Never serialized; delayed migration must not overwrite a newer naming write.
+    publication_identity: tuple[int, int, int] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.source_views = SourceProjectionViews.build(self.source_projection_facts)
@@ -897,17 +908,49 @@ def _read_raw(config_dir: str | Path, session_id: str) -> dict[str, Any] | None:
 
     Deliberately version-agnostic: parts of it (``naming``) survive a version
     mismatch, so the reader cannot be the thing that discards it.
+
+    TWO LAYOUTS ARE READ HERE, and both return the same whole document. A file
+    without ``store`` is the classic single document. A file WITH ``store`` is a
+    small HEAD naming an immutable snapshot plus a committed prefix of an
+    append-only delta log (see "Incremental publication" above
+    :func:`write_index`); the document is the snapshot with every committed delta
+    applied and the head's own fields on top. ``_publication_identity`` is the
+    HEAD's identity in both layouts, because the head is what every publication
+    atomically replaces — the receipt semantics callers rely on are unchanged.
     """
     path = index_path(config_dir, session_id)
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    try:
-        loaded = json.loads(raw)
-    except ValueError:
-        return None
-    return loaded if isinstance(loaded, dict) else None
+    # A compaction can retire the snapshot named by a head this reader already
+    # holds; the retry re-reads the (newer) head instead of failing the read.
+    for _attempt in range(3):
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                stamp = os.fstat(handle.fileno())
+                raw = handle.read()
+        except OSError:
+            return None
+        try:
+            loaded = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(loaded, dict):
+            return None
+        if "store" in loaded:
+            try:
+                loaded = _assemble(path.parent, session_id, loaded)
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError, KeyError, TypeError, IndexError):
+                # A delta that fails its frame inside the COMMITTED range is not a
+                # torn write (those lie past the committed length and are never
+                # read); it is damage. The cache is derived: answering "unusable"
+                # sends the caller to the rescan that rebuilds it from the journal.
+                return None
+            if loaded is None:
+                return None
+        # Private read receipt, deliberately ignored by write_index's explicit payload.
+        loaded["_publication_identity"] = (stamp.st_ino, stamp.st_size, stamp.st_mtime_ns)
+        return loaded
+    return None
 
 
 def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
@@ -973,6 +1016,7 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
     return TranscriptIndex(
         checkpoints=parsed_checkpoints,
         messages=parsed_messages,
+        publication_identity=raw.get("_publication_identity"),
         sig=sig,
         coverage=coverage,
         naming=naming if isinstance(naming, dict) else {},
@@ -997,20 +1041,829 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
 
 def read_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
     """The cached index as a typed view (no freshness check), else ``None``."""
-    return _index_from_raw(_read_raw(config_dir, session_id))
+    return _read_indexed(config_dir, session_id)[1]
 
 
-def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex) -> None:
-    """Persist the index atomically (pid-temp + replace), best-effort.
+# ---------------------------------------------------------------------------
+# Incremental publication: immutable snapshot + append-only delta + small head
+# ---------------------------------------------------------------------------
+#
+# WHY THIS EXISTS. The canonical document holds the whole transcript's derived
+# facts — every message doc, checkpoint, run, journal row/range and source
+# fact. A one-row append re-derives only the resume window's suffix, yet base
+# serialised and fsynced the WHOLE document on every refresh, and the live
+# trigger (``serving.py``'s journal-order correction calls ``start_refresh`` on
+# every durable commit) made that a per-row cost. Measured on a real 470 MB
+# journal (2026-11-03, 62.9 MB index): every one-row append refresh took
+# 1.3-1.55 s of CPU and rewrote 62.9 MB; the operator's session republished it
+# 9x in 60 s (~570 MB/min of writes for ~100 KB of new facts).
+#
+# THE LAYOUT. ``<sid>.json`` stays the commit point and keeps base's resume head
+# (``version, sig, scan, journal_generation`` first, in order — the paint hold's
+# ``_read_resume_head`` and the read model's ``header()`` parse only that), but
+# it becomes a HEAD of a few KB that also carries ``coverage``, ``naming`` and a
+# ``store`` pointer:
+#
+#   ``<sid>.snap.<id>.snapshot``  an IMMUTABLE whole document (base's JSON), written
+#                             once per compaction, never modified afterwards.
+#   ``<sid>.delta.<id>.log``  append-only frames, each one the re-derived suffix
+#                             of one publication, bound to that snapshot.
+#   head ``store``            ``{"snapshot", "delta", "frames", "length"}`` — the
+#                             COMMITTED prefix of the delta.
+#
+# A publication appends ONE frame (the suffix past the previous publication's
+# kept prefix), fsyncs it, then atomically replaces the head with the new
+# committed length. The cost is the suffix plus the head, not the history.
+#
+# CRASH SAFETY. A reader trusts only ``[0, length)`` of the delta, the head's
+# number, and the head is replaced atomically (temp + fsync + ``os.replace``)
+# AFTER the frame is durable. So:
+#   * a crash mid-frame leaves bytes past ``length`` that no head names; the next
+#     writer truncates them before appending (a torn tail is ignored, never read);
+#   * a crash between frame and head leaves the old head: the old publication is
+#     served, intact, and the next refresh re-derives the same suffix;
+#   * every frame is ``<len> <crc32>\n<json>\n``; a frame inside the committed
+#     range that fails its check is damage, and ``_read_raw`` answers ``None`` so
+#     the caller rescans the journal — the cache is derived, never authority.
+# Snapshots are never modified in place (a compaction writes a NEW id), so a
+# reader that resolved a head always finds consistent files or a missing one
+# (retired by a later compaction), and retries on the newer head.
+#
+# MIGRATION. A classic document (no ``store`` key) reads exactly as before. The
+# first incremental publication over one HARD-LINKS the existing file as the
+# snapshot (no copy, no re-serialisation), so no session pays a forced rebuild;
+# where links are unsupported it falls back to one ordinary whole write.
+#
+# COMPACTION. When the committed delta exceeds ``_DELTA_COMPACT_FRACTION`` of the
+# snapshot (or ``_DELTA_COMPACT_FRAMES`` frames), the next publication writes a
+# whole new snapshot and an empty delta. Amortised, the bytes written per
+# publication stay proportional to the new content.
 
-    Atomic because a poll may read while a build writes, and the temp name
-    carries the writer's PID for ``search_index``'s measured reason: two
-    processes building one session wrote the same fixed temp path and produced
-    torn documents. Best-effort because an unwritable cache must cost the speed
-    of the next read, never the read itself.
+#: Compact once the delta is this fraction of its snapshot's size. A quarter
+#: keeps read amplification (snapshot + delta parsed per cold read) at <=1.25x
+#: while amortising one whole write over many appends.
+_DELTA_COMPACT_FRACTION = 0.25
+#: ... or once it holds this many frames, so a session of tiny appends against a
+#: tiny snapshot does not grow an unbounded chain of frames to replay.
+_DELTA_COMPACT_FRAMES = 512
+#: Below this snapshot size the whole document IS the cheap write: a small
+#: session keeps base's single-file layout and pays nothing for the store.
+_STORE_MIN_BYTES = 1 << 20
+
+#: The list sections a frame carries a suffix of. Each is ordered by ``seq``
+#: (``first_seq`` for runs) and an incremental refresh keeps a PREFIX of each and
+#: re-derives the rest — exactly the shape a ``(keep, tail)`` frame encodes.
+_LIST_SECTIONS = ("checkpoints", "messages", "runs", "source_projection_facts")
+
+#: Store file ids are writer-minted uuid hex; anything else in a head is refused
+#: rather than joined into a path.
+_STORE_ID = re.compile(r"[0-9a-f]{32}\Z")
+#: The two store file shapes, and nothing else, are what ``_retire`` and
+#: ``_sweep_missing`` may reclaim; group 1 is the owning session id.
+#:
+#: NEITHER SHAPE MAY END IN ``.json``. Builds before this store sweep the cache
+#: directory with "unlink any ``*.json`` whose STEM is not a session directory"
+#: (``_sweep_missing`` as shipped through 0.96.1), and the stem of
+#: ``<sid>.snap.<hex>.json`` is ``<sid>.snap.<hex>`` — so one old process doing
+#: one full scan deleted every live snapshot (PR #3387 review R2 / QA Q1). Old
+#: running sessions keep that code in memory across ``lop-update``, so the
+#: mixed fleet is the normal state; a non-``.json`` suffix is what that sweep
+#: provably skips. ``test_an_old_builds_sweep_leaves_store_files_alone`` runs a
+#: copy of the old predicate against a store directory.
+_STORE_FILE = re.compile(
+    r"([A-Za-z0-9_-]{1,128})\.(?:snap\.[0-9a-f]{32}\.snapshot|delta\.[0-9a-f]{32}\.log)\Z"
+)
+#: A snapshot being staged: ``<snapshot name>.<pid>.tmp``. A writer that dies
+#: mid-write leaves one the size of the whole index; ``_retire`` reclaims it once
+#: its pid is gone (or it is older than ``_STAGED_GRACE_S`` — pids are reused).
+_STAGED_FILE = re.compile(
+    r"([A-Za-z0-9_-]{1,128})\.snap\.[0-9a-f]{32}\.snapshot\.([0-9]{1,10})\.tmp\Z"
+)
+_STAGED_GRACE_S = 3600.0
+
+#: Parse memo: head path -> (head identity, typed index, store, small raw fields).
+#: Bounded like the resident set. Worker threads read and write it (refreshes run
+#: under ``asyncio.to_thread``), hence the lock around every compound access.
+_ParseMemo = tuple[tuple[int, int, int], Any, "dict[str, Any] | None", dict[str, Any]]
+_PARSED: "OrderedDict[str, _ParseMemo]" = OrderedDict()
+_PARSED_SESSIONS = 4
+_PARSED_LOCK = threading.Lock()
+
+
+def _frame(payload: dict[str, Any]) -> bytes:
+    """One delta record: ``<len> <crc32>\\n<body>\\n`` (body is compact JSON)."""
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return b"%d %08x\n" % (len(body), zlib.crc32(body)) + body + b"\n"
+
+
+def _frames(data: bytes, count: int) -> list[dict[str, Any]]:
+    """Decode exactly ``count`` committed frames from ``data``; raise on damage.
+
+    ``data`` is already cut to the head's committed length, so anything this
+    rejects is inside the committed range: corruption, not a torn append.
+    """
+    out: list[dict[str, Any]] = []
+    position = 0
+    for _ in range(count):
+        newline = data.index(b"\n", position)
+        size_text, crc_text = data[position:newline].split(b" ")
+        size = int(size_text)
+        body = data[newline + 1 : newline + 1 + size]
+        if len(body) != size or zlib.crc32(body) != int(crc_text, 16):
+            raise ValueError("delta frame failed its check")
+        if data[newline + 1 + size : newline + 2 + size] != b"\n":
+            raise ValueError("delta frame is not terminated")
+        loaded = json.loads(body)
+        if not isinstance(loaded, dict):
+            raise ValueError("delta frame is not an object")
+        out.append(loaded)
+        position = newline + 2 + size
+    if position != len(data):
+        raise ValueError("committed delta length does not end on a frame")
+    return out
+
+
+def _store_paths(directory: Path, session_id: str, store: dict[str, Any]) -> tuple[Path, Path]:
+    snapshot, delta = store["snapshot"], store["delta"]
+    if not (_STORE_ID.fullmatch(str(snapshot)) and _STORE_ID.fullmatch(str(delta))):
+        raise ValueError("unsafe store identity")
+    return (
+        directory / f"{session_id}.snap.{snapshot}.snapshot",
+        directory / f"{session_id}.delta.{delta}.log",
+    )
+
+
+def _apply_frame(document: dict[str, Any], frame: dict[str, Any]) -> None:
+    """Fold one frame into a whole document (in place)."""
+    keep = frame["keep"]
+    rows_keep = int(keep["rows"])
+    rows, ranges = document["journal_rows"], document["journal_ranges"]
+    # The ids at or past the cut are exactly the ids of the facts past the cut:
+    # the facts table has one entry per ordinal and ``journal_rows`` names each
+    # id's LAST ordinal (``valid_source_projection_facts`` pins ``last == rows``).
+    # Walking that suffix keeps a cold read O(frames x suffix), not O(frames x
+    # history) — 512 frames over 97k rows would otherwise be ~50M dict probes.
+    facts = document["source_projection_facts"]
+    if not 0 <= rows_keep <= len(facts):
+        raise ValueError("frame keeps more rows than its base holds")
+    for fact in facts[rows_keep:]:
+        id_ = fact.get("id")
+        if id_ and rows.get(id_, -1) >= rows_keep:
+            del rows[id_]
+            ranges.pop(id_, None)
+    for section in _LIST_SECTIONS:
+        current = document[section]
+        cut = int(keep[section])
+        if not 0 <= cut <= len(current):
+            raise ValueError("frame keeps more than its base holds")
+        del current[cut:]
+        current.extend(frame["tail"][section])
+    rows.update(frame["tail"]["journal_rows"])
+    ranges.update(frame["tail"]["journal_ranges"])
+
+
+def _assemble(directory: Path, session_id: str, head: dict[str, Any]) -> dict[str, Any] | None:
+    """Snapshot + committed delta prefix + head fields -> the whole document."""
+    store = head["store"]
+    snapshot_path, delta_path = _store_paths(directory, session_id, store)
+    with snapshot_path.open("r", encoding="utf-8", errors="replace") as handle:
+        document = json.loads(handle.read())
+    # No version gate here: ``_read_raw`` is version-agnostic by contract (naming
+    # survives a bump), and the head's fields — version included — overwrite the
+    # snapshot's below, so ``_index_from_raw`` judges the HEAD's version.
+    if not isinstance(document, dict):
+        return None
+    frames, length = int(store["frames"]), int(store["length"])
+    if frames:
+        with delta_path.open("rb") as handle:
+            data = handle.read(length)
+        if len(data) != length:
+            raise ValueError("delta is shorter than its committed length")
+        for frame in _frames(data, frames):
+            _apply_frame(document, frame)
+    # The head's own fields are the publication's truth; the snapshot's copies
+    # describe the compaction it was cut at.
+    for key, value in head.items():
+        if key != "store":
+            document[key] = value
+    document["store"] = store
+    return document
+
+
+def _head(index: "TranscriptIndex", store: dict[str, Any]) -> dict[str, Any]:
+    """The small commit-point document: base's resume head, THEN ``store``.
+
+    ``store`` sits immediately after the four resume-head keys so the bounded
+    head reader can price a refresh's hydration (snapshot + committed delta) from
+    the same 4 KiB it already reads, with no extra ``stat`` on the event loop.
+    """
+    return {
+        "version": TRANSCRIPT_INDEX_VERSION,
+        "sig": index.sig,
+        "scan": index.scan.to_payload(),
+        "journal_generation": index.journal_generation,
+        "store": store,
+        "coverage": index.coverage,
+        "naming": index.naming,
+    }
+
+
+def _common_prefix(old: list[Any], new: list[Any]) -> int:
+    """How many leading entries ``new`` shares with ``old``.
+
+    Identity first: an incremental refresh carries the kept prefix as the SAME
+    objects, so the comparison is a pointer check for all of it; equality is the
+    fallback that keeps a re-parsed base (fresh objects) honest.
+    """
+    limit = min(len(old), len(new))
+    position = 0
+    while position < limit and (old[position] is new[position] or old[position] == new[position]):
+        position += 1
+    return position
+
+
+def _encode(section: str, items: list[Any]) -> list[Any]:
+    if section == "source_projection_facts":
+        return items
+    return [item.to_payload() for item in items]
+
+
+def _delta_frame(base: "TranscriptIndex", index: "TranscriptIndex") -> dict[str, Any]:
+    """The suffix ``index`` adds over ``base``, as one frame."""
+    keep: dict[str, int] = {}
+    tail: dict[str, Any] = {}
+    for section in _LIST_SECTIONS:
+        old, new = getattr(base, section), getattr(index, section)
+        cut = _common_prefix(old, new)
+        keep[section] = cut
+        tail[section] = _encode(section, new[cut:])
+    # Rows: every kept id keeps its ordinal (append preserves the prefix), so the
+    # frame's cut is the first ordinal the two disagree on, found from the facts
+    # table that carries one entry per ordinal.
+    rows_keep = keep["source_projection_facts"]
+    keep["rows"] = rows_keep
+    tail["journal_rows"] = {i: s for i, s in index.journal_rows.items() if s >= rows_keep}
+    tail["journal_ranges"] = {i: index.journal_ranges[i] for i in tail["journal_rows"]}
+    return {"keep": keep, "tail": tail}
+
+
+def _frame_is_exact(
+    base: "TranscriptIndex", index: "TranscriptIndex", frame: dict[str, Any]
+) -> bool:
+    """Would applying ``frame`` to ``base`` reproduce ``index``'s row maps?
+
+    The list sections are exact by construction (prefix + tail). The two id maps
+    are rebuilt by ordinal, which is right only when the ids kept below the cut
+    keep their ordinal and span — true for every append, and CHECKED so a
+    refresh shape this module does not produce falls back to a whole write.
+
+    O(SUFFIX), not O(history) (QA Q3: walking all 97k rows cost ~56 ms per
+    append). The checks, and why they suffice:
+
+    * both views are ``origins_complete`` (``__post_init__`` already proved
+      ``journal_rows`` == last-ordinal-per-id of the facts table), and the facts
+      prefix up to the cut is shared, so the kept ids and their ordinals are a
+      function of that identical prefix — equal by construction;
+    * spans: the same journal inode and lineage (``journal_generation``, checked
+      by the caller) means kept rows were read from the same bytes;
+    * ``_apply_frame`` deletes every id whose base ordinal is past the cut
+      ("dropped") and re-adds the tail. So the result is right exactly when each
+      dropped id either REAPPEARS at or past the cut in ``index`` (it is then in
+      the tail) or is gone from ``index`` altogether; a dropped id whose
+      surviving occurrence lies below the cut would be lost. That is checked
+      per id — not as a count, which two errors can balance (review round 2,
+      R2-m1: ``[a@0,b@1,a@2]`` -> ``[a@0,b@1,c@2,b@3]`` counted equal while
+      dropping ``a``). Kept ids are right by the shared
+      prefix because tail ids always override them. Cost: O(suffix + dropped).
+    """
+    rows_keep = frame["keep"]["rows"]
+    if not (base.source_views.origins_complete and index.source_views.origins_complete):
+        return False
+    if base.sig.get("inode") != index.sig.get("inode"):
+        return False
+    dropped = {
+        fact["id"]
+        for fact in base.source_projection_facts[rows_keep:]
+        if fact["id"] and base.journal_rows.get(fact["id"], -1) >= rows_keep
+    }
+    # Absent from ``index`` is also right (the delete stands); only a survivor
+    # BELOW the cut — which the delete would lose — refuses the frame.
+    return all(index.journal_rows.get(id_, rows_keep) >= rows_keep for id_ in dropped)
+
+
+def _write_durable(path: Path, data: bytes) -> None:
+    """Whole-file write through the descriptor that wrote it (base's fsync rule)."""
+    with path.open("wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _retire(directory: Path, session_id: str, keep: dict[str, Any] | None) -> None:
+    """Drop this session's store files the live head no longer names.
+
+    Only files of the fixed ``<sid>.snap.<hex>.snapshot`` / ``<sid>.delta.<hex>.log``
+    shape are considered, so nothing else in the cache directory is touched; a
+    reader that already opened a retired file holds its descriptor and keeps
+    reading, and one that resolved a head and finds its file gone retries.
+    """
+    names = set()
+    if keep is not None:
+        snapshot_path, delta_path = _store_paths(directory, session_id, keep)
+        names = {snapshot_path.name, delta_path.name}
+    try:
+        entries = list(directory.glob(f"{session_id}.*"))
+    except OSError:
+        return
+    for entry in entries:
+        staged = _STAGED_FILE.fullmatch(entry.name)
+        if staged is not None:
+            if staged.group(1) == session_id and _staged_is_orphan(entry, int(staged.group(2))):
+                try:
+                    entry.unlink()
+                except OSError:
+                    pass
+            continue
+        match = _STORE_FILE.fullmatch(entry.name)
+        if match is None or match.group(1) != session_id or entry.name in names:
+            continue
+        try:
+            entry.unlink()
+        except OSError:
+            continue
+
+
+def _staged_is_orphan(entry: Path, pid: int) -> bool:
+    """A staged snapshot nobody can still be writing.
+
+    Called under the session's publish lock. OUR OWN PID'S temp is always ours to
+    drop: ``_publish_lock`` takes the in-process ``_PUBLISH_THREADS`` lock as well
+    as the cross-process flock, so no other thread of this process can be
+    mid-write on this session's snapshot while we hold it — the write that made
+    the temp has returned (and its ``finally`` failed to unlink it). A dead pid's
+    temp is an orphan. A live foreign pid's is one only past the grace period,
+    because pids are reused and a crashed writer's number may now name another
+    process.
+
+    LIVENESS GOES THROUGH ``procstate.pid_liveness``, NEVER ``os.kill(pid, 0)``
+    (review round 2, R2-M2): on Windows CPython's ``os.kill`` with signal 0 calls
+    ``TerminateProcess``, and the pid here is by construction a stale one that may
+    now name an unrelated process. Only a proven ``False`` is "dead"; ``None``
+    (unprovable) is treated as alive and falls through to the grace period.
+    """
+    from local_operator.procstate import pid_liveness
+
+    if pid == os.getpid():
+        return True
+    if pid_liveness(pid) is False:
+        return True
+    try:
+        return time.time() - entry.stat().st_mtime > _STAGED_GRACE_S
+    except OSError:
+        return False
+
+
+def _publish_store(
+    directory: Path, session_id: str, path: Path, index: "TranscriptIndex"
+) -> tuple[dict[str, Any], dict[str, Any] | None, bool, bool]:
+    """Stage ``index`` (CALLER HOLDS THE PUBLISH LOCK): ``(head, store, moved, created)``.
+
+    Writes whatever the commit needs BESIDE the head — a delta frame, a hard link
+    or a new snapshot — durably, and returns the document the caller then
+    publishes with the head replace (the one commit point). ``moved`` says the
+    store changed identity, so superseded files are reclaimable after the commit;
+    ``created`` says a new directory entry (link, snapshot or delta) now exists
+    that the head is about to name, so the directory must be synced first.
+
+    The delta path runs when the disk publication is the one this process last
+    parsed or wrote (memo identity) and ``index`` extends it. Anything else is
+    one whole write: a classic document for a small index (base's layout), the
+    hard-linked migration of a classic document that IS the base, or a fresh
+    snapshot (a rebuild, a cold process, or a compaction).
+    """
+    store, base = _store_state(path)
+    frame: dict[str, Any] | None = None
+    if base is not None and base.journal_generation == index.journal_generation:
+        candidate = _delta_frame(base, index)
+        if _frame_is_exact(base, index, candidate):
+            frame = candidate
+    if frame is not None and store is not None and base is not None:
+        snapshot_bytes = int(store.get("snapshot_bytes") or 0)
+        length, frames = int(store["length"]), int(store["frames"])
+        if _frame_is_empty(base, frame):
+            # Nothing past the base changed (a naming patch, a re-publication):
+            # the head alone carries naming/coverage, so no frame is appended.
+            return _head(index, store), store, False, False
+        _snapshot_path, delta_path = _store_paths(directory, session_id, store)
+        delta_present = delta_path.exists()
+        if (
+            # A delta the head says holds committed bytes but which is GONE was
+            # removed behind our back; appending to a fresh file would pad the
+            # committed range with zeros (review R5). Re-snapshot instead.
+            (delta_present or length == 0)
+            and snapshot_bytes
+            and length <= snapshot_bytes * _DELTA_COMPACT_FRACTION
+            and frames < _DELTA_COMPACT_FRAMES
+        ):
+            record = _frame(frame)
+            # Truncate to the COMMITTED length first: bytes past it are a torn
+            # append from a writer that died before its head landed. No head
+            # names them, and they must not end up between two committed frames.
+            with delta_path.open("r+b" if delta_present else "wb") as handle:
+                handle.truncate(length)
+                handle.seek(length)
+                handle.write(record)
+                handle.flush()
+                os.fsync(handle.fileno())
+            new_store = dict(store, frames=frames + 1, length=length + len(record))
+            return _head(index, new_store), new_store, False, not delta_present
+    if frame is not None and store is None:
+        # MIGRATION: the classic document on disk is exactly ``base`` (memo
+        # identity, checked under this lock). Link it as the snapshot instead of
+        # re-serialising it, and publish the suffix as the first frame — an
+        # existing v8 cache moves to the store without any whole rewrite.
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        if size >= _STORE_MIN_BYTES:
+            new_store = _new_store(size)
+            snapshot_path, delta_path = _store_paths(directory, session_id, new_store)
+            try:
+                os.link(path, snapshot_path)
+            except OSError:
+                pass  # no hard links here: fall through to one whole write
+            else:
+                record = _frame(frame)
+                _write_durable(delta_path, record)
+                new_store.update(frames=1, length=len(record))
+                return _head(index, new_store), new_store, True, True
+    document = _document(index)
+    body = json.dumps(document, separators=(",", ":")).encode("utf-8")
+    if len(body) < _STORE_MIN_BYTES:
+        return document, None, store is not None, False
+    new_store = _new_store(len(body))
+    snapshot_path, _delta_path = _store_paths(directory, session_id, new_store)
+    staged = snapshot_path.with_name(f"{snapshot_path.name}.{os.getpid()}.tmp")
+    try:
+        _write_durable(staged, body)
+        staged.replace(snapshot_path)
+    finally:
+        staged.unlink(missing_ok=True)
+    return _head(index, new_store), new_store, True, True
+
+
+def _new_store(snapshot_bytes: int) -> dict[str, Any]:
+    """A fresh store pointer; ``snapshot_bytes`` prices hydration from the head."""
+    return {
+        "snapshot": uuid4().hex,
+        "delta": uuid4().hex,
+        "snapshot_bytes": snapshot_bytes,
+        "frames": 0,
+        "length": 0,
+    }
+
+
+def _frame_is_empty(base: "TranscriptIndex", frame: dict[str, Any]) -> bool:
+    """True when the frame neither cuts nor adds anything over ``base``."""
+    keep, tail = frame["keep"], frame["tail"]
+    return all(keep[s] == len(getattr(base, s)) for s in _LIST_SECTIONS) and not any(
+        tail[key] for key in (*_LIST_SECTIONS, "journal_rows", "journal_ranges")
+    )
+
+
+def _store_state(path: Path) -> tuple[dict[str, Any] | None, "TranscriptIndex | None"]:
+    """``(store, base)`` of the publication on disk now, from the parse memo.
+
+    ``base`` is ``None`` unless the head's current identity is the one this
+    process last parsed or wrote; that identity check, under the publish lock,
+    is what lets a frame be computed against ``base`` without decoding the
+    document — and it is the whole-file receipt the memo shares with
+    ``_previous_if_current``/``expected_publication``.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None, None
+    with _PARSED_LOCK:
+        memo = _PARSED.get(str(path))
+    if memo is None or memo[0] != (st.st_ino, st.st_size, st.st_mtime_ns):
+        return None, None
+    return memo[2], memo[1]
+
+
+def _hydration_bytes(head_bytes: int, store: Any) -> int:
+    """What a cold read of this publication decodes: head + snapshot + delta."""
+    if not isinstance(store, dict):
+        return head_bytes
+    try:
+        return head_bytes + int(store.get("snapshot_bytes") or 0) + int(store.get("length") or 0)
+    except (TypeError, ValueError):
+        return head_bytes
+
+
+def _read_indexed(
+    config_dir: str | Path, session_id: str, *, remember: bool = False
+) -> tuple[dict[str, Any] | None, "TranscriptIndex | None"]:
+    """``(raw, index)`` for the publication on disk, reusing this process's parse.
+
+    THE PARSE MEMO. ``refresh_index``, ``probe_index`` and ``read_index`` each
+    decoded the whole document, three times per append refresh (0.22 s each on
+    the 62.9 MB index, plus 0.32 s of typing). The memo keys the typed view by
+    the head's ``(ino, size, mtime_ns)``: every publication replaces the head,
+    so a hit means exactly "the bytes this process last parsed or wrote".
+
+    ``raw`` on a hit carries only the SMALL fields (resume head, coverage,
+    naming, store) plus the receipt. Every caller of this pairing reads exactly
+    those from it (``preserved_naming``, ``patch_naming``'s receipt); a consumer
+    that needs the bulk sections calls ``_read_raw`` itself.
+
+    ``remember`` IS ONLY FOR THE PATHS THAT PUBLISH. A cold parse is memoised
+    only by ``refresh_index`` (its next step is the write that needs ``base``)
+    and by ``write_index`` itself after a commit. Read-only callers —
+    ``probe_index`` (boot prewarm probes up to 32 journals), ``read_index``,
+    ``patch_naming``'s look — still HIT the memo but never fill it: retaining
+    their parse kept a whole typed index alive per probed session (review R1:
+    379 MB vs 130 MB RSS after one probe of the 62.9 MB fixture).
     """
     path = index_path(config_dir, session_id)
-    payload = {
+    try:
+        st = path.stat()
+    except OSError:
+        return None, None
+    identity = (st.st_ino, st.st_size, st.st_mtime_ns)
+    with _PARSED_LOCK:
+        memo = _PARSED.get(str(path))
+        if memo is not None and memo[0] == identity:
+            _PARSED.move_to_end(str(path))
+    if memo is not None and memo[0] == identity:
+        raw = {**memo[3], "_publication_identity": identity}
+        # The same version gate ``_index_from_raw`` applies: a memo made under
+        # another build's constant is that build's document, naming and all.
+        if raw.get("version") != TRANSCRIPT_INDEX_VERSION:
+            return raw, None
+        return raw, _detached(memo[1], identity)
+    raw = _read_raw(config_dir, session_id)
+    index = _index_from_raw(raw)
+    if remember and raw is not None and index is not None:
+        receipt = raw.get("_publication_identity")
+        if isinstance(receipt, tuple) and len(receipt) == 3:
+            _remember_parse(path, receipt, index, raw)
+    return raw, index
+
+
+def _detached(
+    index: "TranscriptIndex", identity: tuple[int, int, int] | None = None
+) -> "TranscriptIndex":
+    """A copy whose fields a caller may REBIND without touching the memo's view.
+
+    Shallow by design — copying the sections would cost what the memo saves.
+    Callers rebind (``index.naming = ...``) and never mutate the sections in
+    place; the derivation builds new lists for every refresh.
+    """
+    out = _shallow_copy(index)
+    out.naming = dict(index.naming) if isinstance(index.naming, dict) else {}
+    if identity is not None:
+        # The receipt names the head THIS view was served from, as a fresh parse
+        # would; a memo entry made at write time carries the caller's old one.
+        out.publication_identity = identity
+    return out
+
+
+def _remember_parse(
+    path: Path, identity: tuple[int, int, int], index: "TranscriptIndex", raw: dict[str, Any]
+) -> None:
+    """Memoise a parsed or just-written publication under its head identity."""
+    small = {key: raw[key] for key in (*_HEAD_KEYS, "coverage", "naming") if key in raw}
+    store = raw.get("store") if isinstance(raw.get("store"), dict) else None
+    if store is not None:
+        small["store"] = store
+    with _PARSED_LOCK:
+        _PARSED[str(path)] = (identity, _detached(index, identity), store, small)
+        _PARSED.move_to_end(str(path))
+        while len(_PARSED) > _PARSED_SESSIONS:
+            _PARSED.popitem(last=False)
+
+
+@contextmanager
+def _publish_lock(path: Path) -> Iterator[None]:
+    """Serialize one session's writers on every platform; readers never lock.
+
+    ``fcntl`` DOES NOT EXIST ON WINDOWS, and this runs inside
+    ``refresh_index``/``patch_naming``: an unconditional import made the whole
+    cache raise there and left ``checkpoints_view`` at ``error``. Use the POSIX
+    advisory lock where it exists, ``msvcrt.locking`` where it does not, and an
+    in-process lock either way — so a platform with neither still serialises the
+    writers this process has, and the same thread can never deadlock itself.
+    Atomic replace is what protects READERS, so they take no lock at all.
+    """
+    with _PUBLISH_THREADS.setdefault(str(path), threading.Lock()):
+        handle = None
+        try:
+            try:
+                import fcntl as _fcntl
+            except ImportError:  # pragma: no cover - Windows only
+                _fcntl = None  # type: ignore[assignment]
+            if _fcntl is not None:
+                handle = path.open("a")
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+            else:
+                try:
+                    import msvcrt as _msvcrt
+                except ImportError:  # pragma: no cover - exotic platforms
+                    _msvcrt = None  # type: ignore[assignment]
+                # ``getattr`` because this module is only importable on Windows:
+                # a POSIX type-checker sees a stub without these members, and the
+                # lock's absence there is exactly the branch we are NOT in.
+                locking = getattr(_msvcrt, "locking", None) if _msvcrt else None
+                if _msvcrt is not None and locking is not None:
+                    handle = path.open("a")
+                    handle.seek(0)
+                    locking(handle.fileno(), getattr(_msvcrt, "LK_LOCK", 1), 1)
+            yield
+        finally:
+            if handle is not None:
+                handle.close()
+
+
+def _read_model() -> Any:
+    """The read-model module, imported lazily (it imports this one)."""
+    from local_operator.session import index_read_model
+
+    return index_read_model
+
+
+def write_index(
+    config_dir: str | Path,
+    session_id: str,
+    index: TranscriptIndex,
+    *,
+    expected_publication: tuple[int, int, int] | None = None,
+    previous: tuple[tuple[int, int, int], dict[str, Any]] | None = None,
+) -> None:
+    """Persist the index atomically (unique temp + replace), best-effort.
+
+    THIS IS BASE'S WRITE PATH, plus one small locked step. The canonical document
+    is written exactly as it always was; the read-model companion is NOT built
+    here. Building it on this path cost a measured ~1.3 s per append refresh, so
+    the append's own publication landed after the open it was meant to serve.
+    ``index_read_model.schedule_materialize`` now derives the companion from the
+    completed index afterwards, off this path.
+
+    The one addition inside the lock is the naming merge and its sidecar: naming
+    is mutable metadata a concurrent ``patch_naming`` can overwrite, so the merge
+    and the document it lands in must be one atomic step. Readers never take the
+    lock — atomic replace is what protects them.
+
+    ``expected_publication`` is compare-and-publish for a delayed writer: it
+    republishes only the document it actually read.
+
+    ``previous`` is the document the CALLER already parsed, WITH the identity it
+    was parsed from (``patch_naming`` reads it to build its merge). Handing it in
+    removes a second full JSON decode of an index that is routinely tens of MB —
+    the round-3 M3 cost — and it is safe only because the identity is re-checked
+    under the lock: if the file moved since that parse, the document is re-read, so
+    the merge can never run on a stale view (which is the round-1 R4 defect).
+
+    A FAILURE TO REPLACE IS REPORTED, NEVER SWALLOWED. A previous round fsynced a
+    read-only descriptor and then swallowed the ``OSError`` in a trailing
+    handler; on Windows that meant the index was rebuilt on every open and never
+    written. Durability is taken on the handle that wrote the bytes, and a
+    failure that leaves the old document in place is logged at ERROR level.
+    """
+    from local_operator.session import index_read_model
+
+    path = index_path(config_dir, session_id)
+    payload_ok = False
+    moved = False
+    store: dict[str, Any] | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".{os.getpid()}.{uuid4().hex}.tmp")
+        try:
+            with _publish_lock(path.with_suffix(".publish.lock")):
+                if expected_publication is not None:
+                    current = path.stat()
+                    if (
+                        current.st_ino,
+                        current.st_size,
+                        current.st_mtime_ns,
+                    ) != expected_publication:
+                        return
+                    if not _sig_matches(index.sig, _journal_path(config_dir, session_id).stat()):
+                        return
+                else:
+                    latest = _previous_if_current(previous, path)
+                    if latest is None:
+                        # The sidecar is the same naming section for the same
+                        # publication and costs a few KB; the document costs a full
+                        # decode of the whole index on every write (round-3 M3, and
+                        # the reason a one-row append could miss the open budget).
+                        sidecar = index_read_model.naming_for_root(config_dir, session_id)
+                        latest = (
+                            {"naming": sidecar}
+                            if sidecar is not None
+                            else _read_indexed(config_dir, session_id)[0]
+                        )
+                    if latest is not None:
+                        merged = preserved_naming(latest, {c.id for c in index.checkpoints})
+                        live = {c.id for c in index.checkpoints if c.kind == KIND_USER}
+                        own = index.naming.get("items") if isinstance(index.naming, dict) else None
+                        # UNION with THIS write winning (see round-1 R4): the disk
+                        # read is what a concurrent ``patch_naming`` just landed,
+                        # this index is what the caller derived. Neither clobbers
+                        # the other, and both are filtered to live turns.
+                        items = dict(merged.get("items") or {})
+                        if (
+                            isinstance(own, dict)
+                            and index.naming.get("prompt_version") == NAMING_PROMPT_VERSION
+                        ):
+                            items.update({k: v for k, v in own.items() if k in live})
+                        index.naming = {"prompt_version": NAMING_PROMPT_VERSION, "items": items}
+                # The sidecar is keyed by the DERIVED token, so it is correct even
+                # if the companion lands later; it costs a few KB, not the body.
+                try:
+                    index_read_model.write_naming(
+                        config_dir, session_id, index_read_model.token_for(index), index.naming
+                    )
+                except (OSError, ValueError):
+                    logger.debug("read-model naming unavailable for %s", session_id)
+                # Everything BESIDE the head (a delta frame, a migration link or
+                # a new snapshot) is made durable first; the head replace below
+                # is the one commit point, exactly as base's whole document was.
+                head, store, moved, created = _publish_store(path.parent, session_id, path, index)
+                if created:
+                    # The head is about to NAME a link/snapshot/delta that was
+                    # just created. Sync the directory first so a power loss
+                    # cannot persist the head's rename without that entry (the
+                    # read side copes — a missing file rescans — but that is a
+                    # rebuild this ordering avoids). Only paid when an entry is new.
+                    index_read_model._fsync_directory(path.parent)
+                with tmp.open("w", encoding="utf-8") as handle:
+                    handle.write(json.dumps(head, separators=(",", ":")))
+                    handle.flush()
+                    # fsync the descriptor that WROTE these bytes. A read-only
+                    # handle cannot be synced on Windows, and that is exactly the
+                    # round-2 Q10 defect.
+                    os.fsync(handle.fileno())
+                tmp.replace(path)
+                payload_ok = True
+                try:
+                    st = path.stat()
+                    _remember_parse(path, (st.st_ino, st.st_size, st.st_mtime_ns), index, head)
+                except OSError:
+                    pass
+                if moved:
+                    # INSIDE the lock, unlike the read-model collect below: the
+                    # set this keeps is "what the head names NOW", and only the
+                    # lock makes that true. Outside it, another process could
+                    # commit a newer snapshot between this head and the sweep,
+                    # and the sweep would delete the file its head names. A few
+                    # unlinks is the whole cost. A reader still holding an older
+                    # head re-reads on the missing file (see ``_read_raw``).
+                    _retire(path.parent, session_id, store)
+        finally:
+            tmp.unlink(missing_ok=True)
+    except OSError:
+        if not payload_ok:
+            logger.error(
+                "could not write the transcript index for %s; the previous document is "
+                "still in place and this read serves it",
+                session_id,
+                exc_info=True,
+            )
+        return
+    # Reclaim outside the lock: unlink cost must not sit in the critical section.
+    try:
+        index_read_model.collect(config_dir, session_id, index_read_model.token_for(index))
+    except OSError:
+        pass
+
+
+def _previous_if_current(
+    previous: tuple[tuple[int, int, int], dict[str, Any]] | None, path: Path
+) -> dict[str, Any] | None:
+    """The caller's parsed document, but only if the file has not moved since.
+
+    One ``stat`` under the lock is what makes reusing a parse sound: the same
+    identity means the bytes are the ones the caller read, so the merge sees the
+    truth; any motion falls back to a fresh read.
+    """
+    if previous is None:
+        return None
+    identity, document = previous
+    try:
+        current = path.stat()
+    except OSError:
+        return None
+    if (current.st_ino, current.st_size, current.st_mtime_ns) != identity:
+        return None
+    return document
+
+
+def _document(index: TranscriptIndex) -> dict[str, Any]:
+    """The canonical document, in base's key order (the head reader depends on it)."""
+    return {
         # The LIVE constant, not ``index.version``: a cache must be stamped
         # with the version this build writes, and reading it back compares
         # against the same live constant (see ``_index_from_raw``).
@@ -1022,7 +1875,9 @@ def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex)
         # whole multi-MB document (the paint hold decides that on the event
         # loop). Readers of the document are order-blind (``json.loads``); only
         # the head reader depends on this, and it falls back to the pre-head
-        # rule for any file laid out otherwise.
+        # rule for any file laid out otherwise. The read model derives its own
+        # token from exactly these fields, so publishing a companion needs no
+        # field here and no second canonical write.
         "sig": index.sig,
         "scan": index.scan.to_payload(),
         "journal_generation": index.journal_generation,
@@ -1035,13 +1890,6 @@ def write_index(config_dir: str | Path, session_id: str, index: TranscriptIndex)
         "journal_ranges": index.journal_ranges,
         "source_projection_facts": index.source_projection_facts,
     }
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-        tmp.replace(path)
-    except OSError:
-        logger.warning("could not write the transcript index for %s", session_id, exc_info=True)
 
 
 #: How much of the cache file :func:`_read_resume_head` reads. The head holds
@@ -1055,8 +1903,13 @@ _HEAD_KEYS = ("version", "sig", "scan", "journal_generation")
 
 def _read_resume_head(
     config_dir: str | Path, session_id: str
-) -> tuple[dict[str, Any], ScanState, str] | None:
-    """``(sig, scan, journal_generation)`` from the cache file's first bytes.
+) -> tuple[dict[str, Any], ScanState, str, int] | None:
+    """``(sig, scan, journal_generation, document_bytes)`` from the first bytes.
+
+    ``document_bytes`` comes from the SAME open descriptor's ``fstat``. The paint
+    hold runs on the event loop, so the hydration charge it needs must not cost a
+    second path lookup (``stat``) on that loop: the bounded head read is already
+    happening here, and one ``fstat`` on the handle is all this adds.
 
     WHY (conversation-first-paint R2): the paint hold must decide whether a
     refresh is payable by the bytes it will RE-READ, and that is
@@ -1073,6 +1926,7 @@ def _read_resume_head(
     """
     try:
         with index_path(config_dir, session_id).open("rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
             head = handle.read(_RESUME_HEAD_BYTES)
     except OSError:
         return None
@@ -1093,6 +1947,14 @@ def _read_resume_head(
             if text[position : position + 1] != ",":
                 return None
             position += 1
+        # A store head names its snapshot and committed delta right after the
+        # resume head; a cold refresh decodes all three, so that is the
+        # hydration figure (not the few-KB head's own size).
+        if text.startswith('"store"', position):
+            key, position = decoder.raw_decode(text, position)
+            if text[position : position + 1] == ":":
+                store, position = decoder.raw_decode(text, position + 1)
+                size = _hydration_bytes(size, store)
     except ValueError:
         return None
     sig = values["sig"]
@@ -1105,7 +1967,7 @@ def _read_resume_head(
         or not isinstance(generation, str)
     ):
         return None
-    return sig, scan, generation
+    return sig, scan, generation, size
 
 
 def _rederive_bytes(
@@ -1129,16 +1991,28 @@ def _rederive_bytes(
 
 def _cached_refresh_cost(
     config_dir: str | Path, session_id: str, journal: os.stat_result
-) -> tuple[bool, int | None]:
-    """``(has_previous, rederive_bytes)`` for the paint-path payability rule.
+) -> tuple[bool, int | None, int]:
+    """``(has_previous, rederive_bytes, hydration_bytes)`` without hydrating.
 
-    ``has_previous`` is "a cache file exists" exactly as before; the byte figure
-    is ``None`` when the head cannot state it (see :func:`_read_resume_head`).
+    An exact disk HIT avoids journal work, not ``_read_raw``/``_index_from_raw``:
+    the cache still contains the entire transcript's derived facts. Price that
+    document before starting its uninterruptible JSON step. Both figures come
+    from the ONE bounded head read (its ``fstat`` sizes the document), because
+    this runs inside the paint hold's event-loop decision and a separate ``stat``
+    there would be new loop I/O. Missing/old heads retain the previous
+    unknown-rederivation policy, but an existing document is never free.
+
+    This describes a REFRESH, which reads disk even if an older object is held.
+    A validated resident HIT bypasses refresh in the consumers; charging it here
+    as resident would exempt work that ``refresh_index`` actually still does.
     """
     head = _read_resume_head(config_dir, session_id)
-    if head is not None:
-        return True, _rederive_bytes(journal, *head)
-    return _stat_or_none(index_path(config_dir, session_id)) is not None, None
+    if head is None:
+        # No head means no document this build can vouch for; the pre-head rule
+        # (whatever a fresh reader sees) is the caller's fallback, not ours.
+        return _stat_or_none(index_path(config_dir, session_id)) is not None, None, 0
+    rederive = _rederive_bytes(journal, *head[:3])
+    return True, rederive, head[3]
 
 
 def _sweep_missing(config_dir: str | Path) -> None:
@@ -1158,10 +2032,18 @@ def _sweep_missing(config_dir: str | Path) -> None:
         return
     sessions = Path(config_dir) / "sessions"
     for entry in entries:
-        if entry.suffix != ".json":
+        # A store file is named ``<sid>.snap.<id>.snapshot`` / ``<sid>.delta.<id>.log``:
+        # its owner is the leading id, never the stem (which would read every live
+        # snapshot as an orphan and delete it).
+        store = _STORE_FILE.fullmatch(entry.name)
+        if store is not None:
+            owner = store.group(1)
+        elif entry.suffix == ".json" and "." not in entry.stem:
+            owner = entry.stem
+        else:
             continue
         try:
-            if not (sessions / entry.stem).is_dir():
+            if not (sessions / owner).is_dir():
                 entry.unlink()
         except OSError:
             continue
@@ -1175,9 +2057,22 @@ def patch_naming(config_dir: str | Path, session_id: str, items: dict[str, Any])
     (size -1), so the next refresh treats it as stale, scans the journal, and
     carries the naming forward (see :func:`preserved_naming`). Returns whether
     the write was attempted.
+
+    THIS READ IS OUTSIDE THE LOCK, and that is deliberate rather than a claim:
+    it only decides which document shape to hand ``write_index`` (an existing
+    index, a version-mismatched one, or the empty skeleton). The merge that
+    must be atomic — this patch against whatever a concurrent writer landed —
+    happens INSIDE ``write_index``, which re-reads ``naming`` under the publish
+    lock and unions it with this write winning. An earlier version of this
+    docstring claimed the whole function was under that lock; it never was.
     """
-    raw = _read_raw(config_dir, session_id)
-    index = _index_from_raw(raw)
+    # ``remember=True`` because this read PUBLISHES (review round 2, R2-M1): the
+    # write below computes its delta against the memo's ``base``. A read that
+    # does not fill the memo leaves ``write_index`` with no base on a cold or
+    # foreign-published head, and a naming-only patch then re-serialised the
+    # whole snapshot — once per named turn. The memo is replaced by the
+    # publication straight after, so this retains nothing a probe would not.
+    raw, index = _read_indexed(config_dir, session_id, remember=True)
     if index is not None and raw is not None:
         naming = raw.get("naming")
         merged = dict(naming) if isinstance(naming, dict) else {}
@@ -1187,7 +2082,14 @@ def patch_naming(config_dir: str | Path, session_id: str, items: dict[str, Any])
         merged["prompt_version"] = NAMING_PROMPT_VERSION
         merged["items"] = merged_items
         index.naming = merged
-        write_index(config_dir, session_id, index)
+        # Hand the parse over WITH its identity: write_index would otherwise decode
+        # this same document again under the lock (round-3 M3), and the identity
+        # check there keeps a concurrent patch from being merged over stale bytes.
+        receipt = raw.get("_publication_identity")
+        if isinstance(receipt, tuple) and len(receipt) == 3:
+            write_index(config_dir, session_id, index, previous=(receipt, raw))
+        else:
+            write_index(config_dir, session_id, index)
         return True
     if raw is not None:
         # A document exists but is unreadable or another version's: leave it to
@@ -2366,8 +3268,15 @@ class _Derivation:
                 # rescan. Settled means the earlier scan already decided the
                 # outcome from every marker inside the run's own rows, and a kept
                 # run gains no rows, so the stored value is what a full scan
-                # derives. An UNSETTLED kept run is the previous scan's open tail
-                # (a user-less hub/wake run the window moved past): its stored
+                # derives -- PROVIDED the earlier scan derived it correctly. A run
+                # frozen right after an imperfect recompute (from an unsettled
+                # tail whose start lay outside that scan's window) keeps that
+                # scan's ``None`` until a full rescan: the freeze makes the earlier
+                # error sticky rather than self-healing on the next append. Not a
+                # regression -- the pre-freeze code never healed it either (#3032
+                # review M2: 36 of 4,881 measured steps). An UNSETTLED kept run is
+                # the previous scan's open tail (a user-less hub/wake run the
+                # window moved past): its stored
                 # ``open`` is provisional and its closing marker may sit in this
                 # region, so it keeps the recompute below. The tail is excluded
                 # defensively: a region with no run of its own leaves a kept run
@@ -2722,9 +3631,13 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
             st = path.stat()
         except OSError:
             return None
-        raw = _read_raw(config_dir, session_id)
-        previous = _index_from_raw(raw)
+        raw, previous = _read_indexed(config_dir, session_id, remember=True)
         if previous is not None and previous.journal_generation and _sig_matches(previous.sig, st):
+            from local_operator.session import index_read_model
+
+            # Exact HITs never reach write_index. Reuse this parsed snapshot for
+            # migration; the async refresher schedules it on return from workers.
+            index_read_model.schedule_materialize(config_dir, session_id, previous)
             return previous
         try:
             if (
@@ -2766,8 +3679,20 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
         # to this copy. Per-key the disk wins: an item there is the newer write
         # for its turn key, while keys only the scan carries (version-bump
         # preservation) stay put.
+        # THE NAMING SIDECAR FIRST (review round 5, MAJOR-2). This merge only
+        # needs the newest ``naming`` section, and the sidecar carries exactly that
+        # for the publication on disk — including when the journal has moved, which
+        # is the append case. Reading the document here decoded the whole index a
+        # second time on every append (measured: ~90 ms on an 11 MB document);
+        # the sidecar is a few KB. Precedence is unchanged: the section is still
+        # merged with the disk winning per turn key.
+        sidecar = _read_model().naming_for_root(config_dir, session_id)
         fresh_section = preserved_naming(
-            _read_raw(config_dir, session_id),
+            (
+                {"naming": sidecar}
+                if sidecar is not None
+                else _read_indexed(config_dir, session_id)[0]
+            ),
             {c.id for c in index.checkpoints if c.kind == KIND_USER},
         )
         if fresh_section["items"]:
@@ -2805,8 +3730,7 @@ def probe_index(config_dir: str | Path, session_id: str) -> IndexProbe:
         st = path.stat()
     except OSError:
         return IndexProbe(state="missing", index=None, built_at=None)
-    raw = _read_raw(config_dir, session_id)
-    index = _index_from_raw(raw)
+    _raw, index = _read_indexed(config_dir, session_id)
     cache_path = index_path(config_dir, session_id)
     try:
         built_at = cache_path.stat().st_mtime
@@ -2846,6 +3770,7 @@ def scan_payable_in_budget(
     has_previous: bool,
     wait_s: float,
     rederive_bytes: int | None = None,
+    hydration_bytes: int = 0,
 ) -> bool:
     """Whether a refresh can plausibly land inside a first-paint wait of ``wait_s``.
 
@@ -2865,12 +3790,19 @@ def scan_payable_in_budget(
     load; 101 ms with the scan deferred). ``rederive_bytes`` is that re-read;
     ``None`` means the caller could not state it (a cache laid out before the
     resume head) or chose not to (the manifest wager -- see the note at its call
-    in :func:`checkpoints_view`), which keeps the old answer: payable.
+    in :func:`checkpoints_view`), preserving the old unknown-rederivation
+    allowance. Callers that have proven a complete request projection can use
+    ``hydration_bytes`` to account its avoided disk work. Generic shared-flight
+    predicates deliberately retain original admission (see _defer_for_paint).
     """
+    # Hydration and rederivation spend ONE budget, not two independent wagers.
+    # Use the existing planning rate for both; this is a scheduling estimate,
+    # not a promise about wall time on a contended host. An exact disk signature
+    # removes only journal work; never infer zero hydration from that signature.
     budget = _FIRST_PAINT_SCAN_BYTES_PER_S * wait_s
     if has_previous:
-        return rederive_bytes is None or rederive_bytes <= budget
-    return journal_bytes is not None and journal_bytes <= budget
+        return hydration_bytes + (rederive_bytes or 0) <= budget
+    return journal_bytes is not None and hydration_bytes + journal_bytes <= budget
 
 
 # ---------------------------------------------------------------------------
@@ -2911,6 +3843,11 @@ def scan_payable_in_budget(
 #: this is the backstop for a hold whose release was somehow missed, not a
 #: budget anyone is expected to reach.
 _PAINT_HOLD_CEILING_S = 15.0
+
+#: In-process writer serialisation per publish-lock path. USED BY EVERY PLATFORM:
+#: the advisory lock is cross-PROCESS, this one is cross-THREAD, and neither
+#: replaces the other (a thread cannot flock its own descriptor twice safely).
+_PUBLISH_THREADS: dict[str, threading.Lock] = {}
 
 #: Live hold counts per session key. LOOP-ONLY MUTATION, like ``_IN_FLIGHT``.
 _PAINT_HOLDS: dict[tuple[str, str], int] = {}
@@ -3047,6 +3984,9 @@ _YIELD_SLICE_S = 0.002
 _YIELD_BUDGET_S = 2.0
 #: A hold older than this is not a first frame still being built (a cold one on
 #: a loaded host is a few seconds at worst); it is ignored, not yielded to.
+#: Consequence: an open still building its first frame after 5 s loses its
+#: priority, and background refreshes compete with it for the GIL exactly as
+#: they did before #3026 (#3026 review N1).
 _YIELD_HOLD_STALE_S = 5.0
 
 
@@ -3083,7 +4023,9 @@ def _yield_to_other_opens(
             if journal is None:
                 unpayable = False
             else:
-                has_previous, rederive = _cached_refresh_cost(config_dir, session_id, journal)
+                has_previous, rederive, _hydration = _cached_refresh_cost(
+                    config_dir, session_id, journal
+                )
                 unpayable = not scan_payable_in_budget(
                     journal.st_size,
                     has_previous=has_previous,
@@ -3187,7 +4129,7 @@ def refresh_paused_for_paint(config_dir: str | Path, session_id: str) -> bool:
     journal = _stat_or_none(_journal_path(config_dir, session_id))
     if journal is None:
         return False
-    has_previous, rederive = _cached_refresh_cost(config_dir, session_id, journal)
+    has_previous, rederive, _hydration = _cached_refresh_cost(config_dir, session_id, journal)
     return not scan_payable_in_budget(
         journal.st_size,
         has_previous=has_previous,
@@ -3213,13 +4155,13 @@ def _defer_for_paint(config_dir: str | Path, session_id: str) -> asyncio.Event |
     journal = _stat_or_none(_journal_path(config_dir, session_id))
     if journal is None:
         return None
-    # A cache file on disk stands in for "a previous index", and its HEAD for
-    # what the refresh will re-read: parsing the whole document here would be
-    # the very work this defers. A cache that exists but whose head does not
-    # state the figure makes this answer "payable" and the scan run now --
-    # today's behaviour, never a deferral the manifest's own rule would not have
-    # made.
-    has_previous, rederive = _cached_refresh_cost(config_dir, session_id, journal)
+    # Keep ORIGINAL fallback admission here. Hydration is real work (reported
+    # separately by the cost helper), but this shared flight does not know which
+    # complete facts its callers acquired. A summary/previous successful read is
+    # not enough to strand a later corrupt/stale fallback behind its own hold.
+    # Ready projection consumers return their materialized result WITHOUT
+    # scheduling hydration; only that request has the capability proof.
+    has_previous, rederive, _hydration = _cached_refresh_cost(config_dir, session_id, journal)
     if scan_payable_in_budget(
         journal.st_size,
         has_previous=has_previous,
@@ -3253,7 +4195,7 @@ def resident(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
 
 
 def _journal_order_doc(
-    index: TranscriptIndex, entry_id: str, seq: int, role: str
+    index: TranscriptIndex | FrameSelection, entry_id: str, seq: int, role: str
 ) -> MessageDoc | None:
     """Exact existing doc at a raw ordinal; no body/history scan or role guess."""
     if type(seq) is not int or seq < 0 or index.journal_rows.get(entry_id) != seq:
@@ -3269,7 +4211,9 @@ def _journal_order_doc(
     )
 
 
-def journal_order_opener(index: TranscriptIndex, entry_id: str, seq: int) -> tuple[str, int] | None:
+def journal_order_opener(
+    index: TranscriptIndex | FrameSelection, entry_id: str, seq: int
+) -> tuple[str, int] | None:
     """The genuine run opener of an exact source assistant, not a viewer guess.
 
     Sparse ready corrections previously stated an assistant's coordinate while
@@ -3429,11 +4373,20 @@ def fresh_resident(config_dir: str | Path, session_id: str) -> TranscriptIndex |
     file and never waits: the caller decides what to do with ``None`` (the open
     frame starts a refresh and answers without facts — see ``open_frame``).
 
-    Synchronous on purpose. Its two ``stat`` calls are microseconds, and every
-    caller runs in a worker thread (the page builder is invoked through
-    ``asyncio.to_thread``), so there is no event loop to block — and keeping it
+    Synchronous on purpose. Its two ``stat`` calls — paid only on the resident
+    branch — are microseconds, and the page builder's callers invoke it through
+    ``asyncio.to_thread``, so there is no event loop to block — and keeping it
     sync is what lets it share the revalidation rule with the async callers
     instead of re-implementing it around ``await``.
+
+    ONE CALLER IS ON THE EVENT LOOP, AND THAT IS BOUNDED. The desktop bridge's
+    ``_warm_resident_scan`` asks this on the request's own thread to decide
+    whether a background scan is owed at all; answering that costs a bare
+    ``_RESIDENT.get()`` and no ``stat`` at all when nothing is resident, and the
+    two stats above — tens of microseconds — when something is. Skipping the ask
+    would mean arming a scan the cache is about to make pointless. Every other
+    caller is still a worker, so the pair stays inside a frame's noise rather
+    than on a paint path's budget.
     """
     key = _key(config_dir, session_id)
     index = _RESIDENT.get(key)
@@ -3503,7 +4456,12 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Tas
         # worker: only this refresh yields, and ``refresh_index``'s signature
         # (which tests and callers substitute) stays two-argument.
         _YIELD_TO.set(_yield_to_other_opens(key, config_dir, session_id))
-        return await asyncio.to_thread(refresh_index, config_dir, session_id)
+        result = await asyncio.to_thread(refresh_index, config_dir, session_id)
+        if result is not None:
+            from local_operator.session import index_read_model
+
+            index_read_model.schedule_materialize(config_dir, session_id, result)
+        return result
 
     async def _wrapped() -> TranscriptIndex | None:
         try:
@@ -3540,54 +4498,52 @@ def start_refresh(config_dir: str | Path, session_id: str) -> "tuple[asyncio.Tas
     return task, True
 
 
+def resolve_naming_items(
+    checkpoints: list[Checkpoint], naming: Any
+) -> list[tuple[Checkpoint, Any]]:
+    """Pair each checkpoint with the raw naming item its turn owns.
+
+    THE ONE SPELLING of the turn policy, shared by the canonical manifest and the
+    read model: a completion belongs to the LAST user checkpoint of its turn, and
+    only a prompt-version-matching section supplies items at all.
+    """
+    section = naming if isinstance(naming, dict) else {}
+    items = section.get("items") if section.get("prompt_version") == NAMING_PROMPT_VERSION else {}
+    items = items if isinstance(items, dict) else {}
+    users = {c.turn: c.id for c in checkpoints if c.kind == KIND_USER}
+    return [
+        (c, items.get(users.get(c.turn)) if c.kind == KIND_COMPLETION else None)
+        for c in checkpoints
+    ]
+
+
+def checkpoint_entry(checkpoint: Checkpoint, item: Any) -> dict[str, Any]:
+    """Evaluate naming at read time: cooldown expiry needs no publication write."""
+    from local_operator.session import checkpoint_naming
+
+    entry = checkpoint.to_payload()
+    if checkpoint.kind == KIND_COMPLETION:
+        state = checkpoint_naming.naming_state(item)
+        entry["naming"] = {
+            "state": state,
+            "name": item.get("name") if state == "ready" and isinstance(item, dict) else None,
+            "summary": (
+                (item.get("summary") or "") if state == "ready" and isinstance(item, dict) else None
+            ),
+        }
+    return entry
+
+
 def _manifest_state(
     session_id: str, state: str, index: TranscriptIndex | None, built_at: float | None
 ) -> dict[str, Any]:
     """The D9 wire shape for the checkpoints manifest."""
     checkpoints: list[dict[str, Any]] = []
     if index is not None:
-        # The naming slice owns the STATE semantics for its section; this
-        # module only serves them. Function-local because the dependency runs
-        # the other way at module scope (``checkpoint_naming`` imports this
-        # module for the cache API, and a top-level import here would be a
-        # cycle). The derive covers all three states: a named item is
-        # ``ready``, an item inside ``NAMING_UNAVAILABLE_COOLDOWN_S`` of its
-        # ``failed_ts`` is ``unavailable`` (warm writes that marker on a
-        # failed call), and anything else is ``pending``.
-        from local_operator.session import checkpoint_naming
-
-        naming = index.naming if isinstance(index.naming, dict) else {}
-        items = naming.get("items") if naming.get("prompt_version") == NAMING_PROMPT_VERSION else {}
-        items = items if isinstance(items, dict) else {}
-        user_id_for_turn = {c.turn: c.id for c in index.checkpoints if c.kind == KIND_USER}
-        for checkpoint in index.checkpoints:
-            entry: dict[str, Any] = {
-                "id": checkpoint.id,
-                "kind": checkpoint.kind,
-                "turn": checkpoint.turn,
-                "ts": checkpoint.ts,
-                "seq": checkpoint.seq,
-                "text": checkpoint.text,
-            }
-            if checkpoint.outcome is not None:
-                entry["outcome"] = checkpoint.outcome
-            if checkpoint.kind == KIND_COMPLETION:
-                turn_key = user_id_for_turn.get(checkpoint.turn)
-                item = items.get(turn_key) if turn_key else None
-                item_state = checkpoint_naming.naming_state(item)
-                if item_state == "ready" and isinstance(item, dict):
-                    entry["naming"] = {
-                        "state": "ready",
-                        "name": item.get("name"),
-                        "summary": item.get("summary") or "",
-                    }
-                else:
-                    entry["naming"] = {
-                        "state": item_state,
-                        "name": None,
-                        "summary": None,
-                    }
-            checkpoints.append(entry)
+        checkpoints = [
+            checkpoint_entry(c, item)
+            for c, item in resolve_naming_items(index.checkpoints, index.naming)
+        ]
     payload: dict[str, Any] = {"session_id": session_id, "index": {"state": state}}
     if built_at is not None:
         payload["index"]["built_at"] = built_at
@@ -3628,6 +4584,15 @@ async def checkpoints_view(
         if st is not None and _sig_matches(resident_index.sig, st) and cache_stable:
             _RESIDENT.move_to_end(key)
             return _manifest_state(session_id, "ready", resident_index, _mtime_or_none(cache_st))
+    from local_operator.session import index_read_model
+
+    projected = await asyncio.to_thread(
+        index_read_model.checkpoint_manifest, config_dir, session_id
+    )
+    if projected.state == "ready":
+        return projected.value
+    # Legacy, stale, corrupt and archive cases retain the correct prior payload
+    # and its cost. A compact optimization is never authority to drop rail facts.
     probe = await asyncio.to_thread(probe_index, config_dir, session_id)
     if probe.state == "missing":
         # No journal: a draft or a session with nothing written yet. An empty
@@ -3636,6 +4601,7 @@ async def checkpoints_view(
     if probe.state == "ready":
         if probe.index is not None:
             _remember(key, probe.index, probe.built_at)
+            index_read_model.schedule_materialize(config_dir, session_id, probe.index)
         return _manifest_state(session_id, "ready", probe.index, probe.built_at)
 
     failed_at = _FAILURES.get(key)
@@ -3671,11 +4637,14 @@ async def checkpoints_view(
         # wait is an idle `await` (no CPU, no paint) that answers `building` at
         # the budget, while a refused wait answers `building` where the scan
         # might have landed — the regression QA Q1 pinned. And a refresh the
-        # hold deferred is already never awaited (`refresh_deferred` below).
+        # hold defers OR pauses is never awaited: the shared pause predicate
+        # below uses the same original rederivation admission as the worker.
+        # Ready probes still return above; changing their acquisition requires
+        # complete witnessed facts, not replacing that ready answer with building.
         payable = scan_payable_in_budget(
             probe.journal_bytes, has_previous=probe.index is not None, wait_s=wait_s
         )
-        if payable and not refresh_deferred(config_dir, session_id):
+        if payable and not refresh_paused_for_paint(config_dir, session_id):
             done, _pending = await asyncio.wait({task}, timeout=wait_s)
             settled = task in done
         else:
@@ -3732,8 +4701,16 @@ def _reset_for_tests() -> None:
     _IN_FLIGHT.clear()
     _RESIDENT.clear()
     _RESIDENT_STAMP.clear()
+    with _PARSED_LOCK:
+        _PARSED.clear()
     _FAILURES.clear()
     _PAINT_HOLDS.clear()
     _PAINT_HOLD_SINCE.clear()
     _PAINT_RELEASED.clear()
     _DEFERRED.clear()
+    # The read model's own in-process state is keyed by the same roots, so a
+    # suite that re-creates a tmp_path must not inherit a memo or a remembered
+    # publication failure from the previous one.
+    from local_operator.session import index_read_model
+
+    index_read_model.reset_for_tests()

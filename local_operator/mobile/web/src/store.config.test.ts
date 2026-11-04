@@ -9,8 +9,9 @@
  */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BUNDLED_OWNED } from "./i18n/bundled.gen";
-import { initializeLocaleMetadata, messageRuntime, retainConfigStream, useLanguage, useLocaleSnapshot } from "./store";
+import { BUNDLED_CHUNKS, BUNDLED_OWNED } from "./i18n/bundled.gen";
+import { RESOLVED_LOCALES } from "./i18n/runtime";
+import { initializeLocaleMetadata, localeBundleLoader, messageRuntime, retainConfigStream, useLanguage, useLocaleSnapshot } from "./store";
 
 import { FetchStreamFixture as Stream, settleStream } from "./sse-test-fixture";
 
@@ -43,9 +44,13 @@ describe("retainConfigStream", () => {
 		// relay.approvals is the approvals-policy slice's own en-only copy (the
 		// policy state line, the global scope and the mode-change links).
 		// relay.notifications is the phone inbox's own (#/notifications).
+		// relay.skills is the composer's `$skill` picker (SKM-D6): its tray
+		// labels and the one skipped-skill notice.
+		// relay.agent_avatar is the agent picture's alt/label/desktop hint.
 		const ownedNamespaces = Object.keys(BUNDLED_OWNED).sort();
 		expect(ownedNamespaces).toEqual([
 			"relay.account_policy",
+			"relay.agent_avatar",
 			"relay.approvals",
 			"relay.ask",
 			"relay.asks",
@@ -56,6 +61,7 @@ describe("retainConfigStream", () => {
 			"relay.session",
 			"relay.session.tags",
 			"relay.shell",
+			"relay.skills",
 			"relay.transcript",
 		]);
 		const registrations = Object.values(BUNDLED_OWNED).reduce(
@@ -66,20 +72,71 @@ describe("retainConfigStream", () => {
 		expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
 		expect(fetchMock).not.toHaveBeenCalled(); unmount();
 	});
-	it("keeps backend fr separate from English UI and publishes same-locale registration via existing subscription", async () => {
+	it("follows the shipped fr bundle, falls back to English for an unshipped locale (when one exists), and publishes same-locale registration", async () => {
 		vi.useFakeTimers(); Stream.instances = [];
 		vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(configOk()).mockImplementation(Stream.fetch));
+		// Hold the French chunk open for the whole test: the frame only STARTS the
+		// request, and this stub is what that request waits on. Racing the real
+		// chunk — the manifest's own lazy loader for the generated French bundle —
+		// made the frame-time assertion below a scheduling coin-flip (measured 4/4
+		// cold three-file runs and 2/10 single-test repeats red): a chunk that
+		// settles before the assertion reads the store has already flipped the
+		// surface to French, which is the store behaving correctly read back as a
+		// failure. `BUNDLED_CHUNKS` is the seam the loader reads at call time
+		// (`start` does `manifest[locale]`), and the one
+		// `store.locale-bootstrap.test.ts` already patches to hold a chunk open.
+		// The module is therefore reached only THROUGH the manifest here: spelling
+		// its path as a quoted relative specifier in prose fails the packaging guard,
+		// whose import scanner reads comments too
+		// (`tests/unit/mobile/test_web_package_data.py`).
+		const manifest = BUNDLED_CHUNKS as Record<string, () => Promise<{ readonly BUNDLED_LOCALE: typeof BUNDLED_OWNED }>>;
+		const realFr = manifest["fr"];
+		let releaseFr!: () => void;
+		const frHeld = new Promise<void>(resolve => { releaseFr = resolve; });
+		manifest["fr"] = async () => { await frHeld; return realFr(); };
 		initializeLocaleMetadata();
 		const languageHook = renderHook(() => useLanguage());
 		const snapshotHook = renderHook(() => useLocaleSnapshot());
+		// The locale for the FALLBACK half of this contract: supported by the
+		// product, but with no owned relay catalogue, so its preference may not
+		// claim copy nobody translated. It is DERIVED from the generated manifest
+		// rather than named, because the shipped set moves while a branch is open:
+		// vi shipped with #3163, es with #3172, and the hi catalogue (#3166) is still
+		// in flight, and a hardcoded locale goes red the day one of them lands and
+		// invites a "fix" that deletes this assertion. Shipped-ness is read from
+		// `BUNDLED_CHUNKS`, never `BUNDLED_OWNED`: the eager map is English only, so
+		// asking it would call every locale unshipped and pick one that has copy.
+		const unshipped = RESOLVED_LOCALES.find(
+			locale => locale !== "en" && !(locale in BUNDLED_CHUNKS),
+		);
+		// Before any frame opens the request, a SHIPPED locale owns no registered copy
+		// and is therefore English: read straight off the registry, so no async path
+		// can have moved it. (The frame-time half below is the same claim seen through
+		// the store; the unshipped arm pins it for a locale no chunk can ever cover.)
+		expect(messageRuntime.uiLocaleFor("fr")).toBe("en");
 		const close = retainConfigStream();
 		try {
 			await settleStream(); expect(Stream.instances).toHaveLength(1);
 			const source = Stream.instances[0];
 			await act(async () => { source.emit("config", JSON.stringify({ language: "fr" })); await settleStream(); });
 			expect(languageHook.result.current).toBe("fr");
+			// A frame publishes the PREFERENCE at once and only STARTS the locale's
+			// chunk request (`BUNDLED_CHUNKS`), so the surface is still the whole English
+			// bundle here: uiLocale follows copy that has actually been registered, never
+			// the preference alone.
 			expect(snapshotHook.result.current).toMatchObject({ backendLocale: "fr", uiLocale: "en", direction: "ltr" });
 			expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
+			// The other half of the same contract: once the chunk lands — awaited through
+			// the store's own loader, the door the frame already opened — French copy
+			// exists and the UI and the document both move to it. Asserting only one of
+			// these halves goes green on a store that never follows the copy OR on one
+			// that claims a language nobody has.
+			releaseFr();
+			// `ensure` joins the request the frame already started (the held stub), so
+			// the flip below is still observed through the store's own loader.
+			await act(async () => { await localeBundleLoader.ensure("fr"); });
+			expect(snapshotHook.result.current).toMatchObject({ backendLocale: "fr", uiLocale: "fr", direction: "ltr" });
+			expect(document.documentElement.lang).toBe("fr"); expect(document.documentElement.dir).toBe("ltr");
 			const previous = snapshotHook.result.current;
 			act(() => { messageRuntime.registerWire("wire.exec", "fr", { "wire.exec.error_line": "Fixture {error}" }); });
 			expect(snapshotHook.result.current.revision).toBe(previous.revision + 1);
@@ -87,10 +144,29 @@ describe("retainConfigStream", () => {
 			for (const invalid of ["auto", "fr-CA", "bogus", ""]) await act(async () => { source.emit("config", JSON.stringify({ language: invalid })); await settleStream(); });
 			expect(snapshotHook.result.current).toBe(registered);
 			expect(languageHook.result.current).toBe("fr");
-		} finally { close(); languageHook.unmount(); snapshotHook.unmount(); }
+			// The fallback direction, and the assertion that goes red if the store
+			// ever follows the backend preference blindly: the preference lands, but
+			// the UI and the document stay on the whole English bundle. The arm needs
+			// a locale with no relay catalogue and es (#3164) / hi (#3166) are the last
+			// two, so it is skipped rather than asserted once that gap closes: a green
+			// run must not depend on a locale being untranslated.
+			if (unshipped !== undefined) {
+				await act(async () => { source.emit("config", JSON.stringify({ language: unshipped })); await settleStream(); });
+				expect(snapshotHook.result.current).toMatchObject({ backendLocale: unshipped, uiLocale: "en", direction: "ltr" });
+				expect(document.documentElement.lang).toBe("en"); expect(document.documentElement.dir).toBe("ltr");
+			}
+		} finally {
+			close(); languageHook.unmount(); snapshotHook.unmount();
+			// Restore even when an assertion above failed: a stub left behind would hold
+			// the next test's French chunk open for ever.
+			manifest["fr"] = realFr;
+		}
 		const offline = renderHook(() => useLocaleSnapshot());
-		expect(offline.result.current.backendLocale).toBe("fr");
-		expect(offline.result.current.uiLocale).toBe("en");
+		// After the stream closes the preference survives; the copy it selects does
+		// not, because that locale owns none. With no unshipped locale left the last
+		// accepted preference is the shipped fr, whose copy does exist.
+		expect(offline.result.current.backendLocale).toBe(unshipped ?? "fr");
+		expect(offline.result.current.uiLocale).toBe(unshipped === undefined ? "fr" : "en");
 		offline.unmount();
 	});
 	afterEach(() => {
@@ -192,6 +268,107 @@ describe("retainConfigStream", () => {
 	});
 });
 
+describe("config probe lifecycle", () => {
+	afterEach(() => {
+		vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals();
+		localStorage.clear(); Stream.instances = [];
+	});
+
+	it("times out silent headers, retries and preserves the draft without reloading", async () => {
+		vi.useFakeTimers(); vi.resetModules();
+		const fresh = await import("./store");
+		const reload = vi.fn(); vi.stubGlobal("location", { reload });
+		let signal: AbortSignal | undefined;
+		const fetchMock = vi.fn()
+			.mockImplementationOnce((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+				signal = init.signal!;
+				signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+			}))
+			.mockResolvedValueOnce(configOk()).mockImplementation(Stream.fetch);
+		vi.stubGlobal("fetch", fetchMock);
+		localStorage.setItem("lo-mobile-draft:probe-timeout", "keep");
+		const close = fresh.retainConfigStream();
+		try {
+			await vi.advanceTimersByTimeAsync(35_300); await settleStream();
+			expect(signal?.aborted).toBe(true);
+			expect(fetchMock).toHaveBeenCalledTimes(3);
+			expect(Stream.instances).toHaveLength(1);
+			expect(reload).not.toHaveBeenCalled();
+			expect(localStorage.getItem("lo-mobile-draft:probe-timeout")).toBe("keep");
+		} finally { close(); }
+	});
+
+	it("does not wait for body cancellation after capability headers arrive", async () => {
+		vi.useFakeTimers(); vi.resetModules();
+		const fresh = await import("./store");
+		const response = new Response("unread", { headers: { "content-type": "text/event-stream" } });
+		vi.spyOn(response.body!, "cancel").mockReturnValue(new Promise(() => {}));
+		const fetchMock = vi.fn().mockResolvedValueOnce(response).mockImplementation(Stream.fetch);
+		vi.stubGlobal("fetch", fetchMock);
+		const close = fresh.retainConfigStream();
+		try {
+			await settleStream();
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			expect(Stream.instances).toHaveLength(1);
+		} finally { close(); }
+	});
+
+	it.each(["online", "pageshow", "visibilitychange"])("replaces a silent probe after %s wakes the suspended page", async event => {
+		vi.useFakeTimers(); vi.resetModules();
+		const fresh = await import("./store");
+		const reload = vi.fn(); vi.stubGlobal("location", { reload });
+		let respond!: (response: Response) => void;
+		let signal: AbortSignal | undefined;
+		const fetchMock = vi.fn()
+			.mockImplementationOnce((_url: string, init: RequestInit) => {
+				signal = init.signal!;
+				return new Promise<Response>(resolve => { respond = resolve; });
+			})
+			.mockResolvedValueOnce(configOk()).mockImplementation(Stream.fetch);
+		vi.stubGlobal("fetch", fetchMock);
+		const close = fresh.retainConfigStream();
+		try {
+			// Wall time passes while the browser has suspended its timers. The wake
+			// must replace the old leg without waiting for the overdue deadline.
+			vi.setSystemTime(Date.now() + 20_001);
+			(event === "visibilitychange" ? document : window).dispatchEvent(new Event(event));
+			await settleStream();
+			expect(signal?.aborted).toBe(true);
+			expect(fetchMock).toHaveBeenCalledTimes(3);
+			expect(Stream.instances).toHaveLength(1);
+			// A fetch completion already queued before abort may still arrive.
+			// The replaced leg must not invalidate the new leg's private state.
+			localStorage.setItem("lo-mobile-draft:probe-replaced", "keep");
+			respond(new Response(null, { status: 401 })); await settleStream();
+			expect(reload).not.toHaveBeenCalled();
+			expect(localStorage.getItem("lo-mobile-draft:probe-replaced")).toBe("keep");
+			window.dispatchEvent(new Event("online")); await settleStream();
+			expect(fetchMock).toHaveBeenCalledTimes(3);
+		} finally { close(); }
+	});
+
+	it("aborts a disposed probe and ignores its late 401 before auth cleanup", async () => {
+		vi.useFakeTimers(); vi.resetModules();
+		const fresh = await import("./store");
+		const reload = vi.fn(); vi.stubGlobal("location", { reload });
+		let respond!: (response: Response) => void;
+		let signal: AbortSignal | undefined;
+		const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+			signal = init?.signal ?? undefined;
+			return new Promise<Response>(resolve => { respond = resolve; });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const close = fresh.retainConfigStream(); close();
+		localStorage.setItem("lo-mobile-draft:probe-disposed", "new draft");
+		respond(new Response(null, { status: 401 })); await settleStream();
+		expect.soft(signal?.aborted).toBe(true);
+		expect.soft(reload).not.toHaveBeenCalled();
+		expect.soft(localStorage.getItem("lo-mobile-draft:probe-disposed")).toBe("new draft");
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+});
+
 // An auth failure during capability negotiation is not a transient lack of
 // config-stream support. Concurrent probes/streams share one page-wide reload.
 it("config probe 401 clears private state once and stops before streaming", async () => {
@@ -237,8 +414,11 @@ describe("resolveInitialLocale", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 		expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/config/events");
 		const { result, unmount } = renderHook(() => fresh.useLocaleSnapshot());
-		expect(result.current.uiLocale).toBe("ur");
-		expect(result.current.direction).toBe("rtl");
+		// The baseline frame names the backend locale AND its chunk is awaited
+		// inside the bootstrap budget, so the snapshot the first paint reads is
+		// already Urdu: an English frame here is the round-2 regression
+		// (`store.locale-bootstrap.test.ts` pins both sides of the budget).
+		expect(result.current).toMatchObject({ backendLocale: "ur", uiLocale: "ur", direction: "rtl" });
 		expect(document.documentElement.lang).toBe("ur");
 		expect(document.documentElement.dir).toBe("rtl");
 		unmount();

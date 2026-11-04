@@ -48,9 +48,11 @@ them actually moved, plus one bounded authoritative read every
 read. That is what makes detection p50 ~60 ms where the per-session poll's floor
 was 1 s.
 
-COST, CONTINUED — the FOUR 1 s invalidation probes are NOT in that eight-stat figure:
-the catalogue's, the authoring one (O(profiles)), the code-request one (one ``readdir``
-of the derived code-request index plus one ``os.stat`` per session WITH rows — usually
+COST, CONTINUED — the FIVE 1 s invalidation probes are NOT in that eight-stat figure:
+the approvals one (two directory stats; record reads only on movement/expiry,
+with failures backing off on the same clock), the catalogue's, the authoring one
+(O(profiles)), the code-request one (one ``readdir`` of the derived code-request
+index plus one ``os.stat`` per session WITH rows — usually
 zero, since most sessions never touch a pull request, and one small file read per
 CHANGED index), and the inbox's asks-index one (one ``readdir`` of ``asks/`` plus one
 ``os.stat`` per session with asks, the same shape). The catalogue probe is a readdir and
@@ -650,6 +652,10 @@ class DesktopFeed:
         #: is the invalidation cadence, and a second number here would be a second
         #: clock to keep in step for no reason.
         self._authoring_probed_at = 0.0
+        #: ``{agent_id: sha256 | None}`` as of the last avatar probe, and its clock.
+        #: ``None`` until the connection baseline sets it (no replay on connect).
+        self._avatar_shas: dict[str, str | None] | None = None
+        self._avatar_probed_at = 0.0
         #: The monotone counter clients compare against, for the catalogue
         #: counter's own reason (a repeatable hash token cannot tell a client "this
         #: is new"). ``open`` reports this value, so a connecting client's view is
@@ -717,6 +723,13 @@ class DesktopFeed:
         #: doorbell that moved without changing the counts or the high-water
         #: mark (a WAL checkpoint, a no-op connect) publishes nothing.
         self._notifications_seen: tuple[int, int, int, int] | None = None
+        # Approval records are atomically replaced in two flat directories.
+        # Their directory stats are the cheap cross-process doorbell; expiry
+        # also owes a read even when no file moves. No network/peer is dialled.
+        self._approvals_token: tuple[Any, ...] | None = None
+        self._approvals_pending: bool | None = None
+        self._approvals_expiry = 0.0
+        self._approvals_probed_at = float("-inf")
         #: When the inbox read last warned, so a corrupt store reports once a
         #: minute instead of once per 100 ms tick.
         self._inbox_warned_at = 0.0
@@ -1229,6 +1242,9 @@ class DesktopFeed:
         # than the clock means the first tick re-probes and still publishes
         # nothing — so a change landing in that first second is still caught.
         self._authoring_token = self._authoring_probe()
+        # The AVATAR baseline, on the same no-replay rule: pictures that predate
+        # this connection are already in the rows the client is loading.
+        self._avatar_shas = self._avatar_probe()
         # The CODE-REQUEST baseline, per session and on the same rule: priming the tokens
         # (not the clock) means the first tick re-probes and still publishes nothing for a
         # list the client is already loading, while a change landing inside that first
@@ -1241,6 +1257,20 @@ class DesktopFeed:
         # An unreadable store leaves this ``None`` (unknown), which is what
         # stops a failed read being announced as "0 unread" on connect.
         self._notifications_seen = self._notifications_state_or_none()
+        # The ticker owns this first-connection baseline, just like the inbox.
+        # Priming it suppresses a fabricated None -> False edge on a quiet
+        # start; subscriber open snapshots must never commit this shared state.
+        self._approvals_probed_at = time.monotonic()
+        try:
+            (
+                self._approvals_token,
+                self._approvals_pending,
+                self._approvals_expiry,
+            ) = self._approval_snapshot()
+        except Exception:  # noqa: BLE001 — an optional store remains unknown
+            self._approvals_token = None
+            self._approvals_pending = None
+            self._approvals_expiry = 0.0
         candidates = [*records, *self._wake_index, *self._monitor_index, *names]
         states = self.store.state_many([f"session/{session_id}" for session_id in candidates])
         for identity, state in states.items():
@@ -1432,6 +1462,8 @@ class DesktopFeed:
         # test rather than left to be read as a regression of the five-stat tick
         # above — it runs on the 1 s cadence, not on the tick.
         await self._maybe_emit_authoring()
+        # 6b. THE AVATAR CHANGE SIGNAL (``agent.avatar.changed``).
+        await self._maybe_emit_avatar_changes()
         # 7. THE CODE-REQUEST INVALIDATION, per session. Outside the doorbell branch for
         # the authoring channel's reason and one of its own: the index lives under the
         # CONFIG root, which this tick's five-stat doorbell never looks at, and it is
@@ -1442,6 +1474,7 @@ class DesktopFeed:
         # three stats per tick on ``notifications.db`` and its two sidecars —
         # the documented eight-stat tick — and the asks index on the 1 s probe.
         await self._maybe_emit_notifications()
+        await self._maybe_emit_approvals()
         # 9. THE ITEM BANNER LEG (docs/design/notifications-inbox.md §5.3/rung 2):
         # only while a live desktop lease advertises the `update` kind, and only
         # for revisions nothing has claimed yet.
@@ -2203,6 +2236,48 @@ class DesktopFeed:
         self._authoring_revision += 1
         self._publish("authoring", {"revision": self._authoring_revision})
 
+    def _avatar_probe(self) -> dict[str, str | None]:
+        """``{agent_id: avatar sha256 | None}`` from the shared, stat-memoised index.
+
+        A probe of ``agent.yml`` rather than a subscription to the in-process
+        ``agent_avatar.subscribe`` hook, because the CLI (``lop agents picture``)
+        and an agent's bash call write from ANOTHER process, which no in-process
+        hook can hear -- the contract's "consumers reconcile on agent.yml". One
+        mechanism therefore covers both origins. ``agent_index`` re-parses only
+        when an ``agent.yml`` stat moved, so a quiet store costs a readdir and a
+        stat per agent per second, the authoring probe's own cost class.
+        """
+        from local_operator.agent_avatar import agent_index
+
+        return {
+            identity.agent_id: identity.avatar_sha256
+            for identity in agent_index(self.root).values()
+        }
+
+    async def _maybe_emit_avatar_changes(self) -> None:
+        """Publish ``agent.avatar.changed {agent_id, sha256|null}`` per changed agent.
+
+        One frame per agent whose sha moved (set, replaced or removed) -- unlike
+        ``authoring``'s bare revision, the payload names the agent so a client
+        swaps exactly one ``<img>`` URL and refetches nothing else. A deleted
+        agent is not announced: its rows disappear through the catalogue channel.
+        """
+        now = time.monotonic()
+        if now - self._avatar_probed_at < CATALOGUE_PROBE_INTERVAL_S:
+            return
+        self._avatar_probed_at = now
+        shas = await asyncio.to_thread(self._avatar_probe)
+        previous = self._avatar_shas
+        self._avatar_shas = shas
+        if previous is None:
+            return
+        for agent_id, sha in sorted(shas.items()):
+            if agent_id in previous and previous[agent_id] == sha:
+                continue
+            if agent_id not in previous and sha is None:
+                continue
+            self._publish("agent.avatar.changed", {"agent_id": agent_id, "sha256": sha})
+
     async def _maybe_emit_code_requests(self) -> None:
         """The per-session code-request invalidation: a conversation's PR list moved.
 
@@ -2317,6 +2392,54 @@ class DesktopFeed:
                 "waiting_unread_count": waiting_unread,
             },
         )
+
+    def _approval_snapshot(self) -> tuple[tuple[Any, ...], bool, float]:
+        """The existing store's requested predicate, without presentation data."""
+        from local_operator.network.approvals import approvals_dir, list_records
+
+        directories = [approvals_dir(self.root), approvals_dir(self.root, enrollment_only=True)]
+        token: list[Any] = []
+        for directory in directories:
+            try:
+                stat = directory.stat()
+                token.append((stat.st_ino, stat.st_mtime_ns))
+            except FileNotFoundError:
+                token.append(None)
+        fingerprint = tuple(token)
+        now = time.time()
+        if (
+            fingerprint == self._approvals_token
+            and self._approvals_pending is not None
+            and (self._approvals_expiry == 0 or now < self._approvals_expiry)
+        ):
+            return fingerprint, self._approvals_pending, self._approvals_expiry
+        # list_records folds expiry and reads no secret/peer; use its own state,
+        # never infer a pending request from a rail row or notification delivery.
+        records = list_records(root=self.root, now=now)
+        requested = [record for record in records if record.get("state") == "requested"]
+        expirations = [
+            float(record["expires_at"])
+            for record in requested
+            if isinstance(record.get("expires_at"), (int, float)) and record["expires_at"] > now
+        ]
+        return fingerprint, bool(requested), min(expirations, default=0.0)
+
+    async def _maybe_emit_approvals(self) -> None:
+        # Optional authority reads and failures share the existing 1 s probe
+        # budget. Quiet 100 ms ticks retain their existing eight-stat contract.
+        now = time.monotonic()
+        if now - self._approvals_probed_at < CATALOGUE_PROBE_INTERVAL_S:
+            return
+        self._approvals_probed_at = now
+        try:
+            token, pending, expiry = await asyncio.to_thread(self._approval_snapshot)
+        except Exception:  # noqa: BLE001 — optional authority failure is unknown, not empty
+            return
+        if pending != self._approvals_pending:
+            self._publish("approvals", {"pending": pending})
+        self._approvals_token = token
+        self._approvals_pending = pending
+        self._approvals_expiry = expiry
 
     def _notifications_state_or_none(self) -> tuple[int, int, int, int] | None:
         """The inbox counts, or ``None`` when the store cannot be read (CD1).
@@ -2996,19 +3119,71 @@ class DesktopFeed:
             # A synchronous subscriber has no poller task, but still needs the
             # same first-connection boundary before its open snapshot.
             await asyncio.to_thread(self._take_baseline)
-        attention, catalogue_revision, authoring_revision = await asyncio.to_thread(self._snapshot)
-        return self._frame(
-            "open",
-            {
-                "subscription_id": subscription.id,
-                "heartbeat_seconds": HEARTBEAT_INTERVAL_S,
-                "lease_seconds": WATCH_TTL,
-                "watch_ttl_seconds": WATCH_TTL,
-                "catalogue_revision": catalogue_revision,
-                "authoring_revision": authoring_revision,
-                "attention": attention,
-            },
+        # Reserve the envelope BEFORE snapshot reads yield. Level edges queued
+        # during these reads must compare newer than this open, not be dropped
+        # because the open was stamped after an older snapshot finished.
+        frame = self._frame("open", {})
+        snapshot = await asyncio.to_thread(self._badge_open_snapshot)
+        attention, catalogue_revision, authoring_revision, attention_status, notifications = (
+            snapshot
         )
+        try:
+            approvals_pending = (await asyncio.to_thread(self._approval_snapshot))[1]
+            # A subscriber snapshot is local; only the ticker commits the
+            # shared edge baseline, or subscriber B can consume A's next edge.
+        except Exception:  # noqa: BLE001 — retain explicit unknown on an optional read
+            approvals_pending = None
+        frame["payload"] = {
+            "subscription_id": subscription.id,
+            "heartbeat_seconds": HEARTBEAT_INTERVAL_S,
+            "lease_seconds": WATCH_TTL,
+            "watch_ttl_seconds": WATCH_TTL,
+            "catalogue_revision": catalogue_revision,
+            "authoring_revision": authoring_revision,
+            "attention": attention,
+            "attention_status": attention_status,
+            "notifications": notifications,
+            "approvals_pending": approvals_pending,
+        }
+        return frame
+
+    def _badge_open_snapshot(
+        self,
+    ) -> tuple[
+        dict[str, dict[str, Any]], int, int, dict[str, dict[str, Any]], dict[str, Any] | None
+    ]:
+        """Expose the existing baseline's levels without another catalogue scan.
+
+        A native badge has no mounted sidebar to supply the terminal-status
+        predicate. Attention alone would count a read watermark whose running
+        or gated session no longer displays an ackable completion. The primed
+        status pair is already that same backend-derived precedence; shipping
+        its code is a second caller, not a second derivation. Inbox failure
+        remains null (unknown), never an invented empty aggregate.
+        """
+        attention, catalogue_revision, authoring_revision = self._snapshot()
+        statuses = dict(self._status_seen)
+        revisions = dict(self._status_revision)
+        attention_status = {
+            identity: {
+                "code": statuses[session_id][0],
+                "revision": revisions.get(session_id, 0),
+            }
+            for identity in attention
+            if (session_id := self._session_id(identity)) in statuses
+        }
+        inbox = self._notifications_seen
+        notifications = (
+            {
+                "revision": inbox[0],
+                "unread_count": inbox[1],
+                "waiting_count": inbox[2],
+                "waiting_unread_count": inbox[3],
+            }
+            if inbox is not None
+            else None
+        )
+        return attention, catalogue_revision, authoring_revision, attention_status, notifications
 
     def _snapshot(self) -> tuple[dict[str, dict[str, Any]], int, int]:
         """Every user session's attention state, plus both invalidation counters.

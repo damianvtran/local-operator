@@ -1,0 +1,181 @@
+{
+  "locale": "es",
+  "namespace": "wire.settings",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 5,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "id": "F2",
+      "key": "wire.settings.providers_anthropic_cache_ttl_1h_min_context_tokens.label",
+      "severity": "minor",
+      "category": "overflow",
+      "en": "Anthropic 1h cache above (tokens)",
+      "current": "Caché de 1 h de Anthropic a partir de (tokens)",
+      "problem": "The cited main Anthropic cache label is wider than the inferred 29-cell TUI row-label budget. Coordinator remeasured ALL non-choice labels with rich.cells.cell_len: 57 Spanish and 6 English labels exceed 29. settings_view.py truncates labels with truncate_cells at that budget; no rendered frame was captured. This key also overruns in English, so translation alone does not own the whole defect.",
+      "proposed": "Anthropic 1 h desde (tokens)",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F3",
+      "key": "wire.settings.remote_compute_enabled.choice.true.description",
+      "severity": "minor",
+      "category": "overflow",
+      "en": "remote runs allowed",
+      "current": "se permiten ejecuciones remotas",
+      "problem": "Sidecar: 'about 20 cells' (lowercase). Current is 31 cells (en 19). Other two entries of the family are within budget (help 72 ≤ 74; false 10/10).",
+      "proposed": "ejecución remota permitida (25) or 'permite lo remoto' ; shortest faithful: 'ejecuciones remotas' (19)",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F4",
+      "key": "wire.settings.session_compression_enabled.help",
+      "severity": "minor",
+      "category": "overflow",
+      "en": "Off: transcripts stay plain; compressed sessions stay readable. On: old transcripts compress at launch.",
+      "current": "Desactivado: no se comprime nada nuevo; las sesiones ya comprimidas siguen legibles. Activado: las transcripciones antiguas se comprimen al arrancar.",
+      "problem": "Sidecar: help stays inside the ~100-cell help budget. es is 149 cells (en 103); content matches the sidecar's OFF-first shape but can be tightened.",
+      "proposed": "Desactivado: no se comprime nada; lo ya comprimido sigue legible. Activado: al arrancar se comprimen las antiguas.",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F9",
+      "key": "wire.settings.bash_query_budget_seconds.help",
+      "severity": "minor",
+      "category": "accuracy",
+      "en": "Wall-clock budget for one shell query. The advisory fires at 10 s whatever this says; this is the stop. A per-command prefix of LOCAL_OPERATOR_ALLOW_SLOW_QUERY=1 skips the stop for a justified run.",
+      "current": "Presupuesto de tiempo real para una consulta de shell. El aviso se dispara a los 10 s sea cual sea este valor; este valor es el punto de parada. Un prefijo por comando LOCAL_OPERATOR_ALLOW_SLOW_QUERY=1 omite la parada para una ejecución justificada.",
+      "problem": "'Presupuesto de tiempo real' — 'wall-clock' in Spanish tech register is 'tiempo de reloj'; 'tiempo real' reads as 'real-time'.",
+      "proposed": "Presupuesto de tiempo de reloj (wall-clock) para una consulta de shell. …",
+      "source": "independent subaudit; final coordinator adjudication"
+    },
+    {
+      "id": "F16",
+      "key": "wire.settings.retry_pinnedfallback.help",
+      "severity": "minor",
+      "category": "terminology",
+      "en": "What a pinned child may fall back to: same-family hops only, or any vendor (announced).",
+      "current": "A qué puede recurrir un hijo fijado: solo saltos de la misma familia, o cualquier proveedor (anunciado).",
+      "problem": "Bare 'hijo fijado' (also retry_pinnedfallback.label 'Alternativa del hijo fijado', subagents_slim_child_knowledge.*, display_dock 'por hijo') drops 'agent'; glossary term is subagente. 'hijo' alone is ambiguous with a child process (used legitimately in shell_environment_exclude.help).",
+      "proposed": "A qué puede recurrir un subagente fijado…; label 'Alternativa del subagente fijado'",
+      "source": "independent subaudit; final coordinator adjudication"
+    }
+  ],
+  "adjudication": [
+    {
+      "id": "F1",
+      "disposition": "not adopted",
+      "reason": "ADVISORY ONLY: enum-token versus display-label policy was not conclusively established; do not apply speculative translations of literal values."
+    },
+    {
+      "id": "F2",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F3",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F4",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F5",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F6",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F7",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F8",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F9",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F10",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F11",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F12",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F13",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F14",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F15",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F16",
+      "disposition": "accepted",
+      "reason": "Meaning/guide/context reviewed; no catalogue changes made."
+    },
+    {
+      "id": "F17",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F18",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F19",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F20",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    },
+    {
+      "id": "F21",
+      "disposition": "not adopted",
+      "reason": "Retained as an advisory lead; not promoted into the final bounded finding set, not certified fixed."
+    }
+  ],
+  "linguistic_gate_status": "passed",
+  "publication_hold_reasons": [
+    "en context sidecar not routable"
+  ]
+}

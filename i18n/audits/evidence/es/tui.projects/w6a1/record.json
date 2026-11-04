@@ -1,0 +1,147 @@
+{
+  "schema": 1,
+  "audit_id": "w6a1",
+  "audit_round": 1,
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "es",
+  "namespace": "tui.projects",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "b925c2e11be36653dfe88ac78f627bc2531427df on branch feat/es-tui. The TARGET catalogue is UNTRACKED in the worktree (`?? local_operator/i18n/catalogues/es/tui.projects.json`), so this audit binds to the on-disk sha256 in input_hashes, not to a commit; a later commit that lands different bytes is not covered by this verdict.",
+  "key_count": {
+    "en": 97,
+    "target": 97,
+    "context": 97
+  },
+  "verdict": "passed",
+  "result": {
+    "mechanical_checks": "pass — 8/8 in checks.py; repo validator --catalogues-only reports 0 problem(s) tree-wide",
+    "findings_total": 2,
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 1,
+    "note": "No blocker or major. Minors and nits are recorded for the wave's remediation round and do not gate the passed verdict; none of them changes a money claim, a destructive action or a placeholder."
+  },
+  "verdict_reason": "All 97 keys read twice, with the composing callers followed. The delivery-confirmation paragraph keeps all four outcomes distinct and preserves the do-not-resend guard; the read-only notice carries both clauses; the done-gate refusal is exact. No destructive verb exists in this namespace. The one minor is an unidiomatic zoom label.",
+  "auditor": {
+    "agent": "translation-auditor (lopdev team), independent of the translator",
+    "session_or_instance": "b4822b7b44ff",
+    "model": "radient/auto",
+    "actual_model_source": "this session's own model-switch notices (header said anthropic/claude-sonnet-5-5 at turn start)",
+    "model_note": "FALLBACK, disclosed: the session's primary header is anthropic/claude-sonnet-5-5, but provider quota failures moved this run through openai/gpt-6-astra and kimi/k3.1-pro before radient/auto, and ALL work recorded in this bundle was performed under radient/auto. No primary-model audit claim is made.",
+    "date": "2026-10-30",
+    "independence": "I translated none of this copy and repaired none of it. I read the en source, the context sidecar and the render/consumer code directly, formed the verdict before seeing any other auditor's notes for these namespaces (no w6a1 bundle existed), and wrote only inside i18n/audits/evidence/es/. No catalogue, sidecar, ledger or allowance file was touched."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.projects.json",
+      "revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+      "sha256": "aeb473eb7de44143822962b44b6be239d63f930710e754ce5205781ca4b4ae91"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.projects.json",
+      "sha256": "4b6375ad8473afd927126efb535072f41426c80908f03c7a90834888f0264d76",
+      "tracked": false,
+      "note": "UNTRACKED working-tree bytes at the audited revision"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.projects.context.json",
+      "revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+      "sha256": "fa39ad8f21674a42e5218698d11396a08d47e2f82297467ad17bb1ab292bb1fe"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.projects/w6a1/report.md",
+      "sha256": "1343513e9c3302e7b1cd42813e72abd4ad0f66103f80657a6bbb0272dc75a237"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.projects/w6a1/audit.log",
+      "sha256": "3d5b72a2cea572f7fee0ff0a9409e542b03ed205f74133a5766fc2b98eac236c"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.projects/w6a1/checks.py",
+      "sha256": "3161f166ce85788db00742560940f4aef2a7cb9d9e8f00df87db9edd3650e414"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.projects/w6a1/receipt.json",
+      "sha256": "2c279d9da89556127fed3a3570c5b330bb3bc32bbd6408c0b9b2ab46ea539ff5"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 1,
+    "rejected": 0,
+    "deferred": 0,
+    "findings_total": 2,
+    "finding_ids": [
+      "F1",
+      "F2"
+    ]
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "minor",
+      "key": "tui.projects.binding_zoom_out",
+      "current": "Tiempo más grueso",
+      "proposed": "Menos detalle",
+      "reason": "For 'Coarser time'. 'grueso' is the right antonym of 'fino' for grain, but time is not coarse in Spanish, so the label reads as a calque and a native dev pauses on it. Its partner 'Tiempo más fino' is fine. 'Menos detalle' (13 cells) or 'Intervalo mayor' (15) keep the zoom pair readable. No maxCells is declared for this namespace.",
+      "evidence": [
+        "current 17 cells (en 12); partner 'Tiempo más fino' 15 cells (en 10)",
+        "proposed 'Menos detalle' 13 cells, 'Intervalo mayor' 15 cells"
+      ],
+      "disposition": "open — carried by the wave's remediation round (does not gate)"
+    },
+    {
+      "id": "F2",
+      "severity": "nit",
+      "key": "tui.projects.send.compose",
+      "current": "enviar a: {handle} · esc cancela",
+      "proposed": "enviar a: {handle} · esc cancelar",
+      "reason": "The picker's own legend (send.legend, start.legend) uses the infinitive ('esc cerrar', '↑↓ mover', '↵ elegir'), as does shipped copy (tui.asks.dismiss.hint 'cancelar', tui.hub_links.hint.close 'cerrar'). This band conjugates. Nothing is misread — the band is a status strip — so this is a nit about the pair inside one picker, not a register failure.",
+      "evidence": [
+        "send.legend: 'escribe para filtrar · ↑↓ mover · ↵ elegir · esc cerrar'",
+        "current 32 cells (en 30); proposed 33 cells"
+      ],
+      "disposition": "open — nit, no gate"
+    }
+  ],
+  "audit_notes_not_execution_log": [
+    "checks.py produced three false positives on its first run against these same bytes and each rule was tightened before the logged run; the logged run is the post-fix run and all eight controls fire.",
+    "Two independent passes were made on the Spanish text: es against en + sidecar key by key, then the Spanish values alone in file order.",
+    "Callers were read for the strings whose meaning depends on composition (projects_send.py sent_line/compose_band/amber_notice, app.py _system_notice_block), which is how the un-keyed state_word observation in report.md was found. It is NOT filed as a finding against this translation: the token is supplied by local_operator/mobile/peer_send.py and needs its own extraction slice.",
+    "No catalogue, sidecar, ledger or allowance file was modified by this audit; the ledger row below is a PROPOSAL because the brief forbids editing the ledger."
+  ],
+  "limitations": [
+    "No maxCells is declared in this sidecar, so the budget check enforces nothing; fit was judged from the render paths and the caller's own measured budgets.",
+    "No rendered TUI frames captured (loaded host, heavy runs forbidden).",
+    "LLM semantic judgement; no native-speaker attestation.",
+    "The target file is untracked at the audited revision; this verdict binds the recorded sha256, not a commit."
+  ],
+  "proposed_ledger_row": {
+    "_status": "PROPOSAL ONLY — the brief forbids editing i18n/ledger/es.json; the wave appends this row.",
+    "_missing": [
+      "translator.agent",
+      "translator.model",
+      "translator.date"
+    ],
+    "locale": "es",
+    "namespace": "tui.projects",
+    "source_sha256": "aeb473eb7de44143822962b44b6be239d63f930710e754ce5205781ca4b4ae91",
+    "auditor": {
+      "agent": "translation-auditor (lopdev team), independent of the translator",
+      "model": "radient/auto",
+      "date": "2026-10-30",
+      "result": "passed",
+      "findings": 0
+    },
+    "status": "passed",
+    "note": "Independent audit w6a1 (radient/auto, fallback disclosed): 0 blocker, 0 major, 1 minor, 1 nit. Record: i18n/audits/evidence/es/tui.projects/w6a1/record.json"
+  }
+}

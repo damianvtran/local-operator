@@ -763,6 +763,7 @@ def test_the_spawn_only_status_lines_are_wrapped_by_the_terminal_not_by_hand(
             "presence_enforced_by_os": False,
             "capability_guarantee": "spawn-capability",
             "reason": "no anchor is installed, so the runtime trusts no key yet",
+            "device_admission": False,
         },
     )
     assert handlers._status() == 0

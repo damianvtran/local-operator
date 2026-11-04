@@ -45,8 +45,10 @@ _EXTENSION_ERROR_MESSAGES = {
         "or check the extension is enabled."
     ),
     ErrorCode.NOT_PAIRED: (
-        "browser bridge not paired: run 'lop browser pair' and enter the code in the "
-        "extension popup, then retry."
+        "browser bridge not paired: run 'lop browser pair' now, then write the 6-digit code "
+        "it prints into your reply (bold, before any other tool call) and tell the user to "
+        "type it in the Local Operator tab or extension in their browser. Do not ask them to "
+        "open the popup first. Retry once they say it is paired."
     ),
     ErrorCode.DEBUGGER_CONFLICT: (
         "cannot drive the tab: DevTools (or another debugger) is attached to it. Ask the "
@@ -532,6 +534,26 @@ def format_error(
         # payload (which method, which build, whether any build could serve it),
         # so a static table entry cannot carry it.
         return _capability_message(error, host=host)
+    record = _record_reason_message(error, str(error.data.get("reason") or ""))
+    if record:
+        # Keyed by `data.reason`, not by the code: every recording failure is a
+        # distinct remedy, and the host's own English `message` is the fallback
+        # for a reason this build does not know (D9). Rendered ahead of the
+        # table so a generic `internal` sentence can never stand in for it.
+        return record
+    if error.code == ErrorCode.INTERNAL and error.data.get("reason") == "invalid_arguments":
+        # The desktop host reports a refused argument (hover/press target shape)
+        # as `internal` + this reason rather than a new ErrorCode: a code a
+        # released daemon/session does not know hangs it. The harness validates
+        # these arguments before sending, so this only renders for a host whose
+        # rules are stricter or newer — and "the bridge broke" would be the wrong
+        # reading of a plain bad argument.
+        detail = str(error.message or "").strip()
+        return (
+            "the browser host rejected this call's arguments"
+            + (f": {detail}" if detail else "")
+            + ". Nothing was changed; fix the argument and retry."
+        )
     if error.code in messages:
         return messages[error.code]
     if error.code == ErrorCode.TAB_CLOSED:
@@ -810,11 +832,70 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
         CAPABILITY_MIN_EXTENSION_VERSION,
         CAPABILITY_SWITCH_LABEL,
         CAPABILITY_SWITCH_LOCATION,
+        DESKTOP_ONLY_METHODS,
     )
 
+    if error.data.get("reason") == "aria_select_unsupported":
+        # This extension build safely serves native <select> without Input.*,
+        # not application-specific ARIA popups. An update/re-pair cannot turn
+        # native setters into an ARIA selection flow.
+        return (
+            "the extension can select native <select> options, but this target is an "
+            "ARIA/custom control. Open the page with backend='ui' to select it."
+        )
     method = str(error.data.get("method") or "that action")
     peer = str(error.data.get("extension_version") or "")
     remedy = _CAPABILITY_HOST_REMEDY.get(host, _CAPABILITY_HOST_REMEDY[HOST_EXTENSION])
+    if method == "record_size":
+        # A capability on an action that ALREADY EXISTS, so the
+        # "built before this action existed" copy below would be false twice:
+        # `record_start` works on that build, at its default size. Kept in this
+        # function because it is the one place a capability refusal is worded,
+        # and named by its own remedy — update, or drop the size and record now.
+        if host == HOST_UI:
+            return (
+                "this build of the Local Operator desktop app cannot record at a chosen "
+                "size: it records only at the default 1280x720. Update Local Operator "
+                f"({remedy}) and retry at the size asked for, or call 'record_start' "
+                "without width/height for a 1280x720 clip — that works now."
+            )
+        # `record_start` itself is DESKTOP_ONLY (`protocol.DESKTOP_ONLY_METHODS`),
+        # so on an extension host the real gate fires on the ACTION first and
+        # this capability is never asked (review NIT). The arm stays only so a
+        # direct `capability_refusal("record_size", host=…)` cannot fall through
+        # to the "no browser is attached" copy below, and it says the same thing
+        # as that action gate rather than a second version story.
+        return (
+            "sized recording is served only by the Local Operator desktop app's "
+            "browser; the Chrome extension records the page at its own size. Open the "
+            "page with backend='ui' to record at a chosen size."
+        )
+    if method == "record_quality":
+        # Same shape as `record_size` above, and for the same reason: the action
+        # exists on that build (`record_start` works, as the default AV1 clip),
+        # so "built before this action existed" would be false.
+        if host == HOST_UI:
+            return (
+                "this build of the Local Operator desktop app cannot record in high "
+                "quality: it records only the default clip. To use quality='high', "
+                f"{remedy}; or call 'record_start' without quality for the default "
+                "clip — that works now. Nothing was started."
+            )
+        return (
+            "high-quality recording is served only by the Local Operator desktop app's "
+            "browser; the Chrome extension cannot record at all. Open the page with "
+            "backend='ui' to record."
+        )
+    if host == HOST_EXTENSION and method in DESKTOP_ONLY_METHODS:
+        # A desktop-only method has NO remedy inside the extension: no update,
+        # toggle or re-pair makes it servable, and the old copy sent the user to
+        # `chrome://extensions` to hunt for a switch that does not exist (D12).
+        # Checked before every other arm, including "no browser is attached":
+        # opening the extension's browser cannot help either.
+        return (
+            f"'{method}' is served only by the Local Operator desktop app's browser; "
+            "the Chrome extension cannot do it. Open the page with backend='ui'."
+        )
     if host == HOST_UI:
         return (
             f"the Local Operator desktop app's browser host does not provide '{method}' — "
@@ -884,6 +965,163 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
         f"'{method}', so the command was not sent. Ask the user to toggle the Local Operator "
         "extension OFF then ON in chrome://extensions (pairing is preserved), then retry."
     )
+
+
+def _record_reason_message(error: BridgeError, reason: str) -> str:
+    """The model-facing sentence for one recording failure, or "" for none.
+
+    The host reports WHY in ``data.reason`` and its own English ``message`` as
+    context; the copy lives here because that is where every other remedy lives
+    and because the harness must be able to reword a sentence without shipping a
+    new app (D9). An unknown ``record_*`` reason is NOT rendered from this table
+    — it falls through to the host's message, so a newer app's new failure mode
+    is reported in its own words rather than as a generic internal error.
+    """
+    if not reason.startswith("record_"):
+        return ""
+    detail = str(error.message or "").strip()
+    if reason == "record_unsupported":
+        chromium = str(error.data.get("chromium") or "").strip()
+        engine = f"Chromium {chromium}" if chromium else "an older Chromium"
+        return (
+            f"the desktop app's browser engine ({engine}) has no video recording; it "
+            "needs Chromium 153 or newer. Update the desktop app and retry. "
+            "Screenshots still work. Nothing was written."
+        )
+    if reason == "record_av1_unavailable":
+        return (
+            "this browser engine build cannot encode AV1, which video recording needs. "
+            "Nothing was written."
+        )
+    if reason == "record_path":
+        asked = f" ({detail})" if detail else ""
+        return (
+            f"the recording path was refused{asked}. Nothing was written and no "
+            "recording started; choose another .mp4 path in a writable directory "
+            "that does not already exist, then retry."
+        )
+    if reason == "record_active":
+        where = str(error.data.get("path") or "").strip()
+        # `age_ms`, the host's unit (ui `recording.ts` sends integer
+        # milliseconds). Reading `age_s` here dropped the age from the copy on
+        # every real refusal, which is what review round 1 (R1-1) caught.
+        age = error.data.get("age_ms")
+        if isinstance(age, bool) or not isinstance(age, int | float):
+            ago = ""
+        else:
+            ago = f", started {float(age) / 1000:.1f} s ago"
+        running = f" ({where}{ago})" if where else ""
+        return (
+            f"a recording is already running for this session{running}; stop it with "
+            "'record_stop' before starting another. Nothing was changed."
+        )
+    if reason == "record_not_active":
+        return (
+            "no recording is running on this tab for this session, so there was nothing "
+            "to stop. A recording the browser interrupted is reported as discarded, not "
+            "as stopped; start a new one if you still need the clip."
+        )
+    if reason == "record_limit":
+        limit = error.data.get("limit")
+        if isinstance(limit, int) and not isinstance(limit, bool):
+            # ONLY the global count is a limit. The host raises the same reason
+            # for the size rule (one clip above 1920x1080 at a time), where
+            # "its maximum of 1 recordings" would be false for a caller that
+            # could start a 720p clip beside the 4K one it is really colliding
+            # with (review m2).
+            return (
+                f"the desktop app is already running its maximum of {limit} recordings; "
+                "nothing else may start until one stops or its timer fires. Nothing was "
+                "recorded."
+            )
+        # ...so for the size rule the host's own message carries the remedy (stop
+        # the large clip, or record at 1080p or below); pass it through rather
+        # than inventing a cap.
+        if detail:
+            return detail
+        return (
+            "the desktop app refused to start this recording: only one recording above "
+            "1920x1080 may run at a time, and another one is already running. Stop it with "
+            "'record_stop' (or wait for its timer), or record at 1920x1080 or below. "
+            "Nothing was recorded."
+        )
+    if reason == "record_size":
+        why = str(error.data.get("why") or "")
+        cause = {
+            "incomplete": "both width and height are required",
+            "range": "each side must be 240 to 3840 pixels",
+            "odd": "both sides must be even",
+            "area": "the area may not exceed 3840x2160",
+            "visible": "a tab the user is looking at cannot be resized out from under them",
+            "not_applied": "the app could not apply that viewport to the tab",
+        }.get(why, detail or "the app refused the size")
+        # The host's message carries the REMEDY for the two runtime causes
+        # ("activate another tab, or omit width/height"), which the table above
+        # only names the cause of; dropping it left a refusal with no way
+        # forward (review m2). The static causes keep the harness's own words.
+        remedy = f" {detail}" if detail and why in {"visible", "not_applied"} else ""
+        return (
+            f"the clip was not started at the size asked for: {cause}.{remedy} Nothing was started."
+        )
+    if reason == "record_quality":
+        return (
+            "quality must be 'standard' or 'high'; omit it for the default clip. "
+            "Nothing was started."
+        )
+    if reason == "record_quality_unavailable":
+        why = str(error.data.get("why") or "")
+        cause = {
+            "no_h264_encoder": "this machine has no H.264 encoder the desktop app can use",
+            "software_over_1080p": (
+                "only a software H.264 encoder is available here, and it is limited to "
+                "1920x1080 or smaller"
+            ),
+            "size_unsupported": "the H.264 encoder here does not support that clip size",
+            "encoder_start": "the H.264 encoder failed to start",
+        }.get(why, detail or "the app has no usable high-quality encoder")
+        # The app never falls back to the default clip by itself (the caller asked
+        # for the sharper one), so the way forward is spelled out per cause: a
+        # smaller size where the size is the problem, a retry where the failure
+        # may be transient, and in every case the default clip, knowingly.
+        retry = {
+            "software_over_1080p": " Retry at 1920x1080 or smaller, or",
+            "size_unsupported": " Retry at a smaller width/height, or",
+            "encoder_start": " Retry, or",
+        }.get(why, " Instead,")
+        return (
+            f"high-quality recording is not available: {cause}.{retry} call 'record_start' "
+            "without quality for the default AV1 clip, which is lower quality. Nothing "
+            "was started."
+        )
+    if reason == "record_too_large":
+        cap = error.data.get("max_bytes")
+        size = (
+            f"larger than {int(cap) // (1024 * 1024)} MiB"
+            if isinstance(cap, int) and cap > 0
+            else "larger than the recording size limit"
+        )
+        # When the host names the size it was recording, the refusal says
+        # WHICH ceiling was hit — at 4K the same 64 MiB is ~150 s, not ~16 min.
+        width, height = error.data.get("width"), error.data.get("height")
+        at_size = (
+            f" at {width}x{height}" if isinstance(width, int) and isinstance(height, int) else ""
+        )
+        return (
+            f"the recording is {size}{at_size}, so nothing was saved: a truncated MP4 is "
+            "invalid and a partial file would be reported as a clip. Record a shorter span "
+            "(timeout_s) and retry."
+        )
+    if reason == "record_aborted":
+        return (
+            "another debugger took this tab while it was recording, so the clip was "
+            "discarded. Nothing was written. Start a new recording once the tab is "
+            "yours again."
+        )
+    if reason == "record_failed":
+        return (
+            detail or "the recording failed in the desktop app's browser and nothing was written."
+        )
+    return ""
 
 
 def client_timeout(method: str, requested_s: Any = None) -> float:

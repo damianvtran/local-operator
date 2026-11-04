@@ -1352,9 +1352,14 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # through a computed ``getattr`` the derivation is blind to.)
     # 74 → 75 is the optional loaded-window peer-cycle proof accessor. It is
     # facade-only; the existing per-host and aggregate coverage floors stay put.
-    assert len(viewer_only) == 75, (
+    # 75 → 76 is the self-move destination (``pending_move_cwd``): the TUI reads
+    # it when a retirement lands so a cwd move restarts with a notice naming the
+    # new directory. Facade-only by construction — the owner is the runtime that
+    # retires, so it has no pending destination. Declared in
+    # ``ViewerSessionProtocol`` in the same commit; the floors stay put.
+    assert len(viewer_only) == 76, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 75, and the aggregate floor is set at 40 against that number. A "
+        "says 76, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )

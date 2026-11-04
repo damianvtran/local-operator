@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast
 from anyio import CancelScope
 from fastapi import HTTPException
 
+from local_operator.agent_avatar import session_row_fields
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 
 # The row-visibility predicate lives in ``harness/rows.py`` beside the three row
@@ -66,7 +67,12 @@ from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
 # one module owns the scan, its cache and its invalidation, and this adapter is
 # only the door. Imported as a module so tests can drive its decision paths off
 # the bridge without a second seam.
-from local_operator.session import open_trace, transcript_find, transcript_index
+from local_operator.session import (
+    index_read_model,
+    open_trace,
+    transcript_find,
+    transcript_index,
+)
 
 # The pin store is the sidebar's OWN module, reused rather than re-implemented —
 # for the reason the `move_targets` import above cites, which is also that
@@ -124,6 +130,7 @@ from local_operator.session.open_frame import (
     OPEN_FRAME_MAX_RAW_PAGES,
     OPEN_FRAME_MAX_ROWS,
     OPEN_FRAME_SNAPSHOT_BUDGET_S,
+    StripMemo,
     align_page,
     build_frame,
     late_index_stop,
@@ -4007,7 +4014,11 @@ class DesktopSessionBridge:
             "has_newer": page.has_newer,
         }
         answer = await self._with_peer_cycle_records(answer, [page])
-        return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
+        return (
+            await self._journal_order_page(answer, [page], order_ids or [])
+            if journal_order
+            else answer
+        )
 
     async def _open_frame_history(
         self,
@@ -4080,12 +4091,17 @@ class DesktopSessionBridge:
                     "runs_state": "unsupported",
                     "head_cut": False,
                 }
-            anchored = self._wire_rows(page.entries)
-            anchored_index = await self._frame_index(deadline)
+            anchored = self._wire_rows(page.entries, copy=False)
+            anchored_index = await self._frame_source(deadline, [page])
+            anchored_index, facts = await self._resolve_frame_source(
+                anchored_index, anchored, [page], order_ids or [], False, deadline
+            )
             result = build_frame(
                 anchored,
                 supplements=supplements,
+                memo=StripMemo(supplements=supplements),
                 index=anchored_index,
+                resolved_runs=facts.runs if facts is not None else None,
                 runs_state="building",
                 has_more=page.has_more,
                 cursor_missing=page.reconciled,
@@ -4120,7 +4136,13 @@ class DesktopSessionBridge:
             # here is "a cap dropped rows from this window".
             answer["head_cut"] = result.capped
             answer = await self._with_peer_cycle_records(answer, [page])
-            return self._journal_page(answer, [page], order_ids or []) if journal_order else answer
+            if journal_order and facts is not None and index_read_model.apply_order(answer, facts):
+                return answer
+            return (
+                await self._journal_order_page(answer, [page], order_ids or [])
+                if journal_order
+                else answer
+            )
 
         collected: list[dict[str, Any]] = []
         order_pages: list[Any] = []
@@ -4133,6 +4155,12 @@ class DesktopSessionBridge:
         page_rows: list[tuple[int, bool]] = []
         index_at_first_page = False
         tail_read = before_id is None and through_id is None and around_id is None
+        # ONE STRIP PER ROW PER OPEN (``open_frame.StripMemo``): the hunt below
+        # re-cuts the whole of ``collected`` on every attempt and the final cut
+        # strips it twice more. Safe because every row here is this request's own
+        # row object built by ``_wire_rows`` (its payload may be shared with the
+        # page cache, but the memo keys the request's own envelope dict).
+        strip_memo = StripMemo(supplements=supplements)
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
             try:
                 page = await load_transcript_page(
@@ -4172,16 +4200,16 @@ class DesktopSessionBridge:
                 cursor_missing = page.reconciled
             has_more = page.has_more
             order_pages.append(page)
-            rows = self._wire_rows(page.entries)
+            rows = self._wire_rows(page.entries, copy=False)
             if not rows:
                 break
             collected = rows + collected
             page_rows.append((len(rows), page.has_more))
             if not collected:
                 break
-            kept, reached = align_page(collected, limit, supplements=supplements)
-            paintable_rows = paintable(collected, supplements=supplements)
-            if reached and len(paintable(kept, supplements=supplements)) >= limit:
+            kept, reached = align_page(collected, limit, supplements=supplements, memo=strip_memo)
+            paintable_rows = paintable(collected, supplements=supplements, memo=strip_memo)
+            if reached and len(paintable(kept, supplements=supplements, memo=strip_memo)) >= limit:
                 break
             # THE INDEX IS FETCHED AFTER THE FIRST PAGE, DELIBERATELY: the page is
             # what the client asked for and it must not wait behind a scan, while
@@ -4206,7 +4234,7 @@ class DesktopSessionBridge:
                 and through_id is None
                 and around_id is None
             ):
-                index = await self._frame_index(deadline)
+                index = await self._frame_source(deadline, order_pages)
                 index_at_first_page = index is not None
             if (
                 index is not None
@@ -4233,7 +4261,7 @@ class DesktopSessionBridge:
             if not cursor:
                 break
         if index is None:
-            index = await self._frame_index(deadline)
+            index = await self._frame_source(deadline, order_pages)
             if tail_read and not index_at_first_page:
                 # THE INDEX LANDED DURING THE HUNT (#3037 QA, O1; the relay twin
                 # carries the same rule): the facts will say ``ready``, so the rows
@@ -4245,6 +4273,7 @@ class DesktopSessionBridge:
                     index=index,
                     limit=limit,
                     supplements=supplements,
+                    memo=strip_memo,
                 )
                 if stop is not None and stop < len(page_rows):
                     collected = collected[-sum(rows for rows, _more in page_rows[:stop]) :]
@@ -4257,11 +4286,16 @@ class DesktopSessionBridge:
         # extra rows — measured on the S3 fixture, serving the overshoot was 231
         # rows and 264 KB against 100 rows and 114 KB — so the hunt that failed is
         # not paid for, and ``runs`` carries that run's true size instead.
-        kept, reached = align_page(collected, limit, supplements=supplements)
+        index, facts = await self._resolve_frame_source(
+            index, collected, order_pages, order_ids or [], tail_read, deadline
+        )
+        kept, reached = align_page(collected, limit, supplements=supplements, memo=strip_memo)
         result = build_frame(
             kept,
             supplements=supplements,
+            memo=strip_memo,
             index=index,
+            resolved_runs=facts.runs if facts is not None else None,
             runs_state="building",
             has_more=has_more,
             cursor_missing=cursor_missing,
@@ -4296,10 +4330,16 @@ class DesktopSessionBridge:
         # worse than no answer.
         answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
         answer = await self._with_peer_cycle_records(answer, order_pages)
-        return self._journal_page(answer, order_pages, order_ids or []) if journal_order else answer
+        if journal_order and facts is not None and index_read_model.apply_order(answer, facts):
+            return answer
+        return (
+            await self._journal_order_page(answer, order_pages, order_ids or [])
+            if journal_order
+            else answer
+        )
 
     @staticmethod
-    def _wire_rows(entries: Any) -> list[dict[str, Any]]:
+    def _wire_rows(entries: Any, *, copy: bool = True) -> list[dict[str, Any]]:
         """Journal rows as the wire states them, oldest first.
 
         THE ONE SPELLING of a local row on this plane: the same
@@ -4307,6 +4347,16 @@ class DesktopSessionBridge:
         every other local read carries, filtered by the same
         :func:`visible_transcript_rows` predicate. A second reader would be a
         second vocabulary for one screen.
+
+        ``copy=False`` IS FOR THE OPEN FRAME ONLY, and it hands back rows whose
+        payloads ARE the shared page-cache objects. Its one caller strips those
+        rows (``open_frame.strip_entry`` takes a ``dict(payload)`` before it
+        touches a key) and deep-copies only the rows it serves, in
+        :meth:`_frame_answer`. Why (openframe-cpu, 2026-10-31): copying the whole
+        raw page here was 4.6 ms of a ~9 ms warm open on a 36 MB journal, because
+        a ``limit=100`` open reads 200 raw rows (2.3 MB) and the strip then drops
+        most of those bytes — checkpoint, compaction and replay material nobody
+        paints. A caller that edits a row in place must keep the default.
         """
         return visible_transcript_rows(
             [
@@ -4314,12 +4364,70 @@ class DesktopSessionBridge:
                     "id": entry.id,
                     "ts": entry.ts,
                     "type": entry.type,
-                    "payload": _json_copy(entry.payload),
+                    "payload": _json_copy(entry.payload) if copy else entry.payload,
                     "ts_source": "entry",
                 }
                 for entry in entries
             ]
         )
+
+    async def _frame_source(self, deadline: float, pages: list[Any]) -> Any:
+        """Resident first, then witnessed tail summary; fallback keeps its wager.
+
+        A summary only guides the head hunt. It never authorizes suppressing a
+        refresh for a later failed selection or pretending the whole index exists.
+        """
+        source = index_read_model.page_source(pages)
+        resident = transcript_index.fresh_resident(self.root, self.session_id)
+        if resident is not None:
+            expected = (
+                resident.sig.get("inode"),
+                resident.sig.get("size"),
+                resident.sig.get("mtime"),
+            )
+            return resident if source == expected else None
+        projected = await asyncio.to_thread(
+            index_read_model.summary, self.root, self.session_id, source
+        )
+        if projected.state == "ready":
+            return projected.value
+        return await self._frame_index(deadline)
+
+    async def _resolve_frame_source(
+        self,
+        candidate: Any,
+        collected: list[dict[str, Any]],
+        pages: list[Any],
+        order_ids: list[str],
+        reaches_eof: bool,
+        deadline: float,
+    ) -> tuple[Any, Any]:
+        """Materialize selected facts before build_frame, on an existing worker hop."""
+        source = index_read_model.page_source(pages)
+        if isinstance(candidate, index_read_model.FrameSummary):
+            result = await asyncio.to_thread(
+                index_read_model.frame_facts,
+                self.root,
+                self.session_id,
+                collected_ids=[row["id"] for row in collected],
+                reaches_eof=reaches_eof,
+                order_ids=order_ids,
+                source=source,
+            )
+            if result.state == "ready":
+                return None, result.value
+            # Summary success is NOT selection success. Corruption/races use the
+            # original admitted wait rather than stranding a fallback joiner.
+            candidate = await self._frame_index(deadline)
+        if candidate is not None:
+            expected = (
+                candidate.sig.get("inode"),
+                candidate.sig.get("size"),
+                candidate.sig.get("mtime"),
+            )
+            if source != expected:
+                candidate = None
+        return candidate, None
 
     async def _frame_index(self, deadline: float) -> Any:
         """The index this frame's run facts come from, or ``None``.
@@ -4395,8 +4503,98 @@ class DesktopSessionBridge:
 
         return apply_journal_order(self.root, self.session_id, answer, source, ids)
 
-    def _journal_page(
+    async def _journal_order_page(
         self, answer: dict[str, Any], pages: list[Any], ids: list[str]
+    ) -> dict[str, Any]:
+        """Answer ``journal_order`` from the cheapest source that can prove it.
+
+        THREE SOURCES, IN ORDER, and the order is the contract:
+
+        1. the RESIDENT index — the derivation authority, two stats, and the only
+           source that costs nothing when the process already holds this journal;
+        2. the PERSISTED companion — the projection of that same derivation, read
+           in the caller's worker hop. Only opened once (1) has declined, so a
+           process that already holds the index never pays for it;
+        3. today's policy — a background correction and ``building``/``unavailable``
+           — through :meth:`_journal_page`, which owns that answer.
+
+        WARMTH IS THE WHOLE POINT. Before this, source (2) did not exist for this
+        flag: ``journal_order=1`` without ``open_frame=1`` reached the resident
+        join alone, so a renderer's FIRST paint on a session the process had not
+        indexed answered ``building`` and reconciled a moment later — the
+        after-paint change the capability exists to remove. Serving it from the
+        companion is what makes the answer final on the first frame.
+
+        A COMPANION ANSWER ALSO ARMS THE RESIDENT SCAN, and that is not bookkeeping.
+        Source (3) started one as a side effect: a page that answered ``building``
+        began the correction, so from the NEXT read on the resident join answered
+        and the companion was never opened again. A page answered from (2) never
+        enters that branch, so without this the poll loop opens the companion on
+        every request forever — measured on a 36.5 MB journal, 25 identical reads:
+        25/25 companion opens and no resident index ever, against 1/25 and a
+        resident index from poll 1 once the scan is armed, which is what base
+        converges onto. Same singleflight, not awaited, and only when nothing is
+        resident: no scan is added to this request's latency and none is started
+        twice.
+        """
+        ids = list(dict.fromkeys(ids))
+        source = index_read_model.page_source(pages)
+        if self._apply_journal_order(answer, source, ids):
+            return answer
+        projected = await asyncio.to_thread(
+            index_read_model.order_facts,
+            self.root,
+            self.session_id,
+            collected_ids=[row["id"] for row in answer["entries"]],
+            order_ids=ids,
+            source=source,
+        )
+        if projected.state == "ready" and index_read_model.apply_order(answer, projected.value):
+            self._warm_resident_scan()
+            return answer
+        # A missing, stale, corrupt or unsupported projection is NOT an error: the
+        # policy below is exactly what an absent companion answered before this
+        # existed, so an older store degrades to today's behaviour.
+        return self._journal_page(answer, pages, ids)
+
+    def _warm_resident_scan(self) -> None:
+        """Arm the resident index a companion answer skipped, and never wait on it.
+
+        THE SAME SINGLEFLIGHT the ``building`` branch calls from inside
+        :meth:`_journal_page` (``_order_correction``): a refresh already in flight
+        is joined rather than started again, and one that has already landed is
+        left alone — ``fresh_resident`` answers that from its own dict, and the
+        two branches are not the same thing: the lookup alone is paid only when
+        the dict holds no entry, while a PRESENT entry pays the two ``stat``
+        calls whether it is fresh (returned) or stale (still ``None``). It never
+        scans. Nothing is awaited:
+        this request's page is already complete, and the point of arming the scan
+        is the NEXT request, which then answers from the resident join instead of
+        reopening the companion.
+
+        THE TASK'S FAILURE IS RETRIEVED, not swallowed. This caller owns no await
+        on it — that is the whole point — and ``start_refresh``'s own wrapper
+        logs and RE-RAISES, so an unobserved failure surfaces as a second,
+        misleading traceback at GC (``Task exception was never retrieved``) long
+        after the page that armed it. The same guard sits at this file's other
+        no-wait sites (the attention refresh and the peer display's index warm);
+        the ``except`` below covers only a SYNCHRONOUS refusal to start.
+        """
+        from local_operator.session import transcript_index
+
+        try:
+            if transcript_index.fresh_resident(self.root, self.session_id) is not None:
+                return
+            task, _started = transcript_index.start_refresh(self.root, self.session_id)
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        except Exception:  # noqa: BLE001 — an optimisation, never the answer
+            logger.debug("journal order: resident warm could not start", exc_info=True)
+
+    def _journal_page(
+        self,
+        answer: dict[str, Any],
+        pages: list[Any],
+        ids: list[str],
     ) -> dict[str, Any]:
         """Opt-in source facts, from a single verified page/index view only.
 
@@ -4405,6 +4603,11 @@ class DesktopSessionBridge:
         Extra ids name already-loaded rows outside this page, never a new read
         service; their count/string bounds cap the response and source remains
         THIS session. Missing ids are explicitly unknown.
+
+        THE COMPANION IS NOT TRIED HERE. It is
+        :meth:`_journal_order_page`'s own door, because that method must also arm
+        the resident scan once a projection has served the page. This one keeps
+        its own policy for what a page with no provable source answers.
         """
         from local_operator.session import transcript_index
 
@@ -4772,9 +4975,18 @@ class DesktopSessionBridge:
         return candidate
 
     def _frame_answer(self, result: Any) -> dict[str, Any]:
-        """The frame's page as the wire states it, in the existing envelope."""
+        """The frame's page as the wire states it, in the existing envelope.
+
+        THE ONE COPY OF THE OPEN FRAME. Its rows come from ``_wire_rows(...,
+        copy=False)``, so a stripped row's nested values (content blocks,
+        ``details``, tool arguments) are still the page cache's shared objects.
+        Copying the SERVED rows here — ``limit`` of them, already stripped —
+        restores the never-alias guarantee for everything that leaves the frame,
+        at a fraction of copying the raw page. ``_json_copy`` equals the JSON
+        round trip, so the bytes cannot differ from the copy-first order.
+        """
         return {
-            "entries": result.entries,
+            "entries": [_json_copy(entry) for entry in result.entries],
             "has_more": result.has_more,
             "cursor_missing": result.cursor_missing,
             "has_newer": result.has_newer,
@@ -9011,6 +9223,8 @@ class DesktopSessions:
                             "agent": stored.agent or None if stored else None,
                             "team": stored.team or None if stored else None,
                         },
+                        # Picture identity for the row (see ``SessionRow.agent_id``).
+                        **session_row_fields(self.root, entry.id, stored.agent if stored else ""),
                         "preview": session_preview(self.root / "sessions" / entry.id),
                         # WHEN THE PERSON LAST SENT THIS SESSION A MESSAGE, for
                         # the Running section's order — and computed ONLY for

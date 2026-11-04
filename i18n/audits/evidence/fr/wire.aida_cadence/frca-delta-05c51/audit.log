@@ -1,0 +1,11 @@
+COMMAND: /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+
+EXIT: 0
+wire.aida_cadence.interval_hours.label: chars=25, cells=25, en_cells=25, args=(), NFC=true
+wire.aida_cadence.interval_hours.help: chars=133, cells=133, en_cells=137, args=(), NFC=true
+SHA256: {"context": {"path": "local_operator/i18n/catalogues/en/wire.aida_cadence.context.json", "sha256": "6efad501b08345b72e5d4d19cfee3dd27a02a48c2eb721780cf9d7f8c7694d0e"}, "en": {"path": "local_operator/i18n/catalogues/en/wire.aida_cadence.json", "sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd"}, "fr": {"path": "local_operator/i18n/catalogues/fr/wire.aida_cadence.json", "sha256": "42333772890dd59733f0bcff715c9d608ff1f7c069c8dbb025ee3b2f0548ed63"}}
+PASS: exact hashes, JSON/key parity, no ICU arguments/markup/backticks, NFC. No rendered test.
+RECOVERY_NOTE (notes, not captured failure output): bundle assembly asserted speculative 24/129 widths and stopped before writing report/record. Actual probe output was 25/133, as confirmed again here. Assertions corrected; no linguistic defect.
+ACTUAL_RECHECK {"wire.aida_cadence.interval_hours.label": 25, "wire.aida_cadence.interval_hours.help": 133}

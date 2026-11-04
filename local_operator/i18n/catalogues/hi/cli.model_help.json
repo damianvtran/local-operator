@@ -1,0 +1,7 @@
+{
+  "cli.model_help.model": "किसी दूसरे चल रहे lop सत्र का मॉडल बदलें (वहाँ /model की तरह)",
+  "cli.model_help.target": "बातचीत-नाम / सत्र-id / cwd का अंश (अक्षर-भेद रहित)। --pid/--session से संबोधित करते समय छोड़ दें।",
+  "cli.model_help.selector": "जिस मॉडल पर बदलना है, जैसे deepseek/deepseek-flash",
+  "cli.model_help.pid": "सटीक pid से लक्षित करें",
+  "cli.model_help.session": "सटीक सत्र id से लक्षित करें"
+}

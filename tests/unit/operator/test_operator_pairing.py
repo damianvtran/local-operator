@@ -431,7 +431,8 @@ def test_the_revoke_receipt_states_the_window_it_actually_honours(
     assert describe_devices(_args(revoke=device_id, print_only=True)) == 0
     receipt = capsys.readouterr().out
     assert f"within {int(ANCHOR_REFRESH_S)}s" in receipt, receipt
-    assert "Revocation lives in the anchor" in receipt, receipt
+    assert "Removed on this computer. It can no longer approve here." in receipt
+    assert "Your other computers keep trusting this phone until their list changes" in receipt
 
     # (b) NO USABLE ANCHOR: the message names the step that ends that state.
     monkeypatch.setattr(trust, "load_anchor", lambda uid=None: _absent_anchor(trust, uid))
@@ -517,7 +518,7 @@ def test_authorising_a_device_lifts_both_halves_of_its_revocation(
     def installed(uid: Any = None) -> Any:
         return _installed_anchor(trust, root, uid)
 
-    def fake_install(config_root: Path, *, print_only: bool = False) -> int:
+    def fake_install(config_root: Path, *, print_only: bool = False, **kwargs: Any) -> int:
         """The privileged step, stubbed: this rig's anchor IS the staged file.
 
         Needed since round 10 (UX U2) because the SUCCESS receipt now belongs to the
@@ -636,7 +637,7 @@ def test_authorise_print_only_is_a_preview_that_changes_nothing(
 
     real_install = handlers.install_anchor
 
-    def fake_install(config_root: Path, *, print_only: bool = False) -> int:
+    def fake_install(config_root: Path, *, print_only: bool = False, **kwargs: Any) -> int:
         """Models the ONE privileged step — and delegates the PRINT half to the product.
 
         The preview is asserted to print the privileged command, so the rig must not
@@ -745,7 +746,7 @@ def test_authorise_does_not_claim_the_lift_when_the_local_record_survives(
             exists=True,
         )
 
-    def fake_install(config_root: Path, *, print_only: bool = False) -> int:
+    def fake_install(config_root: Path, *, print_only: bool = False, **kwargs: Any) -> int:
         if not print_only:
             installed_path.write_bytes(trust.staging_path(config_root).read_bytes())
         return 0
@@ -911,7 +912,7 @@ def test_the_authorise_preview_promises_exactly_what_its_own_run_does(
     )
     real_install = handlers.install_anchor
 
-    def fake_install(config_root: Path, *, print_only: bool = False) -> int:
+    def fake_install(config_root: Path, *, print_only: bool = False, **kwargs: Any) -> int:
         if print_only:
             return real_install(config_root, print_only=True)
         calls.append("installed")

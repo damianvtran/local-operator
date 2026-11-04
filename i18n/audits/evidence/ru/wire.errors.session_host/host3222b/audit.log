@@ -1,0 +1,17 @@
+Timestamp UTC: 2026-10-31T18:08:14.619069+00:00
+Command: ["/Users/damian/local-operator/.venv/bin/python", "/Users/damian/.local-operator/sessions/bd43602aa8db/scratchpad/host-copy-ru/validation-tree/scripts/i18n/check.py", "--catalogues-only"]
+Working directory: /Users/damian/.local-operator/sessions/bd43602aa8db/scratchpad/host-copy-ru/validation-tree
+Environment: inherited CMUX_* and XPC_FLAGS removed
+Verified checker/source/context/candidate snapshot byte identity before execution.
+Exit code: 0
+STDOUT:
+check.py: catalogue checks: 0 problem(s)
+
+STDERR:
+
+
+Independent mechanical checks (actual execution):
+wire.errors.session_host.unsupported: key present; zero placeholders/ICU/markup/backticks; log literal/product parity; NFC; no Cf controls; chars=152
+wire.errors.session_host.unavailable: key present; zero placeholders/ICU/markup/backticks; log literal/product parity; NFC; no Cf controls; chars=100
+wire.errors.session_host.refused: key present; zero placeholders/ICU/markup/backticks; log literal/product parity; NFC; no Cf controls; chars=176
+No maxCells/maxChars budget declared. No rendered-fit proof collected.

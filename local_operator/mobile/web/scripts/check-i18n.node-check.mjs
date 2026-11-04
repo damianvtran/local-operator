@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { ENFORCED, GENERATED_SOURCES, scanSource, fingerprints, NONTRANSLATABLE } from "./check-i18n.mjs";
+import { ENFORCED, GENERATED_PATTERN, GENERATED_SOURCES, scanSource, fingerprints, NONTRANSLATABLE } from "./check-i18n.mjs";
 const script = fileURLToPath(new URL("./check-i18n.mjs", import.meta.url));
 const root = dirname(dirname(script));
 function fixture(source, baselineSource = source, scope = "src/store.ts") {
@@ -145,6 +145,12 @@ test("the generated owned-copy bundle is not counted as app debt", () => {
 		assert.equal(result.status, 0);
 		assert.match(result.stdout, /; 0 advisory legacy sink literal\(s\)/);
 		assert(GENERATED_SOURCES.has("src/i18n/bundled.gen.ts"));
+		// The per-locale chunks beside it are generated copy too: counting their
+		// values would double count the same extracted sentence in another script.
+		assert(GENERATED_PATTERN.test("src/i18n/bundled.ur.gen.ts"));
+		assert(GENERATED_PATTERN.test("src/i18n/bundled.zh-CN.gen.ts"));
+		assert(!GENERATED_PATTERN.test("src/i18n/bundled.gen.ts"));
+		assert(!GENERATED_PATTERN.test("src/i18n/locale-bundles.ts"));
 	} finally { rmSync(rig.directory, { recursive: true, force: true }); }
 });
 test("build/check/test scripts all execute the mandatory gate", () => {

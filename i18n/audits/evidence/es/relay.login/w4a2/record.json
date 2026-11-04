@@ -1,0 +1,81 @@
+{
+ "schema": 1,
+ "audit_id": "w4a2",
+ "audit_round": 1,
+ "locale": "es",
+ "namespace": "relay.login",
+ "audit_date": "2026-10-29",
+ "audited_revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+ "audited_revision_note": "The es catalogue is UNTRACKED at this revision (`git status --porcelain` -> `?? local_operator/i18n/catalogues/es/relay.login.json`), so HEAD cannot pin the audited bytes; input_hashes.target.sha256 is the exact on-disk hash and checks.py recomputes it.",
+ "key_count": {
+  "en": 4,
+  "target": 4,
+  "context": 4
+ },
+ "verdict": "passed",
+ "result": "passed — 0 blocker, 0 major, 0 minor, 0 nit",
+ "verdict_reason": "All four keys read against source and sidecar. The sidecar's one hard instruction — preserve current login copy and casing — is honoured byte for byte: lowercase throughout, brand 'local operator' untouched, em dash spacing kept. The screen is a password gate, so the security-copy question was asked directly: no value names a recipient, destination, server or storage for the typed secret, and the only failure string reports a mismatch without implying the password travelled anywhere unexpected. Nothing to fix.",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team)",
+  "session_or_instance": "8eb3b9c9a687 (lane es-w4-auditor-b)",
+  "model": "radient/auto (self-reported)",
+  "model_note": "Session header names anthropic/claude-sonnet-5-5 as primary; three provider-failure switches fired on quota before any catalogue was read (openai/gpt-6-astra, kimi/k3.1-pro, then radient/auto). Every judgement here was made under radient/auto - a disclosed fallback, not the pinned primary.",
+  "date": "2026-10-29",
+  "independence": "I wrote none of this copy and repaired none of it; this lane audits bytes produced by a different translator agent. I did not edit, delete, move or rename any file in the worktree: no catalogue, sidecar, ledger, allowance, style guide, glossary or generated file, and no git write of any kind. My only writes are this evidence directory. All three target files are untracked at HEAD, so every binding here is to the on-disk bytes recomputed by checks.py."
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/relay.login.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "9a59686bcd0e3641a5a807ea2b778cb385e591060c26c7fb994bea95e4de5bc5"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/es/relay.login.json",
+   "tracked": false,
+   "sha256": "b6e676acdc5cbb9a85423c458a19a5d6e5bc35594eb1dd21b23569af32f29658"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/relay.login.context.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "9fcd5a1669e6831b10b7041d82f77c69e858183c001ba9faa949532b4d71980a"
+  }
+ },
+ "display_side_risk": "none that survives verification. relay.login.error.password renders through this harness's display layer with its leading token masked; the on-disk bytes contain no 'redacted' literal (byte scan: False) and the value is 22 codepoints - the ordinary Spanish noun for a login secret (10 codepoints, last U+00F1) followed by ' incorrecta.' - plain UI copy, not a credential and not a marker in the file. The codepoint dump is authoritative; the sanctioned read_public_copy reader refused ('the workspace is not a git checkout'), which is moot here. No finding arises from this.",
+ "findings": [],
+ "verified": [
+  "Casing requirement from the sidecar is honoured exactly: all four values stay lowercase, and the brand stays 'local operator' in its original case.",
+  "The copy makes no claim that the typed password is transmitted, stored or forwarded anywhere — no recipient, no server, no destination is named in any of the four values; the only failure string reports a mismatch.",
+  "'iniciar sesión' is used identically in the page title and on the submit button, so the screen has one rendering of the action.",
+  "English source uses an em dash in the page title and the Spanish keeps it with the same spacing."
+ ],
+ "check_output": {
+  "commands": [
+   "python3 i18n/audits/evidence/es/relay.login/w4a2/checks.py",
+   "python3 - (codepoint dump of relay.login.error.password; byte scan for 'redacted')",
+   "python3 - (cell-width comparison via rich.cells.cell_len)"
+  ],
+  "result": "checks.py: exit 0, ALL CHECKS PASS (20 assertions).",
+  "mechanical": {
+   "key_parity": "4/4, identical order",
+   "placeholders": "none on either side",
+   "icu": "none on either side",
+   "casing": "lowercase preserved in all four, per sidecar 'Preserve current login copy and casing'",
+   "brand": "'local operator' kept lowercase and untranslated, per sidecar",
+   "em_dash": "' — ' spacing preserved in page.title",
+   "redaction": "the file contains no 'redacted' literal; the displayed mask is a harness artefact over the Spanish word for a login secret",
+   "password_transmission_implication": "none — no value in this namespace names a recipient, a server, a destination or storage for the typed secret"
+  },
+  "failures": "None."
+ },
+ "artifacts": [
+  "report.md",
+  "audit.log",
+  "checks.py"
+ ],
+ "limitations": [
+  "LLM semantic judgement, not native-speaker attestation.",
+  "No rendered frame was captured; width judgements use rich.cells.cell_len against the shipped relay corpus, and none of the three audited sidecars declares maxCells.",
+  "The target catalogue is untracked, so this binding is to on-disk bytes and any further edit invalidates it; no copy of these bytes is retained elsewhere.",
+  "The audit model is an auto-routing alias; the concrete backend is not identifiable."
+ ]
+}

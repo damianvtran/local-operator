@@ -1,0 +1,16 @@
+{
+  "form_raw_string_cell_widths": {},
+  "settings_nonchoice_labels_over29": [],
+  "settings_english_nonchoice_labels_over29": [],
+  "prior_claims_rederived": {
+    "hi/tui.palette cited target sha256 == current file sha256": {
+      "cited": [
+        "1103bd85cc6bce50ae5fa1754639046135fac188088df2c23c3ecb29fd9ed854"
+      ],
+      "current": "1103bd85cc6bce50ae5fa1754639046135fac188088df2c23c3ecb29fd9ed854",
+      "match": true
+    }
+  },
+  "numeric_token_differences": [],
+  "qualification": "Scalar measurements, not rendered layout evidence. Lengths of strings containing placeholders include placeholder spelling, not all runtime value lengths."
+}

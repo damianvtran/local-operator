@@ -279,10 +279,15 @@ def _owed(pending: dict[str, Any]) -> int | str:
 
 def _save_legacy_pending(memory: MemoryStore, peer: str, ids: list[str], overflow: bool) -> None:
     ids = list(dict.fromkeys(ids))
-    if len(ids) > LEGACY_WITHHELD_CAP:
-        ids, overflow = [], True
     with memory.connection() as db:
+        # Drop ids this store no longer holds BEFORE the cap. Journal compaction deletes
+        # superseded ops, so a long-lived peer's withheld list accumulates dead ids that
+        # nothing can ever redeliver; counting those against ``LEGACY_WITHHELD_CAP``
+        # collapsed a list that already fit into ``overflow`` — a full resend forced by
+        # ids that no longer exist (PR #3057 review r6, n1).
         ids = _still_held(db, ids)
+        if len(ids) > LEGACY_WITHHELD_CAP:
+            ids, overflow = [], True
         if ids or overflow:
             db.execute(
                 "INSERT OR REPLACE INTO meta VALUES (?,?)",

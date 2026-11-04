@@ -1,0 +1,17 @@
+{
+  "cli.mobile_help.mobile": "فون رسائی: اس مشین کے lop سیشنز کو کنٹرول کریں",
+  "cli.mobile_help.install": "ڈیمن، پاس ورڈ اور LaunchAgent انسٹال کریں",
+  "cli.mobile_help.status": "ڈیمن کی صحت، گیٹ اور فعال سیشنز",
+  "cli.mobile_help.daemon_action": "{action, select, start{ڈیمن شروع کریں} stop{ڈیمن روکیں} restart{ڈیمن دوبارہ شروع کریں} other{{action} ڈیمن}}",
+  "cli.mobile_help.logs": "ڈیمن اور رن ٹائمز کے لاگز کا آخری حصہ دکھائیں",
+  "cli.mobile_help.logs_lines": "فی فائل لائنیں (زیادہ سے زیادہ دو پڑھی جاتی ہیں)",
+  "cli.mobile_help.logs_follow": "نام کے ذریعے فالو کریں، تاکہ دیکھتے وقت بننے یا گھومنے والا لاگ نظر آئے (ڈسکرپٹر سے بندھا فالو دونوں چھوڑ دیتا ہے)",
+  "cli.mobile_help.password": "پورٹل پاس ورڈ دکھائیں یا تبدیل کریں",
+  "cli.mobile_help.devices": "اس کمپیوٹر کے push ڈیوائسز کی فہرست دکھائیں، یا ایک کو منسوخ/بحال کریں",
+  "cli.mobile_help.devices_command": "list (ڈیفالٹ)، revoke <device_id>، یا unrevoke <device_id>",
+  "cli.mobile_help.devices_device_id": "وہ device_id جو `lop mobile devices` دکھاتا ہے؛ revoke/unrevoke کے لیے لازمی",
+  "cli.mobile_help.devices_port": "موبائل ڈیمن کا پورٹ (ڈیفالٹ: ڈیمن کا اپنا ڈیفالٹ)",
+  "cli.mobile_help.uninstall": "LaunchAgent ہٹائیں",
+  "cli.mobile_help.uninstall_purge": "پاس ورڈ بھی حذف کریں",
+  "cli.mobile_help.serve": "ڈیمن چلائیں (فورگراؤنڈ)"
+}

@@ -1,0 +1,13 @@
+{
+  "cli.exec_runtime.thinking": "· размышляю…",
+  "cli.exec_runtime.tool_interrupted": "⊘ {name} прервано",
+  "cli.exec_runtime.tool_failed": "✗ {name} — сбой",
+  "cli.exec_runtime.output_check_failed": "! проверка вывода не пройдена ({format}, попытка {attempt}/{max_attempts}): {reason}",
+  "cli.exec_runtime.retry": "[dim]повтор {attempt}: {error}[/dim]",
+  "cli.exec_runtime.model_fallback": "[dim]переход на {selector}[/dim]",
+  "cli.exec_runtime.model_switched": "[dim]переключено на {selector}[/dim]",
+  "cli.exec_runtime.model_returned": "[dim]возврат к {selector}[/dim]",
+  "cli.exec_runtime.compacting": "[dim]сжатие контекста…[/dim]",
+  "cli.exec_runtime.error": "Ошибка: {sentence}",
+  "cli.exec_runtime.aborted": "[red]прервано[/red]"
+}

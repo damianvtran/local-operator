@@ -1,0 +1,36 @@
+$ cd /Users/damian/lo-i18n-base
+## branch
+feat/i18n-core-fr-backfill
+
+## key parity + ICU integrity + fr plural rendering
+$ /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/ab2610514b4d/scratchpad/fr_parity_one.py relay.account_policy
+namespace=relay.account_policy en_keys=13 fr_keys=13
+key_order_equal=True
+extra_in_fr=[]
+missing_in_fr=[]
+argument_mismatches=0
+fr_cldr_categories=('many', 'one', 'other')
+plural_keys=0
+
+## typography + codepoint inventory (masking attestation)
+$ /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/ab2610514b4d/scratchpad/fr_typo_one.py relay.account_policy
+namespace=relay.account_policy values=13
+typography_issues=0
+non_ascii_inventory=U+00E0(LATIN SMALL LETTER A WITH GRAVE)x2, U+00E8(LATIN SMALL LETTER E WITH GRAVE)x4, U+00E9(LATIN SMALL LETTER E WITH ACUTE)x11, U+00EA(LATIN SMALL LETTER E WITH CIRCUMFLEX)x1, U+2019(RIGHT SINGLE QUOTATION MARK)x5, U+2026(HORIZONTAL ELLIPSIS)x2
+equals_sign_in_any_value=False
+U+FFFD_in_any_value=False
+U+202F_total=0
+U+2019_total=5
+
+## repository gate, read-only
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+## input hashes
+en      0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890
+context 7e55e4fadebcde0a6b93d545a62b2743fbb16009498cdf4e2122cb309ecc07f4
+fr      61d4a6c52e2afd6afb4a83bc403995439da198d416507073832aaa26ce71874d
+
+## disclosure - one transient negative control
+While testing whether the repo gate rejects a plural category outside fr's [many, one, other], fr/relay.library.json was temporarily rewritten with an illegal `few` arm and then restored with `cp` from a copy taken before the write. The restored file is byte-identical to the copy (sha256 ab64d2fb171c78e79ac689d49da261474e4eaf687cbfbf113d28345234302ea2, the same hash this audit records as its target input). The gate run above ran after restoration. Disclosed because the audit brief forbids modifying catalogues; there is no net change. The negative control itself was never completed - that invocation used a mis-typed interpreter path and exited 127 - so it is reported as attempted and abandoned, not as evidence.
+

@@ -1,0 +1,27 @@
+{
+  "locale": "ru",
+  "namespace": "cli.hub_shared_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 1,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "RU-021",
+      "severity": "MAJOR",
+      "namespace": "cli.hub_shared_help",
+      "key": "cli.hub_shared_help.sync_accept_unknown_baseline",
+      "english": "Apply when the baseline is unknown: hub additions are taken, nothing of yours goes",
+      "current": "Применить при неизвестной базе: дополнения хаба принимаются, ваших изменений не остаётся",
+      "problem": "Meaning reversed on a data-safety flag: 'nothing of yours goes' = none of your content is removed. «ваших изменений не остаётся» says the opposite — your changes do NOT remain (are lost). A user deciding whether this flag is safe is told it destroys their work.",
+      "suggested": "Применить при неизвестной базе: дополнения хаба принимаются, ничего вашего не удаляется",
+      "disposition": "fixed (remediation core-fix, session ef4f00143d56)"
+    }
+  ]
+}

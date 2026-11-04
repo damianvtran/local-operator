@@ -1,0 +1,22 @@
+{
+  "form_raw_string_cell_widths": {},
+  "settings_nonchoice_labels_over29": [],
+  "settings_english_nonchoice_labels_over29": [],
+  "prior_claims_rederived": {
+    "fr/tui.palette cited target sha256 == current file sha256": {
+      "cited": [
+        "857229201f88ffe91c5103aa1acf7e0ac058136b1d5abe1c546e4489af37698a"
+      ],
+      "current": "857229201f88ffe91c5103aa1acf7e0ac058136b1d5abe1c546e4489af37698a",
+      "match": true
+    },
+    "fr palette placeholder cells (lost claim: Trouver 48 fits, Rechercher 51 refused)": {
+      "current": 48,
+      "Rechercher variant": 51,
+      "Chercher variant": 49,
+      "maxCells": 48
+    }
+  },
+  "numeric_token_differences": [],
+  "qualification": "Scalar measurements, not rendered layout evidence. Lengths of strings containing placeholders include placeholder spelling, not all runtime value lengths."
+}

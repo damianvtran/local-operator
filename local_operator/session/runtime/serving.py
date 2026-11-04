@@ -36,7 +36,7 @@ import uuid
 import weakref
 from asyncio import InvalidStateError
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -407,8 +407,33 @@ _ASK_REFRESH_MIN_S = 1.0
 #: idle threads. Lazy because most runtimes never switch, and the test suite
 #: builds hundreds of handles that never do.
 _SWITCH_EXECUTOR_WORKERS = 2
+
+#: One queue-plus-resolution budget, shorter than the attach ACK deadline.
+#: HTTP read timeouts bound idle reads, not a trickling complete listing, and
+#: dedicated workers can themselves be occupied. Only metadata is built in a
+#: worker: expiry cancels this await before the loop-owned mutation below, so
+#: a late result can populate caches but cannot change the session later.
+_MODEL_SWITCH_RESOLVE_S = 8.0
 _switch_executor_pool: concurrent.futures.ThreadPoolExecutor | None = None
 _switch_executor_lock = threading.Lock()
+
+
+@contextlib.asynccontextmanager
+async def _model_resolution_window(deadline: float) -> AsyncIterator[None]:
+    from local_operator.model.deadline import scope
+
+    # Task-local as well as worker-local: MetaMuse's asynchronous resolver and
+    # its to_thread metadata leg must inherit the SAME foreground deadline.
+    with scope(deadline):
+        try:
+            async with asyncio.timeout(_MODEL_SWITCH_RESOLVE_S):
+                yield
+        except TimeoutError as error:
+            # Reuse the existing noun-neutral localized label; an empty built-in
+            # TimeoutError otherwise becomes the unhelpful "cannot switch model: ".
+            from local_operator.i18n.keys.relay_asks import card_timed_out_badge
+
+            raise TimeoutError(card_timed_out_badge().envelope()["text"]) from error
 
 
 def _switch_executor() -> concurrent.futures.ThreadPoolExecutor:
@@ -879,6 +904,22 @@ class ServingSessionHandle(SessionHandle):
     #: exists to catch. See ``create_session`` for what waits on it.
     mcp_publication_gate: PublicationGate | None = None
 
+    #: The idle latch's recorded refusal cause, or ``""`` until ``begin_retire``
+    #: records one. ``server._idle_refusal_reason`` is its only reader: it turns the
+    #: string into the stop refusal's token (``busy`` / ``wake`` / ``leaving``), so
+    #: a handle that cannot answer the probe would report every refusal as work in
+    #: flight — the answer R3/Q-1 exists to stop producing.
+    #:
+    #: Declared at CLASS level for the reason the latch above gives: the server
+    #: reaches for it with a ``getattr`` capability probe, and the
+    #: capability-surface guard reads ``hasattr(ServingSessionHandle, name)``, so an
+    #: attribute that lived only on the instance reads as a capability the handle
+    #: cannot answer (measured: the guard's first report after this PR added the
+    #: probe). ``begin_retire`` is the only writer, and every path that refuses sets
+    #: it before returning ``False``, so the reader never sees this default in
+    #: practice — the class still has to state it for the probe to resolve.
+    _retire_refusal: str = ""
+
     def __init__(
         self,
         session: Any,
@@ -1147,6 +1188,15 @@ class ServingSessionHandle(SessionHandle):
         # completed duplicates are recognized from transcript-backed history.
         self._prompt_commands: dict[str, _PromptCommand] = {}
         self._prompt_drain_task: asyncio.Task[None] | None = None
+        # STEER ADMISSION IS SERIALIZED, and the reason is ordering rather than
+        # exclusion. A steer is admitted through an awaited durable write (the
+        # successor spool — see ``steer``), so without this lock two corrections
+        # submitted together (``asyncio.gather``, or two clients in the same
+        # tick) could reach ``Session.steer`` in the order their spool writes
+        # finished rather than the order they arrived. The queue's own order is
+        # a pinned property (``test_distinct_concurrent_steers_keep_fifo_order``),
+        # and an ``asyncio.Lock`` hands its waiters the slot in arrival order.
+        self._steer_admission_lock = asyncio.Lock()
         # Prompt and steer share one identity namespace. In particular, an idle
         # projection may race a turn start and transfer the rejected prompt's
         # identity to steer rather than admitting the same producer twice.
@@ -1366,6 +1416,17 @@ class ServingSessionHandle(SessionHandle):
             )
             self._notify()
             self._announce_pending("approval", tool_name, description)
+            # THE INBOX ROW, raised where the card parks and after it is on
+            # screen: a parked approval is a human-blocking condition, and
+            # before this the operator's reel had no row for it at all — only
+            # a banner that dies with its dismissal.
+            #
+            # ``request_id`` rides along because the row's key names THIS WAIT
+            # and not the tool (QA round 1, Q1/Q2): two cards for ``bash`` — a
+            # second one after the operator dismissed the first, or a parallel
+            # batch opening two at once — are two waits, and keying on the tool
+            # collapsed them into one row that could never come back.
+            await self._raise_gate_item("approval", tool_name, description, request_id)
             # Read ONCE, here: `asyncio.wait_for` fixes its deadline when the
             # wait begins, so this is the wait that applies even if a surface
             # attaches later and flips the policy (see `_record_gate_timeout`).
@@ -1458,6 +1519,12 @@ class ServingSessionHandle(SessionHandle):
                 # ``BODIES["ask"]`` vocabulary is the right fallback for it.
                 announced = "" if getattr(question, "secret", False) else prose
                 self._announce_pending("ask", prose, announced)
+                # The ask half of the same gap: a question parks the turn for
+                # exactly as long as an approval does, and the row is raised
+                # with the SAME empty detail a secret question gets — the
+                # shared vocabulary names the wait, never the credential. The
+                # per-question ``request_id`` is the wait this row belongs to.
+                await self._raise_gate_item("ask", prose, announced, request_id)
                 # Read once per question, for the same reason as the approval
                 # gate: the deadline `wait_for` enforces is fixed right here.
                 timeout_s = self._gate_timeout_s()
@@ -2308,13 +2375,36 @@ class ServingSessionHandle(SessionHandle):
         read as an invitation.
         """
         if getattr(self, "_disposing", False):
+            self._retire_refusal = "already disposing"
+            return False
+        # A stop cannot take over the successor promised by an update window.
+        # begin_update sets the handle flag before publishing it; end_update
+        # clears it only when that window closes. Checking the authoritative
+        # flag HERE keeps exclusion and retirement in the same owner-loop step,
+        # including the await while the update announces its handover (R7-1 /
+        # Q4-1). Do not put this in may_refresh or reject every retirement: the
+        # update itself must still latch runtime-retired inside its own window.
+        if cause == "user-stop" and getattr(self, "_updating", ""):
+            self._retire_refusal = "updating"
             return False
         try:
             reason = str(self.may_refresh() or "")
         except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
             reason = "busy probe failed"
         if reason:
+            # THE REFUSAL'S CAUSE, KEPT FOR THE CALLER THAT ASKED. The reasons
+            # ``may_refresh`` gives have different next steps — work in flight
+            # clears on its own, a wake due in the warm window clears when it
+            # fires, and an unevaluable probe may not clear at all — and the
+            # stop ladder's receipt names one step, not three. Recorded here
+            # rather than re-probed by the caller, because a second sample would
+            # describe state this decision did not see (agent review round 1 D2,
+            # UX round 1 U2). Read back by
+            # ``server._idle_refusal_reason``; this attribute is that field's
+            # only reader.
+            self._retire_refusal = reason
             return False
+        self._retire_refusal = ""
         self._retiring_cause = cause or "retiring"
         self._retiring_detail = detail
         self._exit_committed = True
@@ -2907,6 +2997,7 @@ class ServingSessionHandle(SessionHandle):
         message_id: str = "",
         custom_type: str = "",
         bridge_meta: dict[str, Any] | None = None,
+        raise_reader: bool = True,
     ) -> str:
         """Spool one message for the successor runtime, and receipt it.
 
@@ -3010,6 +3101,7 @@ class ServingSessionHandle(SessionHandle):
                     # owner-prompt paths, whose rows stay byte-identical.
                     bridge_meta=bridge_meta or {},
                 ),
+                raise_reader=raise_reader,
             )
         except Exception:  # noqa: BLE001 — a broken spool is a refusal, not a crash
             logger.warning("could not spool a message for the successor", exc_info=True)
@@ -3023,6 +3115,28 @@ class ServingSessionHandle(SessionHandle):
         if source == SOURCE_USER:
             return SPOOL_RECEIPT_PROMPT
         return SPOOL_RECEIPT_WAKE if wake else SPOOL_RECEIPT_NOTE
+
+    async def _forget_spooled_owner_row(self, command_id: str) -> None:
+        """Drop the spooled copy of an owner message that is now durable elsewhere.
+
+        The undo of :meth:`_spool_for_successor` for the one caller that must not
+        leave a copy behind: a steer this runtime went on to accept, whose row a
+        successor would otherwise deliver a second time. Best-effort by contract —
+        a removal lost to a crash is covered by the successor's own dedupe
+        (``has_admitted_command``, see ``process._run_owner_prompt``), and this
+        runs on an admission path where a bookkeeping failure must not turn an
+        accepted message into an error.
+        """
+        directory = self._session_directory()
+        if directory is None or not command_id:
+            return
+        from local_operator.session.runtime.inbox import remove_owner_row
+        from local_operator.wakes.spooled import await_spool_write
+
+        try:
+            await await_spool_write(remove_owner_row, directory, command_id)
+        except Exception:  # noqa: BLE001 — a stale spool row is deduped at replay
+            logger.warning("could not drop the spooled copy of %s", command_id, exc_info=True)
 
     def may_refresh(self) -> str:
         """Why this runtime must NOT retire for a newer build right now, or
@@ -3362,6 +3476,37 @@ class ServingSessionHandle(SessionHandle):
         is therefore the signal "this handle marshals for itself".
         """
         return self._loop
+
+    @_on_session_loop
+    async def call_on_session(self, fn: Callable[[Any], Any]) -> Any:
+        """Run ``fn(session)`` on the session's loop and await its result.
+
+        The owned twin of ``TuiSessionHandle.call_on_session``, for a runtime
+        caller that must touch the SESSION rather than one of this handle's verbs
+        — today the cwd-move hold and expiry announcements
+        (``RuntimeServer._announce_cwd_move``), whose ``journal_incident`` takes
+        the transcript's loop-bound lock (QA round 3, Q5). Implemented here
+        rather than left to the server's ``_session`` fallback because the
+        server probes for this capability, and the capability-surface guard
+        requires the handle EVERY session uses to answer what the server asks
+        for: an owned session reaching the same notice through a second,
+        unadvertised path is the drift that guard exists to stop.
+
+        NO DEADLOCK BY CONSTRUCTION: ``@_on_session_loop`` hands the body to the
+        session's loop with ``run_coroutine_threadsafe`` and awaits it through
+        ``wrap_future`` (never ``.result()``), and runs it inline when the caller
+        is already on that loop, so neither loop ever waits on itself. An
+        awaitable result (``queue_notice``/``journal_incident`` are ``async``)
+        is awaited here, i.e. on the session's loop too.
+
+        ``_check_loop_thread`` refuses the closed-loop case the decorator runs
+        inline, as the other session-writing bodies do: a transcript write on the
+        runtime's thread is exactly the Q5 failure, and the announcement's caller
+        already treats a refusal as "log, do not break the runtime".
+        """
+        self._check_loop_thread()
+        result = fn(self._session)
+        return await result if inspect.isawaitable(result) else result
 
     @property
     def session_projection_seed(self) -> SessionProjection:
@@ -4305,10 +4450,13 @@ class ServingSessionHandle(SessionHandle):
         not a latent bug. Naming the real type is what lets the type gate agree
         with the guard instead of having to be told to look away.
         """
-        from local_operator.session.goal_judge import owns_the_session
+        from local_operator.session.goal_judge import (
+            owns_the_session,
+            quiet_completion_accepted,
+        )
 
         try:
-            if not owns_the_session(self._session):
+            if quiet_completion_accepted(event) or not owns_the_session(self._session):
                 return
             driver = self._goal_judge_driver()
             if driver is None:
@@ -4329,10 +4477,13 @@ class ServingSessionHandle(SessionHandle):
         notifications always go out first. Ownership is checked here for the judge's reason:
         a follower must never spend or write.
         """
-        from local_operator.session.goal_judge import owns_the_session
+        from local_operator.session.goal_judge import (
+            owns_the_session,
+            quiet_completion_accepted,
+        )
 
         try:
-            if not owns_the_session(self._session):
+            if quiet_completion_accepted(event) or not owns_the_session(self._session):
                 return
             loop_running = self._goal_loop is not None and bool(self._goal_loop.running)
             self._supplements.on_agent_end(event, goal_loop_running=loop_running)
@@ -5052,8 +5203,126 @@ class ServingSessionHandle(SessionHandle):
 
                 self._command_reservations.reject(command_id)
                 raise DocumentCarriageUnsupported()
+        # ATTACHMENTS KEEP THEIR PRE-CHANGE CARRIAGE, and the fact is computed
+        # here rather than inside the admission for the same reason the blocks
+        # are: it is part of what the caller submitted, before any await. An
+        # ``InboxLine`` is text, so an image/recording/document steer has no
+        # durable home on the successor spool — it is admitted into the live
+        # queue exactly as before this seam and stays lossy on a runtime swap,
+        # which is a known gap listed on the PR rather than papered over with a
+        # refusal (refusing it broke the tree's own mid-turn ``/goal`` e2e).
+        carries_attachments = bool(images or audio or document_blocks_decoded)
+        # ONE STEER AT A TIME, in arrival order: the durable spool write below
+        # is awaited, so without this lock two corrections submitted together
+        # could reach the queue in the order their writes finished rather than
+        # the order they arrived. See ``_steer_admission_lock``.
+        async with self._steer_admission_lock:
+            # The admission is its OWN task because the message is owed once its
+            # spool write lands: a cancelled client must not abandon it between
+            # that write and the queue insert (see ``_await_steer_admission``).
+            admission = asyncio.ensure_future(
+                self._admit_steer(
+                    text,
+                    blocks,
+                    command_id=command_id,
+                    input_mode=input_mode,
+                    input_path=input_path,
+                    audio_blocks=audio_blocks_decoded,
+                    document_blocks=document_blocks_decoded,
+                    carries_attachments=carries_attachments,
+                    harness_injected=harness_injected,
+                )
+            )
+            receipt, raise_successor = await self._await_steer_admission(admission)
+        # OUTSIDE the lock: raising the read side is a ``launchctl`` hop (15 s
+        # worst case), and holding the arrival-order mutex across it would
+        # serialize every other steer behind a system call.
+        if raise_successor:
+            await self._raise_successor_reader()
+        return receipt
+
+    async def _await_steer_admission(
+        self, admission: "asyncio.Task[tuple[str, bool]]"
+    ) -> tuple[str, bool]:
+        """Join one admission even when the caller is cancelled mid-flight.
+
+        THE MESSAGE IS OWED ONCE ITS SPOOL WRITE LANDS, and the pre-change code
+        had no await between reserving the producer identity and queueing the
+        message — this seam added one. A cancellation delivered there used to
+        abandon the admission halfway: the row was on disk, the live queue never
+        saw it, and the reservation stayed pending forever, so a retry of the
+        same id answered "already admitted" for a message nobody would deliver.
+
+        Shielding alone is not enough: the caller must also not release
+        ``_steer_admission_lock`` while the owed admission is still running, or
+        the next steer can overtake it. The cancellation is remembered and
+        re-raised AFTER the admission settles — the same join-then-re-raise shape
+        ``wakes.spooled.await_spool_write`` uses one layer down.
+        """
+        cancellation: asyncio.CancelledError | None = None
+        while True:
+            try:
+                await asyncio.wait((admission,))
+            except asyncio.CancelledError as error:
+                if admission.cancelled():
+                    raise
+                if cancellation is None:
+                    cancellation = error
+                if not admission.done():
+                    continue
+            if cancellation is not None:
+                # Read the outcome so a task exception is not left unretrieved;
+                # the client is gone, so its receipt is not ours to deliver.
+                if not admission.cancelled():
+                    admission.exception()
+                raise cancellation
+            return admission.result()
+
+    async def _raise_successor_reader(self) -> None:
+        """Nudge the wake supervisor after the steer admission lock is released.
+
+        ``inbox.append_for_successor`` raises the reader inline, but that work is
+        a ``launchctl`` hop — 15 s worst case — and must not run under
+        ``_steer_admission_lock``. The row and its obligation are already durable
+        when this runs; the raise only asks the supervisor to look, so a failure
+        here delays a boot rather than losing a message (``_raise_reader`` is
+        best-effort by contract).
+        """
+        directory = self._session_directory()
+        if directory is None:
+            return
+        from local_operator.paths import config_dir
+        from local_operator.wakes.spooled import _raise_reader
+
+        await asyncio.to_thread(_raise_reader, config_dir(), directory.name)
+
+    async def _admit_steer(
+        self,
+        text: str,
+        blocks: list["ImageContent"],
+        *,
+        command_id: str,
+        input_mode: str | None,
+        input_path: str | None,
+        audio_blocks: list["AudioContent"],
+        document_blocks: list[Any],
+        carries_attachments: bool,
+        harness_injected: bool,
+    ) -> tuple[str, bool]:
+        """The admission half of :meth:`steer`, once its blocks are decoded.
+
+        Runs as its own task so a cancelled client cannot abandon a spooled
+        message halfway (see ``_await_steer_admission``), and the caller holds
+        ``_steer_admission_lock`` across the whole body — the reserve, the
+        durable spool write, the queue insert and the echoed row are one step
+        for ordering purposes.
+
+        Returns the receipt and whether the successor reader must be raised; the
+        caller does that AFTER releasing the lock, because it is a ``launchctl``
+        hop that must not serialize other admissions.
+        """
         if not self._command_reservations.reserve(command_id, kind="steer"):
-            return "already admitted"
+            return "already admitted", False
         # THE UPDATE WINDOW, and a steer is the one admission that cannot simply
         # wait: ``Session.steer`` queues against a TURN, and this runtime is idle
         # by construction (the window only opens when ``may_refresh`` reports
@@ -5062,18 +5331,12 @@ class ServingSessionHandle(SessionHandle):
         # then dispose it. It is the owner's own words, so it takes the spool and
         # the owner's receipt: the successor runs it, at the head of the turn the
         # prompt above it opens.
-        #
-        # ATTACHMENTS — IMAGES, A RECORDING, AND NOW DOCUMENTS — ARE THE ONE
-        # THING THE VEHICLE CANNOT CARRY and take the refusal, exactly as an
-        # attachment-carrying prompt does (see that arm for why an inbox row
-        # cannot hold them). Checked on the RAW image/audio arguments rather
-        # than on the decoded blocks because the decision has to happen before
-        # the attach, and a non-empty ``images`` or ``audio`` is the same fact
-        # one decode earlier; a resolved document block is the only form the
-        # fact takes, because resolving it is what raises the refusal a
-        # missing digest owes.
+        # ATTACHMENTS CANNOT RIDE THE SPOOL in this window, and this window has
+        # no other vehicle — so an attachment steer keeps the refusal it has
+        # always taken here. The normal path below keeps its pre-change in-memory
+        # carriage instead (see that block).
         if self._updating:
-            if images or audio or document_blocks_decoded:
+            if carries_attachments:
                 self._command_reservations.reject(command_id)
                 raise self._retiring_refusal()
             try:
@@ -5085,13 +5348,58 @@ class ServingSessionHandle(SessionHandle):
                     source=SOURCE_USER,
                     command_id=command_id,
                     harness_injected=harness_injected,
+                    raise_reader=False,
                 )
             finally:
                 # A spooled steer is not in this session's transcript, so its
                 # producer identity must stay retryable — the same rule the
                 # refusal's reject keeps below.
                 self._command_reservations.reject(command_id)
-            return receipt
+            return receipt, True
+        # THE UPDATE WINDOW WAS THE ONLY SPOOLING STEER; EVERY PLAIN ACCEPTED
+        # STEER NOW TAKES THE SPOOL (an attachment steer keeps its in-memory
+        # carriage, see the block below). The steering queue is in memory, and
+        # the transcript row
+        # that makes a steer durable is only written at the next tool boundary
+        # (``Session._drain_steering``) — so a runtime replaced before that boundary
+        # took an ACKED message with it, leaving the producer a 200, the session no
+        # row, and nobody an error (operator report, 2026-10-28: two command ids
+        # from session ``1cfce255afc3`` appeared nowhere but a frontend
+        # checkpoint). The spool is the one channel that survives the handover, and
+        # the window's arm above already treats it as the answer to exactly this
+        # question — so it is written BEFORE the queue is touched and before
+        # "steering queued" can be returned. A crash after the ack then leaves a row
+        # the successor replays (``process._run_owner_prompt``), exactly once,
+        # keyed on the command id that is also the transcript's
+        # ``producer_command_id``.
+        #
+        # IT INSURES THE QUEUE, IT DOES NOT REPLACE IT: the live turn still gets the
+        # correction through ``Session.steer``, and the drain removes the spool
+        # copy once the row it wrote is durable, so normal operation leaves nothing
+        # for a successor to deliver twice.
+        #
+        # AN ATTACHMENT STEER IS NOT SPOOLED (the decision is in ``steer``): the
+        # vehicle is text, so the row would drop the image/recording/document and
+        # a successor would deliver a message the user did not send. It keeps the
+        # pre-change in-memory carriage instead.
+        if not carries_attachments:
+            try:
+                await self._spool_for_successor(
+                    text,
+                    mode="mailbox",
+                    wake=True,
+                    sender={},
+                    source=SOURCE_USER,
+                    command_id=command_id,
+                    harness_injected=harness_injected,
+                    raise_reader=False,
+                )
+            except Exception:
+                # Nowhere durable to put the message, so it is refused rather than
+                # queued — and the producer identity stays retryable, which is what
+                # lets the same id be admitted once the spool can be written.
+                self._command_reservations.reject(command_id)
+                raise
         # Images ride the steer too. Producer identity follows the queued user
         # row so a reconnect cannot inject the same correction twice.
         fields: dict[str, Any] = {}
@@ -5112,12 +5420,12 @@ class ServingSessionHandle(SessionHandle):
         # row, and a session that predates the keyword gets none rather than a
         # keyword it would drop.
         if "audio" in parameters:
-            fields["audio"] = audio_blocks_decoded
+            fields["audio"] = audio_blocks
         # Documents ride the correction's keyword, probed like the rest; the
         # reservation path above already refused a session without it when
         # documents were present.
         if "documents" in parameters:
-            fields["documents"] = document_blocks_decoded
+            fields["documents"] = document_blocks
         # The structural stamp rides the steer for the same reason it rides a
         # prompt: a MID-TURN delivery is one of the two ways a spooled owner
         # prompt replays (``process._run_owner_prompt``'s steer fallback), and
@@ -5131,6 +5439,9 @@ class ServingSessionHandle(SessionHandle):
         except Exception:
             # No queue insertion means no durable acceptance exists; the same
             # producer identity must remain retryable after this terminal reject.
+            # The spool copy goes with the rejection: replaying it would deliver a
+            # message the producer was just told failed.
+            await self._forget_spooled_owner_row(command_id)
             self._command_reservations.reject(command_id)
             raise
         self._command_reservations.accept(command_id)
@@ -5149,7 +5460,7 @@ class ServingSessionHandle(SessionHandle):
             message_id=command_id if "message_id" in fields else None,
         )
         self._notify()
-        return "steering queued"
+        return "steering queued", not carries_attachments
 
     @_on_session_loop
     async def receive_peer_message(
@@ -5601,27 +5912,38 @@ class ServingSessionHandle(SessionHandle):
         # that resolves through another is how a "warm" switch used to run the
         # cold body on the loop anyway (review round 2, R2-1).
         from local_operator.model.configure import warm_model_info
+        from local_operator.model.deadline import run_before
 
-        warm_info = warm_model_info(provider, model_id)
-        if warm_info is not None:
-            spec = build_model_spec(provider, model_id, info=warm_info)
-        else:
-            spec = await self._loop.run_in_executor(
-                _switch_executor(), build_model_spec, provider, model_id
-            )
-        if provider == "meta-muse":
-            from local_operator.harness.types import ModelSpec
+        # Captured before submission: queueing cannot earn another network
+        # budget when a worker finally becomes available. run_in_executor does
+        # not propagate contextvars, so install the shared budget explicitly.
+        resolution_deadline = time.monotonic() + _MODEL_SWITCH_RESOLVE_S
+        async with _model_resolution_window(resolution_deadline):
+            warm_info = warm_model_info(provider, model_id)
+            if warm_info is not None:
+                spec = build_model_spec(provider, model_id, info=warm_info)
+            else:
+                spec = await self._loop.run_in_executor(
+                    _switch_executor(),
+                    run_before,
+                    resolution_deadline,
+                    build_model_spec,
+                    provider,
+                    model_id,
+                )
+            if provider == "meta-muse":
+                from local_operator.harness.types import ModelSpec
 
-            # Resolve the same selected account BEFORE publishing primary/spec.
-            # This is the existing metadata seam, not an inference or Codex call.
-            resolver = getattr(
-                getattr(self._session, "_stream_fn", None), "resolve_context_model", None
-            )
-            if callable(resolver):
-                result = resolver(spec)
-                resolved = await result if inspect.isawaitable(result) else result
-                if isinstance(resolved, ModelSpec):
-                    spec = resolved
+                # Resolve the same selected account BEFORE publishing primary/spec.
+                # This is the existing metadata seam, not an inference or Codex call.
+                resolver = getattr(
+                    getattr(self._session, "_stream_fn", None), "resolve_context_model", None
+                )
+                if callable(resolver):
+                    result = resolver(spec)
+                    resolved = await result if inspect.isawaitable(result) else result
+                    if isinstance(resolved, ModelSpec):
+                        spec = resolved
         if effort:
             spec = spec.model_copy(
                 update={
@@ -6860,6 +7182,46 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — the denial still stands
             logger.debug("could not record the unattended gate timeout", exc_info=True)
 
+    async def _raise_gate_item(
+        self, kind: str, gate_title: str, gate_detail: str, wait_id: str
+    ) -> None:
+        """Give the session the chance to raise its inbox row for this gate.
+
+        The OWNER decision belongs to the session graph, not to this handle: a
+        delegated child inherits this very closure (``harness/subagent.py``
+        takes ``parent_session._request_approval``), so the session the gate
+        parks on is the CHILD while the conversation the operator reads is the
+        parent's. ``Session.raise_gate_item`` resolves that walk and applies the
+        rest of the inbox gate to the owner it resolves.
+
+        ``wait_id`` is the id this gate minted for THIS park (``request_id``
+        above, one per question on the ask path), and it is what the row's key
+        names — not the tool. A repeat signal inside one wait updates one row;
+        a SECOND wait, whether a concurrent card in a parallel batch or a park
+        arriving after the operator dismissed the first row, is a new row they
+        can see. The tool cannot be the key: the store revives a dismissed row
+        only on a priority escalation, and every gate row is already ``high``.
+
+        Probed with ``getattr`` like every other host-optional seam on this
+        handle (``set_ask_reach`` below, ``set_record_pending`` in
+        ``_announce_settled``): a reduced session double has no inbox, and the
+        gate must never depend on one. The raise itself never raises — the card
+        is parked by now, and the row is the thing that may be lost, never the
+        wait.
+
+        The seam is TYPED rather than left ``Any``: ``getattr``'s three-argument
+        form widens to ``object`` for the analyzer, which then cannot await the
+        result (pyright: `"object" is not awaitable` — caught by CI, not by the
+        local gate). Naming the contract also says what a reduced host would
+        have to implement to carry an inbox.
+        """
+        raiser: Callable[[str, str, str, str], Awaitable[None]] | None = getattr(
+            self._session, "raise_gate_item", None
+        )
+        if raiser is None:
+            return
+        await raiser(kind, gate_title, gate_detail, wait_id)
+
     def reannounce_pending(self) -> None:
         """Re-run the announcement for a gate that is STILL parked.
 
@@ -7683,6 +8045,10 @@ class ServingSessionHandle(SessionHandle):
         if not recalled:
             raise ValueError("that steering message is no longer queued")
         self._command_reservations.reject(command_id)
+        # THE SPOOL IS THE OTHER HALF OF THE RETRACTION: every accepted steer is
+        # spooled before it is acknowledged, so dropping only the live queue entry
+        # would let a successor deliver the message the user just recalled.
+        await self._forget_spooled_owner_row(command_id)
         self._notify()
         return "steering recalled"
 
@@ -8283,6 +8649,39 @@ class ServingSessionHandle(SessionHandle):
             return await self._effort_slash(session, args, SlashResult)
         if command == "fast":
             return self._fast_slash(session, args, SlashResult)
+        # ONE BRANCH PER WORD, spelled `command ==`, not a set membership: the
+        # dispatch-surface guard reads this body for `command == "<name>"` and a
+        # tuple membership is invisible to it, which is how `/saver` came to be
+        # advertised as authoritative_session while the reader believed nothing
+        # dispatched it (measured: `test_the_runtime_dispatches_every_slash_command
+        # _it_advertises`).
+        if command == "saver":
+            from local_operator.saver.command import saver_slash
+
+            result = await saver_slash(session, args, SlashResult)
+            self._notify()
+            return result
+        if command == "radient":
+            from local_operator.i18n.keys import wire_radient_saver
+            from local_operator.i18n.text import tr
+            from local_operator.saver.command import saver_slash
+
+            word, _, rest = args.partition(" ")
+            if word != "saver":
+                return SlashResult(
+                    kind="notice",
+                    text=str(tr("wire.radient_saver")(wire_radient_saver.command_usage())),
+                    style="warning",
+                )
+            # Same rule as the app host: a bare `/radient saver` REPORTS rather
+            # than toggles, so a namespace command completed by return keys cannot
+            # change state (QA round 3, Q1). STRIPPED, because this host forwards
+            # `body.args` verbatim (desktop_sessions.py) and `rest or "status"` is a
+            # TRUTHINESS test: a whitespace-only argument is truthy, so `/radient
+            # saver␣␣` reported in the app and WROTE Saver on here (round 4).
+            result = await saver_slash(session, (rest or "").strip() or "status", SlashResult)
+            self._notify()
+            return result
         if command == "approvals":
             # ``may_loosen`` (issue #1310; design round 2 D10, UX round 2 U9):
             # whether THIS connection could carry `/approvals auto`, as the seam

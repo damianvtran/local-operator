@@ -253,3 +253,111 @@ describe("the input-mode annotation (input-mode-v1)", () => {
 		expect(sent.input_mode).toBe("typed");
 	});
 });
+
+describe("the skill-expansion request (`expand_skills`)", () => {
+	it("rides a fresh envelope only when the caller asks, and reaches sendCommand", async () => {
+		mockedSendCommand.mockResolvedValue({ ok: true, detail: "prompt sent" });
+
+		const receipt = await submitContinuation(
+			"root",
+			"prompt",
+			"$research fix it",
+			undefined,
+			undefined,
+			undefined,
+			true,
+		);
+
+		expect(receipt.envelope).toEqual({
+			op: "prompt",
+			command_id: "12345678-1234-4678-9234-567812345678",
+			text: "$research fix it",
+			images: undefined,
+			expand_skills: true,
+		});
+		expect(mockedSendCommand).toHaveBeenCalledWith("root", receipt.envelope);
+	});
+
+	it("is absent when the caller does not ask, so an older relay sees the old body", async () => {
+		mockedSendCommand.mockResolvedValue({ ok: true, detail: "prompt sent" });
+
+		const receipt = await submitContinuation("root", "prompt", "plain prose");
+
+		expect("expand_skills" in receipt.envelope).toBe(false);
+		expect("expand_skills" in (mockedSendCommand.mock.calls[0]?.[1] as object)).toBe(false);
+	});
+
+	it("is replayed from the STORED envelope, never re-derived from a later send", async () => {
+		mockedSendCommand
+			.mockRejectedValueOnce(new Error("response lost"))
+			.mockResolvedValueOnce({ ok: true, detail: "already admitted" });
+
+		await expect(
+			submitContinuation("root", "prompt", "$research fix it", undefined, undefined, undefined, true),
+		).rejects.toThrow("response lost");
+
+		/* The retry is asked WITHOUT the flag (the composer's capability read may
+		   have changed); the accepted body's own request must win. */
+		const retry = await submitContinuation("root", "prompt", "edited", undefined, undefined, undefined, false);
+
+		expect(retry.envelope.expand_skills).toBe(true);
+		expect(mockedSendCommand.mock.calls[1]?.[1]).toEqual(mockedSendCommand.mock.calls[0]?.[1]);
+	});
+
+	it("passes the receipt's skills block through unchanged", async () => {
+		mockedSendCommand.mockResolvedValue({
+			ok: true,
+			detail: "prompt sent",
+			skills: { attached: ["research"], skipped: ["empty-one"] },
+		});
+
+		const receipt = await submitContinuation(
+			"root",
+			"prompt",
+			"$research $empty",
+			undefined,
+			undefined,
+			undefined,
+			true,
+		);
+
+		expect(receipt.skills).toEqual({ attached: ["research"], skipped: ["empty-one"] });
+	});
+
+	it("keeps a pre-expansion stored envelope valid, and retires a malformed flag", async () => {
+		localStorage.setItem(
+			"lo-mobile-command:root",
+			JSON.stringify({
+				version: 1,
+				saved_at: Date.now(),
+				envelope: {
+					op: "prompt",
+					command_id: "12345678-1234-4678-9234-567812345678",
+					text: "stored before the flag",
+				},
+			}),
+		);
+		mockedSendCommand.mockResolvedValueOnce({ ok: true, detail: "already admitted" });
+		const replay = await submitContinuation("root", "prompt", "edited", undefined, undefined, undefined, true);
+		expect(replay.envelope.text).toBe("stored before the flag");
+		expect(replay.envelope.expand_skills).toBeUndefined();
+
+		localStorage.setItem(
+			"lo-mobile-command:root",
+			JSON.stringify({
+				version: 1,
+				saved_at: Date.now(),
+				envelope: {
+					op: "prompt",
+					command_id: "12345678-1234-4678-9234-567812345678",
+					text: "corrupt",
+					expand_skills: "yes",
+				},
+			}),
+		);
+		mockedSendCommand.mockResolvedValueOnce({ ok: true, detail: "prompt sent" });
+		const fresh = await submitContinuation("root", "prompt", "fresh", undefined, undefined, undefined, true);
+		expect(fresh.envelope.text).toBe("fresh");
+		expect(fresh.envelope.expand_skills).toBe(true);
+	});
+});

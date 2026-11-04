@@ -15,6 +15,7 @@
   "relay.asks.card.secret_notice_persisted": "خفیہ — براہ راست بھیجا گیا، ٹرانسکرپٹ میں نہیں دکھایا گیا، اور آپ کے کریڈینشل اسٹور میں محفوظ کر دیا گیا",
   "relay.asks.card.placeholder_secret": "خفیہ قدر چسپاں کریں",
   "relay.asks.card.placeholder_answer": "آپ کا جواب",
+  "relay.asks.card.other": "دیگر",
   "relay.asks.card.recommended": "· تجویز کردہ",
   "relay.asks.card.choose_any": "جو بھی لاگو ہوں، منتخب کریں",
   "relay.asks.card.urgent": "· فوری",

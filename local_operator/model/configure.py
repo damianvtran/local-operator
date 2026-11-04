@@ -496,7 +496,11 @@ _USER_SUPPLIED_MODEL_PROVIDERS = frozenset({"ollama"})
 #: direct `/v1/models` listing exposes ids but no capability flags, so an
 #: uncurated current snapshot still needs a family rule; older registry rows
 #: remain explicitly off through ``ModelInfo.supports_responses_api``'s default.
-_OPENAI_RESPONSES_API = re.compile(r"^gpt-5(?:[.-]|$)")
+# Keep the established GPT-5 rule, but infer GPT-6 capabilities only for
+# documented models and their dated snapshots, not an unknown future variant.
+_OPENAI_RESPONSES_API = re.compile(
+    r"^(?:gpt-5(?:[.-]|$)|gpt-6(?:-astra|-sol|-luna|\.1-sol|\.1-terra)" r"(?:-\d{4}-\d{2}-\d{2})?$)"
+)
 
 #: The DeepSeek-hosted models that run DeepSeek's THINKING MODE, and therefore
 #: demand the reasoning echo documented on ``ModelSpec.requires_reasoning_echo``
@@ -1973,7 +1977,9 @@ def _borrowed_listing_token(provider: str, *, base: Path | None = None) -> str:
 
         worker = threading.Thread(target=_run, daemon=True)
         worker.start()
-        worker.join(timeout=_LISTING_BORROW_JOIN_S)
+        from local_operator.model.deadline import remaining
+
+        worker.join(timeout=remaining(_LISTING_BORROW_JOIN_S))
         return outcome[0] if outcome else ""
     except Exception as exc:  # noqa: BLE001 - metadata is never worth a failed start
         logger.debug("could not borrow a %s token for the listing: %s", provider, exc)
@@ -3963,6 +3969,13 @@ class SessionStreamFn:
 
         self._auth_store = auth_store
         self._settings = settings
+        # Bound by Session after construction; keeping these on the stream lets
+        # every turn read the latest CLI/resolver state without rebuilding
+        # clients. Only the parent's spawn value lives here: the session choice
+        # and the agent pin are the SESSION's own fields, named (with this one)
+        # by ``saver/command.py::saver_choices`` — the two stream copies that
+        # nothing assigned are gone (review M1/m1).
+        self._saver_parent_value: bool | None = None
         self._session_id = session_id
         self._parent_session_id: str | None = None
         # The Anthropic response id of this conversation's last DIAGNOSED turn,
@@ -4050,6 +4063,20 @@ class SessionStreamFn:
         # session, its own request calls still never count as child activity.
         self._descendant_request_counter = self._child_request_counter
         self._context_tracker = ContextTokenTracker()
+        # Radient Saver (contract §7, §9): this conversation's chain, built on the
+        # first turn the gate allows and never shared — a fork starts its own.
+        # ``_saver_availability_read`` is the gate's account half: a background
+        # read started at enable and after a 402 (§8), re-tried after its own
+        # back-off when it timed out, and never awaited on a turn (R-1). The
+        # redaction and the spend sink are bound by the owning Session
+        # (:meth:`bind_saver`); until then the projection uses the
+        # credential-shape floor and records no spend.
+        self._saver_chain: Any | None = None
+        self._saver_availability_read: Any | None = None
+        #: One local sign-in check per session for the `opt_in` notice.
+        self._saver_signed_out_checked = False
+        self._saver_redaction: Any | None = None
+        self._saver_spend: Callable[[Any], None] | None = None
         self._notice_handler: Callable[[str, str], Awaitable[None] | None] | None = None
         # The session's route bridge: called with the pinned fallback target
         # (or None on recovery) so the host can keep its model display and its
@@ -4443,8 +4470,22 @@ class SessionStreamFn:
             return
         prompt_tokens = usage.input_tokens if usage else 0
         if prompt_tokens < self.PROVIDER_STRIKE_MIN_PROMPT_TOKENS:
+            # No receipt, missing prompt count, and a short prompt cannot tell
+            # whether this host would have reused the warm prefix. Such a turn
+            # interrupts consecutive misses just like an absent cache counter.
+            self._provider_strikes.get(model_id, {}).pop(served, None)
+            self._provider_strike_at.get(model_id, {}).pop(served, None)
             return
-        cached = usage.cache_read_tokens if usage else 0
+        # Unknown evidence cannot establish consecutive misses: the intervening
+        # turn could have hit. Discard this host's pending strike without treating
+        # the unknown as a measured hit. Replayed receipts safely remain unknown.
+        if usage is None or (
+            usage._cache_read_reported is not True and usage.cache_read_tokens == 0
+        ):
+            self._provider_strikes.get(model_id, {}).pop(served, None)
+            self._provider_strike_at.get(model_id, {}).pop(served, None)
+            return
+        cached = usage.cache_read_tokens
         floor = max(
             self.PROVIDER_STRIKE_MIN_CACHED_TOKENS,
             int(prompt_tokens * self.PROVIDER_STRIKE_MIN_CACHED_FRACTION),
@@ -5236,6 +5277,219 @@ class SessionStreamFn:
             else False
         )
         return map_tier_to_effort(self._message_tier, model.reasoning_efforts, allow_max=allow_max)
+
+    # -- Radient Saver (contract §6, §7, §9) ------------------------------------
+
+    def bind_saver(
+        self,
+        *,
+        redaction: Any | None = None,
+        spend: Callable[[Any], None] | None = None,
+    ) -> None:
+        """Bind the owning session's redactor and spend sink for Radient Saver.
+
+        Called by ``Session.__init__`` (the same division of labour as the notice
+        bridge): the session owns the ``VariableStore`` whose two passes the
+        upload must re-apply (§3.1, C-S2-3) and the channel ledger the ``saver``
+        spend line lands in. A stream with no owner keeps the shape-table floor.
+        """
+        self._saver_redaction = redaction
+        self._saver_spend = spend
+        chain = self._saver_chain
+        if chain is not None:
+            if redaction is not None:
+                from local_operator.saver.chain import upload_redaction
+
+                chain.redaction = upload_redaction(redaction)
+            chain.spend = spend
+
+    def _saver_bypassed(self, request: ChatRequest) -> bool:
+        """The silent bypasses (§6): nothing is uploaded and no notice is shown."""
+        return (
+            request.purpose != "turn"
+            or request.isolated
+            or request.has_one_turn_secrets
+            or request.model.provider in {"radient", "radient-key"}
+            or not request.messages
+        )
+
+    def bind_saver_session(self, session: Any) -> None:
+        """Read the owning session's live choice without sharing stream state.
+
+        Forks bind their own child session, so a parent's slash command cannot
+        silently change a child's upload decision.
+        """
+        self._saver_session = session
+
+    def _saver_choices(self) -> tuple[bool | None, bool | None, bool | None]:
+        from local_operator.saver.command import saver_choices
+
+        # The SESSION's three inputs are named in ONE place (review M1/m1): a
+        # second reader here once read a field nothing assigned, so this path
+        # spliced while `/saver status` reported off for the same session.
+        return saver_choices(getattr(self, "_saver_session", None), stream=self)
+
+    async def _apply_saver(self, request: ChatRequest) -> ChatRequest:
+        """Splice this conversation's Saver epochs into ``request``, or return it unchanged.
+
+        Never raises and never fails the turn (§6): every failure path returns
+        the request as given. With the gate off this reads one setting and
+        returns, so no Saver client, task or socket ever exists.
+
+        Whenever this returns the request UNSPLICED, the chain's frozen set is
+        cleared (R-2): the session's prune sweep restricts itself to the
+        frontier only while Saver is actually reducing the request, so a flip to
+        off, a silent bypass (a Radient-served model) or a 402 gives back
+        main's prune exactly.
+        """
+        spliced = request
+        try:
+            if not self._saver_bypassed(request):
+                spliced = await self._saver_splice(request)
+        except Exception as exc:  # noqa: BLE001 — an optimisation must never fail a turn
+            # The type only (S-9): never ``exc_info`` or args, which could carry
+            # conversation text into a DEBUG log.
+            logger.debug("saver: apply failed (%s); sending unreduced", type(exc).__name__)
+            spliced = request
+        chain = self._saver_chain
+        # R2-4: only a MAIN-TURN request may lift the prune restriction. An
+        # `aside`, `clearance` or `compaction_advisor` call rides the session's
+        # stream fn with `purpose != "turn"`, never touches the chain, and used
+        # to clear the ids anyway — a sweep in between then blanked frozen
+        # prefix rows, truncating the chain and paying for a re-upload.
+        if (
+            chain is not None
+            and request.purpose == "turn"
+            and spliced.frozen_prefix_messages is None
+        ):
+            chain.frozen_ids = frozenset()
+        return spliced
+
+    async def _saver_splice(self, request: ChatRequest) -> ChatRequest:
+        from local_operator.saver.gate import (
+            Availability,
+            configured_mode,
+            resolve_saver,
+            start_availability_read,
+        )
+
+        mode = configured_mode(self._settings)
+        if mode == "off":
+            return request
+        # NO BALANCE READ FOR A MODE THAT CANNOT TURN ON (R-1, S-22). The read
+        # sends the user's Radient bearer, so it is only worth making when a
+        # signed-in account with credit WOULD resolve on. Asking the resolver
+        # that question with a best-case answer keeps this in step with the
+        # gate instead of duplicating it: in LO1 `auto` is refused
+        # (`auto_unavailable`) and `opt_in` has no session choice wired, so
+        # neither reaches the network.
+        session_choice, agent_pin, parent_value = self._saver_choices()
+
+        def resolved(best: Availability | None) -> Any:
+            return resolve_saver(
+                self._settings,
+                best,
+                session_choice=session_choice,
+                agent_pin=agent_pin,
+                parent_value=parent_value,
+            )
+
+        if not resolved(Availability(True, True)).on:
+            # The opt-out guard reads the SAME choice the resolver just used
+            # (review m1): it read a field nothing assigned, so `is not False`
+            # was always true and a user who typed `/saver off` still got the
+            # sign-out notice on every turn.
+            if mode == "opt_in" and session_choice is not False:
+                await self._saver_signed_out_notice()
+            return request
+        # The availability read is NEVER awaited on the turn (R-1/S-4/Q1): it
+        # runs in the background under its own total deadline, and until it
+        # answers "signed in with credit" this turn goes unreduced.
+        availability = self._saver_availability_read
+        if availability is None or availability.expired():
+            availability = start_availability_read()
+            self._saver_availability_read = availability
+        answered = availability.result()
+        owner = getattr(self, "_saver_session", None)  # unbound before Session binds it
+        if answered is not None and owner is not None:
+            # Publish what the read answered so the badge's cached view converges
+            # within one turn. Written as two attribute writes rather than a call
+            # into ``saver.command`` on purpose: this is the per-turn path, and an
+            # import there pulled the i18n runtime into it.
+            owner._saver_availability = answered
+            owner._saver_signed_in = answered.signed_in
+        decision = resolved(availability.result())
+        if not decision.on:
+            return request
+        chain = self._ensure_saver_chain()
+        spliced = await chain.apply(request)
+        if chain.needs_availability_refresh:
+            # A 402 is the one runtime event that re-reads the balance (§8).
+            self._saver_availability_read = None
+            chain.needs_availability_refresh = False
+        return spliced
+
+    async def _saver_signed_out_notice(self) -> None:
+        """Tell an `opt_in` user once per session that Saver needs a sign-in.
+
+        Without a chain nothing else can say it (QA round 7, Q-R7-4): the
+        chain's own signed-out notice only fires from a Radient answer, and
+        this path never calls Radient. The check is LOCAL — whether exactly one
+        Radient login is stored (`tunnels.api.credential_id`, the same rule the
+        availability read uses) — so no request and no bearer leave the
+        machine. Run off the loop because the credential store is a file.
+        """
+        if self._saver_signed_out_checked:
+            return
+        self._saver_signed_out_checked = True
+        from local_operator.saver.chain import NOTICE_SIGNED_OUT, notice_message
+        from local_operator.tunnels.api import credential_id
+
+        try:
+            await asyncio.to_thread(credential_id, None)
+            return
+        except Exception:  # noqa: BLE001 — no single Radient login: signed out
+            pass
+        try:
+            await self._saver_notice(notice_message(NOTICE_SIGNED_OUT))
+        except Exception as exc:  # noqa: BLE001 — a notice must never fail the turn
+            logger.debug("saver: signed-out notice failed (%s)", type(exc).__name__)
+
+    def _ensure_saver_chain(self) -> Any:
+        chain = self._saver_chain
+        if chain is not None:
+            return chain
+        from local_operator.saver.chain import (
+            SaverChain,
+            shared_client,
+            upload_redaction,
+        )
+        from local_operator.saver.projection import shape_only_redaction
+
+        # A stream with no session id still gets its own chain; the id is only
+        # the correlation header and the turn-binding key, both per-object.
+        chain = SaverChain(
+            session_id=self._session_id or f"stream-{id(self):x}",
+            client=shared_client(),
+            redaction=upload_redaction(self._saver_redaction or shape_only_redaction()),
+            notice=self._saver_notice,
+            spend=self._saver_spend,
+        )
+        self._saver_chain = chain
+        return chain
+
+    async def _saver_notice(self, message: Any) -> None:
+        """Deliver one keyed Saver notice through the session's notice bridge.
+
+        The bridge carries ``(text, kind)``; the text is rendered from the
+        catalogue in the active locale, and the reason behind it is a closed
+        enum — never a server sentence (S-31).
+        """
+        from local_operator.i18n.messages import render
+        from local_operator.i18n.text import active_locale
+
+        text = render(message.code, dict(message.params), locale=active_locale())
+        await self._notice(text, "warning")
 
     async def _notice(self, text: str, kind: str = "warning") -> None:
         if self._notice_handler is None:
@@ -6932,6 +7186,16 @@ class SessionStreamFn:
         from local_operator.providers.failover import stream_with_failover
 
         preparation_started = time.perf_counter()
+        # RADIENT SAVER SEAM (contract §7). Spliced HERE — before the request
+        # is measured, admitted, sized and handed to ``stream_with_failover``
+        # below — so the context tracker, output sizing and EVERY failover hop,
+        # credential rotation or OAuth account switch serialise the SAME reduced,
+        # provider-neutral history for their own provider. Never in
+        # ``wrap_client``: that is per provider, and a fallback would then send
+        # the unreduced history. Bypassed silently for every non-turn purpose,
+        # an isolated errand, a one-turn-secret request and a Radient-served
+        # session (§6); with the gate off nothing here runs at all.
+        request = await self._apply_saver(request)
         measured = await asyncio.to_thread(measure_request, request)
         tracks_context = not request.isolated and request.purpose == "turn"
         binding = ContextBinding(self._context_tracker, measured) if tracks_context else None
@@ -7741,6 +8005,7 @@ class SessionStreamFn:
                     cache_read_tokens=int(usage.cache_read_tokens),
                     cache_write_tokens=int(usage.cache_write_tokens),
                     cache_write_1h_tokens=int(getattr(usage, "cache_write_1h_tokens", 0)),
+                    openai_long_context=bool(getattr(usage, "openai_long_context", False)),
                     reasoning_tokens=int(getattr(usage, "reasoning_tokens", 0)),
                     context_tokens=int(context_tokens or 0),
                     component_chars=component_chars,
@@ -7823,6 +8088,14 @@ class SessionStreamFn:
         self._transport.owners -= 1
         if self._transport.owners == 0:
             await self._http.aclose()
+        chain, self._saver_chain = self._saver_chain, None
+        if chain is not None:
+            # Cancels this conversation's in-flight prefetch; the process-wide
+            # Saver client stays open for other sessions.
+            try:
+                await chain.aclose()
+            except Exception:  # noqa: BLE001 — teardown, never fatal
+                pass
         if self._usage_cache is not None:
             try:
                 self._usage_cache.close()
@@ -7889,7 +8162,7 @@ def create_stream_fn(
 def calculate_cost(
     model_info: ModelInfo,
     input_tokens: int,
-    output_tokens: int,
+    output_tokens: float,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
     *,
@@ -7975,6 +8248,16 @@ def _cache_tokens_are_inside_input(provider: str) -> bool:
     return not (definition is not None and definition.wire == "anthropic")
 
 
+# OpenAI's published >272k tier is model-specific, not a generic property of
+# OpenAI-compatible wire formats. Restrict inference to documented exact IDs and
+# dated snapshots; future and aggregator models must not inherit these prices.
+_OPENAI_LONG_CONTEXT_MODELS = re.compile(
+    r"^(?:gpt-6-astra|gpt-6\.1-sol|gpt-6\.1-terra|gpt-6-luna|gpt-6-sol|"
+    r"gpt-5\.6-sol|gpt-5\.6-terra|gpt-5\.6-luna|gpt-5\.5|gpt-5\.5-pro|"
+    r"gpt-5\.4|gpt-5\.4-pro)(?:-\d{4}-\d{2}-\d{2})?$"
+)
+
+
 def cost_for_usage(
     provider: str,
     model_info: ModelInfo,
@@ -8013,6 +8296,11 @@ def cost_for_usage(
     reported = _usage_cost(usage)
     if reported is not None:
         return reported
+    # Login flavours share their canonical provider's accounting, but retain
+    # unrelated aggregator identities so their pricing is never inferred here.
+    from local_operator.providers.registry import credential_provider_id
+
+    provider = credential_provider_id(provider)
     read = _usage_field(usage, "cache_read_tokens")
     written = _usage_field(usage, "cache_write_tokens")
     plain = _usage_field(usage, "input_tokens")
@@ -8021,14 +8309,38 @@ def cost_for_usage(
         # provider that reports more cached tokens than prompt tokens is
         # malformed rather than a reason to hand back a negative bill.
         plain = max(0, plain - read - written)
-    return calculate_cost(
-        model_info,
-        plain,
-        _usage_field(usage, "output_tokens"),
-        read,
-        written,
-        moment=tariff.moment_for(model_info, usage, moment),
-    )
+    output = float(_usage_field(usage, "output_tokens"))
+    if (
+        provider == "openai"
+        and bool(
+            usage.get("openai_long_context", False)
+            if isinstance(usage, Mapping)
+            else getattr(usage, "openai_long_context", False)
+        )
+        and _OPENAI_LONG_CONTEXT_MODELS.fullmatch(model_info.id)
+    ):
+        # The higher rates apply to the entire request, not just the excess.
+        # Scale token buckets rather than catalog rows to retain tariff handling.
+        plain *= 2
+        read *= 2
+        written *= 2
+        output *= 1.5
+    price_moment = tariff.moment_for(model_info, usage, moment)
+    cost = calculate_cost(model_info, plain, output, read, written, moment=price_moment)
+    if provider == "anthropic":
+        # Anthropic's receipt identifies the 1h subset; its documented price is
+        # 2x base, not the catalog's ordinary 5m write rate. A malformed subset
+        # cannot create more billed tokens than the total write count. Other
+        # providers and unknown duration remain on their existing quoted rate.
+        one_hour = min(written, _usage_field(usage, "cache_write_1h_tokens"))
+        write_rate = model_info.cache_writes_price or model_info.input_price
+        cost += (
+            one_hour
+            * (2 * model_info.input_price - write_rate)
+            * tariff.scale_for(model_info, price_moment)
+            / 1_000_000.0
+        )
+    return cost
 
 
 def _usage_cost(usage: Any) -> float | None:

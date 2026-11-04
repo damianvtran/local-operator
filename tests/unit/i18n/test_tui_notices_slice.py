@@ -8,12 +8,10 @@ What this file pins, and why each pin exists:
 2. **The additive event contract (RFC §2.6).** A notice now carries
    `code`/`params` beside `text`; older clients read `text` verbatim, and a
    locale-aware viewer can re-render without parsing prose.
-3. **Per-namespace fallback.** The namespace started en-only, and a shipped
-   locale that does not carry it still reads the English text. Every shipped
-   locale now carries it (the fast-mode fix translated all five), so the
-   fallback is pinned against `ur`, which is inactive and has no directory:
-   the point is that a missing namespace degrades to English and never to the
-   raw message code.
+3. **Per-key locale selection, DERIVED.** Every supported locale reads its own
+   carried key or the English source. Complete coverage is healthy; synthetic
+   catalogue tests independently pin missing-file and missing-key fallback.
+
 """
 
 from __future__ import annotations
@@ -25,6 +23,7 @@ from local_operator.harness.loop import _notice
 from local_operator.harness.types import NoticeEvent
 from local_operator.i18n import catalogues, messages
 from local_operator.i18n.keys import tui_notices as keys
+from tests.unit.i18n import locale_coverage
 
 NAMESPACE = "tui.notices"
 _ROOT = Path(local_operator.__file__).resolve().parent.parent
@@ -196,14 +195,12 @@ def test_four_digit_counts_keep_plain_digits() -> None:
     )
 
 
-def test_an_uncarried_locale_falls_back_to_english() -> None:
-    # `ur` rather than `fr`: fr now carries this namespace (fast-mode fix), so
-    # pinning fr here would assert translation-identity and silently rot into a
-    # duplicate of the catalogue when the copy is next reviewed. An inactive
-    # locale with no directory exercises the fallback path itself.
-    assert not (catalogues.catalogue_root() / "ur" / f"{NAMESPACE}.json").exists()
+def test_supported_locales_render_carried_keys_or_english() -> None:
     for key in REPLACED_LITERALS:
         message = getattr(keys, key)(**_SAMPLE_PARAMS.get(key, {}))
-        en = messages.render(message.code, message.params, locale="en")
-        assert messages.render(message.code, message.params, locale="ur") == en
-        assert _notice(message).text == en
+        for locale in locale_coverage.supported_targets():
+            expected = locale_coverage.expected_message(
+                locale, NAMESPACE, message.code, message.params
+            )
+            assert messages.render(message.code, message.params, locale=locale) == expected, locale
+        assert _notice(message).text == messages.render(message.code, message.params, locale="en")

@@ -1,0 +1,44 @@
+{
+  "locale": "fr",
+  "namespace": "tui.library",
+  "audit_date": "2026-10-29",
+  "key_count": 108,
+  "translator": {
+    "agent": "translator (lopdev team)",
+    "model": "radient/auto",
+    "date": "2026-10-29"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "d5db18882cb9",
+    "model": "radient/auto",
+    "actual_model_source": "Actual served model is the harness's auto route (radient/auto). This session received two provider-failure fallbacks during the audit: anthropic/claude-sonnet-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto (reason: quota). No pinned model is claimed.",
+    "independence": "not the translator; edited nothing",
+    "date": "2026-10-29"
+  },
+  "input_hashes": {
+    "en": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11",
+    "context": null,
+    "target_locale": "db992135159e712c8b6e57ed6f15f557d17e0a96dbdfaa74a9dcdbbf43d68f95"
+  },
+  "remediation": {
+    "note": "Findings were remediated after the audit. input_hashes.target_locale binds the FINAL shipped bytes; input_hashes.context is the sidecar hash the auditor worked from where it changed afterwards. target_sha_at_audit keeps the bytes the auditor actually read.",
+    "target_sha_at_audit": "764cf78d82e995f5e17eb6e7e161eeece56d3f9f36abd4375325fe69d9a02d3a",
+    "target_sha_after_remediation": "db992135159e712c8b6e57ed6f15f557d17e0a96dbdfaa74a9dcdbbf43d68f95",
+    "context_sha_at_audit": null,
+    "context_sha_after_remediation": null
+  },
+  "artifacts": [
+    "report.md",
+    "record.json",
+    "audit.log"
+  ],
+  "current_report_verdict": "findings-remediated",
+  "findings": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "masking_note": "No masking marker exists in the audited bytes. Verified by codepoint rather than by eye across all eight audited French catalogues: no bracketed redaction marker, no U+FFFD and no control characters in any value. The only 'redact' substring anywhere in the set is the placeholder NAME {redactions} in tui.import.result_memory, whose rendered French text is the word 'masquages' — a placeholder name, not a masked value."
+}

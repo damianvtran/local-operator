@@ -784,6 +784,143 @@ def test_a_receipt_that_does_not_cover_the_run_falls_back(tmp_path: Path, alive:
     assert rescue.read_signal_receipt(tmp_path, sid) is not None
 
 
+# --- R-9. a refusal record is not a receipt --------------------------------
+
+
+def test_a_refusal_record_is_not_a_receipt_and_leaves_recovery_untouched(
+    tmp_path: Path, alive: set[int]
+) -> None:
+    """R-9: the refusals file must never reach the receipt reader.
+
+    A run that REFUSED an anonymous SIGTERM and was then SIGKILLed is exactly a run
+    whose recovery matters, and it is the shape that makes a shared receipt dangerous:
+    ``rescue._receipt_covers_run`` accepts on the run key alone (it has no
+    ``signals`` test), and ``_death_class_receipt`` answers
+    ``unclassified/receipt-no-signals`` for a signals-less receipt — which is
+    TERMINAL, so such a run would never be rescued. The receipt therefore keeps its
+    today-shape invariant (it exists only when a signal was recorded) and the refusal
+    lives beside it, in ``registry.SIGNAL_REFUSALS_NAME``.
+
+    Proved both ways: the would-be classifier answer for this document is terminal
+    (first assertion), and the REAL pass over a store that holds it decides exactly as
+    it decides with no document at all (the rest).
+    """
+    sid = "777788889999"
+    _session_dir(tmp_path, sid)
+    _record(tmp_path, sid, pid=DEAD_PID, started_at=STARTED, heartbeat_at=HEARTBEAT)
+    # THE SIGKILL-MID-TURN SHAPE: no completion row at all (the process died with
+    # nothing written — a SIGKILL leaves no receipt), and an OPEN turn journal saying
+    # work was in flight. That is the population rescue exists for, and the one a
+    # refused-then-killed run belongs to. A cell that let a ``user-stop`` completion
+    # explain the death would pass while proving nothing about recovery.
+    _journal(tmp_path, sid, DEAD_PID)
+
+    def decision() -> Any:
+        report = rescue.rescue_scan(tmp_path, now=NOW, apply=False)
+        return next(d for d in report.decisions if d.session_id == sid)
+
+    baseline = decision()
+    assert (
+        baseline.verdict == "fire"
+    ), f"this cell's SIGKILL-shaped death is not rescue-eligible at all: {baseline}"
+
+    refusals_doc = {
+        "v": 1,
+        "kind": "runtime",
+        "session_id": sid,
+        "pid": DEAD_PID,
+        "started_at": STARTED,
+        "refusals": [
+            {
+                "disposition": "refused",
+                "name": "SIGTERM",
+                "number": 15,
+                "at": NOW - 30.0,
+                "first_at": NOW - 30.0,
+                "count": 1,
+                "sanction": "none",
+            }
+        ],
+    }
+    registry.write_signal_refusals(_session_dir(tmp_path, sid), refusals_doc)
+
+    # (a) WHAT IT WOULD HAVE COST: this document, read as a receipt, is terminal.
+    assert rescue._receipt_covers_run(refusals_doc, sid, DEAD_PID, STARTED) is True
+    assert rescue._death_class_receipt(refusals_doc) == (rescue.UNCLASSIFIED, "receipt-no-signals")
+
+    # (b) WHAT ACTUALLY HAPPENS: the receipt reader sees nothing, and the pass decides
+    # exactly as it did before the refusal existed.
+    assert rescue.read_signal_receipt(tmp_path, sid) is None
+    after = decision()
+    # The VERDICT is unchanged by the refusal; the TAG now names the stronger evidence
+    # (the fallback reads the refusals file, Q2), so only the verdict is compared.
+    assert after.verdict == baseline.verdict, "a refusal record changed the recovery decision"
+    assert after.verdict == "fire", "a refused-then-SIGKILLed run must still be rescued"
+    assert after.tag == "refused-signal-then-death"
+    assert after.tag != "receipt-no-signals"
+
+
+def test_a_refused_then_killed_run_is_rescued_even_after_an_earlier_completed_turn(
+    tmp_path: Path, alive: set[int]
+) -> None:
+    """Q2: the fallback must see a refusal, or the gate hides the 2026-10-30 shape.
+
+    The session finished a turn earlier (a ``complete`` row), the next turn was in
+    flight, a bare SIGTERM was REFUSED, then the process was SIGKILLed. Before the
+    gate the SIGTERM wrote a ``sanction: none`` receipt and this was
+    ``fire / receipt-unsanctioned``; with the arrival moved to its own file the
+    fallback read only the latest completion and answered ``skip / complete`` — the
+    same verdict a plain SIGKILL earns, but for a run the evidence says somebody
+    tried to end and nobody sanctioned. The refusal is that evidence.
+    """
+    sid = "777788889999"
+    _session_dir(tmp_path, sid)
+    _record(tmp_path, sid, pid=DEAD_PID, started_at=STARTED, heartbeat_at=HEARTBEAT)
+    _journal(tmp_path, sid, DEAD_PID)
+    _completions(tmp_path, [(f"session/{sid}", "complete", "", "done")])
+
+    without = _verdict(tmp_path, sid)
+    assert without == "skip", "the control (a plain SIGKILL) is today's complete-skip"
+
+    registry.write_signal_refusals(
+        _session_dir(tmp_path, sid),
+        {
+            "v": 1,
+            "kind": "runtime",
+            "session_id": sid,
+            "pid": DEAD_PID,
+            "started_at": STARTED,
+            "refusals": [{"disposition": "refused", "name": "SIGTERM", "number": 15}],
+        },
+    )
+    report = rescue.rescue_scan(tmp_path, now=NOW, apply=False)
+    decision = next(d for d in report.decisions if d.session_id == sid)
+    assert (decision.verdict, decision.tag) == ("fire", "refused-signal-then-death")
+
+
+def test_a_refusal_from_an_earlier_run_does_not_rescue_a_later_one(
+    tmp_path: Path, alive: set[int]
+) -> None:
+    """The run key bounds the evidence: another run's refusal narrates nothing here."""
+    sid = "777788889999"
+    _session_dir(tmp_path, sid)
+    _record(tmp_path, sid, pid=DEAD_PID, started_at=STARTED, heartbeat_at=HEARTBEAT)
+    _journal(tmp_path, sid, DEAD_PID)
+    _completions(tmp_path, [(f"session/{sid}", "complete", "", "done")])
+    registry.write_signal_refusals(
+        _session_dir(tmp_path, sid),
+        {
+            "v": 1,
+            "kind": "runtime",
+            "session_id": sid,
+            "pid": DEAD_PID + 1,
+            "started_at": STARTED - 5_000,
+            "refusals": [{"disposition": "refused", "name": "SIGTERM", "number": 15}],
+        },
+    )
+    assert _verdict(tmp_path, sid) == "skip"
+
+
 # --- G. the exit record (a policy departure is not a death) ------------------
 
 

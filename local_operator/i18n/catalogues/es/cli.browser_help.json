@@ -1,0 +1,22 @@
+{
+  "cli.browser_help.browser": "Conectar la herramienta de navegador a una extensión de Chromium",
+  "cli.browser_help.install": "Instalar el daemon del puente",
+  "cli.browser_help.status": "Mostrar el estado del daemon, la extensión y el emparejamiento",
+  "cli.browser_help.status_repair": "Reconciliar el estado anunciado con el real: descartar pestañas que ya no existen y publicar un heartbeat nuevo. Seguro con sesiones activas.",
+  "cli.browser_help.json": "salida legible por máquina",
+  "cli.browser_help.cleanup": "Cerrar un propietario de navegador que haya terminado, tras revalidarlo",
+  "cli.browser_help.cleanup_yes": "Aprobar exactamente esta limpieza",
+  "cli.browser_help.daemon_action": "{action, select, start{Iniciar} stop{Detener} restart{Reiniciar} other{{action}}} el daemon",
+  "cli.browser_help.pair": "Mostrar el código de emparejamiento de la extensión",
+  "cli.browser_help.pair_reset": "Revocar primero el navegador emparejado",
+  "cli.browser_help.pair_list": "Listar las extensiones de navegador autorizadas y cuál ejerce el control",
+  "cli.browser_help.pair_revoke": "Revocar UNA extensión autorizada (su ID, un prefijo de ID inequívoco o parte de su etiqueta), sin desemparejar las demás",
+  "cli.browser_help.drive": "Elegir qué extensión autorizada controla el navegador",
+  "cli.browser_help.drive_target": "ID de la extensión (o un prefijo inequívoco), o parte de su etiqueta",
+  "cli.browser_help.logs": "Seguir el registro del daemon",
+  "cli.browser_help.uninstall": "Eliminar el daemon del puente",
+  "cli.browser_help.uninstall_purge": "Eliminar también el estado de emparejamiento",
+  "cli.browser_help.serve": "Ejecutar el daemon del puente (en primer plano)",
+  "cli.browser_help.tabs": "Listar registros duraderos de propiedad y pestañas activas (solo lectura)",
+  "cli.browser_help.reconcile": "Alias de 'tabs': inspeccionar la propiedad sin cerrar nada"
+}

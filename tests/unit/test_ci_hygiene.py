@@ -10,7 +10,7 @@ These exist because three defects all produced a *silent* green:
 - #381: ``[tool.pyright] exclude`` *replaces* pyright's built-in defaults.
   Dropping ``**/.*`` makes a local run type-check all of site-packages.
 - #1238: the whole job set ran on every diff, so a one-line docs edit paid for
-  the five-shard matrix, a Windows run, a macOS TUI run, a live-LLM run and a
+  the six-shard matrix, a Windows run, a macOS TUI run, a live-LLM run and a
   dependency audit — 16 checks for a file no gate reads. The gate is a
   classifier (`scripts/ci_scope.py`) shared with `make check-changed`; the
   assertions below pin its predicates, its fail-open direction, and the wiring
@@ -539,16 +539,23 @@ def _shard_step_run(job: str) -> str:
 #: third pytest step, or this one under another id, fails ``_pytest_steps``.
 SERIAL_STEP_ID = "serial_controls"
 ORDINARY_STEP_ID = "shard_pytest"
+#: tui-e2e's own pair. The Darwin evidence step is there because the sharded unit
+#: job is ubuntu-only: the macOS leg is the only place a group census's treatment
+#: of an unreaped zombie leader can be measured, and an unnamed extra pytest
+#: invocation is exactly what this audit exists to refuse.
+E2E_STEP_ID = "e2e_shard_pytest"
+DARWIN_STEP_ID = "darwin_pin"
 
 
 def _pytest_steps(job: str) -> list[dict[str, Any]]:
     """Every step of `job` that invokes pytest, with the job's allowance enforced.
 
-    One step for every job but the unit job, which has EXACTLY two and they are the
-    ones the design names: the ordinary shard run (`shard_pytest`) and the serial
-    controls (`serial_controls`). The old rule ("exactly one pytest step") would
-    either reject the design or, relaxed to "at least one", let an arbitrary extra
-    command ride along unaudited; this keeps both honest.
+    One step for every job but the two audited pairs: the unit job's ordinary shard
+    run (`shard_pytest`) and serial controls (`serial_controls`), and tui-e2e's
+    partitioned e2e run (`e2e_shard_pytest`) and Darwin evidence step
+    (`darwin_pin`). The old rule ("exactly one pytest step") would reject either
+    addition, and relaxing it to "at least one" would let an arbitrary extra
+    command ride along unaudited; naming the ids keeps both honest.
     """
     steps = [s for s in _steps(job) if "pytest" in (s.get("run") or "")]
     if job == "test":
@@ -556,6 +563,12 @@ def _pytest_steps(job: str) -> list[dict[str, Any]]:
         assert ids == [ORDINARY_STEP_ID, SERIAL_STEP_ID], (
             f"{job} must run exactly its two audited pytest steps "
             f"({ORDINARY_STEP_ID}, {SERIAL_STEP_ID}) in that order, got {ids}"
+        )
+    elif job == "tui-e2e":
+        ids = [s.get("id") for s in steps]
+        assert ids == [E2E_STEP_ID, DARWIN_STEP_ID], (
+            f"{job} must run exactly its two audited pytest steps "
+            f"({E2E_STEP_ID}, {DARWIN_STEP_ID}) in that order, got {ids}"
         )
     else:
         assert len(steps) == 1, f"{job} must have exactly one pytest step, got {len(steps)}"
@@ -744,30 +757,25 @@ def test_a_module_level_skip_resolves_through_its_name(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("classname", ["", ".", "..", "tests."])
-def test_a_classname_of_only_separators_is_dropped_not_raised(
-    classname: str, tmp_path: Path
-) -> None:
-    """The guard covers the empty-component CLASS, not just the empty string.
+def test_a_classname_of_only_separators_is_rejected(classname: str, tmp_path: Path) -> None:
+    """Unresolvable inputs fail with attribution context, not a Path crash.
 
-    `"."` splits to two empty components and reaches the SAME `ValueError` as
-    `""`, so `if not classname` closes the spelling pytest emits today and
-    leaves the other one open. Nothing emits `.` yet; the cost of the wider
-    guard is nothing, and the cost of the narrow one is a manifest that
-    silently stops being regenerated. `tests.` is here because a trailing
-    separator trims to `tests.py`, which names no test file and must be a drop,
-    not a crash.
+    Even a positive duration with a malformed classname cannot silently vanish
+    from the regenerated weights. Valid empty-classname skips resolve by name
+    in the separate real-pytest-shape regression above.
     """
     from scripts import gen_test_durations
 
     report = _junit_report(tmp_path, f'<testcase classname="{classname}" time="1.0"/>')
 
-    assert gen_test_durations.aggregate([report]) == {}
+    with pytest.raises(ValueError, match="did not map"):
+        gen_test_durations.aggregate([report])
 
 
-def test_the_unresolved_warning_names_the_string_that_was_tried(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_the_unresolved_error_names_the_string_that_was_tried(
+    tmp_path: Path,
 ) -> None:
-    """A dropped mapping must be actionable: name the string actually tried.
+    """A rejected mapping must be actionable: name the string actually tried.
 
     On the empty-classname path the string tried is `name`, and the warning
     recorded the raw `classname` instead -- so the message printed `['']`,
@@ -781,10 +789,15 @@ def test_the_unresolved_warning_names_the_string_that_was_tried(
         tmp_path, '<testcase classname="" name="tests.unit.test_never_written" time="1.0"/>'
     )
 
-    assert gen_test_durations.aggregate([report]) == {}
-    err = capsys.readouterr().err
-    assert "tests.unit.test_never_written" in err, err
-    assert "['']" not in err, err
+    with pytest.raises(ValueError, match="tests.unit.test_never_written"):
+        gen_test_durations.aggregate([report])
+
+
+def test_unit_shard_capacity_changes_without_relaxing_timeout() -> None:
+    """The fleet repair buys parallel capacity, never fewer tests or a higher cap."""
+    assert _shard_plan("test") == ("unit", 6)
+    assert shard_tests.TREES["unit"].default_shards == 6
+    assert _ci_jobs()["test"]["timeout-minutes"] == 38
 
 
 def test_every_shard_matrix_job_uses_a_known_tree() -> None:
@@ -2350,6 +2363,34 @@ def test_the_local_typed_gate_is_bounded_and_reaped_by_the_wrapper() -> None:
     assert not any(token.endswith(".py") and "/" in token for token in inner), inner
 
 
+def test_status_only_gates_request_the_command_status_contract() -> None:
+    """The local status-only gates name `--contract=command-status` explicitly.
+
+    The default `cleanup-required` contract refuses before spawn wherever no
+    authoritative census backend exists (Darwin), which turned `make type-check`
+    and `make check-changed` into 125 on every Mac (PR #3274, review R3/Q1).
+    These gates consume pyright's status, not a cleanup certificate, so they opt
+    into command-status -- which still enforces the memory grant and sweeps the
+    group. CI's Linux serial-control wrapper deliberately stays strict.
+
+    Mutations that must fail this: drop the flag from the Makefile, from
+    JOB_COMMANDS, from either AGENTS.md gate spelling or from the bench script.
+    """
+    flag = "--contract=command-status"
+    scope = _scope()
+    assert flag in shlex.split(scope.JOB_COMMANDS["type-check"][0])
+    recipe = _makefile_recipe_blocks()["type-check"].replace("\\\n", " ")
+    assert flag in shlex.split(recipe), recipe
+    agents = (REPO / "AGENTS.md").read_text()
+    spellings = re.findall(r"scripts/run_bounded\.py[^\n`]*-m pyright", agents)
+    assert len(spellings) >= 2, spellings
+    assert all(flag in spelling for spelling in spellings), spellings
+    bench = (REPO / "scripts" / "bench_send_admission_ab.sh").read_text()
+    assert re.search(r"run_bounded\.py\" " + re.escape(flag), bench), "bench wrapper"
+    serial = (REPO / ".github" / "workflows" / "ci.yml").read_text()
+    assert "run_bounded.py --timeout 400" in serial, "CI serial wrapper stays strict"
+
+
 def test_the_makefile_typed_gate_is_the_same_command_as_the_job() -> None:
     """A17. The Makefile target is a SECOND copy of the command, so it is guarded.
 
@@ -2448,6 +2489,9 @@ def test_the_bounded_wrapper_raises_the_node_heap_only_when_needed(
         [
             sys.executable,
             str(REPO / "scripts/run_bounded.py"),
+            # command-status: both contracts build the child env through the one
+            # `_child_environment`, and the default refuses before spawn on Darwin.
+            "--contract=command-status",
             "--timeout",
             "15",
             "--",
@@ -2501,7 +2545,15 @@ def test_the_bounded_wrapper_preserves_real_node_heap_semantics(
     assert control.returncode == 0, control.stderr
     env["NODE_OPTIONS"] = node_options
     wrapped = subprocess.run(
-        [sys.executable, str(REPO / "scripts/run_bounded.py"), "--timeout", "15", "--", *probe],
+        [
+            sys.executable,
+            str(REPO / "scripts/run_bounded.py"),
+            "--contract=command-status",  # same env builder; strict refuses on Darwin
+            "--timeout",
+            "15",
+            "--",
+            *probe,
+        ],
         env=env,
         capture_output=True,
         text=True,
@@ -2676,7 +2728,7 @@ def test_a_local_run_classifies_the_diff_instead_of_running_everything(
 def test_coverage_report_inherits_a_skipped_test_job_and_has_no_always() -> None:
     """A14. `coverage-report` must not get an `always()`.
 
-    It combines the five shard artifacts. If `test` was skipped there are zero
+    It combines the six shard artifacts. If `test` was skipped there are zero
     artifacts, and `coverage combine` over nothing goes red on a PR that changed
     nothing the unit suite reads. GitHub's default — a skipped need skips the
     dependent — is exactly the wanted behaviour here, so this job keeps
@@ -2933,6 +2985,8 @@ def test_the_windows_input_set_covers_what_that_job_loads() -> None:
         "tests/unit/network/test_credentials_real_link.py",
         "tests/unit/network/test_credentials_owner.py",
         "tests/unit/network/test_relay_e2e.py",
+        "tests/unit/team_bridge/test_connector_platforms.py",
+        "tests/unit/team_bridge/__init__.py",
     )
     conftest = (REPO / "conftest.py").read_text()
     for helper in ("shard_memory_dump", "shard_stall_watchdog"):
@@ -3248,3 +3302,15 @@ def test_agents_doc_states_the_check_count_a_release_bump_pr_runs() -> None:
             f"AGENTS.md says a release-bump PR runs {word!r} checks; the workflows "
             f"give {expected}: ci.yml {sorted(ci_rows)} + {gate_rows} release-gate rows"
         )
+
+
+def test_shard_plugin_bootstrap_does_not_export_a_cwd_pythonpath():
+    """Child -P isolation must survive loading the checkout's ordering plugin.
+
+    Exporting PYTHONPATH=. makes every spawned interpreter search its own cwd,
+    including children deliberately protected with -P. Module launch resolves
+    the early plugin without changing the environment inherited by user code.
+    """
+    run = _run_step("test")
+    assert "python -m pytest -p tests.ci_order_owned_first" in run
+    assert "PYTHONPATH=" not in run

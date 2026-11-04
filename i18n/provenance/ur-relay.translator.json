@@ -216,7 +216,7 @@
         "verdict": "clean for all 109 keys; zero unresolved BLOCKER/MAJOR/MINOR/NIT"
       }
     ],
-    "ledger": "Seven ur relay rows in i18n/ledger.json record these auditors, sessions and models; the coverage allowance no longer lists the complete relay pairs.",
+    "ledger": "Seven ur relay rows in i18n/ledger/ur.json record these auditors, sessions and models; the coverage allowance no longer lists the complete relay pairs.",
     "rendered_evidence": "Not captured in either round: no browser, screenshot, shaping, bidi or narrow-width measurement is claimed. Rendered RTL/design sign-off remains a separate gate.",
     "integration_rebase": {
       "base": "fd3302ea8757d6d386255380c7feafded1aa97f6",

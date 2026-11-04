@@ -38,6 +38,15 @@ def _destination_open(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _guard_state_isolated(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runtimes here use ``config_dir="."``; channel_post's reply guard
+    writes its budget under that dir, so each test gets a fresh cwd — otherwise
+    the 6-post budget would accumulate across tests (and land in the repo)."""
+
+    monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
 def _gates_open(monkeypatch: pytest.MonkeyPatch) -> None:
     """These tests are about channel semantics, not the fences.
 
@@ -47,6 +56,9 @@ def _gates_open(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
+    # The room ops that are endpoint-addressed (channel_create/post/history/thread/react)
+    # dispatch through the OUTBOUND fence, so this file must open that one too.
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda runtime: None)
     monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
 
 
@@ -71,6 +83,7 @@ class RecordingClient:
         created: dict[str, Any] | None = None,
         sent: dict[str, Any] | None = None,
         messages: dict[str, Any] | None = None,
+        conversation: dict[str, Any] | None = None,
     ) -> None:
         self.conversations_result = conversations or {"conversations": [], "next_cursor": None}
         self.created_result = created or {
@@ -78,9 +91,10 @@ class RecordingClient:
             "kind": "channel",
             "member_count": 1,
         }
-        self.sent_result = sent or {"message": {"id": "cmsg_1", "seq": 4}}
+        self.sent_result = sent if sent is not None else {"id": "bcmsg_post0001", "seq": 4}
         self.messages_result = messages or {"messages": []}
         self.replies_result: dict[str, Any] = {"root": {}, "replies": [], "has_more": False}
+        self.conversation_result: dict[str, Any] = conversation or {"id": "bcv_abcd1234"}
         self.calls: list[dict[str, Any]] = []
 
     async def conversations(self, **kwargs: Any) -> dict[str, Any]:
@@ -93,9 +107,11 @@ class RecordingClient:
         *,
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
+                **({"expected_account_id": expected_account_id} if expected_account_id else {}),
                 "method": "create_conversation",
                 "body": dict(body),
                 "actor_endpoint_id": actor_endpoint_id,
@@ -103,6 +119,14 @@ class RecordingClient:
             }
         )
         return self.created_result
+
+    async def conversation(
+        self, conversation_id: str, *, tenant_id: str | None = None
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {"method": "conversation", "conversation_id": conversation_id, "tenant_id": tenant_id}
+        )
+        return self.conversation_result
 
     async def conversation_send(
         self,
@@ -115,9 +139,15 @@ class RecordingClient:
         actor_endpoint_id: str | None = None,
         origin_session_id: str | None = None,
         thread_root_id: str | None = None,
+        expected_account_id: str | None = None,
+        mentions: Any = None,
+        pre_http_guard: Any = None,
     ) -> dict[str, Any]:
+        if pre_http_guard is not None:
+            pre_http_guard()
         self.calls.append(
             {
+                **({"expected_account_id": expected_account_id} if expected_account_id else {}),
                 "method": "conversation_send",
                 "conversation_id": conversation_id,
                 "client_ref": client_ref,
@@ -127,6 +157,7 @@ class RecordingClient:
                 "actor_endpoint_id": actor_endpoint_id,
                 "origin_session_id": origin_session_id,
                 "thread_root_id": thread_root_id,
+                "mentions": mentions,
             }
         )
         return self.sent_result
@@ -190,10 +221,10 @@ class RecordingClient:
         return self.messages_result
 
 
-def _runtime(client: Any, *, endpoint_id: str = "bep_1") -> BridgeRuntime:
+def _runtime(client: Any, *, endpoint_id: str = "bep_1", config_dir: Any = ".") -> BridgeRuntime:
     return BridgeRuntime(
         client=cast(TeamBridgeClient, client),
-        config_dir=".",
+        config_dir=config_dir,
         tenant_id=TENANT,
         owner=_owner(endpoint_id),
         session_id="sess_1",
@@ -325,7 +356,7 @@ async def test_channel_post_mints_one_client_ref_and_a_retry_reuses_it() -> None
         requests.append(request)
         if len(requests) == 1:
             return httpx.Response(401, json={"error": "unauthorized"})
-        return _ok({"message": {"id": f"cmsg_{len(requests)}", "seq": len(requests)}})
+        return _ok({"id": f"bcmsg_post{len(requests):04d}", "seq": len(requests)})
 
     runtime = _runtime(
         TeamBridgeClient(
@@ -339,6 +370,11 @@ async def test_channel_post_mints_one_client_ref_and_a_retry_reuses_it() -> None
         runtime, {"op": "channel_post", "channel_id": "bcv_abcd1234", "body": "hello"}
     )
     assert first["ok"] is True
+    assert first["message_id"] == "bcmsg_post0002"
+    assert first["seq"] == 2
+    assert first["conversation_id"] == "bcv_abcd1234"
+    assert "message bcmsg_post0002" in first["content"]
+    assert "at seq 2" in first["content"]
 
     # The 401 refresh retried ONCE with the same body: one client_ref.
     assert len(requests) == 2
@@ -354,6 +390,8 @@ async def test_channel_post_mints_one_client_ref_and_a_retry_reuses_it() -> None
         runtime, {"op": "channel_post", "channel_id": "bcv_abcd1234", "body": "hello again"}
     )
     assert second["ok"] is True
+    assert second["message_id"] == "bcmsg_post0003"
+    assert second["seq"] == 3
     # A second CALL is a second message, so it gets a fresh idempotency key.
     assert json.loads(requests[2].content)["client_ref"] != first_body["client_ref"]
 
@@ -598,6 +636,37 @@ async def test_react_paused_admission_refuses_before_write(monkeypatch):
     assert client.calls == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sent,message_id,seq",
+    [
+        ({"id": "bcmsg_post0001", "seq": 7}, "bcmsg_post0001", 7),
+        ({"message": {"id": "bcmsg_post0001", "seq": 7}}, "bcmsg_post0001", 7),
+        ({}, "", None),
+        ({"id": "bcmsg_post0001", "seq": True}, "bcmsg_post0001", None),
+    ],
+)
+async def test_channel_post_receipt_reports_only_confirmed_id_and_sequence(sent, message_id, seq):
+    # The hub unwraps to a message view; the nested proxy shape remains a
+    # compatibility case, not the fake used to prove the primary wire path.
+    client = RecordingClient(sent=sent)
+    outcome = await execute_bridge(
+        _runtime(client),
+        {"op": "channel_post", "channel_id": "bcv_abcd1234", "body": "hello"},
+    )
+    assert outcome["ok"] is True
+    assert outcome["message_id"] == message_id
+    assert outcome["seq"] == seq
+    assert outcome["conversation_id"] == "bcv_abcd1234"
+    assert outcome["destination_type"] == "conversation"
+    assert "message ?" not in outcome["content"]
+    if not message_id:
+        assert "returned no message id" in outcome["content"]
+    if seq is None:
+        assert " at seq " not in outcome["content"]
+    assert len(client.calls) == 1
+
+
 # -- threads (agent-server feat/bridge-threads) --------------------------------
 
 
@@ -722,7 +791,7 @@ async def test_thread_ops_reach_the_hub_with_the_exact_upstream_shape() -> None:
         requests.append(request)
         if request.method == "GET":
             return _ok({"root": {"id": "bcmsg_root0001", "reply_count": 1}, "replies": []})
-        return _ok({"message": {"id": "bcmsg_reply001", "seq": 2}})
+        return _ok({"id": "bcmsg_reply001", "seq": 2})
 
     runtime = _runtime(
         TeamBridgeClient(

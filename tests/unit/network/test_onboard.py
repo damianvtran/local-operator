@@ -1520,6 +1520,71 @@ def test_a_join_mismatch_is_a_failed_receipt_naming_the_step(
     assert network_store.pair_decision("inv_1", isolated) is None
 
 
+def test_the_ssh_target_is_freed_before_the_terminal_row_is_readable(
+    isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """MAIN-RED SHAPE 2 (2026-10-30): "run finished" must imply "target free".
+
+    ``approval_run`` holds one per-target file claim so two cards cannot install
+    on the same host at once. It used to outlive the run's TERMINAL write, and
+    that write is what a client polls as ``run_active`` — so a retry issued the
+    moment the run was reported finished was refused 409
+    ``approval_target_in_flight`` by the run it had just been told was over.
+    That is the ``assert 409 == 202`` main went red on in CI, where the gap
+    between the terminal write and the claim's exit is a thread handoff apart
+    and therefore visible.
+
+    The order is the contract, so this is a structural assertion: the runner
+    frees the claim BEFORE it publishes any terminal row.
+    """
+    _install_fakes(monkeypatch)
+    token = tmp_path / "invite.token"
+    token.write_text("token-bytes", encoding="utf-8")
+    fake = FakeApprovals(_record())
+    monkeypatch.setattr(onboard_approvals, "_module", lambda: fake)
+
+    order: list[str] = []
+    real_release = onboard.TargetLease.release
+    real_finish = onboard_approvals.finish
+
+    def spy_release(lease) -> None:
+        order.extend(["release"])
+        real_release(lease)
+
+    def spy_finish(*args: Any, **kwargs: Any) -> None:
+        order.extend(["finish:" + str(kwargs.get("step") or "?")])
+        real_finish(*args, **kwargs)
+
+    monkeypatch.setattr(onboard.TargetLease, "release", spy_release)
+    monkeypatch.setattr(onboard_approvals, "finish", spy_finish)
+
+    payload = onboard.execute_approval(
+        "ap_aaaa1111",
+        transport=FakeTransport(
+            outputs=[
+                ("uname", {"stdout": PRE_READ_OK}),
+                ("lop-update", {"stdout": "rebuilt\n"}),
+                ("lop --version", {"stdout": "v0.64.12\n"}),
+                (
+                    "identity show",
+                    {"stdout": json.dumps({"ok": True, "device_id": "d_node"})},
+                ),
+                ("network join", {"rc": 1, "stderr": "the peer closed the connection\n"}),
+            ]
+        ),
+        resolve=lambda ref: onboard.ResolvedCredential(kind="file", label=ref["ref"]),
+        local_cli=["lop"],
+        run_local=_happy_run_local(token),
+    )
+
+    assert payload["state"] == "failed"
+    # The runner's own release comes first; approval_run's exit release is the
+    # same call again (idempotent) and is what a reader can no longer outrun.
+    assert order[:2] == ["release", "finish:join"], order
+    # And the record really did carry the failing row the client reads.
+    assert [state for _, state, _ in fake.finished] == ["failed"]
+
+
 def test_a_stale_fingerprint_is_refused_in_product_words_with_both_ends(
     isolated: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

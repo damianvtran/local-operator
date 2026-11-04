@@ -32,6 +32,7 @@ from typing import Any, Awaitable, Callable, Literal, cast
 from local_operator.harness.approval import ApprovalGate
 from local_operator.harness.approval import ask_approval as call_approval_gate
 from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+from local_operator.harness.rows import is_harness_chrome, is_harness_notice_row
 from local_operator.harness.types import (
     EFFORT_CHOICE_UNSET,
     AgentEndEvent,
@@ -1076,6 +1077,131 @@ class _DeferredHistory:
         self.selection = selection
 
 
+#: The state fields a SAVED conversation may paint from a stored row. A
+#: WHITELIST, deliberately, and the opposite of the field-by-field clearing this
+#: started as: a blacklist silently admits every field a later release adds, and
+#: the two that slipped past the first cut were a `paused` job surviving a
+#: ``{"running", "queued"}`` filter while its siblings were dropped, and
+#: ``asks_open``/``asks_truncated`` surviving after ``asks`` was cleared (review
+#: round 1, R3). Everything not named here is reset to its declared default, so a
+#: field added tomorrow is excluded until someone opts it in.
+_SAVED_FACT_FIELDS = frozenset(
+    {
+        # Who and where the conversation is.
+        "session_id",
+        "cwd",
+        "conversation_title",
+        "conversation_title_forked",
+        "conversation_title_user_set",
+        # Which model answers, and the dials that chose it.
+        "selected_model",
+        "effective_model",
+        "active_agent",
+        "active_team",
+        "effective_identity",
+        # What it has spent and how full its window is — the checkpoint's own
+        # turn-end copy, all of it historical.
+        "last_usage",
+        "usage_components",
+        "context_tokens",
+        "context_is_estimate",
+        "context_window",
+        "context_breakdown",
+        "cumulative_parent_cost",
+        "child_costs",
+        "subagent_cost",
+        "subagent_cost_knowledge",
+        "cost_knowledge",
+        "spend_channels",
+        "current_turn_accrued_cost",
+        "active_duration_s",
+        # The plan, the settled roster, the schedules and the tool roster.
+        "todos",
+        "jobs",
+        "wakes",
+        "monitors",
+        "mcp_servers",
+        "mcp_startup",
+        "loop",
+        "slash_capabilities",
+        "model_catalogue",
+        "model_catalogue_truncated",
+        "goal",
+        "goal_status",
+    }
+)
+
+#: Job states a stored row may carry. A child the previous runtime left RUNNING is
+#: not evidence that anything runs now, and ``paused``/``queued`` are that
+#: runtime's live scheduling facts, so only settled rows cross. ``restored`` is
+#: deliberately NOT here: it is a boolean ROW field meaning "live again"
+#: (``harness/jobs.py``, ``session/restored_rows.py``), never a ``status`` value,
+#: so listing it read as if a live-again child would cross (review R2-6).
+_SAVED_JOB_STATES = frozenset({"completed", "failed", "cancelled", "interrupted"})
+
+
+def _saved_facts_only(state: Any, session_id: str) -> dict[str, Any]:
+    """The update dict that turns a stored row into a display snapshot.
+
+    Built by walking the model's OWN fields, so it is exhaustive by construction
+    rather than by a list someone remembered to extend: every field outside
+    :data:`_SAVED_FACT_FIELDS` goes back to its declared default, which is what
+    clears the turn indicator, the live-activity clock, the steering queue, the
+    attention receipt, the peer display records, the ask queue AND its
+    ``asks_open``/``asks_truncated`` counters, the pending gate and the live tool
+    ledger in one place. ``epoch``/``sequence`` are re-stamped so this snapshot can
+    never be mistaken for the runtime that wrote the row, and a fork's inherited
+    identity is folded in exactly as the runtime's own restore folds it
+    (``_inherited_identity_fixups``).
+
+    ``jobs`` survives the walk only through :data:`_SAVED_JOB_STATES`, so the dock's
+    subagent panel cannot claim a child is running before the owner binds.
+    """
+    from local_operator.session.frontend_state import (
+        FrontendSessionState,
+        _inherited_identity_fixups,
+    )
+
+    update: dict[str, Any] = {"epoch": f"saved-facts-{session_id}", "sequence": 0}
+    for name, field in FrontendSessionState.model_fields.items():
+        if name in _SAVED_FACT_FIELDS or name in {"epoch", "sequence"}:
+            # `epoch`/`sequence` have no default — they are re-stamped above,
+            # never restored, which is the whole point of them.
+            continue
+        update[name] = field.get_default(call_default_factory=True)
+    # A STORED `None` MODEL IS ABSENT, NOT A VALUE (QA round 3, Q4). A journal
+    # whose last checkpoint never recorded a selection carries
+    # `selected_model: None`, and copying that through made the facade's `model`
+    # property raise `owner has no selected model spec` — `_model_spec` reads it
+    # with `getattr(..., None)`, which does not swallow an exception raised
+    # INSIDE a property, so the adopt died and the conversation never left
+    # display-only ("Could not open conversation", 10/10 runs). The empty
+    # `FrontendModelSpec` is the same placeholder `saved_preview` installs and the
+    # same shape `_has_model_identity` reads as "no model", so the band keeps the
+    # honest whole-row connecting sentence instead of a last-known row with no
+    # model in it.
+    from local_operator.session.frontend_state import FrontendModelSpec
+
+    # ONLY the selection, and only when it is null. `effective_model` is left
+    # exactly as the journal wrote it: it is a DERIVED field, and filling it with
+    # an empty placeholder made the band lose a model the row does hold (the
+    # grouped fixture caught that as a first-vs-settled difference).
+    if getattr(state, "selected_model", None) is None:
+        update["selected_model"] = FrontendModelSpec(provider="", model_id="")
+    update["jobs"] = [
+        job
+        for job in getattr(state, "jobs", [])
+        if str(getattr(job, "status", "")) in _SAVED_JOB_STATES
+    ]
+    # LAST, not first: `_inherited_identity_fixups` clears `jobs` for a row that
+    # names a DIFFERENT session (a fork's inherited roster belongs to the parent),
+    # so applying it before the assignment above silently restored the parent's
+    # children — `('settled-child','completed')` survived for the fork's id
+    # (review R2-2).
+    update.update(_inherited_identity_fixups(state, session_id))
+    return update
+
+
 class AttachedSession:
     """A SessionProtocol facade backed by one owner's v5 attach socket.
 
@@ -1173,6 +1299,12 @@ class AttachedSession:
         #: viewer needs it (an attached one inherits the runtime's own cwd);
         #: ``cold()`` sets the real value.
         self._cwd = ""
+        #: A ``retiring`` frame's destination, recorded by the SYNCHRONOUS frame
+        #: handler and adopted inside ``_bind_lock`` before the engage reads
+        #: ``_cwd``. Assigning ``_cwd`` here would race that read (the measured
+        #: blocker on ``set_working_directory``), and calling that method from
+        #: the handler would retire a runtime that is already retiring.
+        self._pending_frame_cwd = ""
         #: Serialises ``_ensure_bound`` so concurrent first-writes engage one
         #: runtime between them rather than one each.
         self._bind_lock = asyncio.Lock()
@@ -1882,6 +2014,42 @@ class AttachedSession:
         self._finish_sync()
         self._runtime_ready.set()
         return self
+
+    def install_saved_facts(self, state: Any) -> None:
+        """Put a saved conversation's DURABLE facts on its preview facade.
+
+        A ``saved_preview`` facade installs an empty placeholder state on
+        purpose — config and auth resolution stay off the open path (see that
+        method's docstring) — so every surface reading ``session.frontend_state``
+        painted nothing until the owner bound, then reflowed at the bind. The
+        band (model, effort, cwd, context, cost, title) and the dock's todo
+        panel are both such surfaces, and the conversation-open finality audit
+        measured each moving after first paint for data that had not changed
+        (TUI-FINALITY-DESIGN D1/D2: a warm reopen filled a 39-row viewport where
+        the bound frame has 26, then trimmed the history it had painted).
+
+        So the caller hands over the newest state the journal — or this process's
+        last bound frame — already holds, and this installs its DISPLAY facts
+        only: :func:`_saved_facts_only` rebuilds the snapshot from a WHITELIST of
+        durable fields and resets every other field of the model to its declared
+        default. That is what clears live authority — the turn indicator, the
+        activity clock, the steering queue, the gate, the ask queue and its
+        counters, the attention receipt and every child that is not settled — and
+        it does so exhaustively rather than by a list of names that would silently
+        admit the next live field someone adds. ``epoch``/``sequence`` are
+        re-stamped, so this can never be read as the runtime that wrote the row;
+        the owner's own install replaces it wholesale on the bind. A state naming
+        a DIFFERENT session (a fork's inherited row) keeps its durable facts and
+        takes this session's identity, exactly as the runtime's own restore does
+        (``_inherited_identity_fixups``).
+
+        Never raises: a cosmetic install must not be able to fail an open.
+        """
+        try:
+            shown = state.model_copy(update=_saved_facts_only(state, self._session_id))
+            self._install_frontend(shown)
+        except Exception:  # noqa: BLE001 — a cosmetic install never fails an open
+            logger.debug("saved facts not installed on the preview facade", exc_info=True)
 
     @classmethod
     async def cold(
@@ -4501,6 +4669,19 @@ class AttachedSession:
         if not self.is_cold and not self._model_selection_override:
             return
         async with self._bind_lock_for(foreground=foreground):
+            # THE ADOPTION IS FIRST, INSIDE THE LOCK: the engage below reads
+            # ``_cwd`` in this same critical section, so a destination that
+            # arrived on the retiring frame must be in place before that read or
+            # the successor is spawned at the old path.
+            if self._pending_frame_cwd:
+                self._cwd = self._pending_frame_cwd
+                self._pending_frame_cwd = ""
+                # THE BAND FOLLOWS THE ENGAGE, not the successor's first snapshot:
+                # without this the visible directory stays the OLD one for as long
+                # as the successor takes to publish, which is the same gap
+                # ``set_working_directory`` closes by calling this method (agent
+                # review round 1, m4). Best-effort by that method's own contract.
+                self._publish_working_directory(self._cwd)
             await self._bind_under_lock(foreground=foreground)
             # Cover every winning-owner path, including another attach/recovery
             # completing during an await. A failed model RPC is not a failed
@@ -5328,6 +5509,13 @@ class AttachedSession:
             on_frontend_sync=once_adopted(self._on_frontend_sync),
             on_frontend_update=once_adopted(self._on_frontend_update),
             on_retiring=once_adopted(self._on_retiring_frame),
+            # THIS FACADE ADOPTS the directory a cwd-move `retiring` frame names
+            # (`_ensure_bound` -> `_pending_frame_cwd`), so it declares the
+            # capability the owning runtime requires before it will retire toward
+            # a move at all. Without the declaration a runtime correctly treats
+            # "nobody can follow this" as a hold — see
+            # `RuntimeServer._cwd_move_successor_guaranteed`.
+            cwd_adoption=True,
             # THE PRODUCTION WIRING FOR THE PROMPT COPY (UX round 6, U3 = design
             # round 6, D3). This client is the pane a human is standing at when the
             # machine's key raises its presence prompt, so it is the one surface
@@ -8490,6 +8678,20 @@ class AttachedSession:
             return True
         return bool(getattr(client, "supports_exclusive_move", False))
 
+    @property
+    def pending_move_cwd(self) -> str:
+        """The destination a cwd-move ``retiring`` frame named, while it is pending.
+
+        Set by :meth:`_on_retiring_frame` and cleared the moment ``_ensure_bound``
+        adopts it into ``_cwd``. Read by the HOST at the instant the retirement
+        lands (the refresh callback), which is the only point where the
+        destination is still knowable and a notice is still worth painting: a
+        cwd-move departure reaches the host as an ordinary retirement, so without
+        this the session restarted in a new directory and said nothing (UX round
+        1, U3). Empty for every other departure.
+        """
+        return self._pending_frame_cwd
+
     def set_refresh_callback(self, callback: Callable[[], Any] | None) -> None:
         """Told when the runtime retired itself for a newer build.
 
@@ -8566,6 +8768,9 @@ class AttachedSession:
         they decide; a frame that names neither trigger still yields ``""``, and
         the host paints the sentence that is true of any drain.
         """
+        pending_cwd = str(frame.get("cwd") or "")
+        if pending_cwd:
+            self._pending_frame_cwd = pending_cwd
         if not frame.get("draining") and not frame.get("updating"):
             return
         callback = self._drain_callback
@@ -9766,7 +9971,19 @@ class AttachedSession:
         self._require_not_deferred()
         if self._display_history is not None:
             return self._display_history.opener_text
-        return next((m.text for m in self._history if getattr(m, "role", "") == "user"), "")
+        # Non-window attaches must use the same display provenance rule as
+        # paged history; otherwise an old recovery prompt becomes the title.
+        return next(
+            (
+                m.text
+                for m in self._history
+                if isinstance(m, Message)
+                and m.role == "user"
+                and not is_harness_notice_row(m)
+                and not is_harness_chrome(m.text)
+            ),
+            "",
+        )
 
     def history_last_message(self) -> Any:
         self._require_not_deferred()
@@ -10096,6 +10313,12 @@ class AttachedSession:
                 [_image_to_wire(image) for image in (images or [])],
             )
         except ConnectionError as error:
+            # An ACK expiry is not a disconnect: the authenticated socket is
+            # still live and the mutation may already have landed. Preserve
+            # that typed disposition for the desktop/control caller instead
+            # of falsely prescribing owner recovery (or replaying the switch).
+            if getattr(error, "owner_alive", False):
+                raise
             raise ConnectionError(_RECONNECTING_SLASH_NOTICE.format(command=command)) from error
 
     def _require_routed_model_admission(self, args: str) -> None:

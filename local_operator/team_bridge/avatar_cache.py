@@ -3,6 +3,14 @@
 Every hit must be conditionally revalidated by the hub after current-login
 admission. A global LRU survives the desktop route's per-request clients but
 bounds retention across all config roots and accounts. No bearer is stored.
+
+RETENTION EXPIRY. Entries also age out after ``ttl_s`` (15 minutes) of wall
+time since they were stored. That bounds how long a photo lingers in memory
+after its sender stops appearing; it is NOT a freshness lifetime -- a live
+entry still needs the hub's conditional 304 under the current login before
+reuse, and an expired one simply costs a cold fetch. Rendered notification
+composites (``notification_avatar.py``) are deliberately NOT cached in core:
+the desktop main process owns display retention.
 """
 
 from __future__ import annotations
@@ -10,10 +18,15 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 from threading import Lock
+from time import monotonic
+from typing import Callable
 
 Scope = tuple[str, str]
 Authority = tuple[int, str, str]
 Key = tuple[Scope, Authority, str, str, int]
+
+#: Retention, not freshness: see the module docstring.
+RETENTION_S = 15 * 60
 
 
 @dataclass(frozen=True)
@@ -24,10 +37,21 @@ class Entity:
 
 
 class AvatarCache:
-    def __init__(self, *, max_entries: int = 64, max_bytes: int = 8 * 1024 * 1024):
+    def __init__(
+        self,
+        *,
+        max_entries: int = 64,
+        max_bytes: int = 8 * 1024 * 1024,
+        ttl_s: float = RETENTION_S,
+        clock: Callable[[], float] = monotonic,
+    ):
         self.max_entries = max_entries
         self.max_bytes = max_bytes
+        self.ttl_s = ttl_s
+        # Monotonic so a wall-clock jump can neither resurrect nor mass-expire.
+        self._clock = clock
         self._entries: OrderedDict[Key, Entity] = OrderedDict()
+        self._stored: dict[Key, float] = {}
         self._bytes = 0
         # Loopback test servers and embedded runtimes can use different event
         # loops/threads; only tiny synchronous bookkeeping is held under lock.
@@ -35,6 +59,7 @@ class AvatarCache:
 
     def _drop(self, key: Key) -> None:
         entity = self._entries.pop(key, None)
+        self._stored.pop(key, None)
         if entity is not None:
             self._bytes -= len(entity.body)
 
@@ -48,6 +73,9 @@ class AvatarCache:
     def get(self, key: Key) -> Entity | None:
         with self._lock:
             entity = self._entries.get(key)
+            if entity is not None and self._clock() - self._stored[key] >= self.ttl_s:
+                self._drop(key)
+                return None
             if entity is not None:
                 self._entries.move_to_end(key)
             return entity
@@ -59,12 +87,28 @@ class AvatarCache:
     def put(self, key: Key, entity: Entity) -> None:
         with self._lock:
             self._drop(key)
+            # Sweep expired entries so dead bytes never hold the byte cap
+            # against a live one (``get`` only expires what it is asked for).
+            now = self._clock()
+            for stale in [k for k, at in self._stored.items() if now - at >= self.ttl_s]:
+                self._drop(stale)
             if len(entity.body) > self.max_bytes or self.max_entries < 1:
                 return
             self._entries[key] = entity
+            self._stored[key] = self._clock()
             self._bytes += len(entity.body)
             while len(self._entries) > self.max_entries or self._bytes > self.max_bytes:
                 self._drop(next(iter(self._entries)))
 
 
 AVATAR_CACHE = AvatarCache()
+
+
+def admit(scope: Scope, authority: Authority | None) -> None:
+    """Apply one observed login authority to the raw avatar cache.
+
+    Reads the module global at call time so a test's monkeypatched cache is
+    honoured. Core keeps no derived (composite) cache to purge alongside it.
+    """
+
+    AVATAR_CACHE.admit(scope, authority)

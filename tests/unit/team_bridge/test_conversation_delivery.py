@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import subprocess
@@ -61,6 +62,7 @@ tenant_id: tnt_1
 conversation_id: bcv_abcdefgh
 message_id: bcmsg_abcdef01
 conversation_seq: 1
+expect: reply
 {ROOT_REPLY_LINE}
 guidance: bridge-guidance-v2"""
 
@@ -316,6 +318,25 @@ def _persist_fake_receipt(config_dir: Path, receipt: Any, *, message_id: str) ->
         )
 
 
+@pytest.fixture(autouse=True)
+def _instant_wakes(monkeypatch: pytest.MonkeyPatch):
+    """This file's contract is "one iteration writes its card", so no window.
+
+    The connector's coalescer rate-limits a conversation's wakes to one per
+    ``DEFAULT_COALESCE_WINDOW_S`` (3 s). The window is a production behaviour
+    with its own coverage (``test_wake_every_message.py``); here it is only an
+    INPUT that can make a card late, so the assertions below would be timing
+    the clock between two iterations instead of the delivery under test.
+    ``test_dm_runtime_transport.py`` pins the same seam for the same reason.
+    """
+
+    from local_operator.team_bridge.connector import coalesce as coalesce_mod
+
+    monkeypatch.setattr(
+        coalesce_mod, "CONNECTOR_COALESCER", coalesce_mod.WakeCoalescer(window_s=0.0)
+    )
+
+
 def _wire_rig(
     monkeypatch: pytest.MonkeyPatch,
     server: FakeServer,
@@ -414,7 +435,19 @@ def _runtime_rows(runtimes: dict[str, tuple[OwnerSnapshot, Path]]):
 
 
 def _run(owner: OwnerSnapshot, config_dir: Path) -> dict[str, Any]:
-    return asyncio.run(
+    """One connector iteration, with a silent wake failure made loud.
+
+    ``run_iteration`` hands each card to the coalescer, which delivers it in a
+    ``try`` that turns ANY exception (or a reservation that turned out to be
+    already posted) into a quiet hold — correct in production, where a wake
+    must never fail an iteration, but fatal for these tests: an empty
+    transcript then reports as an ``IndexError`` three lines later and the real
+    cause never reaches the log (CI shard 1, three failures that were "likely
+    flakes" for two rounds). The outcome is part of the iteration's summary, so
+    assert on it HERE.
+    """
+
+    summary = asyncio.run(
         loop_mod.run_iteration(
             owner,
             config_dir=config_dir,
@@ -422,6 +455,18 @@ def _run(owner: OwnerSnapshot, config_dir: Path) -> dict[str, Any]:
             auth_store=None,
         )
     )
+    for outcome in summary.get("coalesced_wakes") or ():
+        # A ``hold`` is the flush's swallowed-exception branch: the wake did not
+        # go out. In production that is the right trade (a wake never fails an
+        # iteration); in these tests it must be a named failure, not an empty
+        # transcript three lines later. ``already_posted`` is NOT a failure —
+        # the settled-reservation cells below expect exactly it.
+        assert outcome.get("action") != "hold", (
+            f"the wake did not go out: {outcome} — the flush caught a delivery "
+            "failure and re-buffered the group; see the logger's "
+            "code=delivery_failed line for the cause"
+        )
+    return summary
 
 
 def _reservation_rows(config_dir: Path) -> list[dict[str, Any]]:
@@ -575,6 +620,175 @@ def test_a_replayed_admit_does_not_post_a_second_card(tmp_path, monkeypatch) -> 
     assert len(_reservation_rows(config_dir)) == 1
 
 
+class _Clock:
+    """``time.time`` under the test's control: the claim lease (900 s), the
+    hold schedule and the reservation clock all read it, so passes can cross
+    a lease expiry without waiting."""
+
+    def __init__(self) -> None:
+        self.now = time.time()
+
+    def __call__(self) -> float:
+        return self.now
+
+
+#: One simulated claim lease plus the park margin: any hold a pass leaves is
+#: due again by then, so a pass after it re-drives everything still owed.
+_PAST_A_LEASE = 15 * 60 + 5.0
+
+
+def _drive_across_leases(owner: OwnerSnapshot, config_dir: Path, clock: _Clock) -> None:
+    """Passes spread across more than one lease expiry: ordinary iterations
+    (feed refs) and the retry pass (holds) both run on every one."""
+
+    for _ in range(4):
+        clock.now += _PAST_A_LEASE
+        _run(owner, config_dir)
+
+
+def test_a_stop_between_the_reservation_and_the_card_still_posts_the_card(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """PR #3063 reviews m6/M5: the reservation proves an admission, not a
+    card. A stop that cancelled the card hand-off left every replay
+    answering ``duplicate`` and the card was never posted. The card-posted
+    fact now lives ON the reservation: the replay posts the card, and every
+    later pass — across lease expiries — is a true duplicate. Totals are
+    asserted at the END: an immediate check missed M5's second card."""
+
+    clock = _Clock()
+    monkeypatch.setattr(time, "time", clock)
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+    real_deliver = conversation_mod.deliver_wake
+
+    async def stopped_at_the_card(*args: Any, **kwargs: Any) -> str:
+        raise asyncio.CancelledError  # the clean stop's cancellation lands here
+
+    monkeypatch.setattr(conversation_mod, "deliver_wake", stopped_at_the_card)
+    with pytest.raises(asyncio.CancelledError):
+        _run(a, config_dir)
+    assert transcripts["sess_a"] == []
+    rows = _reservation_rows(config_dir)
+    assert [row["state"] for row in rows] == ["pending"] and rows[0]["card_posted_at"] is None
+
+    monkeypatch.setattr(conversation_mod, "deliver_wake", real_deliver)
+    with caplog.at_level(logging.WARNING, logger=conversation_mod.logger.name):
+        _run(a, config_dir)
+        _drive_across_leases(a, config_dir, clock)
+    assert len(transcripts["sess_a"]) == 1, "the card is owed once, never twice"
+    rows = _reservation_rows(config_dir)
+    assert len(rows) == 1 and rows[0]["card_posted_at"] is not None
+    # Review m12: the one re-posted card is visible, as a closed line.
+    assert caplog.text.count("bridge: card re-posted code=card_unrecorded") == 1
+
+
+@pytest.mark.parametrize("settled", ["retired", "completed"])
+def test_an_unmarked_settled_reservation_gets_no_card(tmp_path, monkeypatch, settled) -> None:
+    """PR #3063 review m11: a reservation that is no longer live (``retired``
+    after a re-login's binding mismatch, or ``completed`` once the body was
+    served) but whose card was never recorded posted a card anyway — a wake
+    for a body that will never arrive, or was already answered. It is
+    recorded and answered ``duplicate`` instead. Totals at the END, across
+    leases."""
+
+    clock = _Clock()
+    monkeypatch.setattr(time, "time", clock)
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+    real_deliver = conversation_mod.deliver_wake
+
+    async def stopped_at_the_card(*args: Any, **kwargs: Any) -> str:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(conversation_mod, "deliver_wake", stopped_at_the_card)
+    with pytest.raises(asyncio.CancelledError):
+        _run(a, config_dir)
+    from local_operator.team_bridge.store import state_db_path
+
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute("UPDATE body_reservations SET state = ?", (settled,))
+
+    monkeypatch.setattr(conversation_mod, "deliver_wake", real_deliver)
+    _run(a, config_dir)
+    _drive_across_leases(a, config_dir, clock)
+    assert transcripts["sess_a"] == []
+    rows = _reservation_rows(config_dir)
+    assert [row["state"] for row in rows] == [settled]
+    assert rows[0]["card_posted_at"] is not None
+
+
+def test_a_replay_after_a_posted_card_never_posts_again_across_leases(
+    tmp_path, monkeypatch
+) -> None:
+    """PR #3063 review M5 (the regression r4 measured): a plain replay of an
+    already-delivered message left a card-owed marker behind, and one lease
+    later the marker posted a SECOND card."""
+
+    clock = _Clock()
+    monkeypatch.setattr(time, "time", clock)
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+
+    first = _run(a, config_dir)
+    assert first["handled"][0]["action"] == "delivered"
+    _drive_across_leases(a, config_dir, clock)  # the rig re-offers the ref every pass
+    assert len(transcripts["sess_a"]) == 1
+    assert _hold_rows(config_dir) == []
+
+
+def test_a_replay_held_before_admission_never_reads_as_card_owed(tmp_path, monkeypatch) -> None:
+    """M5's second leak: a replay of a delivered message that hits a
+    PRE-admission hold (screening unavailable) leaves an ordinary hold row.
+    That row must never be read as "card owed": its re-drive is a duplicate."""
+
+    clock = _Clock()
+    monkeypatch.setattr(time, "time", clock)
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+    assert _run(a, config_dir)["handled"][0]["action"] == "delivered"
+
+    real_screen = conversation_mod.screen_item
+
+    async def screening_down(*args: Any, **kwargs: Any) -> Any:
+        return None  # -> hold ``screening_unavailable`` on the replay
+
+    monkeypatch.setattr(conversation_mod, "screen_item", screening_down)
+    replay = _run(a, config_dir)
+    assert replay["handled"][0]["action"] == "hold"
+    assert len(_hold_rows(config_dir)) == 1
+    monkeypatch.setattr(conversation_mod, "screen_item", real_screen)
+    _drive_across_leases(a, config_dir, clock)
+    assert len(transcripts["sess_a"]) == 1
+    assert _hold_rows(config_dir) == []
+
+
+def _hold_rows(config_dir: Path) -> list[dict[str, Any]]:
+    from local_operator.team_bridge.store import state_db_path
+
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(row) for row in conn.execute("SELECT * FROM screening_holds")]
+
+
 def test_a_missing_receipt_holds_without_a_card_or_a_row(tmp_path, monkeypatch) -> None:
     """M3: ``receipt_unavailable`` is exercised, not merely defined."""
 
@@ -725,11 +939,13 @@ def test_one_channel_message_wakes_mentioned_a_and_notify_all_b(tmp_path, monkey
     # (f) No OS notification by default.
     assert notifications == []
 
-    # (g) Triage copy is NOT duplicated in the card; it lives in the served
-    # guidance named by version. Mention state alone distinguishes the cases.
-    assert "no_reply" not in card_b
+    # (g) The triage RULES stay in the served guidance named by version; the
+    # card carries only the per-wake expectation (wake contract): a mention
+    # expects a reply, an unmentioned message is weighed, no_reply ends it.
+    assert "expect: weigh relevance; no_reply if nothing is needed" in card_b
     assert "guidance: bridge-guidance-v2" in card_b
     assert "no_reply" not in transcripts["sess_a"][0]["payload"]
+    assert "expect: reply" in transcripts["sess_a"][0]["payload"]
 
     for session in ("sess_a", "sess_b"):
         print(f"\n--- {session} transcript ---")
@@ -1271,7 +1487,8 @@ def test_alias_retry_consumes_only_that_hold_not_canonical_or_sibling(tmp_path, 
             (sibling, time.time() + 3600),
         ):
             conn.execute(
-                "INSERT INTO screening_holds VALUES (?,?,?,?,?)",
+                "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
+                "retry_at, created_at) VALUES (?,?,?,?,?)",
                 (key, raw, "screening_hold", deadline, 12),
             )
     loop_mod._RETRY_ATTEMPTS.clear()
@@ -1328,7 +1545,9 @@ def test_a_reply_card_names_its_thread_and_how_to_answer_in_it() -> None:
     lines = card.splitlines()
     assert lines[0].startswith("Thread reply · #agents · from Bea's agent")
     assert lines[1] == BRIDGE_UNTRUSTED_CLAUSE
-    assert f"thread_root_id: {ROOT_ID}" in lines
+    # `(reply to)` carries the contract's `reply_to_message_id` name for the
+    # same id on the same line (review round 1, m4).
+    assert f"thread_root_id: {ROOT_ID} (reply to)" in lines
     assert "channel_post with this thread_root_id" in card
 
 
@@ -1405,7 +1624,7 @@ def test_a_thread_reply_card_keeps_only_its_thread_route() -> None:
     )
     lines = card.splitlines()
     assert lines[-3:-1] == [
-        f"thread_root_id: {ROOT_ID}",
+        f"thread_root_id: {ROOT_ID} (reply to)",
         "reply in thread: bridge channel_post with this thread_root_id; "
         "read the thread with channel_thread",
     ]
@@ -1448,3 +1667,66 @@ def test_the_card_route_names_arguments_the_bridge_tool_accepts(thread_root_id) 
         args["channel_id"] = CONVERSATION_ID
     params = BridgeToolParams.model_validate(args)
     assert getattr(params, key) == fields[route["named"]]
+
+
+@pytest.mark.parametrize("pre_upgrade_state", ["pending", "claimed", "completed", "retired"])
+def test_a_pre_upgrade_reservation_replay_posts_at_most_the_logged_card(
+    tmp_path, monkeypatch, caplog, pre_upgrade_state
+) -> None:
+    """QA r4 O4: EVERY reservation written before ``card_posted_at`` existed
+    reads NULL, so a hub replay of a message already delivered under the old
+    binary posted a second card, unlogged. The bound, per reservation state:
+
+    * ``claimed`` / ``completed`` / ``retired``: a body turn took the body, or
+      it was served, or it never will be — the card is treated as POSTED/
+      SETTLED, so a replay posts NOTHING (marked, ``duplicate``);
+    * ``pending``: the only state where the old binary may have stopped
+      between the reservation and the card, so the card may genuinely be owed.
+      One card at most, and it is LOGGED (``card_unrecorded``).
+
+    The pre-upgrade row is built the way the old binary left it: a real
+    delivery, then the column NULLed. Totals at the END, across leases."""
+
+    from local_operator.team_bridge.store import state_db_path
+
+    clock = _Clock()
+    monkeypatch.setattr(time, "time", clock)
+    a = _owner("a", 1)
+    config_dir = tmp_path / "a"
+    config_dir.mkdir()
+    _enroll(config_dir, a, "sess_a")
+    server = FakeServer(notify={"bep_a": "mute"}, active={"bep_a": True}, mentioned={"bep_a"})
+    transcripts, _modes = _wire_rig(monkeypatch, server, {"a": (a, config_dir)})
+    assert _run(a, config_dir)["handled"][0]["action"] == "delivered"
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute(
+            "UPDATE body_reservations SET card_posted_at = NULL, state = ?", (pre_upgrade_state,)
+        )
+
+    with caplog.at_level(logging.WARNING, logger=conversation_mod.logger.name):
+        _drive_across_leases(a, config_dir, clock)  # the hub replays the ref every pass
+    reposts = caplog.text.count("bridge: card re-posted code=card_unrecorded")
+    rows = _reservation_rows(config_dir)
+    print(
+        f"MATRIX conversation/pre_upgrade/{pre_upgrade_state} "
+        f"cards={len(transcripts['sess_a'])} logged_reposts={reposts}"
+    )
+    expected_cards = 2 if pre_upgrade_state == "pending" else 1
+    assert len(transcripts["sess_a"]) == expected_cards
+    assert reposts == expected_cards - 1
+    if pre_upgrade_state != "claimed":
+        # Marked, so it is never re-evaluated as owed again. A ``claimed`` row
+        # reads POSTED from its state alone and needs no mark.
+        assert rows[0]["card_posted_at"] is not None
+
+
+def test_the_wake_window_is_pinned_for_this_file() -> None:
+    """The autouse pin above is load-bearing (see its docstring): assert it.
+
+    A fixture that silently stopped applying would turn every card assertion in
+    this file back into a race against the connector's 3 s rate window.
+    """
+
+    from local_operator.team_bridge.connector import coalesce as coalesce_mod
+
+    assert coalesce_mod.CONNECTOR_COALESCER.window_s == 0.0

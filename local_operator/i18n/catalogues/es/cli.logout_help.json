@@ -1,0 +1,4 @@
+{
+  "cli.logout_help.logout": "Cerrar sesión con un proveedor (elimina las credenciales guardadas)",
+  "cli.logout_help.provider": "Proveedor con el que cerrar sesión"
+}

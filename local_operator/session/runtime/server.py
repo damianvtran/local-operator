@@ -94,7 +94,7 @@ from local_operator.operator.trust import (
     AnchorLoad,
     OperatorAnchor,
     anchor_path,
-    device_is_revoked,
+    device_is_admitted,
 )
 from local_operator.paths import config_dir
 from local_operator.session.attachments import AttachmentStore
@@ -1088,7 +1088,61 @@ _PAYLOAD_OPS = {
 #: withholding them until a sync lands would deny a supervisor the ability to
 #: stop a runaway session precisely when its loop is stuck — the situation this
 #: set exists for.
-_SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer", "cancel"})
+_SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "stop_if_idle", "abort", "steer", "cancel"})
+
+
+class _StopRefused(ValueError):
+    """A stop refusal that names its cause as a machine token.
+
+    ``stop_if_idle`` is the idle-only verb, and the refusals it raises are the
+    only ones whose WHY the caller acts on differently: work in flight is worth
+    retrying, a missing idle-only capability never is. So the cause rides the
+    error frame as its own field instead of being parsed back out of the
+    sentence — the sentence may be translated or reworded, the cause may not
+    (agent review round 1 R2's "stable tokens" rule).
+
+    Deliberately NOT folded into ``wire.errors.*``'s ``error_code``: that
+    vocabulary is the desktop plane's closed category set that released clients
+    switch on by equality, and these four tokens are not part of it.
+    """
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+def _idle_refusal_reason(handle: Any) -> str:
+    """The idle-latch's recorded cause for refusing ``stop_if_idle``.
+
+    ``begin_retire`` records the reason ``may_refresh`` gave as it refuses, so
+    this reads the SAME sample that made the decision. Re-probing here would be
+    a second ``is_busy`` read against state that has moved on since.
+
+    Anything unexpected — a host that records nothing, an unknown reason
+    string — is reported as work in flight, which is the answer that says "this
+    may clear on its own" rather than the one that says "never retry".
+
+    THE ONE RECORDED REASON THAT IS NOT WORK IN FLIGHT IS CHECKED FIRST: a
+    handle that has already committed to its own disposal records "already
+    disposing" (:meth:`ServingSessionHandle.begin_retire`). It is leaving, not
+    busy, and folding that into ``busy`` told the operator to retry once the
+    session was idle — advice about a session that will be gone before the
+    retry (R3 / Q-1). Its own token, so the ladder reports the skip it already
+    reports for a record whose ``leaving`` field is set
+    (``control.REASON_LEAVING``).
+    """
+    refusal = str(getattr(handle, "_retire_refusal", "") or "")
+    if "already disposing" in refusal:
+        return "leaving"
+    # Updating is neither conversational work nor an accepted stop. Preserve
+    # its own cause so the caller uses its conservative unconfirmed receipt,
+    # not the busy sentence or a claim that this stop was already accepted.
+    if refusal == "updating":
+        return "updating"
+    if "wake" in refusal:
+        return "wake"
+    return "busy"
+
 
 #: Ops exempt from their connection's op CHAIN. A different question from
 #: :data:`_SYNC_PRIORITY_OPS`: that set decides what may run before the sync
@@ -1289,6 +1343,13 @@ _SYNC_LOCAL_OPS = frozenset(
 #: to the session loop.
 QUEUED_MOVE_TICK_S = 0.5
 
+#: The mesh watcher's stages that mean a move is IN FLIGHT in this runtime. Every
+#: other value it leaves behind (``cancelled``, a terminal record phase) is a
+#: stand-down kept only for the relay's ``queue_move`` reply, and must not block a
+#: later cwd move (agent review round 2, R2-M1).
+_MOVE_IN_FLIGHT_STAGES = frozenset({"finishing", "paused", "retiring"})
+
+
 #: Default for ``network.move.attach_window_s``: how long a queued move holds
 #: for attached clients to convert to remote viewers or detach cleanly before
 #: the retirement commits. Matches the existing handoff announcements' window
@@ -1318,6 +1379,98 @@ def _queued_move_window_s(root: Path) -> float:
     except (TypeError, ValueError):
         return QUEUED_MOVE_DEFAULT_WINDOW_S
     return max(0.0, min(value, 3600.0))
+
+
+#: THIS PROCESS'S HOSTED RUNTIMES, by session id, and it exists for ONE message:
+#: "the move intent for your session was just written — start consuming it".
+#:
+#: A QUEUED MOVE IS ASKED FOR MID-TURN, by a tool call running inside this very
+#: process. Until this index existed, nothing in the asking runtime ever woke the
+#: consumer again: the watcher had been started at boot (with no intent, so it
+#: exited), and the request sat on disk until some later process boot happened to
+#: find it — so a move did nothing at all in a live session (agent review round 1,
+#: B1; UX round 1, U1). The index is weak on purpose: a runtime that goes away is
+#: dropped by the collector, and the marker is the durable half a successor reads.
+_HOSTED_RUNTIMES: "weakref.WeakValueDictionary[str, RuntimeServer]" = weakref.WeakValueDictionary()
+
+
+#: What :func:`notify_move_queued` answers when the woken runtime can act at its
+#: next idle point AND a viewer will follow the session there.
+CWD_MOVE_READY = "ready"
+
+#: The same, with NOBODY able to follow: the runtime retires and writes the
+#: destination as the session's recorded truth, so the session goes COLD until it
+#: is engaged again (a message, a wake, ``lop exec``) and that engage boots it in
+#: the new directory. A caller words its reply from this, because "restarts at the
+#: next idle point" and "stops now and restarts where I asked when you next use
+#: it" are different promises to a model that then has to plan around them.
+CWD_MOVE_HANDOFF = "handoff"
+
+
+def move_host_refusal(session_id: str, root: Path) -> str:
+    """The reason this process's runtime could never act on a cwd move, or ``""``.
+
+    ASKED BEFORE A REQUEST IS RECORDED, and it does NOT wake the consumer:
+    :func:`notify_move_queued` starts the watcher as part of its job, which is
+    wrong for a call that may still be refused (the watcher would find no intent
+    and exit, then be re-armed by the real notification anyway). The two answer
+    from the same predicate, so they cannot disagree about the host.
+
+    Returns the same reason ``notify_move_queued`` would — today only
+    ``host_cannot_restart`` — and ``""`` when no runtime here hosts the session,
+    which is a normal answer: the durable marker is then exactly what a later open
+    consumes.
+    """
+    if not session_id:
+        return ""
+    wanted = os.path.realpath(str(root))
+    for hosted_id, server in list(_HOSTED_RUNTIMES.items()):
+        if hosted_id != session_id or server._closed.is_set():
+            continue
+        if os.path.realpath(str(getattr(server, "_config_root", "") or "")) != wanted:
+            continue
+        return server._cwd_move_predicted_hold()
+    return ""
+
+
+def notify_move_queued(session_id: str, root: Path) -> str:
+    """Wake this process's runtime for ``session_id``, and say what it will do.
+
+    Returns ``""`` when no runtime here was told, :data:`CWD_MOVE_READY` when the
+    woken runtime can carry the move out at its next idle point with a viewer
+    following, :data:`CWD_MOVE_HANDOFF` when it will do it by handoff (nobody can
+    follow, so the session stops and the next engage starts in the destination),
+    and otherwise the reason it can NEVER act (``host_cannot_restart``), which the
+    tool turns into a refusal rather than a promise.
+
+    The caller words its reply from this answer: "at the next idle point" was once
+    printed whenever a runtime merely EXISTED, so a host that could never act told
+    the model a restart was coming that never came (UX round 2, U9; agent review
+    round 2, m-b).
+
+    ``""`` IS A NORMAL ANSWER, not an error: a tool call can run in a process that
+    hosts no runtime for its session (a plain ``exec`` worker, an embedder driving
+    tools off the runtime), and there the durable marker is still exactly what a
+    later boot consumes.
+
+    ``root`` is compared REALPATH-ED against each hosted runtime's config root: a
+    tool in one config tree must never wake a runtime in another, which is how an
+    isolated test or a second store would otherwise cross-talk.
+    """
+    if not session_id:
+        return ""
+    wanted = os.path.realpath(str(root))
+    for hosted_id, server in list(_HOSTED_RUNTIMES.items()):
+        if hosted_id != session_id or server._closed.is_set():
+            continue
+        if os.path.realpath(str(getattr(server, "_config_root", "") or "")) != wanted:
+            continue
+        server._ensure_queued_move_watcher()
+        never = server._cwd_move_predicted_hold()
+        if never:
+            return never
+        return CWD_MOVE_READY if server._cwd_move_successor_guaranteed() else CWD_MOVE_HANDOFF
+    return ""
 
 
 def _running_loop() -> asyncio.AbstractEventLoop | None:
@@ -1411,6 +1564,13 @@ _ANCHOR_REFRESH_S = ANCHOR_REFRESH_S
 #: How long a verified device certificate is remembered. The certificate is
 #: checked lazily and per certificate string; a TTL rather than a permanent cache
 #: because the anchor's revocation list can change under a long-running session.
+#:
+#: IT DOES NOT BOUND A REFUSAL. Everything the anchor decides in the ADMITTING
+#: direction — a phone the human has just confirmed — has to become visible inside
+#: ``ANCHOR_REFRESH_S``, so a cached ``point=None`` expires with that window rather
+#: than with this one (``_device_cert_point``); otherwise the confirmation copy tells
+#: a human to do something the runtime then ignores for five minutes (agent review
+#: round 1, m2).
 _DEVICE_CERT_TTL_S = 300.0
 
 #: Bound on the device-certificate cache. Keyed by an attacker-chosen string, so
@@ -1811,6 +1971,16 @@ class _ClientConn:
     #: was protecting against. ABSENT MEANS LOCAL, exactly as every other additive
     #: auth field does: nothing that reaches this socket today changes behaviour.
     capabilities: frozenset[str] = frozenset()
+    #: Whether this viewer can ADOPT a directory from a ``retiring`` frame — the
+    #: one fact that decides whether a queued cwd move may retire this runtime
+    #: (see ``RuntimeServer._cwd_move_successor_guaranteed``).
+    #:
+    #: FALSE BY DEFAULT, which is the safe direction rather than an oversight: a
+    #: client built before the key exists re-engages at the OLD directory, so
+    #: treating silence as "can follow" is how a session ends up booting in the
+    #: source forever (agent review round 1, B2). The viewer that adopts turns it
+    #: on in its own auth frame, in the same step it gained the adoption code.
+    cwd_adoption: bool = False
     #: ``{"device_id", "name"}`` of the device a relayed viewer sits at, or empty
     #: for a local one. Carried for ONE reason: a refusal a remote viewer can hit
     #: has to name the machine to act on (§4.4 — "run it on build-box" is not
@@ -2252,9 +2422,13 @@ class RuntimeServer:
         )
         #: Verified device certificates, by certificate string, with a TTL — see
         #: ``_device_cert_point`` for why this is lazy, bounded and short-lived.
-        #: ``(point, deadline, device_id)``: the id is kept so REVOCATION can be
-        #: re-checked on a cache hit — see the method, and R6-1.
-        self._device_certs: dict[str, tuple[bytes | None, float, str]] = {}
+        #: ``(point, deadline, device_id, device_key)``: the id AND the key the
+        #: certificate carries are kept so ADMISSION — which is revocation plus the
+        #: id-is-the-key binding plus the anchor's list — can be re-checked on a
+        #: cache hit. What is cached is the expensive half (the signature and the
+        #: expiry, which cannot change); whether the anchor still admits the device
+        #: can, because it is the operator's own action.
+        self._device_certs: dict[str, tuple[bytes | None, float, str, bytes]] = {}
         #: Every unspent operator challenge in this runtime, by challenge string,
         #: with its deadline — the AGGREGATE bound the per-connection maximum
         #: cannot be (see ``_MAX_LIVE_CHALLENGES``). Pruned on mint and on
@@ -2710,6 +2884,13 @@ class RuntimeServer:
         #: The watcher's last stage ("", "finishing", "paused", "retiring") —
         #: what the relay's delivery polls see in the ``queue_move`` reply.
         self._queued_move_stage = ""
+        #: The request id of the cwd intent this runtime last saw ``queued``, so
+        #: an expiry is announced for a request THIS process was holding and
+        #: never for a days-old marker a boot happens to read. The hold itself is
+        #: read from the marker, which is per request by construction — a memo
+        #: here once carried one request's hold onto the next (agent review
+        #: round 2, m-a).
+        self._cwd_move_watched_request = ""
         #: The one watcher task, started on the first ``queue_move`` op.
         self._queued_move_task: asyncio.Task[None] | None = None
         self._thread: threading.Thread | None = None
@@ -2755,6 +2936,12 @@ class RuntimeServer:
         # still be sleeping when close tears down the runtime loop, producing
         # an orphan warning and proving teardown returned before its work ended.
         self._push_task: asyncio.Task[None] | None = None
+        # Post-reply reconciliation must not hold the switch ordering lane.
+        # One owned, dirty-coalesced worker prevents overlapping roster scans;
+        # the revision also invalidates repaints built before a newer switch.
+        self._switch_refresh_task: asyncio.Task[None] | None = None
+        self._switch_refresh_dirty = False
+        self._switch_revision = 0
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._attention_task: asyncio.Task[None] | None = None
         # Shutdown is represented by one owner-loop task so synchronous close,
@@ -3047,6 +3234,7 @@ class RuntimeServer:
         draining: bool = False,
         leaving: str = "",
         checkpoint_id: str = "",
+        cwd: str = "",
     ) -> None:
         """Tell attached viewers this runtime is leaving so a NEWER build can
         take its place — a planned refresh, not a stop and not a death.
@@ -3147,13 +3335,19 @@ class RuntimeServer:
                         draining=draining,
                         leaving=leaving,
                         checkpoint_id=checkpoint_id,
+                        cwd=cwd,
                     ),
                     loop,
                 )
             )
             return
         await self._announce_retiring_on_loop(
-            reason, to=to, draining=draining, leaving=leaving, checkpoint_id=checkpoint_id
+            reason,
+            to=to,
+            draining=draining,
+            leaving=leaving,
+            checkpoint_id=checkpoint_id,
+            cwd=cwd,
         )
 
     async def _announce_retiring_on_loop(
@@ -3164,6 +3358,7 @@ class RuntimeServer:
         draining: bool = False,
         leaving: str = "",
         checkpoint_id: str = "",
+        cwd: str = "",
     ) -> None:
         """The retiring announcement, on the runtime's own loop.
 
@@ -3204,6 +3399,12 @@ class RuntimeServer:
             # ignores the unknown key, and "" is exactly "no readable resume
             # record", which never advertises a continuation that cannot happen.
             "checkpoint_id": checkpoint_id,
+            # ADDITIVE, like ``checkpoint_id``: the directory THIS departure is
+            # a move TO, or "" for every departure that is not a move. A viewer
+            # that does not know the key ignores it; a viewer that does adopts
+            # it before it engages the successor (``attached._ensure_bound``),
+            # so the successor is spawned in the directory the user asked for.
+            "cwd": cwd,
             # The trigger's own words, for the sentence a viewer paints: see the
             # ``leaving`` paragraph above. ``""`` means THIS FRAME NAMED NO
             # TRIGGER — it is what every runtime older than this key sends, this
@@ -3334,6 +3535,10 @@ class RuntimeServer:
         if self._closed.is_set():
             return
         self._closed.set()
+        # DROPPED FROM THE PROCESS INDEX FIRST: a tool call racing this shutdown
+        # must find no consumer rather than a dead one, and the weak entry would
+        # otherwise outlive the runtime for as long as its host holds it.
+        self._unregister_queued_move_waker()
         self._wake_close_wait()
         if self._unsubscribe is not None:
             try:
@@ -3517,6 +3722,36 @@ class RuntimeServer:
             )
             port = self._server.sockets[0].getsockname()[1]
             self._record.control_port = port
+            # BOOT RECONCILIATION (best-effort): a move whose confirmation was
+            # lost is settled against where THIS process actually booted, never
+            # reverted. Then the one move watcher starts; with no intent it reads
+            # a missing file and does nothing.
+            try:
+                from pathlib import Path
+
+                from local_operator.session import cwd_move
+
+                # THE SESSION'S DIRECTORY, NOT THIS PROCESS'S, and the difference
+                # is the whole check: ``launch._spawn_runtime`` passes no
+                # ``cwd=``, so a successor starts where the ENGAGING host stood
+                # and the directory the session actually uses rides
+                # ``LOP_MOBILE_CHILD_CWD`` into the record. Reconcile against
+                # ``Path.cwd()`` and the destination can never match — measured
+                # against a real spawn (the branch's e2e cell): the successor's
+                # record named the destination while the intent stayed `queued`
+                # forever, i.e. no move could ever commit in production.
+                cwd_move.reconcile_move(
+                    Path(getattr(self, "_config_root", None) or config_dir()),
+                    self._record.session_id,
+                    effective_cwd=str(self._record.cwd or ""),
+                )
+            except Exception:  # noqa: BLE001 -- evidence must not block a boot
+                logger.warning("session runtime: cwd-move boot reconcile skipped", exc_info=True)
+            # REGISTERED BEFORE THE WATCHER, so a tool call that queues a move
+            # while this runtime is still coming up finds it (see
+            # ``_HOSTED_RUNTIMES``).
+            self._register_queued_move_waker()
+            self._ensure_queued_move_watcher()
             # INSTALL THE PUBLISHER BEFORE ITS RECORD CAN BE READ, and the
             # ordering is the guarantee rather than housekeeping: ``_republish``
             # no-ops while ``self._publisher`` is unset, so a record made
@@ -3780,6 +4015,10 @@ class RuntimeServer:
             self._attention_task.cancel()
         if self._push_task is not None:
             self._push_task.cancel()
+        if self._switch_refresh_task is not None:
+            self._switch_refresh_task.cancel()
+            await asyncio.gather(self._switch_refresh_task, return_exceptions=True)
+            self._switch_refresh_task = None
         for task in list(self._event_sends):
             task.cancel()
         self._event_sends.clear()
@@ -4570,6 +4809,10 @@ class RuntimeServer:
         # carrying the flag (there is none today) is deliberately ignored.
         wants_events = kind == "attach" and bool(frame.get("events"))
         wants_frontend = kind == "attach" and bool(frame.get("frontend_state"))
+        # The viewer's half of the cwd-move successor guarantee: only a client that
+        # declares it will spawn the successor in the frame's ``cwd`` makes a move
+        # retirable (see ``_ClientConn.cwd_adoption``). Absent is FALSE.
+        cwd_adoption = kind == "attach" and bool(frame.get("cwd_adoption"))
         # Which action-carrying receipts this client consumes itself. Parsed
         # ONCE here rather than per command: the answer cannot change for the
         # life of a connection. Absent (the common case today, and every
@@ -4656,6 +4899,7 @@ class RuntimeServer:
             slash_consumers=slash_consumers,
             wants_events=wants_events,
             wants_frontend=wants_frontend,
+            cwd_adoption=cwd_adoption,
             operator_nonce=client_nonce,
             operator_salt=server_salt,
             device_certificate=device_certificate,
@@ -6055,6 +6299,18 @@ class RuntimeServer:
         lifetime of a session that can run for days. The cache is keyed by the
         certificate string, so a different certificate is always verified rather
         than matched against a stale answer.
+
+        TWO WINDOWS, ONE ENTRY. What the anchor decides survives the entry for
+        ``ANCHOR_REFRESH_S`` at most: an ADMITTED point is re-checked against the
+        anchor on every use (so a revocation or a de-listing made after that entry was
+        filled takes effect within one anchor window, not only on a restart — the
+        anchor it is checked against is the caller's snapshot, refreshed every
+        ``ANCHOR_REFRESH_S``), and a REFUSAL expires after the same window rather than after
+        ``_DEVICE_CERT_TTL_S``, because listing is the transition a HUMAN causes and
+        the phone has to be admitted within the time the confirming copy promises
+        (agent review round 1, m2). Only the expensive half — the operator signature
+        and the expiry, which cannot change — is reused for the full certificate
+        TTL.
         """
         if not isinstance(certificate, str) or not certificate:
             return None
@@ -6063,32 +6319,51 @@ class RuntimeServer:
         cached = self._device_certs.get(certificate)
         now = time.monotonic()
         if cached is not None and cached[1] > now:
-            # REVOCATION IS RE-CHECKED ON EVERY USE, even on a cache hit (agent
+            # ADMISSION IS RE-CHECKED ON EVERY USE, even on a cache hit (agent
             # review round 6, R6-1 — the second half of it, and the half the
             # certificate TTL alone does not cover). What is cached is the
             # EXPENSIVE half: the signature and expiry verification, which cannot
-            # change. Whether the certificate's device is REVOKED can, and it is
-            # the operator's own action — so it is read from the anchor every time
+            # change. Whether the anchor ADMITS the certificate's device can, and it
+            # is the operator's own action — so it is read from the anchor every time
             # rather than frozen for `_DEVICE_CERT_TTL_S`. Without this, a device
-            # revoked while a runtime was running kept acting for up to five
-            # minutes after the anchor re-read that was meant to stop it.
-            point, _deadline, device_id = cached
+            # revoked (or de-listed) while a runtime was running kept acting for up
+            # to five minutes after the anchor re-read that was meant to stop it.
+            point, _deadline, device_id, device_key = cached
             if point is None:
                 return None
-            return None if device_is_revoked(anchor, device_id) else point
+            return None if not device_is_admitted(anchor, device_id, device_key) else point
         parsed = operator_verify.read_device_cert(certificate)
         point = operator_verify.verify_device_cert(
             certificate, operator_spki=anchor.spki, now=int(time.time()), parsed=parsed
         )
         device_id = parsed.device_id if parsed is not None else ""
+        device_key = parsed.spki if parsed is not None else b""
         if point is not None:
-            # A certificate that names a REVOKED device is refused here, at the
-            # point its identity is known: ``verify_device_cert`` deliberately
-            # knows nothing about revocation (it checks a signature and an
-            # expiry), and the revocation list is a property of the anchor.
-            if device_is_revoked(anchor, device_id):
+            # A certificate that does not ADMIT its device is refused here, at the
+            # point its identity is known: ``verify_device_cert`` deliberately knows
+            # nothing about admission (it checks a signature and an expiry), and
+            # whether the anchor lists — or has revoked — this device is a property
+            # of the anchor, while whether the declared id is the KEY's id is a
+            # property of the statement the signature just covered.
+            if not device_is_admitted(anchor, device_id, device_key):
                 point = None
-        self._device_certs[certificate] = (point, now + _DEVICE_CERT_TTL_S, device_id)
+        deadline = now + (
+            _DEVICE_CERT_TTL_S
+            if point is not None
+            # A REFUSAL IS CACHED FOR THE ANCHOR WINDOW, NOT THE CERTIFICATE TTL
+            # (agent review round 1, m2). What was cached as "this certificate is
+            # refused" was safe while the only anchor-driven transition was
+            # admit -> revoked; listing introduced the REVERSE, and the human's own
+            # gesture is what causes it. Frozen for five minutes, a phone the person
+            # had just confirmed kept being refused with the very copy telling them
+            # to confirm it — against the split's "accepted within 30 s" cell
+            # (``ANCHOR_REFRESH_S``). The two directions now cost their own
+            # window: a refusal expires with the anchor re-read it depends on, a
+            # verified point keeps the certificate TTL, because re-verifying it on
+            # every frame would buy nothing (a signature does not become valid).
+            else min(_DEVICE_CERT_TTL_S, _ANCHOR_REFRESH_S)
+        )
+        self._device_certs[certificate] = (point, deadline, device_id, device_key)
         if len(self._device_certs) > _MAX_CACHED_DEVICE_CERTS:
             # Bounded: a client can present a new certificate string on every
             # frame, and an unbounded cache keyed by attacker-chosen strings is a
@@ -6807,9 +7082,14 @@ class RuntimeServer:
                     # could carry.
                     may_loosen=self._connection_may_loosen(frame, conn),
                 )
+                if _is_switch_frame(frame):
+                    self._switch_revision += 1
                 await self._send_to(conn, {"op": "result", "req": req, "data": data})
-                await self._handle.refresh()
-                await self._push()
+                if _is_switch_frame(frame):
+                    self._schedule_switch_refresh()
+                else:
+                    await self._handle.refresh()
+                    await self._push()
                 return
             else:
                 duplicate = await self._already_admitted(op, frame)
@@ -6846,6 +7126,8 @@ class RuntimeServer:
                     # carries the state itself is read the same way rather than
                     # dropped -- see ``_ack_frame_parts``.
                     detail, extra = _ack_frame_parts(outcome)
+                if not duplicate and _is_switch_frame(frame):
+                    self._switch_revision += 1
                 ack_frame = {
                     "op": "ack",
                     "req": req,
@@ -6875,8 +7157,11 @@ class RuntimeServer:
                 else:
                     await self._send_to(conn, ack_frame)
                 if not duplicate:
-                    await self._handle.refresh()
-                    await self._push()
+                    if _is_switch_frame(frame):
+                        self._schedule_switch_refresh()
+                    else:
+                        await self._handle.refresh()
+                        await self._push()
                 return
             await self._send_to(conn, {"op": "ack", "req": req, "detail": detail})
             # Mutations change the projection; push what every front end
@@ -6897,6 +7182,7 @@ class RuntimeServer:
                 "watch_job",
                 "unwatch_job",
                 "stop",
+                "stop_if_idle",
                 "retire_if_pristine",
                 "refresh_if_idle",
                 # Same exemption, same reason: it either retired (nothing to
@@ -6927,6 +7213,14 @@ class RuntimeServer:
             )
 
             frame = {"op": "error", "req": req, "message": str(exc)[:400]}
+            if isinstance(exc, _StopRefused):
+                # A machine token from a closed set, never prose: the stop
+                # ladder picks its own already-catalogued sentence from it, so
+                # the SAME refusal can read in the operator's language while the
+                # category that decides behaviour stays English (docs/I18N.md
+                # ``{code, params, text}`` rule). Additive field — an older
+                # caller ignores it and keeps the ``message`` it always read.
+                frame["reason"] = exc.reason
             if isinstance(
                 exc,
                 (
@@ -7313,17 +7607,350 @@ class RuntimeServer:
         }
 
     def _ensure_queued_move_watcher(self) -> None:
-        """Start the watcher if it is not already running (idempotent)."""
+        """Start the watcher if it is not already running (idempotent).
+
+        TWO CALLERS, TWO THREADS. The boot path and the ``queue_move`` op run on
+        the runtime's own loop; :func:`notify_move_queued` arrives from the tool
+        call that just wrote the marker, on the SESSION's loop (or a plain
+        thread, for a host that drives tools synchronously). The task must land
+        on the RUNTIME's loop either way, because everything the watcher awaits
+        (``announce_retiring``, the handle hops) is bound to it — a task created
+        on the caller's loop would announce through closures this runtime never
+        publishes on.
+        """
         task = self._queued_move_task
         if task is not None and not task.done():
             return
-        loop = _running_loop()
-        if loop is None:
-            # A reduced host driving the op body off the runtime loop has
-            # nowhere to schedule this; the intent stays set and a later op
-            # from the loop path starts the watcher. Belt, not the wire path.
+        target = self._loop or _running_loop()
+        if target is None:
+            # A reduced host driving the op body off any loop has nowhere to
+            # schedule this; the intent stays set and a later op from the loop
+            # path starts the watcher. Belt, not the wire path.
             return
-        self._queued_move_task = loop.create_task(self._queued_move_watch())
+
+        def start() -> None:
+            existing = self._queued_move_task
+            if existing is not None and not existing.done():
+                return
+            self._queued_move_task = target.create_task(self._queued_move_watch())
+
+        if _running_loop() is target:
+            start()
+            return
+        try:
+            target.call_soon_threadsafe(start)
+        except RuntimeError:
+            # The runtime's loop is already closed: there is no session left to
+            # honour the request, and the durable marker is what a successor
+            # reads. Nothing to start, and nothing to report to the tool that
+            # has already returned its receipt.
+            logger.debug("queued move: runtime loop closed; intent left for the successor")
+
+    def _register_queued_move_waker(self) -> None:
+        """Publish this runtime in the process index a tool call wakes (idempotent).
+
+        Named as a method rather than done inline at boot so the test rig and the
+        boot path register the SAME way — a rig that spelled it differently would
+        pass while production stayed unwoken, which is the class of defect the
+        index exists to close (agent review round 1, B1).
+        """
+        _HOSTED_RUNTIMES[self._record.session_id] = self
+
+    def _unregister_queued_move_waker(self) -> None:
+        """Withdraw it again; a wake after this finds no consumer, by design."""
+        if _HOSTED_RUNTIMES.get(self._record.session_id) is self:
+            _HOSTED_RUNTIMES.pop(self._record.session_id, None)
+
+    async def _apply_queued_cwd_move(self) -> str:
+        """Consume a QUEUED cwd intent at an idle boundary; say why if not.
+
+        THE SAME ACT AS A NETWORK MOVE with a different payload, so it rides the
+        one Trigger this runtime already has (this watcher, announce_retiring,
+        request_stop) rather than a second retirement path. Everything mesh-shaped
+        is skipped: no ``move_pending`` frame, no ``to_device``/``to_name``, no
+        ``to=`` on the announce -- the frame carries ``cwd`` and no peer.
+
+        THE CHECKS RUN IN THIS ORDER, and the order is the point:
+
+        1. CAPABILITY. A host that cannot restart this runtime cannot act on a move
+           at all. The tool refuses such a request at the CALL
+           (``_cwd_move_predicted_hold``); a marker still reaching here was queued
+           by another host, so it is held rather than acted on.
+        2. THE BOUNDARY, ``may_refresh`` — the one predicate that already answers
+           "is this runtime doing nothing it would lose" (a live turn, a parked
+           gate, a goal loop, subagents, background jobs, the wake window). Busy is
+           not a hold and records nothing: the intent simply stays queued.
+        3. THE DESTINATION STILL EXISTS. It was checked at enqueue, but a turn can
+           delete it afterwards, and retiring toward it booted a successor in a
+           directory that was gone (QA round 2, Q2; agent review round 2, m-d).
+        4. THE RETIREMENT, in one of two forms. When an attached viewer declares
+           ``cwd_adoption`` it follows the move, so the session simply retires. When
+           NOTHING can follow, the destination is written as the session's RECORDED
+           TRUTH first (``cwd_move.accept_handoff``) and the runtime retires second,
+           so the next engage of any kind boots there. Before this the viewer-less
+           case was a hold (``no_capable_viewer``) that aged out after thirty
+           minutes with the cwd unchanged: a headless session could never move
+           itself at all.
+        5. THE LATCH, which re-checks idleness in the same synchronous step. A
+           refused latch rolls a written handoff back to ``queued``: work arrived,
+           this runtime is staying, and the next engage must not act on a move it
+           is still here to make.
+
+        ONLY TWO HOLD REASONS SURVIVE, both transient and both re-judged on the
+        next tick: a destination that went away, and a boundary that could not be
+        read. Each is written once per reason, logged, and ANNOUNCED — painted for
+        the user and journalled for the agent's next turn. Nothing is left to
+        lapse: a request ends committed, or at an explicit reason.
+
+        Returns ``"retiring"`` when it latched and announced, ``"waiting"`` when
+        an intent exists but cannot be acted on yet, ``""`` when there is nothing
+        to do.
+        """
+        # ONLY AN IN-FLIGHT MESH MOVE BLOCKS: a stood-down one leaves the stage at
+        # ``cancelled`` (or a terminal record phase) for the relay's ``queue_move``
+        # reply to read, and treating that as in-flight made every later cwd move
+        # in this runtime a silent no-op (agent review round 2, R2-M1).
+        if (
+            self._queued_move is not None
+            or self._queued_move_stage in _MOVE_IN_FLIGHT_STAGES
+            or self._retirement_committed
+        ):
+            return ""
+        from pathlib import Path
+
+        from local_operator.session import cwd_move
+
+        root = Path(getattr(self, "_config_root", None) or config_dir())
+        intent = cwd_move.read_move_intent(root, self._record.session_id)
+        if intent is None:
+            return ""
+        if intent.stage != cwd_move.STAGE_QUEUED:
+            # A STAGE THIS LOOP DOES NOT ACT ON. An ``expired`` document can still
+            # sit on disk from a build that aged holds: announce it once (the
+            # watched-request memo is what makes it once) so a lapse written by
+            # that build is not silent, even though nothing ages anything now.
+            if intent.stage == cwd_move.STAGE_EXPIRED and (
+                intent.request_id == self._cwd_move_watched_request
+            ):
+                self._cwd_move_watched_request = ""
+                await self._announce_cwd_move_expired(intent)
+            return ""
+        self._cwd_move_watched_request = intent.request_id
+        # CAPABILITY FIRST: a host whose handle cannot restart the session in
+        # another directory can never honour the request, and the tool refuses
+        # this at the CALL (``_cwd_move_predicted_hold``), so reaching here means
+        # another host queued it and this one picked it up.
+        hold = self._cwd_move_predicted_hold()
+        if hold:
+            await self._note_cwd_move_blocked(root, cwd_move, intent, hold)
+            return "waiting"
+        probe = getattr(self._handle, "may_refresh", None)
+        latch = getattr(self._handle, "begin_retire", None)
+        if not callable(probe) or not callable(latch):
+            return ""  # unreachable: the capability check above holds instead
+        try:
+            reason = str(await self._handle_call_on_session_loop(probe) or "")
+        except Exception:  # noqa: BLE001 -- an unreadable probe keeps the runtime
+            await self._note_cwd_move_blocked(root, cwd_move, intent, "boundary_unreadable")
+            return "waiting"
+        if reason:
+            return "waiting"
+        try:
+            cwd_move.resolve_destination(
+                intent.destination_cwd, effective_cwd=intent.destination_cwd
+            )
+        except cwd_move.CwdMoveRefused:
+            await self._note_cwd_move_blocked(root, cwd_move, intent, "destination_unavailable")
+            return "waiting"
+        if intent.blocked_reason:
+            # The condition is gone (the directory came back): clear the notice
+            # in the same tick that acts on the request.
+            cwd_move.mark_blocked(root, self._record.session_id, "")
+
+        if self._cwd_move_successor_guaranteed():
+            # A VIEWER FOLLOWS NOW. It declared ``cwd_adoption``, so its next
+            # engage happens wherever it was told the session went; the durable
+            # marker still commits on that successor's boot, exactly as below.
+            return await self._retire_for_queued_move(latch, intent.destination_cwd)
+
+        # NOBODY CAN FOLLOW, AND THE MOVE STILL HAS TO HAPPEN. Write the
+        # destination as the session's RECORDED TRUTH first, then retire: the
+        # successor is whoever engages next (a message, a wake, ``lop exec``),
+        # and it boots at the destination because every engage path reads that
+        # marker through ``engage_runtime``. This is the whole of the viewer-less
+        # fix — before it, this branch recorded ``no_capable_viewer`` and the
+        # request aged out with the cwd unchanged.
+        handoff = cwd_move.accept_handoff(root, self._record.session_id, intent)
+        if handoff is None:
+            # Cancelled or replaced between the read above and this write: a
+            # later request owns the document now, and this one must not publish
+            # its destination over it.
+            return "waiting"
+        outcome = await self._retire_for_queued_move(latch, handoff.destination_cwd)
+        if outcome != "retiring":
+            # THE LATCH REFUSED: work arrived between the idle probe and the
+            # claim, so this runtime is staying. Undo the write or the next
+            # engage would act on a move this runtime is still here to make.
+            # Same order as the desktop path: publish, then commit, and roll the
+            # durable copy back if the commit is refused.
+            cwd_move.rollback_handoff(root, self._record.session_id, handoff)
+        return outcome
+
+    async def _retire_for_queued_move(self, latch: Any, destination: str) -> str:
+        """Claim the retire latch, then announce and stop. Shared by both paths.
+
+        The latch RE-CHECKS idleness in the same synchronous step as the claim,
+        which is why the probes above do not have to be atomic: a change between
+        probe and latch simply refuses and the next tick retries.
+        """
+        accepted = await self._handle_call_on_session_loop(lambda: latch("cwd-move", "cwd move"))
+        if not accepted:
+            return "waiting"
+        self._queued_move_stage = "retiring"
+        await self.announce_retiring("cwd-move", cwd=destination)
+        request_stop = getattr(self._handle, "request_stop", None)
+        if callable(request_stop):
+            await self._handle_call_on_session_loop(request_stop)
+        return "retiring"
+
+    def _cwd_move_predicted_hold(self) -> str:
+        """The reason this runtime could NEVER act on a cwd move, or ``""``.
+
+        ASKED AT THE CALL as well as at the idle point: :func:`notify_move_queued`
+        answers a tool call with this, so a host that cannot restart the session
+        anywhere refuses the request immediately instead of queueing one that can
+        only ever sit there. Busy and a vanished destination are facts of the idle
+        point and are judged there.
+
+        NO VIEWER IS NOT A HOLD ANY MORE. Before the durable handoff, "nobody can
+        follow" made a move impossible, so this used to record ``no_capable_viewer``
+        and wait for expiry. The destination is now written to the session's marker
+        and the next engage of any kind boots there, so the same fact only decides
+        WHICH retirement shape is taken — see :meth:`_apply_queued_cwd_move`.
+        """
+        if not callable(getattr(self._handle, "may_refresh", None)) or not callable(
+            getattr(self._handle, "begin_retire", None)
+        ):
+            return "host_cannot_restart"
+        return ""
+
+    def _cwd_move_successor_guaranteed(self) -> bool:
+        """Whether some live viewer will adopt the destination and re-engage.
+
+        THE PRECONDITION OF THE WHOLE ACT (agent review round 1, B2). Retiring a
+        session toward a directory nothing will spawn into is how a move leaves a
+        session that boots, retires and exits on every open. A viewer proves it
+        can follow by declaring ``cwd_adoption`` in its auth frame — the same
+        additive-key negotiation every other capability uses — so an older build,
+        a phone viewer and a headless runtime are all honestly "nobody can take
+        this" instead of a guess about what another process does on disconnect.
+
+        EVENTUAL, NOT EAGER (agent review round 2, m-c): a viewer that is parked
+        (a sidebar facade with no refresh callback) adopts the destination on its
+        next engage rather than at once, so the session may sit cold in between.
+        It still converges on the destination and never loops.
+
+        NO VIEWER IS THE ORDINARY HEADLESS CASE, and it no longer blocks anything:
+        it selects the HANDOFF retirement instead (the destination is written to
+        the marker before the runtime stops, so the next engage boots there). This
+        predicate is therefore a routing question — does somebody follow me now,
+        or does the durable record carry the move until the next engage — and not
+        the precondition it used to be.
+        """
+        for conn in list(self._clients.values()):
+            if conn.kind == "attach" and conn.cwd_adoption:
+                return True
+        return False
+
+    async def _note_cwd_move_blocked(
+        self, root: Path, cwd_move: Any, intent: Any, reason: str
+    ) -> None:
+        """Record, log and ANNOUNCE a hold, once per reason per request.
+
+        THE MARKER IS THE MEMO. The consumer re-reads the intent every tick, so
+        "already recorded" is ``intent.blocked_reason == reason`` on the request
+        in hand — a new request starts with no reason and is announced afresh,
+        which a runtime-wide memo got wrong (agent review round 2, m-a). The
+        watcher ticks twice a second; nothing here runs again until the reason
+        changes.
+        """
+        if intent.blocked_reason == reason:
+            return
+        updated = cwd_move.mark_blocked(root, self._record.session_id, reason)
+        if updated is None:
+            return
+        logger.warning(
+            "queued move: holding session %s in %s; moving to %s is blocked (%s)",
+            self._record.session_id,
+            updated.source_cwd or "?",
+            updated.destination_cwd,
+            reason,
+        )
+        from local_operator.tools.builtin import sessions_move_hold_sentence
+
+        await self._announce_cwd_move(
+            sessions_move_hold_sentence(reason, updated.destination_cwd),
+            f"cwd move held ({reason}): {updated.destination_cwd}",
+        )
+
+    async def _announce_cwd_move_expired(self, intent: Any) -> None:
+        """Say a held move ran out of time, instead of deleting it silently."""
+        logger.warning(
+            "queued move: the move of session %s to %s expired without happening",
+            self._record.session_id,
+            intent.destination_cwd,
+        )
+        from local_operator.tools.builtin import sessions_move_expiry_sentence
+
+        await self._announce_cwd_move(
+            sessions_move_expiry_sentence(intent.destination_cwd, intent.source_cwd),
+            f"cwd move expired: {intent.destination_cwd}",
+        )
+
+    async def _announce_cwd_move(self, text: str, raw: str) -> None:
+        """Tell the USER now and the AGENT at its next turn. Never raises.
+
+        THE SAME PAIR ``note_update_failed`` uses, for the same reason: a hold
+        nobody hears about is the silent failure the hold exists to prevent.
+        ``queue_notice`` paints on every attached viewer (after the running
+        turn's answer when one is running), and ``journal_incident`` lands in the
+        live context — parked to the next boundary mid-turn — and the transcript,
+        so the next open replays it when nobody was watching.
+
+        BOTH RUN ON THE LOOP THAT OWNS THE SESSION, never on this runtime's
+        thread: ``journal_incident`` takes the transcript's lock, which is bound
+        to the session's loop, and taking it from the registrant thread failed
+        the session's OWN turn persistence ("bound to a different event loop",
+        QA round 3, Q5 — intermittent, 1/5 runs on an embedded ``OperatorApp``).
+        A handle that offers ``call_on_session`` is asked to run the call there:
+        ``TuiSessionHandle`` (whose loop is the app's and which publishes no
+        ``session_loop``, so the ordinary hop would run it INLINE here) and
+        ``ServingSessionHandle`` (which hops to its published loop). Any other
+        handle — a reduced host — goes through the ordinary hop.
+        """
+        hop = getattr(self._handle, "call_on_session", None)
+
+        async def on_session(name: str, *args: Any, **kwargs: Any) -> None:
+            if callable(hop):
+
+                def call(session: Any) -> Any:
+                    method = getattr(session, name, None)
+                    return method(*args, **kwargs) if callable(method) else None
+
+                await cast(Callable[[Callable[[Any], Any]], Awaitable[Any]], hop)(call)
+                return
+            method = getattr(getattr(self._handle, "_session", None), name, None)
+            if callable(method):
+                await self._handle_call_on_session_loop(method, *args, **kwargs)
+
+        try:
+            await on_session("queue_notice", text, "warning")
+        except Exception:  # noqa: BLE001 -- a notice never breaks the runtime
+            logger.debug("queued move: could not paint the notice", exc_info=True)
+        try:
+            await on_session("journal_incident", raw, rendered=f"[session incident] {text}")
+        except Exception:  # noqa: BLE001 -- the log line above is the record
+            logger.debug("queued move: could not journal the notice", exc_info=True)
 
     async def _queued_move_watch(self) -> None:
         """Watch for the queued move's safe point; then pause, announce, retire.
@@ -7390,7 +8017,17 @@ class RuntimeServer:
             self._queued_move_stage = ""
 
     async def _queued_move_run(self) -> None:
-        """One pass's loop body — split from the wrapper for the try/finally above."""
+        """One pass's loop body — split from the wrapper for the try/finally above.
+
+        THE CWD INTENT IS POLLED, NOT SAMPLED (agent review round 1, B1; UX round
+        1, U1). A tool call queues a move MID-TURN, so the first tick after it is
+        always "not at a boundary yet": a watcher that returned there would leave
+        the intent to whatever later start happened to occur, which in practice
+        was the next process boot. A queued intent therefore keeps this loop
+        alive until it is acted on, cancelled, expired or the runtime goes away,
+        and the plain "nothing queued" case still returns on the first tick — the
+        cost this loop is allowed to pay in an idle runtime is exactly zero.
+        """
         from pathlib import Path
 
         from local_operator.network import move_queue
@@ -7402,7 +8039,20 @@ class RuntimeServer:
         root = Path(getattr(self, "_config_root", None) or config_dir())
 
         while True:
-            if self._closed.is_set() or self._queued_move is None:
+            if self._closed.is_set():
+                return
+            # BEFORE ANY MESH WORK: a cwd intent must never reach the record
+            # gate below, send a move_pending frame, or name a peer.
+            cwd_outcome = await self._apply_queued_cwd_move()
+            if cwd_outcome == "retiring":
+                return
+            if cwd_outcome == "waiting":
+                # AN INTENT EXISTS AND IS NOT YET ACTIONABLE: stay on it. This is
+                # the mid-turn case a tool call always creates, and the sleep is
+                # the same tick the mesh poll below pays.
+                await asyncio.sleep(QUEUED_MOVE_TICK_S)
+                continue
+            if self._queued_move is None:
                 return
             movement = dict(self._queued_move)
             to_device = str(movement.get("to_device") or "")
@@ -8147,7 +8797,7 @@ class RuntimeServer:
                 str(frame["model_id"]),
                 sender=frame.get("sender") or {},
             )
-        if op == "stop":
+        if op in ("stop", "stop_if_idle"):
             # PR 3 (the kill switch): the graceful rung of the stop ladder
             # (session/runtime/control.py). The plan is deny parked gates →
             # abort/dispose the session → release the lease → unpublish the
@@ -8166,7 +8816,32 @@ class RuntimeServer:
             # answer the ladder is built to continue from.
             request_stop = getattr(h, "request_stop", None)
             if not callable(request_stop):
-                raise ValueError("this owner cannot stop itself gracefully")
+                raise _StopRefused("old_owner", "this owner cannot stop itself gracefully")
+            if op == "stop_if_idle":
+                # The tool's narrower authority must be checked AND latched on
+                # the owner's loop. A sampled busy flag before an await races a
+                # new turn/child delivery and would abort work despite consent
+                # covering only a graceful idle stop. Old owners refuse this
+                # distinct verb rather than silently ignoring a new flag.
+                begin_retire = getattr(h, "begin_retire", None)
+                if not callable(begin_retire):
+                    raise _StopRefused("old_owner", "this owner cannot guarantee an idle-only stop")
+                accepted = await self._handle_call_on_session_loop(
+                    lambda: begin_retire("user-stop", "idle-only stop")
+                )
+                if not accepted:
+                    # THE CAUSE, NOT JUST THE FACT. The latch refuses for two
+                    # different reasons — work in flight, or a wake due inside
+                    # the warm window a runtime keeps to avoid paying it twice —
+                    # and they have different next steps for the caller: retry
+                    # when idle, versus retry after the wake fires. It records
+                    # which one on the handle as it decides, because a second
+                    # sample here could see different state (agent review round
+                    # 1 D2, UX round 1 U2).
+                    raise _StopRefused(
+                        _idle_refusal_reason(h),
+                        "this owner is busy; no stop was requested",
+                    )
             # Tell every attached viewer the disconnect they are about to see
             # is DELIBERATE, before the session goes away. Without this a
             # follower cannot distinguish a stop from owner death and its
@@ -9228,6 +9903,29 @@ class RuntimeServer:
             if not (conn.wants_events and conn.wants_frontend)
         ]
 
+    def _schedule_switch_refresh(self) -> None:
+        """Reconcile after a reply without keeping the mutation's chain alive.
+
+        The switch has committed and replied; roster reconciliation and legacy
+        projection serialization are maintenance, not part of its ordering
+        fence. A dirty bit preserves a subsequent switch's refresh even when
+        the first pass is parked. Shutdown cancels and joins this owned task.
+        """
+        self._switch_refresh_dirty = True
+        if self._switch_refresh_task is None or self._switch_refresh_task.done():
+            self._switch_refresh_task = asyncio.create_task(self._refresh_switches())
+
+    async def _refresh_switches(self) -> None:
+        try:
+            while self._switch_refresh_dirty:
+                self._switch_refresh_dirty = False
+                await self._handle.refresh()
+                await self._push()
+        except Exception:
+            # A maintenance failure cannot retract an already delivered reply.
+            # Consume it here rather than leaving an unobserved task exception.
+            logger.warning("session runtime: post-switch refresh failed", exc_info=True)
+
     async def _push(self) -> None:
         """Broadcast projection repaints, preserving daemon bytes exactly.
 
@@ -9263,7 +9961,13 @@ class RuntimeServer:
         # itself (the writer and its lock are loop-owned objects), and the
         # per-connection frames are derived from ``ordinary`` on the loop after
         # the hop returns, so the wire bytes are unchanged.
+        revision = self._switch_revision
         ordinary = await asyncio.to_thread(self._projection_payload)
+        if revision != self._switch_revision:
+            # A worker may finish an old model's frame after the next switch
+            # commits. Never publish that stale selection over its newer event.
+            self._push_soon()
+            return
         await asyncio.gather(
             *(self._send_to(conn, self._projection_frame(conn, ordinary)) for conn in recipients)
         )

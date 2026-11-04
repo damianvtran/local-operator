@@ -1,0 +1,75 @@
+{
+  "locale": "vi",
+  "namespace": "cli.teams_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 5,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-038",
+      "severity": "MAJOR",
+      "namespace": "cli.teams_help",
+      "key": "cli.teams_help.push",
+      "english": "Push a team to an organization or the public hub (Agent Hub); exit codes: 0 published, 1 error, 2 preview-only with changes pending, 3 declined, 130 cancelled",
+      "current": "Đẩy một nhóm lên tổ chức hoặc hub công khai (Agent Hub); mã thoát: 0 đã xuất bản, 1 lỗi, 2 chỉ xem trước còn thay đổi đang chờ, 3 bị từ chối, 130 đã hủy",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "Push một nhóm lên tổ chức hoặc hub công khai (Agent Hub); mã thoát: …",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-039",
+      "severity": "MAJOR",
+      "namespace": "cli.teams_help",
+      "key": "cli.teams_help.push_name",
+      "english": "Name of the local team to push",
+      "current": "Tên nhóm cục bộ cần đẩy",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "Tên nhóm cục bộ cần push",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-040",
+      "severity": "MAJOR",
+      "namespace": "cli.teams_help",
+      "key": "cli.teams_help.pull",
+      "english": "Pull a team from the hub by id, or by name from the public hub (Agent Hub)",
+      "current": "Kéo một nhóm từ hub theo id, hoặc theo tên từ hub công khai (Agent Hub)",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "Pull một nhóm từ hub theo id, hoặc theo tên từ hub công khai (Agent Hub)",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-041",
+      "severity": "MAJOR",
+      "namespace": "cli.teams_help",
+      "key": "cli.teams_help.pull_team_id",
+      "english": "ID of the published team to pull, or a public team's name (`lop teams pull a-team`; names resolve over the public listing)",
+      "current": "ID của nhóm đã xuất bản cần kéo, hoặc tên của một nhóm công khai (`lop teams pull a-team`; tên được phân giải trên danh sách công khai)",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "ID của nhóm đã xuất bản cần pull, hoặc tên của một nhóm công khai (…)",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-042",
+      "severity": "MAJOR",
+      "namespace": "cli.teams_help",
+      "key": "cli.teams_help.sync",
+      "english": "Check pulled teams against the hub and merge their updates",
+      "current": "Kiểm tra các nhóm đã kéo so với hub và hợp nhất các cập nhật của chúng",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "Kiểm tra các nhóm đã pull so với hub và merge các cập nhật của chúng",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    }
+  ]
+}

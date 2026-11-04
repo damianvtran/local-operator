@@ -88,18 +88,28 @@ from local_operator.providers.radient_credentials import (
     org_oauth_destination_allowed,
 )
 from local_operator.team_bridge import availability
+
+# V2/V3 are re-exported: callers and tests have always imported the consent
+# version names from ``client``.
+from local_operator.team_bridge.consent_versions import (  # noqa: F401
+    CONSENT_VERSION_V2,
+    CONSENT_VERSION_V3,
+    DEFAULT_ON_CONSENT_VERSIONS,
+)
 from local_operator.team_bridge.settings import (
     DEFAULT_ENROLLMENT_DONE,
-    DEFAULT_ON_CONSENT_VERSION,
     TeamBridgeSettings,
     parse_pending_default_enrollment,
     pending_default_enrollment,
     record_default_enrollment,
     record_local_enabled,
     record_local_enabled_if_unset,
+    record_local_session_if_unset,
 )
 from local_operator.team_bridge.types import (
     ATTACHMENT_ID_PATTERN,
+    reply_window_params,
+    validate_member_mention,
     validate_send_recipient,
 )
 
@@ -127,11 +137,16 @@ TEXT_CAP_BYTES = 2048
 SEED_HEAD_TIMEOUT_S = 3.0
 
 CONSENT_VERSION_V1 = "bridge_consent_v1"
-#: The opt-out disclosure. Only a hub SERVING it (and listing it as accepted)
-#: lets the status discipline enrol anybody automatically; see
-#: :func:`default_on_in_force`. An explicit enable is version-agnostic and
-#: echoes whatever the hub served.
-CONSENT_VERSION_V2 = DEFAULT_ON_CONSENT_VERSION
+# ``CONSENT_VERSION_V2`` / ``CONSENT_VERSION_V3`` (the opt-out disclosures) and
+# ``DEFAULT_ON_CONSENT_VERSIONS`` come from ``consent_versions``. Only a hub SERVING a
+# member of that set (and listing it as accepted) lets the status discipline
+# enrol anybody automatically; see :func:`default_on_in_force`. An explicit
+# enable is version-agnostic and echoes whatever the hub served.
+#
+# Served consent TEXT has no per-version byte pin here (only v1 is embedded,
+# for the offline dialog fallback): v2 and v3 bytes are accepted per version by
+# :class:`AcceptedTexts` (monotonic, immutable once versioned, 2 KiB cap), and
+# every default-on decision requires the served bytes to equal that record.
 SCREENING_VERSION_V1 = "bridge-screen-v1"
 GUIDANCE_VERSION_V1 = "bridge-guidance-v1"
 
@@ -290,6 +305,19 @@ SCREENING_TEMPLATE_V3 = (
     "REASON: <one sentence, at most 200 characters; on bounce, name the category>"
 )
 SCREENING_TEMPLATE_V3_SHA256 = hashlib.sha256(SCREENING_TEMPLATE_V3.encode("utf-8")).hexdigest()
+
+#: The screening ENGINE version: bump ONLY when code that turns a model reply
+#: into a hold changes — the parser (``parse_verdict``), the token/byte ceiling
+#: that produces ``reply_truncated``, or the prompt renderer.
+#:
+#: WHY it exists: cached answers are keyed by it. A code fix for a parsing
+#: artefact (the trailing-whitespace case, 784463e92c8) must clear the artefacts
+#: the OLD code recorded, and no policy republish accompanies a code fix — so a
+#: cache keyed on served policy alone would keep replaying the bug's own answer
+#: forever. Bumping this is a data decision, not cosmetic: every cached answer
+#: hold is re-drawn once after the bump, which is the intended cost of fixing a
+#: coder artefact rather than an admission rule.
+SCREENING_ENGINE_VERSION = "bridge-screen-engine-1"
 
 #: version -> embedded template. The served version SELECTS bytes; it never supplies them.
 SCREENING_TEMPLATES = {
@@ -630,6 +658,19 @@ ATTACHMENT_MAX_COUNT = 4
 #: Content-Type outside it is refused here — the bytes are never trusted to
 #: name their own type downstream.
 ATTACHMENT_MIME_TYPES = ("image/png", "image/jpeg")
+#: The endpoint (agent) avatar route's own closed set. The hub sniffs PNG, JPEG
+#: and WebP on upload and RE-ENCODES every variant it serves, so the picture a
+#: reader gets back is the hub's choice of type, not the uploader's — WebP is in
+#: this set for that reason, and deliberately NOT added to the attachment set,
+#: where bytes are served exactly as they were sent.
+ENDPOINT_AVATAR_MIME_TYPES = (*ATTACHMENT_MIME_TYPES, "image/webp")
+#: The endpoint-avatar publish result: a few digests and two variant rows. The
+#: bound exists so a hostile or broken hub cannot make a client trust an
+#: unbounded body.
+AVATAR_RESULT_MAX_BYTES = 64 * 1024
+#: An endpoint id is the hub's own short opaque token. Allowing only this
+#: alphabet is what keeps one from reshaping the upstream path.
+_ENDPOINT_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 #: The owner-audit byte route's served types: the two images plus the ONE type
 #: the hub serves every generic (non-image) file as (agent-server
 #: ``models.BridgeFileServedMime``, with the fixed name ``attachment.bin``). The
@@ -655,6 +696,24 @@ OWNER_AUDIT_SCOPE_SENTENCE = (  # i18n: ignore local guard; a code path, never s
 #: this class, ``_send`` with a hand-built or concatenated path, a ``getattr``
 #: with a computed name reaching something else — is refused before a byte
 #: moves (#3022 R1-1). A static scan cannot see a built string; this can.
+# Grant mutations use the same scoped-dispatch discipline as the human-only
+# audit. A hand-built `_send` URL cannot grant the model access to its owner's
+# conversations. Only the desktop-only grant/revoke methods enter this scope;
+# static reach tests keep those methods out of model-context callers.
+_COS_READ_GRANT_SCOPE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "team_bridge_cos_read_grant_scope", default=False
+)
+
+
+@contextlib.contextmanager
+def _cos_read_grant_scope() -> Any:
+    token = _COS_READ_GRANT_SCOPE.set(True)
+    try:
+        yield
+    finally:
+        _COS_READ_GRANT_SCOPE.reset(token)
+
+
 _OWNER_AUDIT_SCOPE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "team_bridge_owner_audit_scope", default=False
 )
@@ -669,7 +728,7 @@ def _owner_audit_scope() -> Any:
         _OWNER_AUDIT_SCOPE.reset(token)
 
 
-def _refuse_unscoped_owner_audit(path: str) -> None:
+def _refuse_unscoped_owner_audit(path: str, method: str = "GET") -> None:
     """Refuse a hub request on the owner-audit family outside its four methods.
 
     Matched after percent-decoding and collapsing slashes and case, so
@@ -707,6 +766,16 @@ def _refuse_unscoped_owner_audit(path: str) -> None:
             http_status=400,
         )
     normalized = re.sub(r"/+", "/", decoded).lower()
+    if (
+        method.upper() in ("PUT", "DELETE")
+        and normalized.rstrip("/").endswith("/cos-read")
+        and not _COS_READ_GRANT_SCOPE.get()
+    ):
+        raise BridgeRefusal(
+            "cos_read_grant_not_in_scope",
+            "A conversation share may be changed only through the desktop share routes.",
+            http_status=403,
+        )
     # The CONVERSATIONS family, not every ``/agents/owned`` path: the owner's
     # agent-invitations read (``…/agents/owned/invitations``, #3045) shares the
     # prefix and is an ordinary metadata read, so a prefix-wide check turned it
@@ -848,6 +917,9 @@ LOCAL_ENROLLMENT_CODES = (
     "endpoint_not_active",
     "store_failed",
     "vetoed",
+    # Commit-only recovery only: the hub record cites a version other than the
+    # one the default-on POST echoed (#3225). Terminal, like no_consent_echo.
+    "consent_version_mismatch",
 )
 _LOCAL_ENROLLMENT_COMMITTED = frozenset({"committed", "already_owned"})
 #: The outcomes after a default-on POST that a COMMIT-ONLY retry may still fix
@@ -890,7 +962,11 @@ def _consent_on_record(endpoint: Mapping[str, Any]) -> str | None:
     if not isinstance(consent, Mapping) or consent.get("current") is not True:
         return None
     version = consent.get("version")
-    return version if version in (CONSENT_VERSION_V1, CONSENT_VERSION_V2) else None
+    # Exact membership: v1, or a default-on version (v2, v3) whose text this
+    # client knows; anything else (v4, v10, garbage) is not a known consent.
+    if version == CONSENT_VERSION_V1 or version in DEFAULT_ON_CONSENT_VERSIONS:
+        return version
+    return None
 
 
 VALID_STATES = ("active", "paused", "disabled")
@@ -911,6 +987,30 @@ def _require_attachment_id(attachment_id: str) -> None:
 
     if not isinstance(attachment_id, str) or _ATTACHMENT_ID.fullmatch(attachment_id) is None:
         raise ValueError("attachment id is not a minted batt_ id")
+
+
+def _sniff_image(data: bytes) -> str | None:
+    """The image type ``data`` actually is, by magic bytes, or ``None``.
+
+    Covers exactly the avatar routes' closed sets (PNG, JPEG, WebP). Anything
+    else - SVG, HTML, a truncated header - is ``None`` and never matches a
+    declared type.
+    """
+
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _require_endpoint_id(endpoint_id: str) -> None:
+    """Refuse an endpoint id that could reshape the upstream path."""
+
+    if not isinstance(endpoint_id, str) or _ENDPOINT_ID.fullmatch(endpoint_id) is None:
+        raise ValueError("not an endpoint id")
 
 
 def _attachment_ids(ids: Sequence[str] | None) -> list[str]:
@@ -1009,7 +1109,9 @@ def _refusal(response: httpx.Response) -> BridgeRefusal:
     code = body.get("code") if body else None
     message = body.get("error") if body else None
     details = body.get("details") if body else None
-    if not isinstance(code, str) or not code:
+    # Codes reach CLI diagnostics and logs. Treat the hub as untrusted here:
+    # neither line breaks nor response-sized junk are machine identifiers (QA Q2).
+    if not isinstance(code, str) or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code) is None:
         code = "bridge_error"
     if not isinstance(message, str) or not message:
         message = f"Radient refused the request (HTTP {status})."  # i18n: ignore, no code
@@ -1326,13 +1428,18 @@ class TeamBridgeClient:
         max_response_bytes: int | None = None,
         identity_response_only: bool = False,
         if_none_match: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
         timeout: float = REQUEST_TIMEOUT_S,
         accept: str | None = None,
+        files: Mapping[str, tuple[str, bytes, str]] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        oversize_code: str = "attachment_too_large",
+        oversize_sentence: str = _OVERSIZE_ATTACHMENT_SENTENCE,
     ) -> httpx.Response:
         # Every hub request in this class ends here, so the owner-audit path
         # gate lives here: no caller can reach `/agents/owned` by spelling the
         # path itself (#3022 R1-1).
-        _refuse_unscoped_owner_audit(path)
+        _refuse_unscoped_owner_audit(path, method)
         # ONE AsyncClient per request is H1's bounded-CRUD shape: every op is a
         # single small JSON round trip and nothing here runs on a loop. The
         # connector (H4) needs a PERSISTENT client with an owned ``aclose()``
@@ -1343,9 +1450,22 @@ class TeamBridgeClient:
             transport=self._transport,
             follow_redirects=False,
         ) as http:
-            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+            headers = {"Accept": "application/json"}
+            # Caller-supplied headers FIRST, so the pinned bearer below always
+            # wins: merged the other way round this seam replaced the credential
+            # (measured, review R1-S6), and a token that can be shadowed by a
+            # caller is not a pin.
+            if extra_headers:
+                headers.update(extra_headers)
+            headers["Authorization"] = f"Bearer {token}"
             if if_none_match is not None:
                 headers["If-None-Match"] = if_none_match
+            # Per-call synchronous authority runs after client/OAuth awaits,
+            # at every attempt (including 401 refresh), before request initiation.
+            # No await may separate this guard from the request below. It cannot
+            # retract a request whose transport has already started.
+            if pre_http_guard is not None:
+                pre_http_guard()
             if max_response_bytes is not None:
                 # The attachment byte read: STREAM and stop at the bound, so an
                 # oversized (or endless) answer is refused after at most
@@ -1362,8 +1482,22 @@ class TeamBridgeClient:
                 # "unreachable"). Asking for identity also makes the cap
                 # measure wire bytes, so a compressed bomb cannot slip under it.
                 headers["Accept-Encoding"] = "identity"
+                # ``files``/``content`` ride the streamed request too. Leaving
+                # them out sent `content-length: 0` for a bounded multipart
+                # upload — an EMPTY picture the hub would store as nothing
+                # (measured by the security reviewer, review R1-S1) — so the
+                # body a bounded request carries is the body it declares.
                 async with http.stream(
-                    method, self._base_url + path, params=params, headers=headers
+                    method,
+                    self._base_url + path,
+                    params=params,
+                    headers=headers,
+                    files=files,
+                    content=content,
+                    # A response cap must not silently erase a JSON mutation.
+                    # All body forms share the bounded path, just as they do
+                    # the ordinary request path below.
+                    json=body,
                 ) as streamed:
                     # Avatar reads need a hard allocation bound as well as a
                     # decoded-size bound. Refuse an ignored identity request
@@ -1383,9 +1517,13 @@ class TeamBridgeClient:
                     async for chunk in streamed.aiter_bytes():
                         size += len(chunk)
                         if size > max_response_bytes:
+                            # The class is the CALLER's: a byte read over its
+                            # image ceiling is an oversized attachment, while an
+                            # oversized JSON answer is an invalid response. One
+                            # shared reader, one code per contract.
                             raise BridgeRefusal(
-                                "attachment_too_large",
-                                _OVERSIZE_ATTACHMENT_SENTENCE,
+                                oversize_code,
+                                oversize_sentence,
                                 http_status=502,
                             )
                         chunks.append(chunk)
@@ -1401,6 +1539,17 @@ class TeamBridgeClient:
                         content=b"".join(chunks),
                         request=streamed.request,
                     )
+            if files is not None:
+                # The endpoint-avatar upload is the one MULTIPART request: the hub
+                # names the part ``file`` and sniffs its bytes, so the declared
+                # type is the same fixed opaque label an attachment upload uses.
+                return await http.request(
+                    method,
+                    self._base_url + path,
+                    params=params,
+                    files=files,
+                    headers=headers,
+                )
             if content is not None:
                 # An attachment upload is the one raw-body request: the hub
                 # ignores the declared type and sniffs the bytes itself, so
@@ -1428,6 +1577,7 @@ class TeamBridgeClient:
         expected_account_id: str | None = None,
         empty_result: bool = False,
         content: bytes | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """One authenticated request: resolve, send, refresh-once-on-401, map refusals.
 
@@ -1448,6 +1598,7 @@ class TeamBridgeClient:
             access=access,
             content=content,
             expected_account_id=expected_account_id,
+            pre_http_guard=pre_http_guard,
         )
         if response.status_code >= 400:
             raise _refusal(response)
@@ -1474,6 +1625,11 @@ class TeamBridgeClient:
         max_response_bytes: int | None = None,
         expected_account_id: str | None = None,
         accept: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
+        files: Mapping[str, tuple[str, bytes, str]] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
+        oversize_code: str = "attachment_too_large",
+        oversize_sentence: str = _OVERSIZE_ATTACHMENT_SENTENCE,
     ) -> httpx.Response:
         """Resolve, send, refresh-once-on-401: the response, refusals UNMAPPED.
 
@@ -1500,6 +1656,11 @@ class TeamBridgeClient:
                 content=content,
                 max_response_bytes=max_response_bytes,
                 accept=accept,
+                pre_http_guard=pre_http_guard,
+                files=files,
+                extra_headers=extra_headers,
+                oversize_code=oversize_code,
+                oversize_sentence=oversize_sentence,
             )
         except httpx.HTTPError as failure:
             raise BridgeUnreachable() from failure
@@ -1515,6 +1676,11 @@ class TeamBridgeClient:
                     content=content,
                     max_response_bytes=max_response_bytes,
                     accept=accept,
+                    pre_http_guard=pre_http_guard,
+                    files=files,
+                    extra_headers=extra_headers,
+                    oversize_code=oversize_code,
+                    oversize_sentence=oversize_sentence,
                 )
             except httpx.HTTPError as failure:
                 raise BridgeUnreachable() from failure
@@ -1587,7 +1753,11 @@ class TeamBridgeClient:
         return await self._send("GET", "/messaging/settings", params=params)
 
     async def directory(
-        self, tenant_id: str, *, access: OAuthAccess | None = None
+        self,
+        tenant_id: str,
+        *,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """The organization's member directory (§6.1): who an agent may address.
 
@@ -1596,12 +1766,18 @@ class TeamBridgeClient:
         caller's membership, and the server refuses a tenant the account cannot
         see (§6.5). The payload is the frozen desktop shape
         ``{members:[{account_id, display_label, role, bridge_enabled,
-        bridge_state}]}`` and is passed through untouched — this client never
-        re-orders, trims or renames a member row.
+        bridge_state, agent:{endpoint_id, name, state}}]}`` and is passed
+        through untouched — this client never re-orders, trims or renames a
+        member row. ``agent`` is optional per member; when present, its
+        ``endpoint_id`` is the address used to open a chief-of-staff DM.
         """
 
         return await self._send(
-            "GET", "/messaging/directory", params={"tenant_id": tenant_id}, access=access
+            "GET",
+            "/messaging/directory",
+            params={"tenant_id": tenant_id},
+            access=access,
+            expected_account_id=expected_account_id,
         )
 
     async def tenant_state(
@@ -1958,14 +2134,23 @@ class TeamBridgeClient:
         *,
         tenant_id: str,
         expected_account_id: str,
+        consent_version: str,
         may_commit_local: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """``POST /messaging/enrollment``: the hub's default-on enrolment.
 
-        WHY A ROUTE OF ITS OWN. Under ``bridge_consent_v2`` the hub enrols an
-        eligible member with no endpoint and records the provenance itself
-        (``consented_via = default_on``). The body therefore carries ONLY
-        ``consent_version`` (always v2) and the tenant: there is deliberately no
+        WHY A ROUTE OF ITS OWN. Under a default-on consent (``bridge_consent_v2``
+        or ``v3``) the hub enrols an eligible member with no endpoint and records
+        the provenance itself (``consented_via = default_on``). The body
+        therefore carries ``consent_version``, the tenant, and — when one is
+        designated — the chief of staff's own ``agent_name``.
+
+        ``consent_version`` is REQUIRED and must be the version the hub SERVED
+        (the one :func:`default_on_in_force` proved): the hub refuses an echo
+        that is not its served version, and claiming v2 when v3 bytes were
+        shown would record consent to text the member never saw. A version
+        outside :data:`DEFAULT_ON_CONSENT_VERSIONS` raises ``ValueError`` before
+        any I/O. There is deliberately no
         ``consented_via`` parameter anywhere on this path, because provenance is
         a fact the server establishes by which route wrote it, never a claim the
         client makes (pinned by a test that fails if the key ever appears).
@@ -1978,9 +2163,10 @@ class TeamBridgeClient:
 
         THE LOCAL COMMIT. The native owner + receipt are committed through the
         same machinery as an explicit enable, but ONLY when the hub's answer
-        proves THIS call created an active, v2, ``default_on`` endpoint. The hub
+        proves THIS call created an active ``default_on`` endpoint citing the
+        echoed version. The hub
         answers a no-op (200, current settings) when an endpoint already exists
-        in any state; committing a v2 receipt for a consent that was actually
+        in any state; committing a receipt for a consent that was actually
         collected as ``dialog``/``settings`` on another machine would invent a
         consent record this one never saw. Errors (404/405 from an older hub, a
         409 ``consent_version_unknown``, transport failures) propagate as
@@ -1999,7 +2185,18 @@ class TeamBridgeClient:
         member's next Turn off (or the unchanged explicit OFF) governs.
         """
 
-        body: dict[str, Any] = {"consent_version": CONSENT_VERSION_V2, "tenant_id": tenant_id}
+        if consent_version not in DEFAULT_ON_CONSENT_VERSIONS:
+            raise ValueError("default-on enrolment needs a default-on consent version")
+        body: dict[str, Any] = {"consent_version": consent_version, "tenant_id": tenant_id}
+        # Her OWN name rides the SAME insert that creates the row, so the
+        # directory never publishes the owner's display name as her name. Absent
+        # (never "") when nothing designates a chief of staff: an enrollment has
+        # no name to clear, and "" would assert one this machine does not know.
+        from local_operator.team_bridge.cos_name import cos_display_name
+
+        chief_name = cos_display_name(self._config_dir)
+        if chief_name is not None:
+            body["agent_name"] = chief_name
         _require_body_within(body, SETTINGS_BODY_MAX_BYTES)
         access = await self._guarded_access(expected_account_id)
         head = await self._pre_enable_head(tenant_id=tenant_id, access=access)
@@ -2009,7 +2206,7 @@ class TeamBridgeClient:
         if not (
             isinstance(consent, Mapping)
             and consent.get("consented_via") == "default_on"
-            and consent.get("version") == CONSENT_VERSION_V2
+            and consent.get("version") == consent_version
         ):
             # The hub's no-op: nothing was created here, so there is no local
             # enrolment to report on either.
@@ -2020,7 +2217,7 @@ class TeamBridgeClient:
             local_enrollment = await self._commit_explicit_enable(
                 state="active",
                 tenant_id=tenant_id,
-                consent_version=CONSENT_VERSION_V2,
+                consent_version=consent_version,
                 result=result,
                 access=access,
                 head=head,
@@ -2028,14 +2225,15 @@ class TeamBridgeClient:
         if local_enrollment is not None and local_enrollment["code"] in _RETRYABLE_COMMIT_CODES:
             # D1/R3: the endpoint now exists, so the surface reads state C and
             # default-on never runs again. Record what a commit-only retry needs:
-            # the endpoint THIS POST created and the PRE-POST head (R2-1).
+            # the endpoint THIS POST created, the PRE-POST head (R2-1) and the
+            # version this POST echoed (the text the member was shown).
             endpoint_id = endpoint.get("id") if isinstance(endpoint, Mapping) else None
             if self._config_dir is not None and isinstance(endpoint_id, str) and endpoint_id:
                 try:
                     record_default_enrollment(
                         self._config_dir,
                         expected_account_id,
-                        pending_default_enrollment(endpoint_id, head),
+                        pending_default_enrollment(endpoint_id, head, consent_version),
                     )
                 except Exception:  # noqa: BLE001 - bookkeeping; the outcome still says so
                     logger.warning("team_bridge: could not record the pending local commit")
@@ -2049,6 +2247,7 @@ class TeamBridgeClient:
         tenant_id: str,
         endpoint_id: str,
         head: int,
+        consent_version: str,
         expected_account_id: str,
         may_commit_local: Callable[[], bool],
     ) -> dict[str, Any]:
@@ -2060,9 +2259,14 @@ class TeamBridgeClient:
         This NEVER POSTs again: it reads the caller's settings (``GET``, the one
         answer carrying the endpoint's consent record) and commits the owner
         only when that record still proves this machine's default-on consent —
-        the SAME endpoint id the marker names, ``default_on`` + v2, current,
-        active. An endpoint consented elsewhere (dialog/settings) never matches,
-        so the consent hold is not widened into state C (R2-6).
+        the SAME endpoint id the marker names, ``default_on``, current, active,
+        and a version EQUAL to ``consent_version`` — the version the original
+        POST echoed, i.e. the text the member was shown (stored in the marker).
+        A record citing any other version commits nothing and answers
+        ``consent_version_mismatch``, exactly as the fresh enrol path commits
+        nothing when the hub's record does not cite the echo (review m1 / QA Q2
+        on #3225). An endpoint consented elsewhere (dialog/settings) never
+        matches, so the consent hold is not widened into state C (R2-6).
 
         ``head`` is the PRE-POST head the marker stored (0 for a brand-new
         endpoint), never one read now: the endpoint has been live since the POST,
@@ -2071,6 +2275,8 @@ class TeamBridgeClient:
         outcome; refusals and transport failures propagate to the caller.
         """
 
+        if consent_version not in DEFAULT_ON_CONSENT_VERSIONS:
+            raise ValueError("commit-only recovery needs a default-on consent version")
         access = await self._guarded_access(expected_account_id)
         answer = await self._send(
             "GET", "/messaging/settings", params={"tenant_id": tenant_id}, access=access
@@ -2082,18 +2288,21 @@ class TeamBridgeClient:
             and endpoint.get("id") == endpoint_id
             and isinstance(consent, Mapping)
             and consent.get("consented_via") == "default_on"
-            and consent.get("version") == CONSENT_VERSION_V2
             # Fail closed like ``_consent_on_record`` (review R1-3): a recovery
             # that commits consent needs the hub to SAY the record still binds.
             and consent.get("current") is True
         ):
             return _local_enrollment("no_consent_echo")
+        if consent.get("version") != consent_version:
+            # The hub binds this endpoint to a text other than the one shown:
+            # never a receipt for bytes the member did not see.
+            return _local_enrollment("consent_version_mismatch")
         if not may_commit_local():
             return _local_enrollment("vetoed")
         outcome = await self._commit_explicit_enable(
             state="active",
             tenant_id=tenant_id,
-            consent_version=CONSENT_VERSION_V2,
+            consent_version=consent_version,
             result=answer,
             access=access,
             head=head,
@@ -2284,6 +2493,15 @@ class TeamBridgeClient:
             # transaction, but it fires the D2a connector hook, which runs
             # launchctl. Off the loop a first install costs one worker thread;
             # on it, it would freeze every route for the length of a bootstrap.
+            # Default the wake designation to THIS account's chief of staff when
+            # the person never chose one (settings.record_local_session_if_unset
+            # has the incident and the rule): never over an explicit choice, and
+            # never "whatever session happens to be open". In a worker thread
+            # for the same loop-freeze reason as the commit below.
+            try:
+                await asyncio.to_thread(record_local_session_if_unset, self._config_dir)
+            except Exception:  # noqa: BLE001 - no designation is badge-only, not an error
+                pass
             local = _local_settings_snapshot(self._config_dir)
             committed = await asyncio.to_thread(
                 commit_settings_enrollment,
@@ -2438,7 +2656,7 @@ class TeamBridgeClient:
         self,
         *,
         tenant_id: str,
-        to: Mapping[str, str],
+        to: Mapping[str, str] | str,
         type: str,
         text: str,
         client_ref: str,
@@ -2453,11 +2671,13 @@ class TeamBridgeClient:
         thread, it never stands alone — a thread_id-only body is a 400): it
         is either ``{"endpoint_id": …}`` or ``{"account_id": …}``, exactly one
         of the two, and the server resolves the account form without an
-        existence oracle. ``client_ref`` is caller-owned and REQUIRED — retries
-        reuse the same ref and the server answers the identical replay with the
-        original message (same key + different body → ``409
-        idempotency_key_reused``; the durable outbox is what makes the retry
-        carry the same ref across restarts).
+        existence oracle. A BARE STRING is accepted as the account id
+        (``validate_send_recipient`` is the ONE place that maps it, so the tool
+        and this client cannot read it differently). ``client_ref`` is
+        caller-owned and REQUIRED — retries reuse the same ref and the server
+        answers the identical replay with the original message (same key +
+        different body → ``409 idempotency_key_reused``; the durable outbox is
+        what makes the retry carry the same ref across restarts).
 
         Decision replies never travel this path as free text (§13.5): the
         decide call carries the ``ask_ref`` receipt and the outcome message is
@@ -3040,8 +3260,10 @@ class TeamBridgeClient:
         origin_session_id: str | None = None,
         thread_root_id: str | None = None,
         attachment_ids: Sequence[str] | None = None,
+        mentions: Sequence[Mapping[str, Any]] | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Append one message. ``client_ref`` is required and idempotent.
 
@@ -3059,6 +3281,17 @@ class TeamBridgeClient:
         the list is non-empty: a hub without the attachments capability
         refuses unknown fields, so a text-only send must stay byte-identical
         to the pre-attachment wire.
+
+        ``mentions`` directs the message at named members. Each row is the
+        hub's own Send-policy mention shape — the one the scheduled-send body
+        already carries (``{kind, account_id[, endpoint_id]}``) — and every row
+        is validated by
+        :func:`~local_operator.team_bridge.types.validate_member_mention` HERE,
+        at serialization, not only by the tool: a mention the tool built and
+        this body dropped would post an UNDIRECTED message that looks exactly
+        like a directed one in the server's answer. Omitted when empty, so an
+        undirected post remains byte-identical to the pre-mention wire (the same
+        capability-negotiation rule the attachments key follows).
         """
 
         body: dict[str, Any] = {"client_ref": client_ref, "body": text}
@@ -3075,12 +3308,15 @@ class TeamBridgeClient:
             body["origin_session_id"] = origin_session_id
         if thread_root_id:
             body["thread_root_id"] = thread_root_id
+        if mentions:
+            body["mentions"] = [validate_member_mention(entry) for entry in mentions]
         return await self._send(
             "POST",
             f"/messaging/conversations/{conversation_id}/messages",
             body=body,
             access=access,
             expected_account_id=expected_account_id,
+            pre_http_guard=pre_http_guard,
         )
 
     async def conversation_replies(
@@ -3091,23 +3327,38 @@ class TeamBridgeClient:
         tenant_id: str | None = None,
         limit: int | None = None,
         after_seq: int | None = None,
+        before_seq: int | None = None,
+        order: str | None = None,
         endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
-        """One thread: ``{root, replies (oldest-first), has_more, next_after_seq?}``.
+        """A bounded thread window; replies within each page stay chronological.
 
         Same membership gate and body rule as history: for an agent member a
         reply's body is present only after that endpoint admitted it, so a
         thread is never a side door around screening.
+
+        ``expected_account_id`` is the desktop's captured-owner receipt (the
+        desktop route REQUIRES it; the agent tool, which reads as the runtime's
+        own pinned identity, omits it). It is compared against the exact
+        dispatch snapshot in :meth:`_authorized` and is never sent upstream.
         """
 
+        # Keep the legacy tenant/limit/after insertion order: equivalent dicts
+        # serialize to different URIs, and old request bytes are part of this
+        # client's compatibility promise. Validation still omits absent hints.
         params: dict[str, Any] = {}
         if tenant_id:
             params["tenant_id"] = tenant_id
-        if limit is not None:
-            params["limit"] = int(limit)
-        if after_seq is not None:
-            params["after_seq"] = int(after_seq)
+        params.update(
+            reply_window_params(
+                limit=limit,
+                after_seq=after_seq,
+                before_seq=before_seq,
+                order=order,
+            )
+        )
         if endpoint_id:
             params["endpoint_id"] = endpoint_id
         return await self._send(
@@ -3115,6 +3366,126 @@ class TeamBridgeClient:
             f"/messaging/conversations/{conversation_id}/messages/{message_id}/replies",
             params=params or None,
             access=access,
+            expected_account_id=expected_account_id,
+        )
+
+    # -- chief-of-staff read grant ---------------------------------------------
+    #
+    # The OPERATOR-CONSENTED read (agent-server docs/TEAM-BRIDGE-CONVERSATIONS.md
+    # §17): a human grants their OWN chief of staff read access to ONE
+    # agent-capable conversation they are an active member of. Distinct from the
+    # owner audit below in both directions: the audit is the human reading their
+    # agent's rooms (human-only, unscreened); this is the agent reading a room
+    # its human explicitly shared with it.
+    #
+    # WHO CALLS WHAT. ``cos_read_grant``/``cos_read_revoke`` are HUMAN acts: the
+    # desktop route family calls them for the renderer, and the bridge tool must
+    # never (pinned in test_cos_read_grant.py) — an agent cannot widen its own
+    # access. ``cos_read_conversations``/``cos_read_messages`` are the agent's
+    # reads: they carry ``actor_endpoint_id`` and the hub checks that endpoint is
+    # the signed-in account's own chief of staff holding an active grant; every
+    # refusal is a uniform ``conversation_not_found``, and every page served is
+    # an append-only ``cos_read`` audit event on the hub. Nothing is cached here.
+
+    async def cos_read_grant(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str,
+        expected_account_id: str,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Share one conversation with the caller's own chief of staff (human act)."""
+
+        with _cos_read_grant_scope():
+            return await self._send(
+                "PUT",
+                f"/messaging/conversations/{conversation_id}/cos-read",
+                body={"tenant_id": tenant_id},
+                access=access,
+                expected_account_id=expected_account_id,
+            )
+
+    async def cos_read_revoke(
+        self,
+        conversation_id: str,
+        *,
+        tenant_id: str,
+        expected_account_id: str,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Withdraw that share; idempotent (human act)."""
+
+        with _cos_read_grant_scope():
+            return await self._send(
+                "DELETE",
+                f"/messaging/conversations/{conversation_id}/cos-read",
+                params={"tenant_id": tenant_id},
+                access=access,
+                expected_account_id=expected_account_id,
+            )
+
+    async def cos_read_conversations(
+        self,
+        *,
+        actor_endpoint_id: str,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """The conversations the owner shared with this chief of staff (metadata)."""
+
+        params: dict[str, Any] = {"actor_endpoint_id": actor_endpoint_id}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if cursor:
+            params["cursor"] = cursor
+        return await self._send(
+            "GET",
+            "/messaging/cos-read/conversations",
+            params=params,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
+    async def cos_read_messages(
+        self,
+        conversation_id: str,
+        *,
+        actor_endpoint_id: str,
+        expected_account_id: str,
+        tenant_id: str | None = None,
+        thread_root_id: str | None = None,
+        limit: int | None = None,
+        before_seq: int | None = None,
+        after_seq: int | None = None,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """One page of a shared conversation (or one thread with ``thread_root_id``).
+
+        Bodies are the granting HUMAN's view, not screened for the agent: the
+        caller (the bridge tool) wraps them as untrusted data, and nothing here
+        stores them.
+        """
+
+        params: dict[str, Any] = {"actor_endpoint_id": actor_endpoint_id}
+        if tenant_id:
+            params["tenant_id"] = tenant_id
+        if limit is not None:
+            params["limit"] = int(limit)
+        if before_seq is not None:
+            params["before_seq"] = int(before_seq)
+        if after_seq is not None:
+            params["after_seq"] = int(after_seq)
+        path = f"/messaging/conversations/{conversation_id}/cos-read/messages"
+        if thread_root_id:
+            path = f"{path}/{thread_root_id}/replies"
+        return await self._send(
+            "GET", path, params=params, access=access, expected_account_id=expected_account_id
         )
 
     # -- owner audit (HUMAN-ONLY) --------------------------------------------
@@ -3221,19 +3592,28 @@ class TeamBridgeClient:
         tenant_id: str | None = None,
         limit: int | None = None,
         after_seq: int | None = None,
+        before_seq: int | None = None,
+        order: str | None = None,
     ) -> dict[str, Any]:
-        """One audited thread: ``{root, replies (oldest-first), has_more, next_after_seq?}``.
+        """One audited thread window, chronological within each page.
 
         Same window as the timeline (the root must be inside it). HUMAN-ONLY.
         """
 
+        # Keep the legacy tenant/limit/after insertion order: equivalent dicts
+        # serialize to different URIs, and old request bytes are part of this
+        # client's compatibility promise. Validation still omits absent hints.
         params: dict[str, Any] = {}
         if tenant_id:
             params["tenant_id"] = tenant_id
-        if limit is not None:
-            params["limit"] = int(limit)
-        if after_seq is not None:
-            params["after_seq"] = int(after_seq)
+        params.update(
+            reply_window_params(
+                limit=limit,
+                after_seq=after_seq,
+                before_seq=before_seq,
+                order=order,
+            )
+        )
         with _owner_audit_scope():
             return await self._send(
                 "GET",
@@ -3324,10 +3704,21 @@ class TeamBridgeClient:
         endpoint_id: str | None = None,
         attachments_hash: str | None = None,
         template_sha256: str | None = None,
+        refusal_class: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Record the screening verdict. ``reject`` is terminal.
+
+        ``refusal_class`` (delivery-state contract v1) rides only a ``reject``:
+        the ONE coarse class from :func:`store.refusal_class`, never a raw
+        screening category. An older hub that does not know the field answers
+        ``400``; the verdict matters more than the class, so the admit is
+        retried ONCE without it (the hub then shows a generic "refused"). A
+        second refusal is the hub's real answer and propagates.
+
+        The response may carry ``probe_suspected: true`` (the hub's anti-oracle
+        clamp); acting on it is the caller's job.
 
         ``attachments_hash`` + ``template_sha256`` admit the message's IMAGES
         too: the hub binds the allow to that exact image set and requires the
@@ -3341,6 +3732,13 @@ class TeamBridgeClient:
             raise ValueError("attachments_hash and template_sha256 travel together")
         if attachments_hash is not None and verdict != "allow":
             raise ValueError("only an allow binds an attachments_hash")
+        if refusal_class is not None:
+            from local_operator.team_bridge.store import REFUSAL_CLASSES
+
+            if verdict != "reject":
+                raise ValueError("only a reject carries a refusal_class")
+            if refusal_class not in REFUSAL_CLASSES:
+                raise ValueError("refusal_class is outside the closed vocabulary")
         body: dict[str, Any] = {"verdict": verdict, "body_hash": body_hash}
         if attachments_hash is not None:
             body["attachments_hash"] = attachments_hash
@@ -3348,14 +3746,83 @@ class TeamBridgeClient:
         if tenant_id:
             body["tenant_id"] = tenant_id
         params = {"endpoint_id": endpoint_id} if endpoint_id else None
+        path = f"/messaging/conversations/{conversation_id}/messages/{message_id}/admit"
+        if refusal_class is not None:
+            try:
+                return await self._send(
+                    "POST",
+                    path,
+                    params=params,
+                    body={**body, "refusal_class": refusal_class},
+                    access=access,
+                    expected_account_id=expected_account_id,
+                )
+            except BridgeRefusal as refusal:
+                # Only a 400 can mean "this hub predates the field"; anything
+                # else (409 verdict conflict, 403, 5xx) is not about it.
+                if refusal.http_status != 400:
+                    raise
         return await self._send(
             "POST",
-            f"/messaging/conversations/{conversation_id}/messages/{message_id}/admit",
+            path,
             params=params,
             body=body,
             access=access,
             expected_account_id=expected_account_id,
         )
+
+    async def put_delivery_state(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        tenant_id: str,
+        endpoint_id: str,
+        hold_class: str,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Publish "held" for this endpoint's copy of one message (contract v1).
+
+        WHY. Without it the human sender of a message our screener is holding
+        sees nothing at all — indistinguishable from a lost message. The hub
+        upserts idempotently and ignores the write once an admission exists
+        (an admission supersedes a hold), so re-publishing on every drain is
+        safe and is how a lost write recovers.
+
+        Only ``state: "held"`` is written here: delivered/refused ride the
+        admit, write-once with the verdict. ``hold_class`` must be one of the
+        closed :data:`store.DELIVERY_HOLD_CLASSES` — the raw hold code never
+        leaves this machine.
+
+        BEST-EFFORT ON OLD HUBS: a hub without the route answers 404/405 (or
+        400 for a field it does not know); that is ``None``, not an error.
+        Other refusals propagate; the connector treats every failure as
+        best-effort anyway.
+        """
+
+        from local_operator.team_bridge.store import DELIVERY_HOLD_CLASSES
+
+        if hold_class not in DELIVERY_HOLD_CLASSES:
+            raise ValueError("hold_class is outside the closed vocabulary")
+        try:
+            return await self._send(
+                "PUT",
+                f"/messaging/conversations/{conversation_id}/messages/{message_id}"
+                "/delivery-state",
+                body={
+                    "tenant_id": tenant_id,
+                    "endpoint_id": endpoint_id,
+                    "state": "held",
+                    "hold_class": hold_class,
+                },
+                access=access,
+                expected_account_id=expected_account_id,
+            )
+        except BridgeRefusal as refusal:
+            if refusal.http_status in (400, 404, 405):
+                return None
+            raise
 
     # -- image attachments --------------------------------------------------
     #
@@ -3427,6 +3894,103 @@ class TeamBridgeClient:
         # 204 carries no envelope; a 200 {msg} acknowledgement is equally final.
         return {}
 
+    async def put_endpoint_avatar(
+        self,
+        endpoint_id: str,
+        data: bytes,
+        source_sha256: str,
+        *,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Publish the owner's own picture for one endpoint: 200 with variants, or 204.
+
+        THE ONE WRITE. An agent picture is stored on the hub so a teammate's
+        console can render it; the owner's machine is the only writer, over an
+        audience-pinned ``lop`` token. ``X-Source-SHA256`` is what lets the hub
+        answer ``204`` for bytes whose source digest it already holds instead of
+        re-encoding them, so an unchanged picture costs one request and no CPU.
+
+        THE SIZE BOUND IS LOCAL AND FIRST. The hub enforces the same ceiling
+        (``413 avatar_too_large`` with ``details.limit_bytes``); checking here
+        emits the same code, so a caller has one failure to handle rather than
+        two shapes of the same refusal. The type is deliberately NOT checked: the
+        hub sniffs the bytes and answers ``415``/``422`` itself, and a second
+        local opinion is only a way for the two to disagree.
+        """
+
+        from local_operator.team_bridge.cos_name import AVATAR_MAX_BYTES
+
+        _require_endpoint_id(endpoint_id)
+        if not isinstance(data, (bytes, bytearray)) or not data:
+            raise BridgeRefusal(
+                "avatar_invalid",
+                "The picture is empty.",  # i18n: ignore, no code
+                http_status=422,
+            )
+        if len(data) > AVATAR_MAX_BYTES:
+            raise BridgeRefusal(
+                "avatar_too_large",
+                "The picture is larger than allowed.",  # i18n: ignore, no code
+                http_status=413,
+                details={"limit_bytes": AVATAR_MAX_BYTES},
+            )
+        from local_operator.team_bridge.cos_name import SHA256_HEX
+
+        if SHA256_HEX.fullmatch(source_sha256) is None:
+            raise ValueError("avatar digest must be 64 lowercase hex characters")
+        # THE BOUND IS AT DISPATCH, not after parsing: ``max_response_bytes``
+        # streams and stops, so a hostile or broken hub cannot make this buffer
+        # a body of its choosing on a schedule it controls. Measuring a parsed
+        # object afterwards spent the memory first and then billed for a second
+        # copy to measure it (review R1-S1/F7).
+        response = await self._authorized(
+            "PUT",
+            f"/messaging/endpoints/{endpoint_id}/avatar",
+            # The part name is the contract (``file``); the filename is a fixed
+            # opaque label for the same reason the content type is.
+            files={"file": ("avatar", bytes(data), "application/octet-stream")},
+            extra_headers={"X-Source-SHA256": source_sha256},
+            expected_account_id=expected_account_id,
+            max_response_bytes=AVATAR_RESULT_MAX_BYTES,
+            accept="application/json",
+            oversize_code="bridge_invalid_response",
+            oversize_sentence="Radient returned an invalid response.",  # i18n: ignore, no code
+        )
+        if response.status_code >= 400:
+            raise _refusal(response)
+        if response.status_code == 204:
+            # The hub already holds these bytes: nothing was written or re-encoded.
+            return {}
+        return _envelope_result(response)
+
+    async def delete_endpoint_avatar(
+        self, endpoint_id: str, *, expected_account_id: str | None = None
+    ) -> dict[str, Any]:
+        """Remove the hub's copy of one endpoint's picture. ``204``, idempotent.
+
+        Idempotent is the point: the local side clears on a status boundary where
+        the hub's copy may already be gone, and a ``404`` for "nothing to remove"
+        would turn a converged state into a warning.
+        """
+
+        _require_endpoint_id(endpoint_id)
+        response = await self._authorized(
+            "DELETE",
+            f"/messaging/endpoints/{endpoint_id}/avatar",
+            expected_account_id=expected_account_id,
+            # A 204 carries nothing, but a hostile 4xx would otherwise be read
+            # whole before `_refusal` slices its first 16 KiB (review R1-S1).
+            # The class is this ROUTE's: inheriting the attachment code named a
+            # feature the caller is not using (review R2-F2).
+            max_response_bytes=MAX_ERROR_BODY_BYTES,
+            accept="application/json",
+            oversize_code="bridge_invalid_response",
+            oversize_sentence="Radient returned an invalid response.",  # i18n: ignore, no code
+        )
+        if response.status_code >= 400:
+            raise _refusal(response)
+        return {}
+
     async def fetch_avatar(
         self,
         target_account_id: str,
@@ -3443,8 +4007,6 @@ class TeamBridgeClient:
         have zero freshness lifetime: every reuse requires upstream membership
         authorization and a matching conditional 304 under that same login.
         """
-        from local_operator.paths import config_dir
-        from local_operator.team_bridge.avatar_cache import AVATAR_CACHE, Entity
         from local_operator.team_bridge.types import is_account_id
 
         if (
@@ -3455,46 +4017,97 @@ class TeamBridgeClient:
             or size not in (64, 256)
         ):
             raise ValueError("invalid avatar request")
-        self._require_destination()
-        store = self._auth_store()
-        scope = (str((self._config_dir or config_dir()).resolve()), self._base_url)
-        row = self._pinned_row()
-        if row is None:
-            AVATAR_CACHE.admit(scope, None)
-            raise BridgeSignInRequired(SIGN_IN_SENTENCE)
-        incarnation = store.native_login_incarnation(row.id)
+        return await self._avatar_read(
+            f"/accounts/{target_account_id}/avatar",
+            # The cache key's entity element stays the bare account id: it is
+            # what every released reader already keys on, and an endpoint key is
+            # prefixed (below) so the two can never collide.
+            target_account_id,
+            v=v,
+            size=size,
+            expected_account_id=expected_account_id,
+            mime_types=ATTACHMENT_MIME_TYPES,
+        )
+
+    async def fetch_endpoint_avatar(
+        self,
+        endpoint_id: str,
+        *,
+        v: str,
+        size: int,
+        expected_account_id: str,
+    ) -> tuple[bytes, str]:
+        """Closed AGENT image read: the same fence and the same byte bound.
+
+        One reader serves both pictures (``_avatar_read``) because the whole
+        security posture — pinned login incarnation, re-check either side of the
+        bounded read, ETag-only conditional reuse — is identical; only the route
+        differs. The hub serves this to the endpoint's OWNER and to a co-member
+        through their own authenticated relay, so the caller's identity is the
+        authorization, exactly as it is for an account picture.
+        """
+        _require_endpoint_id(endpoint_id)
+        if (
+            re.fullmatch(r"[0-9a-f]{16}", v) is None
+            or type(size) is not int
+            or size not in (64, 256)
+        ):
+            raise ValueError("invalid avatar request")
+        return await self._avatar_read(
+            f"/messaging/endpoints/{endpoint_id}/avatar",
+            f"endpoint:{endpoint_id}",
+            v=v,
+            size=size,
+            expected_account_id=expected_account_id,
+            mime_types=ENDPOINT_AVATAR_MIME_TYPES,
+        )
+
+    async def _avatar_read(
+        self,
+        path: str,
+        key_entity: str,
+        *,
+        v: str,
+        size: int,
+        expected_account_id: str,
+        mime_types: tuple[str, ...],
+    ) -> tuple[bytes, str]:
+        """``(bytes, mime)`` for one image route, under ONE pinned login.
+
+        Extracted from the account-avatar read so the agent read cannot drift
+        from it: a second copy of this fence is how one of the two would end up
+        serving bytes authorized under a login that has since changed.
+        """
+        from local_operator.team_bridge import avatar_cache
+        from local_operator.team_bridge.avatar_cache import Entity
+
+        scope, authority = self._avatar_authority(expected_account_id)
 
         def check_owner() -> None:
-            current = self._pinned_row()
-            if (
-                not incarnation
-                or current is None
-                or current.id != row.id
-                or current.data.get("account_id") != expected_account_id
-                or store.native_login_incarnation(row.id) != incarnation
-            ):
-                AVATAR_CACHE.admit(scope, None)
+            try:
+                current = self._avatar_authority(expected_account_id)
+            except BridgeSignInRequired:
+                current = None
+            if current != (scope, authority):
+                avatar_cache.admit(scope, None)
                 raise BridgeRefusal(
                     ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409
                 )
 
-        check_owner()
-        authority = (row.id, expected_account_id, incarnation)
-        AVATAR_CACHE.admit(scope, authority)
-        key = (scope, authority, target_account_id, v, size)
+        key = (scope, authority, key_entity, v, size)
         try:
             access = await self._guarded_access(expected_account_id)
         except (BridgeRefusal, BridgeSignInRequired):
-            AVATAR_CACHE.admit(scope, None)
+            avatar_cache.admit(scope, None)
             raise
         check_owner()
-        if access is None or access.credential_id != row.id:
+        if access is None or access.credential_id != authority[0]:
             raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
-        cached = AVATAR_CACHE.get(key)
+        cached = avatar_cache.AVATAR_CACHE.get(key)
         try:
             response = await self._dispatch(
                 "GET",
-                f"/accounts/{target_account_id}/avatar",
+                path,
                 access.access_token,
                 params={"v": v, "size": size},
                 body=None,
@@ -3503,15 +4116,15 @@ class TeamBridgeClient:
                 if_none_match=cached.etag if cached else None,
             )
         except httpx.HTTPError as failure:
-            AVATAR_CACHE.discard(key)
+            avatar_cache.AVATAR_CACHE.discard(key)
             raise BridgeUnreachable() from failure
         except BridgeRefusal:
-            AVATAR_CACHE.discard(key)
+            avatar_cache.AVATAR_CACHE.discard(key)
             raise
         check_owner()
         # Remove before interpreting the response: errors, malformed 304s and
         # no-store must never leave an entity available for a later retry.
-        AVATAR_CACHE.discard(key)
+        avatar_cache.AVATAR_CACHE.discard(key)
         if response.status_code >= 400:
             raise _refusal(response)
         etag = response.headers.get("etag")
@@ -3519,10 +4132,19 @@ class TeamBridgeClient:
         if response.status_code == 304 and cached is not None:
             if (etag is None or etag == cached.etag) and not response.content:
                 if storable:
-                    AVATAR_CACHE.put(key, cached)
+                    avatar_cache.AVATAR_CACHE.put(key, cached)
                 return cached.body, cached.mime
         mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-        if response.status_code != 200 or mime not in ATTACHMENT_MIME_TYPES or not response.content:
+        # The bytes must BE the type the hub declared (security review round 1,
+        # S-1): a hub label alone let SVG/HTML through as `image/png`. The relay
+        # then serves the sniffed type, so a renderer never receives a label the
+        # payload contradicts. Shared by the account and the endpoint picture.
+        if (
+            response.status_code != 200
+            or mime not in mime_types
+            or not response.content
+            or _sniff_image(response.content) != mime
+        ):
             raise BridgeRefusal(
                 "bridge_invalid_response",
                 "Radient returned an invalid response.",  # i18n: ignore, no code
@@ -3531,8 +4153,335 @@ class TeamBridgeClient:
         # Only a bounded HTTP entity-tag can authorize conditional reuse. No
         # synthetic validators: an upstream without ETag simply cold-fetches.
         if storable and etag and re.fullmatch(r'(?:W/)?"[\x21\x23-\x7e]{0,254}"', etag):
-            AVATAR_CACHE.put(key, Entity(response.content, mime, etag))
+            avatar_cache.AVATAR_CACHE.put(key, Entity(response.content, mime, etag))
         return response.content, mime
+
+    async def account_profile_request(
+        self,
+        operation: Literal["read", "update", "upload", "remove"],
+        *,
+        expected_account_id: str,
+        expected_scope: str | None = None,
+        fields: Mapping[str, str] | None = None,
+        image: bytes | None = None,
+        mode: Literal["uploaded", "provider"] = "uploaded",
+    ) -> dict[str, Any]:
+        """One self-profile request under the exact login that opened the editor.
+
+        This reuses person OAuth, not Bridge enrollment or membership. The
+        opaque scope is a freshness receipt, NOT authorization: desktop auth
+        still gates the route and the stored OAuth JWT alone owns the upstream
+        target. Capture BEFORE refresh (including A→B→A), check immediately
+        before dispatch and after response, and never replay a mutation on 401.
+        A post-dispatch refusal suppresses stale success; it cannot undo a write
+        the upstream already committed.
+        """
+        import hashlib
+        import json
+
+        from local_operator.team_bridge.types import is_account_id
+
+        if not is_account_id(expected_account_id):
+            raise ValueError("Invalid account identifier")
+        captured = self._account_authority(expected_account_id)
+        scope_token = hashlib.sha256(json.dumps(captured).encode()).hexdigest()
+
+        def check_owner() -> None:
+            try:
+                current = self._account_authority(expected_account_id)
+            except (BridgeSignInRequired, BridgeRefusal):
+                current = None
+            if current != captured or (
+                expected_scope is not None and expected_scope != scope_token
+            ):
+                raise BridgeRefusal(
+                    ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409
+                )
+
+        check_owner()
+        if operation != "read" and expected_scope is None:
+            raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
+        access = await self._guarded_access(expected_account_id)
+        check_owner()
+        if access is None or access.credential_id != captured[1][0]:
+            raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
+        method, path = {
+            "read": ("GET", f"/accounts/{expected_account_id}/profile"),
+            "update": ("PATCH", "/account/profile"),
+            "upload": ("PUT", "/account/avatar"),
+            "remove": ("DELETE", "/account/avatar"),
+        }[operation]
+        try:
+            response = await self._dispatch(
+                method,
+                path,
+                access.access_token,
+                params={"mode": mode} if operation == "remove" else None,
+                body=dict(fields) if operation == "update" and fields is not None else None,
+                files=(
+                    {"file": ("avatar", image, "application/octet-stream")}
+                    if operation == "upload" and image is not None
+                    else None
+                ),
+                max_response_bytes=32 * 1024,
+                identity_response_only=True,
+                pre_http_guard=check_owner,
+            )
+        except httpx.HTTPError as failure:
+            raise BridgeUnreachable() from failure
+        check_owner()
+        if response.status_code >= 400:
+            raise _refusal(response)
+        profile = _envelope_result(response)
+        # The account API may grow sensitive fields. The native editor only
+        # needs this presentation allowlist, never arbitrary upstream metadata.
+        allowed = {
+            "account_id",
+            "display_name",
+            "display_label",
+            "title",
+            "description",
+            "timezone",
+            "avatar_url",
+        }
+        projected: dict[str, Any] = {
+            k: v for k, v in profile.items() if k in allowed and isinstance(v, str)
+        }
+        if projected.get("account_id") != expected_account_id:
+            raise BridgeRefusal(
+                "bridge_invalid_response",
+                # i18n: ignore internal diagnosis; desktop sends only the code
+                "Radient returned an invalid response.",
+                http_status=502,
+            )
+        avatar = profile.get("avatar")
+        if isinstance(avatar, dict):
+            projected["avatar"] = {
+                k: v
+                for k, v in avatar.items()
+                if k in {"source", "hash", "updated_at"} and isinstance(v, str)
+            }
+        return {"scope": scope_token, "profile": projected}
+
+    def _avatar_authority(
+        self, expected_account_id: str
+    ) -> tuple[tuple[str, str], tuple[int, str, str]]:
+        """Admit an image cache only after the shared login fence succeeds."""
+        from local_operator.team_bridge import avatar_cache
+
+        try:
+            scope, authority = self._account_authority(expected_account_id)
+        except (BridgeRefusal, BridgeSignInRequired):
+            from local_operator.paths import config_dir
+
+            scope = (str((self._config_dir or config_dir()).resolve()), self._base_url)
+            avatar_cache.admit(scope, None)
+            raise
+        avatar_cache.admit(scope, authority)
+        return scope, authority
+
+    def _account_authority(
+        self, expected_account_id: str
+    ) -> tuple[tuple[str, str], tuple[int, str, str]]:
+        """Cache-neutral authority for the current person OAuth login.
+
+        Local only (no refresh/network): both private image reads and account
+        profile writes capture the same row/account/durable incarnation before
+        any await. Cache admission belongs to the image wrapper, never to a
+        profile authorization check.
+        """
+
+        from local_operator.paths import config_dir
+
+        self._require_destination()
+        store = self._auth_store()
+        scope = (str((self._config_dir or config_dir()).resolve()), self._base_url)
+        row = self._pinned_row()
+        if row is None:
+            raise BridgeSignInRequired(SIGN_IN_SENTENCE)
+        incarnation = store.native_login_incarnation(row.id)
+        if not incarnation or row.data.get("account_id") != expected_account_id:
+            raise BridgeRefusal(ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409)
+        authority = (row.id, expected_account_id, incarnation)
+        return scope, authority
+
+    async def notification_avatar(
+        self,
+        sender_account_id: str,
+        *,
+        tenant_id: str,
+        kind: Literal["person", "person_agent"],
+        theme: Literal["light", "dark"],
+        size: int,
+        initials: str,
+        v: str | None,
+        expected_account_id: str,
+        endpoint: tuple[str, str] | None = None,
+        on_fallback: Callable[[], None] | None = None,
+    ) -> bytes:
+        """Render only after current-avatar authorization, never from stale bytes.
+
+        ``endpoint`` is first BOUND to the sender (security review round 1,
+        S-2): the tenant directory must list ``sender_account_id`` with an
+        agent whose ``endpoint_id`` is this one and whose published
+        ``avatar_url`` names this exact version. Otherwise the glyph is drawn,
+        so no caller can paint another agent's face under this sender's name,
+        mirroring the ``avatar_account_id`` arm's equality rule.
+
+        ``on_fallback`` is called when an agent picture was asked for and the
+        glyph was drawn instead (unbound, unreadable or undecodable), so the
+        route can tell the desktop to keep that answer for its short failure
+        TTL rather than its photo lease (code review round 1, F1).
+
+        ``endpoint`` is ``(endpoint_id, v)`` for a ``person_agent`` whose hub
+        directory publishes the agent's OWN picture. It is read through
+        :meth:`fetch_endpoint_avatar` (never the owner's account route) and is
+        best effort: an unreachable hub, a stale version or a refusal draws the
+        agent glyph rather than failing the banner, because the picture is
+        cosmetic and the desktop's 250 ms budget has no room for a retry. A
+        changed login is the exception and still refuses, so a queued read
+        cannot draw under the wrong viewer.
+
+        The directory join belongs to the tenant-scoped desktop caller. Here
+        tenant is validated as part of the closed contract (the desktop keys its
+        display cache by it), NOT a replacement for the existing hub avatar
+        authorization. No-photo placeholders make no network request. The login
+        captured before network/CPU work is checked afterwards too; a queued
+        decode cannot return an image from a previous login.
+
+        Stateless: the composite is returned and forgotten. Display retention
+        is the desktop main process's (A0: in memory, <= 15 minutes, cleared on
+        auth transitions); see ``notification_avatar``'s module docstring.
+        """
+        from local_operator.team_bridge import avatar_cache
+        from local_operator.team_bridge import notification_avatar as na
+        from local_operator.team_bridge.types import is_account_id
+
+        if (
+            not is_account_id(sender_account_id)
+            or not is_account_id(expected_account_id)
+            or not tenant_id.strip()
+            or len(tenant_id) > 128
+            or kind not in na.KINDS
+            or theme not in na.THEMES
+            or type(size) is not int
+            or size not in na.SIZES
+            or not na.valid_initials(initials)
+            or (v is not None and re.fullmatch(r"[0-9a-f]{16}", v) is None)
+            or (endpoint is not None and kind != "person_agent")
+            or (endpoint is not None and re.fullmatch(r"[0-9a-f]{16}", endpoint[1]) is None)
+        ):
+            raise ValueError("invalid notification avatar request")
+        if endpoint is not None:
+            _require_endpoint_id(endpoint[0])
+        scope, authority = self._avatar_authority(expected_account_id)
+
+        def check_owner() -> None:
+            try:
+                current = self._avatar_authority(expected_account_id)
+            except BridgeSignInRequired:
+                current = None
+            if current != (scope, authority):
+                avatar_cache.admit(scope, None)
+                raise BridgeRefusal(
+                    ACCOUNT_MISMATCH_CODE, ACCOUNT_MISMATCH_SENTENCE, http_status=409
+                )
+
+        variant = na.Variant(kind=kind, theme=theme, size=size, initials=initials)
+        photo: bytes | None = None
+        # A person's agent is drawn as the agent glyph, never its owner's face
+        # (2026-10-30; ``notification_avatar`` module docstring). An older
+        # desktop still sends the owner's photo version for it: ignore it and
+        # touch no network, so the fix reaches released desktops too.
+        if v is not None and kind != "person_agent":
+            # The raw entity keeps its own rules (revalidated per use, no-store
+            # honoured) in ``fetch_avatar``; nothing derived from it is kept here.
+            photo, _mime = await self.fetch_avatar(
+                sender_account_id, v=v, size=size, expected_account_id=expected_account_id
+            )
+        agent_picture: bytes | None = None
+        if endpoint is not None:
+            try:
+                if await self._endpoint_belongs_to(
+                    sender_account_id,
+                    endpoint,
+                    tenant_id=tenant_id,
+                    expected_account_id=expected_account_id,
+                ):
+                    agent_picture, _mime = await self.fetch_endpoint_avatar(
+                        endpoint[0],
+                        v=endpoint[1],
+                        size=size,
+                        expected_account_id=expected_account_id,
+                    )
+            except BridgeSignInRequired:
+                raise
+            except BridgeRefusal as refusal:
+                # A login change is a refusal, never a fallback: the glyph would
+                # be drawn under a viewer who no longer owns this request.
+                if refusal.code == ACCOUNT_MISMATCH_CODE:
+                    raise
+                agent_picture = None
+        check_owner()
+        data = await na.render(
+            variant,
+            origin=self._base_url,
+            account_id=sender_account_id,
+            photo=photo,
+            agent_picture=agent_picture,
+            check_owner=check_owner,
+            on_fallback=on_fallback if endpoint is not None else None,
+        )
+        check_owner()
+        return data
+
+    async def _endpoint_belongs_to(
+        self,
+        sender_account_id: str,
+        endpoint: tuple[str, str],
+        *,
+        tenant_id: str,
+        expected_account_id: str,
+    ) -> bool:
+        """Whether the tenant directory publishes THIS picture for THIS sender.
+
+        The directory is the same hub answer the desktop derived the endpoint
+        from, read under the same viewer fence. Binding key is
+        ``(sender account, agent.endpoint_id, agent.avatar.hash)``: three fields
+        of ONE row, so naming another agent's endpoint — even with its correct
+        current version — cannot paint it, and a malformed or missing directory
+        is "not bound" (the glyph), never a pass.
+
+        The version is read from ``agent.avatar.hash``, the documented field the
+        hub itself renders into ``?v=``, and NOT from the ``avatar_url`` string
+        (security review round 2, S-3): the URL is agent-server's rendering
+        detail, so keying on it makes any future reshuffle there silently glyph
+        every agent face — fail-closed, and invisible to both repos' tests. A
+        hub that publishes no structured hash still binds through an exactly
+        equal ``avatar_url``, which pins the same version; a row that publishes
+        a structured hash is judged on it alone, so the two can never disagree
+        about whether this is the picture.
+        """
+
+        directory = await self.directory(tenant_id, expected_account_id=expected_account_id)
+        members = directory.get("members") if isinstance(directory, dict) else None
+        if not isinstance(members, list):
+            return False
+        expected_url = f"/v1/messaging/endpoints/{endpoint[0]}/avatar?v={endpoint[1]}"
+        for member in members:
+            if not isinstance(member, dict) or member.get("account_id") != sender_account_id:
+                continue
+            agent = member.get("agent")
+            if not isinstance(agent, dict) or agent.get("endpoint_id") != endpoint[0]:
+                continue
+            avatar = agent.get("avatar")
+            if isinstance(avatar, dict) and isinstance(avatar.get("hash"), str):
+                if avatar["hash"] == endpoint[1]:
+                    return True
+                continue
+            if isinstance(agent.get("avatar_url"), str) and agent["avatar_url"] == expected_url:
+                return True
+        return False
 
     async def fetch_attachment(
         self,
@@ -3601,6 +4550,7 @@ class TeamBridgeClient:
         tenant_id: str | None = None,
         actor_endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
     ) -> dict[str, Any]:
         """Set (``active=True`` -> PUT) or clear (DELETE) one emoji reaction.
 
@@ -3614,6 +4564,12 @@ class TeamBridgeClient:
         ``allow`` admission for the message first). It rides in the body for
         PUT and in the query for DELETE, because a DELETE body is not reliably
         forwarded by every proxy between here and the hub.
+
+        ``expected_account_id`` is the desktop's captured-owner receipt (the
+        desktop routes REQUIRE it): compared against the exact dispatch
+        snapshot before any byte moves, refused as ``account_mismatch``, and
+        never forwarded upstream. The agent tool omits it and reacts as the
+        runtime's own pinned identity.
         """
 
         path = (
@@ -3626,8 +4582,16 @@ class TeamBridgeClient:
         if actor_endpoint_id:
             fields["actor_endpoint_id"] = actor_endpoint_id
         if active:
-            return await self._send("PUT", path, body=fields, access=access)
-        return await self._send("DELETE", path, params=fields or None, access=access)
+            return await self._send(
+                "PUT", path, body=fields, access=access, expected_account_id=expected_account_id
+            )
+        return await self._send(
+            "DELETE",
+            path,
+            params=fields or None,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
 
     async def conversation_read(
         self,
@@ -3685,6 +4649,43 @@ class TeamBridgeClient:
         return await self._send(
             "POST",
             f"/messaging/conversations/{conversation_id}/read",
+            body=body,
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
+    async def conversation_agent_notify(
+        self,
+        conversation_id: str,
+        endpoint_id: str,
+        *,
+        notify: Literal["all", "mention", "mute"],
+        tenant_id: str | None = None,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Set the notification policy of the caller's OWN AGENT member.
+
+        WHY NOT :meth:`conversation_notify`: that write resolves the caller's
+        HUMAN member row, so it can never change what wakes their agent. The
+        hub's endpoint-addressed route (agent-server ``NotifyHandlerEcho``)
+        accepts only an ACTIVE agent member owned by the caller's account, and
+        answers a non-owner, unknown endpoint and non-member with one coded
+        refusal. ``all`` wakes the agent for every message, ``mention`` for
+        direct/channel @-mentions AND replies in threads it follows (wake
+        contract, Amendment A1 — a followed thread is directed at the agent even
+        without a mention), ``mute`` never (history only). The answer is the
+        conversation view.
+        """
+
+        if notify not in ("all", "mention", "mute"):
+            raise ValueError("notify must be 'all', 'mention' or 'mute' (§10.1)")
+        body: dict[str, Any] = {"notify": notify}
+        if tenant_id:
+            body["tenant_id"] = tenant_id
+        return await self._send(
+            "POST",
+            f"/messaging/conversations/{conversation_id}/members/{endpoint_id}/notify",
             body=body,
             access=access,
             expected_account_id=expected_account_id,
@@ -4066,15 +5067,16 @@ def default_on_in_force(check: StatusCheck) -> bool:
     """Whether this answer proves the hub's opt-out default is in force for the caller.
 
     ALL of: a READY answer; an eligible selected organization (the hub omits
-    ``consent`` for everyone else); the served ``consent.version`` is EXACTLY
-    ``bridge_consent_v2`` (the disclosure whose copy offers the opt-out) AND the
-    hub lists it in ``consent.accepted_versions``; and this client ACCEPTED those
+    ``consent`` for everyone else); the served ``consent.version`` is EXACTLY a
+    member of :data:`DEFAULT_ON_CONSENT_VERSIONS` (``bridge_consent_v2`` or
+    ``bridge_consent_v3``, the disclosures whose copy offers the opt-out) AND the
+    hub lists that same version in ``consent.accepted_versions``; and this client ACCEPTED those
     bytes on this answer (a refused text — backwards, changed-in-place, oversized
     — is in ``check.rejected`` and never authorises anything).
 
     A missing or malformed accepted set reads False, never "anything goes":
     that is also what a hub predating the set looks like, and such a hub must
-    keep the consent hold. Exact string membership, never version ordering: v3
+    keep the consent hold. Exact string membership, never version ordering: v4
     would be a new disclosure this build has not been taught to default on.
     """
 
@@ -4087,19 +5089,17 @@ def default_on_in_force(check: StatusCheck) -> bool:
     if not isinstance(consent, Mapping):
         return False
     accepted = consent.get("accepted_versions")
+    served = consent.get("version")
     if (
-        consent.get("version") != CONSENT_VERSION_V2
+        not isinstance(served, str)
+        or served not in DEFAULT_ON_CONSENT_VERSIONS
         or not isinstance(accepted, list)
-        or CONSENT_VERSION_V2 not in accepted
+        or served not in accepted
         or "consent" in check.rejected
     ):
         return False
     record = check.texts.get("consent")
-    return (
-        record is not None
-        and record.version == CONSENT_VERSION_V2
-        and record.text == consent.get("text")
-    )
+    return record is not None and record.version == served and record.text == consent.get("text")
 
 
 class StatusDiscipline:
@@ -4126,10 +5126,21 @@ class StatusDiscipline:
         base_url: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         store: Any = None,
+        credential_id: int | None = None,
+        read_only: bool = False,
     ) -> None:
         self._config_dir = config_dir
+        # Consent preview must share text acceptance and account fences without
+        # silently enrolling a default-on account or changing its designation.
+        # OAuth refresh and in-memory observations remain permitted; no bridge
+        # mutation or connector placement belongs to a read-only discipline.
+        self._read_only = read_only
         self._client = TeamBridgeClient(
-            config_dir, base_url=base_url, transport=transport, store=store
+            config_dir,
+            base_url=base_url,
+            transport=transport,
+            store=store,
+            credential_id=credential_id,
         )
         self._states: dict[str, _AccountState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -4192,7 +5203,7 @@ class StatusDiscipline:
         # enum silently never fired for the one caller that matters (QA round 2,
         # out-of-scope note; the lifespan task hid it). Parse is lenient by its
         # own contract and preserves the boundary recorded later in ``_check``.
-        if Boundary.parse(boundary) is Boundary.APP_START:
+        if not self._read_only and Boundary.parse(boundary) is Boundary.APP_START:
             # CATCH-UP for machines enrolled before D2a existed: an app-start
             # boundary is an existing, event-driven moment with no new poller.
             # A machine with no committed owner answers absent without creating
@@ -4289,9 +5300,15 @@ class StatusDiscipline:
             # A pending local commit must not wait out the status cache (QA Q2):
             # the cached answer already proves state C for the marker's endpoint,
             # and the retry paces itself. Local gates only, unless one is pending.
-            await self._retry_pending_commit(cached, access=access)
+            if not self._read_only:
+                await self._retry_pending_commit(cached, access=access)
             return cached
         lock = self._locks.setdefault(key, asyncio.Lock())
+        #: The picture upload is deferred out of the lock below: it can be up to
+        #: AVATAR_MAX_BYTES of multipart for a whole account's status readers to
+        #: wait behind, and the reconcile is digest-gated, so a few milliseconds
+        #: later is the same answer (review R1-S7).
+        deferred: list[tuple[StatusCheck, OAuthAccess]] = []
         async with lock:
             # Re-check under the lock: a sibling that arrived first already read.
             state = self._states.get(key)
@@ -4301,9 +5318,19 @@ class StatusDiscipline:
                 and time.monotonic() - state.last_attempt < self._ttl(state)
             ):
                 return self._cached(state, boundary)
-            return await self._read(key, boundary, access)
+            check = await self._read(key, boundary, access, deferred=deferred)
+        for pending_check, pending_access in deferred:
+            await self._sync_agent_avatar(pending_check, pending_access)
+        return check
 
-    async def _read(self, key: str, boundary: Boundary, access: OAuthAccess) -> StatusCheck:
+    async def _read(
+        self,
+        key: str,
+        boundary: Boundary,
+        access: OAuthAccess,
+        *,
+        deferred: list[tuple[StatusCheck, OAuthAccess]] | None = None,
+    ) -> StatusCheck:
         revision = self._identity_revision
         prior = self._states.get(key)
         texts = prior.texts if prior is not None else AcceptedTexts()
@@ -4350,10 +5377,19 @@ class StatusDiscipline:
         # BEFORE default-on, on the answer as read: the boundary whose POST just
         # failed to commit reads B here, so the commit-only retry starts at the
         # NEXT boundary (plan R3), never inside the request that created it.
-        await self._retry_pending_commit(check, access=access)
-        check = await self._default_enroll(check, boundary=boundary, access=access, texts=texts)
-        check = self._sync_local_designation(check)
-        await self._sync_agent_name(check, access)
+        if not self._read_only:
+            await self._retry_pending_commit(check, access=access)
+            check = await self._default_enroll(check, boundary=boundary, access=access, texts=texts)
+            check = self._sync_local_designation(check)
+            await self._sync_agent_name(check, access)
+            # The picture is a WRITE on the SAME boundary, so it sits inside the
+            # same read-only gate as the name: a consent-preview discipline must
+            # invent neither an enrollment nor a published picture. It does NOT
+            # sit inside the status lock — see _check (review R1-S7).
+            if deferred is None:
+                await self._sync_agent_avatar(check, access)
+            else:
+                deferred.append((check, access))
         self._states[key] = _AccountState(
             last_attempt=time.monotonic(), check=check, texts=texts, identity_revision=revision
         )
@@ -4420,21 +5456,23 @@ class StatusDiscipline:
         access: OAuthAccess,
         texts: AcceptedTexts,
     ) -> StatusCheck:
-        """The ONE automatic enrolment: ``bridge_consent_v2``, opt-out, nothing fired.
+        """The ONE automatic enrolment: a default-on consent (v2/v3), opt-out, nothing fired.
 
         WHY IT EXISTS. The consent hold (#2712) forbade a status read from
-        enrolling under v1, whose copy never offered an opt-out. v2 is the
-        disclosure that says "on by default, turn it off in Settings", so once
-        the hub SERVES it an eligible member with no endpoint is enrolled here,
-        with nothing sent at enrolment: the endpoint and the native owner +
-        receipt are created, and the member then sees a dismissible notice with
-        Turn off. Enrolling is not sending — every send, receive and wake path
-        still needs the committed owner and a current receipt.
+        enrolling under v1, whose copy never offered an opt-out. v2 and v3
+        (``DEFAULT_ON_CONSENT_VERSIONS``) are the disclosures that say "on by
+        default, turn it off in Settings", so once the hub SERVES one an
+        eligible member with no endpoint is enrolled here, with nothing sent at
+        enrolment: the endpoint and the native owner + receipt are created,
+        and the member then sees a dismissible notice with Turn off. Enrolling
+        is not sending — every send, receive and wake path still needs the
+        committed owner and a current receipt.
 
         EVERY gate must hold, each failing individually means ZERO writes (a
         table test pins each):
 
-        1. v2 is served AND accepted by the hub (:func:`default_on_in_force`);
+        1. a default-on version (v2 or v3) is served AND accepted by the hub
+           (:func:`default_on_in_force`);
         2. the surface state is exactly B — eligible, NO endpoint. Never C/D/E
            (an endpoint in any state, so an opt-out is never reversed by a
            default) and never A/F/G;
@@ -4467,6 +5505,16 @@ class StatusDiscipline:
             return check
         tenant_id = selected_tenant_id(check.payload)
         if tenant_id is None:
+            return check
+        # The version ``default_on_in_force`` just proved served+accepted with
+        # matching bytes: the enrolment echoes exactly what was shown.
+        served_consent = (
+            check.payload.get("consent") if isinstance(check.payload, Mapping) else None
+        )
+        served_version = (
+            served_consent.get("version") if isinstance(served_consent, Mapping) else None
+        )
+        if not isinstance(served_version, str):
             return check
         local = _local_settings_snapshot(config_dir)
         if local is None or (local.enabled_is_set and not local.enabled):
@@ -4512,6 +5560,7 @@ class StatusDiscipline:
             result = await self._client.enroll_default_on(
                 tenant_id=tenant_id,
                 expected_account_id=account_id,
+                consent_version=served_version,
                 may_commit_local=_local_still_open,
             )
         except (BridgeRefusal, BridgeSignInRequired, ValueError):
@@ -4557,6 +5606,11 @@ class StatusDiscipline:
                 # Never over an explicit value: a Turn off / settings edit that
                 # landed after the commit above keeps its ``false``.
                 record_local_enabled_if_unset(config_dir)
+                # The default-on enrolment never had a designation to commit
+                # (nobody chose one), so it was badge-only; point it at the
+                # chief of staff, the account's expected wake destination. The
+                # next status read mirrors the setting into the native record.
+                record_local_session_if_unset(config_dir)
         except Exception:  # noqa: BLE001 - no local authority beats a loud failure
             pass
         # Adopt the post-enrolment answer: returning B after enrolling would
@@ -4613,7 +5667,7 @@ class StatusDiscipline:
         pending = parse_pending_default_enrollment(local.default_enrollment.get(access.account_id))
         if pending is None:
             return
-        endpoint_id, head = pending
+        endpoint_id, head, consent_version = pending
         selected = select_tenant(check.payload)
         tenant_id = selected_tenant_id(check.payload)
         endpoint = selected.get("endpoint") if isinstance(selected, Mapping) else None
@@ -4652,6 +5706,7 @@ class StatusDiscipline:
                 tenant_id=tenant_id,
                 endpoint_id=endpoint_id,
                 head=head,
+                consent_version=consent_version,
                 expected_account_id=account_id,
                 may_commit_local=_still_pending,
             )
@@ -4659,7 +5714,12 @@ class StatusDiscipline:
             logger.warning("team_bridge: pending local enrolment deferred (%s)", type(exc).__name__)
             return
         code = outcome.get("code")
-        if outcome.get("committed") is True or code == "no_consent_echo":
+        # Both refusals are terminal: retrying cannot change the hub's record,
+        # so the marker becomes ``done`` (no loop, and never a second POST).
+        if outcome.get("committed") is True or code in (
+            "no_consent_echo",
+            "consent_version_mismatch",
+        ):
             try:
                 record_default_enrollment(config_dir, account_id)
             except Exception:  # noqa: BLE001 - bookkeeping only
@@ -4687,22 +5747,36 @@ class StatusDiscipline:
         except Exception:  # noqa: BLE001 - store damage is "no authority", not an error
             return
 
+    def reconcile_designation(self, check: StatusCheck) -> StatusCheck:
+        """Apply an explicit surface's persisted selection to its committed owner.
+
+        This does not read status or enroll: backend-only setup calls it only
+        after its guarded consent PUT succeeds and the selected session is
+        persisted through the shared settings writer. Keeping the same native
+        generation fence avoids a second designation authority in the CLI.
+        """
+
+        return self._sync_local_designation(check)
+
     def _sync_local_designation(self, check: StatusCheck) -> StatusCheck:
         """Keep the wake designation in step with ``team_bridge.session``.
 
         A STATUS READ IS NOT AN ENROLLMENT PATH (consent hold, #2712), with ONE
         gated exception that runs BEFORE this (:meth:`_default_enroll`, only
-        under a served+accepted ``bridge_consent_v2``). This method itself never
+        under a served+accepted default-on consent, v2 or v3). This method itself never
         performs the settings PUT and never writes an ``OwnerReceipt``: an
         active endpoint in a server answer can come from another surface or an
         older build, so only the user's explicit settings write (or that gated
-        v2 enrolment, which the hub itself created) may enroll.
+        default-on enrolment, which the hub itself created) may enroll.
 
         The one local write left here is the designation for an ALREADY
         committed owner: the setting the user chose must reach the native record
         on the next fresh answer without reopening the consent dialog. Clearing
         the row withdraws wake consent (§13.6: empty stays badge-only), and the
-        designation is never guessed from "the current session".
+        designation is never guessed from "the current session". The ONE
+        default is the account's chief-of-staff session, written into the
+        setting by the enable paths only while it is empty
+        (``settings.record_local_session_if_unset``).
         """
 
         if self._config_dir is None or check.state != STATE_READY:
@@ -4721,6 +5795,59 @@ class StatusDiscipline:
             self._sync_designation(store, owner, local.session)
         return check
 
+    def _owned_endpoint(
+        self, check: StatusCheck, access: OAuthAccess, *, field: str | None
+    ) -> tuple[str, str, Mapping[str, Any]] | None:
+        """``(tenant_id, endpoint_id, endpoint)`` this machine OWNS, or ``None``.
+
+        The one guard ladder both status-boundary writers share: the agent
+          name re-sync and the avatar reconcile.
+
+        * READY, an eligible selected tenant, and an ACTIVE endpoint: a re-sync
+        must never resume an endpoint the member paused elsewhere, and both
+        writes assert ``state=active`` on their own routes;
+        * ``field`` \u2014 when given \u2014 is a key the payload must carry before the
+          write is worth making: ``agent_name`` is ALWAYS served by the paired
+          hub (``null`` when unset), so its absence means an older hub that would
+          ignore it. ``avatar`` must not gate that way: the contract serves the
+          block only once something is published, so absence there means
+          "publish the local picture" (``field=None``);
+        * this machine holds the COMMITTED owner for THIS account and endpoint —
+          the user consented here, so publishing her name and her picture is part
+          of the enrollment they chose, not a status read writing to a row that
+          belongs to another device.
+        """
+
+        if self._config_dir is None or check.state != STATE_READY:
+            return None
+        selected = select_tenant(check.payload)
+        endpoint = selected.get("endpoint") if selected is not None else None
+        if (
+            selected is None
+            or not bool(selected.get("eligible"))
+            or not isinstance(endpoint, Mapping)
+            or endpoint.get("state") != "active"
+            or (field is not None and field not in endpoint)
+        ):
+            return None
+        endpoint_id = endpoint.get("id")
+        tenant_id = selected.get("tenant_id")
+        if not isinstance(endpoint_id, str) or not isinstance(tenant_id, str):
+            return None
+        try:
+            from local_operator.team_bridge.store import Store
+
+            owner = Store(self._config_dir).active_owner()
+        except Exception:  # noqa: BLE001 - store damage is "no authority", not an error
+            return None
+        if (
+            owner is None
+            or owner.account_id != access.account_id
+            or owner.endpoint_id != endpoint_id
+        ):
+            return None
+        return tenant_id, endpoint_id, endpoint
+
     async def _sync_agent_name(self, check: StatusCheck, access: OAuthAccess) -> None:
         """Re-send the chief of staff's name after a rename, at a status boundary.
 
@@ -4737,64 +5864,40 @@ class StatusDiscipline:
         WHY SO GUARDED. ``PUT /messaging/settings`` is a state ASSERTION with
         no precondition field: a re-sync must send ``state=active``, and if the
         member paused on another surface between this read and the PUT, the
-        PUT would resume them. So this fires only when every one holds:
+        PUT would resume them. :meth:`_owned_endpoint` therefore fires only for
+        an ACTIVE endpoint this machine owns, and the debounce below keeps two
+        coalesced readers from both PUTting the same rename.
 
-        * the answer is READY and its selected tenant is eligible with an
-          ACTIVE endpoint (never resumes a paused/disabled one it can see);
-        * the endpoint block carries the ``agent_name`` KEY — the paired hub
-          always serves it on status (``null`` when unset), so its absence
-          means an older hub that ignores the field; nothing is sent there,
-          so the race window cannot open;
-        * the echo differs from the resolved name, and this process has not
-          already re-sent that name for that endpoint (the debounce);
-
-        WHY UNDER THE STATUS LOCK. This runs inside the per-account lock the
-        fresh read holds. That serialises re-syncs, which is what keeps two
-        coalesced readers from both PUTting the same rename; the cost (one
-        bounded PUT) is paid only on the single fresh read after a rename.
-        * this machine holds the committed owner for THIS account and
-          endpoint — the user consented here, so publishing the CoS name is
-          part of the enrollment they chose, not a status read enrolling.
+        THE CLEARING ARM. When the local side resolves NO name and the hub holds
+        a DEGENERATE one — a name that is only the owner's own, from the
+        default-on rows nobody typed a name into — ``agent_name: ""`` is sent:
+        the empty string is how a client says "no name of its own", and leaving
+        it would keep publishing the owner's own name under her agent. Nothing
+        is ever cleared for a name the user might have chosen: the check lives in
+        :func:`local_operator.team_bridge.cos_name.degenerate_agent_name`.
 
         No ``consent_version`` is sent, so ``_commit_explicit_enable`` commits
         nothing (consent hold, #2712), and the captured account pins the write.
         Best-effort: any failure leaves the status answer untouched.
         """
 
-        if self._config_dir is None or check.state != STATE_READY:
+        owned = self._owned_endpoint(check, access, field="agent_name")
+        if owned is None:
             return
-        selected = select_tenant(check.payload)
-        endpoint = selected.get("endpoint") if selected is not None else None
-        if (
-            selected is None
-            or not bool(selected.get("eligible"))
-            or not isinstance(endpoint, Mapping)
-            or endpoint.get("state") != "active"
-            or "agent_name" not in endpoint
-        ):
-            return
-        endpoint_id = endpoint.get("id")
-        tenant_id = selected.get("tenant_id")
-        if not isinstance(endpoint_id, str) or not isinstance(tenant_id, str):
-            return
-        from local_operator.team_bridge.cos_name import cos_display_name
+        tenant_id, endpoint_id, endpoint = owned
+        from local_operator.team_bridge.cos_name import (
+            cos_display_name,
+            degenerate_agent_name,
+        )
 
         wanted = cos_display_name(self._config_dir)
-        if wanted is None or wanted == endpoint.get("agent_name"):
+        if wanted is None:
+            if not degenerate_agent_name(endpoint.get("agent_name"), endpoint.get("label")):
+                return
+            wanted = ""
+        elif wanted == endpoint.get("agent_name"):
             return
         if self._agent_name_sent.get(endpoint_id) == wanted:
-            return
-        try:
-            from local_operator.team_bridge.store import Store
-
-            owner = Store(self._config_dir).active_owner()
-        except Exception:  # noqa: BLE001 - store damage is "no authority", not an error
-            return
-        if (
-            owner is None
-            or owner.account_id != access.account_id
-            or owner.endpoint_id != endpoint_id
-        ):
             return
         try:
             await self._client.put_settings(
@@ -4810,6 +5913,36 @@ class StatusDiscipline:
             logger.warning("team_bridge: name synchronization deferred (%s)", type(exc).__name__)
             return
         self._agent_name_sent[endpoint_id] = wanted
+
+    async def _sync_agent_avatar(self, check: StatusCheck, access: OAuthAccess) -> None:
+        """Reconcile the hub's copy of this agent's picture at a status boundary.
+
+        WHY HERE. The local agent definition is the source of truth and the hub
+        is a projection of it, so the copy is re-checked at the same boundary the
+        name is (never on a timer, never mid-send, never from the cache). The
+        hub's status answer already carries the digest it holds, which is what
+        makes this one comparison and, when it agrees, ZERO writes.
+
+        WHY SO GUARDED. Same ladder as the name: only a READY, eligible, ACTIVE
+        endpoint this machine holds the committed owner for. Publishing is part
+        of the enrollment the user chose; a status read must never write to a
+        row another device owns.
+
+        Never raises and never mutates ``check`` — ``avatar_publish.reconcile``
+        owns both halves of that promise.
+        """
+
+        owned = self._owned_endpoint(check, access, field=None)
+        if owned is None:
+            return
+        tenant_id, endpoint_id, _endpoint = owned
+        from local_operator.team_bridge import avatar_publish
+
+        # The validated endpoint id rides along: the plan may only address the
+        # row this guard approved, never a re-derived first match (review R1-S3).
+        await avatar_publish.reconcile(
+            self._client, check, tenant_id, self._config_dir, endpoint_id
+        )
 
     def invalidate(self) -> None:
         """Drop every cached answer: the next check reads fresh.

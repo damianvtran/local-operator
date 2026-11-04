@@ -9,8 +9,9 @@ sent a message by its owner — could never receive a Team Bridge card: every de
 ``conversation_failed`` and retried forever.
 
 The bridge may cross that gate for ONE session only, and only when the member
-was TOLD it could: ``bridge_consent_v2`` discloses that an incoming message may
-engage a never-used chief-of-staff session; ``bridge_consent_v1`` does not. So
+was TOLD it could: ``bridge_consent_v2`` and ``bridge_consent_v3`` disclose that an
+incoming message may engage a never-used chief-of-staff session ("A message may
+reach your agent before you have used it"); ``bridge_consent_v1`` does not. So
 the exception is gated on the consent version the member ACCEPTED, read from the
 native enrollment receipt in this machine's own store
 (:meth:`Store.owner_consent_receipt_readonly`) — never from the served status
@@ -40,10 +41,19 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+# An import-free leaf, so the "stdlib + the bridge store only" constraint holds.
+from local_operator.team_bridge.consent_versions import DEFAULT_ON_CONSENT_VERSIONS
+
 #: Consent versions whose ACCEPTED text discloses that an incoming message may
 #: engage a never-used chief-of-staff session. Explicit by design — see the
 #: module docstring. ``bridge_consent_v1`` is deliberately absent.
-ENGAGING_CONSENT_VERSIONS: frozenset[str] = frozenset({"bridge_consent_v2"})
+#:
+#: The SAME set as the default-on versions, by design rather than coincidence:
+#: every default-on text (v2, and v3 which repeats v2's engagement sentence
+#: beside the ``#general`` disclosure) also discloses engagement, and one
+#: named set keeps the two gates from drifting apart. A future version that
+#: discloses one but not the other must split them here, deliberately.
+ENGAGING_CONSENT_VERSIONS: frozenset[str] = DEFAULT_ON_CONSENT_VERSIONS
 
 #: The hold code a card waits under while the accepted consent does not allow
 #: engagement. A machine token, frozen on the wire (local-operator-ui #1325

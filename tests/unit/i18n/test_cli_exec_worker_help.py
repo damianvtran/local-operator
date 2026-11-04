@@ -12,11 +12,13 @@ What this file pins, and why each pin exists:
    the render must hand back ONE. This is the only transformation this slice is
    allowed to make, and it is the one most likely to be undone by a well-meaning
    "tidy up the double apostrophes" edit.
-3. **Translated copy + per-namespace fallback.** The namespace carries French
-   and Chinese translations: both must render their own catalogue, byte-for-byte.
-   A locale that does not carry this namespace (`es`, `ru`, `vi`, `hi`,
-   `unknown`) must still render the English source, not blank and not the
-   message code — the additive contract the programme depends on.
+3. **Translated copy + per-namespace fallback, both DERIVED.** Which shipped
+   locales carry this namespace is read from the committed catalogues: each must
+   render its own copy byte-for-byte, and every shipped locale without it must
+   render the English source, not blank and not the message code — the additive
+   contract the programme depends on. The hand-kept set this replaces is the
+   cautionary case: it still listed `es` as lacking the namespace after `es`
+   shipped it, so the assertion described a tree that no longer existed.
 4. **The ratchet, both ways.** The file is ACTIVATED (its exact path in
    `enforced`, no ceiling left in `files`), and a reintroduced literal in a real
    sink is rejected by the production scanner — the negative control that makes
@@ -35,8 +37,8 @@ from pathlib import Path
 import local_operator
 from local_operator.i18n import catalogues, messages
 from local_operator.i18n.keys import cli_exec_worker_help as keys
-from local_operator.i18n.runtime import render_message
 from local_operator.i18n.text import tr
+from tests.unit.i18n import locale_coverage
 
 _t = tr("cli.exec_worker_help")
 _ROOT = Path(local_operator.__file__).resolve().parent.parent
@@ -114,9 +116,15 @@ def _help_literals() -> dict[str, str]:
         # rejects nothing that used to be accepted.
         if not isinstance(option, str) or keyword is None:
             continue
-        # The extraction replaced each `help=` value with `_t(_ehw.<key>())`;
-        # the assertion below is that NO such site is still a bare literal.
-        if not isinstance(keyword.value, ast.Call):
+        # The extraction replaced each `help=` value with a render point. TWO
+        # shapes are legitimate: the process-locale resolver `_t(_ehw.<key>())`
+        # and the read-only help render
+        # `<key>().envelope(locale=help_locale)["text"]` — the shape
+        # `cli.build_cli_parser` and `exec_startup` already use, and the one that
+        # lets `--help` follow the config without waiting for a boot activation
+        # (`parse_args` exits before one could run). A bare string constant is
+        # the reverted state under either.
+        if isinstance(keyword.value, ast.Constant):
             raise AssertionError(
                 f"{option}: help= is still a literal — the extraction was reverted"
             )
@@ -146,7 +154,7 @@ def _collapse(text: str) -> str:
     return " ".join(text.split())
 
 
-def test_every_help_literal_renders_byte_for_byte() -> None:
+def test_every_help_literal_renders_byte_for_byte(monkeypatch) -> None:
     """The rendered English equals the string argparse used to receive.
 
     The catalogue value is the ICU SOURCE (a literal apostrophe is doubled for
@@ -157,10 +165,15 @@ def test_every_help_literal_renders_byte_for_byte() -> None:
     """
     from local_operator.exec_worker import build_parser
 
+    # This pins the source round-trip, not translation coverage. The parser
+    # resolves help independently of the process locale, so pin both paths.
+    monkeypatch.setenv("LOP_LANG", "en")
     rendered_help = _collapse(build_parser().format_help())
-    for key, source in _catalogue().items():
-        rendered = _t(messages.msg(key))
-        assert rendered == source.replace("''", "'"), key
+    for key in _catalogue():
+        rendered = messages.render(key, {}, locale="en")
+        # Compare to the frozen argparse literal, not another projection of the
+        # same catalogue: otherwise changing a --flag changes both sides.
+        assert rendered == REPLACED_LITERALS[key.rsplit(".", 1)[1]], key
         assert _collapse(rendered) in rendered_help, f"{key}: {rendered!r} is not shown by --help"
 
 
@@ -180,20 +193,16 @@ def test_every_generated_message_is_zero_argument() -> None:
         assert function().params == {}
 
 
-def test_translated_locales_use_their_copy_and_others_fall_back_to_english() -> None:
-    french = catalogues.load_catalogue("fr", NAMESPACE)
-    chinese = catalogues.load_catalogue("zh-CN", NAMESPACE)
-    for function in (keys.prompt(), keys.resume(), keys.job_id()):
-        english = messages.render(function.code, function.params, locale="en")
-        for locale, catalogue in (("fr", french), ("zh-CN", chinese)):
-            rendered = messages.render(function.code, function.params, locale=locale)
-            # The locale carries the namespace: the catalogue is the expected
-            # bytes, and it must be a real translation, not the English source.
-            assert rendered == render_message(catalogue[function.code], function.params, locale)
-            assert rendered != english
-        # Every locale without this namespace still falls back to the source.
-        for locale in ("es", "ru", "vi", "hi", "unknown"):
-            assert messages.render(function.code, function.params, locale=locale) == english
+def test_supported_locales_use_carried_keys_or_english() -> None:
+    for message in (keys.prompt(), keys.resume(), keys.job_id()):
+        for locale in locale_coverage.supported_targets():
+            expected = locale_coverage.expected_message(
+                locale, NAMESPACE, message.code, message.params
+            )
+            assert messages.render(message.code, message.params, locale=locale) == expected, locale
+        assert messages.render(message.code, message.params, locale="unknown") == messages.render(
+            message.code, message.params, locale="en"
+        )
 
 
 def test_every_key_carries_full_context() -> None:

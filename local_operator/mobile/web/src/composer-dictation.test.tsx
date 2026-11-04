@@ -19,6 +19,7 @@ vi.mock("./api", async (importOriginal) => {
 	return {
 		...actual,
 		getCommands: vi.fn(async () => ({ commands: [] })),
+		getSkills: vi.fn(async () => ({ skills: [] })),
 		getModels: vi.fn(async () => ({ models: [] })),
 		sendCommand: vi.fn(async (_sessionId: string, _op: Record<string, unknown>) => ({
 			ok: true,
@@ -129,7 +130,7 @@ function renderComposer() {
 }
 
 function field(): HTMLTextAreaElement {
-	return screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
+	return screen.getByPlaceholderText("Ask anything…") as HTMLTextAreaElement;
 }
 
 function availableCapability(): Capabilities {

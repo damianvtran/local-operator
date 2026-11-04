@@ -83,11 +83,33 @@ SCHEMA = 1
 APPROVALS_DIRNAME = "approvals"
 INDEX_FILENAME = "index.jsonl"
 
-#: The two kinds v1 mints. An OPEN enum: a record with another kind parses (the
-#: fold helpers are kind-agnostic) but nothing here creates one.
+#: The kinds this build MINTS. An OPEN enum: a record with another kind parses (the fold
+#: helpers are kind-agnostic) but nothing here creates one.
 KIND_DEVICE_ONBOARD = "device_onboard"
 KIND_LOCAL_AUTHORITY = "local_authority"
-KINDS: tuple[str, ...] = (KIND_DEVICE_ONBOARD, KIND_LOCAL_AUTHORITY, enrollment.KIND)
+#: A phone asking to become a signer of this computer (``operator/pair_op.py``). Filed by
+#: the phone through the relay, decided on the desktop's typed card, applied by issuing the
+#: device certificate. Its own kind rather than ``device_onboard``: it carries a device
+#: block but installs nothing over SSH and runs no steps, and the two must not be reachable
+#: from each other's runner or card text.
+KIND_OPERATOR_DEVICE_PAIR = "operator_device_pair"
+KINDS: tuple[str, ...] = (
+    KIND_DEVICE_ONBOARD,
+    KIND_LOCAL_AUTHORITY,
+    enrollment.KIND,
+    KIND_OPERATOR_DEVICE_PAIR,
+)
+
+#: The envelope block each kind files, and therefore the block ``request_digest`` binds in
+#: place of the other. ONE table (S4a-pair-op): the sibling blocks REPLACE each other
+#: (§2.2), and a kind added to ``KINDS`` without a row here is a ``KeyError`` at filing
+#: rather than a silently machine-less or device-less record.
+_SUBJECT_BLOCKS: dict[str, str] = {
+    KIND_DEVICE_ONBOARD: "device",
+    enrollment.KIND: "device",
+    KIND_OPERATOR_DEVICE_PAIR: "device",
+    KIND_LOCAL_AUTHORITY: "machine",
+}
 
 STATE_REQUESTED = "requested"
 STATE_APPROVED = "approved"
@@ -360,12 +382,12 @@ def _immutable_request(record: Mapping[str, Any]) -> dict[str, Any]:
     """The fields the request digest binds (§2.2, F1).
 
     Exactly ``{kind, requested_by, device|machine, what, credential_ref,
-    created_at, expires_at}``: the device block for ``device_onboard``, the
-    machine block for ``local_authority`` (the sibling kind REPLACES the block,
-    §2.2). Everything else — state, receipts, the signature, the id itself — is
-    mutable or informational and deliberately outside the digest.
+    created_at, expires_at}``: the subject block :data:`_SUBJECT_BLOCKS` names for this
+    kind (one table, so the digest and the filing validation cannot disagree about which
+    block a kind carries). Everything else — state, receipts, the signature, the id itself —
+    is mutable or informational and deliberately outside the digest.
     """
-    block_key = "machine" if record.get("kind") == KIND_LOCAL_AUTHORITY else "device"
+    block_key = _SUBJECT_BLOCKS.get(str(record.get("kind") or ""), "device")
     return {
         "kind": record.get("kind"),
         "requested_by": record.get("requested_by"),
@@ -666,6 +688,24 @@ def _require(condition: bool, message: str) -> None:
         raise MeshRefusal("approval_invalid", message)
 
 
+def _pair_filing_guard(record: Mapping[str, Any], root: Path | None) -> None:
+    """The ``operator_device_pair`` filing guard, imported LAZILY on purpose.
+
+    This store is stdlib-only at import (the relay and the CLI load it without the operator
+    package), so the operator module is reached only when a pairing record is actually
+    filed. It raises the op's own refusal, so filing and the card speak the same words.
+    """
+    from local_operator.operator import pair_op
+
+    pair_op.require_filing_shape(record, root)
+
+
+#: Per-kind validators run INSIDE ``create_request``, before the record is written.
+#: A kind absent here files with the envelope checks alone (its payload is validated by
+#: whichever op signs it); a kind present is refused here rather than at the signer.
+_FILING_GUARDS: dict[str, Any] = {KIND_OPERATOR_DEVICE_PAIR: _pair_filing_guard}
+
+
 def create_request(
     *,
     kind: str,
@@ -708,12 +748,14 @@ def create_request(
     surface = str(requested_by.get("surface") or "")
     _require(0 < len(surface) <= _SURFACE_LIMIT, "requested_by.surface must name the surface")
     restricted = kind == enrollment.KIND
-    if kind in (KIND_DEVICE_ONBOARD, enrollment.KIND):
-        _require(isinstance(device, Mapping), "a device_onboard request needs a device block")
-        _require(machine is None, "device_onboard carries a device block, not a machine block")
-    else:
-        _require(isinstance(machine, Mapping), "a local_authority request needs a machine block")
-        _require(device is None, "local_authority carries a machine block, not a device block")
+    block_key = _SUBJECT_BLOCKS[kind]
+    block, other = (device, machine) if block_key == "device" else (machine, device)
+    _require(isinstance(block, Mapping), f"a {kind} request needs a {block_key} block")
+    _require(
+        other is None,
+        f"{kind} carries a {block_key} block, not a "
+        f"{'machine' if block_key == 'device' else 'device'} block",
+    )
 
     moment = time.time()
     record: dict[str, Any] = {
@@ -736,13 +778,19 @@ def create_request(
         record["expires_at"] = float(expires_at)
     else:
         record["expires_at"] = record["created_at"] + DEFAULT_EXPIRY_S
-    if kind in (KIND_DEVICE_ONBOARD, enrollment.KIND):
+    if block_key == "device":
         record["device"] = dict(device or {})
     else:
         record["machine"] = dict(machine or {})
     if restricted:
         record["authority_version"] = enrollment.VERSION
     else:
+        # FILING GUARD (S4a-pair-op): a kind whose payload can be refused at filing is
+        # refused there, not at the signer -- a record this build cannot describe must not
+        # become a card a person is asked about.
+        guard = _FILING_GUARDS.get(kind)
+        if guard is not None:
+            guard(record, root)
         record["request_digest"] = request_digest(record)
 
     # The create target's lock is keyed on the REQUEST id: the approval id does
@@ -948,6 +996,13 @@ def _anchor_installed() -> bool:
         return False
 
 
+#: The EXACT key set of a record's ``what.anchor`` block: the provenance trio
+#: :func:`local_anchor_trio` returns (minus the public point). ONE definition for every
+#: typed op that mints or validates an anchor (#3087 review r1, R1-1): the anchor is inside
+#: ``request_digest``, so an op that accepted a fourth key would have it signed unseen.
+ANCHOR_KEYS = frozenset({"key_id", "spki_fp", "statement_digest"})
+
+
 def local_anchor_trio(root: Path | None = None) -> dict[str, Any] | None:
     """``{key_id, spki_fp, statement_digest, spki}`` from the LOCAL operator store.
 
@@ -1142,6 +1197,18 @@ def _record_decision(
                 }
             )
         _require_transition(record, target)
+        if decision == "approve":
+            # THE PER-KIND DECISION GUARD (S4a-pair-op). A pairing is the one decision that
+            # issues a STANDING signer, and its first lock is a code the person transcribed
+            # from the phone. ``check_ack`` runs that check BEFORE the caller reaches its
+            # signer; this is the write-side half of the same rule, so a signature obtained
+            # any other way -- a future route, a script, a surface that grows an approve
+            # button -- is never RECORDED. ``approval_ops`` already refuses this kind on both
+            # generic approvers, which is what keeps those surfaces from signing at all.
+            if str(record.get("kind")) == KIND_OPERATOR_DEVICE_PAIR:
+                from local_operator.operator import pair_op
+
+                pair_op.require_acked(record)
 
         decided = float(decided_at if decided_at is not None else moment)
         signature: dict[str, Any] | None = None
@@ -1260,6 +1327,13 @@ def _record_decision(
             root=root,
             detail=audit_detail,
         )
+        if decision == "approve" and str(record.get("kind")) == KIND_OPERATOR_DEVICE_PAIR:
+            # The pairing's own row beside the store's generic one: WHICH device was made a
+            # signer, under which key, and at what assurance (``presence`` proves a person
+            # signed; ``file_only`` does not). ``operator/pair_op.py`` owns the vocabulary.
+            from local_operator.operator import pair_op
+
+            pair_op.audit_signed(record, approval_id, root)
         return presented(record, moment)
 
 
@@ -1724,6 +1798,56 @@ def mark_failed(
             subject=approval_id,
             root=root,
             detail={"kind": str(record.get("kind")), "step": str(step)},
+        )
+        return presented(record)
+
+
+def append_stopped_receipt(
+    approval_id: str,
+    *,
+    run_id: str,
+    step: str,
+    detail: str = "",
+    root: Path | None = None,
+) -> dict[str, Any] | None:
+    """The failed receipt for a run a mid-run DENY stopped; the state stays ``denied``.
+
+    WHY A SEPARATE WRITER: ``connecting → denied`` is a matrix row whose receipt
+    promises "the runner stops at its next step check", and the runner that stops
+    must leave a receipt saying so. ``append_receipt`` refuses every record that is
+    not ``connecting`` and ``mark_failed`` refuses ``denied → failed`` (the deny is
+    final), so neither can write it. This writer is narrow on purpose: it lands
+    ONLY on a ``denied`` record, never touches ``state``/``signature`` (F3), and
+    answers ``None`` without writing when the record is in any other state, since
+    that record belongs to whichever writer moved it (agent review round 4, n1:
+    this used to live in ``operator/pair_op.py``, reaching into the store's
+    private helpers with no audit line).
+    """
+    _require(bool(str(step)), "a receipt needs a step name")
+    with _record_lock(approval_id, root):
+        record = _load_raw(approval_id, root)
+        if str(record.get("state")) != STATE_DENIED:
+            return None
+        record.setdefault("receipts", []).append(
+            {
+                "run_id": str(run_id),
+                "step": str(step),
+                "at": time.time(),
+                "ok": False,
+                "detail": str(detail)[:400],
+                "digest": "",
+            }
+        )
+        _write_record(record, root)
+        # The run DID fail, so the existing event is the true one; the record's own
+        # ``audit`` fold is left alone because its last entry, ``onboard_denied``, is
+        # the record's state and must stay so.
+        _audit(
+            "onboard_failed",
+            actor="self",
+            subject=approval_id,
+            root=root,
+            detail={"kind": str(record.get("kind")), "step": str(step), "run_id": str(run_id)},
         )
         return presented(record)
 

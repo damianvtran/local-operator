@@ -1,7 +1,10 @@
 """Frozen-clock account policy contracts; no stores, credentials or probes."""
 
+import asyncio
 import math
+from datetime import UTC, datetime
 
+import httpx
 import pytest
 
 from local_operator.providers.account_policy import (
@@ -10,7 +13,12 @@ from local_operator.providers.account_policy import (
     reset_candidate,
     reset_ranked_ids,
 )
-from local_operator.providers.usage import UsageAmount, UsageLimit, UsageReport
+from local_operator.providers.usage import (
+    UsageAmount,
+    UsageLimit,
+    UsageReport,
+    fetch_usage,
+)
 
 NOW = 1_800_000_000_000
 
@@ -181,3 +189,123 @@ def test_five_hour_fallback_and_no_fabricated_paid_period():
     assert reset_ranked_ids(rows, "x") == [2, 1]
     paid = reset_candidate(1, report(limit("lifetime", None, paid=True)), "m", NOW)
     assert paid.weekly_ms is None and paid.five_hour_ms is None
+
+
+def test_a_fresh_depletion_states_when_every_spent_window_reopens():
+    """2026-10-28: the broker's ``quota_blocked`` remainder is the LATEST spent reset.
+
+    Both spent windows must reopen before the account can serve, so the earliest
+    of them would be a time the account can still refuse; a window with headroom
+    does not gate the reopening at all.
+    """
+    both = reset_candidate(
+        1,
+        report(limit("5 hour", 600_000, 1), limit("7 day", 900_000, 1), limit("7 day", 50_000)),
+        "m",
+        NOW,
+    )
+    assert both.state == "depleted"
+    assert both.reopens_at_ms == NOW + 900_000
+
+
+def test_a_reopening_is_never_stated_without_fresh_proof():
+    """Stale evidence, a spent window with no reset, or any non-depleted verdict: None."""
+    stale = reset_candidate(1, report(limit("5 hour", 600_000, 1), age=1_800_001), "m", NOW)
+    assert stale.state == "depleted" and stale.reopens_at_ms is None
+    unstated = reset_candidate(1, report(limit("5 hour", None, 1)), "m", NOW)
+    assert unstated.state == "depleted" and unstated.reopens_at_ms is None
+    healthy = reset_candidate(1, report(limit("5 hour", 600_000, 0.2)), "m", NOW)
+    assert healthy.state == "healthy" and healthy.reopens_at_ms is None
+    assert reset_candidate(1, None, "m", NOW).reopens_at_ms is None
+
+
+def test_a_garbled_far_future_reset_never_becomes_a_proven_reopening():
+    """#3108 review m2: the ranking path's sanity window bounds the reopening too.
+
+    A 5-hour window that claims to reset two years out is garbled evidence. The
+    verdict stays ``depleted`` (the account is spent), but no reopening is proven,
+    so the owner cannot turn the garbage into its retry figure. The tolerance edge
+    still counts, and an unrecognised window proves nothing.
+    """
+    garbled = reset_candidate(1, report(limit("5 hour", 2 * 365 * 86_400_000, 1)), "m", NOW)
+    assert garbled.state == "depleted" and garbled.reopens_at_ms is None
+    edge = 5 * 3_600_000 + 60_000
+    assert reset_candidate(1, report(limit("5 hour", edge, 1)), "m", NOW).reopens_at_ms == (
+        NOW + edge
+    )
+    assert reset_candidate(1, report(limit("5 hour", edge + 1, 1)), "m", NOW).reopens_at_ms is None
+    odd = reset_candidate(1, report(limit("lifetime", 600_000, 1)), "m", NOW)
+    assert odd.state == "depleted" and odd.reopens_at_ms is None
+
+
+def _parsed_verified_ultra(*, weekly_reset_ms: int, age_ms: int) -> UsageReport:
+    """The live verified-Ultra payload (2026-10-30), run through the real parser.
+
+    Synthetic values on the measured shape: an idle ``five_hour`` bucket
+    (0.0, every other field null) and an idle ``session`` entry, beside a 100%
+    weekly window. Parsing it here — rather than hand-building limits — is the
+    point: the defect was the parser turning the idle bucket into a measured
+    window with no reset, which made a stale report "unknown".
+    """
+    reset_iso = datetime.fromtimestamp(weekly_reset_ms / 1000, UTC).isoformat()
+    payload = {
+        "five_hour": {
+            "utilization": 0.0,
+            "resets_at": None,
+            "limit_dollars": None,
+            "used_dollars": None,
+            "remaining_dollars": None,
+            "locked_reason": None,
+        },
+        "seven_day": {"utilization": 100.0, "resets_at": reset_iso},
+        "limits": [
+            {
+                "kind": "session",
+                "group": "g",
+                "percent": 0,
+                "severity": "normal",
+                "resets_at": None,
+                "scope": None,
+                "is_active": False,
+            },
+            {
+                "kind": "weekly_all",
+                "group": "g",
+                "percent": 100,
+                "severity": "critical",
+                "resets_at": reset_iso,
+                "scope": None,
+                "is_active": True,
+            },
+        ],
+    }
+
+    async def fetch() -> UsageReport | None:
+        transport = httpx.MockTransport(lambda _request: httpx.Response(200, json=payload))
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await fetch_usage(client, "anthropic", access_token="tok")
+
+    parsed = asyncio.run(fetch())
+    assert parsed is not None
+    parsed.fetched_at = NOW - age_ms
+    return parsed
+
+
+@pytest.mark.parametrize("age_ms", [60_000, 3 * 3_600_000])
+def test_verified_ultra_weekly_exhaustion_binds_fresh_and_stale(age_ms):
+    """2026-10-30: a verified-Ultra account at 100% weekly must stay depleted.
+
+    The idle five-hour bucket used to parse as a 0% window with no reset; a
+    stale report (3h old) with any reset-less measured window is "unknown", so
+    failover could re-pick a weekly-exhausted account. With the bucket dropped
+    the weekly window binds: depleted, no five-hour deadline, and (fresh) the
+    reopening is the weekly reset.
+    """
+    weekly_reset = NOW + 2 * 86_400_000
+    report = _parsed_verified_ultra(weekly_reset_ms=weekly_reset, age_ms=age_ms)
+    assert [limit.id for limit in report.limits] == ["anthropic:7d"]
+    candidate = reset_candidate(1, report, "claude-opus", NOW)
+    assert candidate.state == "depleted"
+    assert candidate.five_hour_ms is None
+    fresh = age_ms <= 1_800_000
+    assert candidate.reopens_at_ms == (weekly_reset if fresh else None)

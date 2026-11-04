@@ -2556,12 +2556,13 @@ class TestServiceDaemonRefresh:
         from local_operator import launchd
         from local_operator.browser_bridge import install as browser_install
         from local_operator.network import relay as relay_install
+        from local_operator.team_bridge.connector import install as connector_install
         from local_operator.tunnels import install as tunnel_install
         from local_operator.wakes import install as wakes_install
 
         written: dict[str, str] = {}
         buffer = io.StringIO()
-        barrier = threading.Barrier(4)
+        barrier = threading.Barrier(5)
         breached: list[bool] = []
 
         def repair_for(name: str):
@@ -2586,6 +2587,7 @@ class TestServiceDaemonRefresh:
             (tunnel_install, "tunnel"),
             (wakes_install, "wakes supervisor"),
             (relay_install, "network relay"),
+            (connector_install, "bridge connector"),
         ):
             monkeypatch.setattr(module, "refresh_plist_if_stale", repair_for(name))
 
@@ -2594,7 +2596,13 @@ class TestServiceDaemonRefresh:
 
         steps = update_mod._refresh_steps()
         names = tuple(name for name, _recovery, _repair in steps)
-        assert names == ("browser bridge", "tunnel", "wakes supervisor", "network relay")
+        assert names == (
+            "browser bridge",
+            "tunnel",
+            "wakes supervisor",
+            "network relay",
+            "bridge connector",
+        )
         assert sorted(written) == sorted(names), "every daemon was repaired"
         assert len(breached) == len(names), "every repair reached the barrier"
         assert all(breached), "the repairs did not run concurrently"
@@ -2803,6 +2811,7 @@ class TestServiceDaemonRefresh:
         from local_operator.browser_bridge import install as browser_install
         from local_operator.mobile import install as mobile_install
         from local_operator.network import relay as relay_install
+        from local_operator.team_bridge.connector import install as connector_install
         from local_operator.tunnels import install as tunnel_install
         from local_operator.wakes import install as wakes_install
 
@@ -2837,6 +2846,7 @@ class TestServiceDaemonRefresh:
                 tunnel_install,
                 wakes_install,
                 relay_install,
+                connector_install,
             ):
                 stack.enter_context(
                     patch.object(
@@ -2876,6 +2886,7 @@ class TestServiceDaemonRefresh:
         from local_operator import launchd
         from local_operator.browser_bridge import install as browser_install
         from local_operator.network import relay as relay_install
+        from local_operator.team_bridge.connector import install as connector_install
         from local_operator.tunnels import install as tunnel_install
         from local_operator.wakes import install as wakes_install
 
@@ -2887,6 +2898,7 @@ class TestServiceDaemonRefresh:
             (tunnel_install, launchd.PlistRefresh("tunnel", "failed", "boom")),
             (wakes_install, launchd.PlistRefresh("wakes supervisor", "repaired")),
             (relay_install, launchd.PlistRefresh("network relay", "current")),
+            (connector_install, launchd.PlistRefresh("bridge connector", "current")),
         )
         with (
             patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
@@ -2908,6 +2920,7 @@ class TestServiceDaemonRefresh:
             update_mod._daemon_report_line("tunnel", "failed"),
             update_mod._daemon_report_line("wakes supervisor", "refreshed"),
             update_mod._daemon_report_line("network relay", "already"),
+            update_mod._daemon_report_line("bridge connector", "already"),
         }
         assert captured.err.splitlines() == ["warning: tunnel daemon was not refreshed: boom"]
 

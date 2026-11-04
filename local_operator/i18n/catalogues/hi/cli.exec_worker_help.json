@@ -1,0 +1,13 @@
+{
+  "cli.exec_worker_help.agent": "एजेंट नाम चयनकर्ता",
+  "cli.exec_worker_help.agent_id": "एजेंट id",
+  "cli.exec_worker_help.control": "इस रन के लिए सत्र रिकॉर्ड प्रकाशित करें और कंट्रोल सॉकेट सर्व करें",
+  "cli.exec_worker_help.hosting": "होस्टिंग प्लेटफ़ॉर्म ओवरराइड",
+  "cli.exec_worker_help.job_id": "लेजर जॉब id; सेट होने पर वर्कर बाहर निकलते समय JSONL लेजर में टर्मिनल रिकॉर्ड (finished_at + exit_code) जोड़ता है",
+  "cli.exec_worker_help.json": "हर एजेंट इवेंट के लिए एक JSON पंक्ति उत्सर्जित करें",
+  "cli.exec_worker_help.model": "मॉडल ओवरराइड",
+  "cli.exec_worker_help.prompt": "निष्पादित किया जाने वाला प्रॉम्प्ट",
+  "cli.exec_worker_help.resume": "id द्वारा पिछला सत्र फिर शुरू करें (या ''@latest'')",
+  "cli.exec_worker_help.train": "ट्रेनिंग मोड: ट्रांसक्रिप्ट को एजेंट डायरेक्टरी में जोड़ें (पुराना --train)",
+  "cli.exec_worker_help.yolo": "सभी टूल स्तर अपने-आप स्वीकृत करें"
+}

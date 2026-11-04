@@ -1,3 +1,4 @@
+import { contentDir } from "../lib/content-direction";
 import { useScrollCues } from "../lib/use-scroll-cues";
 import { usePriorityFit } from "../lib/use-priority-fit";
 /**
@@ -81,6 +82,7 @@ import { getGroupTags, setGroupTags } from "../lib/session-group-pref";
 import { groupByPrimaryTag, hasGroupedRows } from "../lib/session-grouping";
 import type { SessionSummary, TagCatalogueEntry } from "../types";
 import { cn } from "../lib/cn";
+import { AvatarWithStatus, useAgentAvatar } from "../components/agent-avatar";
 
 /** What a successful bulk clear says it did — naming every bucket it missed.
 
@@ -343,6 +345,9 @@ function SessionCard({
 	/* The second line's cwd half, computed once so the D1 reservation below can
 	   test emptiness against exactly what is rendered. */
 	const cwdText = (home ? shortenHome(s.cwd, home) : s.cwd).split("/").filter(Boolean).at(-1) ?? "";
+	/* The bound agent's picture; `avatar.url` is null again if it failed to load,
+	   and the row then lays out exactly as a pictureless one. */
+	const avatar = useAgentAvatar(s.agent_id, s.avatar_sha256);
 	return (
 		<button
 			ref={ref}
@@ -381,7 +386,7 @@ function SessionCard({
 				}
 				navigate(`/s/${encodeURIComponent(s.session_id)}`);
 			}}
-			className="flex min-h-14 w-full flex-col justify-center gap-0.5 ps-4 pe-11 py-2 text-start select-none active:bg-surface"
+			className="group flex min-h-14 w-full flex-col justify-center gap-0.5 ps-4 pe-11 py-2 text-start select-none active:bg-surface"
 		>
 			<div className="flex items-center gap-2">
 				{/* ONE reserved indicator slot serving every state, so every title
@@ -409,49 +414,60 @@ function SessionCard({
 				    shimmer (applied below whenever `s.streaming`), which is
 				    sufficient and costs no geometry — a second mark would have
 				    to come out of the same 12px box the alignment depends on. */}
-				<span
-					className="flex size-3 shrink-0 items-center justify-center"
-					aria-hidden={!decision && s.streaming ? undefined : true}
-				>
-					{decision ? (
-						<span className="lo-pulse inline-block size-1.5 rounded-full bg-danger" />
-					) : s.streaming ? (
-						/* The obvious in-progress mark beside the title: a small
-						   loading wheel, not just the text sweep — the sweep alone
-						   was too subtle to catch at a glance. */
-						<Spinner />
-					) : unread ? (
-						<span className="inline-block size-1.5 rounded-full bg-accent" />
-					) : delegating ? (
-						/* DELEGATING — the parent's own turn is not running but it still
-						   owns children. BELOW unread on purpose: the unread dot is a
-						   receipt for an outcome the operator has not seen yet, and a
-						   receipt must never be masked by live activity (the same rule
-						   the desktop and TUI ladders follow). ABOVE plain idle, which
-						   is the whole point of the state.
+				{/* THE AGENT'S PICTURE, when the row's session is bound to an agent
+				    that has one. The status slot below is passed in UNCHANGED and kept
+				    as a corner badge (see `components/agent-avatar.tsx`): status must
+				    stay legible, so the picture never replaces the ladder. A row with
+				    no picture renders the slot exactly as before. */}
+				<AvatarWithStatus
+					avatar={avatar}
+					hasStatus={decision || s.streaming || unread || delegating}
+					status={
+					<span
+						className="flex size-3 shrink-0 items-center justify-center"
+						aria-hidden={!decision && s.streaming ? undefined : true}
+					>
+						{decision ? (
+							<span className="lo-pulse inline-block size-1.5 rounded-full bg-danger" />
+						) : s.streaming ? (
+							/* The obvious in-progress mark beside the title: a small
+							   loading wheel, not just the text sweep — the sweep alone
+							   was too subtle to catch at a glance. */
+							<Spinner />
+						) : unread ? (
+							<span className="inline-block size-1.5 rounded-full bg-accent" />
+						) : delegating ? (
+							/* DELEGATING — the parent's own turn is not running but it still
+							   owns children. BELOW unread on purpose: the unread dot is a
+							   receipt for an outcome the operator has not seen yet, and a
+							   receipt must never be masked by live activity (the same rule
+							   the desktop and TUI ladders follow). ABOVE plain idle, which
+							   is the whole point of the state.
 
-						   TWO 4px DOTS rather than one, because this package carries no
-						   icon dependency and a single dot would be indistinguishable
-						   from the unread mark sitting one rung above it in the same
-						   slot and the same accent ink. The pair reads as "more than
-						   one thing moving", and the SHAPE is what separates the two
-						   states — the TUI's own reasoning for putting `⇉` in its
-						   column instead of recolouring `●`.
+							   TWO 4px DOTS rather than one, because this package carries no
+							   icon dependency and a single dot would be indistinguishable
+							   from the unread mark sitting one rung above it in the same
+							   slot and the same accent ink. The pair reads as "more than
+							   one thing moving", and the SHAPE is what separates the two
+							   states — the TUI's own reasoning for putting `⇉` in its
+							   column instead of recolouring `●`.
 
-						   2 × 4px + 2px gap = 10px inside the existing 12px slot, so the
-						   ladder's geometry and the title's start x are untouched. The
-						   dots are aria-hidden (the slot already is): the COUNT is
-						   carried as text by the chip below, which is what a screen
-						   reader should hear — a decorative mark is the wrong place
-						   for a number. */
-						<span className="flex items-center gap-[2px]">
-							<span className="inline-block size-1 rounded-full bg-accent" />
-							<span className="inline-block size-1 rounded-full bg-accent" />
-						</span>
-					) : (
-						<span className="inline-block size-1.5 rounded-full bg-transparent" />
-					)}
-				</span>
+							   2 × 4px + 2px gap = 10px inside the existing 12px slot, so the
+							   ladder's geometry and the title's start x are untouched. The
+							   dots are aria-hidden (the slot already is): the COUNT is
+							   carried as text by the chip below, which is what a screen
+							   reader should hear — a decorative mark is the wrong place
+							   for a number. */
+							<span className="flex items-center gap-[2px]">
+								<span className="inline-block size-1 rounded-full bg-accent" />
+								<span className="inline-block size-1 rounded-full bg-accent" />
+							</span>
+						) : (
+							<span className="inline-block size-1.5 rounded-full bg-transparent" />
+						)}
+					</span>
+					}
+				/>
 				{decision && s.streaming ? (
 					/* The "working" announcement for assistive tech, carried as TEXT
 					   rather than as a mark in the slot. The spinner owns
@@ -469,6 +485,7 @@ function SessionCard({
 					</span>
 				) : null}
 				<span
+					dir={contentDir(s.conversation_name || "untitled")}
 					className={cn(
 						"min-w-0 flex-1 truncate text-body font-medium",
 						s.streaming && "lo-shimmer",
@@ -496,9 +513,15 @@ function SessionCard({
 			    line box to every untagged row and make the list's density depend on
 			    which conversations happen to be tagged, the same defect class the
 			    blank second line had. A tagged row grows by exactly one line. */}
-			<div className="flex min-w-0 items-center gap-2 ps-5 text-meta tabular-nums text-ink-dim">
+			{/* The second line starts under the title: slot (12px) + gap = ps-5, or the
+			    24px picture + gap = ps-8 on a row that draws one. */}
+			<div className={cn("flex min-w-0 items-center gap-2 text-meta tabular-nums text-ink-dim", avatar.url ? "ps-8" : "ps-5")}>
 				<SessionTagLine tags={s.tags ?? []} primary={s.primary ?? null} className="max-w-[45%] shrink-0" />
-				<span className="min-w-0 truncate">{[
+				<span dir={contentDir([
+					s.streaming ? messageRuntime.t("relay.chrome.session.subtitle.working_plain") : null,
+					delegating ? delegatedChip(children) : null,
+					s.todos_open ? `${s.todos_open} todo` : null,
+					!s.tags?.length ? cwdText : null].filter(Boolean).join(" · ") || "\u00a0")} className="min-w-0 truncate">{[
 					s.streaming ? messageRuntime.t("relay.chrome.session.subtitle.working_plain") : null,
 					delegating ? delegatedChip(children) : null,
 					s.todos_open ? `${s.todos_open} todo` : null,
@@ -551,10 +574,10 @@ function ThemePicker({
 							{t.id === current ? "✓" : ""}
 						</span>
 						<span className="min-w-0 flex-1">
-							<span className="block truncate text-body">
+							<span dir={contentDir(t.name)} className="block truncate text-body">
 								{t.name}
 							</span>
-							<span className="block truncate text-meta text-ink-dim">
+							<span dir={contentDir(t.description)} className="block truncate text-meta text-ink-dim">
 								{t.description}
 							</span>
 						</span>
@@ -1456,7 +1479,7 @@ export function SessionListScreen() {
 					aria-label={messageRuntime.t("relay.chrome.list.search_label")} placeholder={messageRuntime.t("relay.session.list.search_placeholder")}
 					className="min-h-11 min-w-0 flex-1 rounded-md bg-elevated px-3 text-body text-ink placeholder:text-ink-dim" /> :
 					<div className="flex min-w-0 flex-1 items-center gap-2"><BrandMark />
-						<div className="min-w-0 flex-1"><h1 className="truncate text-heading font-semibold">{messageRuntime.t("relay.chrome.drawer.conversations")}</h1>
+						<div className="min-w-0 flex-1"><h1 dir={contentDir(messageRuntime.t("relay.chrome.drawer.conversations"))} className="truncate text-heading font-semibold">{messageRuntime.t("relay.chrome.drawer.conversations")}</h1>
 							{sessions.length > 0 && !connected ? <p role="status" className="text-meta text-ink-dim">{messageRuntime.t("relay.chrome.link.reconnecting")}</p> : null}</div></div>}
 				<button type="button" className="flex size-11 shrink-0 items-center justify-center rounded-md text-ink-muted active:bg-surface"
 					aria-label={searchOpen ? messageRuntime.t("relay.chrome.list.search_close") : messageRuntime.t("relay.chrome.list.search_open")}
@@ -1484,7 +1507,7 @@ export function SessionListScreen() {
 				<Chip data-fit-fixed selected={filter === "all"} aria-pressed={filter === "all"} onClick={() => setFilter("all")} className="shrink-0 max-[380px]:px-2">{messageRuntime.t("relay.chrome.list.filter.all")}</Chip>
 				<Chip data-fit-fixed selected={filter === "needs"} aria-pressed={filter === "needs"} onClick={() => setFilter("needs")} className="shrink-0 max-[380px]:px-2">{messageRuntime.t("relay.chrome.list.filter.needs_you", { count: needsCount })}</Chip>
 				<Chip data-fit-fixed selected={filter === "unread"} aria-pressed={filter === "unread"} onClick={() => setFilter("unread")} className="shrink-0 max-[380px]:px-2">{messageRuntime.t("relay.chrome.list.filter.unread", { count: unreadCount })}</Chip>
-				{tagsAvailable ? visibleTags.map(tag => <Chip key={tag.id} data-fit-key={tag.id} className="min-w-0 max-w-40 shrink-0" title={tag.name} selected={filter === tag.id} aria-pressed={filter === tag.id} onClick={() => setFilter(tag.id)}><span className="truncate">{tag.name}</span></Chip>) : null}
+				{tagsAvailable ? visibleTags.map(tag => <Chip key={tag.id} data-fit-key={tag.id} className="min-w-0 max-w-40 shrink-0" title={tag.name} selected={filter === tag.id} aria-pressed={filter === tag.id} onClick={() => setFilter(tag.id)}><span dir={contentDir(tag.name)} className="truncate">{tag.name}</span></Chip>) : null}
 				{/* ONE TAP TO EVERY TAG. The visible mark is `+N`; its accessible
 				    name is the existing "N more tags" sentence (the tag line's own
 				    `+N` mark, same meaning). The sheet lists EVERY tag, so the
@@ -1496,7 +1519,7 @@ export function SessionListScreen() {
 			<Sheet open={tagFiltersOpen} onClose={() => setTagFiltersOpen(false)} title={messageRuntime.t("relay.session.tags.sheet_title")}>
 				<div className="flex flex-wrap gap-2 p-3">
 					{tags.map(tag => <Chip key={tag.id} className="min-w-0 max-w-full" selected={filter === tag.id} aria-pressed={filter === tag.id}
-						onClick={() => { setFilter(tag.id); setTagFiltersOpen(false); }}><span className="truncate">{tag.name}</span></Chip>)}
+						onClick={() => { setFilter(tag.id); setTagFiltersOpen(false); }}><span dir={contentDir(tag.name)} className="truncate">{tag.name}</span></Chip>)}
 				</div>
 			</Sheet>
 			<main ref={listCue} onPointerDown={onListPointerDown} onScroll={event => {

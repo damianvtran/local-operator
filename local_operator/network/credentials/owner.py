@@ -72,7 +72,7 @@ import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from local_operator.network.credentials import github as github_app
 from local_operator.network.credentials import placement as placement_mod
@@ -80,6 +80,8 @@ from local_operator.network.credentials.client import MeshCredentialClient
 from local_operator.network.credentials.messages import render_repair_notice
 from local_operator.network.credentials.placement import PlacementDocument
 from local_operator.network.credentials.types import (
+    QUOTA_REASON_HOLDER_EXCLUDED,
+    QUOTA_REASON_POOL_DEPLETED,
     BrokerError,
     CredentialPlacementEntry,
     CredentialRef,
@@ -89,10 +91,14 @@ from local_operator.network.credentials.types import (
     is_device_bound_provider,
     is_mcp_key,
     mcp_url_from_key,
+    peer_affinity,
     peer_credential_ids,
     peer_int,
     synthetic_credential_id,
 )
+
+if TYPE_CHECKING:  # the store is imported lazily (_auth_store_instance)
+    from local_operator.providers.auth_store import QuotaEligibility
 
 logger = logging.getLogger("local_operator.network.credentials.owner")
 
@@ -682,6 +688,20 @@ class MeshCredentialBroker:
         if peer_excluded:
             excluded_ids = tuple(sorted(set(excluded_ids) | set(peer_excluded)))
 
+        # 2e. THE BORROWER'S SELECTION INPUTS, so a remote session is load-balanced
+        #     the way a local one is (``lend_selection_context``): its warm-account
+        #     anchor (from ITS success receipt) and the rows its own requests just
+        #     saw fail server-side (5xx/529). Both only reorder THIS resolve, among
+        #     rows the peer may already be lent — nothing on the owner is pinned,
+        #     demoted or blocked on a peer's word (§2.1, F3). Absent from an older
+        #     borrower, which keeps today's lend exactly.
+        anchor = peer_affinity(frame.get("affinity"))
+        peer_demoted = peer_credential_ids(frame.get("demote_credential_ids"))
+        # The OWNER's ``retry.accountSelectionPolicy`` — the setting its own local
+        # sessions obey over the same pool. Read per lend, so a settings change
+        # reaches remote sessions as it reaches local ones, without a relay restart.
+        policy = self._selection_policy()
+
         # 3-5. Coalesce, resolve, audit. All on the owner's ONE loop.
         try:
             outcome = self._loop.submit(
@@ -695,6 +715,9 @@ class MeshCredentialBroker:
                     by=by,
                     excluded_ids=excluded_ids,
                     peer_excluded=peer_excluded,
+                    anchor=anchor,
+                    peer_demoted=peer_demoted,
+                    policy=policy,
                 ),
                 timeout=max(1.0, self._op_deadline_s - HANDLER_WAIT_MARGIN_S),
             )
@@ -733,6 +756,9 @@ class MeshCredentialBroker:
                 outcome.code,
                 outcome.message,
                 retry_after_ms=outcome.retry_after_ms,
+                # The arm marker must survive the re-shaping into the wire reply, or
+                # the borrower falls back to the 0-remainder rule (#3108 m1).
+                reason=outcome.reason,
             )
         grant: Grant = outcome
         # Recheck the actual requester after the asynchronous/coalesced result;
@@ -744,21 +770,31 @@ class MeshCredentialBroker:
         except MeshRefusal as exc:
             return self._refuse(link, key, provider, by, exc.code, str(exc))
         grant.latency_ms = int((time.monotonic() - started) * 1000)
+        ref = grant.credential_ref
+        detail: dict[str, Any] = {
+            "credential_key": key,
+            "act": self.self_device,
+            "sub": by,
+            "grant_id": grant.grant_id,
+            "credential_kind": ref.kind,
+            "scope": grant.scope.kind,
+            "refreshed": grant.refreshed,
+            "latency_ms": grant.latency_ms,
+            # The owner row lent (an id, never an email) and whether the borrower's
+            # anchor chose it. ``anchored`` is read off the RESULT: the selector
+            # puts an honoured anchor first, so the lent row equal to the anchor is
+            # exactly "the anchor was eligible and won".
+            "credential_id": int(ref.credential_id),
+            "anchored": anchor is not None
+            and (ref.credential_id, ref.account_created_at) == anchor,
+            "policy": policy,
+        }
         self._audit(
             "credential.grant",
             actor=self.self_device,
             subject=by,
             session_id=for_session,
-            detail={
-                "credential_key": key,
-                "act": self.self_device,
-                "sub": by,
-                "grant_id": grant.grant_id,
-                "credential_kind": grant.credential_ref.kind,
-                "scope": grant.scope.kind,
-                "refreshed": grant.refreshed,
-                "latency_ms": grant.latency_ms,
-            },
+            detail=detail,
         )
         return grant.to_detail()
 
@@ -782,6 +818,11 @@ class MeshCredentialBroker:
             # with different permitted rows must never share one resolve.
             tuple(fields.get("excluded_ids", ())),
             tuple(fields.get("peer_excluded", ())),
+            # The anchor and the peer's demotions change which row wins, so they
+            # are part of the question too.
+            fields.get("anchor"),
+            tuple(fields.get("peer_demoted", ())),
+            fields.get("policy", ""),
         )
         loop = asyncio.get_running_loop()
         slot = self._inflight.get(ckey)
@@ -821,11 +862,16 @@ class MeshCredentialBroker:
         by: str,
         excluded_ids: tuple[int, ...] = (),
         peer_excluded: tuple[int, ...] = (),
+        anchor: tuple[int, int] | None = None,
+        peer_demoted: tuple[int, ...] = (),
+        policy: str | None = None,
     ) -> Any:
         """The owner's own read-only resolve. Returns a :class:`Grant` or a refusal.
 
         ``peer_excluded`` is the subset of ``excluded_ids`` the REQUESTER named (its
         resting rows). It changes what may win: see the guard after the resolve.
+        ``anchor`` / ``peer_demoted`` are the requester's affinity anchor and 5xx
+        demotions, applied through ``lend_selection_context``.
         """
         if github_app.is_github_key(key):
             return await self._resolve_github(
@@ -844,27 +890,33 @@ class MeshCredentialBroker:
                 holder_scope=holder_scope,
                 by=by,
             )
+        from local_operator.providers.account_affinity import lend_selection_context
+
         store = self._auth_store_instance()
         before = self._row_stamps(provider)
         try:
-            access = await store.get_oauth_access(
-                provider,
-                for_session or None,
-                force_refresh=force,
-                # READ-ONLY ON THE OWNER (§2.1). A peer's request never writes
-                # stickiness and never blocks one of the owner's rows: a lender that
-                # let a borrower re-point the owner's own account would be a
-                # delegation that is not narrower than the delegator's, which is the
-                # rule §3.3 states. A successful refresh still persists the rotated
-                # token — that is the same account's own bookkeeping, and dropping it
-                # would throw away a single-use refresh token.
-                read_only=True,
-                model_id=model_id,
-                # Rows a derived holder's approval does not cover are hidden from THIS
-                # resolve only (nothing is blocked or repointed): they are neither
-                # picked nor refreshed on a peer's behalf.
-                exclude_credential_ids=excluded_ids or None,
-            )
+            # THE SAME SELECTOR A LOCAL TURN RUNS, fed the inputs a local turn has:
+            # the operator's selection policy, the borrower's warm-account anchor,
+            # and its 5xx demotions.
+            with lend_selection_context(policy, anchor, frozenset(peer_demoted)):
+                access = await store.get_oauth_access(
+                    provider,
+                    for_session or None,
+                    force_refresh=force,
+                    # READ-ONLY ON THE OWNER (§2.1). A peer's request never writes
+                    # stickiness and never blocks one of the owner's rows: a lender
+                    # that let a borrower re-point the owner's own account would be a
+                    # delegation that is not narrower than the delegator's, which is
+                    # the rule §3.3 states. A successful refresh still persists the
+                    # rotated token — that is the same account's own bookkeeping, and
+                    # dropping it would throw away a single-use refresh token.
+                    read_only=True,
+                    model_id=model_id,
+                    # Rows a derived holder's approval does not cover are hidden from
+                    # THIS resolve only (nothing is blocked or repointed): they are
+                    # neither picked nor refreshed on a peer's behalf.
+                    exclude_credential_ids=excluded_ids or None,
+                )
         except Exception as exc:  # noqa: BLE001 — classified below, never propagated
             return self._classify_refresh_failure(exc, key)
         if (
@@ -899,6 +951,7 @@ class MeshCredentialBroker:
                         f"every lendable login for {provider!r} was excluded by the holder, "
                         "which saw them rate-limited; nothing was lent"
                     ),
+                    reason=QUOTA_REASON_HOLDER_EXCLUDED,
                 )
         if access is None:
             # THE EMPTY ANSWER IS SPLIT BY ITS CAUSE (audit Q5 #9). ``quota_blocked``
@@ -909,17 +962,36 @@ class MeshCredentialBroker:
             # heals on its own. When EVERY row this provider has is blocked for the
             # requested model, that block is the reason, and the remainder travels
             # with the code so the borrower waits the real time instead of guessing.
-            blocked_ms = self._quota_remaining_ms(provider, model_id)
-            if blocked_ms:
+            #
+            # AND THE USAGE GATE, NOT ONLY THE SQL BLOCK (2026-10-28 follow-up): the
+            # selector also drops rows whose cached usage reads ``depleted``, so once
+            # one block timer lapsed while the evidence still said spent, a fully
+            # spent pool answered ``no_local_credential`` and sent the borrower to
+            # re-login. The verdict now comes from the store's own eligibility read,
+            # over the same rows this resolve could pick (the holder's exclusions are
+            # not candidates), so the broker carries no quota policy of its own. An
+            # ``unknown`` usage verdict is not a limit, so mixed or unread evidence
+            # still answers ``no_local_credential``; a remainder travels only when
+            # every row's reopening is proven, otherwise the code goes alone.
+            quota = self._quota_eligibility(provider, model_id, excluded_ids)
+            if quota is not None and quota.all_quota_limited:
+                blocked_ms = quota.retry_after_ms
                 return BrokerError(
                     code="quota_blocked",
                     key=key,
                     owner_device=self.self_device,
                     owner_device_name=self.self_device_name,
                     retry_after_ms=blocked_ms,
+                    # The OWNER's state, not the holder's exclusion: marked so a
+                    # borrower never renders its own cooldowns for it (#3108 m1).
+                    reason=QUOTA_REASON_POOL_DEPLETED,
                     message=(
                         f"every login for {provider!r} is rate-limited on this device "
-                        f"for another {max(1, blocked_ms // 1000)} s"
+                        + (
+                            f"for another {max(1, blocked_ms // 1000)} s"
+                            if blocked_ms
+                            else "until its usage window resets"
+                        )
                     ),
                 )
             return BrokerError(
@@ -960,6 +1032,7 @@ class MeshCredentialBroker:
             provider=provider,
             token=str(access.access_token),
             credential_id=int(access.credential_id),
+            account_created_at=int(getattr(access, "account_created_at", 0) or 0),
             kind=str(getattr(access, "kind", "oauth") or "oauth"),
             token_exp_ms=token_exp_ms,
             refreshed=refreshed,
@@ -1211,6 +1284,7 @@ class MeshCredentialBroker:
         holder_scope: str,
         for_session: str,
         identity: dict[str, str],
+        account_created_at: int = 0,
     ) -> Grant:
         """Build the grant, applying §3.3's narrowing rule to the expiry.
 
@@ -1235,6 +1309,7 @@ class MeshCredentialBroker:
                 provider=provider,
                 kind=kind,
                 credential_id=credential_id,
+                account_created_at=account_created_at,
             ),
             served_by=self.self_device,
             refreshed=refreshed,
@@ -2074,6 +2149,27 @@ class MeshCredentialBroker:
             self._auth_store = AuthStore(config_dir=self.root)
         return self._auth_store
 
+    def _selection_policy(self) -> str:
+        """The owner's effective ``retry.accountSelectionPolicy`` for a lend.
+
+        Resolved by ``effective_account_selection_policy`` — the function a local
+        session's settings go through, legacy ``usageAwareAccountPick`` included —
+        from the owner's own config root. A missing or unreadable config is the
+        shipped default, which is what the lend ran under before this was read.
+        """
+        from local_operator.network import store as net_store
+        from local_operator.providers.account_policy import (
+            DEFAULT_ACCOUNT_SELECTION_POLICY,
+            effective_account_selection_policy,
+        )
+
+        try:
+            retry = net_store.read_config(("retry",), {}, self.root)
+        except Exception:  # noqa: BLE001 — a config read must not fail a lend
+            logger.debug("lend: could not read the selection policy", exc_info=True)
+            return DEFAULT_ACCOUNT_SELECTION_POLICY
+        return effective_account_selection_policy({"retry": retry})
+
     def _credential_id_for(self, key: str, reported_id: int = 0) -> int | None:
         """The owner's row id for ``key``, for the report arms. Prefers the lent row.
 
@@ -2106,26 +2202,24 @@ class MeshCredentialBroker:
             return reported_id if reported_id in ids else None
         return ids[0] if ids else None
 
-    def _quota_remaining_ms(self, provider: str, model_id: str) -> int:
-        """How long every row for ``provider`` is quota-blocked for ``model_id``, ms.
+    def _quota_eligibility(
+        self, provider: str, model_id: str, excluded_ids: tuple[int, ...] = ()
+    ) -> QuotaEligibility | None:
+        """The store's quota eligibility for ``provider``, or ``None`` when unreadable.
 
         The producer ``quota_blocked`` never had (audit Q5 #9), read only when the
-        owner's own cascade came back EMPTY and only when EVERY row the provider has
-        is blocked for the requested model — the exact reason ``_usable_key_rows``
-        could not offer one. A row that is still servable means the empty answer has
-        another cause, and the caller keeps ``no_local_credential``. The earliest
-        unblock is the wait worth reporting: it is when something can be served
-        again, whatever happened to the other rows.
+        owner's own cascade came back EMPTY. The judgement — which rows a live block
+        or spent usage keeps out, and when the earliest one is PROVEN to reopen — is
+        ``AuthStore.quota_eligibility``'s, made from the same evidence the selection
+        applies; this only asks. An unreadable store explains nothing, and the caller
+        keeps ``no_local_credential``.
         """
         try:
-            store = self._auth_store_instance()
-            rows = store.list_credentials(provider)
-            waits = [int(store.blocked_remaining_ms(row.id, provider, model_id)) for row in rows]
+            return self._auth_store_instance().quota_eligibility(
+                provider, model_id, exclude_credential_ids=excluded_ids
+            )
         except Exception:  # noqa: BLE001 — an unreadable store explains nothing
-            return 0
-        if not waits:
-            return 0
-        return min(waits) if all(wait > 0 for wait in waits) else 0
+            return None
 
     def _row_stamps(self, provider: str) -> dict[int, int]:
         """``{credential_id: updated_at}`` for a provider, to observe a refresh.
@@ -2202,6 +2296,7 @@ class MeshCredentialBroker:
         message: str,
         *,
         retry_after_ms: int = 0,
+        reason: str = "",
     ) -> dict[str, Any]:
         """One refusal, audited on the owner and shaped as §3.2's failure reply."""
         error = BrokerError(
@@ -2211,6 +2306,7 @@ class MeshCredentialBroker:
             owner_device_name=self.self_device_name,
             retry_after_ms=retry_after_ms,
             message="",
+            reason=reason,
         )
         # The peer gets the CODE and the owner's own words; the SENTENCE the operator
         # reads is rendered where the operator is (``client.py`` →

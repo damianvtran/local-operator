@@ -1,5 +1,5 @@
 import { DEFAULT_PORT, getLocal } from "../state";
-import { PROTO_VERSION } from "../protocol.gen";
+import { PAIR_ASK_PHRASE, PROTO_VERSION } from "../protocol.gen";
 import {
   capabilityEnabled,
   PERMISSION_MISSING_MESSAGE,
@@ -60,7 +60,17 @@ async function renderStatus(): Promise<void> {
       ? "Paired and connected to Local Operator."
       : "Paired. The browser will reconnect when Local Operator is running.";
   } else {
-    pairStatus.textContent = "Not paired. Open the extension popup to pair.";
+    // Point at the pairing TAB, which survives switching windows, and at the
+    // words that get a code — never "open the popup", which closes the moment
+    // the person looks at the chat for the code (operator report, 2026-11-02).
+    pairStatus.replaceChildren(
+      `Not paired. Ask Local Operator to "${PAIR_ASK_PHRASE}", then type the code on the `,
+      Object.assign(document.createElement("a"), {
+        href: "../pair/pair.html",
+        textContent: "pairing page",
+      }),
+      ".",
+    );
   }
 }
 

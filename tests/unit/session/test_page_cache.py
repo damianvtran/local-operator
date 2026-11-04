@@ -75,6 +75,20 @@ def _journal(directory: Path, ids: list[str]) -> Path:
     return path
 
 
+@pytest.mark.asyncio
+async def test_equal_size_rewrite_does_not_reuse_an_old_page_witness(tmp_path):
+    directory = tmp_path / "rewrite"
+    path = _journal(directory, ["a", "b"])
+    original = await load_transcript_page(directory, limit=10)
+    before = path.stat()
+    _journal(directory, ["c", "d"])
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+    assert (path.stat().st_ino, path.stat().st_size) == (before.st_ino, before.st_size)
+    changed = await load_transcript_page(directory, limit=10)
+    assert _ids(changed) == ["c", "d"]
+    assert changed.source_signature != original.source_signature
+
+
 def _key(directory: Path, **kwargs: Any) -> PageKey:
     """``page_key`` for a journal this test just wrote: the absent arm cannot be taken."""
     key = page_key(directory, **kwargs)
@@ -246,15 +260,13 @@ async def test_a_same_size_replacement_serves_the_new_content(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_rollback_to_a_cached_size_answers_with_the_cached_page(tmp_path):
-    """The one case where a hit on an old key is CORRECT, not stale.
+async def test_a_rollback_to_a_cached_size_keeps_bytes_but_refreshes_the_witness(tmp_path):
+    """A rollback restores bodies but not necessarily their read-time witness.
 
-    ``_commit``'s failure path truncates the journal back to the size it had
-    before the batch (``os.truncate``, same inode). The restored bytes ARE the
-    bytes the cached page was decoded from, so the cached page describes the file
-    that is now there — which is why size is in the key rather than mtime: an
-    append under ``preserve_mtime`` rewinds the clock on purpose and would leave
-    an mtime-keyed cache serving the page the rollback just removed.
+    The key still includes size (preserve_mtime appends must invalidate), AND
+    now mtime so equal-size rewrites cannot attach old bodies to new index facts.
+    A truncate rollback therefore reacquires the same content with a fresh
+    witness; body equality is not proof the previous witness is current.
     """
     directory = tmp_path / "sess"
     path = _journal(directory, ["a", "b"])
@@ -269,10 +281,13 @@ async def test_a_rollback_to_a_cached_size_answers_with_the_cached_page(tmp_path
     assert _ids(await load_transcript_page(directory, limit=10)) == ["a", "b", "c"]
 
     os.truncate(path, original)
+    stamp = path.stat()
+    os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 1_000_000_000))
     restored = await load_transcript_page(directory, limit=10)
 
     assert _ids(restored) == _ids(read_transcript_page(directory, limit=10)) == ["a", "b"]
-    assert restored is first, "the restored size is the cached key, and that is the point"
+    assert restored is not first
+    assert restored.source_signature == (path.stat().st_ino, original, path.stat().st_mtime)
 
 
 @pytest.mark.asyncio

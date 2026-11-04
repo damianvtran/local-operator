@@ -1,4 +1,4 @@
-"""The chief of staff's CURRENT display name, as teammates see it on the bridge.
+"""The chief of staff's published identity: her bridge name and her picture.
 
 WHY THIS EXISTS. Team Bridge lists a person's agent under the endpoint
 ``label`` — a name chosen once at enrollment (default: the account's display
@@ -9,6 +9,12 @@ agent". The agent-server therefore takes an additive, NON-unique
 ``agent_name`` on ``PUT /v1/messaging/settings`` (same sanitizer rules as
 ``label``) and echoes it in the directory's per-member ``agent`` block. This
 module answers the one question the runtime owns: what name to send.
+
+It answers the picture question too (:func:`published_agent`): the LOCAL agent
+definition holds the image the owner chose, and that definition is the source
+of truth ``team_bridge.avatar_publish`` publishes from. Reading it here, in one
+place, keeps the publish path's notion of "her agent" identical to the name
+path's.
 
 WHERE THE NAME COMES FROM, and why only there.
 
@@ -50,8 +56,11 @@ opt-in.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import unicodedata
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -60,6 +69,18 @@ logger = logging.getLogger(__name__)
 #: The bridge's label cap, in code points (agent-server ``bridge.LabelMaxChars``).
 #: ``agent_name`` follows the label rules, so the same cap applies.
 AGENT_NAME_MAX_CHARS = 64
+
+#: The hub's avatar ceiling (its ``avatar_too_large`` ``details.limit_bytes``).
+#: A local file above it could never publish, so the resolver refuses it here
+#: rather than uploading a body the hub is guaranteed to reject. Defined here
+#: because this module is the one place that decides WHAT the local picture is;
+#: ``avatar_publish`` and the client both read it from here.
+AVATAR_MAX_BYTES = 1024 * 1024
+
+#: The hub's source-digest grammar, in ONE place: what ``X-Source-SHA256``
+#: carries, what the status answer echoes back, and what a stored block records
+#: (review R1-F10b: it was declared three times).
+SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 #: Characters the server treats as invisible beyond the Cc/Cf/Co categories
 #: (its ``isLabelInvisible``: Other_Default_Ignorable_Code_Point, variation
@@ -154,6 +175,86 @@ def cos_display_name(config_dir: Path | str | None) -> str | None:
     a designated session that is not Aida's (see the module docstring for why
     its title is never published), or a name that repairs to nothing. Never
     raises.
+
+    A THIN WRAPPER over the same gate :func:`published_agent` uses, on purpose:
+    the callers of this one (the enrollment write and the rename re-sync) must
+    keep their exact pre-avatar behaviour, so the agent-definition lookup the
+    picture needs can never turn a name into ``None``.
+    """
+
+    resolved = _designated_aida(config_dir)
+    return None if resolved is None else resolved[1]
+
+
+def degenerate_agent_name(agent_name: object, label: object) -> bool:
+    """Whether ``agent_name`` is only the owner's OWN name rather than a chosen one.
+
+    The status payload carries no account display name, so the endpoint LABEL
+    stands in for it: the hub's ``DefaultLabel`` derives the label from the
+    owner's display name, and the rows this rule exists for are exactly the
+    default-on enrollments nobody typed a name into. An approximation, and a
+    deliberately one-sided one — the hub's own write-time refusal
+    (``details.rule = owner_name``) stays the authority for the cases the label
+    has since been renamed past (a profile change, a hand-edited label).
+
+    False for an empty name: "no name of its own" is already the state this
+    rule drives towards, so a cleared row must not be re-PUT on every boundary.
+    """
+
+    if not isinstance(agent_name, str) or not agent_name.strip():
+        return False
+    if not isinstance(label, str) or not label.strip():
+        return False
+    return _name_key(agent_name) == _name_key(label)
+
+
+def _name_key(value: str) -> str:
+    """``value`` folded the way the hub's ``NormalizeNameKey`` folds it.
+
+    Case and whitespace runs only: the point is to catch "Sherman  Tsui" and
+    "sherman tsui" as the SAME name, not to re-implement the server's full
+    identifier normalisation for a cosmetic comparison.
+    """
+
+    return " ".join(value.split()).casefold()
+
+
+def published_agent(config_dir: Path | str | None) -> PublishedAgent | None:
+    """The local agent definition behind the designated chief of staff, or ``None``.
+
+    ``None`` is the answer for every case where this machine has nothing to say
+    about the hub's copy — no config root, no designated CoS, a designated
+    session that is not Aida's, or no agent definition named after her role. It
+    means PUBLISH NOTHING and, just as importantly, DELETE NOTHING: a machine
+    that cannot see the local picture must never be the reason the hub's copy
+    disappears.
+
+    A resolved agent may still carry no picture. ``avatar_data is None`` with
+    ``avatar_broken`` False is the user's own choice (the local writer stores
+    the ``avatar`` block together with the file, so the block's absence is a
+    cleared picture); ``avatar_broken`` True is a DOUBT — a block that names a
+    file this side will not resolve — and a doubt publishes nothing.
+    """
+
+    resolved = _designated_aida(config_dir)
+    if resolved is None:
+        return None
+    root, name = resolved
+    if root is None:
+        return None
+    found = _aida_definition(root)
+    if found is None:
+        return None
+    agent_id, agent_dir, definition = found
+    fields = _avatar_of(agent_dir, definition.get("avatar"))
+    return PublishedAgent(local_agent_id=agent_id, name=name, **fields)
+
+
+def _designated_aida(config_dir: Path | str | None) -> tuple[Path | None, str | None] | None:
+    """``(config root, wire-ready name)`` when the designated CoS is Aida's; else ``None``.
+
+    The gate both public readers share. The name may be ``None`` — an unusable
+    ``aida.name`` is still a designated CoS with a picture to publish.
     """
 
     if config_dir is None:
@@ -170,10 +271,186 @@ def cos_display_name(config_dir: Path | str | None) -> str | None:
 
         if not aida_state.is_aida_session(root, designated):
             return None
-        return bridge_agent_name(_aida_name(values))
-    except Exception:  # noqa: BLE001 — a display name must never break the write it rides on
-        logger.debug("team_bridge: could not resolve the CoS display name", exc_info=True)
+        return root, bridge_agent_name(_aida_name(values))
+    except Exception as exc:  # noqa: BLE001 — a name must never break the write it rides on
+        # The TYPE only. A traceback's last line is the exception's message, and
+        # a FileNotFoundError here names a config path (review R1-S8).
+        logger.debug("team_bridge: could not resolve the CoS identity (%s)", type(exc).__name__)
         return None
 
 
-__all__ = ["AGENT_NAME_MAX_CHARS", "bridge_agent_name", "cos_display_name"]
+def _aida_definition(root: Path) -> tuple[str, Path, Mapping[str, Any]] | None:
+    """``(agent id, directory, agent.yml)`` for Aida's role definition, or ``None``.
+
+    Addresses the definition the way the rest of the runtime does — by ``name``,
+    the key ``/agent aida`` and the session attachment's ``agent`` field resolve
+    — but reads the YAML directly instead of through ``AgentRegistry``: building
+    a registry creates and migrates directories, and this runs on read paths
+    (every fresh status read) that must write nothing. Reading the mapping also
+    keeps this working before ``AgentData`` grows a first-class ``avatar`` field:
+    pydantic drops an unknown key on the next registry save.
+    """
+
+    from local_operator.aida.bootstrap import ROLE_NAME
+
+    try:
+        import yaml
+    except Exception:  # noqa: BLE001 — no YAML reader means no definition, not an error
+        return None
+    agents_dir = root / "agents"
+    try:
+        candidates = sorted(agents_dir.iterdir())
+    except OSError:
+        return None
+    for agent_dir in candidates:
+        try:
+            if not agent_dir.is_dir():
+                continue
+            definition = yaml.safe_load((agent_dir / "agent.yml").read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            continue
+        if not isinstance(definition, Mapping):
+            continue
+        raw_name = definition.get("name")
+        if isinstance(raw_name, str) and raw_name.strip().casefold() == ROLE_NAME.casefold():
+            return agent_dir.name, agent_dir, definition
+    return None
+
+
+def _avatar_of(agent_dir: Path, block: object) -> dict[str, Any]:
+    """The :class:`PublishedAgent` avatar fields for one stored ``avatar`` block.
+
+    A block that is PRESENT but names a file this side will not resolve answers
+    ``avatar_broken`` — publishing nothing, and never a delete — while a block
+    that is ABSENT is a DELIBERATE clear... but only when the agent store can
+    preserve the block in the first place. ``AgentData`` is a pydantic model with
+    the default ``extra="ignore"``, so until ``avatar`` is one of its fields both
+    writers drop the key on the next ordinary save (a rename, a settings edit).
+    Absence would then mean "the registry erased it", not "the user cleared it",
+    and treating it as a clear would silently delete the teammate-visible copy
+    for good (review R1-F4). When the field is missing from the model, absence is
+    a DOUBT and :attr:`PublishedAgent.avatar_broken` says so.
+    """
+
+    if block is None:
+        return {} if _avatar_survives_registry() else {"avatar_broken": True}
+    # PRESENT but not a mapping (``avatar: garbage``, ``[]``, ``0``, ``false``,
+    # ``''``) is a malformed block, not an absent one. ``_aida_definition`` reads
+    # raw YAML and bypasses ``AgentData``, so the store's own validation never
+    # saw it; reading it as "no block" planned a DELETE of the teammate-visible
+    # copy from one stray character in a hand edit (security review R3-S4). A
+    # doubt publishes nothing and deletes nothing.
+    if not isinstance(block, Mapping):
+        return {"avatar_broken": True}
+    data = _stored_avatar_bytes(agent_dir, block)
+    if data is None:
+        return {"avatar_broken": True}
+    return {"avatar_data": data, "avatar_sha256": hashlib.sha256(data).hexdigest()}
+
+
+def _stored_avatar_bytes(agent_dir: Path, block: Mapping[str, Any]) -> bytes | None:
+    """The picture bytes the LOCAL STORE would serve for ``block``, else ``None``.
+
+    There is deliberately no second implementation of "which file is the
+    avatar". ``agent.yml`` is writable by the agent itself and the hub copy is
+    visible to every teammate in the tenant, so a publisher that resolves the
+    file differently from the store is a disclosure path: a private resolver that
+    followed same-directory symlinks and accepted any basename uploaded
+    ``agent.yml`` (its ``security_prompt``) for ``filename: agent.yml`` and for a
+    symlink ``avatar.png -> agent.yml`` (review R3-F1). ``agent_avatar.read`` owns
+    the rule — only ``avatar.png``/``avatar.jpg`` agreeing with the mime, a
+    REGULAR file opened without following a symlink, bytes that hash to the
+    block's ``sha256`` — so whatever it refuses is a doubt here too. That also
+    makes a file edited behind the block's digest a doubt (R3-F2) rather than an
+    upload under a digest that does not describe it.
+
+    Read once through the store, then validate and normalize that buffer without
+    reopening a path: a second open would reopen the window the store closed.
+
+    A matching digest proves only integrity, not that the bytes are an image.
+    Before any transmission, sniff the SAME bounded buffer, require agreement
+    with the block's type, then run the store's pixel-only normalizer. Its fresh
+    image construction strips text/EXIF/ICC and trailing data. Never forward the
+    original buffer: hub rejection is too late to prevent disclosure (QA Q1).
+    The resulting wire bytes are hashed by the plan and compared with the hub's
+    source_sha256, so deterministic normalization does not cause endless PUTs.
+    """
+
+    from local_operator import agent_avatar
+    from local_operator.agents import AgentAvatarMeta
+
+    try:
+        meta = AgentAvatarMeta.model_validate(dict(block))
+        data, mime, _sha = agent_avatar.read(agent_dir, meta)
+        from local_operator.media import sniff_image
+
+        info = sniff_image(data)
+        if info is None or info.mime_type != mime or mime not in {"image/png", "image/jpeg"}:
+            return None
+        data = agent_avatar.normalise(data).data
+    except Exception:  # noqa: BLE001 — a doubt of any kind publishes nothing and deletes nothing
+        return None
+    if not data or len(data) > AVATAR_MAX_BYTES:
+        return None
+    return data
+
+
+#: Cached answer for :func:`_avatar_survives_registry`; ``None`` = not asked yet.
+_AVATAR_FIELD: bool | None = None
+
+
+def _avatar_survives_registry() -> bool:
+    """Whether an ``avatar`` block survives the agent store's own round trip.
+
+    The design's MEASURED CONSTRAINT is that ``avatar`` becomes a first-class
+    ``AgentData`` field; both writers serialise ``model_dump()`` and the read path
+    builds rows through the model, so a key the model does not declare is dropped
+    on the next save. Until that field lands, an absent block proves nothing.
+
+    An import failure answers ``False`` — "cannot prove it survives" is exactly
+    the doubt this exists to express, and a picture must not be deleted on a
+    guess.
+    """
+
+    global _AVATAR_FIELD
+    if _AVATAR_FIELD is None:
+        try:
+            from local_operator.agents import AgentData
+
+            _AVATAR_FIELD = "avatar" in AgentData.model_fields
+        except Exception:  # noqa: BLE001 - an unreadable model is a doubt, not a crash
+            return False
+    return _AVATAR_FIELD
+
+
+@dataclass(frozen=True)
+class PublishedAgent:
+    """One local agent definition, as the hub's copy of it is derived from.
+
+    ``local_agent_id`` is the definition's directory name (the id every surface
+    addresses it by), never a path: the publish path needs an identity, and a
+    path in a dataclass that gets logged is how a home directory reaches a log.
+    """
+
+    local_agent_id: str
+    name: str | None = None
+    #: Pixel-only wire bytes derived from the stored picture (None means no picture).
+    #: ``repr=False``: a dataclass that gets logged must never print an image.
+    avatar_data: bytes | None = field(default=None, repr=False)
+    #: Digest of normalized wire bytes; may differ from the local storage digest.
+    avatar_sha256: str | None = None
+    #: An ``avatar`` block is present but yields no usable file — a DOUBT, which
+    #: publishes nothing and never deletes.
+    avatar_broken: bool = False
+
+
+__all__ = [
+    "AGENT_NAME_MAX_CHARS",
+    "AVATAR_MAX_BYTES",
+    "PublishedAgent",
+    "SHA256_HEX",
+    "bridge_agent_name",
+    "cos_display_name",
+    "degenerate_agent_name",
+    "published_agent",
+]

@@ -320,6 +320,7 @@ def _scratchpad_hazard(config: Path, sid: str, directory: Path) -> None:
     repo.mkdir(parents=True)
     env = {
         **os.environ,
+        "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_SYSTEM": os.devnull,
         "GIT_TERMINAL_PROMPT": "0",
     }
@@ -358,6 +359,7 @@ def test_every_guard_skips_with_its_own_reason(
         # The session currently being BUILT is kept by identity, not by a probe
         # on disk, so this case only supplies the path.
         kwargs["live_dir"] = directory
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
     try:
@@ -408,6 +410,7 @@ def test_mail_and_open_asks_do_not_stop_a_reversible_pass(
             "timeout_s": 600,
         },
     )
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
 
@@ -1222,6 +1225,7 @@ def test_a_widened_delegated_window_protects_the_child(
         os.utime(parent / name, (stamp, stamp))
     os.utime(parent, (stamp, stamp))
 
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
     default = compression.run_compression(config, _policy())

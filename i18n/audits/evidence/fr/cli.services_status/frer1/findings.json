@@ -1,0 +1,54 @@
+{
+  "locale": "fr",
+  "namespace": "cli.services_status",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "counts_note": "counts.minor counts every accepted minor this bundle stands behind: 0 newly found (declared maxCells) + 2 carried forward from the ledger row and NOT re-derived by this audit. Carried-forward entries are marked carried_forward: true.",
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "id": "CF1",
+      "key": "cli.services_status.serve_linger_required",
+      "severity": "minor",
+      "category": "layout (status-row budget, no maxCells declared)",
+      "carried_forward": true,
+      "current": "linger est désactivé : lancez `loginctl enable-linger` pour conserver cette unité après la déconnexion",
+      "problem": "The 2026-10-29 ledger row accepts this at 102 cells against the 80-column status budget. This audit did not re-measure it: the en sidecar declares no maxCells for the key, so the maxCells sweep cannot see it.",
+      "proposed": "unchanged — accepted in the row and recorded in i18n/style-guides/fr.md",
+      "source": "ledger row fr/cli.services_status (2026-10-29), carried forward unverified",
+      "disposition": "accepted (carried forward)"
+    },
+    {
+      "id": "CF2",
+      "key": "cli.services_status.unsupervised_unknown",
+      "severity": "minor",
+      "category": "layout (status-row budget, no maxCells declared)",
+      "carried_forward": true,
+      "current": "non supervisé : aucune unité systemd n'a pu être trouvée ; systemd ne peut pas le redémarrer",
+      "problem": "The 2026-10-29 ledger row accepts this at 92 cells against the 78-cell status budget. This audit did not re-measure it: no maxCells is declared for the key, so the maxCells sweep cannot see it.",
+      "proposed": "unchanged — accepted in the row and recorded in i18n/style-guides/fr.md",
+      "source": "ledger row fr/cli.services_status (2026-10-29), carried forward unverified",
+      "disposition": "accepted (carried forward)"
+    }
+  ],
+  "adjudication": [
+    {
+      "id": "CF1",
+      "disposition": "accepted (carried forward)",
+      "reason": "Carried forward from the ledger row; not re-measured here, because the key declares no maxCells and the status-row budget it was accepted against is not in the sidecar."
+    },
+    {
+      "id": "CF2",
+      "disposition": "accepted (carried forward)",
+      "reason": "Carried forward from the ledger row; not re-measured here, because the key declares no maxCells and the status-row budget it was accepted against is not in the sidecar."
+    }
+  ],
+  "linguistic_gate_status": "passed",
+  "publication_hold_reasons": []
+}

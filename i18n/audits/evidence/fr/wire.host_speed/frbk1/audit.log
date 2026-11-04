@@ -1,0 +1,46 @@
+# fr-wire-audit-b — audit.log — fr/wire.host_speed
+# audit id frbk1 | 2026-10-29 | session 500e883ce1b1 | served model radient/auto
+# audited revision 9495f8a6c3bf2b5438ef5c33d7274cf519435dda on branch feat/i18n-core-fr-backfill
+# The target catalogue is an untracked working-tree file, so the bytes audited
+# are bound by sha256 below rather than by a commit of their own.
+
+$ git rev-parse HEAD
+9495f8a6c3bf2b5438ef5c33d7274cf519435dda
+
+$ git branch --show-current
+feat/i18n-core-fr-backfill
+
+$ shasum -a 256 local_operator/i18n/catalogues/{en,fr}/wire.host_speed*.json
+# cross-checked in this audit run: shasum and Python hashlib agree on every file
+en      e193473d58c0de1779bcefab06d0e9b1734ee493aea30ea827e4499510282b8c  en/wire.host_speed.json
+context d5316700be4f79de5280b95f8ae96e48dfa66bef378dec38074fd3311969098d  en/wire.host_speed.context.json
+fr      14fe20f545483363af505d78f7ed61f209eada9b8467cd0dfae6a4ade5aad863  fr/wire.host_speed.json
+
+$ ~/local-operator/.venv/bin/python  # parity + ICU through the repo parser
+from local_operator.i18n.runtime import message_arguments, plural_selectors
+key parity              : en=2 fr=2; missing in fr=none; extra in fr=none
+key order vs english    : identical
+argument tuple mismatches: 0
+keys carrying ICU arguments: 0
+keys carrying plural selectors: 0   (nothing for a plural branch to diverge on)
+
+$ ~/local-operator/.venv/bin/python  # typography by codepoint
+prose anomalies (outside quoted/code spans): 0
+hits inside quoted/code spans (must stay byte-identical): 0
+
+$ ~/local-operator/.venv/bin/python  # masking scan, ordinal comparison
+marker sequence found in any of the 2 French values: NO
+values containing '[' or ']': 0
+
+$ ~/local-operator/.venv/bin/python  # identifier tokens from English kept in French
+keys with an English identifier token missing from the French: 0
+
+$ ~/local-operator/.venv/bin/python  # width against declared maxCells
+    wire.host_speed.retire_below_tps.label: cap=29 en=24 fr=28 within budget
+    widest values (fr cells, en cells, key):
+        405   310  wire.host_speed.retire_below_tps.help
+         28    24  wire.host_speed.retire_below_tps.label
+
+$ ~/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit 0

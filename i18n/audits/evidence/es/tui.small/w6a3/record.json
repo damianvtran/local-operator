@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "audit_id": "w6a3",
+  "audit_round": 3,
+  "audit_kind": "class_sweep_finding_only",
+  "locale": "es",
+  "namespace": "tui.small",
+  "audit_date": "2026-10-30",
+  "audited_revision": "4912975a4b5dd0c2c6011dbfcb20188c50e44084",
+  "audited_revision_note": "Short bundle: this round did not re-audit tui.small as a whole. It records the one code-fixed-column finding the tui.analytics class sweep produced. Full measurements and the checks script are in ../../tui.analytics/w6a3/ (same session, same bytes).",
+  "key_count": {
+    "en": 137,
+    "target": 137,
+    "context": 137
+  },
+  "verdict": "changes_requested",
+  "verdict_reason": "One MAJOR (S1): a Spanish value is wider than the code-fixed budget that the panel subtracts before appending it, so the done tag wraps in a real rendered frame.",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), es-tui-r3-analytics",
+    "session": "13ac587c68a7",
+    "model": "anthropic/claude-sonnet-5-5",
+    "actual_model_source": "the session header of this run names anthropic/claude-sonnet-5-5; no provider failure, fallback or model switch occurred during this round, so the primary model produced every measurement and judgement in this record.",
+    "independent_from_translator_session": true,
+    "independence": "I did not write or remediate this copy, and I read neither author's session. Round-2 evidence was read as context only; every measurement here was re-derived on the current bytes.",
+    "date": "2026-10-30"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.small.json",
+      "sha256": "16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.small.json",
+      "sha256": "e374959d70bb379a37e3f02e8c69edeea168b7edbd11107e4131f41fe116b9af",
+      "tracked": false,
+      "note": "modified/untracked relative to HEAD; HEAD does not bind these bytes, this sha256 does"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.small.context.json",
+      "sha256": "1e3d6785f78126b8389b2acbcc081d5bf782fbaf744114e47611fbff3c45dde1"
+    }
+  },
+  "findings": [
+    {
+      "id": "S1",
+      "severity": "major",
+      "key": "tui.small.goal_panel.done_suffix",
+      "status": "open",
+      "current": "  — hecho",
+      "en": "  — done",
+      "cells": {
+        "en": 8,
+        "es": 9
+      },
+      "fixed_budget": "_GOAL_TAG_CELLS = 8 (local_operator/tui/widgets/goal_panel.py:79), subtracted from the goal clip at line ~268",
+      "text": "The goal row is clipped to `inner - 2 - 8` and the tag is appended AFTER the clip, so a 9-cell tag makes the row one cell wider than the card content box. Rendered at 100x40 in the real GoalPanel after pressing `d`: `▌ Migrar … con e…  —` then `hecho` on the next line. The tag splits, `hecho` is orphaned and the card grows from 8 to 9 rows (English: 1 line, 8 rows). The key hint row is still present in the frame; the defect is the split of the done state, the same D2 shape the constant comment records for English.",
+      "suggested": "Recommended: keep `  — hecho` (house two-space gutter and em dash per the sidecar) and raise `_GOAL_TAG_CELLS` from 8 to 9 in goal_panel.py:79 — a one-line code change; English then clips one cell sooner. If no code change is allowed: `  —hecho` (8 cells) drops one gutter space and breaks the sidecar rule."
+    }
+  ],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "finding_ids": [
+      "S1"
+    ],
+    "blocker_major_finding_ids": [
+      "S1"
+    ]
+  },
+  "execution_evidence": {
+    "record": "i18n/audits/evidence/es/tui.analytics/w6a3/record.json",
+    "log": "i18n/audits/evidence/es/tui.analytics/w6a3/audit.log",
+    "checks": "i18n/audits/evidence/es/tui.analytics/w6a3/checks.py",
+    "probes": [
+      "i18n/audits/evidence/es/tui.analytics/w6a3/probe_goal_wrap.py.txt",
+      "i18n/audits/evidence/es/tui.analytics/w6a3/probe_goal_frame.py.txt"
+    ]
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.small/w6a3/report.md",
+      "sha256": "5988de217447f8f06c5992147831dff17b926dd94a3d452503cd39309f9c672b"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md here is a finding note; execution output lives only in the tui.analytics w6a3 audit.log."
+}

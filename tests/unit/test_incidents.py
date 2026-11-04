@@ -1058,3 +1058,96 @@ def test_signal_detail_without_a_chain_is_byte_identical_to_before() -> None:
     assert render_signal_receipt_detail(signal_name="SIGTERM") == (
         " (unattributed, SIGTERM received from an unidentified sender; nobody asked for a stop)"
     )
+
+
+# --- the named-sender arm of the signal receipt detail -------------------------
+
+
+def test_signal_detail_names_the_sender_when_the_receipt_has_one() -> None:
+    """2026-10-30: a captured sender is rendered as a pid and uid, and claims no more.
+
+    The sender is the one fact the 2026-10-30 fleet kill could not state, and this
+    arm is what changes when it can. Three things are pinned here, because each is
+    a way the sentence could go wrong:
+
+    * the ``unattributed`` lead-in is DROPPED when a party is named — it marks an
+      evidence GAP, and printing it beside a pid says the opposite of what the
+      sentence knows (the same rule ``involuntary_kill_detail`` follows);
+    * the closing conclusion is unchanged and still final — a pid says who
+      DELIVERED the signal, never who asked for the stop;
+    * the uid stays attached to its pid rather than becoming a comma clause that
+      could be read as part of the timestamp.
+    """
+    from local_operator.incidents import KILL_UNATTRIBUTED, render_signal_receipt_detail
+
+    detail = render_signal_receipt_detail(
+        signal_name="SIGTERM",
+        at=1_760_000_000.0,
+        sender={"state": "known", "reason": "siginfo", "pid": 66213, "uid": 501, "code": 2},
+    )
+    assert "from pid 66213 (uid 501)" in detail, detail
+    assert KILL_UNATTRIBUTED not in detail, "a named party is not an unattributed act"
+    assert "unidentified sender" not in detail
+    assert re.search(r"received at \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4} from pid", detail)
+    assert detail.rstrip(")").endswith("nobody asked for a stop")
+    assert detail.startswith(" (") and detail.endswith(")")
+
+    counted = render_signal_receipt_detail(
+        signal_name="SIGTERM",
+        count=3,
+        sender={"state": "known", "pid": 9, "uid": 0},
+    )
+    assert "SIGTERM received 3 times, last from pid 9 (uid 0)" in counted, counted
+
+
+def test_signal_detail_prints_a_pid_zero_delivery_as_unattributed() -> None:
+    """``si_pid == 0`` is the KERNEL, and the sentence must not call it "pid 0".
+
+    Pinned to the exact unknown-sender string: the kernel arm and the never-captured
+    arm are different facts in the receipt and the same sentence here, because
+    neither names a party — while printing "pid 0" would name one that does not
+    exist.
+    """
+    from local_operator.incidents import render_signal_receipt_detail
+
+    for sender in (
+        {"state": "unavailable", "reason": "kernel-originated"},
+        {"state": "known", "pid": 0, "uid": 0},
+        {"state": "known", "pid": None},
+        {"state": "known", "pid": -5},
+        {"state": "known", "pid": True},
+        {"state": "unavailable", "reason": "no-siginfo", "could_be": "same-uid-or-root"},
+        {"pid": 66213},
+        "garbage",
+        None,
+    ):
+        assert render_signal_receipt_detail(signal_name="SIGTERM", sender=sender) == (
+            " (unattributed, SIGTERM received from an unidentified sender;"
+            " nobody asked for a stop)"
+        ), sender
+
+
+def test_signal_detail_names_the_sender_and_the_gone_app_in_that_order() -> None:
+    """Both facts at once: the sender first, the outlived app second, conclusion last.
+
+    Order is the design rule (D4) the spawn-chain clause was added under, and a new
+    arm is exactly what could break it: a reader must be able to read "who delivered
+    this" and then "the app this runtime descends from was already gone" without
+    the conclusion landing in the middle.
+    """
+    from local_operator.incidents import render_signal_receipt_detail
+
+    detail = render_signal_receipt_detail(
+        signal_name="SIGTERM",
+        sender={"state": "known", "pid": 66213, "uid": 501},
+        spawn_chain=[
+            {
+                "pid": 66213,
+                "argv0": "/Applications/Local Operator.app/Contents/MacOS/Local Operator",
+                "alive_at_spawn": True,
+                "alive_now": False,
+            }
+        ],
+    )
+    assert detail.index("from pid 66213 (uid 501)") < detail.index("this runtime descends from")
+    assert detail.rstrip(")").endswith("nobody asked for a stop")

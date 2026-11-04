@@ -1,0 +1,24 @@
+import asyncio, os, sys
+sys.path.insert(0, os.getcwd())
+os.environ["LOP_LANG"]="es"
+from rich.cells import cell_len
+from local_operator.i18n import text
+text.set_active_locale(os.environ.get("PROBE_LOCALE","es"))
+from local_operator.library import service as ls
+import tests.unit.tui.test_library_view as T
+from local_operator.tui.app import OperatorApp
+from tests.unit.tui.test_app_pilot import FakeSession,_factory
+def fake(config_dir, query, **kw):
+    p=T._payload()
+    p["counts"]["category"]={"code":3,"document":2,"image":2,"presentation":4,"spreadsheet":5,"sound":1,"video":1,"other":9}
+    return p
+ls.list_assets=fake
+async def main():
+    app=OperatorApp(lambda:_factory(FakeSession()))
+    async with app.run_test(size=(120,34)) as pilot:
+        await T._boot(pilot,app); view=await T._open(pilot,app)
+        await T._settle(pilot,lambda: view._payload is not None)
+        await pilot.pause(); await pilot.pause()
+        print("locale",text.active_locale(),"rail.size.width",view._rail.size.width,"canvas",view._rail_canvas.size.width)
+        for l in view._rail_canvas.content.plain.split("\n"): print(repr(l), cell_len(l))
+asyncio.run(main())

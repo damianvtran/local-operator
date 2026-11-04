@@ -105,6 +105,15 @@ ICON_EFFORT = "▴"
 #: is ``›``, and ``high › » fast`` read as two separators in a row (design
 #: D1).
 ICON_FAST = "↯"
+#: Saver's compression mark: one cell, distinct from the speed lightning.
+#:
+#: NOT ``≡`` (design round 2, D3): that is ``PLAIN_TOOL_ICONS["read"]``, the
+#: lines-of-text mark on the very same screen, and ``glyphs.py`` states the rule
+#: an icon may not break — it must not echo the shape of a different meaning. It
+#: also reads as a hamburger menu, which this band has no concept of. ``⊖`` (a
+#: minus inside a circle) says the one thing the feature does — FEWER tokens in
+#: the request — and collides with no tool icon, no separator and no verdict.
+ICON_SAVER = "⊖"
 ICON_CWD = "⌂"
 #: Active ``/agent`` profile governing THIS session (U2). A CATEGORY marker like
 #: every other icon here — the value is the profile name beside it (`◉ auditor`),
@@ -299,6 +308,42 @@ FORK_PENDING_TEXT = "forking \u00b7 esc"
 #: widest floor that still survives 100 columns with everything else on screen.
 NAME_CELLS = 40
 NAME_CELLS_FLOOR = 18
+#: The status command's floor once ``shorten-custom`` fires: the narrowest cut
+#: that still reads as a value (`acct 5h 42…`) rather than a stub. The full cap
+#: is the runner's own (``status_command.MAX_CELLS``), applied before the line
+#: reaches the band.
+CUSTOM_CELLS_FLOOR = 12
+
+#: Cells the row keeps free between its two groups for the LIVENESS SLOT — the
+#: ``connecting…`` caption a saved conversation paints while its owner binds.
+#:
+#: The most the last-known caption may occupy in the gap between the two groups.
+#:
+#: The caption rides the gap for one reason: spent anywhere else it competes with
+#: the row's own figures, and the two rows then disagree. The first cut appended
+#: it to the left group, so the shadow frame was fitted with 13 fewer cells than
+#: the bound frame and the two shed DIFFERENT segments — measured at 80 columns on
+#: the fixture: `▂ 17.1%/1.0M` 12 cells to the right of where the bound frame puts
+#: it, the cost segment absent, the title's cut 16 instead of 28 (design round 1
+#: D2). Reserving the width in every frame fixes that and charges every frame for
+#: it, which the band's width budget cannot afford (`_walk`'s own note on the
+#: name's trade, and the three suites that assert the name and its siblings keep
+#: every spare cell). So the fit is computed ONCE, identically for both frames,
+#: and the caption is painted only into gap the bound frame was not going to use
+#: — `_compose`'s condition, which is arithmetic rather than a column threshold:
+#: the caption paints when the gap between the groups exceeds its own width plus
+#: two cells of air, and the gap is NOT monotonic in width because the ladder
+#: admits and sheds right-group members (measured on the fixture: present at
+#: 56-57, 76-78, 103, 137, 151-260 columns with a title). Where it does not fit,
+#: the hollow model glyph and the `muted` ink still say "stored, not live".
+_LIVENESS_SLOT_CELLS = 13
+
+#: The model glyph while the row is LAST-KNOWN: the hollow twin of
+#: :data:`ICON_MODEL`. One cell, so swapping it moves nothing, and it is the
+#: marker that says "stored facts, not a live reading" without colour — the bound
+#: frame paints several of its own values in the same ink, so ink alone cannot
+#: carry that meaning (design round 1, D1).
+ICON_MODEL_LAST_KNOWN = "◇"
 
 #: Cap on the displayed active-agent / active-team NAME (U2). A BOUNDED rung,
 #: unlike ``cwd``: profile and team names are curated identifiers, not paths, so
@@ -418,6 +463,18 @@ _DROP_LADDER: tuple[str, ...] = (
     # whole word. A band tight enough to drop one static dial should keep the
     # expensive one visible.
     "fast",
+    # Beside `fast` and shed just AFTER it — later in this tuple means kept
+    # longer (design round 1, D2; the rung's direction was written backwards
+    # until design round 2's D7 caught it). The old placement put Saver directly
+    # under `duration`, so it survived to 96 columns while `fast` survived to 66:
+    # at 80 columns the indicator this feature exists to provide was gone and the
+    # dial next to it stayed. The old reason ("already visible in /saver status")
+    # separated nothing — `/fast status` is equally recoverable — and `fast`'s own
+    # stated reason ("the one segment COSTING MONEY while it shows") is equally
+    # true of Saver, which bills Radient credits per token removed. Saver now
+    # outlives `fast`: it is the CONSENT mark for sending history off the machine,
+    # so it is the last of the two a narrow band should drop.
+    "saver",
     # The active /team roster and /agent profile (U2). Both are STATIC session
     # settings the user chose — like `effort`, they do not change while the user
     # watches — so they belong in this static-settings band ahead of the live
@@ -468,6 +525,27 @@ _DROP_LADDER: tuple[str, ...] = (
     "last-rate",
     # The one figure that is not a live reading of this turn.
     "cost",
+    # The operator's own status command (``display.composer.command``). It
+    # outlasts the title, every static setting and the two re-derivable figures
+    # above (rate, cost) because the operator configured it ON PURPOSE to keep
+    # something in view the harness cannot tell them — a quota, a deploy state —
+    # and a band that drops the one reading they asked for to keep a tok/s
+    # figure has its priorities backwards (measured: at 80 columns the earlier
+    # placement painted `96 tok/s ‹ $3.18` and no command output). It still
+    # sheds before ``cwd`` and ``context``: those answer "where am I" and "how
+    # close is compaction" for THIS session, and the alarms below it outrank
+    # any reading. Inert (no cells, no effect on the walk) when unset, and
+    # BOUNDED (``status_command.MAX_CELLS``), so it is a legal neighbour of any
+    # rung under :data:`_UNBOUNDED_RUNGS`.
+    #
+    # SHORTEN BEFORE DROP, like cwd and the model label (design round 1, T-1):
+    # all-or-nothing meant a 40-cell reading vanished whole at 80 columns and
+    # left a 41-cell hole. ``shorten-custom`` caps the reading at
+    # :data:`CUSTOM_CELLS_FLOOR` and the fitting row regrows it into whatever is
+    # spare, so it is truncated with an ellipsis to the space left; only below
+    # the floor does ``custom`` drop.
+    "shorten-custom",
+    "custom",
     # The working directory goes before the context number. Its shorten step has
     # already reduced it to a basename by now, so what remains is ~7 cells of
     # "where am I" against ~9 cells of "how close is compaction" — and the second
@@ -1221,7 +1299,14 @@ class StatusLine:
         #: band never reaches into the session, so the source of truth stays the
         #: session's own spec and the app pushes the reading through ``update``.
         self._fast: str = ""
-        # The active /agent profile name and /team roster name governing this
+        # The localized word, or "" when this session is not occupying Saver.
+        # Off paints NOTHING (design round 1, D1): the reserved-five-cells
+        # version this replaced painted a dim glyph with an empty value in every
+        # band for every user, so presence stopped carrying information — and
+        # the reservation bought one 7-cell shift at a command the user typed, at
+        # the cost of a permanent hole. Every other segment in this band is
+        # gated on a non-empty reading; this is the one that was not.
+        self._saver: str = ""
         # session (U2), "" when unattached — the band's two static-identity
         # segments. Held as plain strings the app pushes through `update`, the
         # same shape as `effort`: the band never reaches into the session, so
@@ -1243,6 +1328,11 @@ class StatusLine:
         self._cost: str = ""
         self._last_rate: str = ""
         self._conversation_name: str = ""
+        #: The operator's status-command line (``tui/status_command.py``),
+        #: already sanitised and capped. Empty means no segment.
+        self._custom: str = ""
+        #: The reading is the last GOOD line, held through a failing run.
+        self._custom_stale: bool = False
         # True while this session is a FORK still wearing the title it inherited
         # from its parent. Only the terminal title reads it, and it is pushed by
         # the app rather than read off the session for the same reason every
@@ -1306,6 +1396,9 @@ class StatusLine:
         #: question" — beside a card whose own highlight is the accent green
         #: (design round 2, D7). Set with the same string it qualifies.
         self._connection_muted: bool = False
+        #: The band's segments come from a conversation's STORED state rather
+        #: than a bound owner — see :meth:`set_last_known`.
+        self._last_known: bool = False
         self._spinner_timer = None
         #: Interval the live timer was created with; a focus change compares
         #: against it to decide whether the timer must be replaced.
@@ -1434,6 +1527,34 @@ class StatusLine:
         if self._connecting == connecting:
             return
         self._connecting = connecting
+        self._sync_spinner_timer()
+        self.refresh()
+
+    def set_last_known(self, last_known: bool) -> None:
+        """Paint the ordinary segment row from STORED facts, marked as last-known.
+
+        WHY (TUI-FINALITY-DESIGN D2). A saved conversation's first frame used to
+        replace the whole row with ``Saved excerpt · Connecting…`` and withhold
+        model, effort, cwd, context, cost and title until the owner bound —
+        then swap the row for the ladder in one step, re-laying out every
+        segment and re-truncating the title for data that had not changed.
+        Those facts are durable (the journal's frontend checkpoint, or the last
+        bound frame) and the app can paint them at first frame; what it cannot
+        do is vouch that they are still CURRENT before the bind.
+
+        So while this flag is up the ordinary ladder row is drawn, with every
+        value in the band's dim ink (the "last-known" treatment), and the
+        connection sentence rides the working-indicator slot after cwd — the
+        slot ``starting…`` already occupies — instead of taking the row over.
+        The bind clears the flag: only the ink and that one slot change, and a
+        value moves only when the live state actually differs (a real update).
+        Live authority — streaming, approval, running children — is never
+        derived from the stored row (the app passes none in), so nothing here
+        can show a stale "working" before the bind.
+        """
+        if self._last_known == last_known:
+            return
+        self._last_known = last_known
         self._sync_spinner_timer()
         self.refresh()
 
@@ -1571,6 +1692,7 @@ class StatusLine:
         model_name: str | None = None,
         effort: str | None = None,
         fast: str | None = None,
+        saver: str | None = None,
         agent_profile: str | None = None,
         team: str | None = None,
         cwd: str | None = None,
@@ -1590,8 +1712,17 @@ class StatusLine:
         tunnel_parked: bool | None = None,
         approvals_auto: bool | None = None,
         approvals_always: bool | None = None,
+        custom: str | None = None,
+        custom_stale: bool | None = None,
     ) -> None:
         """Update any subset of segments and repaint the band."""
+        # "" is meaningful (clear the segment: the command failed, printed
+        # nothing, or was unset), so None stays leave-alone as for every other
+        # segment.
+        if custom is not None:
+            self._custom = custom
+        if custom_stale is not None:
+            self._custom_stale = custom_stale
         if connection is not None:
             self._connection = connection
         if connection_muted is not None:
@@ -1604,6 +1735,8 @@ class StatusLine:
             self._effort = effort
         if fast is not None:
             self._fast = fast
+        if saver is not None:
+            self._saver = saver
         # "" is a MEANINGFUL value here (detach), so these follow the same
         # None-means-leave-alone contract as every other segment: the app passes
         # "" to clear the segment on /agent clear or team detach, and None to
@@ -1890,6 +2023,25 @@ class StatusLine:
             return ""
         return self._model_name
 
+    def command_facts(self) -> dict[str, object]:
+        """What the band is showing for THIS session, for the status command.
+
+        The status command's stdin payload is built from these rather than
+        from the session, so a script sees the same model, context and cost
+        the operator is reading on the row beside its output — never a figure
+        the band would spell differently. The main session's figures, not a
+        pinned child's: the command describes the conversation, and its
+        interval does not track pins.
+        """
+        return {
+            "model_label": self._model_label,
+            "model_name": self._model_name,
+            "cwd": self._cwd,
+            "context_tokens": self._context_tokens,
+            "context_window": self._context_window,
+            "cost": self._cost,
+        }
+
     def _shown_context(self) -> tuple[int, int]:
         """``(tokens, window)`` for the context segment."""
         if self._subagent is not None:
@@ -1939,7 +2091,7 @@ class StatusLine:
         accent = Style(color=theme_mod.semantic_color("accent"))
 
         connection = getattr(self, "_connection", "")
-        if connection:
+        if connection and not getattr(self, "_last_known", False):
             # Connection authority outranks live cost/model details from a saved
             # checkpoint. Reuse the existing row so reconnect never moves the
             # transcript or steals the reader's scroll anchor.
@@ -2032,7 +2184,7 @@ class StatusLine:
             # SHIPPED — the rungs the walk tried on the way are attempts, and
             # so is a whole walk the restart threw away.
             self._dropped = dropped
-            return self._compose(left, right, width, dim)
+            return self._compose(left, right, width, dim, slot=self._liveness_slot(muted))
 
         # Even the irreducible row overflows. Truncate the model label rather
         # than shedding it (D7): `deepse…` still answers which model is
@@ -2130,7 +2282,11 @@ class StatusLine:
         # reappear here either. What remains is the spinner and (while a park
         # stands) the alarm, which are not composer segments.
         if label and "model" not in hidden:
-            tail.append(f"{ICON_MODEL} ", style=dim)
+            # The hollow marker rides this path too: it is the only signal left
+            # on a row too narrow for the ladder, so leaving it out made the two
+            # frames byte-identical below 21 columns (review R2-4).
+            icon = ICON_MODEL_LAST_KNOWN if getattr(self, "_last_known", False) else ICON_MODEL
+            tail.append(f"{icon} ", style=dim)
             tail.append(
                 truncate_cells(label, max(1, width - cell_len(tail.plain))),
                 style=Style(color=theme_mod.semantic_color("fg")),
@@ -2249,8 +2405,9 @@ class StatusLine:
                 if "name" in dropped or not self._conversation_name
                 else NAME_CELLS_FLOOR if flexed else NAME_CELLS
             )
+            custom_cap = CUSTOM_CELLS_FLOOR if "custom" in short else 0
             left = self._left_text(dropped, short, dim, muted, seam, accent)
-            right = self._right_text(dropped, short, cap, dim, seam)
+            right = self._right_text(dropped, short, cap, dim, seam, custom_cap=custom_cap)
             # The fit test reserves the group gap rather than asking whether the
             # composed row happens to fit. `_compose` pads with `max(1, …)`, so a
             # row could "fit" with the two groups ONE cell apart — tighter than
@@ -2280,7 +2437,16 @@ class StatusLine:
                 # construction.
                 ink = cell_len(truncate_name(self._conversation_name, cap))
                 cap = min(NAME_CELLS, ink + slack)
-                right = self._right_text(dropped, short, cap, dim, seam)
+                right = self._right_text(dropped, short, cap, dim, seam, custom_cap=custom_cap)
+                slack = width - cell_len(left.plain) - cell_len(right.plain) - gap
+            full = cell_len(self._custom)
+            if custom_cap and slack > 0 and "custom" not in dropped and custom_cap < full:
+                # The same regrow for the command's reading, after the name's:
+                # from its measured ink, so the rebuilt row adds at most
+                # `slack` cells and fits by construction.
+                ink = cell_len(truncate_cells(self._custom, custom_cap))
+                custom_cap = min(full, ink + slack)
+                right = self._right_text(dropped, short, cap, dim, seam, custom_cap=custom_cap)
             return frozenset(dropped), left, right
         return None
 
@@ -2349,6 +2515,19 @@ class StatusLine:
                 # colour a user already reads as "this is costing you". It also
                 # separates the two adjacent dials at a glance.
                 (ICON_FAST, self._fast, Style(color=theme_mod.semantic_color("warning")), None)
+            )
+        # Value-gated exactly like `/effort` and `/fast` above: absent when off,
+        # which is what makes its presence the whole message. A subagent overlay
+        # suppresses it for the same reason `/fast` is suppressed — the parent's
+        # upload policy is not the child's request.
+        if self._saver and self._subagent is None and "saver" not in dropped:
+            parts.append(
+                (
+                    ICON_SAVER,
+                    self._saver,
+                    Style(color=theme_mod.semantic_color("label")),
+                    None,
+                )
             )
         # Active /team roster, then /agent profile (U2). Both are the SESSION's
         # own settings, never a subagent's: the overlay describes a CHILD's
@@ -2444,6 +2623,30 @@ class StatusLine:
                     )
                 )
 
+        # LAST-KNOWN INK (TUI-FINALITY-DESIGN D2): every value painted from a
+        # stored row takes the band's dim step, so the row reads as "what this
+        # conversation last said" rather than as a live reading. Colour only:
+        # the text and therefore every segment's width are the ones the bound
+        # frame paints for the same data, so the bind changes ink, not layout.
+        last_known = getattr(self, "_last_known", False)
+        if last_known:
+            # LAST-KNOWN INK (design round 1, D1). Every value takes `muted`,
+            # 7.93:1 on the dark band ground and 6.58:1 on the light one, both
+            # over the 4.5:1 AA floor — `dim` measured 4.18:1 and 3.46:1 and was
+            # rejected. Colour only: the text is the bound frame's, so no segment
+            # moves. The MARKER is what says "not confirmed", not the ink: the
+            # bound frame paints its own `◷ 12h52m` in `dim`, so a reader cannot
+            # infer the state from a shade, and the hollow model glyph is a
+            # one-cell swap that shifts nothing.
+            parts = [
+                (
+                    ICON_MODEL_LAST_KNOWN if icon == ICON_MODEL else icon,
+                    text.plain if isinstance(text, Text) else text,
+                    muted,
+                    None,
+                )
+                for icon, text, _style, _icon_style in parts
+            ]
         left = Text()
         for index, (icon, text, style, icon_style) in enumerate(parts):
             if index:
@@ -2462,6 +2665,13 @@ class StatusLine:
         # new attribute directly turned three of those into AttributeErrors —
         # a widget's renderer must tolerate the reduced hosts its own suite
         # builds, the same way the fork/subagent fields here already do.
+        # THE LIVE ACTIVITY INDICATORS ARE SUPPRESSED WHILE LAST-KNOWN, and the
+        # slot carries the state instead. `streaming`/`starting` are live
+        # authority: the app clears them on install, and this makes the renderer
+        # agree even if a caller passes them anyway — a saved conversation must
+        # never paint a spinner for a turn nothing is running (review round 1, R1).
+        if getattr(self, "_last_known", False):
+            return left
         if getattr(self, "_starting", False):
             # Before the runtime exists there is nothing to report but the
             # wait itself, and the caption carries the whole meaning — so it is
@@ -2506,9 +2716,19 @@ class StatusLine:
         return left
 
     def _right_text(
-        self, dropped: set[str], short: set[str], name_cells: int, dim: Style, seam: Style
+        self,
+        dropped: set[str],
+        short: set[str],
+        name_cells: int,
+        dim: Style,
+        seam: Style,
+        *,
+        custom_cap: int = 0,
     ) -> Text:
-        """agents ‹ jobs ‹ context ‹ cost ‹ duration ‹ [!] ‹ name.
+        """agents ‹ jobs ‹ custom ‹ context ‹ rate ‹ cost ‹ duration ‹ [!] ‹ name.
+
+        ``custom_cap`` is the cell cap :meth:`_walk` granted the status
+        command's reading once ``shorten-custom`` fired; 0 means uncapped.
 
         ``name_cells`` is the CAP :meth:`_walk` granted the trailing name —
         zero when the ladder dropped it. The title is emitted unpadded and cut
@@ -2550,6 +2770,23 @@ class StatusLine:
         # transcript is still signalled by the in-transcript "older messages
         # above" notice on scroll, so the at-rest counter is not needed — do
         # not re-add it to "fix" discoverability.
+        if self._custom and "custom" not in dropped:
+            # NO icon: the text is the operator's script's own, and scripts that
+            # serve other harnesses already carry their own glyph, so a band icon
+            # in front of it would double up. Leftmost of the figures, so the
+            # session's own readings (context, cost, duration) stay together
+            # against the right edge and the command's reading — usually about
+            # an account or a project, not this session — sits apart from them.
+            #
+            # `muted`, not `fg` (design round 1, T-4): with no icon and no
+            # leading seam, ink is what separates it from the left group's `fg`
+            # model label when only the minimum gap stands between them. A
+            # Held data remains actionable, so retain the legible fresh ink:
+            # dim fails contrast on the band's actual dark and light surfaces.
+            # Italic distinguishes stale without relying on colour or NO_COLOR.
+            ink = Style(color=theme_mod.semantic_color("muted"), italic=self._custom_stale)
+            text = truncate_cells(self._custom, custom_cap) if custom_cap else self._custom
+            parts.append(("", text, ink))
         if "context" not in dropped:
             tokens, window = self._shown_context()
             usage = format_context_usage(tokens, window)
@@ -2727,10 +2964,37 @@ class StatusLine:
                 right.append(f" {_SEP_RIGHT} ", style=seam)
             if icon:
                 right.append(f"{icon} ", style=dim)
-            right.append(text, style=style)
+            # Last-known ink, as `_left_text` explains: colour only, never width.
+            right.append(text, style=dim if getattr(self, "_last_known", False) else style)
         return right
 
-    def _compose(self, left: Text, right: Text, width: int, dim: Style) -> Text:
+    def _liveness_slot(self, muted: Style) -> Text | None:
+        """The row's LIVENESS SLOT content, or ``None`` when the slot is idle.
+
+        The slot is reserved in every frame (``_LIVENESS_SLOT_CELLS``); this
+        decides what fills it. Today that is only the last-known caption, which
+        says the facts beside it are stored ones and that an owner is being
+        dialled. It carries the catalogued ``tui.status.model.connecting`` word —
+        the one the splash already uses for the same state — so no locale needs
+        new copy.
+
+        The caption takes `muted`, the same step as the values it qualifies, so
+        it cannot become the row's brightest element (design round 1, D1 measured
+        the older cut with the caption at `muted` and every value at `dim`: the
+        state word out-shouted the model, context and cost figures it was
+        qualifying). The glyph is deliberately absent: this state outlasts a
+        healthy switch only until the bind, and a spinner inside a fixed slot
+        would have to animate while the row it sits in is static.
+        """
+        if not getattr(self, "_last_known", False):
+            return None
+        return Text(
+            truncate_cells(_t(tui_status.model_connecting()), _LIVENESS_SLOT_CELLS), style=muted
+        )
+
+    def _compose(
+        self, left: Text, right: Text, width: int, dim: Style, *, slot: Text | None = None
+    ) -> Text:
         """Left group, filler, right group — right-aligned to the band edge.
 
         With no right group there is nothing to align and nothing to separate, so
@@ -2748,8 +3012,36 @@ class StatusLine:
         :data:`NAME_CELLS`'s comment prices that trade.
         """
         if not right.plain:
+            # An EMPTY right group still leaves the slot its gap: a stored row
+            # with no title, no context reading and no spend has nothing to align
+            # against, and returning `left` alone dropped the caption at every
+            # width on a visibly half-empty row (review R2-3).
+            if (
+                slot is not None
+                and slot.plain
+                and cell_len(left.plain) + 2 + cell_len(slot.plain) <= width
+            ):
+                row = Text()
+                row.append_text(left)
+                row.append(" " * 2, style=dim)
+                row.append_text(slot)
+                return row
             return left
         gap = max(_MIN_GROUP_GAP, width - cell_len(left.plain) - cell_len(right.plain))
+        if slot is not None and slot.plain and gap > cell_len(slot.plain) + 2:
+            # The liveness slot is painted INTO the reserved gap it already owns,
+            # so it cannot move either group: the left group ends where the
+            # bound frame ends it and the right group starts where the bound
+            # frame starts it. Two cells of air keep it off the left group's last
+            # segment, and the rest of the gap stays filler.
+            filled = gap - (cell_len(slot.plain) + 2)
+            row = Text()
+            row.append_text(left)
+            row.append(" " * 2, style=dim)
+            row.append_text(slot)
+            row.append(" " * filled, style=dim)
+            row.append_text(right)
+            return row
         row = Text()
         row.append_text(left)
         row.append(" " * gap, style=dim)

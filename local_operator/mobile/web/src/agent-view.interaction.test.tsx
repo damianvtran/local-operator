@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./app";
 import { AgentConversation, AgentUnavailable } from "./screens/agent-view";
 import * as api from "./api";
@@ -19,6 +19,13 @@ vi.mock("./api", async (importOriginal) => ({
 	imageUrl: vi.fn(() => ""),
 	sendCommand: vi.fn(async () => ({ ok: true, detail: "steering queued" })),
 	markSessionSeen: vi.fn(async () => ({ ok: true })),
+	/* A DIRECTORIES STUB, so the sheet this screen can mount never dials the
+	   dev server: without it the App's mount path reached a real `fetch` on
+	   `/api/directories` (and the config stream's `/api/config/events`) in this
+	   suite, which is a network round trip inside a unit test — noise on stderr
+	   and, on a machine that happens to have port 3000 open, a different code
+	   path. Measured: 116 + 38 unstubbed fetches over one run before this. */
+	getDirectories: vi.fn(async () => ({ home: "", recent: [], tmp: "" })),
 }));
 
 function entry(id: string, kind: TranscriptEntry["kind"], text: string): TranscriptEntry {
@@ -58,6 +65,14 @@ function fixture(): { detail: SubagentDetail; projection: SessionProjection } {
 	} satisfies SessionProjection;
 	return { detail, projection };
 }
+
+beforeEach(() => {
+	/* The config stream is the store's own doorbell and it fetches
+	   `/api/config/events` to probe for endpoint presence — one stat-shaped
+	   read per subscribe, never something this screen's behaviour depends on.
+	   Stubbed here for the reason above: a unit test must not open sockets. */
+	vi.spyOn(store, "retainConfigStream").mockReturnValue(() => undefined);
+});
 
 afterEach(() => {
 	cleanup();
@@ -203,7 +218,7 @@ describe("AgentConversation", () => {
 		);
 		fireEvent.click(screen.getByRole("button", { name: "Open parent to steer" }));
 		expect(location.hash).toBe("#/s/root");
-		const composer = screen.getByPlaceholderText("Message…");
+		const composer = screen.getByPlaceholderText("Steer the agent…");
 		const steer = screen.getByRole("button", { name: "steer" });
 		expect((steer as HTMLButtonElement).disabled).toBe(true);
 		fireEvent.change(composer, { target: { value: "Please report back once" } });
@@ -250,7 +265,7 @@ describe("AgentConversation", () => {
 			expect(screen.getByRole("button", { name: "Open parent to steer" })).toBeTruthy(),
 		);
 		fireEvent.click(screen.getByRole("button", { name: "Open parent to steer" }));
-		const composer = screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
+		const composer = screen.getByPlaceholderText("Steer the agent…") as HTMLTextAreaElement;
 		fireEvent.change(composer, { target: { value: "Original instruction" } });
 		fireEvent.click(screen.getByRole("button", { name: "steer" }));
 		await waitFor(() => expect(api.sendCommand).toHaveBeenCalledTimes(1));
@@ -299,7 +314,7 @@ describe("AgentConversation", () => {
 		vi.spyOn(store, "retainSessionListStream").mockReturnValue(() => undefined);
 		history.replaceState({}, "", "#/s/root");
 		const mounted = render(<App />);
-		const composer = screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
+		const composer = screen.getByPlaceholderText("Ask anything…") as HTMLTextAreaElement;
 		fireEvent.change(composer, { target: { value: "Original instruction" } });
 		fireEvent.click(screen.getByRole("button", { name: "send" }));
 		await waitFor(() => expect(api.sendCommand).toHaveBeenCalledTimes(1));
@@ -310,7 +325,7 @@ describe("AgentConversation", () => {
 		projectionSpy.mockReturnValue({ projection: { ...projection, streaming: true }, connected: true });
 		mounted.unmount();
 		render(<App />);
-		const reloadedComposer = screen.getByPlaceholderText("Message…") as HTMLTextAreaElement;
+		const reloadedComposer = screen.getByPlaceholderText("Steer the agent…") as HTMLTextAreaElement;
 		expect(reloadedComposer.value).toBe("Edited draft");
 		expect(screen.getByRole("alert").textContent).toContain("earlier instruction may have been delivered");
 		const retry = screen.getByRole("button", { name: "Retry earlier instruction" });
@@ -352,7 +367,7 @@ describe("AgentConversation", () => {
 		);
 		fireEvent.click(screen.getByRole("button", { name: "Open parent to steer" }));
 		const composer = screen.getByPlaceholderText(
-			"Message…",
+			"Steer the agent…",
 		) as HTMLTextAreaElement;
 		fireEvent.change(composer, { target: { value: "Retry this instruction" } });
 		fireEvent.click(screen.getByRole("button", { name: "steer" }));

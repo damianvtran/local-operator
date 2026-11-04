@@ -1317,6 +1317,7 @@ def git_repo(tmp_path: Path) -> Path:
     env = {
         **os.environ,
         "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_SYSTEM": "/dev/null",
         "GIT_TERMINAL_PROMPT": "0",
     }

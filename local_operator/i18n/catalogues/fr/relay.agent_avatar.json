@@ -1,0 +1,5 @@
+{
+  "relay.agent_avatar.alt": "Image de {name}",
+  "relay.agent_avatar.change": "Changer l’image de {name}",
+  "relay.agent_avatar.desktop_hint": "Modifiez cette image dans l’application de bureau"
+}

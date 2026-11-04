@@ -165,6 +165,18 @@ class SpoolWriteError(OSError):
     """The obligation was not durably settled; never receipt it as held success."""
 
 
+def lock_name(session_id: str) -> str:
+    """The lock file's NAME for one session — the ONE place it is spelled.
+
+    Public because a removal has to name the file to clear it
+    (``session/cleanup.py::_drop_session_sidecars``), and a second literal
+    ``f".{session_id}.lock"`` is how the two would drift apart. Dotted, like every
+    other per-session sidecar, so a listing that walks the spool directory never
+    reads it as a row.
+    """
+    return f".{session_id}.lock"
+
+
 def _session_lock(config_dir: Path, session_id: str, *, read: bool = False) -> WakeWriteLock:
     from local_operator.wakes.lock import WakeWriteLock
 
@@ -174,8 +186,8 @@ def _session_lock(config_dir: Path, session_id: str, *, read: bool = False) -> W
     directory = spooled_dir(config_dir)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     if read:
-        return WakeWriteLock(directory, name=f".{session_id}.lock", timeout_s=0.0)
-    return WakeWriteLock(directory, name=f".{session_id}.lock")
+        return WakeWriteLock(directory, name=lock_name(session_id), timeout_s=0.0)
+    return WakeWriteLock(directory, name=lock_name(session_id))
 
 
 def _raw_read(config_dir: Path, session_id: str) -> dict[str, Any] | None:

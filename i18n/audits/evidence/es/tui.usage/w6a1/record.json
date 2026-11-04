@@ -1,0 +1,143 @@
+{
+  "schema": 1,
+  "audit_id": "w6a1",
+  "audit_round": 1,
+  "locale": "es",
+  "namespace": "tui.usage",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "The es target is UNTRACKED at this revision, so HEAD does not bind its bytes. The on-disk sha256 in input_hashes.target is the binding identity, and the probe re-derives it through local_operator.i18n.catalogues.load_catalogue() in section A.",
+  "key_count": {
+    "en": 21,
+    "target": 21,
+    "context": 21
+  },
+  "verdict": "changes_requested",
+  "result": "changes_requested — 0 blocker, 1 major, 3 minor, 0 nit",
+  "verdict_reason": "Mechanical deck clean: both plurals carry one/many/other with every branch rendering the source arguments, and the layout-bearing spaces, leading comma and ellipses are byte-preserved. One major: paid.continue renders 'included quota' as 'cuota incluida' while the shipped relay.shell.usage.continue renders the identical sentence as 'Asignación incluida agotada' — and this same panel calls the paid allowance 'Asignación'. Three minors cover singular agreement on the bare counters and two truncation risks at the supported 40x24 floor.",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), independent Spanish translation auditor",
+    "session_or_instance": "6a2f6fa808a7",
+    "model": "radient/auto",
+    "model_note": "Model as actually run. Session header was anthropic/claude-sonnet-5-5; three provider-failure (quota) switches occurred before any work was done: -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto. Every check, reading and finding in this bundle was produced under radient/auto. No claim is made for the primary model.",
+    "date": "2026-10-30",
+    "independence": "I authored none of this copy and repaired none of it. I wrote no catalogue, sidecar, ledger, allowance or generated file; only this evidence directory. Judgement is LLM reasoning against en source, the context sidecar, the shipped es catalogues and the rendering code; no translation/MT service was used to compare or back-translate."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.usage.json",
+      "sha256": "5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b",
+      "tracked": true
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.usage.json",
+      "sha256": "3cc8ea06555b0bfe52c732ec0bf1b9cf5e1ce76874bdfe10fde1ff3b4ad1f287",
+      "tracked": false
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.usage.context.json",
+      "sha256": "bf599f5f161087b890e1e24434a03209fee286b865173af6b578da3133b6ef19",
+      "tracked": true
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.usage/w6a1/record.json",
+      "role": "record",
+      "sha256": "self"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.usage/w6a1/report.md",
+      "role": "audit report (findings, witnesses, limitations)",
+      "sha256": "cebf90c7c6e062573a1a2495afb8f151caa2e83d08f95b64a9f9696c3df8578a"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.usage/w6a1/audit.log",
+      "role": "execution log: validator + probe commands and their actual output",
+      "sha256": "c1cc02042cf42220dd32f5f12e49e613bd373d81fc8034856b7a0834f1eee010"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.usage/w6a1/checks.py",
+      "role": "the probe that produced sections A-D, including the negative controls",
+      "sha256": "341db1b989d0725dae8d8fdcd343a37501cb436457138a7568c871d111f92a79"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "changes_requested",
+    "unresolved_blocker_major_count": 1,
+    "finding_ids": [
+      "US-1",
+      "US-2",
+      "US-3",
+      "US-4"
+    ]
+  },
+  "findings": [
+    {
+      "id": "US-1",
+      "severity": "major",
+      "key": "tui.usage.paid.continue",
+      "en": "included quota used; credits will continue",
+      "current": "cuota incluida agotada; continuará con créditos",
+      "problem": "The same English sentence ships on the relay surface as 'Asignación incluida agotada; continuará con créditos.' (relay.shell.usage.continue, committed, ledger-passed at the current en hash f53b23560b88), and this same panel says 'Asignación de pago ilimitada' for the paid allowance. One money object is named two ways, so a user comparing the surfaces can read them as different pools.",
+      "suggestion": "Asignación incluida agotada; continuará con créditos — or standardise on 'cuota' and move relay.shell in the same wave, then record the call in i18n/style-guides/es.md",
+      "evidence": "relay.shell es: usage.continue / paid / included / unlimited; tui.usage.paid.unlimited is byte-identical to relay.shell.usage.unlimited; the other three paid.* strings match relay exactly"
+    },
+    {
+      "id": "US-2",
+      "severity": "minor",
+      "keys": [
+        "tui.usage.exhausted",
+        "tui.usage.stale"
+      ],
+      "en": "{value} exhausted / {value} stale",
+      "current": "{value} agotadas / {value} obsoletas",
+      "problem": "{value} is a bare count of windows, so at one window the footer reads '1 agotadas' and '1 obsoletas'. English is invariant and cannot show this.",
+      "suggestion": "agotadas: {value} / obsoletas: {value} (count-neutral, and shorter)",
+      "evidence": "usage_panel.py UsageStats.describe() passes str(count) and joins with ' · '; windows_count renders 'N ventanas'"
+    },
+    {
+      "id": "US-3",
+      "severity": "minor",
+      "key": "tui.usage.sign_in_expired",
+      "en": "{value} sign-in expired",
+      "current": "{value} con inicio de sesión caducado",
+      "problem": "31 cells against en's 17 in a title row that truncates from the right; the mixed-state row is '2 con inicio de sesión caducado  · 2 obsoletas' = 46 cells against the 31-cell body at the supported 40x24 floor, where the English row's 28 cells fit. The second count is cut — the misreading the two-count split exists to prevent.",
+      "suggestion": "{value} sesión caducada (mixed row 32) or {value} caducadas (26) if the floor must stay whole",
+      "evidence": "usage_panel.py:1789-1800 (counts, join, truncate); PANEL_MIN_WIDTH 32, PANEL_PADDING_CELLS 4, SCROLLBAR_GUTTER_CELLS 1"
+    },
+    {
+      "id": "US-4",
+      "severity": "minor",
+      "keys": [
+        "tui.usage.paid.family_caps",
+        "tui.usage.paid.eligibility_unknown"
+      ],
+      "en": "model-family caps still apply / Spend eligibility unknown",
+      "current": "siguen aplicándose los límites por familia de modelos / Elegibilidad para gasto desconocida",
+      "problem": "Both are single-line annotations truncated with an ellipsis (usage_panel.py:1039-1047). At the 31-cell floor body they clip where English does not (55 vs 31, 37 vs 27): the noun is lost in the first, and the 'unknown' qualifier — the one the sidecar says must not imply a side — is lost in the second.",
+      "suggestion": "los límites por familia siguen (30) and elegibilidad de gasto: desconocida (34), or record a width exception as cli.services_status did",
+      "evidence": "usage_panel.py:1039-1047; sidecar note 'Do not imply enabled or disabled'"
+    }
+  ],
+  "check_output": [
+    {
+      "cmd": "python3 scripts/i18n/check.py",
+      "result": "exit 0 — 'check.py: ok — 191 file(s) scanned, 2348 literal(s) at or below the baseline, catalogues consistent; 51 advisory finding(s)'"
+    },
+    {
+      "cmd": "PYTHONPATH=$PWD ~/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.usage/w6a1/checks.py --namespace tui.usage",
+      "result": "exit 1 (findings present). 22 checks pass, 6 fail: paid.continue terminology (US-1), exhausted/stale at count 1 (US-2), the mixed title row width (US-3) and the two paid annotations at the floor (US-4). Section A clean; the render matrix confirms one/many/other selection for both plurals."
+    },
+    {
+      "cmd": "same probe, full three-namespace run (section D)",
+      "result": "10 negative controls: 10 behaved as required (8 breakages caught, 2 intended passes accepted)"
+    }
+  ],
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation.",
+    "No rendered frame captured: clipping is derived from the truncate call and the panel geometry constants, not photographed.",
+    "Width ruler taken from ~/local-operator/.venv (this checkout has no .venv); no dependency was installed.",
+    "No translation/MT service was used to compare or back-translate — judgement only, by rule."
+  ]
+}

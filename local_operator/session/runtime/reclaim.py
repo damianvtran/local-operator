@@ -1336,23 +1336,79 @@ RECLAIM_ATTEST_ACTOR = "runtime residency sweep"
 
 @dataclass(frozen=True)
 class _ReclaimAttestation:
-    """The run key one reclaim marker is staged with — all the sweep knows.
+    """The run key one reclaim marker is staged with.
 
     ``control.note_involuntary_stop`` duck-types the record it is handed (its
     writer reads the session, the pid, the start time and — when present — the
     build, spelled two ways), so this carries exactly those facts and invents
-    nothing. ``started_at`` is the kernel's own age arithmetic (``ps``'s
-    ``etime``, held on :class:`RuntimeProcess`) subtracted from now: a reclaim
-    candidate is by definition the runtime with NO record to read a start time
-    from, which is the case this sweep exists for.
+    nothing.
+
+    ``started_at`` IS THE RUNTIME'S OWN PUBLISHED START, never ``now - ps etime``.
+    The victim pairs a marker on ``abs(marker - its own record) < 1.0 s``
+    (``signal_receipt._RUN_KEY_TOLERANCE_S``), and ``etime`` counts from ``exec``
+    while the runtime stamps its record 1.2-3 s later (measured in review round 1 of
+    the sanction gate: 0 of 21 live runtimes inside the tolerance), so an
+    etime-derived key made this sweep's SIGTERM refused essentially always.
+    :func:`published_run_start` is where the authentic value comes from.
+
+    ``None`` is a deliberate, LOUD degradation (see that function): an unstamped
+    marker pairs on session + pid + the staging window alone.
     """
 
     session_id: str
     pid: int
-    started_at: float
+    started_at: float | None
 
 
-def _attestation_record(item: Verdict) -> _ReclaimAttestation | None:
+def published_run_start(
+    config_root: str | Path,
+    session_id: str,
+    pid: int,
+    *,
+    records: Mapping[int, Any] | None = None,
+) -> tuple[float | None, str]:
+    """``(started_at, source)`` of the run ``pid`` is, from what the RUNTIME wrote.
+
+    The shared answer for every sender that signals a runtime by pid and has to
+    stage a sanction first (``reclaim`` here, ``wakes.owned_runtimes.sweep``). In
+    order of authority:
+
+    1. ``records[pid]`` — the published ``SessionRecord`` (the ladder's own key).
+    2. ``runtime-run.json`` in the conversation directory
+       (``journal.read_run_record``), accepted ONLY when it names this pid. It is
+       written at boot from the very ``RuntimeServer._record.started_at`` the gate
+       compares, so it is byte-identical to the victim's key — and it exists for
+       exactly the candidate class that has no published record (``reclaim``'s
+       whole population). A different pid means a LATER run owns the file, so it
+       says nothing about this process.
+    3. ``(None, "unstamped")``: no authentic start exists. NOT skipped, because
+       skipping is worse on both sides of the fleet — an older build has no gate
+       and would have exited, and a gated one is still reachable by the marker's
+       session + pid + staging-window pairing (``marker_covers_signal`` skips the
+       start comparison when either side has no stamp). The caller logs it.
+
+    NEVER derived from ``ps`` age, and never from the boot record
+    (``run/host/<pid>.json``): its ``started_at`` is stamped earlier than the
+    runtime's own record by 0.15-16 s (measured on nine live runtimes), so it would
+    miss the tolerance exactly as the etime derivation did.
+    """
+    published = (records or {}).get(pid)
+    stamp = getattr(published, "started_at", None)
+    if isinstance(stamp, (int, float)) and not isinstance(stamp, bool) and stamp:
+        return float(stamp), "record"
+    try:
+        from local_operator.session.runtime import journal
+        from local_operator.session.runtime.types import session_dir
+
+        run = journal.read_run_record(session_dir(Path(config_root), session_id))
+    except Exception:  # noqa: BLE001 — evidence must never fail a sweep
+        run = None
+    if run is not None and run.pid == pid and run.started_at:
+        return float(run.started_at), "run-record"
+    return None, "unstamped"
+
+
+def _attestation_record(item: Verdict, view: Fleet | None = None) -> _ReclaimAttestation | None:
     """The run key this candidate's marker would be staged with, or ``None``.
 
     ``None`` is the one class with nowhere to write: a recordless runtime whose
@@ -1363,14 +1419,28 @@ def _attestation_record(item: Verdict) -> _ReclaimAttestation | None:
     Built ONCE per candidate and reused by the withdrawal below, because the
     marker's run key must round-trip exactly: ``withdraw_involuntary_stop``
     re-reads the file it is about to take back and compares ``started_at`` by
-    equality, so a second ``time.time()`` here would refuse its own marker.
+    equality, so a second derivation here could refuse its own marker.
     """
     if not item.session_id:
         return None
+    started_at, source = published_run_start(
+        item.config_root,
+        item.session_id,
+        item.process.pid,
+        records=getattr(view, "records", None),
+    )
+    if source == "unstamped":
+        logger.warning(
+            "runtime residency: no published start for pid %d (session %s): its "
+            "marker is staged WITHOUT a start stamp, so a runtime that gates "
+            "terminating signals pairs it on session + pid + time alone",
+            item.process.pid,
+            item.session_id,
+        )
     return _ReclaimAttestation(
         session_id=item.session_id,
         pid=item.process.pid,
-        started_at=time.time() - item.process.age_s,
+        started_at=started_at,
     )
 
 
@@ -1590,7 +1660,7 @@ def reclaim_runtimes(
         # one of the machine's mass-kill paths, and those must be attributable.
         # The record is built once and reused by the withdrawal below, because
         # the marker's run key must round-trip exactly.
-        attestation = _attestation_record(item)
+        attestation = _attestation_record(item, view)
         if attestation is not None:
             _attest_before_signal(item, attestation)
         try:

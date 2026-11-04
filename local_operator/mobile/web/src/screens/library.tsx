@@ -297,7 +297,7 @@ export function LibraryScreen() {
 				</p>
 			) : null}
 
-			<main className="lo-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-4">
+			<main className="lo-scroll min-h-0 flex-1 overflow-y-auto px-2 pb-[max(env(safe-area-inset-bottom),1rem)]">
 				{loading && rows.length === 0 ? (
 					<div className="grid grid-cols-2 gap-2" aria-label="loading assets" aria-busy="true">
 						{Array.from({ length: 6 }, (_, index) => (

@@ -1,0 +1,37 @@
+{
+  "wire.errors.agent_avatar.empty_body": {
+    "role": "API refusal sentence (desktop/phone show it to the person)",
+    "tone": "plain, helpful",
+    "note": "Refusal when the PUT request carrying the picture has an empty body. Mostly seen by developers/agents calling the API."
+  },
+  "wire.errors.agent_avatar.imaging_unavailable": {
+    "role": "API refusal sentence (desktop/phone show it to the person)",
+    "tone": "plain, helpful",
+    "note": "Refusal when this install lacks the Pillow image library (the 'images' optional extra). 'images' is a literal package extra name; keep it untranslated."
+  },
+  "wire.errors.agent_avatar.not_found": {
+    "role": "API refusal sentence (desktop/phone show it to the person)",
+    "tone": "plain, helpful",
+    "note": "404 answer when an agent's profile picture is requested but none is set."
+  },
+  "wire.errors.agent_avatar.too_large": {
+    "role": "API refusal sentence (desktop/phone show it to the person)",
+    "tone": "plain, helpful",
+    "note": "Refusal when an uploaded agent profile picture file exceeds the input cap. {limit_mib} is an integer number of mebibytes (10); render with the locale's MB abbreviation."
+  },
+  "wire.errors.agent_avatar.too_many_pixels": {
+    "role": "API refusal sentence (desktop/phone show it to the person)",
+    "tone": "plain, helpful",
+    "note": "Refusal when an uploaded agent profile picture decodes to more pixels than allowed. {limit_mp} is an integer (40)."
+  },
+  "wire.errors.agent_avatar.undecodable": {
+    "role": "API refusal sentence (desktop/phone show it to the person)",
+    "tone": "plain, helpful",
+    "note": "Refusal when an uploaded agent profile picture looks like an image but cannot be decoded (corrupt/truncated)."
+  },
+  "wire.errors.agent_avatar.unsupported_type": {
+    "role": "API refusal sentence (desktop/phone show it to the person)",
+    "tone": "plain, helpful",
+    "note": "Refusal when a picture upload for an agent's profile picture is not a recognised image (sniffed by content, not filename). Product/format names stay as-is."
+  }
+}

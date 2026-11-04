@@ -130,6 +130,25 @@ RECEIPT_CAP = 20
 #: member's sentence (chars; the audit detail value cap is 200).
 DETAIL_CAP = 200
 
+
+def cap_sentence(text: str, cap: int = DETAIL_CAP) -> str:
+    """``text`` within ``cap`` characters, cut on a word boundary with an ellipsis.
+
+    A plain slice cut a member's receipt mid-word through its own remedy (QA
+    round 1 on #3093, Q4: ``run `lop services restart` on this d``). A cut
+    that lands inside a word steps back to the last space when one is near
+    (the ``resume`` clipping rule), so the reader sees whole words and a mark
+    that the sentence goes on; the structured fields carry what was cut.
+    """
+    if len(text) <= cap:
+        return text
+    cut = text[: cap - 1]
+    spaced = cut.rsplit(" ", 1)[0]
+    if len(spaced) >= cap - 40:
+        cut = spaced
+    return cut.rstrip(" ,.;:") + "…"
+
+
 #: The member states that mean "nothing more will happen to this member
 #: without a new rollout" (the §3 vocabulary map's record column). ``failed``
 #: is NOT terminal: the window is its bound. ``refused`` SPLITS (round 2,
@@ -594,6 +613,56 @@ def _left_busy_ids(answer: Mapping[str, Any]) -> list[str]:
     return ids
 
 
+#: The serve states a member's answer may put on the record; anything else is
+#: dropped, because the value comes from a paired peer (the LEFT_BUSY_CAP rule).
+SERVE_STATES = frozenset({"moved", "current", "none", "stale", "unknown"})
+
+
+def _serve_fact(answer: Mapping[str, Any]) -> dict[str, Any]:
+    """The member's serve fact, bounded, or ``{}`` for a member that sent none.
+
+    An older member's answer carries no ``serve``; ``{}`` is the honest value
+    then — the record must not read "moved" or "stale" for a fact nobody
+    reported.
+    """
+    raw = answer.get("serve")
+    if not isinstance(raw, Mapping) or str(raw.get("state") or "") not in SERVE_STATES:
+        return {}
+    fact: dict[str, Any] = {"state": str(raw["state"])}
+    stale = raw.get("stale")
+    if isinstance(stale, list):
+        fact["stale"] = [
+            {"pid": _bounded_pid(row.get("pid")), "version": str(row.get("version") or "")[:40]}
+            for row in stale[:LEFT_BUSY_CAP]
+            if isinstance(row, Mapping)
+        ]
+    # ``stuck`` (QA Q1 on #3093): alive-but-not-serving daemons, named by pid and
+    # the status verdict word. ``moved`` (review n2): which pids moved, so a
+    # `--json` reader of a ``moved`` member can tell. Both bounded like ``stale``.
+    stuck = raw.get("stuck")
+    if isinstance(stuck, list):
+        fact["stuck"] = [
+            {"pid": _bounded_pid(row.get("pid")), "verdict": str(row.get("verdict") or "")[:20]}
+            for row in stuck[:LEFT_BUSY_CAP]
+            if isinstance(row, Mapping)
+        ]
+    moved = raw.get("moved")
+    if isinstance(moved, list):
+        fact["moved"] = [_bounded_pid(pid) for pid in moved[:LEFT_BUSY_CAP]]
+    if raw.get("remedy"):
+        fact["remedy"] = str(raw.get("remedy"))[:80]
+    return fact
+
+
+def _bounded_pid(value: Any) -> int:
+    """A peer-supplied pid as an int, 0 when it is not one."""
+    try:
+        pid = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return pid if 0 < pid < 2**31 else 0
+
+
 def classify_answer(
     answer: Mapping[str, Any], *, fails: int, now: float, waits: int = 0
 ) -> dict[str, Any]:
@@ -627,7 +696,7 @@ def classify_answer(
             "next_ask_at": now + floor,
             "cause": cause,
             "outcome": outcome,
-            "detail": message[:DETAIL_CAP],
+            "detail": cap_sentence(message),
             "version": version,
             "method": method,
             # CONSECUTIVE-failure count, so every non-failure answer resets it
@@ -651,7 +720,14 @@ def classify_answer(
         # ``left_busy`` rides alongside as data (QA round 1 on #3028, Q2): the
         # sentence can be cut at DETAIL_CAP with two or three named sessions,
         # and the ids are what a `--json` reader and the audit row need.
-        return moved(state) | {"waits": 0, "left_busy": _left_busy_ids(answer)}
+        # ``serve`` rides the same way (2026-10-28): whether the member's
+        # `lop serve` came along, so a STALE one is on the record and its audit
+        # row rather than only in the member's own log.
+        return moved(state) | {
+            "waits": 0,
+            "left_busy": _left_busy_ids(answer),
+            "serve": _serve_fact(answer),
+        }
     if state == "busy" or code == "update_in_progress":
         # Skip-then-retry: parked on the cadence, a FRESH probe each time, and
         # nothing was touched on the member (its own sentence rides `detail`).
@@ -776,6 +852,10 @@ def _audit_member_state(
             # The ids the member deliberately left on its old build (QA Q2):
             # the reason above is capped and may have lost the names.
             detail["left_busy"] = list(update.get("left_busy") or [])
+        if "serve" in update:
+            from local_operator.network.meshupdate import serve_audit
+
+            detail.update(serve_audit(update.get("serve") or {}))
         event = AuditEvent(
             event=MEMBER_STATE,
             actor="self",
@@ -951,6 +1031,12 @@ def step_record(server: "RelayServer", record_id: str, *, now: float | None = No
             target_member["next_ask_at"] = float(_update.get("next_ask_at") or 0.0)
             if "left_busy" in _update:
                 target_member["left_busy"] = list(_update.get("left_busy") or [])
+            # Replaced on key PRESENCE, as ``left_busy`` is (review m4): a later
+            # answer that carries no fact (an older member, a re-probed
+            # ``already_on_target``) must clear an earlier one, not leave a
+            # STALE verdict standing beside a newer receipt.
+            if "serve" in _update:
+                target_member["serve"] = dict(_update.get("serve") or {})
             note_receipt(
                 target_member,
                 state=str(_update["state"]),

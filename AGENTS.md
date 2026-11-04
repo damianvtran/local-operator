@@ -22,7 +22,7 @@ exceptions. The string ratchet records file-level categories in
 of supported languages, including languages added later. A feature is not done
 until it is localized; "English first, translate later" is a missing feature,
 not a follow-up. Adding a language means adding it to the manifest, its
-`i18n/style-guides/<locale>.md`, and its audited `i18n/ledger.json` rows.
+`i18n/style-guides/<locale>.md`, and its audited `i18n/ledger/<locale>.json` rows.
 Removing one is a product decision, never a code cleanup.
 
 **Translations are idiomatic, never literal.** An LLM translator produces them
@@ -50,7 +50,11 @@ not tied to a real plan.
 
 HOWTO: [`docs/I18N.md`](docs/I18N.md). Contract:
 [`docs/design/i18n.md`](docs/design/i18n.md). `local_operator/i18n/data/shipped.json`
-is GENERATED from ledger completeness — **never hand-edit it**.
+is GENERATED from ledger completeness — **never hand-edit it**. The audit
+ledger is sharded per locale: append audit rows to `i18n/ledger/<locale>.json`
+(authoritative, append-only, last row per `(locale, namespace)` wins), never to
+`i18n/ledger.json` — that aggregate is a generated mirror re-rendered by
+`scripts/i18n/generate.py`, and `--check` fails if the two disagree.
 
 ## Environment
 
@@ -69,7 +73,7 @@ this host, so the same command lands anywhere in that range (and it is the reaso
 `tests/durations.json` exists as the sharder's input). Do not treat the whole suite
 as a routine inner-loop step: run the targeted command for what you changed (see
 "Scoping the inner loop" below, and note which jobs still narrow), and let CI's
-five shards be the whole-tree run.
+six shards be the whole-tree run.
 
 **Every pytest invocation in this file is isolated, and that is not decoration.**
 Each block also carries its own `ISO=$(mktemp -d)`, because the variable lives in
@@ -369,12 +373,15 @@ jobs of `.github/workflows/ci.yml`, spelled as they are for a full-tree run:
 .venv/bin/python -m flake8 .
 uvx --from black==26.1.0 black --check .
 uvx isort==5.13.2 --check .
-.venv/bin/python scripts/run_bounded.py --timeout 1800 -- .venv/bin/python -m pyright --pythonpath .venv/bin/python .
+.venv/bin/python scripts/run_bounded.py --contract=command-status --timeout 1800 -- .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 ```
 
 The `pyright` line goes through a bounded, process-group-reaping wrapper: it is
-whole-tree, exactly as before, but it cannot leave an analyzer running. See
-"The local `pyright` gate is bounded and process-group-reaped" below.
+whole-tree, exactly as before, but it cannot leave an analyzer running. It asks
+for `--contract=command-status` because the gate needs pyright's status, not a
+cleanup certificate; the default `cleanup-required` contract refuses before
+spawn on Darwin. See "The local `pyright` gate is bounded and
+process-group-reaped" below.
 
 **CI no longer runs all four over the whole tree on every PR.** Each job is
 gated on a scope flag computed by `scripts/ci_scope.py`, which classifies the
@@ -648,7 +655,7 @@ narrowest scope that could hold the answer, and widen only when it shows nothing
 
 ### Running the suite locally: what it costs, and how to read a stall
 
-**CI's five shards are the whole-tree gate. A local whole-tree run is not one, and
+**CI's six shards are the whole-tree gate. A local whole-tree run is not one, and
 no session should block on it.** Measured 2026-09-24 at load average 140-200, the
 whole tree is **~84 minutes projected at the four workers this host's hook resolved**
 — the run's own line is `pytest worker cap: 4 (bound by memory, cpu arm 7, memory arm 4,
@@ -834,9 +841,15 @@ that too, and each unresolved class has its own row in
 ### The local `pyright` gate is bounded and process-group-reaped
 
 The local `type-check` command is spelled
-`.venv/bin/python scripts/run_bounded.py --timeout 1800 -- .venv/bin/python -m pyright …`.
+`.venv/bin/python scripts/run_bounded.py --contract=command-status --timeout 1800 -- .venv/bin/python -m pyright …`.
 The gate itself is **whole-tree**, exactly as `ci.yml` spells it: the wrapper
-bounds and reaps, it never narrows. The recipe also gives the node child
+bounds and reaps, it never narrows. `--contract=command-status` is deliberate:
+the default `cleanup-required` contract certifies owned-group cleanup and so
+refuses before spawn (125, `unsupported-backend`) where no authoritative census
+backend exists — Darwin today. command-status keeps the bound, the forwarded
+signals, the leader-exit sweep and the memory grant, signals the group only
+while its leader is unreaped, and always reports `cleanup=unknown`; it never
+certifies cleanup (`docs/design/run-bounded-contract.md`). The recipe also gives the node child
 ci.yml's heap headroom — `NODE_OPTIONS=--max-old-space-size=6144`, raised only
 when the caller's `NODE_OPTIONS` has no `--max-old-space-size` or a smaller
 one, a larger value passing through — because a bare run otherwise inherits
@@ -883,11 +896,19 @@ measured; 300 s in an earlier run for a 300 s one), where the wrapper SIGKILLs t
 group after `--grace` and clears the same tree in 5 s **with `--grace 2`** (the
 shipped `--grace` default of 10 takes ~13 s for it). It keeps
 `timeout(1)`'s statuses (124 on a fired bound, 125 when the command could not
-start), reports **128 + signum** when a signal ends the run — forwarded by this
+start, 126 when the command ran and produced its own status but the wrapper could
+not prove its owned group was cleaned up — deliberately distinct from 125, since
+"did not run" and "ran, residuals unknown" call for different follow-up), reports
+**128 + signum** when a signal ends the run — forwarded by this
 wrapper, or delivered to the child by someone else, where `sys.exit` used to
 render the raw `-9` as 247 — forwards **SIGHUP and SIGQUIT** as well as
 SIGINT/SIGTERM (SIGHUP used to kill the wrapper and leave the group alive), writes
-diagnostics to stderr only, and reports what it reaped.
+diagnostics to stderr only, and reports what it reaped. Every invocation writes
+`run-bounded-runs/<invocation_id>.completion.json` (the authoritative outcome,
+named on the last stderr line); spawned cleanup-required runs also write
+`<run_id>.spawn.json` and `.exit.json` naming the group it owned (`--run-id` or
+`$LOCAL_OPERATOR_RUN_ID` binds the id); see `scripts/run_bounded.py`'s RUN
+RECORD section for the schema.
 
 Its own limit, stated: a `SIGKILL` to the wrapper itself cannot be caught, so
 nothing runs a sweep in that case — what protects the group there is that the
@@ -896,11 +917,12 @@ members were signalled as a group in the first place.
 ### Every feature worktree owns its own venv. Never symlink one.
 
 This repo is worked through many concurrent worktrees, and **each one gets a
-real `.venv` installed editable from itself**:
+real `.venv` installed editable from itself**. Prefer `<repo>/.worktrees/<name>` (Python: its own `.venv`, below; JS: share the primary dependency tree); a sibling `../<repo>-<topic>` is tolerated with APFS-cloned deps or an absolute link; never session scratchpads, /tmp or `$TMPDIR` dirs, `$HOME` top level or ad-hoc sibling roots. `git worktree remove` (clean only, never discard unpushed work) once the PR merges or the lane closes.
+`scripts/worktree_janitor.py` lists the removable ones (dry-run).
 
 ```sh
-git worktree add -b feat/my-change ~/workspace/repos/lo-my-change main
-cd ~/workspace/repos/lo-my-change
+git worktree add -b feat/my-change ~/local-operator/.worktrees/my-change main
+cd ~/local-operator/.worktrees/my-change
 uv venv --python 3.12 .venv
 uv pip install -e ".[all,dev]" --python .venv/bin/python
 ```
@@ -925,9 +947,9 @@ Verify which source a venv actually resolves before trusting an interactive
 session, especially after any venv repair:
 
 ```sh
-cd ~/workspace/repos/lo-my-change
+cd ~/local-operator/.worktrees/my-change
 .venv/bin/python -c "import local_operator; print(local_operator.__file__)"
-# MUST print .../lo-my-change/local_operator/__init__.py
+# MUST print .../.worktrees/my-change/local_operator/__init__.py
 ```
 
 Wrong path? Rebuild the venv with the two `uv` commands above. `PYTHONPATH=$PWD`
@@ -962,7 +984,7 @@ The fix is to reinstall editable **from the checkout you want to run**, not
 merely to make the error go away:
 
 ```sh
-cd ~/workspace/repos/local-operator   # or the worktree that should own it
+cd ~/local-operator   # or the worktree (~/local-operator/.worktrees/<name>) that should own it
 uv pip install -e ".[all,dev]" --python .venv/bin/python
 ```
 
@@ -973,6 +995,42 @@ test_eval_tool.py` as **24 failures** that three agents in a row wrote off as
 "environmental". They were a broken venv, and they all pass once it points
 somewhere real. Treat a standing block of "known environmental" failures as an
 unverified claim, not as weather.
+
+### One stash list is shared by every worktree of a clone
+
+Worktrees share one `.git`, so `refs/stash` — and the `stash@{n}` index that
+addresses it — is shared with them. Every worktree of a clone answers
+`git stash list` with the same entries in the same order, which makes an
+unqualified two-command sequence unsafe wherever another agent (or person) is
+working: your `git stash push` lands at `stash@{0}`, a peer's push between it
+and your `git stash pop` renumbers yours to `stash@{1}`, and the bare `pop`
+then applies THEIR work to YOUR tree. Nothing in the output says it is not
+yours, and a `pop` drops the entry it applied, so the peer's own restore later
+finds their entry gone.
+
+**Rule: for anything you intend to restore, do not use a bare `git stash` in a
+shared checkout — and do not treat reading `stash@{0}` after a `push` as a
+capture.** That read is racy in exactly the way the push is: a peer's push can
+land between the two commands, and the id you then record is theirs. Take an id
+that cannot move instead. `git stash create` prints the commit id, adds nothing
+to the list and leaves the working tree untouched; store that commit under a
+message you recognise — `git stash store -m "<why>" <id>` — and it becomes the
+newest entry. Restore by value — `git stash apply <id>` — and the number stops
+mattering: it may change under you, the content will not. Four limits, all
+real. `create` SNAPSHOTS the tree rather than clearing it, so it does not
+replace `push` when the point is a clean tree — and clearing a tree you share is
+the whole-tree operation banned above. It holds the index and the TRACKED
+working tree only: it takes no `-u` (a bare `-u` is read as the message), so
+untracked files are not in that id at all — copy those aside instead, for
+example from `git ls-files --others --exclude-standard`. Being alone in YOUR
+worktree does not make push-then-capture safe either, because the list is
+clone-wide: only being alone in the CLONE would, which in a parallel fleet is
+not something to assume. And an id that is never stored is a dangling commit
+that `git gc` may prune; `store` is what makes it durable. This is a property of
+Git, not of this repository's layout: it applies to any clone running parallel
+agents. The conflict shape a foreign apply leaves, and how to recover path by
+path, are in "The stash list is repo-global, and `apply` lands whatever it
+resolves" under "Always capture before AND after".
 
 ### Isolating a run: `LOCAL_OPERATOR_CONFIG_DIR` alone is not enough
 
@@ -1216,11 +1274,12 @@ leftover either blocks the next agent or gets silently reused at a stale
 revision (`git worktree list` presently shows dozens of abandoned ones):
 
 ```sh
-read=$(mktemp -d /tmp/lo-read.XXXXXX)
+read=~/local-operator/.worktrees/read-$$   # in-repo, never /tmp
+# --force is fine here: a detached read-only tree has nothing worth refusing for.
+trap 'git -C ~/local-operator worktree remove --force "$read"' EXIT   # success AND failure
 git -C ~/local-operator fetch origin main --quiet
 git -C ~/local-operator worktree add --detach "$read" origin/main --quiet
-grep -n 'thing you are checking' "$read/AGENTS.md"
-git -C ~/local-operator worktree remove --force "$read"
+grep -n 'thing you are checking' "$read/AGENTS.md"   # the trap removes "$read" on exit
 ```
 
 The `-C ~/local-operator` is load-bearing on every command here: you are
@@ -1542,9 +1601,16 @@ pypi/support#12738 and pypi/support#12882.
    would be the silent downgrade the design forbids. The consequence for this checklist is
    that an expired Developer ID identity or a revoked App ID stops the Linux and Windows
    release too — and the remedy is a re-issued p12/profile refilled into
-   `secrets.MACOS_SIGNING_P12_BASE64` / `secrets.MACOS_SIGNING_PROFILE_BASE64`, not a
-   skipped job. `keyagent-macos` runs on the pinned `macos-15` runner deliberately, so do
-   not bump that pin during a release window.
+   `secrets.MACOS_DEVID_APP_P12_BASE64` / `secrets.MACOS_DEVID_APP_P12_PASSWORD` /
+   `secrets.MACOS_KEYAGENT_PROFILE_BASE64` (the Radient Inc. organization identity,
+   team `SHA2U6KT7V`; certificate expires 2027-12-02), not a skipped job. The job
+   also asserts the signature's `Authority=` is that organization identity, so a
+   refill with any other certificate fails loudly; the retired
+   `MACOS_SIGNING_P12_*` / `MACOS_SIGNING_PROFILE_BASE64` secrets are rollback only,
+   and the tests forbid them, so a rollback reverts that PR with its tests and docs
+   (it would also commit the individual's name). Renewal procedure:
+   `docs/design/operator-key-agent.md` §8. `keyagent-macos` runs on the pinned
+   `macos-15` runner deliberately, so do not bump that pin during a release window.
 5. **Post the refs** (tag, release URL, installed `.lop-source` revision and
    the verified `lop --version`) as a comment on every PR in the window, and
    `send` them to each contributor still running.
@@ -1573,10 +1639,10 @@ git -C ~/local-operator log --oneline "$(git -C ~/local-operator describe --tags
 # 2. Take the lock: an empty claim commit in a throwaway worktree, opened as
 #    a draft PR. (No open chore(release) PR was found in step 1 of "One
 #    release owner per window".) The number is not known yet.
-git -C ~/local-operator worktree add /tmp/lop-release-next origin/main
-git -C /tmp/lop-release-next checkout -b release-next
-git -C /tmp/lop-release-next commit --allow-empty -m 'chore(release): claim release window'
-git -C /tmp/lop-release-next push -u origin release-next
+git -C ~/local-operator worktree add ~/local-operator/.worktrees/release-next origin/main
+git -C ~/local-operator/.worktrees/release-next checkout -b release-next
+git -C ~/local-operator/.worktrees/release-next commit --allow-empty -m 'chore(release): claim release window'
+git -C ~/local-operator/.worktrees/release-next push -u origin release-next
 gh pr create --draft --base main --head release-next \
   --title 'chore(release): claim release window' --assignee damianvtran \
   --body 'Release window claimed. Owner session pid: <pid from lop sessions>.
@@ -1590,9 +1656,9 @@ Replace using .github/RELEASE_NOTES_TEMPLATE.md before ready/tagging.'
 #     merge; then, with the bump decided:
 
 # 2b. Turn the claim into the bump: amend the SAME commit, retitle the SAME PR.
-sed -i '' 's/^version = ".*"$/version = "X.Y.Z"/' /tmp/lop-release-next/pyproject.toml
-git -C /tmp/lop-release-next commit --amend -am 'chore(release): bump version to X.Y.Z'
-git -C /tmp/lop-release-next push --force-with-lease origin release-next
+sed -i '' 's/^version = ".*"$/version = "X.Y.Z"/' ~/local-operator/.worktrees/release-next/pyproject.toml
+git -C ~/local-operator/.worktrees/release-next commit --amend -am 'chore(release): bump version to X.Y.Z'
+git -C ~/local-operator/.worktrees/release-next push --force-with-lease origin release-next
 gh pr edit <claim-pr-number> --title 'chore(release): bump version to X.Y.Z'
 gh pr ready <claim-pr-number>
 # ... independent scope-check round, merge; then:
@@ -1661,8 +1727,9 @@ cd /tmp && ~/.local/bin/lop --version
 #     A docstring can quote a removed line verbatim, so a grep for a code string
 #     is not evidence either way; the symbol is.
 
-# 6. Reclaim the worktree.
-git -C ~/local-operator worktree remove /tmp/lop-release-next
+# 6. Reclaim the worktree (also on an aborted release: a stranded one is
+#    what `scripts/worktree_janitor.py` reports).
+git -C ~/local-operator worktree remove ~/local-operator/.worktrees/release-next
 ```
 
 `lop-update` archives the committed `main` ref, builds and installs that
@@ -1994,7 +2061,7 @@ Warnings that still hold, each of which has already cost a release:
   rather than a stale local checkout — run it, do not read it:
 
   ```sh
-  python scripts/shard_tests.py --shard <I> --total 5 \
+  python scripts/shard_tests.py --shard <I> --total 6 \
     --out "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shard_<I>.txt"
   ```
 
@@ -2092,6 +2159,17 @@ re-dispatching the stage workflow is the practical way to read the queue state
 34385550911, 34452314995 while 0.1.8 sat in review). The script itself
 deliberately does not translate error reasons into behaviour — it only prints
 the store's body — so treat the rejection as an observation, not a contract.
+
+Prefer the read-only poller to that: `chrome-web-store-status.yml` runs hourly
+on main (or `gh workflow run chrome-web-store-status.yml -R
+damianvtran/local-operator --ref main`), does one `GET …:fetchStatus` with a
+`chromewebstore.readonly` token, and uploads the `chrome-web-store-status`
+artifact — `chrome-web-store-status.json` with `submitted.state` (`PENDING_REVIEW`, `STAGED`,
+`REJECTED`, …), the version, `warned`/`taken_down`, and
+`expected_version_staged_at_full` against main's manifest version. Watch that,
+not the public listing: a `STAGED_PUBLISH` approval is private until promoted.
+It never uploads, publishes or cancels; a rejection's reason is only in the
+dashboard and the review email, since `fetchStatus` does not carry one.
 
 Google publishes no SLA for review. Extensions using the `debugger` permission
 with broad host access routinely draw extended manual review (the 0.1.8 review
@@ -2679,7 +2757,22 @@ merge gate needs a fresh round on the current head. "Everything else is green"
 is exactly when that lapses. The one narrow exception: changes since the
 review that are exclusively non-conflicting fixes from parallel approved
 streams — a docs or nit commit from another round — leave it fresh, as does a
-rebase whose posted `### Rebase proof` is MECHANICAL.
+rebase or merge of main whose posted `### Rebase proof` is MECHANICAL.
+
+**Review economy.** Across the last ~75 merged non-release PRs in each repo
+(manager measurement, 2026-11-02, from `gh pr view --json comments`), lop ran a
+median of 6 rounds per PR (p90 15) and ui 7 (p90 20); ~55% of rounds were
+no-BLOCKER/MAJOR re-runs after an already-clean round of the same stream: clean-round chains, minors fixed then re-reviewed, merge-of-main
+convergence rounds, staggered streams, re-pin/addendum sub-rounds. The rules
+that stop that live in `guide://delivery` ("Review economy"): briefs carry the
+operator's request, acceptance criteria and non-goals; pre-existing defects
+never gate; all streams review one pushed head in waves (target <= 2); accepted
+MINOR/NIT fold into the remediation commit or are deferred. Freshness is
+unchanged from the rule above: only a MECHANICAL rebase/merge of main keeps
+rounds fresh on its proof; a docs/comments/test-only commit gets a delta round,
+and any executable change, minor fixes included, gets a numbered
+`### Agent review — round <N>` delta round scoped `<prev-head>..<head>` by an
+independent reviewer, plus QA if a QA'd surface moved.
 
 ## Security advisories
 
@@ -2940,11 +3033,13 @@ anyway? Take it from a throwaway worktree, which cannot reach anyone's work
 but yours:
 
 ```sh
-git worktree add --detach /tmp/lo-before HEAD
-ln -s ~/local-operator/.venv /tmp/lo-before/.venv
-cd /tmp/lo-before && env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
-  "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.svg"
-git worktree remove --force /tmp/lo-before
+git worktree add --detach .worktrees/lo-before HEAD
+# --force is fine on removal: a detached, read-only tree holds nothing but the
+# symlinked venv and the shot's output; the trap also covers a failed shot.
+trap 'git worktree remove --force .worktrees/lo-before' EXIT
+ln -s ~/local-operator/.venv .worktrees/lo-before/.venv
+(cd .worktrees/lo-before && env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
+  "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.svg")
 ```
 
 The symlink is safe **here and only here**: a shot script starts with
@@ -3298,10 +3393,14 @@ The commit to retrieve each from:
 ### Detached runner memory budgets
 
 `memory_mb` on the bash tool covers its own PG, not a child that runs
-`start_new_session=True`. `scripts/run_bounded.py` now guards its OWN child PG
-with the canonical memory guard and inherits the resolved nonsecret
-`LOCAL_OPERATOR_RESOLVED_MEMORY_MB` from updated Toolbash. Before that update,
-outer-tool limits were not proof a detached test/build child was capped.
+`start_new_session=True`. `scripts/run_bounded.py` guards its OWN child PG with
+the canonical memory guard under **both** contracts and inherits the resolved
+nonsecret `LOCAL_OPERATOR_RESOLVED_MEMORY_MB` from updated Toolbash.
+`--contract=command-status` enforces the same grant on its group, sampling only
+while the leader is unreaped (so the group number cannot be a stranger's); a
+breach is 137 with cause `memory-policy`. Choosing command-status never drops
+or widens a grant. Before Toolbash exported the value, outer-tool limits were
+not proof a detached test/build child was capped.
 
 **Isolation drops inheritance.** For `env -i ... run_bounded.py`, expand the
 resolved ceiling before clearing env and pass `--memory-mb "$MEMORY_MB"`
@@ -3313,7 +3412,9 @@ refuses before spawn. Explicit zero disables protection only without an inherite
 positive ceiling. Inherited zero keeps protection off unless a positive explicit
 flag adds a ceiling. Units are MiB. Memory breach status 137 is named by the
 `MEMORY LIMIT EXCEEDED` diagnostic; timeout status is 124. Check the first
-`[run_bounded] memory budget …` stderr line for the effective ceiling and source.
+`[run_bounded] memory budget …` stderr line (printed by both contracts) for the
+effective ceiling and source; the completion receipt repeats them as
+`memory_ceiling_mb`/`memory_budget_source`.
 
 The bound is sampled/live-wrapper/owned-PG only: no aggregate ancestor or
 arbitrary descendant-setsid protection. Outer SIGKILL can still orphan a child;

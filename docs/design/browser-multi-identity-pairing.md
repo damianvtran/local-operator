@@ -98,7 +98,7 @@ daemon:
 A. store code 765294 -> after unpacked dial, pending is for UNPACKED code 362304
    store's code still valid?   False
 B. store pairs with its old code -> ok=False
-   "That code didn't match. Codes expire after two minutes — check the app."
+   "That code didn't match. Codes expire after two minutes — check the app." *(Superseded 2026-11-02 by PR #3339: codes now last 15 minutes and the shipped wording lives in `protocol.PAIR_*_MESSAGE`.)*
 ```
 
 Today this is unreachable (§1.1 refuses the second identity before

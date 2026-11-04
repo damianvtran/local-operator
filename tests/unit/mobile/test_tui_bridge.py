@@ -40,6 +40,14 @@ SPEND_CONTEXT_PARITY = (
     / "local_operator/mobile/web/src/lib/spend-context.parity.json"
 )
 
+#: The generated `$skill` grammar fixture: the phone's port of `skill_token` +
+#: `skill_token_is_leading` + the SKILL branch of `completion_for`, asserted
+#: case for case by `web/src/lib/skill-token.test.ts` on the other side.
+SKILL_TOKEN_PARITY = (
+    Path(__file__).resolve().parents[3]
+    / "local_operator/mobile/web/src/lib/skill-token.parity.json"
+)
+
 
 @pytest.mark.asyncio
 async def test_tui_same_id_concurrent_steers_cross_thread_once() -> None:
@@ -675,6 +683,21 @@ def test_the_formatter_fixture_is_what_its_generator_produces() -> None:
 
     assert FORMATTER_PARITY == FIXTURE, "the generator writes the file this suite reads"
     assert FORMATTER_PARITY.read_text() == render()
+
+
+def test_the_skill_token_fixture_is_what_its_generator_produces() -> None:
+    """The `$skill` fixture is pinned to its GENERATOR, not only to the port.
+
+    `web/src/lib/skill-token.test.ts` asserts every case against the TypeScript
+    port; this is the provenance half, and the reason a hand edit that shrinks
+    coverage cannot hide: `render()` is the generator's own bytes, and the
+    generator's answers come from the TUI's `skill_token`,
+    `skill_token_is_leading` and `completion_for` directly.
+    """
+    from scripts.generate_skill_token_parity import FIXTURE, render
+
+    assert SKILL_TOKEN_PARITY == FIXTURE, "the generator writes the file this suite reads"
+    assert SKILL_TOKEN_PARITY.read_text(encoding="utf-8") == render()
 
 
 def test_the_phone_spend_context_fixture_still_matches_the_python_sources() -> None:

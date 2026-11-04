@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Per-key machine-token parity: `--flags` and SCREAMING tokens.
+
+A translated flag or identifier is a blocker: it names something the binary
+does not accept. This compares, per key, the ordered list of `--flag` tokens
+and of all-caps tokens (SESSION_ID, JOB_ID, TUI, TTY...).
+
+Read-only.
+"""
+import json
+import re
+import sys
+
+NS = sys.argv[1]
+BASE = "local_operator/i18n/catalogues"
+en = json.load(open(f"{BASE}/en/{NS}.json", encoding="utf-8"))
+es = json.load(open(f"{BASE}/es/{NS}.json", encoding="utf-8"))
+FLAG = re.compile(r"--[a-z][a-z0-9-]*")
+CAPS = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
+
+diffs = 0
+for k in sorted(en):
+    fe, ff = FLAG.findall(en[k]), FLAG.findall(es[k])
+    if fe != ff:
+        print(f"FLAG_DIFF {k}: en={fe} es={ff}")
+        diffs += 1
+    ce, cf = CAPS.findall(en[k]), CAPS.findall(es[k])
+    if ce != cf:
+        print(f"CAPS_DIFF {k}: en={ce} es={cf}")
+        diffs += 1
+print(f"keys_compared={len(en)} token_diffs={diffs}")
+print("en flags:", sorted({f for v in en.values() for f in FLAG.findall(v)}))
+print("es flags:", sorted({f for v in es.values() for f in FLAG.findall(v)}))
+print("es flags equal to en flags:",
+      sorted({f for v in en.values() for f in FLAG.findall(v)})
+      == sorted({f for v in es.values() for f in FLAG.findall(v)}))

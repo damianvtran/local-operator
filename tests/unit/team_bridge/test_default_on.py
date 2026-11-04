@@ -37,6 +37,11 @@ pytestmark = pytest.mark.asyncio
 
 V2_TEXT = "served v2 consent text"
 V1_TEXT = "served v1 consent text"
+V3_TEXT = "served v3 consent text (names #general)"
+#: Spelled as a literal, not imported: the test must fail if the client's
+#: constant ever drifts from the hub's wire identifier.
+CONSENT_VERSION_V3 = "bridge_consent_v3"
+_SERVED_TEXT = {CONSENT_VERSION_V2: V2_TEXT, CONSENT_VERSION_V3: V3_TEXT}
 
 
 @pytest.fixture(autouse=True)
@@ -86,7 +91,7 @@ class Hub:
         if request.method == "GET" and path.endswith("/messaging/status"):
             consent: dict[str, Any] = {
                 "version": self.version,
-                "text": V2_TEXT if self.version == CONSENT_VERSION_V2 else V1_TEXT,
+                "text": _SERVED_TEXT.get(self.version, V1_TEXT),
             }
             if self.accepted is not None:
                 consent["accepted_versions"] = self.accepted
@@ -109,7 +114,10 @@ class Hub:
         if request.method == "POST" and path.endswith("/messaging/enrollment"):
             if self.enroll_override is not None:
                 return self.enroll_override(request)
-            self.endpoint = _default_on_endpoint()
+            # Like the hub: the record cites the version the body echoed (the
+            # hub refuses an echo that is not the served version).
+            echoed = json.loads(request.content)["consent_version"]
+            self.endpoint = _default_on_endpoint(version=echoed)
             return _ok({"endpoint": self.endpoint, "settings": {"tenant_id": "tnt_1"}})
         if request.method == "PUT" and path.endswith("/messaging/settings"):
             body = json.loads(request.content)
@@ -119,12 +127,14 @@ class Hub:
         return httpx.Response(404, json={"error": "nope", "code": "not_found"})
 
 
-def _default_on_endpoint(state: str = "active", via: str = "default_on") -> dict[str, Any]:
+def _default_on_endpoint(
+    state: str = "active", via: str = "default_on", *, version: str = CONSENT_VERSION_V2
+) -> dict[str, Any]:
     return {
         "id": "bep_1",
         "state": state,
         "label": "My agent",
-        "consent": {"version": CONSENT_VERSION_V2, "consented_via": via, "current": True},
+        "consent": {"version": version, "consented_via": via, "current": True},
     }
 
 
@@ -192,6 +202,59 @@ async def test_a_second_fresh_read_does_not_enrol_again(tmp_path: Path):
     assert len(_enrolment_writes(hub)) == 1
 
 
+async def test_v3_enrols_once_echoing_v3_never_v2(tmp_path: Path):
+    """A hub serving ``bridge_consent_v3`` (agent-server #258, the #general
+    disclosure) defaults on exactly like v2, and the enrolment echoes the
+    version the member was SHOWN: claiming v2 for v3 bytes would record a
+    consent to text the member never saw."""
+
+    hub = Hub(
+        version=CONSENT_VERSION_V3,
+        accepted=[CONSENT_VERSION_V1, CONSENT_VERSION_V2, CONSENT_VERSION_V3],
+    )
+    await _discipline(hub, tmp_path).check(Boundary.APP_START)
+
+    posts = _enrolment_writes(hub)
+    assert len(posts) == 1
+    assert json.loads(posts[0].content) == {
+        "consent_version": CONSENT_VERSION_V3,
+        "tenant_id": "tnt_1",
+    }
+    store = Store(tmp_path)
+    owner = store.active_owner()
+    assert owner is not None
+    assert store.owner_consent_receipt(owner) == {
+        "consent_version": CONSENT_VERSION_V3,
+        "consent_ref": "bep_1",
+    }
+    from local_operator.team_bridge.scheduler import (
+        _consent_receipt_is_current as current,
+    )
+
+    assert current(
+        CONSENT_VERSION_V3,
+        CONSENT_VERSION_V3,
+        (CONSENT_VERSION_V1, CONSENT_VERSION_V2, CONSENT_VERSION_V3),
+    )
+    assert _local(tmp_path).default_enrollment == {"acc_1": "done"}
+
+
+async def test_v3_served_but_hub_records_v2_commits_nothing(tmp_path: Path):
+    """The local commit needs the hub's record to cite the version WE echoed."""
+
+    def enroll(request: httpx.Request) -> httpx.Response:
+        return _ok({"endpoint": _default_on_endpoint(), "settings": {"tenant_id": "tnt_1"}})
+
+    hub = Hub(
+        version=CONSENT_VERSION_V3,
+        accepted=[CONSENT_VERSION_V2, CONSENT_VERSION_V3],
+        enroll=enroll,
+    )
+    await _discipline(hub, tmp_path).check(Boundary.APP_START)
+    assert len(_enrolment_writes(hub)) == 1
+    assert Store(tmp_path).committed_owner_count() == 0
+
+
 # -- every gate, failing individually => ZERO writes --------------------------
 
 GATES = [
@@ -206,7 +269,14 @@ GATES = [
     pytest.param(dict(accepted=None), {}, id="no-accepted-set"),
     pytest.param(dict(accepted=[CONSENT_VERSION_V1]), {}, id="v2-not-in-accepted"),
     pytest.param(dict(accepted=[]), {}, id="empty-accepted-set"),
-    pytest.param(dict(version="bridge_consent_v3", accepted=["bridge_consent_v3"]), {}, id="v3"),
+    # Exact membership, never ordering: unknown later versions fail closed.
+    pytest.param(dict(version="bridge_consent_v4", accepted=["bridge_consent_v4"]), {}, id="v4"),
+    pytest.param(dict(version="bridge_consent_v10", accepted=["bridge_consent_v10"]), {}, id="v10"),
+    pytest.param(
+        dict(version=CONSENT_VERSION_V3, accepted=[CONSENT_VERSION_V1, CONSENT_VERSION_V2]),
+        {},
+        id="v3-not-in-accepted",
+    ),
     pytest.param(dict(eligible=False), {}, id="not-eligible-F-or-A"),
     pytest.param(
         dict(endpoint=_default_on_endpoint("active", "settings")), {}, id="B-with-endpoint-active"
@@ -450,6 +520,31 @@ def test_default_on_in_force_requires_the_exact_accepted_pair():
     assert default_on_in_force(check_for(CONSENT_VERSION_V2, [CONSENT_VERSION_V1])) is False
     served_v1_both = check_for(CONSENT_VERSION_V1, [CONSENT_VERSION_V1, CONSENT_VERSION_V2])
     assert default_on_in_force(served_v1_both) is False
+    # bridge_consent_v3 (the #general disclosure) defaults on like v2 ...
+    v3 = "bridge_consent_v3"
+    assert default_on_in_force(check_for(v3, [CONSENT_VERSION_V2, v3])) is True
+    assert default_on_in_force(check_for(v3, [CONSENT_VERSION_V2])) is False
+    # ... and nothing past it is inferred by ordering.
+    for later in ("bridge_consent_v4", "bridge_consent_v10"):
+        assert default_on_in_force(check_for(later, [CONSENT_VERSION_V2, v3, later])) is False
+    # Served v3 bytes that differ from the bytes this client accepted for v3
+    # (a changed-in-place re-serve) authorise nothing.
+    mismatched = check_for(v3, [v3])
+    assert isinstance(mismatched.payload, dict)
+    mismatched.payload["consent"]["text"] = "different v3 bytes"
+    assert default_on_in_force(mismatched) is False
+
+
+async def test_v3_changed_in_place_is_refused_and_never_defaults_on(tmp_path: Path):
+    """Same version, different bytes, on a later answer: refused by the
+    accepted-text record (immutable once versioned), so nothing is enrolled."""
+
+    from local_operator.team_bridge.client import AcceptedTexts
+
+    texts = AcceptedTexts()
+    assert texts.accept("consent", version="bridge_consent_v3", text=V3_TEXT) is not None
+    assert texts.accept("consent", version="bridge_consent_v3", text="edited v3") is None
+    assert texts.rejected == ["consent"]
 
 
 # -- Turn off: sticky across restart, refresh and re-sign-in ------------------
@@ -527,11 +622,38 @@ async def test_enroll_default_on_body_never_carries_consented_via(tmp_path: Path
         transport=httpx.MockTransport(handler),
         store=FakeStore(rows=[FakeRow(1, data={"access": "tok", "account_id": "acc_1"})]),
     )
-    await client.enroll_default_on(tenant_id="tnt_1", expected_account_id="acc_1")
+    await client.enroll_default_on(
+        tenant_id="tnt_1", expected_account_id="acc_1", consent_version=CONSENT_VERSION_V2
+    )
     assert seen and b"consented_via" not in seen[0]
     import inspect
 
     assert "consented_via" not in inspect.signature(client.enroll_default_on).parameters
+
+
+@pytest.mark.parametrize(
+    "version", ["bridge_consent_v1", "bridge_consent_v4", "bridge_consent_v10"]
+)
+async def test_enroll_default_on_refuses_a_non_default_on_version_before_any_io(
+    tmp_path: Path, version: str
+):
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"endpoint": _default_on_endpoint(), "settings": {}})
+
+    client = tb_client.TeamBridgeClient(
+        tmp_path,
+        base_url="https://hub.example/v1",
+        transport=httpx.MockTransport(handler),
+        store=FakeStore(rows=[FakeRow(1, data={"access": "tok", "account_id": "acc_1"})]),
+    )
+    with pytest.raises(ValueError):
+        await client.enroll_default_on(
+            tenant_id="tnt_1", expected_account_id="acc_1", consent_version=version
+        )
+    assert seen == []
 
 
 def _remove_enabled_key(root: Path) -> None:

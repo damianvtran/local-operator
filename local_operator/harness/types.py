@@ -1275,6 +1275,8 @@ def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
     for field in ("at_ms", "billing_basis"):
         if data.get(field) is None:
             data.pop(field, None)
+    if not data.get("openai_long_context"):
+        data.pop("openai_long_context", None)
     return data
 
 
@@ -1318,6 +1320,13 @@ class Usage(BaseModel):
     #: zero-frame-bytes reason as the decode window; the transcript encoder is
     #: the one writer that puts it on disk.
     _cache_diagnostics_id: str | None = PrivateAttr(default=None)
+    # This is live routing evidence, not durable billing data. Repeating even a
+    # tiny field across hundreds of receipts breaks the bounded attach frame.
+    # model_copy retains it; a serialized/replayed receipt safely becomes unknown.
+    _cache_read_reported: bool | None = PrivateAttr(default=None)
+    # Live wire completeness is not a zero token count; keep it off bounded
+    # serialized frames, like cache evidence. Legacy/manual usage remains None.
+    _token_counts_reported: bool | None = PrivateAttr(default=None)
 
     @model_serializer(mode="wrap")
     def _serialize_usage_without_unset_stamp(
@@ -1330,6 +1339,10 @@ class Usage(BaseModel):
     # API-key traffic, so consumers cannot reconstruct this from its id later.
     billing_basis: str | None = None
 
+    # Only the actual public adapter can assert this per-call pricing tier;
+    # unknown legacy/gateway receipts stay false. Omitted when false to avoid
+    # adding bytes to every usage on the bounded attach frame.
+    openai_long_context: bool = False
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
@@ -2800,6 +2813,11 @@ class AgentEndEvent(AgentEvent[Literal["agent_end"]]):
     #: a synthetic end, or one produced by a pre-field build — keeps every
     #: existing reader's behaviour.
     notify: bool = True
+    #: Permission/request is not completion. The loop may nominate a settled
+    #: invocation; only the owning Session, after host continuations settle,
+    #: commits acceptance. Defaults never reconstruct authority on replay.
+    quiet_requested: bool = False
+    quiet_accepted: bool = False
 
 
 class ProviderTurnStartEvent(AgentEvent[Literal["provider_turn_start"]]):
@@ -4428,6 +4446,14 @@ class ChatRequest(BaseModel):
     # Local, request-owned binding of the counted boundary to the native
     # protocol and credential selected by the wire client. Never serialized.
     context_binding: Any = Field(default=None, exclude=True, repr=False)
+    #: How many leading ``messages`` are Radient Saver epochs (contract §4).
+    #: Set ONLY by ``SessionStreamFn`` after a splice; ``None`` is today's
+    #: behaviour exactly, which is also Saver's fail-open state. When set, the
+    #: Anthropic and OpenAI-compatible wires put one cache marker on the last
+    #: block of the last epoch message and one on the final block, so the frozen
+    #: prefix is a byte-stable cache entry. Excluded from serialisation like
+    #: ``context_binding``: it is a wire-layout hint, never conversation content.
+    frozen_prefix_messages: int | None = Field(default=None, exclude=True, repr=False)
     #: Opt this request into Anthropic's cache diagnostics, comparing it with
     #: ``cache_diagnostics_previous_id`` (``None`` = the conversation's first
     #: diagnosed request, sent as an explicit JSON ``null``, which is still an
@@ -4725,6 +4751,10 @@ class ChatRequest(BaseModel):
         ):
             raise OneTurnSecretScopeError("An armed one-turn secret request cannot be rewritten.")
         return candidate
+
+    # Shared only by the main turn's request clones; never serialized to a
+    # transcript, telemetry row, helper call or independent conversation.
+    _codex_turn_state: Any = PrivateAttr(default=None)
 
     _one_turn_secrets: dict[str, SecretStr] = PrivateAttr(default_factory=dict)
 

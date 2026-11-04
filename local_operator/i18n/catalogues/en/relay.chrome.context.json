@@ -462,6 +462,18 @@
     "maxCells": 16,
     "note": "Owned relay SPA chrome for the borderless redesign (docs/design/mobile-relay-redesign.md). aria-label of the message field at the bottom of a conversation."
   },
+  "relay.chrome.composer.placeholder.idle": {
+    "role": "message field placeholder",
+    "tone": "Short, inviting hint; sentence case; ends with an ellipsis (…).",
+    "maxCells": 22,
+    "note": "Owned relay SPA chrome (docs/design/mobile-relay-guidelines.md, Composer and startup). Placeholder inside the EMPTY message field at the bottom of a conversation. Width is the binding constraint: it must fit ONE line in the field's narrowest resting width, 184 px at 16 px system-ui beside the microphone on a 390 px phone (design D1) — a wrapped placeholder makes the empty box two lines tall and the first keystroke visibly collapses it. Keep the trailing ellipsis character (…; zh-CN uses its own …… per its style guide). Prefer a shorter synonym to truncation. Shown while no turn is running — including on an ENDED conversation, where sending still works (it wakes the session), so do not mention reopening, folders or state. Mirrors the desktop app's ui.chat.composer.placeholder.idle ('Ask anything. @ adds files, / runs commands'), shortened to its first clause: an open invitation to type a question or request."
+  },
+  "relay.chrome.composer.placeholder.steer": {
+    "role": "message field placeholder",
+    "tone": "Short hint; sentence case; ends with an ellipsis (…).",
+    "maxCells": 22,
+    "note": "Owned relay SPA chrome (docs/design/mobile-relay-guidelines.md, Composer and startup). Placeholder inside the EMPTY message field at the bottom of a conversation. Width is the binding constraint: it must fit ONE line in the field's narrowest resting width, 184 px at 16 px system-ui beside the microphone on a 390 px phone (design D1) — a wrapped placeholder makes the empty box two lines tall and the first keystroke visibly collapses it. Keep the trailing ellipsis character (…; zh-CN uses its own …… per its style guide). Prefer a shorter synonym to truncation. Shown while the agent is working on a turn: a message sent now redirects (steers) the running turn instead of starting a new one. Mirrors the desktop app's ui.chat.composer.placeholder.waiting ('Steer the agent. Enter sends now · Esc stops'), shortened to its first clause; reuse that key's verb for 'steer' and the glossary's 'agent'."
+  },
   "relay.chrome.composer.folder_label": {
     "role": "composer meta button accessible name",
     "tone": "Sentence case (the redesign's O1); no trailing period on a label.",

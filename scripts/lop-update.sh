@@ -22,7 +22,7 @@ SEED=$(mktemp "${TMPDIR:-/tmp}/lop-update-seed.XXXXXXXX")
 # Only our creator-owned seed file is removed; no installed/candidate tree is
 # reclaimed here. The existing bounded worker runner reaps bootstrap children.
 trap 'rm -f "$SEED"' EXIT HUP INT TERM
-GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false \
+GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false \
   git -C "$REPO" show "$REF:local_operator/update_bootstrap.py" > "$SEED" || {
     printf '%s\n' 'lop-update: this committed source does not carry the capable controller seed' >&2; exit 1;
 }

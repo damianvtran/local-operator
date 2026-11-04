@@ -1,0 +1,139 @@
+{
+  "schema": 1,
+  "audit_id": "w1a3",
+  "audit_id_assigned_by": "es-w1-auditor-r2, audit-id fixed by the round-2 delegation",
+  "audit_round": 2,
+  "audit_kind": "independent_final_byte_namespace_audit",
+  "supersedes": "w1a2",
+  "supersedes_scope": "Supersedes the round-1 record at i18n/audits/evidence/es/wire.slash.library/w1a2/ for the copy that will ship. CORRECTED 2026-10-29 (erratum, after round-2 code review): that record's target sha256 is f6cc726978641736096351eb2f4bc7d754ce848cc6b3b93d8f5523cecaf47875, which is identical to the bytes this record binds — no remediation moved this namespace between rounds, so round 2 re-read the same bytes the round-1 audit had already read. Round-1 findings are therefore open on the SAME bytes, not on a remediated copy. Each round-1 finding was still re-checked by reading the value, not by trusting a remediation summary.",
+  "locale": "es",
+  "namespace": "wire.slash.library",
+  "audit_date": "2026-10-29",
+  "audited_revision": "efcfbe812609cbf228c01f11a1fb622f3555b487",
+  "audited_revision_note": "The es catalogue local_operator/i18n/catalogues/es/wire.slash.library.json is UNTRACKED at efcfbe812609cbf228c01f11a1fb622f3555b487 ('??' in git status), so this audit is bound to the on-disk bytes, not to a committed blob: target sha256 f6cc726978641736096351eb2f4bc7d754ce848cc6b3b93d8f5523cecaf47875. The en source and its sidecar are tracked at that revision.",
+  "key_count": {
+    "en": 2,
+    "target": 2,
+    "context": null
+  },
+  "verdict": "passed",
+  "result": "clean",
+  "verdict_reason": "Both keys read. The two descriptions are accurate, use the locale's established tú-imperative register for slash-command help ('Lista', 'Abre', 'Muestra', 'Compacta' elsewhere in wire.slash), keep all three verbs of 'Open, pause or run', and use the renderings the catalogue already established for Library, Librarian and assets. No findings.",
+  "finding_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "auditor": {
+    "agent": "translation-auditor (lopdev team delegation es-w1-auditor-r2)",
+    "session_or_instance": "session 3da6fd7a1b13",
+    "model": "radient/auto",
+    "model_note": "SELF-REPORTED from this session's own model-switch notices; not independently observable. The request opened on anthropic/claude-sonnet-5-5; three provider-failure switches fired before any audit work began and the entire audit ran under radient/auto, an auto-routing alias whose concrete backend the session header does not identify. No pinned model is claimed.",
+    "model_switch_notices": "anthropic/claude-sonnet-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto; each transition was a session model-switch notice reading \"provider failure: quota\"",
+    "model_switch_note": "fallback disclosed; no role, tool or default profile was changed",
+    "date": "2026-10-29",
+    "independence": "Independent both ways: I did not author any of this copy and had not audited it before (fresh round-2 agent, not the round-1 auditor; round-1 records were read only to resolve which findings landed, after I had formed my own reading of the final bytes). I edited nothing: no catalogue, sidecar, ledger, allowance, generated file or git state; this audit's only writes are its own evidence directories."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.library.json",
+      "revision": "efcfbe812609cbf228c01f11a1fb622f3555b487",
+      "sha256": "0f8615f2ed9ffaf3aeb0288a4ff4b8fc8becd46017a931db9d4b3d9ec32fce46"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/wire.slash.library.json",
+      "sha256": "f6cc726978641736096351eb2f4bc7d754ce848cc6b3b93d8f5523cecaf47875",
+      "tracked": false,
+      "note": "untracked at the audited revision; sha256 is of the on-disk bytes"
+    },
+    "context": null
+  },
+  "safety_adjacent_verdict": null,
+  "amendment": null,
+  "post_audit_drift": null,
+  "findings": [],
+  "source_notes": [
+    {
+      "kind": "sidecar",
+      "text": "There is no en/wire.slash.library.context.json, so role, tone and any maxCells are unknown by construction; both keys were judged from the English value and the key name, and no context was invented."
+    }
+  ],
+  "help_width_note": {
+    "status": "not-applicable",
+    "text": "No help string in this namespace carries a declared budget, and none is near one."
+  },
+  "display_side_note": {
+    "text": "No value in this namespace displayed as a redaction marker, so no sanctioned read_public_copy re-read was needed to judge any of the copy. Verified source-side instead: the reader serves the HEAD blob and REFUSES a working-tree difference or an untracked file (local_operator/tools/public_copy.py:487-496), so it cannot read these untracked es bytes at all; and its catalogue reader rejects any value that is not a string (public_copy.py:343-345), so *.context.json sidecars are unreadable through it by construction. Both are recorded as source-side risks, never worked around."
+  },
+  "noted_outside_scope": [],
+  "check_output": {
+    "commands": [
+      "git rev-parse HEAD",
+      "git status --porcelain",
+      "shasum -a 256 over en/target/sidecar",
+      "python3 $LOCAL_OPERATOR_SCRATCHPAD/audit_es_w1a3.py wire.slash.library",
+      "grep/sed over settings_view.py, settings_io.py, team_bridge/availability.py"
+    ],
+    "failures": "None. Every mechanical detector passed on the final bytes.",
+    "negative_controls": "placeholder dropped, placeholder renamed, machine literal renamed, em dash -> hyphen, label over the 29-cell budget, declared maxCells breached: all DETECTED by the same checker pointed at deliberately broken bytes.",
+    "checks_run_per_key": [
+      "key-set parity",
+      "ICU category and argument parity",
+      "placeholder parity",
+      "digit-sequence parity",
+      "em/en-dash and numeric-range dash parity",
+      "newline-count parity",
+      "edge-whitespace parity",
+      "byte-identical machine literals (flags, config keys, SESSION_ID/JOB_ID, create.json)",
+      "guillemet / exclamation / ASCII-ellipsis hygiene",
+      "width against the renderer's 29-cell label budget via the repository's truncate_cells",
+      "width against sidecar maxCells and the settings detail band at 80 and 100 columns"
+    ],
+    "code_facts": {
+      "fact_1_label_budget": {
+        "claim": "every settings row label is rendered as truncate_cells(label, 29)",
+        "verified": true,
+        "evidence": "settings_view.py:4020 truncate_cells(setting.label, _LABEL_BUDGET); settings_view.py:434 _LABEL_BUDGET = _VALUE_COLUMN(34) - _ROW_INDENT(2) - _MARKER_WIDTH(2) - 1 = 29; truncate_cells cannot wrap (tool_card.py:728-750).",
+        "consequence": "Any label over 29 cells is painted cut with a visible ellipsis. Applies to the console rows (settings_io.py:4774-4799, section 'console', always visible) and to the hub and failover rows, not only to the two namespaces the briefing named."
+      },
+      "fact_2_wrap_rung": {
+        "claim_as_briefed": "when no rung fits, _wrap_cells(help_text, width, max_lines=2) renders the help across two rows, so the two hub_defaults help strings are acceptable with a narrow-width limit",
+        "verified": false,
+        "verdict": "REFUTED AS STATED",
+        "evidence": "The wrap rung is a None entry in the shed ladder and is created only in the bridge_row branches (settings_view.py:4881 for the no-clause case, 4873 region for the clause case). bridge_row is set at settings_view.py:4767 from section == team_bridge.BRIDGE_SECTION, and BRIDGE_SECTION is the literal 'team_bridge' (team_bridge/availability.py:33). The hub rows are section 'hub' (settings_io.py:5120). No None rung exists for them, so _wrap_cells at 4910 is never reached and the ladder's last rung, settings_view.py:4937, applies: truncate_cells(rendered.plain, width) - a marked cut, not a wrap. _wrap_cells' own docstring scopes it to 'the agent-messages explanation only'.",
+        "measured": "_detail_width() is max(total-2, 24) (settings_view.py:5203), i.e. 98 cells at 100 columns and 78 at 80. agents.help is 113 cells -> truncated at both sizes, whole only from 115 columns. teams.help is 94 -> whole at 100 columns once the key path sheds, truncated at 80.",
+        "consequence": "The briefing's premise is wrong for this surface; round 1 had it right. agents.help is a real defect (C03 major), not an accepted narrow-width limit. teams.help is a narrow-width limit only (C04 minor)."
+      }
+    }
+  },
+  "artifacts": [
+    "report.md",
+    "audit.log"
+  ],
+  "limitations": [
+    "LLM semantic judgement, not native-speaker attestation.",
+    "Static copy audit only: no rendered-frame, runtime-service, eligibility or release claim. Width verdicts are derived from the renderer source at the audited revision and from the repository's own truncate_cells, not from screenshots.",
+    "The eight es catalogues are UNTRACKED at efcfbe812609; every record binds on-disk sha256 values rather than a committed blob.",
+    "The audit model is an auto-routing alias; the concrete backend is not identifiable from the session header.",
+    "Evidence files were written but never committed: this role performs no git writes."
+  ],
+  "errata": [
+    {
+      "date": "2026-10-29",
+      "trigger": "round-2 code review of this evidence bundle",
+      "field": "supersedes_scope (record.json) and the header bullet of report.md",
+      "was": "'That record binds the pre-remediation bytes sha256 ...; the translator then applied fixes, and this record binds the FINAL on-disk bytes' / 'round 1, which bound superseded bytes'",
+      "is": "No remediation moved this namespace: round 1 and round 2 bound identical bytes, sha256 f6cc726978641736096351eb2f4bc7d754ce848cc6b3b93d8f5523cecaf47875.",
+      "evidence": "round-1 record input_hashes.target.sha256 == sha256 of the on-disk local_operator/i18n/catalogues/es/wire.slash.library.json, recomputed in round 2.",
+      "unchanged_by_this_correction": [
+        "verdict",
+        "result",
+        "finding_counts",
+        "input_hashes",
+        "findings"
+      ]
+    }
+  ]
+}

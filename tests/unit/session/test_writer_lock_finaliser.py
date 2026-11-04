@@ -339,6 +339,7 @@ def test_a_queued_release_does_not_read_as_busy_to_the_dry_run_probe(
 ) -> None:
     """The rehearsal's ``lock_is_busy`` probe settles the queue the same way."""
     config, directory = _stale_session(tmp_path, "queued000002")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
     _queue_a_deferred_release(directory, private_guard)

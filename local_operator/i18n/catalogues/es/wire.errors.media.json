@@ -1,0 +1,22 @@
+{
+  "wire.errors.media.media_refusal": "{error}",
+  "wire.errors.media.provider_model_pair": "provider y model deben indicarse juntos, o no indicarse ninguno.",
+  "wire.errors.media.radient_key_missing": "La clave de API de Radient no está configurada en el servidor.",
+  "wire.errors.media.save_audio_failed": "No se pudo guardar el archivo de audio subido: {error}",
+  "wire.errors.media.speech_generate_failed": "No se pudo generar la voz: {error}",
+  "wire.errors.media.speech_no_credential": "Inicia sesión en Radient en Ajustes para activar la lectura en voz alta.",
+  "wire.errors.media.speech_radient_credit_low": "Tu saldo de créditos de Radient es insuficiente para la voz. Añade créditos en Radient Console para continuar.",
+  "wire.errors.media.speech_radient_sign_in_failed": "Tu sesión de Radient dejó de funcionar. Vuelve a iniciar sesión en Ajustes.",
+  "wire.errors.media.speech_temporarily_unavailable": "La voz no está disponible temporalmente. Inténtalo de nuevo en un momento.",
+  "wire.errors.media.speech_unavailable": "La voz no está disponible ahora mismo. Inténtalo de nuevo en un momento.",
+  "wire.errors.media.speech_unknown_agent": "El agente de esta conversación ya no está disponible.",
+  "wire.errors.media.speech_upstream_no_response": "La generación de voz falló en el upstream: no hubo respuesta del upstream: {error}",
+  "wire.errors.media.speech_upstream_reported_error": "La generación de voz falló en el upstream: Radient informó de un error (HTTP {status}): {error}",
+  "wire.errors.media.speech_upstream_responded": "La generación de voz falló en el upstream: el upstream respondió {status}: {error}",
+  "wire.errors.media.speech_vendor_credit_low": "Tu saldo de créditos de {vendor} es insuficiente para la voz. Añade créditos con {vendor} para continuar.",
+  "wire.errors.media.speech_vendor_key_refused": "{vendor} rechazó tu clave de API. Sustitúyela.",
+  "wire.errors.media.temp_audio_missing": "No se encontró el archivo de audio temporal después de guardarlo.",
+  "wire.errors.media.transcription_unexpected": "Se produjo un error inesperado durante la transcripción: {error}",
+  "wire.errors.media.unknown_model": "Modelo desconocido {provider}/{model}: {error}",
+  "wire.errors.media.unknown_provider": "Proveedor desconocido {provider}."
+}

@@ -7,6 +7,7 @@ claim goal_set and own the ordinary submit, so the owner must not also send.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -70,8 +71,11 @@ class GoalSession(FakeSession):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entry", ["slash", "slash_images", "authoritative"])
 @pytest.mark.parametrize("busy", [False, True])
-async def test_goal_starts_or_steers_once(entry, busy):
+async def test_goal_starts_or_steers_once(entry, busy, tmp_path):
     session = GoalSession()
+    # The steer door spools an accepted correction for a successor before it
+    # acknowledges, so this double needs a directory to write it to.
+    session.transcript = SimpleNamespace(directory=tmp_path / "session")
     session.is_streaming = busy
     handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd="/tmp")
     try:

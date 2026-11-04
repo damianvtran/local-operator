@@ -1,0 +1,2 @@
+PASS
+Both halves of "Show or set" present (bare /approvals reports, ask|auto sets), noun phrase and per-session scope intact, no placeholder or typography defect; one MINOR fit note (picker ellipsizes the tail at 100/110 columns) and zero drift in the other 51 keys — restoring only the approvals value re-hashes to the previous audit's e5b19e5e… exactly.

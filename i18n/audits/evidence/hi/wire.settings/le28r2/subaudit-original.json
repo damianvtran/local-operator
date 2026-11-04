@@ -1,0 +1,153 @@
+{
+ "locale": "hi",
+ "namespace": "wire.settings",
+ "keys_total": 820,
+ "keys_read": 820,
+ "coverage_statement": "Printed en+hi side by side for every key by index in chunks 0-70,70-125,125-175,175-245,245-320,320-370,370-425,425-530,530-640,640-760,760-820 plus targeted re-prints of ranges the tool output elided (27-49, 90-125 etc., 278-293, 326-344, 391-409, 493-500, 549-556, 591-612, 669-674, 724-734, 779-787); every index 0..819 was displayed and read. Also ran stdlib checks: maxCells for all 8 sidecar keys (all within budget), Latin-period/danda scan, whitespace scan, and identical-to-English scan (69 keys; all enum/config-token labels, names, placeholders).",
+ "auditor_model": "anthropic/claude-sonnet-5-5 (fallback; session started as deepseek/deepseek-flash, provider quota 402 switched model mid-audit; style guide/glossary were read under the first model, all 820 keys under this one)",
+ "non_native_note": "Auditor is not a native Hindi speaker; low-confidence calls flagged in notes.",
+ "findings": [
+  {
+   "id": "F1",
+   "key": "wire.settings.proactive_patience_episode_ttl_ms.help",
+   "severity": "major",
+   "category": "glossary-terminology",
+   "en": "Hard stop for one cycle however the waits were sized (milliseconds; 7200000 = 2 h). A fire past it retires silently.",
+   "current": "एक चक्र की कड़ी सीमा, इंतज़ार चाहे कैसे भी तय हुए हों (मिलीसेकंड; 7200000 = 2 h)। इसके बाद का जागरण चुपचाप बंद हो जाता है।",
+   "excerpt": "इसके बाद का जागरण चुपचाप बंद हो जाता है।",
+   "problem": "‘wake/fire’ is rendered ‘जागरण’ (vigil/awakening), but glossary §2 and the hi guide fix wake → जागृति (the rest of this namespace uses जागृति: aida_cadence_min_gap_minutes.help, wakes.*). A different term for the same concept breaks the one-term invariant.",
+   "proposed": "इसके बाद आने वाली जागृति चुपचाप बंद हो जाती है।",
+   "note": "replace the clause only"
+  },
+  {
+   "id": "F2",
+   "key": "wire.settings.shell_environment_exclude.help",
+   "severity": "major",
+   "category": "terminology/mistranslation",
+   "en": "Empty = nothing removed. Names never handed to a command the agent runs, in either mode — including the session credential store's own injections, so this is how a variable is denied outright. Covers the bash and eval children only; MCP servers and the harness's own processes are not governed by it.",
+   "current": "खाली = कुछ नहीं हटाया जाता। ऐसे नाम जो एजेंट के चलाए कमांड को किसी भी मोड में कभी नहीं दिए जाते — सत्र क्रेडेंशियल स्टोर के अपने इंजेक्शन समेत, यानी किसी वेरिएबल को सीधे मना करने का यही तरीक़ा है। सिर्फ़ bash और eval के चिल्ड्रन पर लागू; MCP सर्वर और हार्नेस की अपनी प्रक्रियाएँ इसके दायरे में नहीं आतीं।",
+   "excerpt": "सिर्फ़ bash और eval के चिल्ड्रन पर लागू;",
+   "problem": "‘children’ here means child processes of the bash/eval tools, not agents. ‘चिल्ड्रन’ (literally ‘kids’) is a bare transliteration a native reader will find odd/unclear, and the hi guide records that the child-only transliteration was abandoned. Use ‘child process’ wording.",
+   "proposed": "सिर्फ़ bash और eval की चाइल्ड प्रोसेस पर लागू;",
+   "note": "replace the clause only"
+  },
+  {
+   "id": "F3",
+   "key": "wire.settings.speech.description",
+   "severity": "minor",
+   "category": "meaning-fidelity",
+   "en": "How the assistant sounds when it speaks aloud. The descriptor is sent to the hub, which maps it onto whichever voice provider serves; fields a provider cannot express degrade with a note rather than failing. Read on the next spoken message.",
+   "current": "असिस्टेंट बोलते समय कैसा सुनाई देता है। यह डिस्क्रिप्टर हब को भेजा जाता है, जो इसे जो भी वॉइस प्रोवाइडर सेवा दे रहा हो उस पर मैप करता है; जिन फ़ील्ड को कोई प्रोवाइडर नहीं दिखा सकता, वे विफल होने के बजाय नोट के साथ कम हो जाते हैं। अगले बोले गए संदेश पर पढ़ा जाता है।",
+   "excerpt": "जिन फ़ील्ड को कोई प्रोवाइडर नहीं दिखा सकता, वे विफल होने के बजाय नोट के साथ कम हो जाते हैं।",
+   "problem": "‘cannot express’ rendered with ‘दिखा सकता’ (show) and ‘degrade with a note’ as ‘कम हो जाते हैं’ (get reduced) — the sense (unsupported fields are downgraded/approximated with a note rather than erroring) is not conveyed.",
+   "proposed": "जिन फ़ील्ड को कोई प्रोवाइडर व्यक्त नहीं कर सकता, वे विफल होने के बजाय नोट के साथ सरल रूप में लागू होते हैं।",
+   "note": "low confidence on exact wording"
+  },
+  {
+   "id": "F4",
+   "key": "wire.settings.librarian.description",
+   "severity": "minor",
+   "category": "register/gender-consistency",
+   "en": "The Librarian keeps the global Library organised: her display name, the daily pass, and the pause switch. The Library is long-term and shared by every conversation.",
+   "current": "लाइब्रेरियन वैश्विक लाइब्रेरी को व्यवस्थित रखता है: उसका प्रदर्शित नाम, दैनिक पास और पॉज़ स्विच। लाइब्रेरी दीर्घकालिक है और हर बातचीत में साझा है।",
+   "excerpt": "लाइब्रेरियन वैश्विक लाइब्रेरी को व्यवस्थित रखता है: उसका प्रदर्शित नाम, दैनिक पास और पॉज़ स्विच।",
+   "problem": "en refers to the Librarian as ‘her’ (also in librarian_cadence_max_extra_per_day/min_gap/paused/enabled/name help), and the sibling Aida strings use feminine honorific ‘उनका / वे … सकती हैं’. The Librarian strings use masculine ‘रखता है / वह … सकता है / उसका / उसके / उसकी’ with the less polite ‘उस-’. Affected: librarian.description, librarian_cadence_max_extra_per_day.help, librarian_cadence_min_gap_minutes.help, librarian_cadence_paused.help, librarian_enabled.help, librarian_name.help. Make them feminine and match the Aida register.",
+   "proposed": "लाइब्रेरियन वैश्विक लाइब्रेरी को व्यवस्थित रखती हैं: उनका प्रदर्शित नाम, दैनिक पास और पॉज़ स्विच।",
+   "note": "apply analogous change to the other 5 keys (वे … सकती हैं; उनके पासों; उनकी निर्धारित पंक्तियाँ; उनका सत्र; उनकी पिन की गई बातचीत). Low confidence that the team wants this persona gendered; en does say ‘her’."
+  },
+  {
+   "id": "F5",
+   "key": "wire.settings.supplements_denyprefixes.help",
+   "severity": "minor",
+   "category": "meaning-fidelity (omission)",
+   "en": "Needs Highlights on. Comma-separated folders whose files are never listed or sent to a decision model; use it on a machine holding customer data.",
+   "current": "हाइलाइट्स चालू होने पर ही लागू। ऐसे फ़ोल्डर जिनकी फ़ाइलें कभी सूचीबद्ध नहीं होतीं और निर्णय मॉडल को नहीं भेजी जातीं; ग्राहक डेटा वाली मशीन पर इस्तेमाल करें।",
+   "excerpt": "हाइलाइट्स चालू होने पर ही लागू। ऐसे फ़ोल्डर जिनकी फ़ाइलें कभी सूचीबद्ध नहीं होतीं और निर्णय मॉडल को नहीं भेजी जातीं; ग्राहक डेटा वाली मशीन पर इस्तेमाल करें।",
+   "problem": "en says ‘Comma-separated folders’; the input-format cue is dropped (every sibling list help — providers_openrouter_ignore/only/order, static_roots, web_search_providers — says ‘कॉमा से अलग’).",
+   "proposed": "हाइलाइट्स चालू होने पर ही लागू। कॉमा से अलग फ़ोल्डर, जिनकी फ़ाइलें कभी सूचीबद्ध नहीं होतीं और निर्णय मॉडल को नहीं भेजी जातीं; ग्राहक डेटा वाली मशीन पर इस्तेमाल करें।"
+  },
+  {
+   "id": "F6",
+   "key": "wire.settings.speech_transcription_cleanup.choice.off.label",
+   "severity": "minor",
+   "category": "consistency",
+   "en": "off",
+   "current": "off",
+   "excerpt": "off",
+   "problem": "Enum ‘off’ label is left in English here (also speech_voice_expressiveness high/medium/low, speech_voice_gender female/male, speech_voice_tone authoritative/bright/calm/neutral/warm), while the same ‘off’ is rendered ‘बंद’ in compaction_strategy.choice.off.label, network_rollout_on_update.choice.off.label, display_nerd_icons.choice.false.label and bool.off, and other enum labels are translated (tui_sidebar_position left/right, display_dock full/hidden/summary, retry_pinnedfallback). Their descriptions are translated, so a Hindi row reads half-English. If these are stored enum values it is defensible, but the namespace treats the two classes inconsistently; at least ‘off’ and the speech tone/gender/expressiveness labels should follow one rule.",
+   "proposed": "बंद",
+   "note": "Tone/gender/expressiveness suggestions (low confidence): high→उच्च, medium→मध्यम, low→निम्न, female→स्त्री, male→पुरुष, authoritative→अधिकारपूर्ण, bright→उत्साही, calm→शांत, neutral→तटस्थ, warm→गर्मजोशी भरा. Only if the label is display-only; keep English if the label is the typed value."
+  },
+  {
+   "id": "F7",
+   "key": "wire.settings.hub.description",
+   "severity": "minor",
+   "category": "untranslated-English/typography-policy",
+   "en": "Keep agents and teams you pulled from the Agent Hub current: whether updates are merged in automatically, how often the hub is checked, and which model resolves a conflict. Your edits and deletions are merged, never overwritten.",
+   "current": "Agent Hub से pull किए गए एजेंट और टीमें अपडेट रहें: अपडेट अपने-आप merge होते हैं या नहीं, हब कितनी बार जाँचा जाता है, और टकराव कौन-सा मॉडल सुलझाता है। आपने जो संपादित या हटाया, वह merge हो जाता है, कभी ओवरराइट नहीं।",
+   "excerpt": "Agent Hub से pull किए गए एजेंट … अपडेट अपने-आप merge होते हैं या नहीं … वह merge हो जाता है",
+   "problem": "Latin verbs/nouns used inline in prose that are not in the style guide's kept-Latin list (API, CLI, TUI, JSON, YAML, HTTP, URL) nor its Devanagari loan list: merge/pull/push (hub.*, hub_auto_update_*.*, network_sync_debounce_s.help, session_delegated.description), endpoint (11 keys: classification_vendor.choice.typesafe.description, desktop..., local_providers.*, network_*, providers_openrouter_*), distill (providers_openrouter_enforce_distillable_text.*), ‘structured output’, userspace, accept/reply/stat (network_max_handshakes.help, network_sync_tick_s.help, bash_memory_soft_fraction.help). Mixing scripts in running Hindi is readable for developers, so this is a consistency/policy point, not an error; at least pick one convention (e.g. Devanagari एंडपॉइंट, मर्ज, पुल/पुश) and apply it namespace-wide.",
+   "proposed": "Agent Hub से पुल किए गए एजेंट और टीमें अपडेट रहें: अपडेट अपने-आप मर्ज होते हैं या नहीं … (example for this key only)",
+   "note": "Style-policy decision for the team; not individually wrong."
+  },
+  {
+   "id": "F8",
+   "key": "wire.settings.memory_guard.description",
+   "severity": "nit",
+   "category": "idiom",
+   "en": "A per-command RAM ceiling, so one oversized command is killed instead of taking the whole device down.",
+   "current": "प्रति-कमांड RAM सीमा, ताकि ज़रूरत से बड़ा कमांड पूरे डिवाइस को गिराने के बजाय बंद कर दिया जाए।",
+   "excerpt": "ताकि ज़रूरत से बड़ा कमांड पूरे डिवाइस को गिराने के बजाय बंद कर दिया जाए।",
+   "problem": "‘oversized command’ = one that uses too much memory; ‘ज़रूरत से बड़ा कमांड’ reads as ‘a command bigger than needed’.",
+   "proposed": "ताकि ज़रूरत से ज़्यादा मेमोरी लेने वाला कमांड पूरे डिवाइस को गिराने के बजाय बंद कर दिया जाए।"
+  },
+  {
+   "id": "F9",
+   "key": "wire.settings.display_composer_rate.help",
+   "severity": "nit",
+   "category": "grammar",
+   "en": "The tok/s segment — the last completed call's throughput.",
+   "current": "tok/s खंड — पिछली पूरी हुई कॉल की थ्रूपुट।",
+   "excerpt": "tok/s खंड — पिछली पूरी हुई कॉल की थ्रूपुट।",
+   "problem": "‘थ्रूपुट’ is treated as feminine; it is masculine (like आउटपुट), and ‘throughput’ belongs to the call, so ‘का’.",
+   "proposed": "tok/s खंड — पिछली पूरी हुई कॉल का थ्रूपुट।",
+   "note": "low confidence"
+  },
+  {
+   "id": "F10",
+   "key": "wire.settings.monitor_normalizetimestamps.label",
+   "severity": "nit",
+   "category": "idiom",
+   "en": "Ignore timestamp churn",
+   "current": "टाइमस्टैम्प उथल-पुथल अनदेखी करें",
+   "excerpt": "टाइमस्टैम्प उथल-पुथल अनदेखी करें",
+   "problem": "‘उथल-पुथल’ (turmoil) is an odd rendering of ‘churn’ (constant timestamp changes).",
+   "proposed": "टाइमस्टैम्प के बदलाव अनदेखे करें",
+   "note": "low confidence; label ≤29 cells either way"
+  },
+  {
+   "id": "F11",
+   "key": "wire.settings.speech_voice_tone.choice.authoritative.description",
+   "severity": "nit",
+   "category": "word-choice",
+   "en": "Confident and assured.",
+   "current": "आत्मविश्वासी और निश्चिंत।",
+   "excerpt": "आत्मविश्वासी और निश्चिंत।",
+   "problem": "‘निश्चिंत’ means carefree/untroubled, not ‘assured’.",
+   "proposed": "आत्मविश्वासी और दृढ़।",
+   "note": "low confidence"
+  },
+  {
+   "id": "F12",
+   "key": "wire.settings.session_compression_after_days.label",
+   "severity": "nit",
+   "category": "word-order",
+   "en": "↳ compress after (days)",
+   "current": "↳ (दिन) बाद कंप्रेस करें",
+   "excerpt": "↳ (दिन) बाद कंप्रेस करें",
+   "problem": "Unit in parentheses before ‘बाद’ is unnatural.",
+   "proposed": "↳ कंप्रेस करें (दिन बाद)",
+   "note": "width 19 cells, fine"
+  }
+ ]
+}

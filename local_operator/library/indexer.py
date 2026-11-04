@@ -34,8 +34,10 @@ from __future__ import annotations
 import logging
 import os
 import queue
+import re
 import threading
 import time
+import weakref
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Final
@@ -45,11 +47,13 @@ from local_operator.library import identity
 from local_operator.library import index as library_index
 from local_operator.library.metadata import MetadataStore
 from local_operator.library.store import (
+    SCHEMA_VERSION,
     STATE_BACKFILL_DONE,
     STATE_BUILT_AT,
     STATE_LAST_RECONCILE,
     STATE_SESSIONS_SCANNED,
     STATE_SESSIONS_TOTAL,
+    IndexUnavailable,
     LibraryStore,
 )
 from local_operator.session_files import ledger
@@ -81,6 +85,20 @@ THUMB_QUALITY: Final = 82
 #: spellings of one config share one worker (and one observer).
 _INSTANCES: dict[str, "LibraryIndexer"] = {}
 _INSTANCES_LOCK = threading.Lock()
+
+#: Every indexer with a started worker, whether or not it came through
+#: :func:`ensure_started`. WEAK on purpose: this set is a lifetime handle for
+#: :func:`reset_for_tests`, never an owner — a stopped instance the caller drops
+#: must stay collectable, and a strong set here would keep every worker of the
+#: process (and its observer, its SQLite handles) alive.
+#:
+#: WHY IT IS NOT ``_INSTANCES``. The cache is keyed by config root and only holds
+#: what :func:`ensure_started` built, so a worker a test started directly with
+#: ``LibraryIndexer(root).start()`` was invisible to the reset and outlived its
+#: test. It then kept reconciling a deleted ``tmp_path``, and its warning landed
+#: in whichever test was capturing stderr at that moment (the CLI entrypoint test
+#: that asserts an empty stderr was the one that caught it).
+_LIVE: weakref.WeakSet["LibraryIndexer"] = weakref.WeakSet()
 
 #: One writer per config root ACROSS PROCESSES. The desktop server, a TUI
 #: session and a measurement harness can all reach the same config, and three
@@ -193,11 +211,15 @@ def ensure_started(config_dir: str | Path) -> "LibraryIndexer":
 
 
 def reset_for_tests() -> None:
-    """Stop every indexer and forget them. Tests own the process lifetime."""
+    """Stop every indexer this process started, cached or not. Tests own the lifetime."""
     with _INSTANCES_LOCK:
-        instances = list(_INSTANCES.values())
+        # ``dict.fromkeys`` dedupes by identity (the class defines no ``__eq__``):
+        # an ``ensure_started`` instance is in BOTH the cache and the live set,
+        # and stopping it twice would be a second ``join`` for no reason.
+        targets = dict.fromkeys([*_INSTANCES.values(), *_LIVE])
         _INSTANCES.clear()
-    for instance in instances:
+        _LIVE.clear()
+    for instance in targets:
         instance.stop()
 
 
@@ -355,6 +377,42 @@ class _JournalHandler:
 #: sentinel can never be mistaken for a session id.
 _WAKE: Final = "\x00library-wake"
 
+#: A derived table name out of SQLite's own ``no such table`` message.
+_MISSING_DERIVED_TABLE: Final = re.compile(r"no such table: (idx_[A-Za-z0-9_]+)")
+
+
+def _log_worker_failure(headline: str, error: BaseException, store: LibraryStore) -> None:
+    """Report a worker failure: one actionable line, or a traceback when earned.
+
+    WHY NOT ``exc_info`` FOR EVERYTHING. The reconciler can legitimately meet a
+    file whose derived schema is absent — a database replaced under a live
+    process, a config directory recreated beneath it, a cache restored from
+    somewhere else. That state is recoverable and has exactly one thing to do
+    about it, but a traceback ending in ``IndexUnavailable: no such table:
+    idx_sessions`` names neither the file nor the migration, and it reached the
+    CLI's stderr as if the process had failed (CI shard 40812326996: an
+    entrypoint test asserted nothing was written to stderr while a leaked worker
+    reconciled an unmigrated file). Naming the table, the file and the migration
+    that creates it is what makes the warning actionable; everything else (a
+    torn page, a lapsed lock, an I/O error) is genuinely unexpected and keeps
+    its traceback. The level stays WARNING either way: a broken store must not
+    become silent.
+    """
+    missing = _MISSING_DERIVED_TABLE.search(str(error))
+    if missing is None or not isinstance(error, IndexUnavailable):
+        logger.warning("library: %s", headline, exc_info=True)
+        return
+    logger.warning(
+        "library: %s \u2014 derived table %s is missing from %s, so its schema has not "
+        "been migrated; it is created by the derived-index migration "
+        "(LibraryStore.ensure_schema, derived schema v%d), which the next read on "
+        "this file re-runs. Indexing for this file stays off until it succeeds.",
+        headline,
+        missing.group(1),
+        store.path,
+        SCHEMA_VERSION,
+    )
+
 
 class LibraryIndexer:
     """One background worker per config root. Use :func:`ensure_started`."""
@@ -407,6 +465,11 @@ class LibraryIndexer:
             if not _acquire_writer(self.config_dir):
                 logger.info("library: another process owns the index; reader only")
             self._stop.clear()
+            # Registered BEFORE the threads start: from here on this instance can
+            # spawn a worker, and a reset that raced the start would otherwise
+            # leave that worker running with nothing left to stop it.
+            with _INSTANCES_LOCK:
+                _LIVE.add(self)
             self._thread = threading.Thread(target=self._run, name="library-indexer", daemon=True)
             self._thread.start()
             # NO thumbnail worker without the writer lock. It WRITES
@@ -440,6 +503,11 @@ class LibraryIndexer:
         # Another process may now take over. The lock is also released by the
         # kernel on exit, which is why a crashed run cannot wedge the next one.
         _release_writer(self.config_dir)
+        # Stopped is not live: leaving it in the set would make the next reset
+        # join threads that are already gone (harmless) and, worse, imply this
+        # instance still owns work.
+        with _INSTANCES_LOCK:
+            _LIVE.discard(self)
 
     def _stop_observer(self) -> None:
         observer = self._observer
@@ -474,8 +542,8 @@ class LibraryIndexer:
         self._start_thumb_worker()
         try:
             self.reconcile()
-        except Exception:  # noqa: BLE001 - a first reconcile is best effort
-            logger.warning("library: initial reconcile failed", exc_info=True)
+        except Exception as error:  # noqa: BLE001 - a first reconcile is best effort
+            _log_worker_failure("initial reconcile failed", error, self.store)
         self._start_observer()
         try:
             while not self._stop.is_set():
@@ -486,8 +554,8 @@ class LibraryIndexer:
                         break
                     try:
                         self.reconcile()
-                    except Exception:  # noqa: BLE001 - keep the worker alive
-                        logger.warning("library: periodic reconcile failed", exc_info=True)
+                    except Exception as error:  # noqa: BLE001 - keep the worker alive
+                        _log_worker_failure("periodic reconcile failed", error, self.store)
                     continue
                 if self._stop.is_set() or not first:
                     continue
@@ -495,8 +563,8 @@ class LibraryIndexer:
                 self._batch_active = True
                 try:
                     self.process_dirty(batch)
-                except Exception:  # noqa: BLE001 - one bad session must not stop the index
-                    logger.warning("library: session batch failed", exc_info=True)
+                except Exception as error:  # noqa: BLE001 - one bad session must not stop the index
+                    _log_worker_failure("session batch failed", error, self.store)
                 finally:
                     self._batch_active = False
                 if not wake:
@@ -620,7 +688,10 @@ class LibraryIndexer:
         ``transcript_index._YIELD_BUDGET_S`` per batch (R3; the why and the
         measurement are on ``transcript_index.yield_to_any_open``). Only here:
         :meth:`rebuild` (the CLI's and the tests' synchronous path) and every
-        request-path ledger read run unpaused.
+        request-path ledger read run unpaused. :meth:`reconcile` (the startup
+        backfill, the idle-timeout pass and the wake reconcile after a batch) is
+        not an exception: it only stats journals and queues the moved ids, which
+        are then scanned HERE, paused.
         """
         # Deferred: the index module graph costs ~0.4 s to import, and the
         # Library's readers (the TUI, the phone portal) load this module without

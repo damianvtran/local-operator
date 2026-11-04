@@ -43,7 +43,9 @@ from local_operator.mobile.projection import (
     ProjectionFold,
     _diff_counts,
     _image_refs,
+    _peer_cycle_child_row,
     _summarize_args,
+    fold_messages_to_entries,
     monotonic_from_epoch,
 )
 from local_operator.mobile.types import (
@@ -1425,6 +1427,190 @@ def test_the_derived_roster_graph_is_what_fits_a_cliff_width_roster() -> None:
     assert all(row["label"] for row in rows)
 
 
+def test_a_wide_roster_never_costs_the_transcript() -> None:
+    """A 256-wide flat roster: shed the DERIVED graph, never the reader's messages.
+
+    ``peer_ids`` is every sibling's job id, so a flat group of width n costs
+    O(n^2) — measured on this fixture: 1,044,992 B of a 1,396,444 B frame
+    (74.8%). While that graph was shed AFTER the transcript tiers, the cap spent
+    the transcript first (text floored to 200 chars, tail cut to 16 rows) and
+    dropped the graph anyway, so a frame that would have fitted with every row
+    and character intact reached the phone cut short. Every field in it is a
+    pure derivation of ``parent_job_id`` (kept on every row), which is what
+    makes it the right thing to give up when that alone buys the frame.
+
+    256 is ``SubagentComms.MAX_RECORDS``: a wider request is clamped by the
+    fold, so a larger number here would only rename the same fixture.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+    from local_operator.mobile.types import TranscriptEntry
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    fold = _flat_roster_fold(256)
+    fold.projection.transcript = [
+        TranscriptEntry(id="opener", kind="user", text="open the conversation"),
+        *[
+            TranscriptEntry(id=f"answer-{index}", kind="assistant", text="evidence " * 160)
+            for index in range(PROJECTION_TRANSCRIPT_LIMIT - 1)
+        ],
+    ]
+
+    data, degraded = cap_projection_frame(fold.projection)
+
+    assert degraded is True
+    assert all(
+        row.get("peer_ids") == [] for row in data["subagents"]
+    ), "the derivable graph has to be shed to fit a 256-wide roster"
+    assert all("parent_job_id" in row for row in data["subagents"])
+    assert (
+        len(data["transcript"]) == PROJECTION_TRANSCRIPT_LIMIT
+    ), "the cap cut the reader's rows to make room for a field it then dropped"
+    assert not any(
+        str(row.get("text") or "").endswith("…") for row in data["transcript"]
+    ), "a message was truncated to fit a field it then dropped"
+    assert all(row.get("text_complete") is True for row in data["transcript"])
+    assert len(data["transcript"][0]["text"]) == len(
+        "open the conversation"
+    ), "the opening row is the one row the phone must always read in full"
+    assert (
+        len(json.dumps({"op": "projection", "data": data}).encode()) <= 700_000
+    ), "the transcript survived by spending a different field, not by breaking the cap"
+    assert len(json.dumps({"op": "projection", "data": data}).encode()) < _MAX_LINE_BYTES
+
+
+def test_a_small_rosters_graph_is_not_spent_to_save_a_transcript() -> None:
+    """A graph worth a few hundred bytes must not be shed before the cheap tiers.
+
+    Shed FIRST and unconditionally, the graph left the Agents sheet for nothing
+    whenever the frame was over the cap for a different reason: the sheet reads
+    ``peer_ids``/``ancestor_ids`` and nothing on the client rebuilds them. The
+    tier is now gated on ``total - derived <= cap`` — it fires only when the
+    graph alone is the whole fix. Here the transcript's expand payloads are the
+    weight, so tier 3 fits the frame and the roster keeps its edges.
+    """
+    from local_operator.mobile.projection import cap_projection_frame
+    from local_operator.mobile.types import TranscriptEntry
+
+    fold = _flat_roster_fold(5)
+    fold.projection.transcript = [
+        TranscriptEntry(id="opener", kind="user", text="open the conversation"),
+        *[
+            TranscriptEntry(
+                id=f"answer-{index}",
+                kind="assistant",
+                text="short answer",
+                details={"expanded": "x" * 12_000},
+            )
+            for index in range(PROJECTION_TRANSCRIPT_LIMIT - 1)
+        ],
+    ]
+
+    data, degraded = cap_projection_frame(fold.projection)
+
+    assert degraded is True
+    assert any(
+        row.get("peer_ids") for row in data["subagents"]
+    ), "a five-child graph cannot buy this frame; shedding it only costs the sheet"
+    assert all(
+        row.get("details") == {} for row in data["transcript"]
+    ), "the expand payload is the cheaper thing to spend"
+    assert len(data["transcript"]) == PROJECTION_TRANSCRIPT_LIMIT
+    assert len(json.dumps({"op": "projection", "data": data}).encode()) <= 700_000
+
+
+def test_the_pinned_head_is_stated_on_the_wire() -> None:
+    """The pin is a FACT the daemon publishes, not something the client infers.
+
+    The client's first history cursor must be the oldest row of the tail, and a
+    pinned opener is not it. Length cannot say so: the frame cap can publish a
+    pinned tail of ``FRAME_CAP_TRANSCRIPT_FLOOR`` rows, and an older owner's
+    pinned 80-row frame is indistinguishable from an uncapped one. SPARSE: an
+    unpinned projection omits the key entirely, which is also what an older
+    daemon means.
+    """
+    from local_operator.mobile.types import TranscriptEntry
+
+    fold = make_fold()
+    fold._append(TranscriptEntry(id="opener", kind="user", text="the brief"))
+    for index in range(PROJECTION_TRANSCRIPT_LIMIT):
+        fold._append(TranscriptEntry(id=f"row-{index}", kind="assistant", text="body"))
+
+    assert fold.projection.transcript_head_pinned is True
+    assert fold.projection.to_json()["transcript_head_pinned"] is True
+    assert len(fold.projection.transcript) == PROJECTION_TRANSCRIPT_LIMIT
+    assert fold.projection.transcript[0].id == "opener"
+
+    small = make_fold()
+    small._append(TranscriptEntry(id="opener", kind="user", text="the brief"))
+    for index in range(4):
+        small._append(TranscriptEntry(id=f"row-{index}", kind="assistant", text="body"))
+
+    assert small.projection.transcript_head_pinned is False
+    assert "transcript_head_pinned" not in small.projection.to_json()
+
+
+def test_the_graph_is_offered_again_after_details() -> None:
+    """A graph that did not buy the frame alone may buy it once details are gone.
+
+    Tier 2 asks "is shedding the graph enough by itself". The answer can only
+    improve after a spend, so the same measured question is asked again after
+    tier 3. Without it, a roster whose graph plus expand payloads is the whole
+    weight sends the tail and the text to the floor and drops the graph anyway
+    (measured in round 2: 435 siblings with 8 KB details per row ended at 16
+    rows and 199 KB, where details then graph keeps 80 rows at 218 KB).
+
+    The cap is derived from the fixture's own sizes rather than hard-coded, so
+    the test lands inside the band it is about: ``total - derived > cap`` (tier
+    2 declines) and ``total - derived - details <= cap`` (tier 3 + graph fits).
+    """
+    from local_operator.mobile.projection import (
+        FRAME_CAP_DERIVED_ROSTER_FIELDS,
+        cap_projection_frame,
+    )
+    from local_operator.mobile.types import TranscriptEntry
+
+    fold = _flat_roster_fold(160)
+    fold.projection.transcript = [
+        TranscriptEntry(id="opener", kind="user", text="open the conversation"),
+        *[
+            TranscriptEntry(
+                id=f"answer-{index}",
+                kind="assistant",
+                text="short",
+                details={"expanded": "x" * 6_000},
+            )
+            for index in range(PROJECTION_TRANSCRIPT_LIMIT - 1)
+        ],
+    ]
+
+    def measure(value: object) -> int:
+        return len(json.dumps(value, ensure_ascii=False, sort_keys=True).encode())
+
+    whole = fold.projection.to_json()
+    total = measure(whole)
+    derived = sum(
+        measure(row.get(field) or [])
+        for row in whole["subagents"]
+        for field in FRAME_CAP_DERIVED_ROSTER_FIELDS
+    )
+    details = sum(measure(row.get("details") or {}) for row in whole["transcript"])
+    cap = total - derived - details // 2
+
+    assert 0 < cap
+    assert total - derived > cap, "tier 2 must decline, or the case is not the one tested"
+    assert total - derived - details <= cap, "tier 3 plus the graph must fit"
+
+    frame, degraded = cap_projection_frame(fold.projection, cap_bytes=cap)
+
+    assert degraded is True
+    assert all(row.get("peer_ids") == [] for row in frame["subagents"])
+    assert (
+        len(frame["transcript"]) == PROJECTION_TRANSCRIPT_LIMIT
+    ), "the tail was halved to make room for a graph it then dropped"
+    assert all(row.get("details") == {} for row in frame["transcript"])
+    assert measure(frame) <= cap
+
+
 def test_the_roster_falls_back_to_identity_rows_when_shedding_is_not_enough() -> None:
     """The last tier before the honest warning: identity rows only.
 
@@ -2657,6 +2843,73 @@ def test_a_legacy_handle_without_an_id_keeps_the_tail_dedup() -> None:
     added = fold.absorb_user_event(Message.user("no id supplied"))
     assert added is False
     assert len([e for e in fold.projection.transcript if e.text == "no id supplied"]) == 1
+
+
+# --- a $skill payload paints the typed line on the LIVE fold too ----------------
+
+
+def _skill_payload(text: str, *, body: str = "SKILL_BODY_MARKER") -> str:
+    """A `$skill` payload in the shape ``skills.invoke.render_skill_block`` writes."""
+    from local_operator.skills.invoke import render_skill_block
+
+    return f"{text}\n\n{render_skill_block([('research', body)])}"
+
+
+def test_a_live_skill_row_matches_the_replay_row() -> None:
+    """The live fold must paint what replay paints for a ``$skill`` payload.
+
+    A modern invocation persists as the typed line plus a tail
+    ``<operator-skills>`` block (``skills.invoke.render_skill_block``). Replay
+    has stripped that block since it shipped; the live paths painted the raw
+    payload, so a TUI-typed invocation showed the whole SKILL.md body on an
+    attached phone until the next full repaint — and a phone-sent steer echoed
+    the same body (SKM-D2).
+    """
+    typed = "$research fix it"
+    sent = _skill_payload(typed)
+
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    live = make_fold()
+    assert live.absorb_user_event(Message.user(sent, id="skill-live-1")) is True
+    replay = fold_messages_to_entries([Message.user(sent, id="skill-replay-1")])
+
+    live_row = live.projection.transcript[-1]
+    assert live_row.text == typed
+    assert live_row.text == replay[0].text
+    assert "SKILL_BODY_MARKER" not in live_row.text
+
+
+def test_a_phone_steer_echo_strips_the_skill_block() -> None:
+    """The queued steer row is registered before the payload comes back, so it
+    must already read as the typed line: the echo is matched to the queued
+    message by id and the envelope branch does not rewrite a plain row."""
+    typed = "$research fix it"
+    sent = _skill_payload(typed)
+
+    fold = make_fold()
+    fold.note_user_message(sent, steer=True, message_id="cmd-skill")
+    assert fold.absorb_user_event(Message.user(sent, id="cmd-skill")) is False
+
+    rows = [entry for entry in fold.projection.transcript if entry.kind == "steer"]
+    assert len(rows) == 1
+    assert rows[0].text == typed
+
+
+def test_a_legacy_echo_reconciles_across_the_skill_block() -> None:
+    """The id-less tail fallback compares the TYPED line on both sides: the
+    echo row holds the stripped text while the event carries the payload, so a
+    raw comparison would paint the skill body twice under two ids."""
+    typed = "$research fix it"
+    sent = _skill_payload(typed)
+
+    fold = make_fold()
+    fold.note_user_message(sent, steer=True)
+    assert fold.absorb_user_event(Message.user(sent)) is False
+
+    rows = [entry for entry in fold.projection.transcript if entry.kind in ("user", "steer")]
+    assert len(rows) == 1
+    assert rows[0].text == typed
 
 
 def test_a_history_fold_clears_pending_echoes() -> None:
@@ -4527,3 +4780,291 @@ def test_the_projection_wire_carries_the_supplement_map_loosely() -> None:
 
     older = _projection_from_json({k: v for k, v in wire.items() if k != "supplements"}, record)
     assert older.supplements == {}
+
+
+def test_bridge_rows_are_the_shared_decision_at_start_and_settle() -> None:
+    """The phone's bridge summary is the TUI's words (`harness/bridge_copy.py`).
+
+    The generic tail painted `op=channel_post channel_id=bcv_…`; the row now
+    leads with the verb and the target, and the settle repaints it from the
+    result's details on BOTH paths — the live fold and the history fold — so a
+    watched call and its replay agree. The outcome word rides the line's end
+    because the phone cell has no status cap.
+    """
+    args = {"op": "send", "to": "acc_7", "text": "ping"}
+    assert _summarize_args("bridge", args) == "Sending to a teammate · ping"
+    details = {"ok": True, "state": "sent", "destination_type": "peer_inbox"}
+    settled = "Sent to a teammate · ping · not posted to a conversation"
+
+    fold = make_fold()
+    fold.fold_event(ToolExecutionStartEvent(tool_call_id="b1", tool_name="bridge", args=args))
+    row = fold.projection.transcript[-1]
+    assert row.summary == "Sending to a teammate · ping"
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="b1",
+            tool_name="bridge",
+            result=ToolResult(
+                tool_call_id="b1",
+                tool_name="bridge",
+                content=[TextContent(text="{}")],
+                details=details,
+            ),
+        )
+    )
+    assert row.summary == settled
+
+    from local_operator.mobile.projection import fold_messages_to_entries
+
+    history: list[AgentMessage] = [
+        Message(
+            role="assistant",
+            content=[TextContent(text="")],
+            tool_calls=[ToolCall(id="b2", name="bridge", arguments=args)],
+            stop_reason="toolUse",
+        ),
+        Message.tool_result(
+            ToolResult(
+                tool_call_id="b2",
+                tool_name="bridge",
+                content=[TextContent(text="{}")],
+                details=details,
+            )
+        ),
+    ]
+    (entry,) = [e for e in fold_messages_to_entries(history) if e.kind == "tool"]
+    assert entry.summary == settled
+
+    refused = {"ok": False, "code": "not_permitted", "error": "writes are off"}
+    fold.fold_event(
+        ToolExecutionStartEvent(
+            tool_call_id="b3",
+            tool_name="bridge",
+            args={"op": "channel_post", "channel_id": "bcv_b0044d9e1a2f", "body": "hi"},
+        )
+    )
+    row = fold.projection.transcript[-1]
+    assert "bcv_" not in row.summary
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="b3",
+            tool_name="bridge",
+            result=ToolResult(
+                tool_call_id="b3",
+                tool_name="bridge",
+                content=[TextContent(text="writes are off")],
+                details=refused,
+                is_error=True,
+            ),
+        )
+    )
+    assert row.tool_state == "failed"
+    assert row.summary == "Couldn't post in a conversation · hi · refused · not_permitted"
+
+
+# --- the Team Bridge row's facts ---------------------------------------------
+#
+# The phone renders a ``bridge`` row from ``details["bridge_row"]``, the shared
+# ``harness/rows.py::bridge_row`` decision. These pin that the projection
+# carries it on BOTH paint paths (live settle and history replay), that the
+# outcome the phone must not paint as success arrives, and that no opaque
+# Team Bridge id rides any field of it.
+
+_BRIDGE_ID_PREFIXES = ("bcv_", "bcmsg_", "acc_", "ep_")
+
+
+def _no_bridge_ids(value: Any) -> None:
+    text = json.dumps(value)
+    for prefix in _BRIDGE_ID_PREFIXES:
+        assert prefix not in text, f"{prefix} leaked into bridge_row: {text}"
+
+
+def _settle_bridge(args: dict[str, Any], details: dict[str, Any], *, error: bool = False) -> Any:
+    fold = make_fold()
+    fold.fold_event(ToolExecutionStartEvent(tool_call_id="b1", tool_name="bridge", args=args))
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="b1",
+            tool_name="bridge",
+            result=ToolResult(
+                tool_call_id="b1",
+                content=[TextContent(text="ok")],
+                details=details,
+                is_error=error,
+            ),
+        )
+    )
+    return fold.projection.transcript[-1]
+
+
+def test_bridge_peer_inbox_send_projects_inbox_only() -> None:
+    row = _settle_bridge(
+        {"op": "send", "recipient": "acc_01J9PRIYA", "body": "Can you take the cut?"},
+        {
+            "ok": True,
+            "message_id": "bcmsg_01J9X",
+            "state": "sent",
+            "destination_type": "peer_inbox",
+        },
+    )
+    facts = row.details["bridge_row"]
+    assert facts["op"] == "send"
+    assert facts["outcome"] == "inbox_only"
+    _no_bridge_ids(facts)
+    # The WORDS ride beside the tokens, rendered from the shared copy, so the
+    # phone paints the TUI's strings and mints none of its own.
+    copy = row.details["bridge_copy"]
+    assert copy["outcome"] == "not posted to a conversation"
+    assert copy["outcome_sentence"].startswith("Accepted into their inbox")
+    _no_bridge_ids(copy)
+
+
+def test_bridge_refusal_projects_refused_with_its_code() -> None:
+    row = _settle_bridge(
+        {
+            "op": "channel_post",
+            "endpoint_id": "ep_01J9",
+            "conversation_id": "bcv_01J9",
+            "body": "hi",
+        },
+        {"ok": False, "code": "not_member", "error": "not a member of bcv_01J9"},
+        error=True,
+    )
+    facts = row.details["bridge_row"]
+    assert (facts["outcome"], facts["code"]) == ("refused", "not_member")
+    _no_bridge_ids(facts)
+    assert row.details["bridge_copy"]["outcome"] == "refused · not_member"
+
+
+def test_bridge_dm_target_is_a_label_never_an_id() -> None:
+    row = _settle_bridge(
+        {"op": "dm", "endpoint_id": "ep_01J9", "recipient": "acc_01J9PRIYA", "body": "hey"},
+        {"ok": True, "content": "direct message to Priya Shah in bcv_01J9ABCDEF"},
+    )
+    facts = row.details["bridge_row"]
+    assert facts["target"]["kind"] == "dm"
+    assert facts["target"]["label"] == "Priya Shah"
+    _no_bridge_ids(facts)
+    assert row.details["bridge_copy"]["headline"] == "Direct message to Priya Shah"
+    _no_bridge_ids(row.details["bridge_copy"])
+
+
+def test_bridge_row_rides_the_replay_paint_too() -> None:
+    """A reconnect must expand to what the live row did: history replay
+    builds the details through the same function, so the facts agree."""
+    args = {"op": "send", "recipient": "acc_01J9PRIYA", "body": "ping"}
+    details = {"ok": True, "destination_type": "peer_inbox"}
+    live = _settle_bridge(args, details)
+    entries = fold_messages_to_entries(
+        [
+            Message.user("tell priya"),
+            Message(
+                role="assistant",
+                content=[TextContent(text="")],
+                tool_calls=[ToolCall(id="b1", name="bridge", arguments=args)],
+            ),
+            Message(
+                role="tool",
+                content=[TextContent(text="ok")],
+                tool_call_id="b1",
+                tool_name="bridge",
+                provider_payload={"details": details},
+            ),
+        ]
+    )
+    replayed = next(e for e in entries if e.kind == "tool")
+    assert replayed.details["bridge_row"] == live.details["bridge_row"]
+    assert replayed.details["bridge_copy"] == live.details["bridge_copy"]
+    assert replayed.details["bridge_row"]["outcome"] == "inbox_only"
+
+
+def test_non_bridge_rows_carry_no_bridge_facts() -> None:
+    fold = make_fold()
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="t1", tool_name="bash", args={"command": "ls"})
+    )
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="t1",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="t1", content=[TextContent(text="a")], details={}),
+        )
+    )
+    assert "bridge_row" not in fold.projection.transcript[-1].details
+    assert "bridge_copy" not in fold.projection.transcript[-1].details
+
+
+def test_bridge_body_keeps_its_lines_for_the_markdown_render() -> None:
+    """The phone renders the body as markdown; a flattened body loses lists
+    and paragraphs. Other tools' args stay one-line compacted."""
+    body = "**Heads up**\n\n- one\n- two"
+    row = _settle_bridge({"op": "dm", "recipient": "acc_X", "body": body}, {"ok": True})
+    assert row.details["args"]["body"] == body
+    fold = make_fold()
+    fold.fold_event(
+        ToolExecutionStartEvent(tool_call_id="t9", tool_name="bash", args={"command": "a\nb"})
+    )
+    fold.fold_event(
+        ToolExecutionEndEvent(
+            tool_call_id="t9",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="t9", content=[TextContent(text="")], details={}),
+        )
+    )
+    assert fold.projection.transcript[-1].details["args"]["command"] == "a b"
+
+
+def test_bridge_copy_scrubs_ids_from_every_field_including_the_error() -> None:
+    """Review R3 / QA Q2: the outcome sentence interpolates the tool's raw
+    ``error``, and real refusals name the conversation. Every copy field must be
+    id-free on the WIRE, including ids whose tail carries ``_`` or ``-``."""
+    row = _settle_bridge(
+        {"op": "channel_post", "conversation_id": "bcv_Z", "body": "hi"},
+        {
+            "ok": False,
+            "code": "not_member",
+            "error": "you are not in bcv_Z (acc_remote_9) via ep_01J-ABC msg bcmsg_7",
+        },
+        error=True,
+    )
+    copy = row.details["bridge_copy"]
+    # The core names the conversation in words where it can (#3203 R4); the
+    # remaining ids are scrubbed here. Either way the sentence keeps its
+    # refusal and code and carries no id.
+    assert copy["outcome_sentence"].startswith("Refused: you are not in ")
+    assert copy["outcome_sentence"].endswith("(not_member)")
+    for value in copy.values():
+        assert "remote_9" not in value and "-ABC" not in value
+    _no_bridge_ids(copy)
+    unconfirmed = _settle_bridge(
+        {"op": "channel_post", "conversation_id": "bcv_Z", "body": "hi"},
+        {"ok": False, "code": "post_failed", "error": "upstream 500 for bcv_QA0Z"},
+        error=True,
+    )
+    assert unconfirmed.details["bridge_row"]["outcome"] == "unconfirmed"
+    _no_bridge_ids(unconfirmed.details["bridge_copy"])
+
+
+def test_bridge_peer_cycle_child_row_carries_the_same_facts() -> None:
+    """Review R5: the peer-cycle child path is the third producer of a bridge
+    row; it must carry the same tokens and copy as the live settle."""
+    args = {"op": "send", "recipient": "acc_01J9PRIYA", "body": "ping"}
+    details = {"ok": True, "destination_type": "peer_inbox"}
+    live = _settle_bridge(args, details)
+    child = _peer_cycle_child_row(
+        {
+            "tool_call_id": "b1",
+            "tool_name": "bridge",
+            "arguments": args,
+            "result": {
+                "tool_call_id": "b1",
+                "tool_name": "bridge",
+                "content": [{"type": "text", "text": "{}"}],
+                "details": details,
+            },
+        }
+    )
+    assert child.details["bridge_row"] == live.details["bridge_row"]
+    assert child.details["bridge_copy"] == live.details["bridge_copy"]
+    assert child.details["bridge_copy"]["outcome"] == "not posted to a conversation"
+    _no_bridge_ids(child.details["bridge_copy"])

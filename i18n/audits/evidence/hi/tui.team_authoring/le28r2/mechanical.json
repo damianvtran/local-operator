@@ -1,0 +1,131 @@
+{
+  "locale": "hi",
+  "namespace": "tui.team_authoring",
+  "en_sha256": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
+  "target_sha256": "337b491537061e5b51f9d004cc769c71f8c1ebb28e255202aec333fe5ae27c06",
+  "en_keys": 36,
+  "target_keys": 36,
+  "missing": [],
+  "unknown": [],
+  "arg_problems": [],
+  "render_errors": [],
+  "plural_cat_problems": [],
+  "not_nfc": [],
+  "backtick_diff": [],
+  "over_budget": [],
+  "typography": [],
+  "identical_to_en": [
+    [
+      "tui.team_authoring.footer",
+      "/team chart <name> · /team new · /team edit <name>"
+    ]
+  ],
+  "gloss_leads": [
+    [
+      "tui.team_authoring.footer",
+      "team"
+    ],
+    [
+      "tui.team_authoring.invalid_members",
+      "team"
+    ],
+    [
+      "tui.team_authoring.members_hint",
+      "team"
+    ],
+    [
+      "tui.team_authoring.usage_edit",
+      "team"
+    ],
+    [
+      "tui.team_authoring.usage_new",
+      "team"
+    ]
+  ],
+  "empty": [],
+  "ws_edge": [],
+  "length_ratio_outliers": [],
+  "script_leads": [
+    [
+      "tui.team_authoring.footer",
+      [
+        "team",
+        "chart",
+        "name",
+        "team",
+        "new",
+        "team",
+        "edit",
+        "name"
+      ]
+    ],
+    [
+      "tui.team_authoring.instructions_hint",
+      [
+        "Tab"
+      ]
+    ],
+    [
+      "tui.team_authoring.invalid_members",
+      [
+        "role",
+        "role",
+        "team",
+        "pod"
+      ]
+    ],
+    [
+      "tui.team_authoring.legend",
+      [
+        "ctrl",
+        "tab",
+        "esc"
+      ]
+    ],
+    [
+      "tui.team_authoring.members_hint",
+      [
+        "coder",
+        "coder",
+        "team",
+        "pod"
+      ]
+    ],
+    [
+      "tui.team_authoring.usage_edit",
+      [
+        "team",
+        "edit",
+        "name"
+      ]
+    ],
+    [
+      "tui.team_authoring.usage_new",
+      [
+        "team",
+        "new"
+      ]
+    ]
+  ],
+  "excl_added": [],
+  "end_punct": [],
+  "counts": {
+    "missing": 0,
+    "unknown": 0,
+    "arg_problems": 0,
+    "render_errors": 0,
+    "plural_cat_problems": 0,
+    "not_nfc": 0,
+    "backtick_diff": 0,
+    "over_budget": 0,
+    "typography": 0,
+    "identical_to_en": 1,
+    "gloss_leads": 5,
+    "empty": 0,
+    "ws_edge": 0,
+    "length_ratio_outliers": 0,
+    "script_leads": 7,
+    "excl_added": 0,
+    "end_punct": 0
+  }
+}

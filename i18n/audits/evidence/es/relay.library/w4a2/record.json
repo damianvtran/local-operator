@@ -1,0 +1,91 @@
+{
+ "schema": 1,
+ "audit_id": "w4a2",
+ "audit_round": 1,
+ "locale": "es",
+ "namespace": "relay.library",
+ "audit_date": "2026-10-29",
+ "audited_revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+ "audited_revision_note": "The es catalogue is UNTRACKED at this revision (`git status --porcelain` -> `?? local_operator/i18n/catalogues/es/relay.library.json`), so HEAD cannot pin the audited bytes; input_hashes.target.sha256 is the exact on-disk hash and checks.py recomputes it.",
+ "key_count": {
+  "en": 1,
+  "target": 1,
+  "context": 1
+ },
+ "verdict": "passed",
+ "result": "passed — 0 blocker, 0 major, 1 minor, 0 nit",
+ "verdict_reason": "The single key was read against source and sidecar. Structure is intact — 'count' byte-identical, '#' used in both branches and never pre-formatted — and 'recurso' matches the shipped Library vocabulary. The one minor is the missing es `many` branch, which is the sole such omission among 58 es plural messages and only bites at an exact 1.000.000 count; it renders correctly for every plausible total, so it does not gate.",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team)",
+  "session_or_instance": "8eb3b9c9a687 (lane es-w4-auditor-b)",
+  "model": "radient/auto (self-reported)",
+  "model_note": "Session header names anthropic/claude-sonnet-5-5 as primary; three provider-failure switches fired on quota before any catalogue was read (openai/gpt-6-astra, kimi/k3.1-pro, then radient/auto). Every judgement here was made under radient/auto - a disclosed fallback, not the pinned primary.",
+  "date": "2026-10-29",
+  "independence": "I wrote none of this copy and repaired none of it; this lane audits bytes produced by a different translator agent. I did not edit, delete, move or rename any file in the worktree: no catalogue, sidecar, ledger, allowance, style guide, glossary or generated file, and no git write of any kind. My only writes are this evidence directory. All three target files are untracked at HEAD, so every binding here is to the on-disk bytes recomputed by checks.py."
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/relay.library.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/es/relay.library.json",
+   "tracked": false,
+   "sha256": "f2d5ab3a9a5660f94b7656324a4c1069c06d88c31e908a5df1226872cb7d1a71"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/relay.library.context.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "877b88290cf14602e63b2bb1c58719fac96a20ae53ff04b147e21de23df93c54"
+  }
+ },
+ "display_side_risk": "none that survives verification. relay.login.error.password renders through this harness's display layer with its leading token masked; the on-disk bytes contain no 'redacted' literal (byte scan: False) and the value is 22 codepoints - the ordinary Spanish noun for a login secret (10 codepoints, last U+00F1) followed by ' incorrecta.' - plain UI copy, not a credential and not a marker in the file. The codepoint dump is authoritative; the sanctioned read_public_copy reader refused ('the workspace is not a git checkout'), which is moot here. No finding arises from this.",
+ "findings": [
+  {
+   "id": "es-w4a2-LB-01",
+   "severity": "minor",
+   "status": "open",
+   "keys": [
+    "relay.library.count"
+   ],
+   "source_term": "plural category set (es CLDR `many`)",
+   "current": "{count, plural, one {# recurso} other {# recursos}}",
+   "proposed": "{count, plural, one {# recurso} many {# de recursos} other {# recursos}}",
+   "reason": "es CLDR has `many` for exact multiples of 10^6 and style-guide/es.md prescribes 'many {# de sesiones}'; 57 of the 58 es plural messages in this catalogue carry one/many/other, so this key is the sole outlier and at exactly 1.000.000 falls back to `other`, rendering '1.000.000 recursos' instead of the grammatical '1.000.000 de recursos'.",
+   "evidence": "Programmatic census of every plural message in the es catalogues: 58 total, 57 with {one, many, other}, 1 with {one, other} — this key. En has {one, other} in all 105 of its plural messages, so the `many` branch is a deliberate es-side addition the translator did not apply here."
+  }
+ ],
+ "verified": [
+  "The plural is grammatical, not an abbreviation, per the sidecar; 'recurso/recursos' is a full word in both branches.",
+  "'count' is the server's filtered total and the copy adds no qualifier that would misdescribe what is painted on screen.",
+  "Lowercase as the sidecar requires.",
+  "Width 51 cells vs 47 (+8.5%), inside the 15-25% band."
+ ],
+ "check_output": {
+  "commands": [
+   "python3 i18n/audits/evidence/es/relay.library/w4a2/checks.py",
+   "python3 - (census of ICU plural categories across all 58 es plural messages)"
+  ],
+  "result": "checks.py: exit 1, exactly one FAIL — 'es plural carries `many`' — which is the finding itself, not a script error. Every other assertion passes.",
+  "mechanical": {
+   "key_parity": "1/1",
+   "variable": "'count' byte-identical; '#' used in both branches, never pre-formatted",
+   "icu_categories_match_en": "yes — one+other, exactly as the source",
+   "es_locale_convention": "57 of 58 es plural messages carry one+many+other; this is the only one+other",
+   "asset_term": "'recurso' matches shipped wire.slash.library.help 'la Biblioteca global de recursos'"
+  },
+  "failures": "the single expected FAIL is finding es-w4a2-LB-01"
+ },
+ "artifacts": [
+  "report.md",
+  "audit.log",
+  "checks.py"
+ ],
+ "limitations": [
+  "LLM semantic judgement, not native-speaker attestation.",
+  "No rendered frame was captured; width judgements use rich.cells.cell_len against the shipped relay corpus, and none of the three audited sidecars declares maxCells.",
+  "The target catalogue is untracked, so this binding is to on-disk bytes and any further edit invalidates it; no copy of these bytes is retained elsewhere.",
+  "The audit model is an auto-routing alias; the concrete backend is not identifiable."
+ ]
+}

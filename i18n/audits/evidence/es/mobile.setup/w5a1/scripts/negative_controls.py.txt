@@ -1,0 +1,32 @@
+import importlib.util, copy, json
+spec=importlib.util.spec_from_file_location("chk", "/Users/damian/.local-operator/sessions/99bb6933f60c/scratchpad/audit_w5a1.py")
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+b='/Users/damian/lo-i18n-es/local_operator/i18n/catalogues'
+en=json.load(open(f'{b}/en/mobile.setup.json')); es=json.load(open(f'{b}/es/mobile.setup.json'))
+def mut(**kv):
+    d=copy.deepcopy(es); d.update(kv); return d
+cases=[]
+def add(label, fn):
+    d=copy.deepcopy(es); fn(d); cases.append((label,d))
+add('placeholder dropped', lambda d: d.__setitem__('mobile.setup.price','Precio mensual vigente: USD (requiere activación)'))
+add('placeholder renamed', lambda d: d.__setitem__('mobile.setup.verified_url','URL móvil verificada: {link}'))
+add('placeholder mangled', lambda d: d.__setitem__('mobile.setup.apply','Ejecuta {cmd}'))
+add('URL altered', lambda d: d.__setitem__('mobile.setup.balance', d['mobile.setup.balance'].replace('dashboard/tunnels','tunnels')))
+add('sentence dropped', lambda d: d.__setitem__('mobile.setup.complete','Abre la URL de arriba e inicia sesión con la misma cuenta de Radient.'))
+add('negation flipped', lambda d: d.__setitem__('mobile.setup.billing_activated','Facturación: no se completó la activación.'))
+add('version changed', lambda d: d.__setitem__('mobile.setup.cloudflared', d['mobile.setup.cloudflared'].replace('2025.4.0','2025.4.1')))
+add('command renamed', lambda d: d.__setitem__('mobile.setup.owner_missing', d['mobile.setup.owner_missing'].replace('lop login-status','lo login-status')))
+add('key removed', lambda d: d.pop('mobile.setup.busy'))
+add('extra key added', lambda d: d.__setitem__('mobile.setup.extra','x'))
+add('english leftover', lambda d: d.__setitem__('mobile.setup.failed','Setup did not finish.'))
+add('stray exclamation', lambda d: d.__setitem__('mobile.setup.stopped', d['mobile.setup.stopped']+' ¡Listo!'))
+add('em dash -> hyphen', lambda d: d.__setitem__('mobile.setup.verifying', d['mobile.setup.verifying'].replace('—','-')))
+add('ellipsis -> ascii', lambda d: d.__setitem__('mobile.setup.reserving', d['mobile.setup.reserving'].replace('…','...')))
+fired=0
+for label,d in cases:
+    r=m.check(en,d)
+    ok=r['problem_count']>0
+    fired+=ok
+    print(f"  {'DETECTED' if ok else 'MISSED  '}  {label:38} {sorted({p['kind'] for p in r['problems']})}")
+ctrl=m.check(en,copy.deepcopy(es))
+print(f"\nmutations: {len(cases)}   detected: {fired}   unmutated control problems: {ctrl['problem_count']}")

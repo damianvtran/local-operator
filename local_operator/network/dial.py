@@ -309,6 +309,14 @@ AUTH_FIELDS: tuple[str, ...] = (
     # guard's literal-key fix surfaced it; the fix is to name it, never to
     # widen the copy).
     "peer_journal_source",
+    # The viewer's half of the own-cwd move's successor guarantee: the owner
+    # retires toward a new directory only while an attached client has declared
+    # it will adopt it. Dropped here, a relayed viewer silently reads as unable
+    # to follow, and a queued move holds until it expires for a reason nobody on
+    # that viewer can see. Forwarding it widens no authority — it is a
+    # capability declaration, and the move itself stays approval-gated on the
+    # owner (QA round 3, Q4b).
+    "cwd_adoption",
     "supplements",
     "slash_consumers",
     "surface",

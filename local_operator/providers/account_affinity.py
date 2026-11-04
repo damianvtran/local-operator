@@ -57,6 +57,13 @@ _selection_endpoint: ContextVar[EndpointModeResolver | None] = ContextVar(
     "account_selection_endpoint", default=None
 )
 _wire_attempt: ContextVar[WireHintCapture | None] = ContextVar("account_wire_attempt", default=None)
+# A LEND's selection inputs (see :func:`lend_selection_context`). Task-local for
+# the same reason as the request context above: the owner's broker serves many
+# peers' lends on one loop, and one peer's anchor must never steer another's.
+_lend_anchor: ContextVar[tuple[int, int] | None] = ContextVar("account_lend_anchor", default=None)
+_lend_demotions: ContextVar[frozenset[int]] = ContextVar(
+    "account_lend_demotions", default=frozenset()
+)
 _StreamItem = TypeVar("_StreamItem")
 
 
@@ -126,6 +133,66 @@ def selection_context(
         _selection_policy.reset(policy_token)
         _isolated_request.reset(isolated_token)
         _selection_endpoint.reset(endpoint_token)
+
+
+@contextmanager
+def lend_selection_context(
+    policy: str | None,
+    anchor: tuple[int, int] | None = None,
+    demoted: frozenset[int] = frozenset(),
+):
+    """The inputs a credential OWNER feeds its own selector for one peer's lend.
+
+    WHY THIS EXISTS. A lend runs ``AuthStore.get_oauth_access`` — the same
+    selector a local turn runs — but without the three inputs a local turn has:
+    the operator's ``retry.accountSelectionPolicy`` (a local turn carries it in
+    :func:`selection_context`), a success receipt (the borrower holds the
+    conversation, so the receipt lives there), and the turn's own 5xx demotion
+    (``rotate_sibling`` writes it into the store the turn owns). Without them a
+    remote session was re-ranked from scratch on every request and moved account
+    whenever the usage evidence moved, and a 529 re-served the same row.
+
+    The anchor is ``(owner row id, row created_at)`` from the BORROWER's receipt;
+    ``AuthStore._affinity_credential_id`` honours it only when that exact row is
+    still among the eligible candidates (not excluded, blocked or depleted), so
+    it is a preference among rows the peer could already be lent, never a way to
+    reach one. ``demoted`` is unioned into ``_active_demotions`` for this resolve
+    only. NOTHING HERE IS WRITTEN TO THE OWNER'S STORE: a lend is ``read_only``
+    and a peer's word must never move the owner's own routing (§2.1, F3).
+    """
+    policy_token = _selection_policy.set(policy)
+    anchor_token = _lend_anchor.set(anchor)
+    demoted_token = _lend_demotions.set(frozenset(demoted))
+    try:
+        yield
+    finally:
+        _selection_policy.reset(policy_token)
+        _lend_anchor.reset(anchor_token)
+        _lend_demotions.reset(demoted_token)
+
+
+def current_lend_anchor() -> tuple[int, int] | None:
+    return _lend_anchor.get()
+
+
+def current_lend_demotions() -> frozenset[int]:
+    return _lend_demotions.get()
+
+
+def receipt_endpoint_matches(
+    receipt: "AccountAffinityReceipt",
+    identity: "OAuthAccess",
+    endpoint: EndpointModeResolver | None,
+) -> bool:
+    """Whether a receipt's cache endpoint is still the one this dispatch would use.
+
+    ONE rule for both holders of a receipt: ``AuthStore`` (a local row) and the
+    mesh borrower (an owner's row). A receipt earned on one wire mode is no
+    evidence of a warm prefix on another, so it must not anchor there. With no
+    resolver in context the mode is unknowable and the receipt stands, which is
+    the rule ``_affinity_credential_id`` has always applied.
+    """
+    return endpoint is None or endpoint(identity) == receipt.endpoint_mode
 
 
 def current_selection_signature() -> str | None:

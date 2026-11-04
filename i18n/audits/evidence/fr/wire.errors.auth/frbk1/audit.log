@@ -1,0 +1,48 @@
+# fr-wire-audit-b — audit.log — fr/wire.errors.auth
+# audit id frbk1 | 2026-10-29 | session 500e883ce1b1 | served model radient/auto
+# audited revision 9495f8a6c3bf2b5438ef5c33d7274cf519435dda on branch feat/i18n-core-fr-backfill
+# The target catalogue is an untracked working-tree file, so the bytes audited
+# are bound by sha256 below rather than by a commit of their own.
+
+$ git rev-parse HEAD
+9495f8a6c3bf2b5438ef5c33d7274cf519435dda
+
+$ git branch --show-current
+feat/i18n-core-fr-backfill
+
+$ shasum -a 256 local_operator/i18n/catalogues/{en,fr}/wire.errors.auth*.json
+# cross-checked in this audit run: shasum and Python hashlib agree on every file
+en      9d48edaa61269239e132201224c1c7d6cf89ef198598f0ec6c99c1f3ade542f6  en/wire.errors.auth.json
+context (none)  en/wire.errors.auth.context.json  [absent]
+fr      715c65c837616fe2be669d6684844705eac081ade681311cbb0221cdf2dc24bd  fr/wire.errors.auth.json
+
+$ ~/local-operator/.venv/bin/python  # parity + ICU through the repo parser
+from local_operator.i18n.runtime import message_arguments, plural_selectors
+key parity              : en=12 fr=12; missing in fr=none; extra in fr=none
+key order vs english    : identical
+argument tuple mismatches: 0
+keys carrying ICU arguments: 2
+    argument names: error
+keys carrying plural selectors: 0   (nothing for a plural branch to diverge on)
+
+$ ~/local-operator/.venv/bin/python  # typography by codepoint
+prose anomalies (outside quoted/code spans): 0
+hits inside quoted/code spans (must stay byte-identical): 0
+
+$ ~/local-operator/.venv/bin/python  # masking scan, ordinal comparison
+marker sequence found in any of the 12 French values: NO
+values containing '[' or ']': 0
+
+$ ~/local-operator/.venv/bin/python  # identifier tokens from English kept in French
+keys with an English identifier token missing from the French: 0
+
+$ ~/local-operator/.venv/bin/python  # width against declared maxCells
+    no maxCells in en/wire.errors.auth.context.json (no sidecar)
+    widest values (fr cells, en cells, key):
+         94    70  wire.errors.auth.store_unreadable
+         64    51  wire.errors.auth.credentials_missing
+         57    52  wire.errors.auth.input_invalid
+
+$ ~/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit 0

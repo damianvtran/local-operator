@@ -1,0 +1,46 @@
+PHASE: pre-ledger-update controls and per-pair probes. Post-ledger held-state results are in i18n/audits/lost-evidence-r2-20261028/checks-after.log.
+
+Shared gate output below was produced once in this session, not rerun per bundle.
+
+$ date -u
+2026-10-28T17:12:37Z
+$ git rev-parse HEAD
+9495f8a6c3bf2b5438ef5c33d7274cf519435dda
+$ /Users/damian/local-operator/.venv/bin/python --version
+Python 3.12.13
+$ node --version
+v24.22.1
+
+$ python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+[exit 0]
+
+$ python scripts/i18n/check.py
+advisory: local_operator/memory_cli.py: 81 literal(s) against a ceiling of 39
+advisory: local_operator/memory_maintenance.py: 3 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/memory_triage.py: 10 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/procname.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+advisory: local_operator/session_factory.py: 16 literal(s) against a ceiling of 15
+advisory: local_operator/supervisors.py: 9 literal(s) against a ceiling of 6
+advisory: local_operator/update.py: 57 literal(s) against a ceiling of 53
+check.py: ok — 34 file(s) scanned, 872 literal(s) at or below the baseline, catalogues consistent; 7 advisory finding(s) (report-only until activated)
+[exit 0]
+
+$ python scripts/i18n/generate.py --check
+generate.py --check: 100 artifact(s) byte-identical
+[exit 0]
+
+PER-PAIR PROBE: /Users/damian/local-operator/.venv/bin/python -c "$(cat probe.py.txt)" ru tui.team_authoring
+{
+  "locale": "ru",
+  "namespace": "tui.team_authoring",
+  "key_count": 36,
+  "en_keys": 36,
+  "en_sha256": "b956c90f98b9542da3fc8b9b9af1d1d797d36617f4230ffd4f616382445e9d6c",
+  "target_sha256": "7c073b1a667260264b82f0c1d782186431e34f91e4d5a3e76b658166709cbee6",
+  "key_parity": true,
+  "plural_messages": 0,
+  "explicit_budget_count": 0,
+  "explicit_over_budget": []
+}
+[exit 0]

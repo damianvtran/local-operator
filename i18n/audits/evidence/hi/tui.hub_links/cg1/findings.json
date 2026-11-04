@@ -1,0 +1,29 @@
+{
+  "locale": "hi",
+  "namespace": "tui.hub_links",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": "targeted-argorder",
+      "auditor_session": "d8fb2395abc5",
+      "id": "HI-ARG-01",
+      "severity": "MINOR",
+      "namespace": "tui.hub_links",
+      "key": "tui.hub_links.mark.retry",
+      "english": "Retry {direction} for {item} at {source}",
+      "current": "{direction} को {item} के लिए {source} पर फिर आज़माएँ",
+      "problem": "Meaning correct (retry {direction} for {item} at {source}), but '{direction} को … फिर आज़माएँ' marks the action as an object with को, which reads stilted; a native reader expects '{direction} फिर आज़माएँ' without को.",
+      "suggested": "{direction}: {item} के लिए {source} पर फिर आज़माएँ",
+      "disposition": "accepted unchanged"
+    }
+  ],
+  "counts_scope": "counts, result and gate_status describe locale-wide rounds 1-2 as recorded in the ledger; findings with round \"targeted-argorder\" come from session d8fb2395abc5 (read only the rephrased keys) and are not in those counts"
+}

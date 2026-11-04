@@ -107,6 +107,33 @@ nor removes skills, teams, lazy MCP discovery, tools or encrypted reasoning to
 reduce token counts. A cache-hit ratio alone is not a total-cost or performance
 metric; no measured percentage savings is asserted.
 
+## Server-issued routing within one logical turn (candidate)
+
+The server's `x-codex-turn-state` is distinct from the shared lineage headers.
+[Codex at `67f0994b`](https://github.com/openai/codex/blob/67f0994b532b8740f14b5b738af7b7b2a915b1d6/codex-rs/core/src/client.rs#L331-L342)
+retains its first value within a turn and attaches it to continuation requests.
+LOP's candidate holder is owned by the main attention-turn stream wrapper: tool
+rounds and request clones share it, while new turns, helpers, independent sessions
+and subagents do not. Adapter instances are recreated and cannot own this state.
+
+Only the exact built-in ChatGPT OAuth Responses destination may establish or echo
+it. Actual account/provider attempts invalidate the holder before dispatch;
+ineligible clients clear it too, so A→B→A cannot revive A's earlier token. A model
+or endpoint change also resets it conservatively. A generation check refuses late
+responses from an older owner, and the first accepted value is immutable. Empty,
+oversized (>4096 characters), non-ASCII and whitespace/control-containing values
+are ignored rather than truncated. The bound is a local defensive envelope, not
+a claim that OpenAI documents a maximum token length. The private holder is not a
+request field on the wire, and neither its header nor its value is written to
+transcript or accounting records. No new routing knob is exposed.
+
+Synthetic complete SSE probes establish missing echo on the base adapter and
+continuation echo on the candidate. They do not establish that the real service
+emits this header today, that it improves cache hits or latency, or that it saves
+money/quota. Live matched benchmarking remains admission-gated; no such benefit
+is claimed from source parity alone. Full session/tool-loop and failover tests,
+independent review and QA must pass before release.
+
 ## Why this identity and this scope
 
 `SessionStreamFn` already forwards `ChatRequest.prompt_cache_key` from the

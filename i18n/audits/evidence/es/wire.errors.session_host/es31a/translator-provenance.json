@@ -1,0 +1,39 @@
+{
+  "locale": "es",
+  "namespace": "wire.errors.session_host",
+  "key_count": 3,
+  "date": "2026-10-31",
+  "commit": "9c979a03d55",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "056852035b33",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-10-31",
+    "actual_model_source": "host model-switch notice: temporary fallback for provider quota; anthropic/claude-sonnet-5-5 -> anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; translation reasoning and writing performed on openai/gpt-6.1-sol"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "es": {
+      "path": "local_operator/i18n/catalogues/es/wire.errors.session_host.json",
+      "sha256": "b27376785fe2c4bc4e3ca302e3f34097dad93bf483ccef5a921177ac6e8a00b8"
+    }
+  },
+  "status": "translated",
+  "independent_audit": "pending",
+  "ambiguities": [
+    "host is rendered servidor de sesiones, not anfitrión: a background service/process, not a physical host; no new implementation detail added."
+  ],
+  "glossary_proposals": {
+    "background session host": "servidor de sesiones en segundo plano",
+    "background service manager": "gestor de servicios en segundo plano"
+  },
+  "width": "No maxChars/maxCells declared in committed context.",
+  "validation": "Committed check_catalogues() on isolated namespace fixture, not full CLI or semantic audit."
+}

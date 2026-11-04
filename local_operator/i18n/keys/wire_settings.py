@@ -658,6 +658,26 @@ def display_composer_chevron_label() -> Msg:
     return Msg("wire.settings.display_composer_chevron.label", {})
 
 
+def display_composer_command_help() -> Msg:
+    return Msg("wire.settings.display_composer_command.help", {})
+
+
+def display_composer_command_label() -> Msg:
+    return Msg("wire.settings.display_composer_command.label", {})
+
+
+def display_composer_command_placeholder() -> Msg:
+    return Msg("wire.settings.display_composer_command.placeholder", {})
+
+
+def display_composer_command_interval_help() -> Msg:
+    return Msg("wire.settings.display_composer_command_interval.help", {})
+
+
+def display_composer_command_interval_label() -> Msg:
+    return Msg("wire.settings.display_composer_command_interval.label", {})
+
+
 def display_composer_context_choice_false_description() -> Msg:
     return Msg("wire.settings.display_composer_context.choice.false.description", {})
 

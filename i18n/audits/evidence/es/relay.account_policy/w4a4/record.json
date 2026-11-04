@@ -1,0 +1,152 @@
+{
+ "schema": 1,
+ "audit_id": "w4a4",
+ "audit_round": 4,
+ "locale": "es",
+ "namespace": "relay.account_policy",
+ "audit_date": "2026-10-29",
+ "audited_revision": "91b6984e8531bf01520690fa1196a3b8287a3556",
+ "audited_revision_note": "Unlike the earlier rounds, the target is now COMMITTED. `git ls-files --error-unmatch` succeeds, the file was introduced by b26f3276c32d802a2cdbcd7ff4f8365d743cdb38 and HEAD's blob sha256 equals the working-tree sha256 (71956128095ae4afebaf4aa26356db6acf9796a100332d503fbcc785ab178453), so this record binds to a revision and a blob rather than to untracked bytes. checks.py re-runs both the hash and the git equality.",
+ "supersedes": "w4a3",
+ "supersedes_scope": "relay.account_policy.unavailable",
+ "supersedes_note": "Round 4 is scoped to the one key the implementer changed after round 2 closed. Because my w4a3 record stored 12 of the 13 values verbatim and the thirteenth (rejected) in an ellipsised form, round 4 additionally re-derives all 13 from the w4a2 base plus the two documented transformations rather than diffing against a partial map — see delta_proof.",
+ "key_count": {
+  "en": 13,
+  "target": 13,
+  "context": 13,
+  "keys_read_this_round": 13
+ },
+ "verdict": "passed",
+ "result": "passed — AP-02 closed by measurement; AP-01 remains closed; 1 nit (AP-03) still open and non-gating",
+ "verdict_reason": "The shipped bytes carry 'relé' (U+00E9, NFC) in relay.account_policy.unavailable, no value in the namespace matches /\\brelay\\b/ any more, and the sibling vocabulary now agrees: wire.settings.network_max_handshakes.help already says 'este relé' and cli.services_help and wire.settings.network describe the relay as 'relé'. The sentence still reads as two clauses naming two distinct things — the relay where the settings are unavailable and the machine the user must update — so the change introduced no ambiguity and 'esta máquina' survived untouched. The delta since w4a3 is exactly this one key: the other twelve values reproduce their w4a3 text exactly, which the record states positively (delta_proof) rather than by omission. Nothing is left open except the AP-03 nit, which the implementer chose to keep.",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team)",
+  "session_or_instance": "8eb3b9c9a687 (lane es-w4-auditor-b)",
+  "model": "radient/auto (self-reported)",
+  "model_note": "Session header names anthropic/claude-sonnet-5-5 as primary; provider-failure switches fired on quota before the catalogues were read (openai/gpt-6-astra, kimi/k3.1-pro, then radient/auto). This round ran on radient/auto after a session-runtime restart; every value, hash and git fact below was recomputed from disk.",
+  "date": "2026-10-29",
+  "independence": "I did not make this edit and did not verify it by trusting the implementer: the shipped file is reproduced here from the w4a2 values stored in my own earlier records plus the two transformations, and the reproduction is asserted byte for byte. I edited no catalogue, sidecar, ledger, allowance, guide or generated file and performed no git write. My only writes are this evidence directory, and I removed the one scratch file I created there this round."
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/relay.account_policy.json",
+   "revision": "91b6984e8531bf01520690fa1196a3b8287a3556",
+   "sha256": "0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/es/relay.account_policy.json",
+   "tracked": true,
+   "revision": "91b6984e8531bf01520690fa1196a3b8287a3556",
+   "introduced_in": "b26f3276c32d802a2cdbcd7ff4f8365d743cdb38",
+   "sha256": "71956128095ae4afebaf4aa26356db6acf9796a100332d503fbcc785ab178453",
+   "previous_sha256": "67dbbf6a3bc75058b38f40a076de852c86c7d58004e938b43019513280e2a407"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/relay.account_policy.context.json",
+   "revision": "91b6984e8531bf01520690fa1196a3b8287a3556",
+   "sha256": "7e55e4fadebcde0a6b93d545a62b2743fbb16009498cdf4e2122cb309ecc07f4"
+  }
+ },
+ "display_side_risk": "none — no value in this namespace renders as a mask in this harness.",
+ "delta_proof": {
+  "method": "The shipped file is modelled as w4a2 -> (round 2: 'del equipo'/'este equipo' -> 'de la máquina'/'esta máquina' in title, saved, scope, rejected, unavailable) -> (round 4: 'este relay' -> 'este relé' in unavailable). The model is then compared with the file for all 13 keys.",
+  "result": "model == shipped file, all 13 keys",
+  "changed_since_w4a3": [
+   "relay.account_policy.unavailable"
+  ],
+  "unchanged_since_w4a3": [
+   "title",
+   "back",
+   "loading",
+   "save",
+   "saving",
+   "saved",
+   "retry",
+   "error",
+   "scope",
+   "entry",
+   "rejected",
+   "load_error"
+  ],
+  "why_not_a_plain_diff": "My w4a3 record stored the five remediated values in full but 'rejected' as '… o los ajustes de esta máquina …', so a naive diff against it would report 'rejected' as changed. The w4a2 record stores 'rejected' in full, and the substitution reproduces the shipped text exactly, which proves the key is unchanged. Stated here so the point is not mistaken for a real delta.",
+  "one_word": "unavailable differs from its w4a3 value by exactly 'relay' -> 'relé': every other character of the string is identical."
+ },
+ "findings": [
+  {
+   "id": "es-w4a2-AP-01",
+   "severity": "major",
+   "status": "closed",
+   "closed_in": "w4a3",
+   "keys": [
+    "relay.account_policy.title",
+    "relay.account_policy.saved",
+    "relay.account_policy.unavailable",
+    "relay.account_policy.scope",
+    "relay.account_policy.rejected"
+   ],
+   "reason": "Remains closed on these bytes. All five keys still carry 'máquina', the namespace contains no 'equipo', and round 4's touch on 'unavailable' changed only the relay noun in that key — its 'esta máquina' clause is byte-identical to the w4a3 value.",
+   "verification": "checks.py asserts model == file (which includes the máquina substitution) and separately asserts 'esta máquina' is present in unavailable and that no 'equipo' remains."
+  },
+  {
+   "id": "es-w4a2-AP-02",
+   "severity": "minor",
+   "status": "closed",
+   "closed_in": "w4a4",
+   "open_since": "w4a2",
+   "keys": [
+    "relay.account_policy.unavailable"
+   ],
+   "source_term": "relay",
+   "previous": "Los ajustes de enrutamiento de cuentas no están disponibles en este relay. Actualiza Local Operator en esta máquina.",
+   "current": "Los ajustes de enrutamiento de cuentas no están disponibles en este relé. Actualiza Local Operator en esta máquina.",
+   "closure": "By measurement. (1) 'relé' is present and is U+00E9 (acute e), NFC-stable, not a combining sequence. (2) No value in the namespace matches /\\brelay\\b/ any more. (3) The term now agrees with the shipped catalogue: wire.settings.network_max_handshakes.help 'este relé', wire.settings.network.description and cli.services_help also use 'relé'. (4) The sentence still names the relay and the machine as two distinct referents, so the noun swap introduced no ambiguity.",
+   "residual": "The glossary decision (line 59, relay -> relé) is now applied in the last es value that was keeping the English noun. Nothing is deferred."
+  },
+  {
+   "id": "es-w4a2-AP-03",
+   "severity": "nit",
+   "status": "open",
+   "open_since": "w4a2",
+   "keys": [
+    "relay.account_policy.save"
+   ],
+   "source_term": "policy",
+   "current": "Guardar política",
+   "proposed": "Guardar política de cuentas (optional)",
+   "reason": "Still present and still not worth blocking: the English source says 'Save policy', so the shortening is faithful and the button sits among the policy controls. Kept because the shipped label for the setting is 'Política de cuentas'. The implementer elected to leave it, which is a fine disposition for a nit.",
+   "disposition": "carried forward as an accepted nit for this namespace; no further round needed."
+  }
+ ],
+ "check_output": {
+  "commands": [
+   "python3 i18n/audits/evidence/es/relay.account_policy/w4a4/checks.py",
+   "git ls-files --error-unmatch <target>  (tracked at HEAD)",
+   "git show HEAD:<target> | sha256sum  (equals working tree)",
+   "git log --format='%H | %s' -3 -- <target>",
+   "python3 - (value-only scan for /\\brelay\\b/ and 'relé'; codepoint check; width)"
+  ],
+  "result": "checks.py exit 0 — ALL CHECKS PASS (19 assertions), including the model==file equality, the one-key delta and the git binding.",
+  "mechanical": {
+   "key_parity": "13/13, same order",
+   "delta": "1 key: unavailable",
+   "relay_in_values": "0 matches",
+   "rele_occurrences": 1,
+   "equipo": "0 matches",
+   "accent": "U+00E9, NFC",
+   "register": "tú throughout, no usted/vosotros",
+   "promises": "error = unconfirmed (not failed); rejected = not-saved",
+   "width": "unavailable EN 95 / ES 115 (+21.1%; was 116, the swap saves one cell)"
+  },
+  "failures": "None."
+ },
+ "artifacts": [
+  "report.md",
+  "audit.log",
+  "checks.py"
+ ],
+ "limitations": [
+  "LLM semantic judgement for the reading of the sentence; the value, accent, delta and git facts are mechanical.",
+  "No rendered frame was captured; this sidecar declares no maxCells and the string is 115 cells, inside the shipped relay corpus range.",
+  "The model in this record is an auto-routing alias; the concrete backend is not identifiable."
+ ]
+}

@@ -1,0 +1,1 @@
+PASS — 0 BLOCKER / 0 MAJOR; all 7 round-1 findings verified fixed on the new bytes (hi-mcp carries one MINOR: the typeable add/remove subcommands were translated away by the width fix) and one pre-existing NIT (effort "cycles" flattened).

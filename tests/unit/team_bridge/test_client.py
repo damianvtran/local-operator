@@ -939,6 +939,29 @@ async def test_conversation_notify_posts_the_policy_on_the_read_route():
         await client.conversation_notify("conv_1", notify="loud")  # type: ignore[arg-type]
 
 
+async def test_conversation_agent_notify_posts_on_the_endpoint_addressed_route():
+    """The AGENT member's policy: the hub's endpoint-addressed notify route,
+    never the read route (which only ever reaches the caller's human row)."""
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _ok({"id": "conv_1"})
+
+    client = _make_client(handler)
+    await client.conversation_agent_notify("conv_1", "bep_1", tenant_id="tnt_1", notify="all")
+
+    assert seen[0].method == "POST"
+    assert seen[0].url.path == "/v1/messaging/conversations/conv_1/members/bep_1/notify"
+    assert json.loads(seen[0].content) == {"notify": "all", "tenant_id": "tnt_1"}
+
+    with pytest.raises(ValueError):
+        await client.conversation_agent_notify(
+            "conv_1", "bep_1", notify="loud"  # type: ignore[arg-type]
+        )
+
+
 async def test_conversations_passes_discoverable_rows_through_untouched():
     """Discovery is the server's authorization answer, not the client's to edit."""
 

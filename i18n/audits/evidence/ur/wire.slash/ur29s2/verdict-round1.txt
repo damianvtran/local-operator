@@ -1,0 +1,2 @@
+CHANGES_REQUESTED
+wire.slash.fork lost its third clause and the '<message>' argument token when shortened to 49 cells (1 BLOCKER); 5 MINOR (hub 'پالیسی', stop 'نام', team 'تنظیمی' dropped; usage 'استعمالی' calque; pre-existing notifications fragment), 0 MAJOR, 4 NIT; width objective met — 0 of 52 ur values exceed 51 cells.

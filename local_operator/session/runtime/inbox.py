@@ -809,11 +809,23 @@ def _parse(raw: bytes) -> list[InboxLine]:
     return lines
 
 
-def append_for_successor(root: Path, session_dir: Path, line: InboxLine, *, cwd: str = "") -> bool:
+def append_for_successor(
+    root: Path,
+    session_dir: Path,
+    line: InboxLine,
+    *,
+    cwd: str = "",
+    raise_reader: bool = True,
+) -> bool:
     """Persist obligation BEFORE append under one mutex, and raise only after unlock.
 
     An append failure retains its marker for reconciliation. Its receipt is a
     refusal, never exactly-once delivery; existing message IDs remain authority.
+
+    ``raise_reader=False`` is for a caller that holds a lock the ``launchctl``
+    hop must not sit under (``ServingSessionHandle._admit_steer``'s arrival-order
+    mutex): the obligation record is durable either way, and that caller raises
+    the reader itself once its lock is released.
     """
     from local_operator.wakes.spooled import (
         SpoolWriteError,
@@ -827,7 +839,7 @@ def append_for_successor(root: Path, session_dir: Path, line: InboxLine, *, cwd:
         if owes and not _note_locked(root, session_dir.name, cwd=cwd):
             raise SpoolWriteError("could not persist successor obligation")
         written = append_inbox(session_dir, line)
-    if owes:
+    if owes and raise_reader:
         _raise_reader(root, session_dir.name)
     return written
 
@@ -1247,6 +1259,109 @@ def _without_wake_rows(raw: bytes, wake_id: str) -> tuple[list[bytes], int]:
         if line is not None and line.wake and line.wake_id == wake_id:
             dropped += 1
             continue
+        kept.append(chunk)
+    return kept, dropped
+
+
+def holds_owner_row(session_dir: Path, command_id: str) -> bool:
+    """Whether the spool still holds the OWNER row ``command_id`` names.
+
+    The read half of the steer-durability seam, and it is deliberately the same
+    predicate :func:`withdraw_inbox` uses (``_holds_owner_row``): a row can only
+    be an owner's steer if it says ``SOURCE_USER``, so this can never mistake a
+    peer's message for one.
+
+    UNLOCKED, like :func:`peek_inbox` and for the same reason: a reader that
+    sees a torn final line drops it rather than taking a lock on a path a UI or
+    a rejection notice is waiting on. A wrong answer here costs at most a notice
+    that need not have been shown (see ``Session._reject_steering``), never a
+    message — the spool row is what actually holds it.
+    """
+    if not command_id:
+        return False
+    try:
+        return _holds_owner_row(inbox_path(session_dir).read_bytes(), command_id)
+    except OSError:
+        return False
+
+
+def remove_owner_row(session_dir: Path, command_id: str) -> bool:
+    """Drop the spooled OWNER row ``command_id`` names. True if one went.
+
+    THE LIVE-TURN HALF of the steer durability patch. ``serving.ServingSessionHandle.
+    steer`` spools an accepted steer before it acknowledges (the live steering
+    queue is an in-memory list and the transcript row only lands at the next turn
+    boundary), and ``Session._drain_steering`` calls this once that row is
+    durable — so a successor cannot deliver the same message twice.
+
+    DELIBERATELY THE SAME SHAPE AS :func:`remove_wake_rows`, and best-effort by
+    the same contract: a spool another reader owns is left untouched (the row is
+    then deduplicated at replay by ``has_admitted_command``, which is the
+    authority for exactly-once), and the rewrite goes through the live
+    descriptor so a concurrent appender's row is not orphaned. Unlike
+    :func:`withdraw_inbox` it appends no marker: a marker is one row per steer
+    that survives until the next drain and counts against ``MAX_INBOX_ROWS``, so
+    a long session would fill the spool with bookkeeping and then refuse new
+    steers.
+
+    ON WINDOWS THE NON-BLOCKING LOCK IS NEVER TAKEN (``_NonBlockingLock`` skips
+    there rather than emulating ``flock``), so every removal on that platform is
+    skipped and the replay dedupe does the work — the same trade
+    :func:`remove_wake_rows` already makes.
+    """
+    if not command_id or not session_dir.is_dir():
+        return False
+    path = inbox_path(session_dir)
+    try:
+        fd = os.open(path, os.O_RDWR | O_BINARY)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        logger.warning("could not open inbox for %s", session_dir.name, exc_info=True)
+        return False
+    try:
+        with _NonBlockingLock(fd) as lock:
+            if not lock.acquired:
+                logger.info(
+                    "inbox removal for steer %s skipped: a reader owns the spool", command_id
+                )
+                return False
+            raw = _read_all(fd)
+            kept, dropped = _without_owner_row(raw, command_id)
+            if not dropped:
+                return False
+            _rewrite_in_place(fd, b"".join(kept))
+            return True
+    except OSError:
+        logger.warning("inbox removal failed for %s", session_dir.name, exc_info=True)
+        return False
+    finally:
+        os.close(fd)
+
+
+def _without_owner_row(raw: bytes, command_id: str) -> tuple[list[bytes], int]:
+    """``(kept line bytes, rows dropped)`` for the owner row ``command_id`` names.
+
+    Byte-faithful for the reason :func:`_without_wake_rows` is. The row's own
+    recall MARKER goes with it: once the message is admitted, a marker naming it
+    can only withhold a future row that reused the id, and inbox ordering makes
+    that reuse a duplicate the transcript already owns.
+    """
+    kept: list[bytes] = []
+    dropped = 0
+    for chunk in raw.splitlines(keepends=True):
+        if not chunk.strip():
+            kept.append(chunk)
+            continue
+        try:
+            payload = json.loads(chunk)
+            line = InboxLine.from_json(payload) if isinstance(payload, dict) else None
+        except (ValueError, TypeError, KeyError):
+            line = None
+        if line is not None and line.command_id == command_id:
+            if line.source in (SOURCE_USER, SOURCE_RECALL):
+                dropped += 1
+                continue
         kept.append(chunk)
     return kept, dropped
 

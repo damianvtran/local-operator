@@ -276,10 +276,50 @@ def ask_item(
             "deadline_at": int(row.get("expires_at") or 0),
             "question_count": len(questions),
             "dismissible": _ask_dismissible(row),
+            # FOLDED UPDATES (``asks/dedupe.py``): ``notify`` text that only
+            # restated this ask, riding it instead of being a second item.
+            # ON THIS ITEM the key is ALWAYS PRESENT, as a list (``[]`` when
+            # none), so a renderer reads one shape; it is a NEW key on the
+            # item, so an older client simply ignores it. Contrast the ask
+            # RECORD and ``pending_row``, where it is ABSENT when empty so the
+            # frozen ask wire stays byte-identical for every older ask.
+            # ``context_dropped`` (always an int here) counts entries the
+            # fold's cap left out.
+            "context_dropped": int(row.get("context_dropped") or 0),
+            "context": [
+                {
+                    "title": str(entry.get("title") or ""),
+                    "body_md": str(entry.get("body") or ""),
+                    "at": int(entry.get("at") or 0),
+                }
+                for entry in (row.get("context") or ())
+                if isinstance(entry, Mapping)
+            ],
         },
         # The reel never dismisses an open ask (§2.3); it offers Answer.
         "actions": {"dismiss": False, "answer": True, "read": True},
     }
+
+
+def folded_context_md(item: Mapping[str, Any]) -> str:
+    """An ask item's folded update text as one markdown body, or ``""``.
+
+    The ONE place an ask's ``context`` list becomes prose, so the detail route,
+    the relay and the TUI cannot render it three ways.
+    """
+    blocks: list[str] = []
+    for entry in (item.get("ask") or {}).get("context") or ():
+        if not isinstance(entry, Mapping):
+            continue
+        title = str(entry.get("title") or "").strip()
+        body = str(entry.get("body_md") or "").strip()
+        block = "\n\n".join(part for part in (f"**{title}**" if title else "", body) if part)
+        if block:
+            blocks.append(block)
+    # No "+N earlier" marker here: it would be untranslated product copy inside
+    # agent prose. The count rides ``ask.context_dropped`` for any surface to
+    # localize; the TUI shows it in its catalogued section header.
+    return "\n\n".join(blocks)
 
 
 def waiting_items(
@@ -459,6 +499,13 @@ def detail(
             return None
         marks = store.ref_states([item_id])
         item = ask_item(rows[0], marks, sessions, projects)
+        folded = folded_context_md(item)
+        if folded:
+            # Folded update text (``asks/dedupe.py``) as the ask's body, the key
+            # every detail renderer already draws for an update — so the phone
+            # and desktop show it with the question without a client change.
+            # Absent when nothing was folded: the ask detail keeps its old shape.
+            item["body_md"] = folded
         history: list[dict[str, Any]] = []
         anchor = None
     else:

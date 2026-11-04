@@ -176,13 +176,18 @@ class _LocalOps:
         return self._client
 
     def grant(self, frame: dict[str, Any]) -> dict[str, Any]:
-        from local_operator.network.credentials.types import peer_credential_ids
+        from local_operator.network.credentials.types import (
+            peer_affinity,
+            peer_credential_ids,
+        )
 
         key = str(frame.get("credential_key") or "")
         provider = str(frame.get("provider") or key)
         client = self._source()
         if client is None:
             return _detail("not_a_holder", key, _no_placement_sentence(provider))
+        # This op forwards fields BY NAME, so a field not read here is silently
+        # dropped before leg 2: the selection inputs must be named explicitly.
         return client.serve_grant(
             key,
             provider=provider,
@@ -190,6 +195,8 @@ class _LocalOps:
             model_id=str(frame.get("model_id") or ""),
             force_refresh=bool(frame.get("force_refresh")),
             exclude_credential_ids=list(peer_credential_ids(frame.get("exclude_credential_ids"))),
+            affinity=peer_affinity(frame.get("affinity")),
+            demote_credential_ids=peer_credential_ids(frame.get("demote_credential_ids")),
         )
 
     def report(self, frame: dict[str, Any]) -> dict[str, Any]:

@@ -76,6 +76,14 @@ PANEL_PADDING_ROWS = 2
 #: budget below: the goal row was built to the FULL content width and then had
 #: the tag appended, so at 80 columns a 54-cell goal wrapped and pushed the key
 #: hint off the card entirely (design D2).
+#:
+#: This is the ENGLISH width and now only the floor of the budget: the tag is a
+#: catalogue string (``tui.small.goal_panel.done_suffix``), so its real width is
+#: the active locale's. A constant tuned to English under-reserved for any
+#: longer rendering — Spanish ``  — hecho`` is 9 cells, so a clipped done-goal
+#: row wrapped and orphaned ``hecho`` on a second line. The budget below
+#: measures the string that will actually be appended; this floor only keeps an
+#: empty or missing catalogue value from reserving less than English does.
 _GOAL_TAG_CELLS = 8
 
 #: The stamp tail a settled row prints (`` · 2026-09-23 11:04``). Named because
@@ -264,12 +272,14 @@ def build_goal_body(
         # columns used `inner - 2` and then had `  — done` added, so the row
         # measured 74 cells in a 66-cell box, wrapped, and pushed the key hint
         # off the card entirely (design D2).
-        text = truncate_cells(
-            " ".join(goal.split()), max(10, inner - 2 - (_GOAL_TAG_CELLS if done else 0))
-        )
+        # Measured from the string about to be appended, not from a constant:
+        # the tag is localised, so its width is the locale's (see _GOAL_TAG_CELLS).
+        done_suffix = _t(_x.goal_panel_done_suffix()) if done else ""
+        tag_cells = max(_GOAL_TAG_CELLS, cell_len(done_suffix)) if done else 0
+        text = truncate_cells(" ".join(goal.split()), max(10, inner - 2 - tag_cells))
         out.append(text, style=_DONE_STYLE if done else "")
         if done:
-            out.append(_t(_x.goal_panel_done_suffix()), style="dim")
+            out.append(done_suffix, style="dim")
     out.append("\n")
     out.append_text(judge_line(judge, cap=cap))
     out.append("\n\n")

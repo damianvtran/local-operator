@@ -1,0 +1,19 @@
+{
+  "wire.exec.approval_advisory": "Aviso: esta ejecución no puede pedir aprobación (no hay terminal conectada), así que cualquier llamada a herramienta que necesite aprobación se denegará.\n  Soluciones: --control retiene las tarjetas para un supervisor; --yolo aprueba automáticamente todos los niveles; --tools NAME[,NAME] preaprueba las herramientas indicadas y limita el alcance de esta ejecución a esas herramientas; tool_approval_mode: auto en la configuración responde a todas las llamadas igual en todas las ejecuciones.",
+  "wire.exec.clear_goal_needs_start": "--clear-goal ajusta una ejecución, no la inicia. Combínalo con --resume SESSION_ID y un prompt o --loop.",
+  "wire.exec.error_line": "Error: {error}",
+  "wire.exec.error_preflight": "Error: falló la comprobación previa: {error}",
+  "wire.exec.exec_epilog": "Ejemplos:\n  lop exec 'Review the change' --team release --background\n  printf 'Inspect this report' | lop exec --profile reviewer\n  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'\n  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'\n  lop exec --status JOB_ID\n\nAl reanudar se restauran primero la transcripción, el equipo, el perfil, el\nobjetivo y el nombre; las opciones de inicio explícitas anulan sus propios\ncampos. Equipo y perfil pueden coexistir. Un bucle se ejecuta después del\nprompt inicial opcional; --loop N solo cuenta continuaciones. El progreso\nguardado del bucle se ve al reanudar, pero las iteraciones nunca se repiten\nautomáticamente. Un objetivo por sí solo no ejecuta ningún modelo. Los\nprompts son literales, no comandos slash. --goal solo FIJA el objetivo; a\ndiferencia de /goal de la TUI, no envía además ese texto como mensaje,\nporque el prompt es el canal de mensajes de exec. --agent/--agent-id\nseleccionan datos de agente heredados y son mutuamente excluyentes. Sin\nTTY, las aprobaciones se deniegan de forma predeterminada. --control puede\nesperar a un supervisor; --yolo es una anulación explícita, nunca implícita\npor --background o --team. --tools limita a qué puede llegar la ejecución:\nlas herramientas excluidas quedan fuera de alcance. Los eventos y el texto\nen primer plano usan stdout; los recibos usan stderr. Las ejecuciones en\nsegundo plano registran ambos flujos e imprimen IDs de trabajo y de sesión\ndistintos. Usa lop --resume SESSION_ID para ver una ejecución en vivo o\nreanudar una terminada; exec rechaza a un propietario activo.",
+  "wire.exec.exec_help": "Ejecutar una tarea o un bucle con objetivo en una sesión persistente sin iniciar la TUI",
+  "wire.exec.goal_only_sets_objective": "--goal fija el objetivo pero no inicia trabajo (a diferencia de /goal de la TUI). Añade un prompt, envíalo por stdin (o '-') o ejecuta un bucle con --loop N.",
+  "wire.exec.log_pointer": "Registro: {log_path}",
+  "wire.exec.no_exec_job": "No hay ningún trabajo de exec {job_id}; los IDs de trabajo los imprime --background y quedan registrados en {jobs_path}",
+  "wire.exec.no_prompt": "no hay prompt. Pásalo como argumento, envíalo por stdin (o '-') o ejecuta un bucle con --loop/--loop-goal",
+  "wire.exec.receipt_failure_suffix": " (recibo de ejecución) — {failure}",
+  "wire.exec.receipt_suffix": " (recibo de ejecución)",
+  "wire.exec.session_pointer": "Sesión: {session_id} (la conversación) — conéctate o reanúdala: lop --resume {session_id}",
+  "wire.exec.status_pointer": "Estado: lop exec --status {job_id}",
+  "wire.exec.tools_unreachable": "Aviso: --tools no nombra ninguna herramienta a la que esta ejecución pudiera llegar: {names}. La sesión alcanzó {count} herramienta(s).",
+  "wire.exec.turn_did_not_complete": "el turno no se completó",
+  "wire.exec.waiting_on_you": "¿Algo te espera? lop sessions muestra lo que necesita una ejecución"
+}

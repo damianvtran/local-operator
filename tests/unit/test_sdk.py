@@ -26,6 +26,7 @@ launchd episode does, so the cache check passes the honest way.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import inspect
 import json
@@ -1499,10 +1500,10 @@ async def test_sdk4_execution_oracle_rejects_broken_consumers(
         ({"language": []}, {"LC_ALL": "ru_RU.UTF-8"}, "ru", "ru"),
         ({"language": "auto"}, {"LANG": "hi_IN.UTF-8"}, "hi", "hi"),
         ({}, {}, "en", "en"),
-        # zh-CN ships after its security disposition, and its `sdk_startup`
-        # child is English-only: the selected locale is zh-CN while the child
-        # copy falls back to en. The "unknown" arm below is the genuinely
-        # unshipped tag that exercises the English-only selection path.
+        # zh-CN: the selected locale is zh-CN; whether its `sdk_startup` child
+        # answers itself or falls back to en is read from the tree above. The
+        # "unknown" arm below is the genuinely unshipped tag that exercises the
+        # English-only selection path.
         ({"language": "zh-CN"}, {}, "zh-CN", "zh-CN"),
         ({"language": "ur"}, {}, "ur", "ur"),
         ({"language": "unknown"}, {}, "en", "en"),
@@ -1513,7 +1514,23 @@ async def test_sdk4_execution_oracle_rejects_broken_consumers(
 async def test_sdk4_explicit_locale_and_english_child_fallback(
     sdk4_boundary, monkeypatch, case, values, environ, resolved, rendered
 ):
-    from local_operator.i18n import messages, resolve
+    from local_operator.i18n import catalogues, messages, resolve
+    from local_operator.i18n import runtime as i18n_runtime
+
+    # The expectation is derived from the COMMITTED TREE, not from a belief about
+    # which locales are translated today: a locale whose `sdk_startup` file carries
+    # the case's key answers from itself (one lookup, its own wording); one that
+    # does not falls back to English (lookups `[rendered, "en"]`, English wording).
+    # Hand-listing the untranslated locales is what reddened every translation
+    # wave (ru/vi/hi/ur) that landed this namespace. The absent path is pinned
+    # independently of the tree by the synthetic-root test below.
+    code = f"{_SDK4_NAMESPACE}.{case}"
+    translated = None
+    if rendered != "en":
+        try:
+            translated = catalogues.load_catalogue(rendered, _SDK4_NAMESPACE).get(code)
+        except (catalogues.CatalogueNotFound, catalogues.CatalogueInvalid):
+            translated = None
 
     sdk4_boundary.values = values
     for name, value in environ.items():
@@ -1545,10 +1562,139 @@ async def test_sdk4_explicit_locale_and_english_child_fallback(
     monkeypatch.setattr(messages, "render", render_explicit)
     monkeypatch.setattr(messages, "_lookup", lookup)
     spec, _ = _sdk4_spec(case)
-    await _sdk4_assert_refusal(sdk4_boundary, case, _sdk4_english(case, spec))
+    if translated is None:
+        expected = _sdk4_english(case, spec)
+        expected_lookups = ["en"] if rendered == "en" else [rendered, "en"]
+    else:
+        # Formatted from the catalogue's own string, not through `messages.render`,
+        # so the oracle stays independent of the path under test.
+        expected = i18n_runtime.render_message(translated, _sdk4_params(case, spec), rendered)
+        expected_lookups = [rendered]
+    await _sdk4_assert_refusal(sdk4_boundary, case, expected)
     assert observed == [resolved]
-    assert lookups == (["en"] if rendered == "en" else [rendered, "en"])
+    assert lookups == expected_lookups
     assert sdk4_boundary.reads == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", _SDK4_CASES)
+async def test_sdk4_absent_child_namespace_falls_back_to_english(
+    sdk4_boundary, monkeypatch, tmp_path, case
+):
+    """The fallback itself, with the absence CONSTRUCTED rather than read off the tree.
+
+    The tree-derived test above stops exercising the English fallback for a locale
+    once that locale ships `sdk_startup`; this one keeps proving the mechanism
+    whatever the catalogues contain. The root holds only the English source plus an
+    unrelated sibling file for `ru`, so the lookup misses on the NAMESPACE.
+    """
+    from local_operator.i18n import catalogues, messages
+
+    synthetic = tmp_path / "sdk4-catalogues"
+    (synthetic / "en").mkdir(parents=True)
+    (synthetic / "ru").mkdir()
+    (synthetic / "ru" / "wire.unrelated.json").write_text("{}")
+    (synthetic / "en" / f"{_SDK4_NAMESPACE}.json").write_bytes(
+        (catalogues.catalogue_root() / "en" / f"{_SDK4_NAMESPACE}.json").read_bytes()
+    )
+    monkeypatch.setattr(catalogues, "catalogue_root", lambda: synthetic)
+    sdk4_boundary.values = {"language": "ru"}
+    lookups = []
+    original_lookup = messages._lookup
+
+    def lookup(locale, namespace, code):
+        lookups.append(locale)
+        return original_lookup(locale, namespace, code)
+
+    monkeypatch.setattr(messages, "_lookup", lookup)
+    spec, _ = _sdk4_spec(case)
+    await _sdk4_assert_refusal(sdk4_boundary, case, _sdk4_english(case, spec))
+    assert lookups == ["ru", "en"]
+
+
+#: The pre-change English cause clause, copied here rather than imported so the
+#: oracle cannot drift with the implementation it judges.
+_SDK4_OWNED_CAUSE = "Hosting platform is not configured."
+
+
+@pytest.mark.asyncio
+async def test_sdk4_owned_hosting_cause_renders_in_the_selected_locale(
+    sdk4_boundary, monkeypatch, tmp_path
+):
+    """The ONE cause clause we author must not stay English inside a translated frame.
+
+    The exception keeps its English ``str``/args on purpose (callers classify by
+    type and the CLI reports the legacy message), so the refusal's ``{error}``
+    slot used to splice that English sentence into a catalogue-rendered,
+    localized sentence — English in the middle of e.g. a French refusal.
+
+    Construction, not a shipped translation: the synthetic root carries the real
+    English files plus a marker-only ``fr`` cause file, so this proves the seam
+    whatever translation waves have landed. The English arm is the byte control:
+    with the default locale the composed refusal must equal the pre-change
+    baseline exactly, and a SUBCLASS (a different condition with dynamic text)
+    must still pass through verbatim.
+    """
+    from local_operator.i18n import catalogues
+    from local_operator.session_factory import (
+        HostingNotConfiguredError,
+        HostingUnknownError,
+    )
+
+    root = tmp_path / "sdk4-hosting-catalogues"
+    (root / "en").mkdir(parents=True)
+    (root / "fr").mkdir()
+    for name in ("wire.errors.hosting.json", "wire.errors.sdk_startup.json"):
+        (root / "en" / name).write_bytes((catalogues.catalogue_root() / "en" / name).read_bytes())
+    marker = "FR-CAUSE-MARKER."
+    (root / "fr" / "wire.errors.hosting.json").write_text(
+        json.dumps({"wire.errors.hosting.not_configured": marker}), encoding="utf-8"
+    )
+    monkeypatch.setattr(catalogues, "catalogue_root", lambda: root)
+    case = "attach_hosting_unconfigured"
+    spec, _ = _sdk4_spec(case)
+    baseline = _sdk4_english(case, spec)
+
+    for language, cause, clause in (
+        ("en", HostingNotConfiguredError(_SDK4_OWNED_CAUSE), _SDK4_OWNED_CAUSE),
+        ("fr", HostingNotConfiguredError(_SDK4_OWNED_CAUSE), marker),
+        ("fr", HostingUnknownError("Unsupported hosting platform: nope"), None),
+    ):
+        sdk4_boundary.values = {"language": language}
+        sdk4_boundary.cause = cause
+        expected = baseline.replace(_SDK4_OPAQUE, clause if clause is not None else str(cause))
+        await _sdk4_assert_refusal(sdk4_boundary, case, expected)
+        # The English sentence survives only as the rendered English clause or as
+        # an opaque subclass's own text — never inside a translated refusal.
+        assert (str(cause) in expected) == (language == "en" or clause is None)
+
+
+def test_sdk4_hosting_cause_english_source_is_the_exceptions_own_sentence() -> None:
+    """Ownership is decided by matching the catalogued English source to the
+    sentence the real hosting preflight raises with — so the two cannot drift.
+
+    Driven through the production preflight, not a hand-built exception: if
+    ``resolve_hosting_model``'s literal moves, the SDK stops recognizing its own
+    cause and silently goes back to English, which is the regression this pins.
+    """
+
+    from local_operator.config import ConfigManager
+    from local_operator.i18n import catalogues
+    from local_operator.session_factory import (
+        HostingNotConfiguredError,
+        resolve_hosting_model,
+    )
+
+    class Unconfigured:
+        def get_config_value(self, name, default=None):
+            return default
+
+    with pytest.raises(HostingNotConfiguredError) as caught:
+        resolve_hosting_model(None, argparse.Namespace(), cast(ConfigManager, Unconfigured()))
+    source = catalogues.load_catalogue("en", "wire.errors.hosting")[
+        "wire.errors.hosting.not_configured"
+    ]
+    assert str(caught.value) == source == _SDK4_OWNED_CAUSE
 
 
 @pytest.mark.asyncio

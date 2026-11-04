@@ -469,7 +469,11 @@ def clean_env(home: Path, config_dir: Path) -> dict[str, str]:
     env["HOME"] = str(home)
     env["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
     # No bash tool is exposed, but lop itself may shell out to git at startup;
-    # the system gitconfig names the osxkeychain helper, so neutralise it.
+    # the system gitconfig names the osxkeychain helper, so neutralise it. On
+    # macOS GIT_CONFIG_SYSTEM alone does not cover Apple Git's second system
+    # file, which carries the same helper — GIT_CONFIG_NOSYSTEM is what removes
+    # that layer.
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_CONFIG_SYSTEM"] = "/dev/null"
     env["GIT_TERMINAL_PROMPT"] = "0"
     return harness_child_env(env)

@@ -62,6 +62,25 @@ def test_the_wait_separates_a_commit_here_from_a_confirmation_there(
     server_a = request.getfixturevalue("pair")[0]
     _owned_session(server_a)
     progress = mobility.progress_for(server_a)
+    # Mirror the precondition the real entry point applies: ``_offload`` calls
+    # ``progress.forget(session_id)`` immediately after ``progress_for(server)``,
+    # because a progress record is scoped to ONE move. (Named rather than cited by
+    # line: the coordinates drift and a stale number in a comment is worse than none.)
+    #
+    # Without it this cell inherits whatever an earlier cell in the same worker left
+    # behind. ``done`` is a level-triggered ``threading.Event`` that nothing clears,
+    # and this family shares one module-level ``SESSION``, so a previous test's
+    # successful move answers THIS wait's first poll with ``"done"`` before anything
+    # has moved — which is how main went red (run 41239213762, job 124682212843, and
+    # again on run 41252682294: ``assert ('done', None) == ('none', None)``).
+    #
+    # Measured, not assumed: seeding a ``done`` for ``SESSION`` on the pair's server
+    # makes this wait return ``('done', None)``; forgetting first makes it return
+    # ``('none', None)``. WHICH earlier cell seeds it is not proven — the leftover
+    # record is, the address-reuse step that carries it between servers is not, and
+    # shard adjacency under ``--dist worksteal`` is not a scheduling guarantee.
+    progress.forget(SESSION)
+
     try:
         outcome, refusal = mobility._await_own_progress(server_a, SESSION, budget=0.2)
         assert (outcome, refusal) == ("none", None), (outcome, refusal)

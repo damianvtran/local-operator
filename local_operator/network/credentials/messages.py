@@ -276,15 +276,19 @@ def render_broker_error(
         # time for exactly this refusal. Absent (an older owner, or a value the
         # boundary dropped) keeps the old wording.
         left = render_retry_after(error.retry_after_ms)
+        # The owner's reset is LATER than the boundary lets a borrower wait (see
+        # ``BrokerError.retry_after_is_floor``): say the floor plainly, never as the
+        # reset time.
+        span = f"at least {left}" if error.retry_after_is_floor else f"another {left}"
         if accounts and left:
             return (
-                f"'{label}' on {owner} is rate-limited for another {left} "
+                f"'{label}' on {owner} is rate-limited for {span} "
                 f"({', '.join(accounts)}), so nothing was borrowed. The usual failover "
                 "to another of your own logins is already running."
             )
         if left:
             return (
-                f"'{label}' on {owner} is rate-limited for another {left}, so nothing "
+                f"'{label}' on {owner} is rate-limited for {span}, so nothing "
                 "was borrowed. The usual failover to another of your own logins is "
                 "already running."
             )
@@ -595,9 +599,11 @@ def render_removal_endings(
 #: tree's convention for session records that are not conversation (incidents,
 #: the MCP warning), and '[session credential]' is the family's own credential
 #: head — measured at 20 cells against the first cut's 28, which wrapped the
-#: sentence onto a third row at 60 columns (design round 1, D5). The message
-#: TYPE and the peek heading ("account change") carry the distinction; nothing
-#: consumes the longer words.
+#: sentence onto a third row at 60 columns (design round 1, D5). The message TYPE
+#: carries the distinction now; nothing consumes the longer words, and there is no
+#: peek heading of this type at all — a peek step is model context, so
+#: ``harness/comms.py``'s ``is_peek_step_entry`` refuses this row outright (#3098
+#: round 1, R1).
 _BINDING_NOTICE_HEAD = "[session credential] "
 
 
@@ -611,6 +617,84 @@ def _device_phrase(name: str, fallback: str) -> str:
     return name.strip() or fallback
 
 
+#: Display bound for a sign-in label inside a notice, in characters — the same
+#: bound the offer frame puts on the label (``offers.MAX_OFFER_LABEL``), so one
+#: account reads the same length on both surfaces.
+_NOTICE_LABEL_LIMIT = 64
+
+#: How much of a label is sanitised before the display bound is applied. Well
+#: above ``providers/auth_store.IDENTITY_LIMIT`` (256), so a real label is
+#: shortened as a whole rather than pre-cut at an arbitrary point; a label past
+#: even this is bounded first, which is a stated limit rather than a silent one.
+_NOTICE_LABEL_SOURCE_LIMIT = 4096
+
+
+def _middle_elide(text: str, limit: int) -> str:
+    """``text`` shortened to ``limit`` cells with its MIDDLE dropped.
+
+    WHY BOTH ENDS SURVIVE (design round 1, D1): a plain tail cut throws away
+    exactly where two labels most often differ — the end of the local part — so
+    two accounts rendered the identical sentence and a genuine account switch
+    could not be seen at all. Keeping a prefix AND a suffix means a difference
+    near either end stays visible.
+
+    The elision is taken INSIDE the local part when the value is an email: two
+    logins on one account provider share the domain, so spending the tail's
+    budget on it would waste the very characters that distinguish them.
+
+    This is a display convenience, never an identity. Sentences can still
+    coincide when two labels differ only in the middle that was cut; the journal
+    row's own ``credential_id`` is what separates accounts for the transcript's
+    fold (``tui/session_presentation.py``), so a real change is never lost to a
+    rendering collision.
+    """
+    local, at, domain = text.partition("@")
+    if len(text) <= limit:
+        return text
+    if at and len(domain) + 9 <= limit and len(local) >= 4:
+        room = limit - len(domain) - 2  # the "@" and one ellipsis
+        head = room // 2
+        tail = max(1, room - head)
+        return f"{local[:head]}\u2026{local[-tail:]}@{domain}"
+    room = limit - 1  # one ellipsis
+    head = room // 2
+    tail = max(1, room - head)
+    return f"{text[:head]}\u2026{text[-tail:]}"
+
+
+def _account_label(label: str) -> str:
+    """The sign-in label as it may appear in a notice: one printable line.
+
+    WHY SANITISED: a borrowed row's label is the grant's identity, i.e. text a
+    PEER device chose, and the notice is painted verbatim into the operator's
+    terminal on every replay. ``sanitize_prompt_line`` is the tree's one
+    helper for "untrusted text rendered as one line a person must read
+    literally": escapes stripped, format characters made visible, whitespace
+    collapsed, length bounded.
+
+    WHY MIDDLE-ELIDED rather than truncated: see :func:`_middle_elide` — a tail
+    cut made two distinct accounts render one sentence (design round 1, D1).
+
+    AND NO DIGEST, HASH OR OTHER DERIVED IDENTIFIER IS APPENDED. An unkeyed
+    digest of a low-entropy label (an email) is dictionary-reversible, and
+    recording it in a transcript row would put a linkable pseudonym for the
+    operator's account into the journal, the move copies and every peer replica
+    — the very class of leak this row's operator-only rule exists to stop. The
+    identity a fold needs is the row's own ``credential_id``.
+
+    WHERE IT MAY APPEAR: the operator-facing transcript row, and nowhere else —
+    the surface list lives on ``SESSION_BINDING_NOTICE_MESSAGE_TYPE`` in
+    ``harness/message_types.py``. A peek/step result is model context and must
+    never receive this string (``harness/comms.py`` ``is_peek_step_entry``).
+    """
+    from local_operator.ansi import sanitize_prompt_line
+
+    text = sanitize_prompt_line(label or "", limit=_NOTICE_LABEL_SOURCE_LIMIT)
+    if len(text) <= _NOTICE_LABEL_LIMIT:
+        return text
+    return _middle_elide(text, _NOTICE_LABEL_LIMIT)
+
+
 def _login_phrase(label: str, provider: str, owner: str) -> str:
     """The serving login as the row knows it: label first, else provider+owner.
 
@@ -619,9 +703,58 @@ def _login_phrase(label: str, provider: str, owner: str) -> str:
     operator-facing account string, when the row carries one) is what answers
     "which of my two logins" when both belong to the same owner.
     """
-    if label.strip():
+    label = _account_label(label)
+    if label:
         return f"{label} on {owner}"
     return f"the {provider} login on {owner}"
+
+
+def render_binding_notice_repeat(text: str, *, seen: int, accounts: int = 1) -> str:
+    """``text`` with a quiet count of the rows it stands for — the operator row ONLY.
+
+    WHY (design round 1, D2, and the manager's group fold): a run of identical
+    notices paints as ONE row now, so a reader could not tell a single change
+    from a run of forty, and a fold that hides its own arithmetic is a quieter
+    version of the flood it replaced.
+
+    TWO counts, because they are two facts. ``seen`` is how many rows folded in.
+    ``accounts`` is how many distinct store rows the run named, and it is the
+    honesty that makes the fold safe: two accounts CAN render one sentence (the
+    label is a bounded rendering), and a run that covered both says so instead of
+    silently reporting one. A run naming one account, or naming none (an older
+    row with no ``credential_id``), prints the bare multiplier.
+
+    WHAT IT STILL DOES NOT SAY: "N account changes". The rows behind a run are the
+    recording's own repetitions — one account re-announced, or the resolves of a
+    subagent misattributed to its parent — so ``seen`` is a volume fact, and
+    ``accounts`` is the disclosure of what that volume contained.
+
+    WHY "logins", AND WHY THIS SPELLING (design round 2, D3): "login" is the noun
+    the rest of this module already uses for one account on one owner
+    (``_login_phrase``, and the remedy ``lop login <provider>``), so the marker
+    names the thing the operator has two of rather than introducing a second word
+    for it. It is 2 cells shorter than "accounts".
+
+    AND THE MARKER MOVES WHOLE, NEVER IN PIECES (design round 3, D4). The
+    notice's wrapper is ``wrap_cells``, which breaks on the ASCII SPACE only, so
+    the two spaces before ``×`` are the marker's one legal break point and
+    everything after it is NBSP-joined — the same trick, and the same reason, as
+    ``SendFailureNotice._SEND_AGAIN_CONTROLS`` in ``tui/session_presentation.py``.
+    So the marker either stays inline or moves under the sentence WHOLE: at 100
+    columns a 77-cell flood sentence reads ``… on my-mac.`` / ``×20 · 2 logins``,
+    and a longer device name (``damians-macbook-pro``) reads the same way — the
+    marker whole on the second line either way, which both round-3 frames show.
+    The one bound: this holds while the notice's text area is at least as wide as
+    the marker itself (14 cells), because below that ``wrap_cells`` has no choice
+    but to break a token that no longer fits (design review round 3, NIT-1).
+
+    It lives HERE, beside the sentence it annotates, because this module is the
+    credential copy home; the fold in ``tui/session_presentation.py`` calls it
+    rather than spelling a marker of its own.
+    """
+    if accounts > 1:
+        return f"{text}  \u00d7{seen}\u00a0\u00b7\u00a0{accounts}\u00a0logins"
+    return f"{text}  \u00d7{seen}"
 
 
 def render_binding_change_notice(
@@ -661,6 +794,12 @@ def render_binding_change_notice(
     change is never silent) is what the cells pin.
     """
     provider = binding.provider or "credential"
+    # THE ACCOUNT IS NAMED in every arm that has a label: two logins on one
+    # device rendered the identical sentence, so a genuine switch and a
+    # spurious one (a subagent's account misattributed to its parent) were
+    # indistinguishable on screen. The label is what tells them apart.
+    now_label = _account_label(binding.identity_label)
+    was_label = _account_label(previous.identity_label)
     owner_changed = binding.owner_device != previous.owner_device
     id_changed = binding.credential_id != previous.credential_id
     if not owner_changed and not id_changed:
@@ -672,15 +811,12 @@ def render_binding_change_notice(
         # cascade took the session onto it. Names the account it came FROM and
         # the device it landed on (the row's own name field).
         where = _device_phrase(previous.owner_device_name, "another device")
-        was = (
-            f"using {previous.identity_label} on {where}"
-            if previous.identity_label
-            else f"using the {provider} login on {where}"
-        )
+        was = f"using {_login_phrase(was_label, provider, where)}"
         landed = _device_phrase(binding.owner_device_name, "the recording device")
+        which = f" ({now_label})" if now_label else ""
         return (
             f"{_BINDING_NOTICE_HEAD}This session was {was}; "
-            f"it moved onto {landed}'s own {provider} login."
+            f"it moved onto {landed}'s own {provider} login{which}."
         )
 
     if owner_changed and previous.owner_device == self_device:
@@ -688,10 +824,10 @@ def render_binding_change_notice(
         # or no longer resolvable), so the borrow rung answers now.
         was_local = _device_phrase(previous.owner_device_name, "the recording device")
         who = _device_phrase(binding.owner_device_name, "another device")
-        now = _login_phrase(binding.identity_label, provider, who)
+        now = _login_phrase(now_label, provider, who)
         return (
-            f"{_BINDING_NOTICE_HEAD}This session was running on the {provider} "
-            f"login on {was_local}; it is now served by {now}."
+            f"{_BINDING_NOTICE_HEAD}This session was running on "
+            f"{_login_phrase(was_label, provider, was_local)}; it is now served by {now}."
         )
 
     if owner_changed:
@@ -699,7 +835,7 @@ def render_binding_change_notice(
         # the NEW owner once, with the old one as context.
         was_owner = _device_phrase(previous.owner_device_name, "another device")
         now_owner = _device_phrase(binding.owner_device_name, "another device")
-        now = _login_phrase(binding.identity_label, provider, now_owner)
+        now = _login_phrase(now_label, provider, now_owner)
         return (
             f"{_BINDING_NOTICE_HEAD}This session is now using {now} "
             f"(previously served by {was_owner})."
@@ -709,7 +845,8 @@ def render_binding_change_notice(
         # Same device, different row: the local walk re-picked (a re-login, or a
         # sibling the operator added). Rare, and still an account change.
         landed = _device_phrase(binding.owner_device_name, "the recording device")
-        return f"{_BINDING_NOTICE_HEAD}This session is now using the {provider} login on {landed}."
+        now = _login_phrase(now_label, provider, landed)
+        return f"{_BINDING_NOTICE_HEAD}This session is now using {now}."
 
     # M3 — the owner-side sibling pick: same owner, a different row. States the
     # FACT of the rotation, never its cause (the row cannot tell the four
@@ -718,7 +855,7 @@ def render_binding_change_notice(
     # logins is unknown, and a third sibling would make "other" a lie
     # (design round 2, N2).
     owner = _device_phrase(previous.owner_device_name, "the owner device")
-    landed_on = f" ({binding.identity_label})" if binding.identity_label.strip() else ""
+    landed_on = f" ({now_label})" if now_label else ""
     return (
         f"{_BINDING_NOTICE_HEAD}The {provider} login on {owner} went out of "
         f"rotation, and the next turn ran on another {provider} login{landed_on}."

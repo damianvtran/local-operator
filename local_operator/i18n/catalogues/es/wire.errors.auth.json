@@ -1,0 +1,14 @@
+{
+  "wire.errors.auth.account_not_found": "No se encontró la cuenta del proveedor",
+  "wire.errors.auth.auth_refusal": "{error}",
+  "wire.errors.auth.credentials_missing": "No se encontraron credenciales guardadas para este proveedor.",
+  "wire.errors.auth.input_invalid": "Introduce un valor que no esté vacío y que tenga como máximo 32768 caracteres.",
+  "wire.errors.auth.key_not_accepted": "Este proveedor no acepta una clave de API.",
+  "wire.errors.auth.key_rejected": "El proveedor rechazó esta clave de API.",
+  "wire.errors.auth.local_server_only": "Solo se puede probar el servidor de un proveedor local.",
+  "wire.errors.auth.provider_refusal": "{error}",
+  "wire.errors.auth.server_address_missing": "Este proveedor no tiene ninguna dirección de servidor que probar.",
+  "wire.errors.auth.sign_in_missing": "Este inicio de sesión ya no está disponible. Empieza de nuevo.",
+  "wire.errors.auth.sign_in_not_waiting": "Este inicio de sesión no está esperando una entrada.",
+  "wire.errors.auth.store_unreadable": "No se pudo leer el almacén de credenciales: el censo de proveedores lo necesita."
+}

@@ -171,8 +171,12 @@ check-changed: ## Run the CI gates this branch's diff can affect
 # operator-set value; its constant is guarded against ci.yml's value by tests.
 BOUND_TIMEOUT ?= 1800
 
+# --contract=command-status: the gate needs pyright's STATUS, not a cleanup
+# certificate, and cleanup-required refuses before spawn on Darwin (no
+# authoritative census backend). command-status still enforces the memory grant
+# and sweeps the owned group; it never certifies cleanup (docs/design/run-bounded-contract.md).
 type-check: ## Run type checking with pyright
-	.venv/bin/python scripts/run_bounded.py --timeout $(BOUND_TIMEOUT) -- .venv/bin/python -m pyright --pythonpath .venv/bin/python .
+	.venv/bin/python scripts/run_bounded.py --contract=command-status --timeout $(BOUND_TIMEOUT) -- .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 
 # Build the OSWorld V2 evaluation adapter: lock, wheel, and the workspace
 # materialisation command. Deliberately NOT wired into CI's default job — the

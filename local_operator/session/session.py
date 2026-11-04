@@ -57,6 +57,7 @@ from collections.abc import (
     Callable,
     Collection,
     Coroutine,
+    Iterable,
     Iterator,
     Mapping,
     Sequence,
@@ -401,6 +402,28 @@ logger = logging.getLogger(__name__)
 #: is a paid turn the same failure would refuse. The card stays durable in the
 #: transcript and on the live context, so the next ordinary turn still reads it.
 BRIDGE_CARD_FALLBACK_ATTEMPTS = 3
+
+
+def _saver_redaction(variables: Any) -> Any:
+    """The session's two redaction passes as Radient Saver's ``Redaction``, or ``None``.
+
+    ``redact`` (registered values plus the credential-shape table) for text and
+    tool results, ``redact_arguments`` (the high-confidence floor that never
+    rewrites code) for tool-call arguments, and ``redaction_values`` so the
+    projection cache re-projects when a new secret is registered (contract §3.1).
+    """
+    redact: Any = getattr(variables, "redact", None)
+    redact_arguments: Any = getattr(variables, "redact_arguments", None)
+    if not callable(redact) or not callable(redact_arguments):
+        return None
+    from local_operator.saver.projection import Redaction, Redactor
+
+    values: Any = getattr(variables, "redaction_values", None)
+    return Redaction(
+        redact=cast(Redactor, redact),
+        redact_arguments=cast(Redactor, redact_arguments),
+        values=cast(Callable[[], Iterable[str]], values) if callable(values) else (lambda: ()),
+    )
 
 
 def _notice(
@@ -3449,7 +3472,25 @@ class Session:
         system_blocks_provider: Callable[..., list[str]] | Callable[..., Awaitable[list[str]]],
     ) -> None:
         self._model = model
+        # Tri-state conversation choice: None follows the global setting/agent
+        # pin; True/False are explicit overrides journaled for resume.
+        self.radient_saver_choice: bool | None = None
+        #: The last real balance read for this session's gate, cached so a
+        #: reporting surface never has to guess or block (see
+        #: ``saver/command.py::cached_availability``). ``None`` = never read.
+        self._saver_availability: Any = None
+        #: The last sign-in answer, stamped by the same read. Read by the
+        #: badge instead of the credential store, which shells out per call.
+        self._saver_signed_in: bool | None = None
+        #: The launching agent's Saver pin (team slot, then profile), stamped by
+        #: ``harness.subagent`` on a child it spawns and read by
+        #: ``saver.command.saver_choices``. ``None`` = no pin, the resolver's
+        #: "fall through" value, which is what every non-child session holds.
+        self._saver_agent_pin_value: bool | None = None
         self._stream_fn = stream_fn
+        saver_bridge = getattr(self._stream_fn, "bind_saver_session", None)
+        if callable(saver_bridge):
+            saver_bridge(self)
         notice_bridge = getattr(self._stream_fn, "set_notice_handler", None)
         if callable(notice_bridge):
             # The stream owns provider routing; the session owns ordered event
@@ -3573,6 +3614,13 @@ class Session:
         _process_boot_build()
         self._attention: dict[str, Any] = {}
         self._attention_outcome: AgentEndEvent | None = None
+        # Pipeline-local terminal latch. Reset only on admission, not internal
+        # _run_turn continuations sharing the same externally visible owner.
+        self._quiet_accepted_generation: int | None = None
+        # A clean candidate may outlive its settled Team Bridge reservation.
+        # Capture its body ownership before _settle_pending_body clears it;
+        # only the final host recheck may use this per-owner witness.
+        self._quiet_requested_by_body = False
         self._attention_run_token: str | None = None
         #: §14's per-run trigger record: which origins this run's inputs had
         #: ("user" / "wake_prompt" / "monitor_prompt" / "internal") and
@@ -3786,6 +3834,18 @@ class Session:
         self._goal_state = goal_state if goal_state is not None else GoalState()
         self._variables = variables
         self._job_id = job_id
+        saver_bridge = getattr(self._stream_fn, "bind_saver", None)
+        if callable(saver_bridge):
+            # Radient Saver (contract §3.1, §7): the upload re-applies THIS
+            # session's two redaction passes, and a charged prepare lands in THIS
+            # session's channel ledger. The same division of labour as the notice
+            # bridge above — the stream owns the call, the session owns the
+            # secrets and the ledger. A session without a variable store keeps the
+            # stream's credential-shape floor.
+            saver_bridge(
+                redaction=_saver_redaction(variables),
+                spend=self.record_channel_spend,
+            )
         #: The parent link (see the ``parent_session`` parameter). The id is
         #: kept even when the OBJECT is gone — a resumed child still answers
         #: "whose child am I" for its analytics rows (QA round 1, Q3).
@@ -5157,6 +5217,9 @@ class Session:
         # that model already restored, or the pin reads as stranded and is
         # dropped.
         self._restore_selected_model()
+        from local_operator.saver.command import restore_saver_choice
+
+        restore_saver_choice(self)
         # Subagents and todos: both live only in memory during a session, so a
         # resume rebuilds them from the transcript here — the job rows and comms
         # records that make the subagent panel and ``hub op='resume'`` work, and
@@ -5960,7 +6023,10 @@ class Session:
         from local_operator.providers.failover import is_request_too_large
 
         if not is_request_too_large(error):
-            return False
+            # Not a byte-size refusal: a TOKEN overflow ("maximum context
+            # length", or this harness's own local refusal, which uses the same
+            # wording) has its own, narrower remedy. See the method.
+            return await self._degrade_largest_document_for_context(error)
 
         budget = self._wire_bytes_budget()
         if budget <= 0:
@@ -5999,6 +6065,132 @@ class Session:
             frames_left,
         )
         await self._emit(_notice(_nt.request_too_large_dropped(), kind="warning"))
+        return True
+
+    async def _degrade_largest_document_for_context(self, error: BaseException | str) -> bool:
+        """Replace the largest attached document with its reference line.
+
+        The last rung for a CONTEXT-LENGTH refusal that compaction cannot
+        answer. Compaction only sheds history; a document in the live tail, or
+        in a user turn (those are preserved verbatim), survives every pass, and
+        the local estimator can under-count dense text (base64, hex, control
+        bytes: ``document_limits.DOCUMENT_CHARS_PER_TOKEN``), so the same
+        oversized request is refused on every later turn. Measured: 25 refusals
+        in a row for a 2 MB UTF-16-as-UTF-8 CSV at 128k beside 30-60k tokens of
+        user-turn history.
+
+        One document per error, largest first: the next refusal takes the next
+        one, so the cost to the user is bounded by what was actually too big.
+        The failing turn is NOT retried (the user resends once), for the reason
+        ``_recover_if_request_too_large`` documents.
+
+        The LIVE context only. The transcript row keeps the document, exactly
+        as frame shedding does: ``/export``, forks and a later session on a
+        larger window still see it. The price is that a resumed session replays
+        the document and can take one more refusal before this fires again.
+        Persisting is safe from the turn-end pass: ``_persist_new_messages``
+        skips a message id the transcript already holds, so the mutated message
+        is never rewritten.
+
+        Documents are touched only when they are a material share of the window
+        (``DOCUMENT_CULPRIT_SHARE`` for one document, or ``DOCUMENT_WINDOW_SHARE``
+        for all of them together; both capped at ``DOCUMENT_CULPRIT_CEILING``).
+        The sum covers a collection whose members are each under the first bar
+        (13 dense files). It has the higher bar on purpose: modest attachments
+        beside a history that is itself the cause are left alone, since
+        stripping them would not cure the overflow and the notice would blame
+        the wrong thing. The error then surfaces exactly as before. A window of
+        0 or unknown makes the thresholds 0, so every document qualifies: the
+        cause-blind behaviour, accepted there because nothing is known to judge
+        by.
+
+        The error filter is the context-length marker list, which is wider than
+        "the prompt is over the window": it also matches an attached-file size
+        cap, a tool-definition cap and an image size cap. An image refusal is
+        left to ``_degrade_if_image_rejected`` while images can still be rejected
+        (it never reaches here); once they all already are, it falls through to
+        the document guard, since an image handler with nothing left to do would
+        otherwise leave a document-driven overflow unanswered. The other two
+        are bounded by the share gate, since neither is cured by a small
+        document and a large one is the thing a size cap names.
+
+        Returns ``False`` when the error is not a context-length refusal or no
+        document is a material share, so the error surfaces exactly as it did
+        before.
+        """
+        from local_operator.compaction.tokens import (
+            _document_token_estimate,
+            invalidate_message_cache,
+        )
+        from local_operator.harness.document_limits import (
+            DOCUMENT_CULPRIT_CEILING,
+            DOCUMENT_CULPRIT_SHARE,
+            DOCUMENT_WINDOW_SHARE,
+        )
+        from local_operator.incidents import CONTEXT_LENGTH_MARKERS
+        from local_operator.providers.documents import _reference_text
+        from local_operator.providers.failover import (
+            _KIND_LABELS,
+            ProviderError,
+            is_image_rejection,
+        )
+
+        if is_image_rejection(error) and not self._images_rejected:
+            # "Image exceeds the maximum size" also matches the context markers;
+            # it is a poisoned-block refusal with its own handler, which the
+            # caller runs when this declines.
+            return False
+        if isinstance(error, ProviderError):
+            if error.kind != "request":
+                return False
+            haystack = error.message.lower()
+        else:
+            haystack = (error if isinstance(error, str) else str(error)).lower()
+            if not haystack.startswith(_KIND_LABELS["request"]):
+                return False
+        if not any(marker in haystack for marker in CONTEXT_LENGTH_MARKERS):
+            return False
+
+        window = int(self.effective_model.context_window)
+        threshold = min(window // DOCUMENT_CULPRIT_SHARE, DOCUMENT_CULPRIT_CEILING)
+        total_threshold = min(window // DOCUMENT_WINDOW_SHARE, DOCUMENT_CULPRIT_CEILING)
+
+        largest: tuple[int, Message, int] | None = None
+        total = 0
+        for message in self._context.messages:
+            if not isinstance(message, Message):
+                continue
+            for index, block in enumerate(message.content):
+                if not isinstance(block, DocumentContent):
+                    continue
+                cost = _document_token_estimate(block)
+                total += cost
+                if largest is None or cost > largest[0]:
+                    largest = (cost, message, index)
+        if largest is None or (largest[0] < threshold and total < total_threshold):
+            return False
+
+        _, message, index = largest
+        block = message.content[index]
+        assert isinstance(block, DocumentContent)
+        message.content[index] = TextContent(
+            text=_reference_text(block, reason="dropped to fit the model's context window")
+        )
+        # The estimate cache is keyed on ``Message.id``: without this the
+        # message keeps its document's charge and the next request is refused
+        # again for content that is no longer there.
+        invalidate_message_cache(message)
+        logger.warning(
+            "provider refused the request as over the context window; replaced %s (%d bytes) "
+            "with its reference line in this session's context",
+            block.filename,
+            block.bytes,
+        )
+        # Reuses the "too large, run /compact" notice: a dedicated, localized
+        # sentence needs the translator + independent auditor per locale (see
+        # docs/I18N.md). It does not name the file; the model does, from the
+        # reference line it now holds, on the next turn.
+        await self._emit(_notice(_nt.too_large_run_compact(), kind="warning"))
         return True
 
     async def _degrade_images_for_size(self, budget: int, frames_left: int) -> bool:
@@ -10174,6 +10366,15 @@ class Session:
         second row. Empty means the receiver mints its own, which is what every
         pre-field sender gets.
         """
+        # Reserved display carriage must never leak through the advisory sender
+        # fallback, including an invalid receipt or a non-Bridge custom kind.
+        # Copy first: spool/live callers may still own the supplied dictionary.
+        sender = dict(sender)
+        display_carriage = {
+            key: sender.pop(key)
+            for key in ("bridge_receipt", "bridge_receipt_source")
+            if key in sender
+        }
         pid = sender.get("pid")
         conversation = sender.get("conversation_name", "")
         model_label = sender.get("model_label", "")
@@ -10266,6 +10467,17 @@ class Session:
             # byte-identical to what this function built before the carriage.
             peer_fields["id"] = entry_id
         details: dict[str, Any] = {"text": wrapped, "body": text, "sender": sender}
+        if chosen == TEAM_BRIDGE_MESSAGE_TYPE and display_carriage:
+            from local_operator.team_bridge.authority import authority_fence
+            from local_operator.team_bridge.display_receipt import (
+                validated_display_receipt,
+            )
+            from local_operator.team_bridge.store import Store as DisplayStore
+
+            runtime = getattr(self, "bridge_runtime", None)
+            if runtime is not None and authority_fence(runtime) is None:
+                owner = DisplayStore(runtime.config_dir).active_owner()
+                details.update(validated_display_receipt(display_carriage, owner=owner))
         if bridge_meta is not None:
             # The internal bridge LOCATOR (H5a/F3) rides the row so the
             # issuance hook beside the durable append can find THIS machine's
@@ -10466,7 +10678,10 @@ class Session:
         append-only, and a retried prompt must not land twice. ``seen`` covers
         what the index cannot — two rows of one batch with the same id, where
         the first steer is still queued and has therefore not reached the index
-        yet (agent review round 1, R3).
+        yet (agent review round 1, R3). ``_steer_is_live_queued`` covers the
+        other live case: the steer this very row was spooled from is still on
+        the queue (an idle steer opens its own turn and meets its own row here),
+        and steering it again would double-deliver one message.
         """
         command_id = str(getattr(line, "command_id", "") or "")
         if command_id and command_id in seen:
@@ -10474,6 +10689,15 @@ class Session:
             return
         if command_id and self.has_admitted_command(command_id):
             logger.info("spooled prompt already in the transcript; not steering it twice")
+            return
+        if command_id and self._steer_is_live_queued(command_id):
+            # THE SAME MESSAGE, ALREADY OWED BY THIS PROCESS. ``has_admitted_command``
+            # only answers once the row is durable, and a queued steer is not
+            # durable until its next boundary drain — so without this check an
+            # idle steer that opened its own turn found its own just-spooled row
+            # here and was steered a SECOND time: two queue entries with one id,
+            # two ``MessageStartEvent``s, the text twice in the model request.
+            logger.info("spooled prompt is already on the steering queue; not steering it twice")
             return
         self.steer(
             line.text,
@@ -10487,6 +10711,25 @@ class Session:
         # 2, MINOR-2).
         if command_id:
             seen.add(command_id)
+
+    def _steer_is_live_queued(self, command_id: str) -> bool:
+        """Whether a steer with this producer id is already owed by this process.
+
+        The first-turn drain's duplicate gate, checked BEFORE ``Session.steer``
+        would queue the spooled row again. ``_steering_producers`` is where the
+        handle keeps the producer id of an admitted steer, and the queue itself
+        carries the id as the message id for the callers that supply one without
+        a producer entry. ``queued_steering`` drains and rebuilds in one
+        synchronous step, so this reads the live order without disturbing it.
+        """
+        if not command_id:
+            return False
+        if command_id in self._steering_producers.values():
+            return True
+        return any(
+            str(getattr(message, "id", "") or "") == command_id
+            for message in self.queued_steering()
+        )
 
     async def receive_peer_message(
         self,
@@ -10776,7 +11019,11 @@ class Session:
         await self._emit(
             PeerMessageDeliveredEvent(
                 body=str(message.details.get("body", "")),
-                sender=sender,
+                sender={
+                    key: value
+                    for key, value in sender.items()
+                    if key not in ("bridge_receipt", "bridge_receipt_source")
+                },
                 message_id=message.id,
                 # The row's OWN provenance kind, so the live surface paints the
                 # same card the history replay will (§13.4); empty stays peer.
@@ -11584,7 +11831,20 @@ class Session:
             return self._standing_grants
         from local_operator.team_bridge import ask_issuance as ledger_mod
         from local_operator.team_bridge.authority import authority_fence
+        from local_operator.team_bridge.host import owner_fence_refusal
         from local_operator.team_bridge.store import Store
+
+        # THE STRICT FENCE RUNS ONCE, BEFORE THE LOOP (review round 1 MAJOR 1).
+        # The bridge runtime now exists on every writer session, so presence is no
+        # longer "this is the inbox reader". A non-designated session must return
+        # EMPTY here — never walk the ledger — because the walk's per-row fence
+        # miss calls `ledger.mark_held(...)`, which would let an ordinary turn in
+        # a task session overwrite every real hold reason for the owner
+        # (`standing_no_envelope`, `standing_uncertain`, ...) with
+        # `standing_fence`. The authority contract says a fence miss performs NO
+        # mutation; that has to be true at the entry, not only per row.
+        if owner_fence_refusal(runtime) is not None:
+            return self._standing_grants
 
         ledger = ledger_mod.AskIssuance(runtime.config_dir)
         stale = [
@@ -12313,7 +12573,13 @@ class Session:
             return {"ok": False, "error": "this session has no queued-ask engine"}
         if relay is not None:
             return queue.enqueue_relay(relay, tool_call_id=tool_call_id)
-        return queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
+        outcome = queue.enqueue(questions, timeout, tool_call_id=tool_call_id)
+        # The mirror of the notify door's check (``asks/dedupe.py``): a
+        # same-topic update raised just before this question leaves Unread and
+        # rides the ask. Not on the relay arm: those questions are another
+        # session's, and this session's updates are not about them.
+        self._merge_updates_into_ask(outcome)
+        return outcome
 
     #: TB-02 P1 (PR #2378): the sentence a plain ask door refuses a bridge
     #: request with — it names the door that works (the request's own verified
@@ -13329,6 +13595,32 @@ class Session:
         # during the session flips it, and the trigger must see that on the next
         # message rather than on the next session.
         hooks.code_requests_ledger = self._code_requests_ledger_nonempty
+        # Team Bridge recommendation probe: same attach point, same reason
+        # (session-owned state; the answer moves as admission settles).
+        hooks.team_bridge_available = self._team_bridge_available
+
+    def _team_bridge_available(self) -> bool:
+        """Whether this session can message teammates over Team Bridge — no network.
+
+        True only when the session holds BOTH the ``bridge`` tool (createIf on
+        the runtime) and a runtime whose cached admission is ``pending`` or
+        ``admitted``. ``pending`` counts because the runtime itself exists only
+        when persisted, network-free facts hold (enabled, committed Radient
+        owner, live Team-org enrollment, consent) — that IS "signed in and on a
+        team"; only the eligibility re-check is outstanding, and the tool
+        returns a typed refusal if it fails. A KNOWN negative (``signin``,
+        ``disabled`` incl. ``read_only``, ``paused``) means the bridge cannot
+        carry the message, so recommending it would be wrong. Never raises.
+        """
+        try:
+            runtime = getattr(self, "bridge_runtime", None)
+            if runtime is None:
+                return False
+            if not any(getattr(tool, "name", "") == "bridge" for tool in self._tools):
+                return False
+            return str(getattr(runtime, "admission", "") or "") in ("pending", "admitted")
+        except Exception:  # noqa: BLE001 - a probe never breaks a prompt build
+            return False
 
     def _code_requests_ledger_nonempty(self) -> bool:
         """Whether this session's derived code-request index has any rows.
@@ -16340,33 +16632,21 @@ class Session:
         return ""
 
     def _run_ended_quiet(self, event: AgentEndEvent) -> bool:
-        """Whether this run ended with a ``no_reply`` call and no answer after it.
+        """One owning outcome for notification and publication consumers.
 
-        THE QUIET-TURN PREDICATE (docs/design/quiet-turns.md §4): true when the
-        run's LAST tool result carries the ``QUIET_TURN_KEY`` marker and no
-        assistant text exists after it — the marker must be the run's last
-        word. Read by exactly two consumers, ``_finalize_attention_notify``
-        (suppress the notify) and ``_publish_attention_outcome`` (publish
-        nothing), and it is a pure function of the end event's messages, so the
-        two cannot disagree.
-
-        A backwards scan, and the order is load-bearing: walking back from the
-        end, the first thing seen is either assistant TEXT (a real answer
-        produced after the call — not quiet, and it does not matter whether the
-        marker is still in the history) or the run's LAST tool result (its
-        marker decides). Earlier narration does NOT block the verdict — text
-        already streamed stays visible and persisted; the explicit quiet signal
-        governs the END — which is why this is not "no assistant text in the
-        run". A run with no tool result at all is not quiet.
+        Permission, finite peer-exchange certificates and persisted child
+        markers are not terminal acceptance. Earlier narration remains visible;
+        only the Session's clean committed end suppresses completion delivery.
+        Error/abort/cutoff always wins, including classification after the loop.
         """
-        for message in reversed(event.messages):
-            if getattr(message, "role", None) == "tool":
-                payload = getattr(message, "provider_payload", None)
-                details = payload.get("details") if isinstance(payload, Mapping) else None
-                return bool(details) and details.get(QUIET_TURN_KEY) is True
-            if getattr(message, "role", None) == "assistant" and getattr(message, "text", ""):
-                return False
-        return False
+        # A child marker proves only the finite exchange. Never reconstruct
+        # terminal acceptance from history, a renderer certificate, or repr.
+        return bool(
+            event.quiet_accepted
+            and not event.error
+            and not event.aborted
+            and not event.cut_off_cause
+        )
 
     def _quiet_end_callable(self) -> Callable[[], Awaitable[str | None]] | None:
         """The ``no_reply`` tool's quiet-end door, or ``None`` where silence is unavailable.
@@ -16470,6 +16750,7 @@ class Session:
         key: str,
         links: list[dict[str, str]],
         anchor_id: str,
+        raise_banner: bool = True,
     ) -> str:
         """Persist unread; presence never proves a newly written callout was seen.
 
@@ -16477,9 +16758,27 @@ class Session:
         covered, or showing a child. Only a later item-specific render receipt
         can acknowledge this revision. L1b owns bounded banner grace; it must
         re-read the item's read watermark before claiming delivery.
+
+        ``raise_banner`` is an ACTION OF THIS DOOR, not a second door: the
+        ``notify`` tool never passes it, so the agent-facing write keeps its own
+        behaviour byte for byte. A PARKED GATE passes ``False``, because that
+        park's OS banner is already owned by ``ServingSessionHandle._announce_pending``
+        — which decides ONCE, at park, against the watching surfaces, the
+        desktop lease, a hidden session and the kill switch, and re-decides when
+        the operator detaches (``reannounce_pending``). Letting this write
+        banner the same park after the grace would put two lock-screen cards on
+        one event, the duplicate ``_announce_pending`` already refuses between
+        its own Electron and detached legs. The row is the durable half of a
+        park and needs no toast of its own to justify its existence.
         """
         from local_operator.notifications.store import NotificationStore
 
+        # ONE TOPIC, ONE ENTRY (``asks/dedupe.py``): an open same-topic ask from
+        # this session already notifies the operator, so the update rides it as
+        # context instead of becoming a second item they must also clear.
+        folded = await asyncio.to_thread(self._fold_notify_into_open_ask, title, body, priority)
+        if folded is not None:
+            return folded
         root = Path(self._config_dir)
         store = NotificationStore(root)
         outcome = await asyncio.to_thread(
@@ -16499,9 +16798,233 @@ class Session:
         # the write's action, revision and priority. Best-effort: a banner is
         # chrome and the item is already durable, so a delivery failure leaves
         # an unread row rather than failing the tool call the model made.
-        if outcome.priority == "high":
+        if raise_banner and outcome.priority == "high":
             await self._route_item_banner(root, store, outcome, title=title, body=body)
         return _notify_sentence(outcome)
+
+    def _notification_owner(self) -> "Session | None":
+        """The session whose inbox an item raised for THIS one belongs in.
+
+        THE GATE ABOVE ANSWERS A DIFFERENT QUESTION (:meth:`_notify_inbox_callable`).
+        It answers "is there an inbox the operator reads for this session", and
+        it is right to refuse a delegated child, a hidden session, a one-shot
+        host, an output-contract session and ``LOP_NOTIFY=0`` — the agent-callable
+        tool speaks for the session the model is running in, and a child has its
+        parent to decide whether the operator needs an item
+        (``docs/design/notifications-inbox.md`` §3.2).
+
+        A PARKED GATE IS NOT THAT KIND OF EVENT. It is a human-blocking
+        condition, and the one that matters most: a subagent held on an approval
+        is the parent conversation unable to advance. Attribution is what the
+        child arm is about, not existence, so this walks the parent links to the
+        session the operator actually reads and answers the question there.
+
+        THE REST OF THE GATE IS NOT RE-STATED HERE (:meth:`_notify_inbox_callable`).
+        A one-shot host, an output-contract session and ``LOP_NOTIFY=0`` still
+        mean there is no inbox to put an item in, and the caller asks exactly
+        that of the OWNER this returns — one definition of the exclusions, so the
+        day the tool's gate grows a condition the gate path inherits it instead
+        of drifting out of step with it. The walk's own termination already
+        leaves the owner a listed, non-child session, which is what makes that
+        reuse a no-op rather than a second opinion. ``None`` therefore means "no
+        conversation this process can reach", never "no caller asked".
+
+        A parent link that is GONE (a weakref to a collected parent, a resumed
+        child whose parent is not in this process) answers ``None``: the item
+        would name a conversation this process cannot reach, and inventing an
+        owner is worse than the drop.
+        """
+        seen: set[int] = set()
+        owner: Session | None = self
+        while owner is not None and (owner._job_id is not None or not owner._session_is_listed()):
+            if id(owner) in seen:
+                return None  # a cycle no real graph has; never loop on it
+            seen.add(id(owner))
+            owner = owner._parent_session
+        if owner is None:
+            return None
+        return owner
+
+    async def raise_gate_item(
+        self, kind: str, gate_title: str, gate_detail: str, wait_id: str
+    ) -> None:
+        """Raise the operator's inbox row for a gate that has just PARKED.
+
+        The inbox had one writer, :meth:`_notify_inbox` (the door behind the
+        ``notify`` tool), and nothing on the gate path called it — so an approval
+        or a question that parked was on every surface except the reel, and an
+        operator away from the screen learned of it only from a banner that is
+        gone once dismissed. This goes through the SAME door, deliberately: the
+        row keeps the attribution, the same-topic fold into an open ask
+        (``asks/dedupe.py``), the priority ladder and the store's read/dismiss
+        marks. A second store or a second row shape is how the two systems drift
+        and the operator ends up with an item they cannot clear.
+
+        ``kind`` is the ``NotificationKind`` of the gate ("approval" or "ask"),
+        and ``gate_title``/``gate_detail`` are exactly the pair the host hands
+        :meth:`_announce_pending`, so the composed sentence is the one every
+        other gate surface shows (``notifications.compose.gate_body``) rather
+        than a second wording. For a SECRET question ``gate_detail`` is empty by
+        the host's own rule, and the shared vocabulary carries the row instead —
+        a lock-screen item must not enumerate the user's missing credentials.
+
+        The priority is ``high`` because the turn cannot advance: the store's own
+        ladder describes an open ask that way, and a wait for the operator is the
+        same fact whichever side of the gate it came from.
+
+        THE KEY NAMES THE WAIT, NOT THE TOOL (QA round 1, Q1/Q2). It is
+        ``gate:{kind}:{wait_id}``, where ``wait_id`` is the id the gate minted
+        for THIS park. One wait that signals twice updates its own row — the
+        dedupe the store's key column exists for — while a SECOND wait is a new
+        row: a card opened in a parallel tool batch beside another for the same
+        tool, or a park arriving after the operator dismissed the previous one.
+        Keying on the tool instead collapsed those into the first row, and the
+        store only revives a dismissed row on a priority ESCALATION
+        (``NotificationStore.notify``'s keyed branch) while every gate row is
+        already ``high`` — so dismissing one card silently muted that tool for
+        the rest of the process, which is the very "the notification dies with
+        its dismissal" gap this change exists to close. Forcing the revival by
+        escalating the priority would trade that bug for a worse one: a rising
+        severity banner instead of a row the operator can read.
+
+        ``wait_id`` also keeps the key free of content: an ask's ``gate_title``
+        is the question's prose, and a key is a durable index into the store,
+        so the identifier the gate already minted is the only safe thing to key
+        on.
+
+        NEVER RAISES, AND THAT COVERS THE WHOLE RAISE. The card is already
+        parked by the time this runs, so a busy or unreadable inbox, an
+        unimportable composer and an unexpected failure in the owner walk must
+        all cost the row and not the gate — a lost item is the bug this fixes,
+        an unparked approval would be a worse one. Everything below the
+        docstring — the walk, the gate question, both lazy imports and the
+        composed text — sits inside ONE ``try``. The imports stay lazy on
+        purpose: ``local_operator.tui.notify`` is imported inside
+        ``_announce_pending`` for the same reason, and only the tools and
+        surfaces that render it should pay for it. Nothing is swallowed
+        silently: everything is logged.
+        """
+        try:
+            owner = self._notification_owner()
+            if owner is None:
+                logger.debug(
+                    "gate item: no inbox the operator reads for %s (%s); not raised",
+                    self.session_id,
+                    kind,
+                )
+                return
+            # THE TOOL'S OWN GATE, ASKED OF THE OWNER, AND ITS OWN DOOR RETURNED:
+            # the exclusions are stated once (``_notify_inbox_callable``) and the
+            # callable it hands back is ``_notify_inbox`` — so the item below is
+            # written by the very method every other writer of the inbox uses.
+            door = owner._notify_inbox_callable()
+            if door is None:
+                logger.debug(
+                    "gate item: %s has no inbox door for the operator (%s); not raised",
+                    owner.session_id,
+                    kind,
+                )
+                return
+            from local_operator.notifications import gate_body
+            from local_operator.tui.notify import CONTEXTS
+
+            await door(
+                title=gate_body(kind, gate_title, gate_detail),
+                # The state CATEGORY, from the same vocabulary the banner beside it
+                # uses (CONTEXTS["approval"] and ``["ask"]`` are the same
+                # category on purpose — both mean the turn is held).
+                body=CONTEXTS.get(kind, ""),
+                priority="high",
+                key=f"gate:{kind}:{wait_id}",
+                links=[],
+                anchor_id="",
+                # THE PARK'S BANNER BELONGS TO ``_announce_pending``, which ran
+                # beside this call and decided it once, on the evidence this door
+                # does not have (watching surfaces, the desktop lease, a hidden
+                # session). One park, one event, one lock-screen card: the row
+                # raised here is the durable half and stays silent.
+                raise_banner=False,
+            )
+        except Exception:  # noqa: BLE001 — the gate settles the card, not the inbox
+            logger.warning(
+                "gate item: could not raise the %s item for %s",
+                kind,
+                self.session_id,
+                exc_info=True,
+            )
+
+    def _fold_notify_into_open_ask(self, title: str, body: str, priority: str) -> str | None:
+        """The suppression sentence when ``notify`` duplicates an open ask, else ``None``.
+
+        Best-effort by design: any failure (no queue on the blocking arm, an
+        unreadable log, a failed append) returns ``None`` and the update is
+        delivered as before — a missed merge costs one extra click, a lost
+        update costs the operator the information.
+        """
+        try:
+            queue = self.ask_queue()
+            if queue is None:
+                return None
+            from local_operator.asks import dedupe
+
+            match = dedupe.matching_ask(
+                queue.open_records(),
+                title=title,
+                body=body,
+                now=queue.clock_ms(),
+                priority=priority,
+            )
+            if match is None:
+                return None
+            if not queue.add_context(str(match["ask_id"]), title=title, body=body, source="notify"):
+                return None
+            return dedupe.SUPPRESSED_TEXT.format(ask_id=match["ask_id"])
+        except Exception:  # noqa: BLE001 — fall through to delivering the update
+            logger.debug("notify: open-ask dedupe check failed", exc_info=True)
+            return None
+
+    def _merge_updates_into_ask(self, outcome: Mapping[str, Any]) -> None:
+        """After an ask is queued: fold same-topic unread updates into it.
+
+        The mirror of :meth:`_fold_notify_into_open_ask` (``asks/dedupe.py``).
+        The text is appended to the ask FIRST and the update is marked read
+        (``via=merged_into_ask``, never dismissed) only once that append
+        landed, so a failure can leave both entries but never neither.
+        Best-effort.
+        """
+        try:
+            if not outcome.get("ok"):
+                return
+            details = outcome.get("details") or {}
+            ask_id = str(details.get("ask_id") or "")
+            queue = self.ask_queue()
+            if not ask_id or queue is None:
+                return
+            record = queue.find(ask_id)
+            if record is None:
+                return
+            from local_operator.asks import dedupe
+            from local_operator.notifications.store import NotificationStore
+
+            store = NotificationStore(Path(self._config_dir))
+            rows, _ = store.list_items(state="unread", session_id=self.session_id, limit=100)
+            # Measured from the ask's own creation stamp: "was this update raised
+            # within the window before the question" is the duplicate pattern.
+            matches = dedupe.matching_updates(
+                rows, ask=record, now=int(record.get("created_at") or 0)
+            )
+            for row in matches:
+                if not queue.add_context(
+                    ask_id,
+                    title=str(row.get("title") or ""),
+                    body=str(row.get("body_md") or ""),
+                    source="merged",
+                    item_id=str(row["id"]),
+                ):
+                    continue
+                store.merge_into_ask([(str(row["id"]), int(row.get("revision") or 1))])
+        except Exception:  # noqa: BLE001 — both entries stay; nothing is lost
+            logger.debug("ask: merging same-topic updates failed", exc_info=True)
 
     async def _route_item_banner(
         self, root: Path, store: Any, outcome: Any, *, title: str, body: str
@@ -16636,7 +17159,7 @@ class Session:
         except Exception:  # noqa: BLE001 — unknown is "not active"
             return None
 
-    async def _quiet_end_refusal(self) -> str | None:
+    async def _quiet_end_refusal(self, *, held_body_request: bool = False) -> str | None:
         """The refusal sentence for a quiet end, or ``None`` when it is allowed.
 
         THE RULE IS A DENYLIST (review R4, docs/design/quiet-turns.md §4):
@@ -16670,7 +17193,11 @@ class Session:
         folds the queued row into its next request, so it keeps the refusal.
         """
         if "user" in self._run_triggers or (
-            self._has_awaiting_user() and not self._body_turn_yields_to_person()
+            self._has_awaiting_user()
+            and not (
+                self._body_turn_yields_to_person()
+                or (held_body_request and self._person_steer_queued())
+            )
         ):
             return "A person asked this turn; answer them in one line."
         # A ``notify:true`` delivery is answered by an inbox item as well as by
@@ -16680,6 +17207,10 @@ class Session:
         # still wins — a human waiting on words gets words.
         if self._run_notify_requested and not self._run_notified:
             return "This wake or monitor asked to tell the user; say what they need to know."
+        # Only the live runtime objective is an obligation. Agent personality,
+        # proactive defaults and profile prose do not make peer pings actionable.
+        if self.goal_status in {"", "active"} and self.goal.strip():
+            return "The active runtime goal still requires work; continue or settle that goal."
         return None
 
     async def _silent_end_is_a_failure(self) -> bool:
@@ -17554,6 +18085,8 @@ class Session:
             # publish) does the right thing without being taught a new field. A
             # deliberate stop is left exactly as it was.
             event = self._classify_cut_off(event)
+            if event.error or event.aborted or event.cut_off_cause:
+                event = event.model_copy(update={"quiet_accepted": False})
             # A held item banner decides whether this run's completion banner
             # is redundant, so it settles first (bounded; see the method).
             await self._settle_item_banners()
@@ -18135,6 +18668,8 @@ class Session:
         if callable(begin_message):
             begin_message()
         self._attention_outcome = None
+        self._quiet_accepted_generation = None
+        self._quiet_requested_by_body = False
         self._attention_run_token = str(uuid.uuid4())
         # This run has not yet said how it ended; a teardown that finds it so
         # must publish the outcome itself (see ``Session.dispose``).
@@ -18210,7 +18745,7 @@ class Session:
                 drain_steering_on_open=drain_steering_on_open,
                 opened_body=opened_body,
             )
-            await self._drain_continuation()
+            await self._settle_quiet_request()
         except ImportError as exc:
             # A lazy import against a HALF-REPLACED install is the one failure
             # whose cause the traceback cannot state: ``lop-update`` replaces
@@ -18638,12 +19173,16 @@ class Session:
     async def _open_pending_body_turn(self, *, selected: tuple[str, str] | None = None) -> None:
         """Claim this session's oldest pending BODY for the turn about to run.
 
-        ONLY a session the bridge runtime already admitted reaches here (owner
-        pinned, generation live, designated, consenting — all inside
-        ``bridge_runtime_for_session``), and only when a read-only check finds a
-        ``pending`` row for THIS session. Anything else leaves
-        ``transform_context`` unset, so an ordinary turn pays nothing and no
-        other session's row is ever served.
+        THE GATE IS THE ROW, NOT THE DESIGNATION (review round 2, MINOR D). The
+        bridge runtime is built for EVERY writer session of the enrolled owner, so
+        presence proves only owner/generation/consent — it no longer proves "this
+        is the chief-of-staff session". What keeps a body out of the wrong session
+        is ``pending_body_reservation_for(owner, session_id)``: reservations are
+        scoped per session, so a non-designated session finds no row and
+        ``open()`` returns False. That scoping is the invariant to preserve; the
+        earlier wording here asserted a designation check the construction no
+        longer performs, which is the same false-contract class as the ask-ledger
+        write fixed in round 1.
         """
 
         self._pending_body_turn = None
@@ -18725,6 +19264,59 @@ class Session:
             self._body_answered_turn = None
             self._body_turn_opening_tail = None
 
+    async def _settle_quiet_request(self) -> None:
+        """Commit silence only at the HOST boundary, after compaction/obligations.
+
+        The loop's candidate carries actual dispatch evidence but cannot know
+        what persistence/compaction will queue. Retain the logical generation
+        until every required continuation is done. No acceptance survives a
+        failed/aborted continuation, and no drain follows successful commitment.
+        """
+        while True:
+            await self._drain_continuation()
+            held = self._held_end
+            if (
+                held is None
+                or not held.quiet_requested
+                or held.error
+                or held.aborted
+                or held.cut_off_cause
+                or self._abort_requested
+                or self._disposed
+            ):
+                return
+            # _run_turn already settled the reservation in its finally. Its
+            # clean body candidate must retain the same held-person exception
+            # as the tool-time door (Q-R3-1), without admitting a person into
+            # that body's owner. Consumed-user triggers still win unconditionally.
+            refusal = (
+                await self._quiet_end_refusal(held_body_request=True)
+                if self._quiet_requested_by_body
+                else await self._quiet_end_refusal()
+            )
+            if self._abort_requested or self._disposed:
+                return
+            if refusal:
+                # Do not consume or copy queued input here: the ordinary
+                # steering-on-open path owns it exactly once. The correction is
+                # harness chrome, not a manufactured new person/notification.
+                from local_operator.compaction.cutpoint import RENDERED_INJECTION_KEY
+
+                self._held_end = None
+                correction = Message.user(
+                    "Harness quiet request was not accepted: " + refusal,
+                    provider_payload={RENDERED_INJECTION_KEY: True},
+                )
+                await self._run_turn([correction], drain_steering_on_open=True)
+                continue
+            # _quiet_end_refusal currently has no suspended await internally;
+            # after its awaited permission result, commit synchronously and
+            # return immediately to the pipeline's sole terminal flush. Any
+            # later input remains ordinary next-turn ingress, never drained here.
+            self._quiet_accepted_generation = self._logical_generation or held.generation
+            self._held_end = held.model_copy(update={"quiet_accepted": True})
+            return
+
     async def _flush_held_end(self) -> None:
         """Emit the boundary event the pipeline was holding, if any."""
         held = self._held_end
@@ -18763,6 +19355,14 @@ class Session:
         continuation runs ``_drain_continuation`` opens call this method
         directly and inherit the default — a continuation is not an opening.
         """
+        if self._quiet_accepted_generation is not None:
+            # Fail before touching initial/queued input or issuing inference.
+            # A real new turn must use pipeline admission, which resets the
+            # latch; an internal call cannot relabel itself as a new owner.
+            raise RuntimeError("Accepted quiet owner is terminal; new pipeline admission required.")
+        runtime = getattr(self, "bridge_runtime", None)
+        if runtime is not None:
+            runtime.bridge_input_presented = False
         if self._abort_requested and may_drop:
             # BORN PRE-ABORTED: do not open a turn at all. Running one spends a
             # real provider request — the loop builds and issues the call
@@ -19014,6 +19614,12 @@ class Session:
             # "the stream was iterated" the observable, so the pre-aborted path
             # leaves the flag False while every dispatched round-trip sets it.
             base_stream_fn = self._stream_fn
+            from local_operator.providers.turn_state import CodexTurnState
+
+            # This wrapper belongs to one attention turn, including tool rounds
+            # and provider retries. Helpers use the base stream directly and
+            # must not share the server's turn routing with unrelated work.
+            codex_turn_state = CodexTurnState()
 
             def marking_stream_fn(
                 request: ChatRequest, stream_signal: AbortSignal | None = None
@@ -19024,6 +19630,8 @@ class Session:
                     # frame. Refuse dispatch, rather than just stopping future
                     # transforms after these bytes have crossed the boundary.
                     raise RuntimeError("bridge body authority changed before dispatch")
+                request = request.model_copy()
+                request._codex_turn_state = codex_turn_state
                 inner = base_stream_fn(request, stream_signal)
                 # The context this request was built from, taken before any
                 # later boundary can extend it.
@@ -19039,6 +19647,19 @@ class Session:
                     if frame is not None and not frame.binding_intact():
                         raise RuntimeError("bridge body authority changed before dispatch")
                     self._attention_run_request_dispatched = True
+                    from local_operator.team_bridge.card_projection import (
+                        presented_bridge_ref,
+                    )
+
+                    runtime = getattr(self, "bridge_runtime", None)
+                    # Inspect final provider payloads only. Historical text and
+                    # model-origin lookalikes cannot carry this ephemeral proof.
+                    # Check each message so independently admitted A/B frames
+                    # cannot cancel each other's run-level presentation evidence.
+                    if runtime is not None and any(
+                        presented_bridge_ref([message]) is not None for message in request.messages
+                    ):
+                        runtime.bridge_input_presented = True
                     if carried:
                         # Past the refusal checks, the request is going out:
                         # any owed card it carries has now been read.
@@ -19293,6 +19914,9 @@ class Session:
                         # Held until _maybe_compact has had its say; the
                         # pipeline flushes it if no continuation is queued.
                         self._held_end = event
+                        self._quiet_requested_by_body = bool(
+                            event.quiet_requested and self._pending_body_turn is not None
+                        )
                     continue
                 # The worked-turn guard for the project guardrail: a turn that
                 # ran no tools cannot have moved a project's record. Both halves
@@ -19411,6 +20035,11 @@ class Session:
             await self._refresh_context_metadata()
             await self._maybe_compact()
         finally:
+            runtime = getattr(self, "bridge_runtime", None)
+            if runtime is not None:
+                # Clear before awaited cleanup, including error/cancellation:
+                # no later run may inherit a previous dispatch's requirement.
+                runtime.bridge_input_presented = False
             # LAST-RESORT durability. The persistence above runs only on the
             # normal path: an exception out of the loop (the
             # "model turn produced no assistant message" RuntimeError, a
@@ -19777,6 +20406,10 @@ class Session:
         sequential turns inside the same lock hold, capped at
         ``_MAX_CONTINUATIONS`` — the remainder is dropped with a warning
         notice so a thrashing recovery band cannot re-prompt forever."""
+        if self._quiet_accepted_generation is not None:
+            # Do not consume late work into an owner whose terminal boundary
+            # has committed. Ordinary ingress owns the next admission.
+            return
         continuations = 0
         while self._continuation_queue and not self._disposed:
             if self._abort_requested:
@@ -21868,6 +22501,15 @@ class Session:
                 "owner_device": binding.owner_device,
                 "owner_device_name": binding.owner_device_name,
                 "credential_id": binding.credential_id,
+                # NO DERIVED IDENTIFIER IS RECORDED HERE, deliberately: a digest
+                # or hash of the account label is dictionary-reversible (an
+                # email is low-entropy) and this row is copied to peers and moved
+                # between devices, so the pseudonym would be a linkable
+                # identifier for the operator's account on every replica — the
+                # leak class this notice's operator-only rule exists to stop. The
+                # transcript's fold uses ``credential_id`` above instead: a store
+                # fact, stable across restarts, not reversible, and different for
+                # two accounts.
             },
         )
         try:
@@ -22586,18 +23228,67 @@ class Session:
             logger.warning("deferred job delivery failed", exc_info=True)
 
     async def _reject_steering(self, command_id: str, reason: str) -> None:
-        """Terminally reject one accepted-but-undurable producer steer."""
+        """Terminally reject one accepted producer steer that reached no row.
+
+        THE NOTICE IS GATED ON THE SPOOL, and that is the half the durability
+        seam added. ``serving.ServingSessionHandle.steer`` now spools every
+        accepted steer before it acknowledges, so a steer rejected here — at
+        disposal, or by a failed journal append — is still HELD for the next
+        runtime (``process._run_owner_prompt`` replays it). Telling the user it
+        "was not saved" would then be false, and it is exactly the sentence this
+        change exists to retire. A steer that is in no spool (the TUI's own
+        handle, or a producer older than that seam) keeps the notice, which is
+        the honest answer for it.
+        """
         for handler in list(self._steering_rejection_handlers):
             try:
                 handler(command_id, reason)
             except Exception:  # noqa: BLE001 - one handler cannot hide rejection from others
                 logger.exception("steering rejection handler failed")
-        await self._emit(
-            _notice(_nt.steering_not_saved(command_id=command_id, reason=reason), kind="info")
-        )
+        if not await self._steer_is_spooled(command_id):
+            await self._emit(
+                _notice(_nt.steering_not_saved(command_id=command_id, reason=reason), kind="info")
+            )
         # Mobile projections optimistically count accepted steers. Rejection is
         # another terminal exit from that queue, even though it was not delivered.
         await self._emit(SteeringDeliveredEvent(count=1))
+
+    async def _steer_is_spooled(self, command_id: str) -> bool:
+        """Whether the successor spool still holds this owner message."""
+        directory = getattr(self._transcript, "directory", None)
+        if not command_id or directory is None:
+            return False
+        from local_operator.session.runtime.inbox import holds_owner_row
+        from local_operator.wakes.spooled import await_spool_write
+
+        try:
+            return bool(await await_spool_write(holds_owner_row, Path(directory), command_id))
+        except Exception:  # noqa: BLE001 - an unreadable spool reads as "not held"
+            logger.warning("could not read the spool for %s", command_id, exc_info=True)
+            return False
+
+    async def _forget_spooled_steer(self, command_id: str) -> None:
+        """Drop the successor-spooled copy of a steer this turn has just persisted.
+
+        The serving handle spools every accepted steer before it acknowledges
+        (``serving.ServingSessionHandle.steer``), because the steering queue dies
+        with the process. Once the row is in the transcript the spool copy is a
+        duplicate, and a successor that drained it would deliver the same message
+        twice — so it is removed here, at the one place that knows the append
+        succeeded. Never fatal: a removal lost to a crash is covered by the
+        successor's own dedupe (``has_admitted_command``, see
+        ``process._run_owner_prompt``), and bookkeeping must not fail the turn.
+        """
+        directory = getattr(self._transcript, "directory", None)
+        if not command_id or directory is None:
+            return
+        from local_operator.session.runtime.inbox import remove_owner_row
+        from local_operator.wakes.spooled import await_spool_write
+
+        try:
+            await await_spool_write(remove_owner_row, Path(directory), command_id)
+        except Exception:  # noqa: BLE001 - a stale spool row is deduped at replay
+            logger.warning("could not drop the spooled copy of steer %s", command_id, exc_info=True)
 
     async def _drain_steering(self) -> list[AgentMessage]:
         """Consume the steering queue. Steering messages are real injected
@@ -22657,6 +23348,10 @@ class Session:
                 # replayed history. Constant-time check on the transcript's id
                 # set, so the ordinary steer pays effectively nothing.
                 self._steering_producers.pop(queued_id, None)
+                if producer_command_id is not None:
+                    # Durable already, so any spooled copy is a duplicate — the
+                    # same rule the append path below applies.
+                    await self._forget_spooled_steer(producer_command_id)
                 messages.append(message)
                 continue
             try:
@@ -22672,6 +23367,9 @@ class Session:
                 continue
             finally:
                 self._steering_producers.pop(queued_id, None)
+            if producer_command_id is not None:
+                # The row is durable, so the successor's copy is a duplicate now.
+                await self._forget_spooled_steer(producer_command_id)
             # THE STEER DOOR'S AUDIO FORK, at the same point the prompt door
             # forks: strictly after THIS drain's own append made the row
             # durable (see ``_fork_audio_sidecars`` — a record for a row the
@@ -23542,6 +24240,17 @@ class Session:
             # Before the render below, so the bound reads the flushed history.
             await self._flush_stale_if_due(compaction_api, settings)
             rendered = self._render_history(messages)
+            # RADIENT SAVER (contract §7, agent review R-8): the contract says the
+            # trigger "reads provider usage (now reduced), so compaction fires
+            # later". It does not, here, ON PURPOSE: the gate takes
+            # ``max(provider_reported, current_bound)`` and this bound is over
+            # the UNREDUCED render, so with Saver on compaction still fires at
+            # the unreduced size. That is the conservative side for LO1: the
+            # session never depends on a reduction that a fail-open (a 402, an
+            # outage, a rejection) can withdraw on the very next turn, which
+            # would put an unreduced request over the window with no compaction
+            # behind it. Recorded under "Where the contract did not fit" in the
+            # PR; firing later is an LO2 decision once the badge can show it.
             current_bound = compaction_api.messages_tokens_upper_bound(rendered)
             if not _should_compact(
                 compaction_api,
@@ -23680,6 +24389,14 @@ class Session:
         # the later agent-end reduction, every frontend briefly paints `after`
         # from compaction_end and then rebounds to `before` at turn settlement.
         self._held_context_tokens = outcome.tokens_after
+        if self._quiet_accepted_generation is not None or (
+            self._held_end is not None and self._held_end.quiet_requested
+        ):
+            # A settled explicit quiet request supersedes stale length-based
+            # resume bookkeeping, not genuine user/goal continuations. Gate the
+            # producer: leaving this synthetic resume queued would revive it on
+            # the next unrelated input or extend the already accepted owner.
+            return
 
         # (5) Recovery band: only schedule a continuation when the pass
         # actually created headroom (an anti-thrash guard).
@@ -24103,15 +24820,33 @@ class Session:
         now_ms = int(time.time() * 1000)
         last_ms = self._last_provider_request_ms
         frames = _history_captured_browser_views(llm_history)
+        # RADIENT SAVER (contract §7): while Saver is reducing the request, both
+        # sweeps act only on messages at or after the chain's frontier. Rows
+        # before it are already frozen into epochs: blanking one saves nothing on
+        # the wire (the epoch replaces it) and costs a chain truncation and a
+        # re-upload. Both sweeps mutate the messages they are given in place, so
+        # handing them the tail restricts them without copying.
+        #
+        # The batch-flush ceiling is judged over THAT SAME TAIL (R-3): judged
+        # over the whole history, stale rows in the frozen prefix (which the
+        # sweep may not touch) kept the flush due at every tool boundary, and
+        # each due flush lifted the sent-prefix guard on the tail: one cache
+        # break per boundary instead of one per batch. Frame victims are
+        # computed over the tail too, so their indices are already the tail's.
+        # ``0`` (Saver off, bypassed, or not reducing) is main's behaviour
+        # exactly: the chain clears its frozen set whenever a request goes out
+        # unspliced (R-2).
+        frontier = self._saver_frontier(llm_history)
+        swept = llm_history[frontier:] if frontier else llm_history
         flush = False
         stale: Any = None
         compute: Any = getattr(compaction_api, "stale_set", None)
         due: Any = getattr(compaction_api, "stale_flush_due", None)
         if callable(compute) and callable(due):
-            stale = compute(llm_history, frames=frames)
+            stale = compute(swept, frames=frames)
             flush = bool(
                 due(
-                    llm_history,
+                    swept,
                     context_window=self.effective_model.context_window,
                     wire_bytes_trigger=self._wire_trigger_bytes(compaction_api, settings) or 0,
                     stale=stale,
@@ -24125,7 +24860,7 @@ class Session:
         # old signature.
         extra: dict[str, Any] = {"flush": True} if flush else {}
         try:
-            compaction_api.prune_tool_outputs(llm_history, now_ms, last_ms, **extra)
+            compaction_api.prune_tool_outputs(swept, now_ms, last_ms, **extra)
         except (ImportError, AttributeError):
             pass  # optional pruning hook absent; degrade to no pruning
         if frames:
@@ -24134,12 +24869,31 @@ class Session:
                 frame_extra["victims"] = stale.frames
             try:
                 compaction_api.prune_stale_frames_in_place(
-                    llm_history, now_ms=now_ms, last_activity_ms=last_ms, **frame_extra
+                    swept, now_ms=now_ms, last_activity_ms=last_ms, **frame_extra
                 )
             except (ImportError, AttributeError):
                 pass  # optional frame sweep absent; degrade to no sweep
         await self._journal_prunes(llm_history, pruned_before)
         return flush
+
+    def _saver_frontier(self, llm_history: Sequence[Message]) -> int:
+        """Where pruning may start while Radient Saver is on (contract §7), or 0.
+
+        The index just past the last ``llm_history`` message the stream's Saver
+        chain has frozen into an epoch. Matched by MESSAGE ID, not by the chain's
+        index: this sweep runs on ``_render_for_compaction`` (live-only
+        injections removed) while the chain counts the request's rows, so the
+        two lists are not index-aligned. ``0`` when Saver never ran for this
+        conversation or holds no epochs.
+        """
+        chain = getattr(self._stream_fn, "_saver_chain", None)
+        frozen = getattr(chain, "frozen_ids", None) if chain is not None else None
+        if not frozen:
+            return 0
+        for index in range(len(llm_history) - 1, -1, -1):
+            if llm_history[index].id in frozen:
+                return index + 1
+        return 0
 
     async def _flush_stale_if_due(self, compaction_api: Any, settings: Any) -> None:
         """Batch-flush stale outputs at a tool boundary when a ceiling is crossed.
@@ -30716,7 +31470,17 @@ class Session:
         # ``retry.*`` edit landing in the same tick, which is both arbitrary
         # and the thing that made its NEW_LAUNCH label a lie. They are all in
         # the LIVE ``providers`` section now, so the trigger matches the scope.
-        if any(key.startswith("retry.") or key.startswith("providers.") for key in changed):
+        # ``radient.saver.`` joins for the same reason: Radient Saver's gate is
+        # read per turn off this mapping (``saver.gate.configured_mode`` in
+        # ``SessionStreamFn._apply_saver``), so an operator switching it OFF from
+        # another process must stop the next upload, which is what its LIVE label
+        # promises (the cross-process probe in test_config_live.py proves it).
+        if any(
+            key.startswith("retry.")
+            or key.startswith("providers.")
+            or key.startswith("radient.saver.")
+            for key in changed
+        ):
             apply_settings = getattr(self._stream_fn, "apply_settings", None)
             if callable(apply_settings):
                 apply_settings(values)
@@ -31528,6 +32292,28 @@ class Session:
             self._disposal_task = task
         return task
 
+    async def _reap_session_process_groups(self) -> None:
+        """End process groups this session's bash calls left running.
+
+        A finished subagent child shares its parent's ``lop`` process, so the
+        process-exit reaper never fires for it; this runs on every disposal
+        (top-level or child). Strictly this session's own, non-detached,
+        ownership-proven groups (``group_reaper.reap_session_groups``). Threaded
+        and time-boxed because it may fork ``ps`` and waits out a SIGTERM grace;
+        dispose must never raise or stall on it.
+        """
+        from local_operator.tools import group_reaper
+
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(group_reaper.reap_session_groups, self._session_id),
+                timeout=10.0,
+            )
+        except asyncio.CancelledError:
+            raise
+        except BaseException:  # noqa: BLE001 — teardown must proceed
+            logger.debug("session process-group reap failed", exc_info=True)
+
     async def _dispose_impl(self) -> None:
         """Abort any in-flight turn, close the browser surface, cancel
         background work, dispose jobs and the wake scheduler, flush the
@@ -31901,13 +32687,18 @@ class Session:
             # substitute — delivering it onto the next turn — is exactly the wrong
             # attribution the queue exists to avoid. Before the hooks, so the event
             # stream is still live when it goes out.
-            await self._flush_queued_notices()
-            # The same canonical owner teardown serves agent and subagent
-            # sessions. Console cleanup is completed-only; quitting a turn must
-            # never terminate a live prompt, REPL or background PTY.
-            from local_operator.ui_console.backend import cleanup_owner_completed
+            try:
+                await self._flush_queued_notices()
+                # The same canonical owner teardown serves agent and subagent
+                # sessions. Console cleanup is completed-only; quitting a turn must
+                # never terminate a live prompt, REPL or background PTY.
+                from local_operator.ui_console.backend import cleanup_owner_completed
 
-            await cleanup_owner_completed(self._session_id, self._config_dir)
+                await cleanup_owner_completed(self._session_id, self._config_dir)
+            finally:
+                # Own finally: a fault in the notice flush or console cleanup must
+                # not leak this session's servers (the reap never raises itself).
+                await self._reap_session_process_groups()
             # ``finally``: host-owned resources must be released even when the
             # session's own teardown blew up part way through.
             for hook in self._dispose_hooks:

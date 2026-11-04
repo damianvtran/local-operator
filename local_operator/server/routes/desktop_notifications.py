@@ -27,6 +27,7 @@ what this route was doing.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import pathlib
@@ -38,7 +39,10 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validat
 
 from local_operator.i18n.keys import wire_errors_notifications as _wn
 from local_operator.i18n.messages import render
+from local_operator.notifications import bulk
 from local_operator.notifications import items as inbox
+from local_operator.notifications import reconcile
+from local_operator.notifications.store import NotificationStore
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.desktop_sessions import Input, errors, reply
@@ -120,6 +124,29 @@ class NotificationsQuery(BaseModel):
     limit: Annotated[int, Field(ge=1, le=inbox.LIST_LIMIT_MAX)] = inbox.LIST_LIMIT_DEFAULT
 
 
+def _bulk_scope(request: Request) -> str:
+    # Authorization already passed require_desktop. Persist a one-way binding,
+    # never the bearer: a rotated or differently scoped credential cannot reuse
+    # an old receipt, even if its token was copied to another client.
+    return hashlib.sha256(request.headers["authorization"].encode()).hexdigest()
+
+
+def _bulk_preview(
+    root: pathlib.Path, filters: dict[str, Any], scope: str, window: int
+) -> dict[str, Any]:
+    asks = []
+    if filters["kind"] != "updates" and filters["state"] != "dismissed":
+        asks = inbox.open_asks(root, lapsed_visible_ms=window)
+        if filters["session_id"]:
+            asks = [row for row in asks if row.get("session_id") == filters["session_id"]]
+    # Open asks are high priority and stay visible even after their read mark
+    # changes. Counting the index directly avoids formatting every waiting row.
+    selection = bulk.preview(
+        NotificationStore(root), filters, scope=scope, skipped_ask_count=len(asks), ask_rows=asks
+    )
+    return {"selection": selection, **inbox.counts(root)}
+
+
 @router.get("/v1/desktop/notifications", response_model=CRUDResponse[dict[str, Any]])
 async def list_notifications(
     request: Request,
@@ -130,11 +157,68 @@ async def list_notifications(
     cursor: Annotated[CursorQuery, Query(max_length=80)] = None,
     through_seq: Annotated[int | None, Query(ge=0)] = None,
     limit: Annotated[int, Query(ge=1, le=inbox.LIST_LIMIT_MAX)] = inbox.LIST_LIMIT_DEFAULT,
+    preview: bool = False,
+    include_ask_reads: bool = False,
+    kind: Literal["all", "asks", "updates"] | None = None,
+    bulk_priority: Literal["any", "high", "normal_up"] | None = None,
+    count_session_ids: Annotated[list[SessionID] | None, Query(max_length=50)] = None,
+    selection_token: Annotated[str | None, Query(pattern=r"^[A-Za-z0-9_-]{43}$")] = None,
+    excluded_ids: Annotated[list[ItemID] | None, Query(max_length=500)] = None,
 ):
     """One page of items, newest content first; ``waiting`` on the first page only."""
     async with errors(request, notifications_refusal):
         root = _config_dir(request)
         window = _lapsed_window(root)
+        if preview and selection_token is not None:
+            if set(request.query_params) - {"preview", "selection_token", "excluded_ids"}:
+                raise HTTPException(422, detail={"code": "selection_filter_conflict"})
+            try:
+                selection = await asyncio.to_thread(
+                    bulk.refresh,
+                    NotificationStore(root),
+                    selection_token,
+                    scope=_bulk_scope(request),
+                    excluded_ids=excluded_ids or (),
+                )
+            except bulk.SelectionError as error:
+                raise HTTPException(error.status, detail={"code": error.code}) from error
+            return reply({"selection": selection, **await asyncio.to_thread(inbox.counts, root)})
+        if (
+            selection_token is not None
+            or excluded_ids is not None
+            or (include_ask_reads and not preview)
+        ):
+            raise HTTPException(422, detail={"code": "selection_preview_required"})
+        if preview:
+            allowed = {
+                "preview",
+                "state",
+                "kind",
+                "bulk_priority",
+                "session_id",
+                "count_session_ids",
+                "include_ask_reads",
+            }
+            if set(request.query_params) - allowed:
+                raise HTTPException(422, detail={"code": "selection_filter_conflict"})
+            filters = {
+                "state": state,
+                "kind": kind or "all",
+                "bulk_priority": bulk_priority or "any",
+                "session_id": session_id,
+                "count_session_ids": list(dict.fromkeys(count_session_ids or [])),
+                "include_ask_reads": include_ask_reads,
+            }
+            try:
+                return reply(
+                    await asyncio.to_thread(
+                        _bulk_preview, root, filters, _bulk_scope(request), window
+                    )
+                )
+            except bulk.SelectionError as error:
+                raise HTTPException(error.status, detail={"code": error.code}) from error
+        if kind is not None or bulk_priority is not None or count_session_ids is not None:
+            raise HTTPException(422, detail={"code": "selection_preview_required"})
         page = await asyncio.to_thread(
             inbox.list_page,
             root,
@@ -252,10 +336,9 @@ class ItemToken(Input):
     revision: int = Field(ge=1)
 
 
-class NotificationsPatch(Input):
-    """``PATCH /v1/desktop/notifications``. Exactly one target (§5.2)."""
+class _NotificationTargets(Input):
+    """Common legacy targets; only desktop advertises receipt-backed selection."""
 
-    op: Literal["read", "unread", "dismiss", "undismiss"]
     #: 1..500, the catalogue's own page bound (``attention/seen``'s reasoning):
     #: one user gesture never has to be chunked.
     ids: list[ItemToken] | None = Field(default=None, min_length=1, max_length=500)
@@ -264,8 +347,7 @@ class NotificationsPatch(Input):
     all: bool = False
     observed: list[ItemToken] | None = Field(default=None, max_length=500)
 
-    @model_validator(mode="after")
-    def _one_target(self) -> "NotificationsPatch":
+    def _legacy_target(self) -> None:
         targets = sum((self.ids is not None, self.session_id is not None, bool(self.all)))
         if targets != 1:
             raise ValueError("name exactly one target: ids, session_id or all")
@@ -273,14 +355,136 @@ class NotificationsPatch(Input):
             raise ValueError("bulk writes require through_seq and observed tokens")
         if self.ids is not None and self.observed is not None:
             raise ValueError("observed tokens belong only to bulk targets")
+
+
+class NotificationsPatch(_NotificationTargets):
+    """Legacy schema shared with the relay, which has no selection capability."""
+
+    op: Literal["read", "unread", "dismiss", "undismiss"]
+
+    @model_validator(mode="after")
+    def _one_target(self) -> "NotificationsPatch":
+        self._legacy_target()
+        return self
+
+
+#: The largest ``through_seq`` SQLite can bind. ``seq`` is an INTEGER column, so
+#: a larger watermark cannot name any row; on the receipt path it would reach
+#: ``bulk.apply``'s ``seq<=?`` bind and raise ``OverflowError`` (a 500). Only the
+#: receipt path is bounded here: the legacy path clamps an oversized watermark to
+#: ``high_water`` and the relay shares its validator, so its answer stays as it was.
+_MAX_SEQ = 2**63 - 1
+
+
+class DesktopNotificationsPatch(_NotificationTargets):
+    """Additive desktop-only receipt contract, leaving relay validation intact.
+
+    ``op: "preview"`` is the BODY form of the selection recount: it never
+    mutates, never mints a receipt and never extends the handle's expiry. It
+    exists because the GET form carries ``excluded_ids`` in the URL, and 500
+    ask-shaped ids (~50 KB) exceed uvicorn/h11's 16 KiB incomplete-request-head
+    limit whenever the kernel delivers the head in more than one read, so the
+    request was refused with a 400 before the route ran (QA Q1 on #3103).
+    Raising that limit is a server-wide hardening knob shared by every route,
+    and lowering the cap would cut the 500-row page the UI needs; a body is not
+    subject to that limit. PATCH is used because it is the one body-carrying
+    method this path already serves, with the same token and exclusion fields.
+    """
+
+    op: Literal["read", "unread", "dismiss", "undismiss", "undo", "preview"]
+    selection_token: Annotated[str | None, Field(pattern=r"^[A-Za-z0-9_-]{43}$")] = None
+    operation_token: Annotated[str | None, Field(pattern=r"^[A-Za-z0-9_-]{43}$")] = None
+    receipt: bool = False
+    excluded_ids: list[ItemID] | None = Field(default=None, max_length=500)
+    reconcile_ids: list[ItemID] | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def _one_target(self) -> "DesktopNotificationsPatch":
+        if self.reconcile_ids is not None and not (
+            self.selection_token is not None or self.operation_token is not None or self.receipt
+        ):
+            raise ValueError("reconcile_ids requires a receipt-backed target")
+        if self.reconcile_ids is not None and self.op == "preview":
+            # The body recount returns before reconciliation is read, so the ids
+            # would be silently dropped; a recount mints no receipt either.
+            raise ValueError("reconcile_ids is not accepted on a recount")
+        if self.excluded_ids is not None and self.selection_token is None:
+            raise ValueError("excluded_ids requires selection_token")
+        if self.selection_token is not None or self.operation_token is not None:
+            if any(
+                (
+                    self.ids is not None,
+                    self.session_id is not None,
+                    self.all,
+                    self.observed is not None,
+                    self.through_seq is not None,
+                    self.receipt,
+                )
+            ):
+                raise ValueError("receipt targets cannot be combined with legacy targets")
+            if self.op == "undo":
+                if self.operation_token is None or self.selection_token is not None:
+                    raise ValueError("undo requires only operation_token")
+            elif self.selection_token is None or self.operation_token is not None:
+                raise ValueError("a mutation requires only selection_token")
+            return self
+        if self.op == "undo":
+            raise ValueError("undo requires operation_token")
+        if self.op == "preview":
+            raise ValueError("preview requires selection_token")
+        if self.receipt and (self.ids is None or self.through_seq is None):
+            raise ValueError("receipt requires ids and through_seq")
+        if self.receipt and self.through_seq is not None and self.through_seq > _MAX_SEQ:
+            raise ValueError("through_seq is out of range")
+        self._legacy_target()
         return self
 
 
 @router.patch("/v1/desktop/notifications", response_model=CRUDResponse[dict[str, Any]])
-async def patch_notifications(body: NotificationsPatch, request: Request):
+async def patch_notifications(body: DesktopNotificationsPatch, request: Request):
     """Read / unread / dismiss / undismiss, token-bound; open asks are never dismissed."""
     async with errors(request, notifications_refusal):
         root = _config_dir(request)
+        if body.selection_token is not None or body.operation_token is not None or body.receipt:
+            store = NotificationStore(root)
+            try:
+                if body.op == "preview":
+                    # The validator guarantees a selection_token and no other
+                    # target. Same answer shape as the GET recount.
+                    selection = await asyncio.to_thread(
+                        bulk.refresh,
+                        store,
+                        str(body.selection_token),
+                        scope=_bulk_scope(request),
+                        excluded_ids=body.excluded_ids or (),
+                    )
+                    counts = await asyncio.to_thread(inbox.counts, root)
+                    return reply({"selection": selection, **counts})
+                if body.operation_token is not None:
+                    result = await asyncio.to_thread(
+                        bulk.undo, store, body.operation_token, scope=_bulk_scope(request)
+                    )
+                else:
+                    result = await asyncio.to_thread(
+                        bulk.apply,
+                        store,
+                        body.op,
+                        scope=_bulk_scope(request),
+                        selection_token=body.selection_token,
+                        ids=[entry.model_dump() for entry in body.ids] if body.ids else None,
+                        through_seq=body.through_seq,
+                        excluded_ids=body.excluded_ids or (),
+                    )
+            except bulk.SelectionError as error:
+                raise HTTPException(error.status, detail={"code": error.code}) from error
+            answer = {**result, **await asyncio.to_thread(inbox.counts, root)}
+            if body.reconcile_ids is not None:
+                # Read only AFTER receipt auth/expiry/replay fencing. These ids
+                # never enter the mutation target or its idempotency identity.
+                answer["reconciliation"] = await asyncio.to_thread(
+                    reconcile.read_rows, store, body.reconcile_ids
+                )
+            return reply(answer)
         answer = await asyncio.to_thread(
             inbox.apply_patch,
             root,

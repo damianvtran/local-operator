@@ -1,0 +1,140 @@
+$ git rev-parse HEAD
+088699bfea0fc33d6b2f0748037dd7e89d85627d
+
+$ initial environment probe: .venv/bin/python ...
+/opt/homebrew/bin/bash: line 1: .venv/bin/python: No such file or directory
+Recovered using isolated HOME/config and available python3 with PYTHONPATH=$PWD; no dependencies installed.
+
+$ read_public_copy(path=en catalogue, key=cli.agents_help.agents)
+refused: the workspace is not a git checkout
+No workaround; target untracked files and context sidecars are outside its supported reads.
+
+$ final parity command (actual output)
+$ git rev-parse HEAD
+088699bfea0fc33d6b2f0748037dd7e89d85627d
+
+== cli.agents_help ==
+sha256 local_operator/i18n/catalogues/en/cli.agents_help.json: d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3
+sha256 local_operator/i18n/catalogues/es/cli.agents_help.json: ffe93eb7d0bc050572fcf3296213fc96cfe775f02ba8f8c2d1a7f590678fd122
+sha256 local_operator/i18n/catalogues/en/cli.agents_help.context.json: ab38c7dc51bcdc238f4911998e722b9bca65d1addea7c26dd27004e358f5c742
+status es: ?? local_operator/i18n/catalogues/es/cli.agents_help.json
+keys en/es/context: 21/21/21; ICU arguments: 0
+ordered_keys: PASS
+context_complete: PASS
+no_maxCells_declared: PASS
+parse/ICU/plural/printf/flags/code-spans: PASS
+
+== cli.teams_help ==
+sha256 local_operator/i18n/catalogues/en/cli.teams_help.json: 400637df631f938b7c144cf500a64bd5976f3157b25944d4ea3b701d79c69738
+sha256 local_operator/i18n/catalogues/es/cli.teams_help.json: 412c8119912d7672b4b7cdc7c3c97161b4dbd5d5c59db92a07d64ce284d37408
+sha256 local_operator/i18n/catalogues/en/cli.teams_help.context.json: 38cfbecb4f57e62b7bf73f00a241f40b74f212bbf82e6b0c5c61479b9288e0ae
+status es: ?? local_operator/i18n/catalogues/es/cli.teams_help.json
+keys en/es/context: 34/34/34; ICU arguments: 0
+ordered_keys: PASS
+context_complete: PASS
+no_maxCells_declared: PASS
+parse/ICU/plural/printf/flags/code-spans: PASS
+
+== cli.sessions_help ==
+sha256 local_operator/i18n/catalogues/en/cli.sessions_help.json: a250a185a780ab330187560c23dfe5e8d95956da24d417b22e1fc8bb121c2a6a
+sha256 local_operator/i18n/catalogues/es/cli.sessions_help.json: 27f21f00b13e15320ce3f989c7cca51738bf0951600a296dd5840a1e6376dd0b
+sha256 local_operator/i18n/catalogues/en/cli.sessions_help.context.json: 0b1f7b4fc04b7d033d9b2a495415b115bca204ce4b38f641aa42ead4bf7151bb
+status es: ?? local_operator/i18n/catalogues/es/cli.sessions_help.json
+keys en/es/context: 47/47/47; ICU arguments: 0
+ordered_keys: PASS
+context_complete: PASS
+no_maxCells_declared: PASS
+parse/ICU/plural/printf/flags/code-spans: PASS
+
+== cli.wake_help ==
+sha256 local_operator/i18n/catalogues/en/cli.wake_help.json: eff6775fe3ad39c228dd4c360b22011d9a95c887fa5b7839744f4b532a31ac8a
+sha256 local_operator/i18n/catalogues/es/cli.wake_help.json: 63ab3617615587d40be899aa854ff812958b2f9e5c0546cdf36c80ec04e0813c
+sha256 local_operator/i18n/catalogues/en/cli.wake_help.context.json: 5ba382086e76863859f02482a80ff17f41779b2ee8ca1fe495b9f76b4d8bc970
+status es: ?? local_operator/i18n/catalogues/es/cli.wake_help.json
+keys en/es/context: 17/17/17; ICU arguments: 1
+ordered_keys: PASS
+context_complete: PASS
+no_maxCells_declared: PASS
+parse/ICU/plural/printf/flags/code-spans: PASS
+
+== cli.mcp_help ==
+sha256 local_operator/i18n/catalogues/en/cli.mcp_help.json: 3f5e0f11b186501e6a708ffaba4af294ebdb663175722b58c24143dbf0173417
+sha256 local_operator/i18n/catalogues/es/cli.mcp_help.json: df7cc79adcf68a2e6f02154680b8cfeacf6ff767166fda73d71cacc7a0f93396
+sha256 local_operator/i18n/catalogues/en/cli.mcp_help.context.json: a8a42a82ada1777293a840e6d9280e855671394c0ee9cd5bd19cd8957d0f9bc0
+status es: ?? local_operator/i18n/catalogues/es/cli.mcp_help.json
+keys en/es/context: 19/19/19; ICU arguments: 0
+ordered_keys: PASS
+context_complete: PASS
+no_maxCells_declared: PASS
+parse/ICU/plural/printf/flags/code-spans: PASS
+
+== cli.global_help ==
+sha256 local_operator/i18n/catalogues/en/cli.global_help.json: c6e91dda89a9b792587f4ac9c594e188b78b8cd529fa1acf51ca783422c3152f
+sha256 local_operator/i18n/catalogues/es/cli.global_help.json: 4b13208f4837e6402de1509782ce7cf7ab8e02669742949a6c46aefac2f1abf4
+sha256 local_operator/i18n/catalogues/en/cli.global_help.context.json: 27388bf24447053aa71a26a5457827a419daf7046d3169101d28eda893b358c7
+status es: ?? local_operator/i18n/catalogues/es/cli.global_help.json
+keys en/es/context: 17/17/17; ICU arguments: 0
+ordered_keys: PASS
+context_complete: PASS
+no_maxCells_declared: PASS
+parse/ICU/plural/printf/flags/code-spans: PASS
+
+Total keys: 155
+Cross-key failures: []
+$ render cli.wake_help.create_message with max='4000'
+prompt automático que se entrega al activarse (como máximo 4000 caracteres)
+$ explicit ICU select-label negative control (not catalogue text)
+labels: [('action', ('start', 'stop', 'restart', 'other'))]
+source start: Start the daemon
+translated-label start: start el daemon
+$ cross-file terminology controls
+en starter: Install this packaged starter before editing it.
+shipped es starter: Instala esta plantilla incluida antes de editarla.
+shipped es headless: Solo en los arranques headless del REPL; el runtime de la TUI no lo lee.
+$ scratchpad destructive implementation (read-only source excerpts)
+--- local_operator/cli.py:5908-5914 ---
+5908|    if scratchpads_only and not args.dry_run:
+5909|        # CONTENT ONLY. The parent class and the record pass are not called at
+5910|        # all, which is the whole point: an operator can reclaim cache-shaped
+5911|        # data without deleting one transcript. ``only=()`` empties the record
+5912|        # candidate list; ``content_only`` re-applies exactly the pads the
+5913|        # preview named, so a pad that became eligible between preview and
+5914|        # confirmation is not taken unseen.
+--- local_operator/session/cleanup.py:1622-1643 ---
+1622|def remove_scratchpad_entry(
+1623|    target: Path,
+1624|    *,
+1625|    config_dir: Path | None,
+1626|    sessions_dir: Path,
+1627|) -> bool:
+1628|    """Remove ONE file or tree inside a session's scratchpad: the content phase's remover.
+1629|
+1630|    THE second — and last — removal shape in this module, reached only by the
+1631|    delegated class's content phase (``delegated_retention``), never by a
+1632|    user-facing command directly. Refuses unless :func:`_scratchpad_refusal`
+1633|    clears the target and logs the refusal at WARNING, like
+1634|    :func:`remove_session_dir`. The removal shape is decided by ``lstat``: a
+1635|    directory goes through :func:`_bounded_rmtree` (the shared widen-and-retry
+1636|    discipline — a 0555 rig-created tree inside a pad is a measured shape); a
+1637|    file goes through a plain ``os.unlink``. Files get no widen phase on
+1638|    purpose: the content pass removes a file only when shape+size+age passed,
+1639|    nothing here is mid-record (the session record is untouched by this
+1640|    pass), and a file that cannot be unlinked is left for a later pass to
+1641|    retry — so the failure raises to the caller, exactly as
+1642|    :func:`remove_session_dir`'s does, and is counted. Returns whether the
+1643|    entry was (or, in a dry run, would have been) removed; ``False`` for a
+
+$ targeted semantic evidence
+en/es tui.authoring.seed_not_installed: starter -> plantilla incluida (see checks output).
+en cli.sessions_help.cleanup_scratchpads_only.context note: use scratchpad rather than pad.
+local_operator/session/cleanup.py:1652-1656: directory -> _bounded_rmtree(target), file -> os.unlink(target).
+local_operator/session/catalog.py:445-446: Unseen interruption is a literal runtime label; Spanish catalogue preserves it.
+local_operator/cli.py:14851-14853 and 14880-14882: Team ID is a literal output label; Spanish catalogue preserves it.
+
+$ initial sha256 binding and final hash recheck
+d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3  local_operator/i18n/catalogues/en/cli.agents_help.json
+ffe93eb7d0bc050572fcf3296213fc96cfe775f02ba8f8c2d1a7f590678fd122  local_operator/i18n/catalogues/es/cli.agents_help.json
+ab38c7dc51bcdc238f4911998e722b9bca65d1addea7c26dd27004e358f5c742  local_operator/i18n/catalogues/en/cli.agents_help.context.json
+
+$ evidence-only writes
+record.json, report.md, audit.log, checks.py.txt

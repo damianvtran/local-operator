@@ -1,0 +1,11 @@
+{
+  "record_reference": "i18n/audits/evidence/ur/wire.errors.session_host/hura1/record.json",
+  "canonical_path_status": "planned_not_tracked",
+  "created_utc": "2026-10-31T18:06:00.965299+00:00",
+  "files": {
+    "record.json": "bf2cf1be18d354aa63adf5de3b995fadb2f9f1862ac38ada4113781419ac65f3",
+    "report.md": "c54194b99c1c4decc8432a91925ad0d8cc394ddaf2cc533c316a7a7872a40ed9",
+    "audit.log": "981fac3868f0dec381a4931a9ad645850964625428b0f4ec0146e51827a0017c",
+    "ledger-row.proposal.json": "f0d2be42402e1d180a99f1744ddb4c9527561b0035d8c70b3ee7e1d74d498569"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "cli.services_status.install_service": "cài đặt nó bằng `{command}`",
+  "cli.services_status.install_service_help": "Chỉ Linux: cài đặt và bật unit người dùng systemd cho serve",
+  "cli.services_status.restart_supervision_limit": "`lop services restart` có thể tải lại nó, nhưng không thể giám sát nó",
+  "cli.services_status.serve_install_isolated_home": "đã ghi tệp unit, nhưng HOME này không phải thư mục chính của trình quản lý systemd của người dùng; không có gì được bật",
+  "cli.services_status.serve_install_linux_only": "việc cài đặt dịch vụ serve cần systemd --user trên Linux; serve trên macOS không thay đổi",
+  "cli.services_status.serve_install_not_serving": "unit serve đã được bật nhưng không phục vụ tiến trình của chính nó: {error}",
+  "cli.services_status.serve_install_wrong_cgroup": "unit serve đã phản hồi, nhưng cgroup của PID không xác nhận local-operator-serve.service",
+  "cli.services_status.serve_linger_required": "linger đang tắt: chạy `loginctl enable-linger` để giữ unit này sau khi đăng xuất",
+  "cli.services_status.serve_unit_enabled": "đã bật dịch vụ người dùng systemd: {unit}",
+  "cli.services_status.serve_unit_written": "đã ghi tệp unit: {unit}",
+  "cli.services_status.supervised_by": "được giám sát bởi: {unit}",
+  "cli.services_status.supervision_unknown": "chưa rõ giám sát: không thể xác định unit systemd",
+  "cli.services_status.unsupervised_scope": "không được giám sát: {scope}; systemd không thể khởi động lại nó",
+  "cli.services_status.unsupervised_unknown": "không được giám sát: không tìm thấy unit systemd; systemd không thể khởi động lại nó"
+}

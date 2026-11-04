@@ -73,6 +73,7 @@ def _entry_owners() -> dict[str, str]:
     from local_operator.session.auto_tag import AUTO_TAG_FILENAME
     from local_operator.session.channel_spend import PENDING_SIDECAR_NAME
     from local_operator.session.creation import CREATED_AT_NAME
+    from local_operator.session.cwd_move import MOVE_MARKER_NAME
     from local_operator.session.placement import MESH_STAMP_NAME
     from local_operator.session.retention import (
         ATTACHMENT_SIDECAR_FILENAME,
@@ -132,6 +133,13 @@ def _entry_owners() -> dict[str, str]:
         # fact the published object states (sync.COPY_SET_NAMES's comment has
         # the full argument).
         PENDING_SIDECAR_NAME: "session.channel_spend",
+        # The session's own relocation intent (``session.cwd_move``): a request
+        # naming THIS device's absolute path and the pid that asked, so it is
+        # excluded from the copy set (``sync.EXCLUDED_ENTRIES`` has the argument —
+        # a destination that adopted it would retire into a directory that need not
+        # exist there). Listed here so the round-trip test builds it and proves it
+        # does NOT arrive.
+        MOVE_MARKER_NAME: "session.cwd_move",
         # The copy machinery's own two: a replica's cursor (never inside a session)
         # and the move's boot marker, which lives in a staging directory and is
         # deleted by the promote (a crash can leave one inside a promoted session,
@@ -278,6 +286,19 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/agent_avatar.py": (
+        3,
+        "``PNG_NAME``/``JPEG_NAME`` ('avatar.png', 'avatar.jpg'): an AGENT's picture, "
+        "stored in the agent's own directory (<config>/agents/<id>/), never an entry of "
+        "a session directory -- so no session copy carries it. The picture is also "
+        "deliberately local-only on the mesh: the definitions mirror keeps the local "
+        "row's own picture and a peer can neither set, replace nor clear it, and an "
+        "agent EXPORT drops it (``AgentRegistry._is_skipped_from_archive``). "
+        "``_DERIVATIVE_PREFIX`` ('.avatar.') names the picture's size-variant CACHE "
+        "(``.avatar.<sha12>.<size>.<ext>``), which lives beside that picture in the "
+        "agent directory, never in a session directory, and is skipped by clone, "
+        "export and import through the same ``.avatar.`` prefix rule",
+    ),
     "local_operator/notifications/store.py": (
         1,
         "notifications.db is the machine-wide config-root inbox, not a session "
@@ -292,7 +313,24 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "``ENV_LEASE_PATH`` is the nonsecret environment-variable NAME for that exact "
         "lease path, not a pathname or a translated/copyable session entry",
     ),
+    "local_operator/session/runtime/session_host.py": (
+        4,
+        "``HOST_DIRNAME`` ('run/session-host'), ``SOCKET_NAME`` ('host.sock'), ``LOCK_NAME`` "
+        "('host.lock'), ``INSTALL_LOCK_NAME`` ('install.lock'): the session host's rendezvous "
+        "under the DEVICE-LEVEL run root (<config>/run/session-host/), beside run/mobile and "
+        "run/host and never an entry of a session directory. A live unix socket and an flock "
+        "election belong to THIS machine's launchd-owned process; ``install.lock`` serialises "
+        "THIS machine's cold-start installer ladder (review R-4) and is meaningless anywhere "
+        "else. A copy that carried any of them would hand a peer a path to a host that does "
+        "not exist there.",
+    ),
     # ---- this install's CONFIG, LOG and STORE surface (outside ``sessions/``) ----
+    "local_operator/disk_pressure.py": (
+        1,
+        "``RECEIPT_DIRNAME`` ('disk-reclaim-receipts'): lives at the DEVICE-level "
+        "config root (<config>/disk-reclaim-receipts/), a sibling of sessions/ -- "
+        "never an entry of a session directory, so no session copy carries it.",
+    ),
     "local_operator/memory_maintenance.py": (
         3,
         "``LOCK_NAME``/``STAMP_NAME``/``ATTEMPT_NAME`` ('.compact.lock', '.compact.stamp', "
@@ -332,6 +370,16 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the store's own roots and log file (``~/.local-operator``, ``logs``, "
         "``runtime.log``, the agent home): the directories a session lives UNDER",
     ),
+    "local_operator/evaluation/team_bridge_moderation/fixture.py": (
+        1,
+        "``_FIXTURE_MARKER`` ('.team-bridge-moderation-fixture-v1'): a provenance file the "
+        "moderation eval writes at the TOP of a caller-supplied temporary world root (a "
+        "pytest ``tmp_path`` or the operator's ``--workdir``), so `teardown_fixture` can "
+        "prove the tree was built by ``build_fixture`` before deleting it. It lives in "
+        "that throwaway world, never in a session directory, and no session copy may "
+        "carry it: a peer device inheriting the marker could not rebuild the world "
+        "around it, and the eval's worlds are per-case scratch, not conversation state",
+    ),
     "local_operator/remote_compute/config.py": (
         2,
         "``_ALABEL_PREFIX`` ('xn--') and ``_LOOPBACK_NAME`` ('localhost') are "
@@ -353,6 +401,17 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "prefix that claims every ``credential_*`` ``what`` key for this module's family "
         "refusal. An in-memory dispatch key, not a filename or directory: nothing on "
         "disk is named by it, so it is not a session-directory entry",
+    ),
+    # THE PAIRING CARD'S OWN FAMILY PREFIX, the ``credential_`` rule one module over.
+    # ``pair_op`` registers ``pair_`` as a FAMILY so an unknown pairing operation
+    # beside the shapes this build can describe is refused instead of signed blind.
+    "local_operator/operator/pair_op.py": (
+        1,
+        "``_PAIR_PREFIX`` ('pair_'): the approval-op registry's record-key prefix for "
+        "the pairing card's family refusal. An in-memory ``what``-key dispatcher, not "
+        "a filename or directory — nothing on disk is named by it, and the card's "
+        "own sidecars live outside the session store, so it is not a "
+        "session-directory entry",
     ),
     # ---- the transcript compression pass's STORE-LEVEL names ----
     "local_operator/session/compression.py": (
@@ -1010,9 +1069,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "the default config dirname, as ``paths`` has it",
     ),
     "local_operator/browser_files.py": (
-        3,
-        "the browser download audit log, the downloads directory beside it, and the "
-        "fallback filename stem for a download with no name of its own",
+        4,
+        "the browser download audit log, the downloads directory beside it, the "
+        "recordings directory beside that (clips the agent asked for, never part of a "
+        "session's copy set), and the fallback filename stem for a download with no "
+        "name of its own",
     ),
     "local_operator/ui_browser/state.py": (
         2,

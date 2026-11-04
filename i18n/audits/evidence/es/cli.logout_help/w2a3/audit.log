@@ -1,0 +1,302 @@
+AUDIT LOG — es / cli.logout_help / w2a3 (round 1)
+============================================================
+
+Working directory: /Users/damian/lo-i18n-es
+Auditor: translation-auditor / es-w2-auditor-c / session 422494cdb264
+Model: kimi/k3.1-pro (self-reported; quota-failure fallback disclosed in record.json)
+
+=== provenance commands and actual output ===
+$ git rev-parse HEAD
+088699bfea0fc33d6b2f0748037dd7e89d85627d
+$ git branch --show-current
+feat/i18n-es-wire-runtime
+$ git status --short -- local_operator/i18n/catalogues/en local_operator/i18n/catalogues/es i18n/style-guides/es.md i18n/glossary.md
+?? local_operator/i18n/catalogues/es/cli.agents_help.json
+?? local_operator/i18n/catalogues/es/cli.aida_help.json
+?? local_operator/i18n/catalogues/es/cli.browser.json
+?? local_operator/i18n/catalogues/es/cli.browser_help.json
+?? local_operator/i18n/catalogues/es/cli.config_help.json
+?? local_operator/i18n/catalogues/es/cli.credential_help.json
+?? local_operator/i18n/catalogues/es/cli.exec_help.json
+?? local_operator/i18n/catalogues/es/cli.exec_runtime.json
+?? local_operator/i18n/catalogues/es/cli.exec_worker_help.json
+?? local_operator/i18n/catalogues/es/cli.global_help.json
+?? local_operator/i18n/catalogues/es/cli.hub_help.json
+?? local_operator/i18n/catalogues/es/cli.hub_shared_help.json
+?? local_operator/i18n/catalogues/es/cli.install_help.json
+?? local_operator/i18n/catalogues/es/cli.login_help.json
+?? local_operator/i18n/catalogues/es/cli.login_status_help.json
+?? local_operator/i18n/catalogues/es/cli.logout_help.json
+?? local_operator/i18n/catalogues/es/cli.mcp_help.json
+?? local_operator/i18n/catalogues/es/cli.memory_help.json
+?? local_operator/i18n/catalogues/es/cli.mobile_help.json
+?? local_operator/i18n/catalogues/es/cli.model_help.json
+?? local_operator/i18n/catalogues/es/cli.monitor_help.json
+?? local_operator/i18n/catalogues/es/cli.qwencloud_help.json
+?? local_operator/i18n/catalogues/es/cli.refresh_help.json
+?? local_operator/i18n/catalogues/es/cli.resume_click_help.json
+?? local_operator/i18n/catalogues/es/cli.send_help.json
+?? local_operator/i18n/catalogues/es/cli.serve_help.json
+?? local_operator/i18n/catalogues/es/cli.services_help.json
+?? local_operator/i18n/catalogues/es/cli.sessions_help.json
+?? local_operator/i18n/catalogues/es/cli.stop_help.json
+?? local_operator/i18n/catalogues/es/cli.teams_help.json
+?? local_operator/i18n/catalogues/es/cli.update_help.json
+?? local_operator/i18n/catalogues/es/cli.wake_help.json
+(The final checker repeats a batched query restricted to the 21 assigned targets.)
+
+$ shasum -a 256 i18n/style-guides/es.md i18n/glossary.md
+f2495debdf1615e75d83181107355e9853f2df858c5d3b797d97965a6718de44  i18n/style-guides/es.md
+ef07b446668778822d0ff4dcd7b380543456ddf7b08e060dce5818cb8fd6fdcd  i18n/glossary.md
+
+=== sanctioned reader probe ===
+$ cd /Users/damian/lo-i18n-es && lop exec --run-in "$PWD" "Use read_public_copy with path='local_operator/i18n/catalogues/es/cli.install_help.json' and [redacted] for '%(default)s'."
+The read was refused: `local_operator/i18n/catalogues/es/cli.install_help.json` is not committed at `HEAD`. Commit the public copy first, then retry reading `cli.install_help.keep`.
+(Sign-in-expired MCP warnings also appeared; they are unrelated to this catalogue audit.)
+
+=== machine checks: real command and complete real final output ===
+$ python3 -u "$LOCAL_OPERATOR_SCRATCHPAD/audit_es_w2a3.py"
+REVISION 088699bfea0fc33d6b2f0748037dd7e89d85627d
+
+NAMESPACE cli.aida_help
+  keys en=4 es=4 context=4 identical_key_sets=True
+  sha256 en=31e8445b6d8a9540ef524988b0fca3efca111362188f2ba41d6f857499828423
+  sha256 es=01485a1a9a0ab61af257e2e499af73e812810bb6c127d2e98b190d51a83e658f
+  sha256 context=9aea5c2fd1bc65c766b23c1f45116042ba0968b8242fae988695e922ae4083e9
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.config_help
+  keys en=9 es=9 context=9 identical_key_sets=True
+  sha256 en=97f625f6c6e26f8723e471569a0227f8e4da18518f2ab50e444fe93345ab2c8c
+  sha256 es=9fea13bbe605b62a0cb0e7c400a1ef0f3e4a891dc2f8f931b140a61181f0f5ed
+  sha256 context=f1bc05e555bc66b4690ffc87eac141afed72d5e211ca634a94aa2c846eb71c3b
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.credential_help
+  keys en=5 es=5 context=5 identical_key_sets=True
+  sha256 en=2757dc32f5d75d81f639bf689b6423ef64614ad1e91289bb67655e9681266418
+  sha256 es=e447a882aadb47b43e9e32acb81e4fdda4c967c061da3b2c4b88baceacf4036f
+  sha256 context=4014487d9a68ab8d2f99c308eeeed7cae0d93dd512fdf4f2465d6479ccb19d4d
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.hub_help
+  keys en=12 es=12 context=12 identical_key_sets=True
+  sha256 en=df519de9acb3cdd99fa5ae4cc0c5753b090c43b79f8870c543258c0f4fcdfec6
+  sha256 es=b28d2b692f21374217d5236241eb50c0d14873f7b82587e65debbe3e9697642e
+  sha256 context=5b948945d34b6fc0b08c0de5739f65dc86069c75796dfa2b48506f461aca3a36
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.hub_shared_help
+  keys en=12 es=12 context=12 identical_key_sets=True
+  sha256 en=5d40860430e36224bd77e95ff8298bd4b80f052f3d910a532947af6e78632b44
+  sha256 es=3c58b69e84425b2fcc95bcf141d9008a5d5a94a6bd0a4b8e1f15557b643750a9
+  sha256 context=02ae159c824a12eac802c42bc679565a23f427c7788b1aab969418650e2f7ca5
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.install_help
+  keys en=5 es=5 context=5 identical_key_sets=True
+  sha256 en=f242bfdbf8e80bd7f956ae361985180d7eb797dd4223da8423dc678b6fec61e7
+  sha256 es=0ed8f2171db06cebf1b8d45ace3ce456ca0d75ebfd40aa95e9b505d5f246e51f
+  sha256 context=9a9f1aaa7bda951f3b670d85e97b4fa07cbfc1f7b11ca6ee94a5c9b598588f6f
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.login_help
+  keys en=2 es=2 context=2 identical_key_sets=True
+  sha256 en=66ae3d9bfe16c2830bb0a78ef7b5c768ae194f9f4d972379bbe9d752b35502f7
+  sha256 es=c1b6b301968272653d7789d05d47332e05d3783ab0211ac8555b7b332d00cd57
+  sha256 context=7b43fb90bd2e4e2e47959c827d14278412a68e8bb154c8ec4958b360192773cb
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.login_status_help
+  keys en=2 es=2 context=2 identical_key_sets=True
+  sha256 en=17ef2629c0ad8a20c7e0a939d8fb38e594936e0c5dd47a3a1600300c1bf3f0f3
+  sha256 es=3fdb5fa84b7c2bb6672c7a5c185e41563d21e055bce2a40f097afde481f6724d
+  sha256 context=d64a6e4f6338cf33a83cde2651694babaacab4ef3cd4a6456faddeb5aecb3963
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.logout_help
+  keys en=2 es=2 context=2 identical_key_sets=True
+  sha256 en=2f479fa8e75a73f8897ec74902345bd36ca7117ae275dbf7a9bfbc98a830e453
+  sha256 es=33a0695662fc5bb1a0d3e836d2fd002da77c23a591f9c84c1a08ddf77aba23a9
+  sha256 context=5b9961b1ad0640c3ca8df6e819216255b2c9e04fa083f23907c982bbc7b794bb
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.memory_help
+  keys en=1 es=1 context=1 identical_key_sets=True
+  sha256 en=b3b63aeb9c1b27d3e686c2c6ab7378130577255ac5e999296a583cd5bf0c3a13
+  sha256 es=960c7b4d0bcf09293a67ecefda892bde07ea4659c513ea28eed95251fc536cf7
+  sha256 context=a87adc833d805ce45a031730c0ab13f9a875778aecc6d02c9163917387f33309
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.mobile_help
+  keys en=15 es=15 context=15 identical_key_sets=True
+  sha256 en=88681bae09adf93216e3e3b990652f7f57654a0438f6bc8c3cc5dd9ebb6eb947
+  sha256 es=133b59107b2004d69333cd7e295b8e49cf45482ecbc22ea33ce50950aa1e3d9a
+  sha256 context=26054791e1413cfba7d777561c410c8de6f47a76a1d5c3a8081fc8b2077c84e1
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.model_help
+  keys en=5 es=5 context=5 identical_key_sets=True
+  sha256 en=3b28b1bac7b2bd3d05f781585d27770940a12e549f3d8df456a107b61605008f
+  sha256 es=3a8b4d9959cb5bd45aa2587c53cb6d15f6a04c17d3ba66ccd0135419a94be440
+  sha256 context=4f93c0ff3982505e57437ea2110394cf492c3d945996b1aa228ad34e998c2d4a
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.monitor_help
+  keys en=6 es=6 context=6 identical_key_sets=True
+  sha256 en=766f6162643fec0c473dd4ffd822e5f1f9590e32caa2bc98793e9d65061161ab
+  sha256 es=9f525f7997e1ebc0bc13dc860ab51f386f52f7a4d11666536136be5efb89dcc5
+  sha256 context=35396c652554d037e336be0d49098a4d1c4cc8f2b09df1a60726f1d5c8af250c
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.qwencloud_help
+  keys en=5 es=5 context=5 identical_key_sets=True
+  sha256 en=6406143d97b406ca752a3fedecf2a69c22d635a5f2e1daf2fd2370ac393ff13b
+  sha256 es=04b18b24bcb7b77e66a15e5ba5ac76caceb2b702e858f9ecedfcd70853d2c984
+  sha256 context=c0c029dd547b4428657436d93ea40e60c9a8ebdbf60c0edb33e9e2020a13c1a1
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.refresh_help
+  keys en=7 es=7 context=7 identical_key_sets=True
+  sha256 en=b7168f0a70be23ed3637b1a91abef6dce1eb0d47a21b9fefc9d6104556be730f
+  sha256 es=a2f33655e34395ebb3327989fb51f3c9689d9969e0ce7d06068a2d9a4d996e1e
+  sha256 context=c0b43468aee48073a8ab2acff005664b65c7f62afa940bfa75b940d546832400
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.resume_click_help
+  keys en=1 es=1 context=1 identical_key_sets=True
+  sha256 en=36caf0cd5f4c9f8081281e41a57d0cb7adb573f944ce14f6d0e087e04535a73e
+  sha256 es=fb99c08e2c9de25b3dd3a647050c64356b3db48247b3cd08f714a22d7f267ce3
+  sha256 context=0e6267a4716ec57d8af400df68cca000fd42ba40ecf26c2dca8fe50c92f27e6c
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.send_help
+  keys en=7 es=7 context=7 identical_key_sets=True
+  sha256 en=ab7d3c4a3ac0696b935d613c2b7596c56dbd3b32a8fdabe29ff2bc3a93a1bfb9
+  sha256 es=f1278f1a52c76ab0614b91f703d4e7c617b2a594b3b322f834b610bf0cdaabee
+  sha256 context=cc8f29b50b4a841a2d88200c8c033b6da90e31f6d934c94e49cb92c7ac3ad193
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.serve_help
+  keys en=5 es=5 context=5 identical_key_sets=True
+  sha256 en=bd0b51271edc67c23978ca23688a9af1ef94a5623b0e86a5e3bbb418a5b243f0
+  sha256 es=71ff3f34bab59a2908341f5aabd01a3c4dd723c61f55bab4c1d30d701d789842
+  sha256 context=d569b1252c7965cc07456c6dba086187237c609a6d9f3021a206a07bf731c770
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.services_help
+  keys en=9 es=9 context=9 identical_key_sets=True
+  sha256 en=76aca39fb3bfe46be1d31fbfde2176ee525b7ac650961104894a894f71751935
+  sha256 es=008f3dfe5a93443c0de8d2ca0e07b208cb696693fc9850aa04ce00168c06009d
+  sha256 context=cc6104f97fbb0faac19232252063cdb7effaa2ffb4bbe2d4b65c2c749a8fe1e1
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.stop_help
+  keys en=9 es=9 context=9 identical_key_sets=True
+  sha256 en=ab8ae153e8749888e2426614c06d1ba672c70bad33d2a44bed46c00004f33d28
+  sha256 es=5007e8644710979b686f02e3ef1dddb03766c2aab7c5a78b66be88e34e3ab3b2
+  sha256 context=1f94c5fc9b839aa459fa989f3480be38641251c8e581d436703642c3f474105d
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+NAMESPACE cli.update_help
+  keys en=6 es=6 context=6 identical_key_sets=True
+  sha256 en=78da39b393ee77900255ddfdf92a17220a6eedbecba340e7d925a2fbdf01abf9
+  sha256 es=c4d2302ef3a4b10c36b234fff33e80905ae4855ba8734445a174d9a948537190
+  sha256 context=46dfc07c168a78805b437a4561dc0a8f47b005a48176b424b5aca47373cdaa5f
+  target_status=??
+  declared_maxCells=[]
+  mechanical_failures=[]
+
+TOTAL_KEYS 129; NAMESPACES 21; MECHANICAL_FAILURES 0
+
+DISCRIMINATING RENDER CONTROLS
+  start => Iniciar el demonio
+  stop => Detener el demonio
+  restart => Reiniciar el demonio
+  pause => pause el demonio
+  install %(default)s occurrence count = 1
+
+NEGATIVE CONTROLS (synthetic in memory; no repository writes)
+  translated select label detected = True
+  renamed ICU argument detected = True
+  dropped printf token detected = True
+  invalid es plural category detected = ['ICU plural selector tuples', 'non-es plural category: few']
+
+EXPANSION REVIEW (informational, not a clipping assertion)
+  cli.hub_help.link: 38->54 code points; ratio=1.42
+  cli.hub_help.link_set_expected_revision: 68->94 code points; ratio=1.38
+  cli.hub_help.links_json: 30->43 code points; ratio=1.43
+  cli.hub_help.status: 51->85 code points; ratio=1.67
+  cli.hub_help.status_json: 30->42 code points; ratio=1.40
+  cli.hub_shared_help.sync_dry_run: 43->59 code points; ratio=1.37
+  cli.login_help.login: 39->54 code points; ratio=1.38
+  cli.logout_help.provider: 22->34 code points; ratio=1.55
+  cli.memory_help.memory: 33->46 code points; ratio=1.39
+  cli.mobile_help.devices: 57->82 code points; ratio=1.44
+  cli.mobile_help.logs: 40->63 code points; ratio=1.57
+  cli.mobile_help.mobile: 49->71 code points; ratio=1.45
+  cli.mobile_help.serve: 27->37 code points; ratio=1.37
+  cli.mobile_help.status: 37->56 code points; ratio=1.51
+  cli.model_help.pid: 19->26 code points; ratio=1.37
+  cli.refresh_help.pid: 19->26 code points; ratio=1.37
+  cli.refresh_help.target: 71->104 code points; ratio=1.46
+  cli.send_help.pid: 19->26 code points; ratio=1.37
+  cli.stop_help.pid: 19->26 code points; ratio=1.37
+  cli.stop_help.stop: 51->73 code points; ratio=1.43
+  cli.stop_help.target: 71->104 code points; ratio=1.46
+  cli.stop_help.timeout: 59->82 code points; ratio=1.39
+  cli.update_help.check: 39->54 code points; ratio=1.38
+  strings_at_or_above_1.35=23; no maxCells is declared in any of the 129 context entries
+
+=== judgement notes ===
+[
+  "Read every English value, Spanish value and context entry side by side; judged accuracy, idiom, tú/infinitive register, behavioural promises, product-name policy and glossary consistency.",
+  "Used the repository runtime.py parser, not a regex or visual brace comparison, for message_arguments, plural_selectors and select-label signatures. Exact key sets and parser-derived argument tuples match; zero plural arguments occur.",
+  "Checked flags, backticked commands, choice tokens, identifiers, numeric literals and argparse printf tokens against the actual strings. No required source token was dropped or renamed.",
+  "No maxCells is declared in this namespace. Width was reviewed without a declared clipping budget; no rendered-fit or terminal-layout pass is claimed.",
+  "Spanish is LTR, so RTL-specific checks are not applicable. No value displayed as a redaction marker; the catalogue bytes themselves were read."
+]
+
+=== writes performed by this audit ===
+Only i18n/audits/evidence/es/cli.logout_help/w2a3/: record.json, report.md, audit.log.
+No catalogue, sidecar, ledger, allowance or generated file was edited; no git write command was run.

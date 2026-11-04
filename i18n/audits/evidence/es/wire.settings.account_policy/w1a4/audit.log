@@ -1,0 +1,37 @@
+AUDIT LOG — es / wire.settings.account_policy / w1a4 (round 3, delta only)
+================================================================
+
+Every command below ran in /Users/damian/lo-i18n-es; the output is this run's own.
+
+# namespace wire.settings.account_policy
+
+=== hashes, computed here (not copied from the delegation) ===
+  en  sha256 1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25
+  es  sha256 f5824ce686fde85dea395fbca9d91d7354bea0cd8a4a4bbe545dc9b1ed24d04c
+  ctx sha256 ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254
+
+=== byte-identity of everything OUTSIDE the delta ===
+$ python3 -  # diff current values against the values this auditor read at w1a3
+  keys on disk 14, keys read at w1a3 14
+  keys whose value differs: 2 -> ['wire.settings.account_policy.label', 'wire.settings.account_policy.legacy.help']
+  keys on disk not read at w1a3: []
+  unchanged keys: 12
+  => the differing set is exactly the declared delta
+
+=== label budget: truncate_cells(x, 29) must be a no-op on every label ===
+  fair            18 cells  'Reparto equitativo'  no-op=True
+  headroom        10 cells  'Más margen'  no-op=True
+  account_policy  19 cells  'Política de cuentas'  no-op=True
+  legacy          27 cells  'Elección heredada según uso'  no-op=True
+  reset_soonest   20 cells  'Reinicio más próximo'  no-op=True
+
+=== help strings against the detail band ===
+  account_policy es 423  en 376  whole@80=False  whole@100=False
+  legacy         es 339  en 275  whole@80=False  whole@100=False
+
+=== mechanical parity (failures only) ===
+  failures=0
+
+=== writes performed by this round ===
+Only this directory: record.json, report.md, audit.log. No catalogue, sidecar, ledger,
+allowance or generated file was edited; no git command was run.

@@ -6,7 +6,7 @@
 // read-only lapsed state after a deadline, and the rule that a refusal is rendered in
 // the DAEMON's own words rather than humanised here.
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AskCard } from "./components/ask-card";
 import type { AskQuestion, PendingAsk } from "./types";
 
@@ -491,6 +491,239 @@ describe("AskCard", () => {
 		expect(
 			(screen.getByRole("button", { name: /send answers/ }) as HTMLButtonElement).disabled,
 		).toBe(false);
+	});
+
+	describe("the Other row", () => {
+		/* The answer draft is persisted in localStorage under the ask id and every
+		   case here reuses `ask-1`; without this, one case's open `Other` seeds the
+		   next. */
+		beforeEach(() => localStorage.clear());
+		const otherRow = () => screen.getByRole("button", { name: /^Other/ });
+		const typeOther = (text: string) =>
+			fireEvent.change(screen.getByRole("textbox", { name: "ship the fix?" }), {
+				target: { value: text },
+			});
+		const send = () => screen.getByRole("button", { name: /send answer/ }) as HTMLButtonElement;
+		const sentAnswers = (answers: Record<string, string[]>) =>
+			expect(sendCommand).toHaveBeenCalledWith("s1", {
+				op: "ask_respond",
+				ask_id: "ask-1",
+				answers,
+			});
+
+		it("renders after the options on an option question, with no field until pressed", () => {
+			renderCard(ask());
+			const buttons = screen.getAllByRole("button").map((b) => b.textContent);
+			expect(buttons.indexOf("no")).toBeLessThan(buttons.findIndex((t) => /^Other/.test(t ?? "")));
+			expect(otherRow().getAttribute("aria-pressed")).toBe("false");
+			expect(screen.queryByRole("textbox")).toBeNull();
+		});
+
+		it("sends the typed text, not an index or a label", async () => {
+			renderCard(ask());
+			fireEvent.click(otherRow());
+			expect(otherRow().getAttribute("aria-pressed")).toBe("true");
+			typeOther("  typed answer ");
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["typed answer"] }));
+		});
+
+		it("takes focus only from the press, and re-focuses on a second press instead of deselecting", () => {
+			renderCard(ask());
+			fireEvent.click(otherRow());
+			const field = screen.getByRole("textbox", { name: "ship the fix?" });
+			expect(document.activeElement).toBe(field);
+			(field as HTMLInputElement).blur();
+			fireEvent.click(otherRow());
+			expect(otherRow().getAttribute("aria-pressed")).toBe("true");
+			expect(document.activeElement).toBe(field);
+		});
+
+		it("caps the field at the wire's 32768 characters", () => {
+			renderCard(ask());
+			fireEvent.click(otherRow());
+			expect(screen.getByRole("textbox", { name: "ship the fix?" }).getAttribute("maxlength")).toBe(
+				"32768",
+			);
+		});
+
+		it("is exclusive with the options in single-select", async () => {
+			renderCard(ask());
+			fireEvent.click(otherRow());
+			typeOther("typed answer");
+			fireEvent.click(screen.getByRole("button", { name: /^yes$/ }));
+			expect(otherRow().getAttribute("aria-pressed")).toBe("false");
+			expect(screen.queryByRole("textbox")).toBeNull();
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["yes"] }));
+		});
+
+		it("is additive and last in multi-select, and unticks when pressed again", async () => {
+			renderCard(ask({ questions: [question({ multi: true })] }));
+			fireEvent.click(otherRow());
+			typeOther("something else");
+			fireEvent.click(screen.getByRole("button", { name: /^yes$/ }));
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["yes", "something else"] }));
+
+			cleanup();
+			vi.clearAllMocks();
+			localStorage.clear();
+			renderCard(ask({ questions: [question({ multi: true })] }));
+			fireEvent.click(screen.getByRole("button", { name: /^yes$/ }));
+			fireEvent.click(otherRow());
+			typeOther("something else");
+			fireEvent.click(otherRow());
+			expect(otherRow().getAttribute("aria-pressed")).toBe("false");
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["yes"] }));
+		});
+
+		it("does not read a label typed into the field as a tick", async () => {
+			/* Typing `no, thanks` passes through `no`, an option's label: the cell then
+			   holds that string, which must not be read back as a tick of the option. */
+			renderCard(ask({ questions: [question({ multi: true })] }));
+			fireEvent.click(otherRow());
+			typeOther("no");
+			typeOther("no, thanks");
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["no, thanks"] }));
+		});
+
+		it("keeps the question incomplete while Other is open and empty", () => {
+			renderCard(ask());
+			fireEvent.click(otherRow());
+			expect(send().disabled).toBe(true);
+			typeOther("   ");
+			expect(send().disabled).toBe(true);
+			typeOther("now it is an answer");
+			expect(send().disabled).toBe(false);
+		});
+
+		it("does not grey send on a multi-select that already has a tick, and drops the blank marker", async () => {
+			/* Deliberately not the desktop's rule: here a tick IS a complete answer. */
+			renderCard(ask({ questions: [question({ multi: true })] }));
+			fireEvent.click(screen.getByRole("button", { name: /^yes$/ }));
+			fireEvent.click(otherRow());
+			expect(otherRow().getAttribute("aria-pressed")).toBe("true");
+			expect(send().disabled).toBe(false);
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["yes"] }));
+		});
+
+		it("still holds a multi-select open when the open Other is its only entry", () => {
+			renderCard(ask({ questions: [question({ multi: true })] }));
+			fireEvent.click(otherRow());
+			expect(send().disabled).toBe(true);
+		});
+
+		it("puts the 'choose any' hint above the option rows, not after the Other field", () => {
+			renderCard(ask({ questions: [question({ multi: true })] }));
+			const hint = screen.getByText("choose any that apply");
+			const first = screen.getByRole("button", { name: /^yes$/ });
+			expect(
+				hint.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING,
+			).toBeTruthy();
+		});
+
+		it("dismisses the keyboard on Enter without submitting, and leaves an IME's Enter alone", () => {
+			renderCard(ask());
+			fireEvent.click(otherRow());
+			const field = screen.getByRole("textbox", { name: "ship the fix?" }) as HTMLInputElement;
+			typeOther("half a thought");
+			expect(document.activeElement).toBe(field);
+
+			fireEvent.keyDown(field, { key: "Enter", isComposing: true });
+			expect(document.activeElement).toBe(field);
+
+			/* Safari confirms a composition with `isComposing` already false and the
+			   legacy `keyCode` 229 as the only signal. */
+			fireEvent.keyDown(field, { key: "Enter", keyCode: 229 });
+			expect(document.activeElement).toBe(field);
+
+			fireEvent.keyDown(field, { key: "Enter" });
+			expect(document.activeElement).not.toBe(field);
+			expect(sendCommand).not.toHaveBeenCalled();
+			expect(field.value).toBe("half a thought");
+		});
+
+		it("survives an unmount open and empty, without taking focus, and still sends no blank", async () => {
+			const first = renderCard(ask());
+			fireEvent.click(otherRow());
+			first.unmount();
+
+			renderCard(ask());
+			expect(otherRow().getAttribute("aria-pressed")).toBe("true");
+			expect(document.activeElement).not.toBe(screen.getByRole("textbox"));
+			expect(send().disabled).toBe(true);
+			typeOther("back again");
+			cleanup();
+			renderCard(ask());
+			expect((screen.getByRole("textbox") as HTMLInputElement).value).toBe("back again");
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["back again"] }));
+		});
+
+		it("never lets a blank or duplicate value reach the wire", async () => {
+			/* A draft written by something else (or an older build): the submit still
+			   trims, drops blanks and keeps the first of a duplicate. */
+			localStorage.setItem(
+				"lo-mobile-draft:ask:ask-1",
+				JSON.stringify({ answers: { q1: ["yes", "  ", "yes", " typed "] }, skipped: [] }),
+			);
+			renderCard(ask({ questions: [question({ multi: true })] }));
+			fireEvent.click(send());
+			await waitFor(() => sentAnswers({ q1: ["yes", "typed"] }));
+			for (const [, body] of vi.mocked(sendCommand).mock.calls) {
+				const answers = (body as { answers: Record<string, string[]> }).answers;
+				expect(Object.values(answers).flat()).not.toContain("");
+			}
+		});
+
+		it("is withheld on a secret question and on a free-text one", () => {
+			renderCard(ask({ questions: [question({ options: [], secret: true })] }));
+			expect(screen.getByPlaceholderText("paste secret").getAttribute("type")).toBe("password");
+			expect(screen.queryByRole("button", { name: /^Other/ })).toBeNull();
+			cleanup();
+			renderCard(ask({ questions: [question({ options: [] })] }));
+			expect(screen.queryByRole("button", { name: /^Other/ })).toBeNull();
+			expect(screen.getByPlaceholderText("your answer")).toBeTruthy();
+		});
+
+		it("is withheld on a secret question that has options", () => {
+			renderCard(ask({ questions: [question({ secret: true })] }));
+			expect(screen.getByRole("button", { name: /^yes$/ })).toBeTruthy();
+			expect(screen.queryByRole("button", { name: /^Other/ })).toBeNull();
+		});
+
+		it("receipts a mixed multi answer with ' · ' between the option and the typed text", () => {
+			renderCard(
+				ask({
+					status: "answered",
+					delivered: true,
+					questions: [
+						question({
+							multi: true,
+							options: [
+								{ label: "yes", description: "ship it" },
+								{ label: "no", description: "" },
+							],
+						}),
+					],
+					answers: { q1: ["yes", "typed, with a comma"] },
+				}),
+			);
+			expect(screen.getByText("yes — ship it · typed, with a comma")).toBeTruthy();
+		});
+
+		it("is disabled while the answer is in flight", async () => {
+			vi.mocked(sendCommand).mockImplementationOnce(() => new Promise(() => {}));
+			renderCard(ask());
+			fireEvent.click(otherRow());
+			typeOther("slow");
+			fireEvent.click(send());
+			await waitFor(() => expect((otherRow() as HTMLButtonElement).disabled).toBe(true));
+		});
 	});
 
 	it("marks the recommended option from the wire's own index", () => {

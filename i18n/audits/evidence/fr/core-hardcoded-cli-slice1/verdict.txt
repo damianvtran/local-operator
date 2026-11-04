@@ -1,0 +1,58 @@
+PASS
+BLOCKER 0, MAJOR 0, MINOR 0, NIT 0
+
+Locale: fr
+Scope: cli.failures (4), cli.group_help (10), tui.setup_cues (2). All 16 keys reviewed against English and context sidecars, after reading the French style guide and glossary.
+Auditor: i18n-auditor; session 94f0fe9d61c8.
+Actual audit model: openai/gpt-6.1-sol. Host-disclosed provider quota fallback: anthropic/claude-sonnet-5-5 -> anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol. French judgments and mechanical checks were performed after the final switch.
+Audit date: 2026-10-31.
+Independent: this session did not translate or edit the catalogues. No translation/MT service used.
+
+Actual execution results:
+1. Worktree .venv/bin/python unavailable; initial validator command exited 127. Used the existing primary repository interpreter without installing dependencies.
+2. From /Users/damian/local-operator/.worktrees/lit-translate:
+   PYTHONDONTWRITEBYTECODE=1 /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+   Actual stdout: check.py: catalogue checks: 0 problem(s)
+   Exit: 0.
+3. Independent JSON/string.Formatter probe verified all 16 source/context/target key sets and placeholder field names, format specifications and conversions. No plural/select constructs occur. Punctuation probe confirmed U+202F before every prose colon; the error wrapper is the deliberate exception explained below.
+4. rich.cells.cell_len on the actual rendered no-provider cue:
+   Connecter d’abord un compte IA : saisir /login radient
+   Measured: 54 cells; maxCells: 74; spare: 20 cells.
+
+Semantic/style review notes (not an execution log):
+- cli.failures.error_line: correct terse wrapper. The ASCII colons in “{prog}: erreur: {message}” deliberately retain the exact mandated source wrapper, with only “error” translated. The explicit wrapper instruction takes precedence over ordinary French prose spacing; no typography finding is raised for it.
+- cli.failures.required: accurate and idiomatic list-based wording. The fixed plural names a list of required arguments, as in English, and does not need a numeric ICU branch.
+- cli.failures.invalid_choice: accurate terse CLI wording; {value} and {choices} retain caller-supplied quotation marks. French infinitive “choisir” is appropriate here.
+- cli.failures.invalid_command: correct French adjective position; command-group and command values, including literal None, pass through unchanged.
+- cli.group_help.skills: natural infinitive list; “effectuer un pull” and “compétences” follow the style/glossary. Agent Hub remains a product term.
+- cli.group_help.skills_description: both safety guarantees retained, including refusal of any execute bit and never executing code on installation.
+- cli.group_help.tunnel: preserves Radient remote access and local runtime scope; runtime is explicitly kept English by the French guide.
+- cli.group_help.secret: preserves encryption, long-term retention and retrieval without prompting the user.
+- cli.group_help.network: preserves device pairing and control of sessions on those devices.
+- cli.group_help.disk: preserves measuring first and deleting only after verifying absence of risk; concise French rendering of disk-pressure tooling, without an added guarantee beyond the source.
+- cli.group_help.operator: preserves the key's authority to loosen an active approval gate.
+- cli.group_help.pair: preserves phone/operator-device pairing, signature authorization and the once-only qualification.
+- cli.group_help.search: accurate load-balanced search wording.
+- cli.group_help.fetch: accurate fetching with no visible browser window, matching the source context definition of headless.
+- tui.setup_cues.setup_placeholder: natural infinitive action cue; command interpolation unchanged.
+- tui.setup_cues.no_provider_cue: natural action-first French, including after initial lowercasing; command interpolation unchanged and width within budget.
+
+Typography and plural conclusions:
+All prose colons use U+202F and apostrophes use U+2019. No literal guillemets, exclamation/question marks or semicolons occur. Quoted choices are caller-owned tokens and must not be converted to guillemets. No numeric count occurs, so French CLDR one/many/other branches are not required.
+
+Width limitations:
+French here uses Latin script, not CJK or Devanagari. Rich counts U+202F and U+2019 as one cell each, matching the conventional terminal model I would trust for these strings. No physical terminal rendering or other-script width verification is claimed. No other assigned source key declares a maxCells/maxChars hint; longer help summaries may wrap, and no unsupported fixed-width limit was invented.
+
+Read-only boundary:
+No repository/catalogue edits or audit-ledger writes were made. The specific delegated task prohibits repository changes; the coordinator must retain/record this report through the repository audit process if required. This is one independent French pass, not evidence of a separately performed second independent high-visibility pass.
+
+Input SHA-256 (paths relative to worktree):
+local_operator/i18n/catalogues/en/cli.failures.json b2fdec07146b26ad5bb43f3acf3fa8f1ab527c4bf94d9065ca715c16be2eec44
+local_operator/i18n/catalogues/en/cli.failures.context.json b8f5e700bcdaf46fbeefc6c40269c7fe7cd4c91d7069f7f6dfcc8f813823b97d
+local_operator/i18n/catalogues/fr/cli.failures.json 785a5045e823b37fb196e2d8bb4105b4711868480c68a6da7ab83100521cc711
+local_operator/i18n/catalogues/en/cli.group_help.json b819cbdf879a9f0b6567f8a555eceec4d1c7210b8ddab9beb665e2c21e3b7e88
+local_operator/i18n/catalogues/en/cli.group_help.context.json 10ebe588116f331251985812a8a959aec5bf13cb2f9a57406aaadd01679b598c
+local_operator/i18n/catalogues/fr/cli.group_help.json 47dc0b3f476b54470f63268cb2f02151f126b0724d73c767e03cd5fbb38f09c5
+local_operator/i18n/catalogues/en/tui.setup_cues.json 9028bb3883b7f60d6fe7cdeac21495e307279ad3eb959b53bc62add500cedce0
+local_operator/i18n/catalogues/en/tui.setup_cues.context.json 96a124500c8c523e3d0e1fb5de9f8f486c4050441c81ea458b3d9f782cf4d6bc
+local_operator/i18n/catalogues/fr/tui.setup_cues.json c3dffa1f4b3c53bbe31b1919443ca8b9c727aaf7727e70bea583fc9c5032d2a4

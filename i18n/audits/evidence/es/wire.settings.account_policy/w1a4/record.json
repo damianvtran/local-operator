@@ -1,0 +1,162 @@
+{
+  "schema": 1,
+  "audit_id": "w1a4",
+  "audit_id_assigned_by": "es-w1-auditor-r2, audit-id fixed by the round-3 delegation",
+  "audit_round": 3,
+  "audit_kind": "independent_delta_audit",
+  "supersedes": "w1a3",
+  "supersedes_scope": "delta only — the keys this round re-judges are wire.settings.account_policy.label, wire.settings.account_policy.legacy.help; every other value in this file is byte-identical to what w1a3 read, and was diffed rather than re-read.",
+  "supersedes_delta_keys": [
+    "wire.settings.account_policy.label",
+    "wire.settings.account_policy.legacy.help"
+  ],
+  "supersedes_statement": "Supersedes w1a3 for these two namespaces ONLY on the delta keys named above. Every other key was compared against the values w1a3 read and is byte-identical; it is not re-read or re-judged here.",
+  "prior_rounds": {
+    "round_1": "w1a1",
+    "round_2": "w1a3",
+    "trail": [
+      "round 1 w1a1 — first independent audit of this namespace",
+      "round 2 w1a3 — final-byte audit; raised the findings this delta judges",
+      "round 3 w1a4 — this record; delta only, on bytes that moved after round 2"
+    ],
+    "wave_context": "wire.console w1a3 amendment A1 (NOT this namespace): that amendment established the same-code-control rule this delta applies — a width finding must first be run through the identical budget on the English source before it is called a translation defect."
+  },
+  "locale": "es",
+  "namespace": "wire.settings.account_policy",
+  "audit_date": "2026-10-29",
+  "audited_revision": "efcfbe812609cbf228c01f11a1fb622f3555b487",
+  "audited_revision_note": "local_operator/i18n/catalogues/es/wire.settings.account_policy.json is UNTRACKED at efcfbe812609cbf228c01f11a1fb622f3555b487 and changed after w1a3, so no committed blob and no retained copy of the old bytes exist. This record binds the CURRENT on-disk bytes sha256 f5824ce686fde85dea395fbca9d91d7354bea0cd8a4a4bbe545dc9b1ed24d04c.",
+  "key_count": {
+    "en": 14,
+    "target": 14,
+    "context": 14
+  },
+  "verdict": "passed",
+  "result": "clean-with-findings",
+  "verdict_reason": "Delta clean on these bytes. The differing keys are exactly the declared delta (2 of 14), and the other 12 are byte-identical to what w1a3 read. All 5 labels are truncate_cells(x, 29) no-ops. The long help strings are not whole at 80 or 100 columns (es 423, 339 cells), but neither is the English source (en 376, 275), so the delta does not change the class of that pre-existing source-side gap. No blocker, no major: 0 unresolved. 0 minor and 2 nit findings remain open, carried and unchanged: es-w1-C13, es-w1-C14.",
+  "finding_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 2
+  },
+  "unresolved_blocker_major": 0,
+  "closed_findings": [
+    {
+      "id": "es-w1-C06",
+      "status": "closed by measurement on these bytes",
+      "detail": "label 'Política de selección' -> 'Política de cuentas' (19 cells): keeps policy and accounts, closes round 1's es-w1-B01 and round 2's es-w1-C06."
+    }
+  ],
+  "open_findings": [
+    {
+      "id": "es-w1-C13",
+      "severity": "nit",
+      "status": "open — help string unchanged by the delta",
+      "keys": [
+        "wire.settings.account_policy.help"
+      ],
+      "detail": "'de una petición con éxito' is a calque of 'a successful request'; 'una petición correcta' is the idiomatic form.",
+      "remediation": "'Una concesión compatible y sin vencer de una petición correcta tiene prioridad…'"
+    },
+    {
+      "id": "es-w1-C14",
+      "severity": "nit",
+      "status": "open — help string unchanged by the delta",
+      "keys": [
+        "wire.settings.account_policy.help"
+      ],
+      "detail": "'concesión' renders 'lease' and is an unrecorded term decision: it appears once and nowhere else in the locale.",
+      "remediation": "Record it in the es guide when the account-routing copy is next touched."
+    }
+  ],
+  "accepted_trades": [],
+  "findings": [
+    {
+      "id": "es-w1-C13",
+      "severity": "nit",
+      "status": "open — help string unchanged by the delta",
+      "keys": [
+        "wire.settings.account_policy.help"
+      ],
+      "detail": "'de una petición con éxito' is a calque of 'a successful request'; 'una petición correcta' is the idiomatic form.",
+      "remediation": "'Una concesión compatible y sin vencer de una petición correcta tiene prioridad…'"
+    },
+    {
+      "id": "es-w1-C14",
+      "severity": "nit",
+      "status": "open — help string unchanged by the delta",
+      "keys": [
+        "wire.settings.account_policy.help"
+      ],
+      "detail": "'concesión' renders 'lease' and is an unrecorded term decision: it appears once and nowhere else in the locale.",
+      "remediation": "Record it in the es guide when the account-routing copy is next touched."
+    }
+  ],
+  "auditor": {
+    "agent": "translation-auditor (lopdev team delegation es-w1-auditor-r2)",
+    "session_or_instance": "session 3da6fd7a1b13",
+    "model": "radient/auto",
+    "model_note": "SELF-REPORTED from this session's model-switch notices; not independently observable. The request opened on anthropic/claude-sonnet-5-5; three provider-failure switches fired before any audit work and the whole audit ran under radient/auto, an auto-routing alias whose concrete backend the header does not identify. No pinned model claimed.",
+    "model_switch_notices": "anthropic/claude-sonnet-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto; each transition a session model-switch notice reading \"provider failure: quota\"",
+    "date": "2026-10-29",
+    "independence": "Independent in both directions: I did not translate this copy and this delta round audits bytes that changed after my own round-2 audit. I edited nothing while auditing - no catalogue, sidecar, ledger, allowance, generated file or git state; this round's only writes are its two evidence directories."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.account_policy.json",
+      "revision": "efcfbe812609cbf228c01f11a1fb622f3555b487",
+      "sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/wire.settings.account_policy.json",
+      "sha256": "f5824ce686fde85dea395fbca9d91d7354bea0cd8a4a4bbe545dc9b1ed24d04c",
+      "tracked": false,
+      "note": "untracked; sha256 of the on-disk bytes at this round"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.account_policy.context.json",
+      "revision": "efcfbe812609cbf228c01f11a1fb622f3555b487",
+      "sha256": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254"
+    }
+  },
+  "delta_judgements": {
+    "label": "PASS. 'Política de cuentas' (19 cells) keeps both nouns the English has - policy and accounts - and drops only 'selection', which the row's own enum values carry. This was es-w1-C06's proposal; the row sits in the 'failover' section with no account cue in the section title, so naming accounts on the label matters.",
+    "legacy.help": "PASS, and this is the part that makes the label change safe. EN names the setting three times inside this help; the Spanish now says 'política de cuentas' in all three, which is exactly the label, so a reader following the instruction can find the control. The three policy names quoted in the help still match their own labels byte-for-byte. true/false remain literal. 339 cells, no declared budget; the ratio to English is 1.23, inside the guide's 15-25% band."
+  },
+  "source_notes": [
+    {
+      "kind": "width",
+      "text": "The two long help strings (423 and 339 cells) are not whole at 80 or 100 columns, but neither is their English source (376 and 275): the Spanish does not change the class of the defect, so by the same rule this audit applied to console C01/C02 it is recorded as a source-side budget gap, not a Spanish finding. The sidecar pins no maxCells here."
+    }
+  ],
+  "check_output": {
+    "commands": [
+      "shasum -a 256 on en/es/context",
+      "python3 - # diff current values against the w1a3 reading",
+      "python3 - # truncate_cells(x,29) no-op over every label",
+      "python3 - # help widths vs the 78/98-cell detail band",
+      "python3 - # mechanical parity per key"
+    ],
+    "failures": "None. No detector fired on these bytes.",
+    "byte_identity": {
+      "keys_compared": 14,
+      "keys_differing": [
+        "wire.settings.account_policy.label",
+        "wire.settings.account_policy.legacy.help"
+      ],
+      "verdict": "exactly the declared delta"
+    }
+  },
+  "artifacts": [
+    "report.md",
+    "audit.log"
+  ],
+  "limitations": [
+    "LLM semantic judgement, not native-speaker attestation.",
+    "Delta audit: only the four changed values were re-judged; the rest were diffed, not re-read.",
+    "No rendered frame was captured; width verdicts come from the renderer's own truncate_cells.",
+    "The catalogue is untracked, so this binding is to on-disk bytes and can be invalidated by a further edit. No copy of the superseded bytes is retained anywhere.",
+    "The audit model is an auto-routing alias; the concrete backend is not identifiable."
+  ]
+}

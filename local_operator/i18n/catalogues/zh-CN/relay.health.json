@@ -6,6 +6,5 @@
   "relay.health.dropped_detail": "电脑目前无法连接到此会话，正在不断重试。连上之前，发送会立即失败，已输入的文字会保留在输入框中。",
   "relay.health.quiet_detail": "电脑上的此会话已停止响应——可能正忙或卡住了。发送可能显示失败，但会话重新响应后仍可能送达。重试也不会重复送达。",
   "relay.health.ended_detail": "历史记录已保留。发送消息或点击“恢复”，即可在主目录中重新打开。",
-  "relay.health.ended_send_failed": "此会话已结束，刚才未能重新打开。可以重试，或点击顶部的“已结束”，然后选择“恢复”。",
-  "relay.health.ended_placeholder": "发送即可在主目录中重新打开……"
+  "relay.health.ended_send_failed": "此会话已结束，刚才未能重新打开。可以重试，或点击顶部的“已结束”，然后选择“恢复”。"
 }

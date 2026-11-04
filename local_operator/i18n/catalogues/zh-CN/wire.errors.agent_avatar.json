@@ -1,0 +1,9 @@
+{
+  "wire.errors.agent_avatar.empty_body": "未发送图片。请将图片字节作为请求正文发送。",
+  "wire.errors.agent_avatar.imaging_unavailable": "头像功能需要图片支持，但尚未安装。请使用 images 扩展重新安装 Local Operator。",
+  "wire.errors.agent_avatar.not_found": "此智能体没有头像。",
+  "wire.errors.agent_avatar.too_large": "此图片过大。请选择小于 {limit_mib} MB 的图片。",
+  "wire.errors.agent_avatar.too_many_pixels": "此图片像素过多。请选择小于 {limit_mp} 百万像素的图片。",
+  "wire.errors.agent_avatar.undecodable": "无法读取此图片。文件可能已损坏。",
+  "wire.errors.agent_avatar.unsupported_type": "无法使用此图片。请选择 PNG、JPEG、WebP、GIF 或 HEIC 格式的图片。"
+}

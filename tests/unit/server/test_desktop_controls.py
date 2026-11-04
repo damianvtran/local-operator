@@ -694,6 +694,35 @@ async def test_settings_census_typed_writes_reset_and_secret_exclusion(desktop):
     assert fresh.config.values["private_secret"] == "never-serialize-me"
 
 
+async def test_settings_list_carries_the_registrys_search_vocabulary(desktop):
+    """``synonyms`` on the wire: present on every row, authored where curated.
+
+    Additive and optional by design - the desktop app and this server release
+    independently, so the field has to be a default ``[]`` that an older app
+    ignores and a newer app tolerates missing (the app's search falls back to
+    the visible copy). That is why this asserts on the FIELD and on the rows
+    the registry AUTHORED, never on an exact row key-set: the census test above
+    already owns "every setting is listed", and a row being added or retired
+    must not turn this projection test red.
+    """
+    client, app = desktop
+    _show_dynamic_sections(app)
+    rows = (await client.get("/v1/settings")).json()["result"]["settings"]
+    authored = {s.key: list(s.synonyms) for s in settings_io.SETTINGS if s.synonyms}
+    assert authored, "the registry authored no search vocabulary"
+
+    by_key = {row["key"]: row for row in rows}
+    for key, expected in authored.items():
+        assert by_key[key]["synonyms"] == expected, key
+
+    # The default half of the contract: a row the registry did not author comes
+    # back as an empty list, not null and not absent.
+    unauthored = [row for row in rows if row["key"] not in authored]
+    assert unauthored
+    assert all(row["synonyms"] == [] for row in unauthored)
+    assert all("synonyms" in row for row in rows)
+
+
 async def test_settings_refusals_use_the_envelope(desktop, monkeypatch):
     """The configuration surface's refusals carry the RFC §2.6 envelope.
 
@@ -819,6 +848,7 @@ async def test_settings_projection_carries_the_derived_hotkey_scope(desktop):
         "keymap.resume": "app",
         "keymap.quick_send": "desktop",
         "keymap.push_to_talk": "desktop",
+        "keymap.start_recording": "desktop",
     }
     assert not any(
         row["hotkey_scope"] for key, row in rows.items() if not key.startswith("keymap.")
@@ -874,10 +904,25 @@ async def test_settings_projection_carries_the_bounded_duration_contract(desktop
     ) == ("int", 1, 3650, "days")
     assert compression_age["default"] == 30
     assert compression_age["gated_by"] == "session.compression.enabled"
-    unit_rows = {hours["key"], scratchpad["key"], compression_age["key"]}
+    # The status command interval is the fourth: "every 30" is only renderable
+    # as seconds, and its bounds are the runner's own clamp.
+    command_interval = rows["display.composer.command_interval"]
+    assert (
+        command_interval["kind"],
+        command_interval["minimum"],
+        command_interval["maximum"],
+        command_interval["unit"],
+    ) == ("int", 5, 3600, "seconds")
+    assert command_interval["default"] == 30
+    unit_rows = {
+        hours["key"],
+        scratchpad["key"],
+        compression_age["key"],
+        command_interval["key"],
+    }
     assert all(
         row["unit"] == "" for key, row in rows.items() if key not in unit_rows
-    ), "only the hours, bytes and days rows declare a unit"
+    ), "only the hours, bytes, days and seconds rows declare a unit"
 
 
 async def test_a_patch_of_a_desktop_hotkey_dispatches_to_the_desktop_rules(desktop):

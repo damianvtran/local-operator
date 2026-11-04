@@ -1,0 +1,151 @@
+# w4a1 audit run — relay.shell
+run_at_utc: 2026-10-29T22:05:33Z
+host: damians-MacBook-Pro / macOS-27.0.1-arm64-arm-64bit-Mach-O
+python: 3.14.7
+repo: /Users/damian/lo-i18n-es   branch: feat/i18n-es-wire-errors
+HEAD: 183f7a0537e4cee42fd82f25a21fe52953a81bdf
+tracked_state (target):
+  ?? local_operator/i18n/catalogues/es/relay.shell.json
+tracked_state (en + sidecar):
+  clean
+
+## input hashes (sha256)
+  en          f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560  local_operator/i18n/catalogues/en/relay.shell.json
+  en.context  16746ecd1537006992935bb2aa88fe39c46700d9e0341e7aacd565e2366349ea  local_operator/i18n/catalogues/en/relay.shell.context.json
+  es          7bef1632cf4b503116725d409ebd3567213cf9322897672d188a3ff2ba602b7f  local_operator/i18n/catalogues/es/relay.shell.json
+
+## key parity: en=44 es=44 missing=[] extra=[]
+
+## ICU signature diff (en -> es)
+  relay.shell.usage.unit_credits
+    en: [('count', 'plural', None, ['one', 'other'])]
+    es: [('count', 'plural', None, ['one', 'many', 'other'])]
+  relay.shell.usage.unit_tokens
+    en: [('count', 'plural', None, ['one', 'other'])]
+    es: [('count', 'plural', None, ['one', 'many', 'other'])]
+  relay.shell.usage.unit_requests
+    en: [('count', 'plural', None, ['one', 'other'])]
+    es: [('count', 'plural', None, ['one', 'many', 'other'])]
+  signature_diffs=3
+
+## plural categories selectable in es: ['many', 'one', 'other']
+  categories_used_by_target: ['many', 'one', 'other']
+  illegal_for_es: []
+
+## rendered values
+  relay.shell.list.empty = 'no hay sesiones en ejecución'
+  relay.shell.list.connecting = 'conectando…'
+  relay.shell.list.section.active = 'Sesiones activas'
+  relay.shell.list.section.previous = 'Sesiones anteriores'
+  relay.shell.list.theme = 'elegir tema'
+  relay.shell.session.waiting = 'esperando la vista de la sesión…'
+  relay.shell.session.connecting = 'conectando con la sesión…'
+  relay.shell.usage.title = 'uso'
+  relay.shell.usage.cached = 'Uso en caché. No se solicita una actualización al proveedor.'
+  relay.shell.usage.unavailable = 'Uso en caché no disponible.'
+  relay.shell.usage.loading = 'Cargando el uso en caché…'
+  relay.shell.usage.empty = 'No hay datos de uso en caché.'
+  relay.shell.usage.last_known = 'Último uso conocido; el uso actual no está disponible.'
+  relay.shell.usage.continue = 'Cuota incluida agotada; continuará con créditos.'
+  relay.shell.usage.family_caps = 'Siguen aplicándose los límites por familia de modelos.'
+  relay.shell.usage.paid = 'Asignación de pago'
+  relay.shell.usage.family = 'Asignación por familia de modelos'
+  relay.shell.usage.included = 'Asignación incluida'
+  relay.shell.usage.amount_unknown = 'Importe no informado'
+  relay.shell.usage.blocked = 'Gasto no disponible'
+  relay.shell.usage.eligibility_unknown = 'Elegibilidad para gasto desconocida'
+  relay.shell.usage.unlimited = 'Asignación de pago ilimitada'
+  relay.shell.usage.window_five = '5 horas'
+  relay.shell.usage.window_week = '7 días'
+  relay.shell.usage.window_month = 'Mensual'
+  relay.shell.usage.window_lifetime = 'Total'
+  relay.shell.usage.window_unknown = 'Ventana desconocida'
+  relay.shell.usage.command = 'Mostrar el uso del proveedor en caché'
+  relay.shell.usage.stale = 'Puede estar desactualizado.'
+  relay.shell.usage.unit_usd = 'USD'
+
+## plural branches rendered (unit labels, count -> text)
+  relay.shell.usage.unit_credits: {0: 'créditos', 1: 'crédito', 2: 'créditos', 21: 'créditos', 1000000: 'de créditos', 1500000: 'créditos'}
+  relay.shell.usage.unit_tokens: {0: 'tokens', 1: 'token', 2: 'tokens', 21: 'tokens', 1000000: 'de tokens', 1500000: 'tokens'}
+  relay.shell.usage.unit_requests: {0: 'solicitudes', 1: 'solicitud', 2: 'solicitudes', 21: 'solicitudes', 1000000: 'de solicitudes', 1500000: 'solicitudes'}
+
+## composed rows, exactly usage-sheet.tsx's path
+  credits  remaining         0 -> 0 créditos restantes
+  credits  remaining         1 -> 1 crédito restantes
+  credits  remaining         2 -> 2 créditos restantes
+  credits  remaining        21 -> 21 créditos restantes
+  credits  remaining   1000000 -> 1.000.000 de créditos restantes
+  credits  remaining   1500000 -> 1.500.000 créditos restantes
+  credits  used              0 -> 0 créditos usados
+  credits  used              1 -> 1 crédito usados
+  credits  used              2 -> 2 créditos usados
+  credits  used             21 -> 21 créditos usados
+  credits  used        1000000 -> 1.000.000 de créditos usados
+  credits  used        1500000 -> 1.500.000 créditos usados
+  tokens   remaining         0 -> 0 tokens restantes
+  tokens   remaining         1 -> 1 token restantes
+  tokens   remaining         2 -> 2 tokens restantes
+  tokens   remaining        21 -> 21 tokens restantes
+  tokens   remaining   1000000 -> 1.000.000 de tokens restantes
+  tokens   remaining   1500000 -> 1.500.000 tokens restantes
+  tokens   used              0 -> 0 tokens usados
+  tokens   used              1 -> 1 token usados
+  tokens   used              2 -> 2 tokens usados
+  tokens   used             21 -> 21 tokens usados
+  tokens   used        1000000 -> 1.000.000 de tokens usados
+  tokens   used        1500000 -> 1.500.000 tokens usados
+  requests remaining         0 -> 0 solicitudes restantes
+  requests remaining         1 -> 1 solicitud restantes
+  requests remaining         2 -> 2 solicitudes restantes
+  requests remaining        21 -> 21 solicitudes restantes
+  requests remaining   1000000 -> 1.000.000 de solicitudes restantes
+  requests remaining   1500000 -> 1.500.000 solicitudes restantes
+  requests used              0 -> 0 solicitudes usados
+  requests used              1 -> 1 solicitud usados
+  requests used              2 -> 2 solicitudes usados
+  requests used             21 -> 21 solicitudes usados
+  requests used        1000000 -> 1.000.000 de solicitudes usados
+  requests used        1500000 -> 1.500.000 solicitudes usados
+  usd      remaining         0 -> 0 USD restantes
+  usd      remaining         1 -> 1 USD restantes
+  usd      remaining         2 -> 2 USD restantes
+  usd      remaining        21 -> 21 USD restantes
+  usd      remaining   1000000 -> 1.000.000 USD restantes
+  usd      remaining   1500000 -> 1.500.000 USD restantes
+  usd      used              0 -> 0 USD usados
+  usd      used              1 -> 1 USD usados
+  usd      used              2 -> 2 USD usados
+  usd      used             21 -> 21 USD usados
+  usd      used        1000000 -> 1.000.000 USD usados
+  usd      used        1500000 -> 1.500.000 USD usados
+  percent  remaining         0 -> 0 % restante
+  percent  remaining         1 -> 1 % restante
+  percent  remaining         2 -> 2 % restante
+  percent  remaining        21 -> 21 % restante
+  percent  remaining   1000000 -> 1.000.000 % restante
+  percent  remaining   1500000 -> 1.500.000 % restante
+  percent  used              0 -> 0 % usado
+  percent  used              1 -> 1 % usado
+  percent  used              2 -> 2 % usado
+  percent  used             21 -> 21 % usado
+  percent  used        1000000 -> 1.000.000 % usado
+  percent  used        1500000 -> 1.500.000 % usado
+  unknown  remaining         0 -> 0 restantes
+  unknown  remaining         1 -> 1 restantes
+  unknown  remaining         2 -> 2 restantes
+  unknown  remaining        21 -> 21 restantes
+  unknown  remaining   1000000 -> 1.000.000 restantes
+  unknown  remaining   1500000 -> 1.500.000 restantes
+  unknown  used              0 -> 0 usados
+  unknown  used              1 -> 1 usados
+  unknown  used              2 -> 2 usados
+  unknown  used             21 -> 21 usados
+  unknown  used        1000000 -> 1.000.000 usados
+  unknown  used        1500000 -> 1.500.000 usados
+
+## timestamp keys
+  reset = Se restablece el 11 oct 2026 a las 9:00
+  as_of = A fecha de 11 oct 2026, 9:00.
+  fraction = 29 % usado
+  row = L · W: V
+  row_family = L (fam) · W: V

@@ -142,6 +142,23 @@ class CRUDResponse(BaseModel, Generic[T]):
     result: Optional[T] = None
 
 
+class AgentAvatar(BaseModel):
+    """An agent's stored profile picture, as listings carry it.
+
+    Mirrors ``local_operator.agents.AgentAvatarMeta`` (the ``agent.yml`` block).
+    A client builds the image URL as ``/v1/agents/{id}/avatar?v=<sha256>`` and
+    never fetches per row just to learn whether a picture exists.
+    """
+
+    sha256: str = Field(..., description="Hex SHA-256 of the stored file; also its ETag.")
+    mime: str = Field(..., description="image/png, or image/jpeg for the over-cap fallback.")
+    bytes: int = Field(..., description="Stored file size in bytes.")
+    updated_at: datetime = Field(..., description="When the picture was last set (UTC).")
+    filename: Optional[str] = Field(
+        None, description="Stored basename: avatar.png, or avatar.jpg for the over-cap fallback."
+    )
+
+
 class Agent(BaseModel):
     """Representation of an Agent."""
 
@@ -164,6 +181,13 @@ class Agent(BaseModel):
             )
         ),
     ] = ""
+    #: The profile picture block, or ``null`` when the agent has none. A plain
+    #: default for ``label``'s pyright reason, with the ``Annotated`` description
+    #: so the served OpenAPI documents it.
+    avatar: Annotated[
+        Optional[AgentAvatar],
+        Field(description="Profile picture metadata, or null when unset."),
+    ] = None
     created_date: datetime = Field(..., description="The date when the agent was created")
     version: str = Field(..., description="The version of the agent")
     security_prompt: str = Field(

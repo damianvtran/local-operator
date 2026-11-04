@@ -137,6 +137,7 @@ class PendingTurn:
         self._drifted = False
         self._drift_reason = "admission_drift"
         self._injected: InjectedBody | None = None
+        self._presentation_ref: Any = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -237,6 +238,15 @@ class PendingTurn:
             self._release("binding_drift")
             return False
 
+        from .types import ConversationFeedRef
+
+        self._presentation_ref = ConversationFeedRef(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            conversation_seq=int(row["conversation_seq"]),
+            mention=bool(row["mention"]),
+            sender_kind=fetched.sender_kind if fetched.sender_kind in ("human", "agent") else None,
+        ).validated()
         reservation_id = f"{conversation_id}/{message_id}"
         try:
             pending = PendingBody(
@@ -280,9 +290,42 @@ class PendingTurn:
         text = self.for_call()
         if text is None:
             return messages
+        from .card_projection import mark_admitted_frame
         from .request_body import CustomFrameInjection
 
-        return CustomFrameInjection.append(messages, text, message_id=self._frame_message_id())
+        shaped = CustomFrameInjection.append(messages, text, message_id=self._frame_message_id())
+        if self._presentation_ref is not None:
+            mark_admitted_frame(shaped[-1], self._presentation_ref, self._card_admission_intact)
+        # This native frame contains screened source metadata AND body. Raw
+        # journal cards never borrow its admission by repeating the same ids;
+        # they remain content-free markers even in this very request.
+        return shaped
+
+    def _card_admission_intact(self) -> bool:
+        """Reused ephemeral copies cannot outlive their exact admission lease."""
+        if not self.binding_intact() or self._drifted or self._injected is None:
+            return False
+        if self._conversation_id is None or self._message_id is None:
+            return False
+        try:
+            row = self._store.body_reservation(self._owner, self._conversation_id, self._message_id)
+            facts = self._store.per_call_admission_state(self._owner, self._session_id)
+            return bool(
+                row
+                and self._facts_hold(facts)
+                and row["state"] == "claimed"
+                and row["claim_token"] == self._claim_token
+                and row["turn_token"] == self._turn_token
+                and self._injected.authority.admission_digest
+                == admission_digest(
+                    _owner_key(self._owner),
+                    str(row["screening_fingerprint"]),
+                    str(row["body_sha256"]),
+                    f"{self._conversation_id}/{self._message_id}",
+                )
+            )
+        except (StoreRefused, KeyError, TypeError, ValueError):
+            return False
 
     def _frame_message_id(self) -> str:
         """A stable, host-owned id for the injected row.

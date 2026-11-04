@@ -1,0 +1,148 @@
+{
+ "schema": 1,
+ "audit_id": "w1a1",
+ "audit_round": 1,
+ "locale": "es",
+ "namespace": "wire.settings.hub_defaults",
+ "audit_date": "2026-10-29",
+ "audited_revision": "efcfbe812609cbf228c01f11a1fb622f3555b487",
+ "audited_revision_note": "The es catalogue is UNTRACKED at this revision — `git status --porcelain` reports `?? <path>`, so HEAD cannot pin the audited bytes. The exact on-disk sha256 is recorded in input_hashes.target.sha256 and is re-hashed by the bundled run-checks.sh.",
+ "key_count": {
+  "en": 9,
+  "target": 9,
+  "context": 9
+ },
+ "verdict": "failed",
+ "result": "failed — 0 blocker, 2 major, 2 minor, 2 nit",
+ "verdict_reason": "Semantics, register and placeholder integrity are clean: all 9 keys say what the English says, the ceiling semantics of the agents switch survive ('pausa las actualizaciones de TODOS los vínculos'), the teams help never reads as a master switch, and the deprecated hub model override is still 'ignorada', not removed. The namespace fails on width, not on meaning: the agents row label is cut to 'Autoactualizar vínculos de ag…' by an unconditional 29-cell budget the sidecar does not declare, and the agents help is 113 cells on a detail line that truncates at 98 rather than wrapping, so the ON half of the sentence is lost.",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team)",
+  "session_or_instance": "4e01ec3a1b46",
+  "model": "radient/auto (self-reported)",
+  "model_note": "The session header names anthropic/claude-sonnet-5-5 as the primary model. Three provider-failure switches were injected into this session before and during the audit: '[model switch] You are now running as openai/gpt-6-astra (was anthropic/claude-sonnet-5-5). Reason: provider failure: quota HTTP 429', then '[model switch] ... kimi/k3.1-pro ... same reason', then '[model switch] You are now running as radient/auto (was anthropic/claude-sonnet-5-5). Reason: provider failure: quota HTTP 429'. Everything judged below was produced under radient/auto — a disclosed fallback, not the pinned primary.",
+  "date": "2026-10-29",
+  "independence": "I authored none of this copy and repaired none of it. Every es value in this namespace was written by a different translator agent in an earlier session. I read the en source, the en context sidecar and the es candidate myself, and derived every finding from those bytes plus the renderer source at the audited revision. I edited no catalogue, sidecar, ledger, allowance or generated file; my only writes are this evidence directory."
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/wire.settings.hub_defaults.json",
+   "revision": "efcfbe812609cbf228c01f11a1fb622f3555b487",
+   "sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/es/wire.settings.hub_defaults.json",
+   "tracked": false,
+   "sha256": "87eec88988076fbd22637d497f9117009d7028c64b6de00bd6172763573a90c0"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/wire.settings.hub_defaults.context.json",
+   "sha256": "a337e7394f3856476044f9accdb8daeb7a864a9a8ecfe0c579ec97ec646712ba"
+  }
+ },
+ "findings": [
+  {
+   "id": "es-w1-A01",
+   "severity": "major",
+   "status": "open",
+   "keys": [
+    "wire.settings.hub_defaults.agents.label"
+   ],
+   "detail": "48 cells. The TUI settings list truncates EVERY row label to _LABEL_BUDGET = 29 cells before painting (settings_view.py:434 and :4020), so this label renders as 'Autoactualizar vínculos de ag…'. The en value is 29 cells and fits exactly. The sidecar declares no maxCells for this key even though the renderer applies one unconditionally; wire.settings.account_policy.context.json does declare maxCells 29 on its label keys, so the omission is a source-side gap, not a translator error.",
+   "remediation": "Shorten to <=29 cells: 'Autoactualizar vínculos' (23, keeps the action; the scope is carried by the help and the on/off descriptions) or 'Vínculos de agente/habilidad' (28, keeps the scope). Independently, add maxCells: 29 to the label keys in en/wire.settings.hub_defaults.context.json."
+  },
+  {
+   "id": "es-w1-A02",
+   "severity": "major",
+   "status": "open",
+   "keys": [
+    "wire.settings.hub_defaults.agents.help"
+   ],
+   "detail": "113 cells against maxCells 72. The 72 is not stylistic: settings_io.py:5121 says 'Help strings are budgeted to <=72 cells (the detail line at 100 columns)'. That detail line does NOT wrap for a non-bridge settings row — it is one Static of terminal_width - 2 cells (98 at 100 columns, 78 at 80 columns), the shed ladder drops the key path and the state clause, and its floor is truncate_cells(<help>, width) with a visible ellipsis (settings_view.py:4914-4934); the wrap rung exists for bridge rows only (:4901-4912). At 113 cells no rung holds the string whole at any size the page measures, so the tail — 'activado suscribe los nuevos', i.e. the ON behaviour — is what falls off. The sidecar's 'wrap explanatory copy rather than truncating it' states an authoring intent the surface cannot honour; it does not license an over-budget help string.",
+   "remediation": "Fit the budget, e.g. 'Desactivado pausa todas las actualizaciones; activado suscribe nuevas.' (70 cells)."
+  },
+  {
+   "id": "es-w1-A03",
+   "severity": "minor",
+   "status": "open",
+   "keys": [
+    "wire.settings.hub_defaults.teams.help"
+   ],
+   "detail": "94 cells against maxCells 72. It fits the detail line alone at 100 columns (94 <= 98), but only after the state clause and the key path have been shed, so the row loses 'hub.auto_update.teams' and 'default: …' at every width; at 80 columns (78 cells) it truncates mid-clause and loses 'sus propias políticas'.",
+   "remediation": "'Solo define los vínculos nuevos; los existentes conservan su política.' (70 cells) fits the budget; if the wording must keep 'Predeterminado', the 74-cell 'Predeterminado para vínculos nuevos; los existentes conservan su política.' at least renders whole on the 98-cell detail line, at the cost of the key path."
+  },
+  {
+   "id": "es-w1-A04",
+   "severity": "minor",
+   "status": "open",
+   "keys": [
+    "wire.settings.hub_defaults.agents.*",
+    "wire.settings.hub_defaults.teams.*"
+   ],
+   "detail": "Glossary drift on 'link': this namespace maps it to 'vínculo' (8 occurrences), while es/wire.slash.json renders 'Open a link from this conversation in a browser' as 'Abre un enlace de esta conversación en el navegador' (wire.slash.links) and leaves 'Open Hub links — per-link subscribe and auto-push policy' untranslated (wire.slash.hub). Three spellings for one English term, and neither i18n/glossary.md nor i18n/style-guides/es.md records a 'link' row. The sense split (a hub subscription link vs a browser hyperlink) is defensible, which is why this is minor and not a term violation.",
+   "remediation": "Record the decision (glossary row: hub link -> vínculo, browser hyperlink -> enlace) and align wire.slash.hub, currently untranslated, when that namespace is next audited."
+  },
+  {
+   "id": "es-w1-A05",
+   "severity": "nit",
+   "status": "open",
+   "keys": [
+    "wire.settings.hub_defaults.teams.label"
+   ],
+   "detail": "35 cells: it would clip to 29 if it were painted as a TUI row label. The TUI teams row is currently sourced from wire.settings.hub_auto_update_teams_label (settings_io.py:5138), not from this key, so the clip is not proven on that surface; desktop/mobile wiring is outside this audit.",
+   "remediation": "If it lands on a 29-cell row, use 'Suscribir vínculos de equipo' (28)."
+  },
+  {
+   "id": "es-w1-A06",
+   "severity": "nit",
+   "status": "open",
+   "keys": [
+    "wire.settings.hub_defaults.agents.off.description",
+    "wire.settings.hub_defaults.teams.off.description"
+   ],
+   "detail": "The two 'off' choice descriptions are the longest strings in the namespace after the helps: 73 cells (170% of en 43) and 69 (168% of en 41). No maxCells is declared for choice descriptions, so no budget is being broken; the note is that Spanish is running far past the style guide's 15-25% expansion norm where the en is a terse fragment.",
+   "remediation": "If a chip budget ever applies: 'pausar actualizaciones de todos los vínculos de agentes y habilidades' (69) and 'pausar las actualizaciones entrantes de los vínculos nuevos' (59)."
+  }
+ ],
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "audit.log",
+  "parity.py.txt",
+  "run-checks.sh",
+  "labels.py.txt"
+ ],
+ "check_output": [
+  {
+   "cmd": "./run-checks.sh (see audit.log)",
+   "result": "exit 0; full command trace and output retained in audit.log"
+  },
+  {
+   "cmd": "python3 parity.py.txt wire.settings.hub_defaults",
+   "result": "keys en=9 es=9 context=9; missing=[] extra=[]; placeholders_compared=0; mechanical_failures=0; WIDTH agents.help maxCells=72 es=113 OVER; WIDTH teams.help maxCells=72 es=94 OVER"
+  },
+  {
+   "cmd": "python3 labels.py.txt wire.settings.hub_defaults",
+   "result": "agents.label es=48 en=29 maxCells=None -> CLIPS; teams.label es=35 en=24 maxCells=None -> CLIPS (against the 29-cell _LABEL_BUDGET the renderer applies)"
+  },
+  {
+   "cmd": "grep -n '_LABEL_BUDGET = ' local_operator/tui/widgets/settings_view.py",
+   "result": "434: _LABEL_BUDGET = _VALUE_COLUMN - _ROW_INDENT - _MARKER_WIDTH - 1  (= 34-2-2-1 = 29)"
+  },
+  {
+   "cmd": "sed -n '4014,4021p' local_operator/tui/widgets/settings_view.py",
+   "result": "4000s row painter: label = _paint(truncate_cells(setting.label, _LABEL_BUDGET), ...) — every row label is cut to 29 cells before painting"
+  },
+  {
+   "cmd": "grep -n 'budgeted to <=72 cells' local_operator/settings_io.py",
+   "result": "5121: # Help strings are budgeted to <=72 cells (the detail line at 100 columns)."
+  },
+  {
+   "cmd": "git status --porcelain -- local_operator/i18n/catalogues/es/wire.settings.hub_defaults.json",
+   "result": "?? local_operator/i18n/catalogues/es/wire.settings.hub_defaults.json (untracked)"
+  }
+ ],
+ "limitations": [
+  "No native-speaker judgement is part of this audit: the auditor is an LLM and this record claims no native review.",
+  "No rendered frame was captured (the host was under load and the task forbids heavy runs). Width verdicts are derived from the renderer source at the audited revision, which is quoted in audit.log; they are not eyeballed screenshots."
+ ]
+}

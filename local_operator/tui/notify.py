@@ -1143,11 +1143,19 @@ def detached_notify(
     holds the runtime resident for up to a day.
 
     STRICTLY BEST-EFFORT, and the constraint is stronger than for the in-band
-    paths: this is called from the runtime's GATE path — its only caller,
-    `_announce_pending`; a detached turn merely finishing sends nothing (the
-    docstring claimed turn-end too, which grep does not support: round 3,
-    D13) — on the event loop, so it must never block that loop and never
-    delay the process's exit.
+    paths: it is called ON THE EVENT LOOP, from the runtime's GATE path
+    (`_announce_pending`) and from rung 4 of an inbox item's delivery
+    (`notifications.delivery.deliver_item`, once that revision's grace is up),
+    so it must never block that loop and never delay the process's exit. A
+    detached turn merely finishing sends nothing (the docstring claimed
+    turn-end too, which grep does not support: round 3, D13).
+
+    ONE PARK IS ONE OF THOSE CALLERS. A parked gate ALSO raises a durable inbox
+    row (`Session.raise_gate_item`), and that write passes ``raise_banner=False``
+    precisely so the two paths cannot banner the same event: `_announce_pending`
+    owns a park's OS banner, and the item rung owns every other high-priority
+    write.
+
     Delivery is a detached spawn that is never waited on (``spawn_detached``
     documents the three properties that makes safe), every failure is
     swallowed, and the return value reports only whether a child was STARTED.

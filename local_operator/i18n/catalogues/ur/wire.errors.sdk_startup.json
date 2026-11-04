@@ -1,0 +1,6 @@
+{
+  "wire.errors.sdk_startup.attach_hosting_unconfigured": "{resume} کو کوئی فعال رن ٹائم سروس نہیں دے رہا، اور یہ روٹ ایک شروع نہیں کر سکتا: {error} اس روٹ کے لیے ہوسٹنگ کنفیگر کریں (اس کی config.yml)، پھر id کو spawn_session()/deliver() سے engage کریں اور رن ٹائم موجود ہونے پر attach کریں۔",
+  "wire.errors.sdk_startup.attach_runtime_missing": "{resume} کو کوئی فعال رن ٹائم سروس نہیں دے رہا؛ اسے اسی پروسیس میں چلانے کے لیے mode=''own'' سے کھولیں، یا پہلے spawn_session()/deliver() سے engage کریں اور رن ٹائم موجود ہونے پر attach کریں۔",
+  "wire.errors.sdk_startup.profile_attach_failed": "پروفائل {profile} منسلک نہیں ہو سکا",
+  "wire.errors.sdk_startup.tool_inventory_mismatch": "spec.tools {spec_tools} اور ApprovalPolicy.declared({policy_tools}) مختلف انوینٹریز بتاتے ہیں؛ رن کی رسائی ایک ہی بار بیان کریں"
+}

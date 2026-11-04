@@ -767,7 +767,7 @@ class TranscriptEntry:
     # terminal.
     #
     # TOP LEVEL, not in ``details``, because ``details`` is what the frame cap
-    # drops first (tier 2 sets it to ``{}``) and a fact the client needs on every
+    # drops first (tier 3 sets it to ``{}``) and a fact the client needs on every
     # repaint must survive that. SPARSE on the wire (``to_json``), because a
     # capped frame is 700 KB and these are absent on most rows.
     #
@@ -1191,6 +1191,17 @@ class SessionProjection:
     #: stale, which would turn every older relay's sessions yellow.
     heartbeat_stale: bool | None = None
     transcript: list[TranscriptEntry] = field(default_factory=list)
+    #: Whether ``transcript[0]`` is the conversation's OPENING user message
+    #: pinned ahead of a disjoint tail (see ``ProjectionFold._cap_tail`` and
+    #: ``cap_projection_frame``'s tail tier), rather than the tail's own oldest
+    #: row. The client's first history cursor is the oldest TAIL row: paging
+    #: from the pinned opener asks for history older than the conversation's
+    #: first message and gets nothing, which is the "gap then the very start"
+    #: field report. Length is not a usable proxy — the frame cap can publish a
+    #: pinned tail of ``FRAME_CAP_TRANSCRIPT_FLOOR`` rows — so the pin is
+    #: stated here. SPARSE: absent means false, which is what an older daemon
+    #: and an uncapped projection both mean.
+    transcript_head_pinned: bool = False
     # Optional DISPLAY capability, never inferred from raw entry details. Old
     # owners omit it; only the updated owner source binding sets version 1.
     peer_cycles: int | None = None
@@ -1294,6 +1305,8 @@ class SessionProjection:
         # path or it does not hold at all: the frame is the only push form.
         if self.transcript:
             data["transcript"] = [row.to_json() for row in self.transcript]
+        if not self.transcript_head_pinned:
+            data.pop("transcript_head_pinned", None)
         if self.peer_cycles is None:
             data.pop("peer_cycles", None)
         data["pending"] = self.pending.to_json() if self.pending else None

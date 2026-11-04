@@ -1,0 +1,82 @@
+# Audit log — es / relay.library / round 1 (`w4a2`)
+
+Auditor: translation-auditor (lopdev team), session 8eb3b9c9a687, lane es-w4-auditor-b
+Model: radient/auto (self-reported). Primary was anthropic/claude-sonnet-5-5; three
+provider-failure switches fired on quota before any catalogue was read (openai/gpt-6-astra,
+kimi/k3.1-pro, radient/auto). Disclosed fallback, not the pinned primary.
+Date: 2026-10-29. Read-only: no catalogue, sidecar, ledger, allowance, guide or git state touched.
+
+## 1. Orientation
+
+    cd ~/lo-i18n-es && git rev-parse HEAD
+    -> 183f7a0537e4cee42fd82f25a21fe52953a81bdf  (branch feat/i18n-es-wire-errors)
+    git status --porcelain
+    -> ?? local_operator/i18n/catalogues/es/relay.account_policy.json
+       ?? local_operator/i18n/catalogues/es/relay.library.json
+       ?? local_operator/i18n/catalogues/es/relay.login.json   (+ 3 other lanes' untracked files)
+
+The three targets are UNTRACKED, so HEAD cannot pin them. Every binding in record.json is to
+the on-disk sha256, recomputed by checks.py. I left the other lanes' untracked files alone and
+created nothing outside my own evidence directories.
+
+## 2. References read before judging
+
+- `i18n/style-guides/es.md` — tu address; infinitive action labels; sentence case; neutral Spanish;
+  settled words incl. `ajustes`, `equipo (team)`, `habilidad`; plurals one/many/other; width band
+  15-25%; `caché` amendment.
+- `i18n/glossary.md` — line 59 `relay -> relé` (translate, identifiers stay); line 63 `team -> equipo`;
+  line 65 `device -> dispositivo`; plus the rule that a kept-vs-translated name
+  is decided by FORM (prose translates, identifiers stay).
+- `local_operator/i18n/catalogues/en/relay.library.json` and `en/relay.library.context.json` — read in full.
+- `local_operator/i18n/catalogues/es/relay.library.json` — read in full.
+
+Note on the sidecars: they carry `role`, `tone` and `note` only. **No `maxCells` is declared** in
+any of the three (grep count 0), unlike `relay.chrome.context.json` (80 declarations) or
+`relay.ask.context.json` (11), so width was judged against the shipped relay corpus instead.
+
+## 3. Mechanical pass
+
+    python3 i18n/audits/evidence/es/relay.library/w4a2/checks.py
+
+This script is part of the evidence and reproduces every structural claim below. It writes
+nothing and exits non-zero if any check fails.
+
+    exit 1 — RESULT: FAILURES: es plural carries `many` (locale convention 57/58)
+    FAIL  es plural carries `many` :: MISSING - exact 10^6 falls back to `other`
+
+That non-zero exit is the finding, not a script error: the script encodes the locale convention,
+and this key does not meet it. All other assertions pass (placeholders, categories, parity, hashes).
+
+Supporting census (outside the script):
+
+    all 58 es plural messages -> 57 with {one, many, other}, 1 with {one, other}  <-- this key
+    all 105 en plural messages -> {one, other} only
+
+
+## 4. Semantic pass
+
+Read the English and the Spanish namespace by namespace against the sidecar roles. Judged
+accuracy, idiom, register, glossary consistency, placeholder/ICU integrity, plurals, width.
+The findings and their reasoning are in `record.json` (structured) and `report.md` (prose).
+
+- The plural is grammatical in both branches and stays lowercase, per the sidecar.
+- 'recurso' matches the shipped Library vocabulary (`wire.slash.library.help`: "la Biblioteca global
+  de recursos"), so the phone grid and the slash surface name the same thing the same way.
+- 'count' is the server's filtered total; the Spanish adds no qualifier that would imply the number
+  matches what is painted.
+- The one defect is structural: the es `many` branch is absent. Spanish CLDR needs it for exact
+  multiples of 10^6, the style guide prescribes it, and 57 of 58 es plural messages have it. At
+  exactly 1.000.000 the fallback renders "1.000.000 recursos" instead of "1.000.000 de recursos".
+
+## 5. Judgement
+
+**PASSED** — 1 key read, 1 minor, nothing gating.
+
+Structure and vocabulary are right; the missing es `many` branch is the only defect and it only
+manifests at an exact count of one million. Worth fixing in the next pass, not worth blocking the
+wave.
+
+## 6. Writes
+
+- `record.json`, `report.md`, `audit.log`, `checks.py` in this directory. Nothing else.
+- No file in the worktree was deleted, moved or renamed.

@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2",
+  "locale": "fr",
+  "namespace": "tui.transcript",
+  "source_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+  "target_sha256": "25ef192c3c26288e98ccb4a8ee993a59be449b95f0c440f051c9f87c90fd2771",
+  "hashes": {
+    "audit.log": "58cf75a0ad58d55f41d94b1b47e9044a084a1913c4825602abd7c44ae634a390",
+    "coverage.json": "28da57c934fb022f3088614af9c2c80bbd1c5d7e85fde1d1c22bc1277cbcccda",
+    "extra_checks.py.txt": "021b80e6a99f447fe6973af5c655c123750f7c042f1c5e8cb38c410e5e226d39",
+    "findings.json": "4e6db9f13bbe2a973c5582a157dbe7c353c4deee277ede30aa02ea6b2236341a",
+    "mech_sweep.py.txt": "3905b1630aea590646fccb31b2628de7519a93fb4a443a62d9a0e161ba400348",
+    "mechanical.json": "80b3d9218b693349c5cbdf204cfe72bc5e0ed44483471c4563cd4162ce56bf3c",
+    "prior-ledger.json": "c7ab90d912d622472fbd28c9abb164fd10138db0b631b5e6418f54cdc2d89e56",
+    "probe.py.txt": "a431d62529197feec3f74988f1a19cefb5acfbf90e836f7fc382beb574517f31",
+    "record.json": "850b60c8fa0ba4aa554fe1829b2d653a3914a1f71350e7f5cafab4543626a69e",
+    "rendered-text.json": "cee9ac0767f57d80f92fbac1a2e919dbc814eaf25c23b550812d94c5b5dfaf80",
+    "renders.py.txt": "7cd2c376d3c59183f6fc60155dce9f6c2d514b10e58ce4da1f4dec49d657bf33",
+    "report.md": "0924e2a0543c4563ea217e66659736df876b55710a4208c977b83b337623b65e",
+    "route-receipts.json": "467573b379489b29cb7cf5e7f67e9c73705184950a618f5998fc57d7bc95e6a6",
+    "widths-and-rederivations.json": "9c7954fa56467ed60e6778423b45cb6b256336f209f116845140c682e6b13c5c"
+  }
+}

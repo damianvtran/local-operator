@@ -1,0 +1,45 @@
+{
+  "locale": "fr",
+  "namespace": "wire.errors.media",
+  "audit_date": "2026-10-29",
+  "key_count": 20,
+  "translator": {
+    "agent": "translator (lopdev team)",
+    "model": "radient/auto",
+    "date": "2026-10-29",
+    "note": "translator's model recorded as the session-reported route; not independently verifiable by the auditor"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "500e883ce1b1",
+    "model": "radient/auto",
+    "fallback": "anthropic/claude-sonnet-5-5 (primary) -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto, each move caused by a provider quota failure; radient/auto served every command in this audit",
+    "independence": "not the translator; edited nothing in the repository",
+    "date": "2026-10-29"
+  },
+  "input_hashes": {
+    "en": "1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b",
+    "context": null,
+    "target_locale": "c0944c1a11a1b70fa75de73ec512cc00a0e2bb4480d98ee63dab3e20f5cb1050"
+  },
+  "remediation": {
+    "note": "Findings were remediated after the audit. input_hashes.target_locale binds the FINAL shipped bytes; input_hashes.context is the sidecar hash the auditor worked from where it changed afterwards. target_sha_at_audit keeps the bytes the auditor actually read.",
+    "target_sha_at_audit": "222d3cf6667d23a9b8de6e44eaddaf9fd7e5f155eb53365bc43e79d6fd921010",
+    "target_sha_after_remediation": "c0944c1a11a1b70fa75de73ec512cc00a0e2bb4480d98ee63dab3e20f5cb1050",
+    "context_sha_at_audit": null,
+    "context_sha_after_remediation": null
+  },
+  "artifacts": [
+    "report.md",
+    "record.json",
+    "audit.log"
+  ],
+  "current_report_verdict": "clean",
+  "findings": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1
+  },
+  "masking_note": "Verified by ordinal comparison, not by eye: the display filter's marker sequence (ordinals 91,114,101,100,97,99,116,101,100,93, assembled at runtime rather than typed) occurs in 0 of the 20 French values in this namespace. No marker shown anywhere in the transcript was treated as file content, and no French value contains one. Bracket scan: 0 value(s) carry '[' or ']'. Also dumped by ordinal: prose colons are U+003A (58) preceded by U+202F (8239); apostrophes are U+2019 (8217) outside quoted literals; U+003D '=' (61) appears 0 times in this namespace, so no name=value run exists for a filter to rewrite."
+}

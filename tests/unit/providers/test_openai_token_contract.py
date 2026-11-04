@@ -35,6 +35,63 @@ def _request(model_id: str = "gpt-6.1-sol", provider: str = "openai") -> ChatReq
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_id", ["gpt-4o", "gpt-4.1", "gpt-5.4", "unknown-model"])
+async def test_public_retention_respects_model_and_organization_defaults(model_id: str) -> None:
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            text='data: {"type":"response.completed","response":{"output":[]}}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        _ = [event async for event in client.stream(_request(model_id), "synthetic-key")]
+    assert captured["body"]["prompt_cache_key"] == "synthetic-contract"
+    assert "prompt_cache_retention" not in captured["body"]
+
+
+@pytest.mark.asyncio
+async def test_direct_openai_chat_does_not_send_anthropic_breakpoints() -> None:
+    request = _request("gpt-5.4")
+    request.model.supports_responses_api = False
+    request.system_blocks = ["stable one", "stable two", "volatile one", "volatile two"]
+    request.messages = [Message.user("first"), Message.user("second")]
+    captured = {}
+
+    def handler(wire: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(wire.content)
+        return httpx.Response(
+            200,
+            text='data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = OpenAICompatClient("https://api.openai.com/v1", http_client=http)
+        _ = [event async for event in client.stream(request, "synthetic-key")]
+    assert "cache_control" not in json.dumps(captured["body"])
+
+
+@pytest.mark.parametrize(
+    ("base", "provider"),
+    [
+        ("https://openrouter.ai/api/v1", "openrouter"),
+        ("https://custom.example/v1", "openai"),
+    ],
+)
+def test_chat_compatible_gateway_keeps_existing_breakpoints(base: str, provider: str) -> None:
+    request = _request("gpt-5.4", provider=provider)
+    request.system_blocks = ["stable one", "stable two", "volatile one", "volatile two"]
+    request.messages = [Message.user("first"), Message.user("second")]
+    body = OpenAICompatClient(base)._build_body(request)
+    assert "cache_control" in json.dumps(body)
+
+
 @pytest.mark.parametrize("codex", [False, True])
 @pytest.mark.parametrize(
     "parameters",
@@ -116,9 +173,9 @@ async def test_public_wire_uses_documented_modern_cache_defaults(model_id, moder
         _ = [event async for event in client.stream(_request(model_id), "synthetic-key")]
     body = captured["body"]
     assert captured["url"] == "https://api.openai.com/v1/responses"
-    assert ("prompt_cache_retention" not in body) is modern
-    if not modern:
-        assert body["prompt_cache_retention"] == "24h"
+    # The public endpoint selects the documented, organization-aware default
+    # for every family; no guessed 24-hour retention for unknown models.
+    assert "prompt_cache_retention" not in body
     assert body["prompt_cache_key"] == "synthetic-contract"
     assert body["instructions"] == "Stable synthetic instructions."
     assert "prompt_cache_options" not in body

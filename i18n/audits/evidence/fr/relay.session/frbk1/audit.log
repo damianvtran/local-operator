@@ -1,0 +1,36 @@
+$ cd /Users/damian/lo-i18n-base
+## branch
+feat/i18n-core-fr-backfill
+
+## key parity + ICU integrity + fr plural rendering
+$ /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/ab2610514b4d/scratchpad/fr_parity_one.py relay.session
+namespace=relay.session en_keys=17 fr_keys=17
+key_order_equal=True
+extra_in_fr=[]
+missing_in_fr=[]
+argument_mismatches=0
+fr_cldr_categories=('many', 'one', 'other')
+plural_keys=0
+
+## typography + codepoint inventory (masking attestation)
+$ /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/ab2610514b4d/scratchpad/fr_typo_one.py relay.session
+namespace=relay.session values=17
+typography_issues=0
+non_ascii_inventory=U+00E8(LATIN SMALL LETTER E WITH GRAVE)x2, U+00E9(LATIN SMALL LETTER E WITH ACUTE)x3, U+2019(RIGHT SINGLE QUOTATION MARK)x1, U+2026(HORIZONTAL ELLIPSIS)x6
+equals_sign_in_any_value=False
+U+FFFD_in_any_value=False
+U+202F_total=0
+U+2019_total=1
+
+## repository gate, read-only
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+## input hashes
+en      a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129
+context 8777c48c750d982f3f795c81d0a543e92000a3898223cfa60637f8a2edc1e2db
+fr      100b953cb117cd08812fd8ad27487067b3757b69d1e20da21ac54e9ba813de04
+
+## disclosure - one transient negative control
+While testing whether the repo gate rejects a plural category outside fr's [many, one, other], fr/relay.library.json was temporarily rewritten with an illegal `few` arm and then restored with `cp` from a copy taken before the write. The restored file is byte-identical to the copy (sha256 ab64d2fb171c78e79ac689d49da261474e4eaf687cbfbf113d28345234302ea2, the same hash this audit records as its target input). The gate run above ran after restoration. Disclosed because the audit brief forbids modifying catalogues; there is no net change. The negative control itself was never completed - that invocation used a mis-typed interpreter path and exited 127 - so it is reported as attempted and abandoned, not as evidence.
+

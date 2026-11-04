@@ -21,6 +21,7 @@ from local_operator.compaction.cutpoint import (
     PRESERVED_USER_TURN_KEY,
     RENDERED_INJECTION_KEY,
 )
+from local_operator.harness.chrome_prompts import MISSING_ARGUMENTS_RECOVERY_PROMPT
 from local_operator.harness.types import Message, TextContent
 from local_operator.incidents import format_model_switch_message
 from local_operator.tui.app import OperatorApp
@@ -106,6 +107,23 @@ async def test_a_pasted_notice_is_hidden_on_display_but_kept_in_the_transcript()
     assert "[model switch] You are now running as zai/glm-5.3" not in shown
     # Not lost: the row itself is untouched, which is the half that matters.
     assert pasted.text.startswith("[model switch] You are now running as zai/glm-5.3")
+
+
+@pytest.mark.asyncio
+async def test_missing_argument_recovery_does_not_paint_on_replay() -> None:
+    session = FakeSession()
+    session._history = [
+        Message.user("Please investigate the tool warning"),
+        Message.user(MISSING_ARGUMENTS_RECOVERY_PROMPT),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        app._project_settled_rows(list(session._history))
+        await pilot.pause()
+        shown = _transcript_text(app)
+    assert "Please investigate the tool warning" in shown
+    assert "required tool arguments were omitted" not in shown
 
 
 @pytest.mark.asyncio
@@ -472,7 +490,104 @@ async def test_a_legacy_flood_of_binding_notices_folds_to_one_row() -> None:
             for block in app.query_one(TranscriptView).blocks()
             if isinstance(block, NoticeBlock)
         ]
-    assert notices == [same, switched], notices
+    # Round 1 (D2): the folded row states how many rows it stands for, and a
+    # different sentence is still its own row rather than another repetition.
+    assert notices == [f"{same}  \u00d712", switched], notices
+
+
+@pytest.mark.asyncio
+async def test_a_run_spanning_two_accounts_folds_to_one_row_that_names_both() -> None:
+    """One row for a real alternation, and it SAYS the run covered two accounts.
+
+    The live flood's rows alternated two store ids with an identical sentence.
+    Folding per credential id painted the wall back; folding on the sentence
+    alone would hide a genuine second account. The run therefore folds on what a
+    reader sees (sentence + provenance) and carries the SET of ids it covered, so
+    one row replaces the wall and ``· 2 logins`` states what the wall was.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    same = "[session credential] This session is now using the anthropic login on my-mac."
+    named = "[session credential] This session is now using b@example.test on my-mac."
+
+    def _notice(text: str, row: int) -> CustomMessage:
+        return CustomMessage(
+            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": text,
+                "provider": "anthropic",
+                "owner_device": "d_local",
+                "credential_id": row,
+            },
+        )
+
+    session = FakeSession()
+    session._history = [_notice(same, (104, 125)[i % 2]) for i in range(20)] + [_notice(named, 125)]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        await pilot.pause()
+        notices = [
+            block._text
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+    # "logins" is the module's own noun for one account on one owner (D3), and the
+    # marker is NBSP-joined after its single ASCII break point (D4): wrap_cells
+    # breaks on the ASCII space only, so at 100 columns the marker may move under
+    # the sentence whole, but never split — which is what the round-3 frames show.
+    assert notices == [f"{same}  \u00d720\u00a0\u00b7\u00a02\u00a0logins", named], notices
+
+
+@pytest.mark.asyncio
+async def test_a_collapsed_run_states_how_many_notices_it_stands_for() -> None:
+    """A fold says how many rows it swallowed — quietly, in this row only.
+
+    Round 1, D2: collapsing a run to one line is right, but a reader could not
+    tell one change from forty. The marker is a bare multiplier, never "3
+    account changes": in the live incident behind #3098 those rows were the SAME
+    account reported repeatedly, so the count is a volume fact about the
+    recording, not a claim that each row was a switch.
+    """
+    from local_operator.harness.message_types import SESSION_BINDING_NOTICE_MESSAGE_TYPE
+    from local_operator.harness.types import CustomMessage
+    from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
+
+    sentence = "[session credential] This session is now using the stub login on my-mac."
+
+    def _notice() -> CustomMessage:
+        # The SAME identity three times: one account re-announced, which is what
+        # a fold is allowed to collapse.
+        return CustomMessage(
+            custom_type=SESSION_BINDING_NOTICE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": sentence,
+                "provider": "stub",
+                "owner_device": "my-mac",
+                "credential_id": 125,
+            },
+        )
+
+    session = FakeSession()
+    session._history = [_notice(), _notice(), _notice()]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await await_session_boot(app)
+        await pilot.pause()
+        notices = [
+            block._text
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+    assert len(notices) == 1, notices
+    # ONE account in the run, so no accounts clause: the bare multiplier.
+    assert notices[0] == f"{sentence}  \u00d73", notices
+    # The count is the ROW's, not a second notice: nothing else was painted.
+    assert "3 account" not in notices[0]
 
 
 @pytest.mark.asyncio

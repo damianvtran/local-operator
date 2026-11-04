@@ -1,0 +1,13 @@
+{
+  "cli.exec_worker_help.agent": "Selector de nombre del agente",
+  "cli.exec_worker_help.agent_id": "ID del agente",
+  "cli.exec_worker_help.control": "Publicar un registro de sesión y servir el socket de control para esta ejecución",
+  "cli.exec_worker_help.hosting": "Anulación de la plataforma de alojamiento",
+  "cli.exec_worker_help.job_id": "ID del trabajo en el registro; si se define, el worker añade un registro terminal (finished_at + exit_code) al registro JSONL al salir",
+  "cli.exec_worker_help.json": "Emitir una línea JSON por evento del agente",
+  "cli.exec_worker_help.model": "Anulación del modelo",
+  "cli.exec_worker_help.prompt": "Prompt que ejecutar",
+  "cli.exec_worker_help.resume": "Reanudar una sesión anterior por ID (o ''@latest'')",
+  "cli.exec_worker_help.train": "Modo de entrenamiento: añadir la transcripción al directorio del agente (--train antiguo)",
+  "cli.exec_worker_help.yolo": "Aprobar automáticamente todos los niveles de herramientas"
+}

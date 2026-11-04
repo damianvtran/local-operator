@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "audit_id": "w6a3",
+  "audit_round": 3,
+  "locale": "es",
+  "namespace": "tui.small",
+  "audit_date": "2026-10-30",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), es-tui-r3-analytics",
+    "session": "13ac587c68a7",
+    "model": "anthropic/claude-sonnet-5-5"
+  },
+  "files": [
+    {
+      "path": "i18n/audits/evidence/es/tui.small/w6a3/report.md",
+      "sha256": "5988de217447f8f06c5992147831dff17b926dd94a3d452503cd39309f9c672b"
+    }
+  ],
+  "note": "Hashes of the companions record.json describes. The record's artifacts list the same files; the receipt does not hash record.json (circular)."
+}

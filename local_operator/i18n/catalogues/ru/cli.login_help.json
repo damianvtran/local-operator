@@ -1,0 +1,4 @@
+{
+  "cli.login_help.login": "Войти у провайдера (OAuth или ключ API)",
+  "cli.login_help.provider": "Провайдер для входа (например, openai, anthropic, kimi, xai). Опустите, чтобы вывести провайдеров с поддержкой входа."
+}

@@ -415,7 +415,7 @@ export function answeredPairs(
 					const option = (q.options ?? []).find((o) => o.label === label);
 					return option?.description ? `${label} — ${option.description}` : label;
 				})
-				.join(", "),
+				.join(" · "),
 		};
 	});
 }
@@ -448,4 +448,26 @@ export function blockingPending<T extends { kind: string }>(
 	if (pending == null) return null;
 	if (asks !== undefined && pending.kind === "ask") return null;
 	return pending;
+}
+
+/** Whether anything in the above-composer slot will actually DRAW: the
+ *  blocking card, or the minimized ask dock.
+ *
+ *  WHY THIS IS NOT `blockingPending` ALONE (QA round 4, Q-R4-1). A runtime that
+ *  publishes `asks` mirrors its queued ask into `pending`, and `blockingPending`
+ *  correctly resolves that mirror to no card — but the same state still draws
+ *  the 32 px dock (`components/ask-dock.tsx`) in the slot. The composer's skill
+ *  tray caps itself in COLUMN units, and the cap has to yield to the slot
+ *  exactly when the slot has something in it: two rows when the card or the
+ *  dock is on screen (D5's ask row, restored), the 45 % cap only when the
+ *  mirror is EMPTY and nothing draws (m8/U8's case).
+ *
+ *  THE DOCK'S GATE IS `outstandingAsks`, the same predicate `AskDock` returns
+ *  null on — one rule, so this cannot disagree with what the slot shows.
+ */
+export function aboveComposerOccupied<T extends { kind: string }>(
+	pending: T | null | undefined,
+	asks: PendingAsk[] | undefined | null,
+): boolean {
+	return blockingPending(pending, asks) != null || outstandingAsks(asks).length > 0;
 }

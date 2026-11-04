@@ -1,0 +1,37 @@
+$ cd /Users/damian/lo-i18n-base
+## branch
+feat/i18n-core-fr-backfill
+
+## key parity + ICU integrity + fr plural rendering
+$ /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/ab2610514b4d/scratchpad/fr_parity_one.py mobile.setup
+namespace=mobile.setup en_keys=76 fr_keys=76
+key_order_equal=True
+extra_in_fr=[]
+missing_in_fr=[]
+argument_mismatches=0
+fr_cldr_categories=('many', 'one', 'other')
+plural_keys=0
+
+## typography + codepoint inventory (masking attestation)
+$ /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/ab2610514b4d/scratchpad/fr_typo_one.py mobile.setup
+namespace=mobile.setup values=76
+typography_issues=1
+  NO_NNBSP_BEFORE_: mobile.setup.balance :: 'Ajoutez vous-m\xeame du cr\xe9dit sur https://console.radienthq.com/dashboard/tunnels\u202f; la configuration n\u2019ach\xe8te jamais de cr\xe9dit. R\xe9essayez ensuite.'
+non_ascii_inventory=U+00E0(LATIN SMALL LETTER A WITH GRAVE)x10, U+00E8(LATIN SMALL LETTER E WITH GRAVE)x30, U+00E9(LATIN SMALL LETTER E WITH ACUTE)x232, U+00EA(LATIN SMALL LETTER E WITH CIRCUMFLEX)x8, U+2014(EM DASH)x7, U+2019(RIGHT SINGLE QUOTATION MARK)x80, U+2026(HORIZONTAL ELLIPSIS)x7, U+202F(NARROW NO-BREAK SPACE)x29
+equals_sign_in_any_value=False
+U+FFFD_in_any_value=False
+U+202F_total=29
+U+2019_total=80
+
+## repository gate, read-only
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+## input hashes
+en      6249b10379beb9b2433746416fa7baff061265a1b9315d47465140cd5fcf61e9
+context be33c74a329196fdbe78f11f015848ff4f9593add57eba414163d4042807c811
+fr      4c0bd0d04f4946e04e4eff23fab925f674df6568b9d3adfbd092dcb3df86894b
+
+## disclosure - one transient negative control
+While testing whether the repo gate rejects a plural category outside fr's [many, one, other], fr/relay.library.json was temporarily rewritten with an illegal `few` arm and then restored with `cp` from a copy taken before the write. The restored file is byte-identical to the copy (sha256 ab64d2fb171c78e79ac689d49da261474e4eaf687cbfbf113d28345234302ea2, the same hash this audit records as its target input). The gate run above ran after restoration. Disclosed because the audit brief forbids modifying catalogues; there is no net change. The negative control itself was never completed - that invocation used a mis-typed interpreter path and exited 127 - so it is reported as attempted and abandoned, not as evidence.
+

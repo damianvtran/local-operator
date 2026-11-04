@@ -1,0 +1,39 @@
+{
+  "locale": "ur",
+  "namespace": "cli.browser",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-017",
+      "severity": "MINOR",
+      "namespace": "cli.browser",
+      "key": "cli.browser.config_root_line",
+      "english": "config root:         {path}",
+      "current": "کنفیگ روٹ:        {path}",
+      "problem": "`lop browser status` is a fixed-column block: every English label+padding is 21 cells so values and the 21-space continuation lines (extension_update_note, heartbeat_fallback, legacy_note) line up. ur paddings were not recomputed: value columns are installed 22, daemon_healthy/paired/driving_*/waiting 20, legacy 19, supervisor 19, config_root 18. Values zig-zag in the rendered block.",
+      "suggested": "Pad each label to 21 cells, e.g. 'کنفیگ روٹ:' + 11 spaces, 'سپروائزر:' + 12, 'انسٹال شدہ:' + 10 …",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    },
+    {
+      "round": 1,
+      "id": "UR-018",
+      "severity": "MINOR",
+      "namespace": "cli.browser",
+      "key": "cli.browser.heartbeat_stale",
+      "english": "\n\u001b[1;33mheartbeat:           STALE by {age}s (discovery file is not being refreshed)\u001b[0m",
+      "current": "\n\u001b[1;33mہارٹ بیٹ:            {age}s سے باسی (discovery فائل تازہ نہیں ہو رہی)\u001b[0m",
+      "problem": "«{age}s سے باسی» = 'stale since {age}s' and «باسی» is colloquial (stale food); English says stale BY {age}s (overdue by that amount). Upper-case STALE is an alarm word on a yellow line.",
+      "suggested": "ہارٹ بیٹ:            {age}s سے پرانی (discovery فائل تازہ نہیں ہو رہی) — or «{age}s کی تاخیر سے پرانی»",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    }
+  ]
+}

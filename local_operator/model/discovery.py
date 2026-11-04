@@ -1715,9 +1715,9 @@ def fetch_models(
         account_id: ChatGPT account scope required by the Codex listing. Other
             providers ignore it.
         base_url: Overrides the registry base (proxies, local gateways).
-        client: Reused HTTP client. When omitted, one is created and closed here;
-            a caller listing several providers should pass one so the connection
-            pool and TLS handshake are shared.
+        client: Reused caller-owned HTTP client; never modified or closed here.
+            Injected transports own their total-deadline contract. The default
+            owned client bounds every socket read, including header/body trickles.
         timeout: Ceiling in seconds for the whole listing. Google's transport
             paginates and spends it as a single deadline; every other transport
             issues one request, so for them it is also the per-request ceiling.
@@ -1736,7 +1736,16 @@ def fetch_models(
     try:
         active = client
         if active is None:
-            owned = httpx.Client(timeout=timeout)
+            from local_operator.model.deadline import remaining
+            from local_operator.model.deadline_http import ListingDeadlineTransport
+
+            ceiling = remaining(timeout)
+            if ceiling <= 0:
+                raise TimeoutError
+            owned = httpx.Client(
+                timeout=ceiling,
+                transport=ListingDeadlineTransport(time.monotonic() + ceiling),
+            )
             active = owned
         if definition.local_setup:
             from local_operator.providers.local_discovery import discover_local
@@ -2511,9 +2520,17 @@ def _available_models(
             "models": [dataclasses.asdict(row) for row in live],
         }
 
+    from local_operator.model.deadline import remaining
+
+    # Lease waits, a second listing, and price fallback all spend the same
+    # foreground resolution budget. Recompute on INVOCATION after any wait.
+    listing_deadline = time.monotonic() + remaining(timeout)
+
     def fetch() -> dict[str, Any]:
-        # On the calling path: the caller's budget, which from a repaint is 2 s.
-        return fetch_within(timeout)
+        ceiling = remaining(max(0.0, listing_deadline - time.monotonic()))
+        if ceiling <= 0:
+            raise TimeoutError
+        return fetch_within(ceiling)
 
     def revalidate() -> dict[str, Any]:
         # Off the calling path, so the caller's budget is the wrong ceiling: a
@@ -2593,6 +2610,7 @@ def _available_models(
         cache_dir=cache_dir,
         refetch_if=refetch_if,
         revalidate=revalidate,
+        deadline=listing_deadline,
     )
     payload = listing.payload
     live_rows = _rows_from_payload(payload, capture)
@@ -2621,6 +2639,7 @@ def _available_models(
                 ttl_s=ttl_s,
                 cache_dir=cache_dir,
                 revalidate=revalidate,
+                deadline=listing_deadline,
             )
             payload = listing.payload
             live_rows = _rows_from_payload(payload, capture)

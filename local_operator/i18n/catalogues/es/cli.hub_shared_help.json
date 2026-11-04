@@ -1,0 +1,14 @@
+{
+  "cli.hub_shared_help.publish_yes": "Omitir las preguntas de confirmación; no acepta valores sin resolver (usa --accept-unresolved para eso)",
+  "cli.hub_shared_help.publish_preview_only": "Ejecutar la vista previa e imprimir el diff sin publicar (código de salida 2 si generalizaría algo)",
+  "cli.hub_shared_help.publish_json": "Salida de vista previa legible por máquina; contiene los valores de referencia y el pin de commit de un solo uso, así que trátala como sensible",
+  "cli.hub_shared_help.publish_accept_unresolved": "Aceptar todos los valores que la vista previa no pudo clasificar y publicarlos tal cual",
+  "cli.hub_shared_help.publish_allow_internal_ops": "Aceptar el permiso de operaciones internas para publicar en una organización (requiere --org; muestra el texto de consentimiento interactivamente)",
+  "cli.hub_shared_help.sync_check": "Solo informar de lo disponible; no cambiar nada",
+  "cli.hub_shared_help.sync_prefer": "Resolver un conflicto: conservar tu versión o tomar la del hub para las secciones que cambiaron en ambas",
+  "cli.hub_shared_help.sync_accept_unknown_baseline": "Aplicar si la línea base es desconocida: se aceptan las adiciones del hub y no se elimina nada tuyo",
+  "cli.hub_shared_help.sync_replace": "DESCARTAR tu copia y usar la del hub (muestra lo descartado; requiere --yes)",
+  "cli.hub_shared_help.sync_yes": "Confirmar --replace",
+  "cli.hub_shared_help.sync_dry_run": "Mostrar los cambios que haría; no escribir filas de agentes",
+  "cli.hub_shared_help.sync_json": "Emitir el informe como JSON"
+}

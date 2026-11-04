@@ -1,0 +1,13 @@
+{
+  "cli.agents_picture.error.no_agent": "Không có tác nhân nào có tên hoặc ID {agent}.",
+  "cli.agents_picture.error.read_file": "Không đọc được {path}: {error}",
+  "cli.agents_picture.help.agent": "Tên hoặc ID của tác nhân",
+  "cli.agents_picture.help.file": "Đường dẫn tới ảnh PNG, JPEG, WebP, GIF hoặc HEIC",
+  "cli.agents_picture.help.group": "Đặt, gỡ hoặc xem ảnh hồ sơ của tác nhân",
+  "cli.agents_picture.help.remove": "Gỡ ảnh của tác nhân",
+  "cli.agents_picture.help.set": "Đặt ảnh cho tác nhân từ một tệp ảnh",
+  "cli.agents_picture.help.show": "In siêu dữ liệu ảnh của tác nhân dưới dạng JSON",
+  "cli.agents_picture.remove.done": "Đã gỡ ảnh của {agent}.",
+  "cli.agents_picture.remove.none": "{agent} không có ảnh để gỡ.",
+  "cli.agents_picture.set.done": "Đã đặt ảnh cho {agent} ({mime}, {bytes} byte)."
+}

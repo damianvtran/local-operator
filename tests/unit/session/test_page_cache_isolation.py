@@ -58,15 +58,14 @@ def _served(page: TranscriptPage) -> str:
 
 
 @pytest.mark.asyncio
-async def test_a_same_identity_rewrite_is_stale_until_the_boundary_reset(tmp_path: Path) -> None:
-    """The CI collision, deterministic, crossed inside one test.
+async def test_a_same_size_rewrite_moves_the_witness_before_the_boundary_reset(
+    tmp_path: Path,
+) -> None:
+    """The former CI collision now invalidates at the actual write.
 
-    The rewrite moves neither half of the key, so the cached ``alpha`` page
-    answers a read of a file that now holds ``bravo``. That stale serve is
-    asserted as the live poison — it is the residual the page-cache module
-    docstring names, and if it ever stops happening this pin must be re-derived
-    rather than pass vacuously — and only the boundary reset turns the next
-    read fresh.
+    mtime joined inode/size to prevent old page bodies joining new index facts.
+    The reset remains a harmless second boundary for cross-process/inode-recycle
+    residuals, but is no longer what repairs an ordinary equal-size overwrite.
     """
     directory = tmp_path / "sess"
     size_a = _write_row(directory, "alpha")
@@ -77,12 +76,10 @@ async def test_a_same_identity_rewrite_is_stale_until_the_boundary_reset(tmp_pat
 
     size_b = _write_row(directory, "bravo")
     assert size_b == size_a, "precondition: the rewrite must not move the size"
-    assert page_key(directory, limit=10) == key, "precondition: the identity must not move"
+    assert page_key(directory, limit=10) != key
 
-    stale = await load_transcript_page(directory, limit=10)
-    assert (
-        _served(stale) == "alpha"
-    ), "precondition: the poison must be live, or the final read proves nothing"
+    current = await load_transcript_page(directory, limit=10)
+    assert _served(current) == "bravo"
 
     # The boundary: exactly the call `reset_page_cache_between_tests` makes
     # between two tests.

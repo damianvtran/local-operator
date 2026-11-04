@@ -1,0 +1,5 @@
+{
+  "relay.agent_avatar.alt": "Изображение: {name}",
+  "relay.agent_avatar.change": "Изменить изображение: {name}",
+  "relay.agent_avatar.desktop_hint": "Изменить это изображение можно в настольном приложении"
+}

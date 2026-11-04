@@ -49,6 +49,18 @@ def _live(store: MemoryStore, tag: str | None = None) -> list[dict[str, Any]]:
     return [f for f in rows if tag is None or f["tags"] == [tag]]
 
 
+def _recent(offset: float = 0.0) -> float:
+    """A capture timestamp near NOW, ``offset`` seconds later.
+
+    Eviction now leaves a row past its deadline to the expiry sweep (see
+    ``test_an_expired_candidate_belongs_to_the_expiry_sweep_not_to_eviction``), so a
+    fixture anchored at 1.0 or 100.0 — both past the capture TTL — would exercise the
+    sweep's arm instead of the eviction under test. What these tests assert is the
+    ORDER of eviction, so the anchor only has to be recent.
+    """
+    return time.time() - 300 + offset
+
+
 def _visible(store: MemoryStore, query: str) -> list[dict[str, Any]]:
     return store.search(query, "session", limit=20)
 
@@ -180,13 +192,13 @@ def test_eviction_never_kills_a_live_state_head(store, monkeypatch):
     """
     monkeypatch.setattr(memory_capture, "CAPTURE_SESSION_TOKENS", 600)
     goal = "Ship the capture efficiency slice to production this week"
-    persist(store, "m0", extract("", f"## Goal\n- {goal}"), "ok", committed_at=1.0)
+    persist(store, "m0", extract("", f"## Goal\n- {goal}"), "ok", committed_at=_recent())
     for n in range(6):
-        persist(store, f"d{n}", _bulky(n), "ok", committed_at=10.0 + n)
+        persist(store, f"d{n}", _bulky(n), "ok", committed_at=_recent(10 + n))
     assert capture_status(store)["evicted"] > 0
     assert [f["body"] for f in _live(store, "goal")] == [goal]
     newer = "Ship the capture slice after the QA round passes"
-    persist(store, "m1", extract("", f"## Goal\n- {newer}"), "ok", committed_at=100.0)
+    persist(store, "m1", extract("", f"## Goal\n- {newer}"), "ok", committed_at=_recent(100))
     assert [f["body"] for f in _live(store, "goal")] == [newer]
 
 
@@ -246,7 +258,7 @@ def test_an_unenforceable_budget_is_reported_not_silent(store, monkeypatch):
     monkeypatch.setattr(memory_capture, "CAPTURE_SESSION_TOKENS", 200)
     monkeypatch.setattr(memory_capture, "MAX_TOMBSTONES", 2)
     for n in range(4):
-        persist(store, f"f{n}", _bulky(n), "ok", committed_at=1.0 + n)
+        persist(store, f"f{n}", _bulky(n), "ok", committed_at=_recent(n))
     assert capture_status(store)["unenforced_sessions"] == 1
     assert "can no longer forget older candidates" in hint(store, "f3")
 
@@ -323,7 +335,7 @@ def test_over_budget_evicts_oldest_captured_only_and_deliberate_survives(store, 
         "session", {"title": "Operator rule", "body": "Always deploy on Tuesdays only."}
     )
     for n in range(12):
-        persist(store, f"bulk-{n}", _bulky(n), "ok", committed_at=100.0 + n)
+        persist(store, f"bulk-{n}", _bulky(n), "ok", committed_at=_recent(n))
     with store.connection() as db:
         captured = db.execute(
             "SELECT json_extract(fact,'$.body'),tokens FROM current "
@@ -346,7 +358,7 @@ def test_deliberate_tokens_are_not_charged_to_the_capture_budget(store, monkeypa
     monkeypatch.setattr(memory_capture, "CAPTURE_SESSION_TOKENS", 400)
     for n in range(8):
         store.put("session", {"title": f"Rule {n}", "body": " ".join(["stated"] * 30) + str(n)})
-    persist(store, "one", _bulky(0), "ok", committed_at=1.0)
+    persist(store, "one", _bulky(0), "ok", committed_at=_recent())
     assert capture_status(store)["evicted"] == 0
     assert len(_live(store, "decision")) == 1
 
@@ -357,8 +369,8 @@ def test_the_shipped_budget_is_sixteen_thousand():
 
 def test_an_evicted_candidate_is_a_replicating_tombstone(store, monkeypatch):
     monkeypatch.setattr(memory_capture, "CAPTURE_SESSION_TOKENS", 200)
-    persist(store, "e0", _bulky(0), "ok", committed_at=1.0)
-    persist(store, "e1", _bulky(1), "ok", committed_at=2.0)
+    persist(store, "e0", _bulky(0), "ok", committed_at=_recent())
+    persist(store, "e1", _bulky(1), "ok", committed_at=_recent(1))
     with store.connection() as db:
         ops = [json.loads(r[0]) for r in db.execute("SELECT data FROM ops WHERE kind='tombstone'")]
     assert len(ops) == 1
@@ -581,3 +593,58 @@ def test_recall_stats_is_never_journalled(store):
     assert _stats(store) == {fact["id"]: 1}
     with store.connection() as db:
         assert db.execute("SELECT count(*) FROM ops").fetchone()[0] == before
+
+
+# --- eviction vs the expiry sweep (PR #3057 review r6, m1) ------------------
+
+
+def _capture_tokens(store: MemoryStore) -> dict[str, int]:
+    """Captured body prefix ("Decision 3") -> the tokens it is charged."""
+    with store.connection() as db:
+        return {
+            json.loads(r[1])["body"].split(":")[0]: int(r[0])
+            for r in db.execute(
+                "SELECT tokens,fact FROM current "
+                "WHERE json_extract(fact,'$.source.author')='deterministic-capture'"
+            )
+        }
+
+
+def test_an_expired_candidate_belongs_to_the_expiry_sweep_not_to_eviction(store, monkeypatch):
+    """An expired-but-unswept capture must survive an eviction pass.
+
+    PR #3057 review r6, m1. Eviction writes an ORDINARY tombstone, which is final;
+    the expiry sweep writes an EXPIRY-derived one, which leaves the text
+    re-capturable when the session resumes. So evicting a row the sweep was about to
+    take turned a stale fact that comes back into one that never does. The same row
+    also stopped being charged to the budget: every read path already skips a past
+    deadline, so charging it evicted live text to pay for something invisible.
+    """
+    from local_operator import memory_maintenance
+
+    monkeypatch.setattr(memory_capture, "CAPTURE_SESSION_TOKENS", 10_000)
+    persist(store, "stale", _bulky(0), "ok", committed_at=time.time() - 15 * 86400)
+    persist(store, "live-a", _bulky(1), "ok")
+    persist(store, "live-b", _bulky(2), "ok")
+    charged = _capture_tokens(store)
+    # Over budget ONLY while the stale row is charged: the two live rows fit alone.
+    monkeypatch.setattr(
+        memory_capture, "CAPTURE_SESSION_TOKENS", charged["Decision 1"] + charged["Decision 2"]
+    )
+    persist(store, "next", [], "ok")
+    with store.connection() as db:
+        tombs = [
+            json.loads(r[0]) for r in db.execute("SELECT data FROM ops WHERE kind='tombstone'")
+        ]
+    assert tombs == []
+    assert len(_live(store, "decision")) == 3
+
+    # The sweep, not eviction, retires it — and only then is the text re-capturable.
+    with store._reader() as db:
+        expired = memory_maintenance._expirable(store, db, time.time())
+    assert [owner for _, owner, _ in expired] == ["eff-session"]
+    # ``_forget`` takes the CONFIG dir (``store.root`` is already ``<cfg>/memory``).
+    memory_maintenance._forget(store.root.parent, expired, time.monotonic() + 30, "expired")
+    assert len(_live(store, "decision")) == 2
+    persist(store, "again", _bulky(0), "ok")
+    assert "Decision 0" in {f["body"].split(":")[0] for f in _live(store, "decision")}

@@ -212,7 +212,10 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "``/agent promote <name>`` verb, which the user must run "
             "themselves; there is no retry through this tool. An account name "
             "collision is refused: pass ``confirm_replace`` only when the user "
-            "asked to overwrite it."
+            "asked to overwrite it.\n"
+            "- PICTURES: set/remove/show through ``bash`` "
+            "(``lop agents picture <verb> --help``); the server re-crops and strips "
+            "metadata. Refusals exit 1 with a reason word."
         ),
     ),
     # -- team ---------------------------------------------------------------
@@ -326,6 +329,24 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 op="type",
                 blurb="Type text, or a stored secret via 'secret_ref', into a field.",
             ),
+            ToolDocOp(
+                op="press",
+                blurb=(
+                    "One key chord (Control+K, e, Shift+Tab) to the owned page; "
+                    "selector= focuses first. Desktop app only."
+                ),
+            ),
+            ToolDocOp(
+                op="hover",
+                blurb="Move the pointer onto selector= XOR x+y; desktop app only.",
+            ),
+            ToolDocOp(
+                op="select",
+                blurb=(
+                    "Choose options by label/value or zero-based index in selector=; "
+                    "native or ARIA (desktop); extension native only. [] clears native multiples."
+                ),
+            ),
             ToolDocOp(op="scroll", blurb="Move the viewport."),
             ToolDocOp(op="logs", blurb="Console + errors."),
             ToolDocOp(
@@ -379,6 +400,14 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
                 ),
             ),
             ToolDocOp(op="network_clear", blurb="Drop the buffer."),
+            ToolDocOp(
+                op="record_start",
+                blurb="Record THIS tab's video to an .mp4 (see notes).",
+            ),
+            ToolDocOp(
+                op="record_stop",
+                blurb="Stop and save the recording; returns its path and size.",
+            ),
             ToolDocOp(op="recover", blurb="Recover YOUR tab."),
             ToolDocOp(op="retain", blurb="Hold it."),
             ToolDocOp(op="release", blurb="End that hold."),
@@ -404,6 +433,12 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "'network_start' then read with 'network_read'. Bodies are opt-in "
             "per exact origin+path and land in a private session file, never in "
             "this transcript.\n"
+            "- 'record_start'/'record_stop' make an MP4 of this tab (default AV1: "
+            "QuickTime only; quality='high' is sharper H.264, played in Chromium, "
+            "~0.5-0.7 GB more RAM); path= is approved first, never overwritten. "
+            "width=/height= go together (area <= 3840x2160). A default clip over "
+            "64 MiB (32 in a scratchpad) is discarded: 4K ~150 s worst case, 75 s "
+            "there. Desktop host only.\n"
             "- Hosts, setup, approvals, error meanings: ``guide://browser``."
         ),
     ),
@@ -624,16 +659,128 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(
                 op="send",
                 blurb=(
-                    "An outbound note/question/request through the durable "
-                    "outbox: the intent and its client_ref are recorded before "
-                    "dispatch, so a retry replays the same idempotent send."
+                    "The PAIR-INBOX lane only: an outbound note/question/request "
+                    "through the durable outbox (intent and client_ref recorded "
+                    "before dispatch, so a retry replays the same idempotent "
+                    "send). It is NOT a direct message: nothing is posted in any "
+                    "Team Bridge conversation and the recipient does not see it "
+                    "there. Use `dm` for a person or their agent, `channel_post` "
+                    "for a room, and `send` only to answer a delivery that "
+                    "arrived on this lane."
                 ),
             ),
             ToolDocOp(
                 op="reply",
                 blurb=(
-                    "A send on an existing thread: thread_id and to always "
-                    "travel together — a thread_id alone is refused."
+                    "A send on an existing PAIR-INBOX thread: thread_id and to "
+                    "always travel together — a thread_id alone is refused. For "
+                    "a conversation reply use `channel_post` with "
+                    "thread_root_id."
+                ),
+            ),
+            ToolDocOp(
+                op="directory",
+                blurb=(
+                    "Who is on the team: each member's account id, display name "
+                    "and, when they have one, their chief of staff "
+                    "(`chief_of_staff.endpoint_id` and its CURRENT name). "
+                    "Metadata only — no bodies. Rows marked `you: true` are you "
+                    "or your own owner. An agent whose `reachable` is false is "
+                    "not addressable right now (state says why)."
+                ),
+            ),
+            ToolDocOp(
+                op="dm",
+                blurb=(
+                    "A DIRECT MESSAGE to another member's agent "
+                    "(`endpoint_id`, or `account_id` with target=agent) or to a "
+                    "person (`account_id`, target=human). It opens or reuses the "
+                    "same conversation the desktop shows, so both people see it "
+                    "and the recipient's connector delivers it to their chief of "
+                    "staff. The reply arrives in that conversation: read it with "
+                    "`channel_history(channel_id=<the dm's conversation_id>)`. "
+                    "A person asking you to pass something to someone's agent "
+                    "means `dm` — never 'forward this thread'."
+                ),
+            ),
+            ToolDocOp(
+                op="shared_conversations",
+                blurb=(
+                    "Conversations your OWNER explicitly shared with you (the "
+                    "chief-of-staff read grant). Metadata only. A conversation "
+                    "that was not shared never appears; a revoked grant takes "
+                    "effect immediately, and every page you read is audited on "
+                    "the hub."
+                ),
+            ),
+            ToolDocOp(
+                op="channels",
+                blurb=(
+                    "One page of YOUR OWNER's conversations (the human list). It "
+                    "belongs to the chief-of-staff session: a task session gets "
+                    "`not_designated` here. Tenant-visible channels your owner has "
+                    "not joined come back discoverable with a member count."
+                ),
+            ),
+            ToolDocOp(
+                op="channel_create",
+                blurb=(
+                    "Open a group or channel as this agent; the creator agent member "
+                    "is added automatically, and the human owner only if you name "
+                    "them. Members found with `directory` can be added here, so a "
+                    "group of several teammates' agents is one call."
+                ),
+            ),
+            ToolDocOp(
+                op="channel_post",
+                blurb=(
+                    "Post one message into a conversation as this agent, and the "
+                    "result carries `message_id`/`seq` so you can confirm it and "
+                    "thread on it. `thread_root_id` posts as a reply in that "
+                    "message's thread. This is the op for a ROOM, and for answering "
+                    "a DM, not `send`. Bind replies with `in_reply_to_message_id` "
+                    "(the exact admitted inbound message, not a thread root). "
+                    "A bridge-input run requires this or intentional `new_post: true`; "
+                    "new_post declares intent, not semantic isolation or authority."
+                ),
+            ),
+            ToolDocOp(
+                op="channel_history",
+                blurb=(
+                    "A bounded page of one conversation. Bodies appear only for "
+                    "messages this agent admitted; everything else is metadata with "
+                    "`body: null` (no local body cache). A null body with a "
+                    "`body_state` means you have not been given that message (held, "
+                    "not admitted, or your own post that could not be read back in "
+                    "this read) - it is NOT an empty message; "
+                    "do not infer its content. This is also how you read "
+                    "the reply to a DM you opened, using the `conversation_id` the "
+                    "`dm` result gave you."
+                ),
+            ),
+            ToolDocOp(
+                op="channel_thread",
+                blurb=(
+                    "One thread, oldest-first: the root with its reply count and a "
+                    "bounded page of replies. Same screening rule as history, "
+                    "including `body_state` on a null body."
+                ),
+            ),
+            ToolDocOp(
+                op="react",
+                blurb=(
+                    "Set or clear one emoji on an admitted message. Reactions never "
+                    "wake anyone; `remove` clears your own."
+                ),
+            ),
+            ToolDocOp(
+                op="shared_history",
+                blurb=(
+                    "Read one conversation the owner shared with you "
+                    "(`channel_id`; add `thread_root_id` for a thread). Read "
+                    "only — you can never post as your owner — and `not_shared` "
+                    "means the owner has not shared it, which only they can "
+                    "change in the desktop."
                 ),
             ),
         ),
@@ -655,7 +802,15 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "approved'.\n"
             "- Claims are local leases: a claim releases on ack done (or "
             "expires); a message another session holds is refused here rather "
-            "than duplicate-worked."
+            "than duplicate-worked.\n"
+            "- WHICH LANE: `dm`/`channel_post` are visible in Team Bridge and "
+            "auditable; `send`/`reply` are the legacy pair inbox, invisible in "
+            "the UI. One path per intent — do not answer a DM with `send`.\n"
+            "- WHICH SESSION: any session with this tool may collaborate, but "
+            "`take_up`/`ack`/`send`/`reply`, `channels` and `shared_*` belong to "
+            "the account's chief-of-staff session. Getting `not_designated` "
+            "there is not an account problem and not retryable: hand the work "
+            "to that session instead."
         ),
     ),
     # -- project ------------------------------------------------------------

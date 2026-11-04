@@ -1,0 +1,27 @@
+{
+  "locale": "vi",
+  "namespace": "cli.hub_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 1,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-043",
+      "severity": "MAJOR",
+      "namespace": "cli.hub_help",
+      "key": "cli.hub_help.status",
+      "english": "Show which pulled agents and teams have hub updates",
+      "current": "Hiển thị tác nhân và nhóm đã kéo nào có cập nhật trên hub",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "Hiển thị tác nhân và nhóm đã pull nào có cập nhật trên hub",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+CHANGES_REQUESTED
+1 MAJOR + 5 MINOR: /team reads as an elided note and splits the manager/responsable term against this locale's own team-authoring copy; five shortened lines drop a claim (agent addressee, fork <message>, effort 'de razonamiento', approvals session scope, hub verb + per-link). Width is clean: 0 of 52 values over the 51-cell budget, max 51 cells.

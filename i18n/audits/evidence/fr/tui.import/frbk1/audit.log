@@ -1,0 +1,58 @@
+# audit.log — fr / tui.import / frbk1
+# commands are recorded verbatim; the text under each is the command's real output.
+
+$ git -C /Users/damian/lo-i18n-base status --porcelain | grep 'catalogues/fr/'
+?? local_operator/i18n/catalogues/fr/tui.import.json
+
+$ git -C /Users/damian/lo-i18n-base rev-parse HEAD
+9495f8a6c3bf2b5438ef5c33d7274cf519435dda
+
+$ ls /Users/damian/lo-i18n-base/local_operator/i18n/catalogues/en/tui.import.context.json
+ls: /Users/damian/lo-i18n-base/local_operator/i18n/catalogues/en/tui.import.context.json: No such file or directory
+
+$ PYTHONPATH=/Users/damian/lo-i18n-base /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/d5db18882cb9/scratchpad/frbk1_audit_ns.py tui.import
+namespace=tui.import keys_en=87 keys_fr=87 context=ABSENT (null)
+sha256 en=932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2
+sha256 context=None
+sha256 fr=0426d38851af5cf4d741a7d98667faddfe9068f5eb7b387910c6fdeb057d4aa7
+key_order_matches_en= True
+missing_in_fr= []
+extra_in_fr= []
+argument_tuple_diffs= NONE
+fr_plural_categories= ['many', 'one', 'other']
+plural_selectors_added_vs_en= 11
+  tui.import.pending_count: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.import.preview_memory: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.import.preview_narrow: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.import.preview_narrow_metadata: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.import.preview_summary: en=(('one', 'other'), ('one', 'other'), ('one', 'other')) fr=(('one', 'many', 'other'), ('one', 'many', 'other'), ('one', 'many', 'other'))
+  tui.import.preview_warnings: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.import.result_detail: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.import.result_summary: en=(('one', 'other'), ('one', 'other')) fr=(('one', 'many', 'other'), ('one', 'many', 'other'))
+  tui.import.result_warnings: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.import.session_meta: en=(('one', 'other'), ('one', 'other')) fr=(('one', 'many', 'other'), ('one', 'many', 'other'))
+  tui.import.source_row: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+invalid_fr_selectors= NONE
+typography_strays= NONE
+u202f_total=9 u00a0_total=0
+whitespace_signature_diffs= NONE
+maxCells_rows= []
+over_budget= NONE
+largest_fr_minus_en  (plural=ICU template length, not rendered width):
+  + 63  tui.import.preview_memory                      en=116 fr=179 [plural-template]
+  + 63  tui.import.preview_summary                     en=165 fr=228 [plural-template]
+  + 57  tui.import.preview_narrow                      en= 91 fr=148 [plural-template]
+  + 51  tui.import.rerun_hint                          en=102 fr=153
+  + 45  tui.import.session_meta                        en=137 fr=182 [plural-template]
+  + 42  tui.import.result_summary                      en=121 fr=163 [plural-template]
+  + 38  tui.import.pending_count                       en= 67 fr=105 [plural-template]
+  + 38  tui.import.preview_warnings                    en= 51 fr= 89 [plural-template]
+  + 38  tui.import.result_warnings                     en= 51 fr= 89 [plural-template]
+  + 30  tui.import.metadata_only_explain               en=122 fr=152
+  + 28  tui.import.preview_narrow_metadata             en= 80 fr=108 [plural-template]
+  + 23  tui.import.error_select                        en= 57 fr= 80
+
+$ PYTHONPATH=/Users/damian/lo-i18n-base /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only; echo "exit=$?"
+check.py: catalogue checks: 0 problem(s)
+exit=0
+

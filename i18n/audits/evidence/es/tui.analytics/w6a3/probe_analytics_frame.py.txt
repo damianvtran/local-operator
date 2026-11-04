@@ -1,0 +1,24 @@
+import asyncio, os, sys
+sys.path.insert(0, os.getcwd())
+from rich.cells import cell_len
+from local_operator.i18n import text
+text.set_active_locale(os.environ.get("PROBE_LOCALE","es"))
+import tests.unit.tui.test_analytics_panel as T
+from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.analytics_panel import AnalyticsScreen
+from tests.unit.tui.test_app_pilot import FakeSession,_factory
+async def main():
+    app=OperatorApp(lambda:_factory(FakeSession()))
+    async with app.run_test(size=(80,24)) as pilot:
+        for _ in range(300):
+            if app._session is not None: break
+            await pilot.pause(); await asyncio.sleep(0.01)
+        agg=T._agg(); agg.decode_tokens=42000; agg.decode_us=1_000_000_000; agg.decode_calls=10
+        s=AnalyticsScreen(agg); await app.push_screen(s); await pilot.pause(); await pilot.pause()
+        print(text.active_locale(),"80x24 body_width",s._body.size.width)
+        for strip in app.screen._compositor.render_strips():
+            t=strip.text.rstrip()
+            if any(k in t for k in ("Total","Contex","├","└","Salida","Output","Aciert","Cache hit","Decod","Decode","Context","Fresh","Nuevo")): print("  PAINTED|"+t)
+try: asyncio.run(asyncio.wait_for(main(),50))
+except BaseException as e: print("ERR",type(e).__name__,e)
+os._exit(0)

@@ -53,7 +53,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -128,6 +128,36 @@ def real_home() -> Path | None:
             return None
     profile = os.environ.get("USERPROFILE")
     return Path(profile).resolve() if profile else None
+
+
+def windows_profile_home() -> Path | None:
+    """Read the current user's profile from Windows, not mutable environment.
+
+    A redirected USERPROFILE must not turn a scratch home into the identity
+    that owns Task Scheduler jobs. CSIDL_PROFILE resolves through the user's
+    token, unlike Path.home()/expanduser. Failure refuses ownership; falling
+    back to the environment would reopen the very sandbox escape this guards.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        shell = getattr(ctypes, "WinDLL")("shell32", use_last_error=True)
+        get_folder = shell.SHGetFolderPathW
+        get_folder.argtypes = [
+            wintypes.HWND,
+            ctypes.c_int,
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+        ]
+        get_folder.restype = ctypes.c_long
+        buffer = ctypes.create_unicode_buffer(32768)
+        if get_folder(None, 0x0028, None, 0, buffer) != 0 or not buffer.value:
+            return None
+        return Path(buffer.value).resolve()
+    except (AttributeError, OSError, ValueError):
+        return None
 
 
 def home_is_the_users() -> bool | None:
@@ -707,6 +737,7 @@ def render_task_xml(
     log: Path | None = None,
     interval_minutes: int | None = None,
     user_id: str | None = None,
+    hidden: bool = False,
 ) -> str:
     """The Task Scheduler definition for one daemon, as XML.
 
@@ -778,7 +809,7 @@ def render_task_xml(
         "    </IdleSettings>\n"
         "    <AllowStartOnDemand>true</AllowStartOnDemand>\n"
         "    <Enabled>true</Enabled>\n"
-        "    <Hidden>false</Hidden>\n"
+        f"    <Hidden>{'true' if hidden else 'false'}</Hidden>\n"
         "    <RunOnlyIfIdle>false</RunOnlyIfIdle>\n"
         "    <WakeToRun>false</WakeToRun>\n"
         "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n"
@@ -867,14 +898,22 @@ def task_create_args(name: str, xml_path: Path) -> list[str]:
     return ["/Create", "/TN", name, "/XML", str(xml_path), "/F"]
 
 
-def create_task(name: str, xml: str) -> tuple[bool, str]:
+def create_task(
+    name: str, xml: str, *, runner: Callable[..., subprocess.CompletedProcess[str]] | None = None
+) -> tuple[bool, str]:
     """Register ``name`` from ``xml``; ``(ok, detail)`` with schtasks' own words.
 
     The XML goes through a temporary file because ``schtasks`` has no stdin
     form, and it is written as UTF-16 because that is what Task Scheduler
     imports — a UTF-8 file is rejected. Always ``/F``: an install is idempotent,
     and a stale task from an older build must be replaced rather than shadowed.
+
+    ``runner`` is the caller's own ``schtasks`` seam (default :func:`schtasks`),
+    so an installer that routes every supervisor call through one patchable
+    name — the bridge connector's ``install._schtasks`` — keeps that property
+    for the three helpers below instead of reimplementing them.
     """
+    run = runner or schtasks
     try:
         with tempfile.NamedTemporaryFile(
             "w", suffix=".xml", encoding=TASK_XML_ENCODING, delete=False
@@ -884,7 +923,7 @@ def create_task(name: str, xml: str) -> tuple[bool, str]:
     except OSError as exc:
         return False, f"could not write the task definition: {exc}"
     try:
-        result = schtasks(*task_create_args(name, path))
+        result = run(*task_create_args(name, path))
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"schtasks could not be run: {exc}"
     finally:
@@ -895,10 +934,15 @@ def create_task(name: str, xml: str) -> tuple[bool, str]:
     return True, "registered"
 
 
-def delete_task(name: str) -> tuple[bool, str]:
-    """Remove ``name``; an absent task is success, not an error."""
+def delete_task(
+    name: str, *, runner: Callable[..., subprocess.CompletedProcess[str]] | None = None
+) -> tuple[bool, str]:
+    """Remove ``name``; an absent task is success, not an error.
+
+    ``runner``: see :func:`create_task`.
+    """
     try:
-        result = schtasks(*task_delete_args(name))
+        result = (runner or schtasks)(*task_delete_args(name))
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"schtasks could not be run: {exc}"
     if result.returncode:
@@ -928,7 +972,9 @@ def _csv_status_field(stdout: str) -> str | None:
     return None
 
 
-def task_state(name: str) -> tuple[bool, bool | None, str]:
+def task_state(
+    name: str, *, runner: Callable[..., subprocess.CompletedProcess[str]] | None = None
+) -> tuple[bool, bool | None, str]:
     """``(registered, running, detail)`` for ``name``, from one ``schtasks`` call.
 
     One call and not a query plus a probe: this runs on the wake persist path
@@ -948,8 +994,9 @@ def task_state(name: str) -> tuple[bool, bool | None, str]:
     callers that can act on it already have a branch for
     (:attr:`local_operator.wakes.install.SupervisorState.verifiable`).
     """
+    # ``runner``: see :func:`create_task`.
     try:
-        result = schtasks(*task_query_args(name))
+        result = (runner or schtasks)(*task_query_args(name))
     except (OSError, subprocess.SubprocessError) as exc:
         return False, False, f"schtasks could not be run: {exc}"
     if result.returncode:

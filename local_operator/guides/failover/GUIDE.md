@@ -39,12 +39,13 @@ and model-family quota window gates eligibility.
 
 - `reset-soonest` (new default): prefer the nearest included-plan weekly refill.
   Accounts within **60,000ms inclusive** of the fixed earliest deadline tie; use
-  their five-hour deadlines with the same fixed-minimum tolerance, then stable
-  session hashing. This is not transitive neighbour chaining. All relevant caps
-  must still have capacity: one window reopening is only an opportunity to
-  recheck another spent cap, not proof the account is healthy. If several
-  applicable weekly windows exist, the earliest future refill is the next
-  useful preference; every other overlapping allowance still gates eligibility.
+  their five-hour deadlines (where the account reports a five-hour window) with
+  the same fixed-minimum tolerance, then stable session hashing. This is not
+  transitive neighbour chaining. All relevant caps must still have capacity: one
+  window reopening is only an opportunity to recheck another spent cap, not
+  proof the account is healthy. If several applicable weekly windows exist, the
+  earliest future refill is the next useful preference; every other overlapping
+  allowance still gates eligibility.
 - `headroom`: retain the cached-quota preference, spreading accounts within ten
   percentage points of the most remaining headroom.
 - `fair`: use a stable per-session spread, without ranking reset or headroom
@@ -54,7 +55,8 @@ No extra blocking usage probes are made for ranking. Reset forecasts use reports
 at most 30 minutes old; missing, stale, malformed, past, unsupported or
 future-fetched reset evidence does not invent a deadline. Weekly-unknown accounts
 join a neutral tie pool rather than starving behind known accounts. Without
-comparable weekly data use actual five-hour data, otherwise the stable hash.
+comparable weekly data use actual five-hour data where the account reports a
+five-hour window, otherwise the stable hash.
 No-session callers keep round-robin. Cached reports are observations, not quota
 reservations; concurrent requests can still need normal reactive recovery.
 
@@ -192,7 +194,7 @@ Returning to the primary is three separate mechanisms:
   message boundary **regardless of the cooldown**. Quota resets on a schedule
   the usage endpoint can state definitively, so a cooldown sized to a 24-hour
   advertised reset would glue the session to a fallback for a day after the
-  primary's 5-hour window reopened.
+  primary's 5-hour window (where the account reports one) reopened.
 - **`target_retry_at_ms`** — a per-target bench ("kimi 500'd 40s ago") so a
   settled session does not replay a dead target's failure at every message
   boundary. It is deliberately **not** cleared by `clear()`: it records facts

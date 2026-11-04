@@ -1,0 +1,75 @@
+AUDIT LOG — es / wire.aida_cadence / w1a3 (round 2)
+============================================================
+
+Every command below was run in /Users/damian/lo-i18n-es and the output shown is the real
+captured output, not a reconstruction.
+
+=== provenance and the renderer's constraints ===
+$ grep -n "^_ROW_INDENT\|^_VALUE_COLUMN\|^_MARKER_WIDTH\|^_LABEL_BUDGET" local_operator/tui/widgets/settings_view.py
+396:_ROW_INDENT = 2
+400:_VALUE_COLUMN = 34
+426:_MARKER_WIDTH = 2
+434:_LABEL_BUDGET = _VALUE_COLUMN - _ROW_INDENT - _MARKER_WIDTH - 1
+$ sed -n "4018,4021p" local_operator/tui/widgets/settings_view.py
+# Fit registry source first; projection controls must never be sliced.
+        label = _paint(
+            truncate_cells(setting.label, _LABEL_BUDGET),
+            source_locale="en",
+
+=== mechanical checks and width measurements ===
+$ python3 $LOCAL_OPERATOR_SCRATCHPAD/audit_es_w1a3.py wire.aida_cadence
+# namespace wire.aida_cadence
+# en  local_operator/i18n/catalogues/en/wire.aida_cadence.json  sha256 3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd
+# es  local_operator/i18n/catalogues/es/wire.aida_cadence.json  sha256 119a09f199b86afe94bfac1614def110ac0c5d9b6949e3074848af4978dd52b8
+# ctx local_operator/i18n/catalogues/en/wire.aida_cadence.context.json  sha256 6efad501b08345b72e5d4d19cfee3dd27a02a48c2eb721780cf9d7f8c7694d0e
+
+PARITY en=2 es=2 identical_key_sets=True
+PARITY missing_in_target=[] extra_in_target=[]
+
+PER-KEY MECHANICAL CHECKS (failures only)
+  failures=0
+
+WIDTH: every .label measured with the renderer's own truncate_cells(., 29)
+  wire.aida_cadence.interval_hours.label: 29 cells -> 'Intervalo de contacto (horas)'  [no-op (fits)]  (en 25)
+
+WIDTH: help/description/note strings against declared budget and the detail band
+  wire.aida_cadence.interval_hours.help: es 167, en 137, declared maxCells=None -> no declared budget
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+      truncates at 100 cols -> '0 mantiene la hora local del contacto diario. Con 1–168 se usan horas transcurridas; 4 = un conta…'
+      truncates at 80 cols  -> '0 mantiene la hora local del contacto diario. Con 1–168 se usan horas transcu…'
+
+=== negative controls ===
+$ # negative controls — the same checker, pointed at deliberately broken bytes
+$ AUDIT_DATA_ROOT=<scratch control tree> python3 audit_es_w1a3.py wire.exec
+PER-KEY MECHANICAL CHECKS (failures only)
+  FAIL wire.exec.approval_advisory: machine literal lost '--yolo'
+  FAIL wire.exec.error_preflight: placeholder ['{error}'] -> []
+  FAIL wire.exec.exec_epilog: newline count 20 -> 24
+  FAIL wire.exec.session_pointer: placeholder ['{session_id}', '{session_id}'] -> ['{session}', '{session}']; em/en dash 1/0 -> 0/0
+  failures=4
+
+$ AUDIT_DATA_ROOT=<scratch control tree> python3 audit_es_w1a3.py wire.console
+WIDTH: every .label measured with the renderer's own truncate_cells(., 29)
+  wire.console.max_live.label: 39 cells -> 'Máximo de terminales activas…'  [CLIPS -> 'Máximo de terminales activas…']  (en 21)
+  wire.console.max_owner.label: 37 cells -> 'Terminales de agente por con…'  [CLIPS -> 'Terminales de agente por con…']  (en 32)
+  wire.console.user_reserved.label: 32 cells -> 'Ranuras de terminales de usu…'  [CLIPS -> 'Ranuras de terminales de usu…']  (en 33)
+
+$ AUDIT_DATA_ROOT=<scratch control tree> python3 audit_es_w1a3.py wire.settings.hub_defaults
+  wire.settings.hub_defaults.agents.help: es 146, en 69, declared maxCells=72 -> OVER DECLARED BUDGET
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+      truncates at 100 cols -> 'Desactivado pausa las actualizaciones de TODOS los vínculos de agentes y habilidades del hub; act…'
+      truncates at 80 cols  -> 'Desactivado pausa las actualizaciones de TODOS los vínculos de agentes y habi…'
+
+CONTROL VERDICT: placeholder dropped / placeholder renamed / machine literal renamed / em dash -> hyphen
+                 / label over the 29-cell budget / declared maxCells breached: ALL DETECTED.
+CONTROL LIMIT: the exec_epilog newline counter also fires on the REAL data (en 20 -> es 24); that
+               difference was judged a legitimate reflow by reading the geometry, not by trusting
+               the counter (the geometry evidence in the wire.exec log). A counter firing is a prompt to look,
+               not a finding.
+
+=== judgement notes ===
+(none beyond the report)
+
+=== writes performed by this audit ===
+Only this directory: record.json, report.md, audit.log. No catalogue, sidecar, ledger, allowance or
+generated file was edited and no git command was run.

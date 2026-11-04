@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 
 from local_operator.i18n import catalogues
+from tests.unit.i18n import locale_coverage
 
 REPO = Path(__file__).resolve().parents[3]
 CLI = "local_operator/cli.py"
@@ -155,7 +156,7 @@ def test_owned_block_copy_is_exactly_the_pinned_envelopes():
     assert len(actual) == 20
 
 
-def test_french_locale_reaches_each_owned_message_and_falls_back(monkeypatch):
+def test_parser_reaches_owned_messages_and_supported_locales_use_tree_copy(monkeypatch):
     from local_operator.cli import build_cli_parser
     from local_operator.i18n.messages import Msg
 
@@ -173,27 +174,28 @@ def test_french_locale_reaches_each_owned_message_and_falls_back(monkeypatch):
     assert len(seen) == len(PINS)
     assert {locale for _, locale in seen} == {"fr"}
     for namespace in ("update", "services", "install"):
-        assert (
-            REPO / "local_operator/i18n/catalogues/fr" / ("cli." + namespace + "_help.json")
-        ).is_file()
-        en_values = catalogues.load_catalogue("en", "cli." + namespace + "_help")
-        fr_values = catalogues.load_catalogue("fr", "cli." + namespace + "_help")
-        assert set(fr_values) == set(en_values)
+        full_namespace = "cli." + namespace + "_help"
+        en_values = catalogues.load_catalogue("en", full_namespace)
         alias = {"update": "_up", "services": "_sr", "install": "_in"}[namespace]
-        for key, value in en_values.items():
-            rendered_fr = _message(alias, key.rsplit(".", 1)[1]).envelope(locale="fr")["text"]
-            expected_fr = fr_values[key].replace("{wait_seconds}", "45")
-            assert rendered_fr == expected_fr
-            assert rendered_fr != value.replace("{wait_seconds}", "45")
-            # A shipped locale without this namespace still reads the source.
-            assert _message(alias, key.rsplit(".", 1)[1]).envelope(locale="es")[
-                "text"
-            ] == value.replace("{wait_seconds}", "45")
+        for key in en_values:
+            message = _message(alias, key.rsplit(".", 1)[1])
+            for locale in locale_coverage.supported_targets():
+                expected = locale_coverage.expected_message(
+                    locale, full_namespace, key, message.params
+                )
+                assert message.envelope(locale=locale)["text"] == expected, (locale, key)
     assert parser.prog
 
 
 def test_wait_parameter_contract_tracks_the_actual_constant(monkeypatch):
     import local_operator.cli as cli
+
+    # The parser renders its help in the ACTIVE locale, so this test must pin
+    # the one it asserts in. Without this it passed only because the ambient
+    # locale happened to be English: after the es W2 catalogues landed, running
+    # the suite under LOP_LANG=es made `restart.format_help()` return Spanish
+    # and the English assertion below fail on a correct render (QA Q-2).
+    monkeypatch.setenv("LOP_LANG", "en")
 
     signature = inspect.signature(MODULES["_sr"].wait)
     assert list(signature.parameters) == ["wait_seconds"]

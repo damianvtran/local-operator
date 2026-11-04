@@ -1836,3 +1836,112 @@ def test_the_origins_own_unparseable_stamp_is_still_a_terminal_refusal() -> None
     )
     assert (update["state"], update["code"]) == ("refused", "target_not_published"), update
     assert rollouts.member_terminal(update)
+
+
+def test_a_done_member_puts_its_serve_fact_on_the_record_and_audit_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-10-28: a member whose `lop serve` stayed STALE says so on the origin.
+
+    The record carries the bounded fact and the REAL audit log keeps the flat
+    keys (``serve``/``serve_stale``/``serve_remedy`` are allow-listed for
+    ``update_member_state``) — the same filter that once dropped ``left_busy``.
+    """
+    from local_operator.network.audit import AuditLog
+
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    log = AuditLog(root)
+    server.audit = cast(Any, log)
+    record = _open(root, devices=["d_a"])
+    done = _answer("done", version="0.99.0", reason="this device moved from 0.91.1 to 0.99.0")
+    done["serve"] = {
+        "state": "stale",
+        "moved": [],
+        "stale": [{"pid": 537864, "version": "0.91.1"}],
+        "remedy": "lop services restart",
+    }
+    _scripted(monkeypatch, [done])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    log.close()
+    member = _member(_live(record["id"], root), "d_a")
+    assert member["serve"] == {
+        "state": "stale",
+        "stale": [{"pid": 537864, "version": "0.91.1"}],
+        "moved": [],
+        "remedy": "lop services restart",
+    }, member
+    rows = [r for r in AuditLog(root).tail(200) if r.get("event") == rollouts.MEMBER_STATE]
+    detail = rows[-1].get("detail", {})
+    assert detail.get("serve") == "stale", rows[-1]
+    assert detail.get("serve_stale") == ["537864@0.91.1"], rows[-1]
+    assert detail.get("serve_remedy") == "lop services restart", rows[-1]
+
+
+def test_an_answer_without_a_serve_fact_records_none() -> None:
+    """An older member sends no ``serve``; the record must not invent one."""
+    update = rollouts.classify_answer({"ok": True, "state": "done"}, fails=0, now=0.0)
+    assert update["serve"] == {}, update
+    junk = rollouts.classify_answer(
+        {"ok": True, "state": "done", "serve": {"state": "teleported"}}, fails=0, now=0.0
+    )
+    assert junk["serve"] == {}, junk
+
+
+def test_a_later_answer_without_a_serve_fact_clears_the_earlier_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review m4 on #3093: ``serve`` is replaced on key presence, like ``left_busy``.
+
+    A member record carrying an earlier STALE fact, answered by an older
+    member (no ``serve``), must not keep the stale verdict beside the newer
+    receipt.
+    """
+    root = tmp_path / "cfg"
+    server = _Server(root)
+    record = _open(root, devices=["d_a"])
+
+    def _seed(rec: dict[str, Any]) -> bool:
+        member = rollouts.member_of(rec, "d_a")
+        assert member is not None
+        member["serve"] = {"state": "stale", "stale": [{"pid": 1, "version": "0.91.0"}]}
+        return True
+
+    rollouts.mutate_record(record["id"], root, _seed)
+    _scripted(monkeypatch, [_answer("done", version="0.99.0", reason="moved")])
+    rollouts.step_record(cast(Any, server), record["id"], now=1000.0)
+    assert _member(_live(record["id"], root), "d_a")["serve"] == {}
+
+
+def test_a_capped_receipt_keeps_the_serve_remedy_whole() -> None:
+    """QA round 1 on #3093, Q4: the remedy survives the origin's DETAIL_CAP.
+
+    The member's reason used to append the serve clause AFTER named busy
+    sessions, and a plain slice cut it as `... on this d`. The clause now rides
+    first and the cap breaks on a word with an ellipsis.
+    """
+    from local_operator.network import meshupdate
+
+    fact = {
+        "state": "stale",
+        "stale": [{"pid": 1203893, "version": "0.91.92"}],
+        "remedy": "lop services restart",
+    }
+    reason = (
+        "this device moved from 0.91.92 to 0.91.93"
+        + meshupdate.serve_clause(fact)
+        + "; 1 session(s) retired for the new build, 2 kept; 2 busy session(s) stay on "
+        "0.91.92 until they settle: Librarian (approval), Quarterly planning (tool)"
+    )
+    assert len(reason) > rollouts.DETAIL_CAP, len(reason)
+    update = rollouts.classify_answer(
+        {"ok": True, "state": "done", "message": reason}, fails=0, now=0.0
+    )
+    detail = update["detail"]
+    assert len(detail) <= rollouts.DETAIL_CAP, detail
+    assert "run `lop services restart`" in detail, detail
+    assert detail.endswith("…"), detail
+    kept = detail[:-1]
+    assert reason.startswith(kept), detail
+    # Whole words: what follows the kept text is a separator, never a letter.
+    assert reason[len(kept)] in " ,.;:", (detail, reason[len(kept) :][:10])

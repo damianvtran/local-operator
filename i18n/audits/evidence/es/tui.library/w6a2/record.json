@@ -1,0 +1,155 @@
+{
+  "schema": 1,
+  "audit_id": "w6a2",
+  "audit_round": 2,
+  "audit_kind": "independent_current_byte_remediation_verification",
+  "locale": "es",
+  "namespace": "tui.library",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "b925c2e11be36653dfe88ac78f627bc2531427df on branch feat/i18n-es-tui (the brief's worktree note said `tui-wip`; the checked-out branch is the one recorded here). The TARGET catalogue is UNTRACKED in the worktree, so this audit binds to the on-disk sha256 in input_hashes, not to a commit; a later commit that lands different bytes is not covered.",
+  "key_count": {
+    "en": 108,
+    "target": 108,
+    "context": 0
+  },
+  "verdict": "passed",
+  "result": {
+    "mechanical_checks": "pass — C1–C8 and C10–C13 clean in checks.py; repo validator --catalogues-only reports 0 problem(s) tree-wide",
+    "findings_total": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0,
+    "round1_findings_total": 2,
+    "round1_findings_closed": 2,
+    "round1_findings_held_constraint": 0,
+    "note": "Both round-1 findings resolved with the requested wording; nothing else in the namespace moved."
+  },
+  "verdict_reason": "The notice that is painted exactly when the rail is hidden dropped from 76 to 45 cells, so it now survives every width at which it can be shown (down to 45 columns) where the round-1 text was clipped below 76; the field placeholder now states its condition first and keeps the load-bearing half under clipping. Both fixes are the round-1 proposals verbatim, and the revert reproduces the round-1 digest.",
+  "round1_bundle": {
+    "path": "i18n/audits/evidence/es/tui.library/w6a1/record.json",
+    "sha256": "5b9060a94b603651189bf157358574c26524a7a8d38e39c1aed3f5b4f47cc460",
+    "note": "the finding list this round closes; read directly, not from memory"
+  },
+  "round1_findings": [
+    {
+      "id": "F1",
+      "severity": "minor",
+      "key": "tui.library.rail_hidden",
+      "status": "closed"
+    },
+    {
+      "id": "F2",
+      "severity": "nit",
+      "key": "tui.library.form_name_placeholder",
+      "status": "closed"
+    }
+  ],
+  "remediation_scope_proof": {
+    "method": "C10: each recorded key must carry the round-1-proposed value exactly, and replacing those values with their round-1 originals must reproduce the round-1 target digest byte-for-byte",
+    "round1_target_sha256": "4b3e5982fdf26c71896579709f968dd25508f9fa48a1f942c0f616c0f4acbc62",
+    "current_target_sha256": "81cbce350526ce25b68aeebd09175c747716dc8324e9277b424ec44cf6b3f205",
+    "reverted_sha256": "4b3e5982fdf26c71896579709f968dd25508f9fa48a1f942c0f616c0f4acbc62",
+    "match": true,
+    "changed_keys": 2,
+    "note": "exactly the recorded keys moved; no sibling drifted"
+  },
+  "environment_observation": {
+    "ship_gate": "local_operator/i18n/data/shipped.json is MODIFIED in the working tree (es removed vs HEAD), so resolve.eligible_locale('es') -> 'en'",
+    "effect_on_c9": "messages.render(locale='es') would have rendered English; C9 therefore renders through the same catalogue lookup + ICU formatter render_record uses AFTER the gate, and audit.log prints the gate state",
+    "audit_did_not_modify_it": true,
+    "judged": false
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team), independent of the translator",
+    "session_or_instance": "75c80f4d7f2b",
+    "model": "radient/auto",
+    "actual_model_source": "this session's own model-switch notices (header said anthropic/claude-sonnet-5-5 at turn start)",
+    "model_note": "FALLBACK, disclosed: the session's primary header is anthropic/claude-sonnet-5-5, but provider quota failures moved this run through openai/gpt-6-astra and kimi/k3.1-pro before radient/auto, and ALL work recorded in this bundle was performed under radient/auto. No primary-model audit claim is made.",
+    "independent_from_translator_session": true,
+    "date": "2026-10-30",
+    "independence": "I translated none of this copy and repaired none of it. I authored the round-1 audit of this namespace (w6a1) and did not translate the copied text afterwards; in round 2 I re-read the current bytes against the English source and the sidecar, ran checks.py and the repo validator myself, and wrote only inside i18n/audits/evidence/es/. No catalogue, sidecar, ledger or allowance file was touched."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.library.json",
+      "revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+      "sha256": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.library.json",
+      "sha256": "81cbce350526ce25b68aeebd09175c747716dc8324e9277b424ec44cf6b3f205",
+      "tracked": false,
+      "note": "UNTRACKED working-tree bytes at the audited revision; this verdict binds this sha256, not a commit"
+    },
+    "context": {
+      "path": null,
+      "sha256": null,
+      "note": "this namespace has no English context sidecar (unchanged from round 1); fit was judged from the render paths"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.library/w6a2/report.md",
+      "sha256": "6ddce6bcb71147ff5fc30095bfa90700018d5e5232f6db8765bbce7cd510293a"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.library/w6a2/audit.log",
+      "sha256": "3cd4f34cdcd46a0d0c614108af2f22b15d021c7678f5a2979fdccddcd2ce79d4"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.library/w6a2/checks.py",
+      "sha256": "9bb403e96339f7c460a4aa6c9904c0e6fc6f49560ad9874c33d37a0e12c00f20"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.library/w6a2/receipt.json",
+      "sha256": "11d7a10747b0de53afe05b07dd279eca4b7e12e36c098ac3c6604e0c611dbd01"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0,
+    "findings_total": 0,
+    "finding_ids": [],
+    "round1_findings_closed": 2,
+    "round1_findings_open": 0
+  },
+  "findings": [],
+  "audit_notes_not_execution_log": [
+    "checks.py is the w6a1 script with a round-2 section (C10–C13) appended; C1–C9 are the same floor, re-derived on the current bytes. The run in audit.log is the post-fix run and every control fires.",
+    "Two independent passes were made on the Spanish text in round 1 and repeated here for the changed keys: es against en + sidecar, then the Spanish values alone in file order.",
+    "Meaning, register and terminology verdicts come from reading; the script proves the mechanical floor, the delta scope, the widths and the ICU selection.",
+    "No catalogue, sidecar, ledger or allowance file was modified by this audit; the ledger row below is a PROPOSAL because the brief forbids editing the ledger."
+  ],
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation (the team's gate is this independent audit).",
+    "No rendered TUI frames: this host is loaded and heavy runs are forbidden; widths are rich.cells.cell_len on the built strings.",
+    "C9 executes the ICU selection through the catalogue lookup + formatter after the ship gate, not through messages.render()'s gate, which currently resolves es to en (see environment_observation).",
+    "The target file is untracked at the audited revision; this verdict binds the recorded sha256, not a commit."
+  ],
+  "proposed_ledger_row": {
+    "_status": "PROPOSAL ONLY — the brief forbids editing i18n/ledger/es.json; the wave appends this row.",
+    "_missing": [
+      "translator.agent",
+      "translator.model",
+      "translator.date"
+    ],
+    "locale": "es",
+    "namespace": "tui.library",
+    "source_sha256": "5a389b6a7d8de06621462f2685eff6dc95cd4cd6584d35dd6c26a0a19ad50b11",
+    "auditor": {
+      "agent": "translation-auditor (lopdev team), independent of the translator",
+      "model": "radient/auto",
+      "date": "2026-10-30",
+      "result": "passed",
+      "findings": 0
+    },
+    "status": "passed",
+    "note": "Independent round-2 audit w6a2 (radient/auto, fallback disclosed): round-1 findings closed, 0 new. Record: i18n/audits/evidence/es/tui.library/w6a2/record.json"
+  }
+}

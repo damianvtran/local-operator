@@ -1,0 +1,3 @@
+{
+  "relay.library.count": "{count, plural, one {# recurso} many {# de recursos} other {# recursos}}"
+}

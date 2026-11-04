@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -514,3 +515,247 @@ def test_a_clean_exit_removes_its_run_record(tmp_path: Path) -> None:
 
     assert journal.read_run_record(directory) is None
     assert journal.read_exit_record(directory) is not None
+
+
+# --- the boot cost riding on the run record --------------------------------
+#
+# WHY these pin what they pin: the record exists so a 150 s boot can be read as
+# "starved" or "slow work" without a profiler. The shape has to stay additive
+# (older builds read ``v: 1`` and must keep treating it as the same artifact),
+# and the measurement must never be the reason a run record is missing.
+
+
+_WINDOW_KEYS = {
+    "wall_s",
+    "cpu_s",
+    "waited_for_cpu_s",
+    "blocked_s",
+    "voluntary_switches",
+    "involuntary_switches",
+}
+
+
+def test_the_run_record_carries_this_boot_cost(tmp_path: Path, monkeypatch) -> None:
+    """``_note_run_start`` writes the since-exec breakdown, load and ``standby: false``."""
+    monkeypatch.setattr(journal, "_ADOPTION", None)
+    directory = _session_dir(tmp_path)
+    process._note_run_start(_Handle("abc123", directory), _Runtime("abc123", 42.0))
+
+    raw = json.loads(journal.run_record_path(directory).read_text())
+    boot = raw["boot"]
+    assert set(boot) == _WINDOW_KEYS | {"window", "load_1m", "standby"}
+    assert boot["window"] == "since-exec"
+    assert boot["standby"] is False, "a cold child says so explicitly"
+    assert boot["cpu_s"] > 0
+    # Linux and macOS both supply the runnable time; anything else would leave
+    # these None, and a None here on CI's Ubuntu is the Linux reader failing.
+    assert boot["wall_s"] is not None and boot["wall_s"] > 0
+    assert boot["waited_for_cpu_s"] is not None and boot["waited_for_cpu_s"] >= 0
+    assert boot["blocked_s"] is not None and boot["blocked_s"] >= 0
+    # The record's original keys are untouched: ``covers_run`` still keys on them.
+    record = journal.read_run_record(directory)
+    assert record is not None and record.covers_run(os.getpid(), 42.0)
+    assert record.boot == boot
+
+
+def test_an_adopted_standby_reports_only_its_own_boot(tmp_path: Path, monkeypatch) -> None:
+    """After adoption the headline covers adoption->record; the spare's life is separate.
+
+    MINOR-1 of #3226 review: the spare's whole lifetime (up to its idle window)
+    in the headline ``wall_s`` reads as starvation.
+    """
+    from local_operator.session.runtime import boot_cost
+
+    spare = boot_cost.sample()
+    assert spare is not None
+    # Pretend the spare was adopted after 600 s of idling.
+    spare = {**spare, "wall_s": (spare["wall_s"] or 0.0) - 600.0}
+    monkeypatch.setattr(journal, "_ADOPTION", spare)
+    directory = _session_dir(tmp_path)
+    process._note_run_start(_Handle("abc123", directory), _Runtime("abc123", 42.0))
+
+    record = journal.read_run_record(directory)
+    assert record is not None and record.boot is not None
+    boot = record.boot
+    assert boot["standby"] is True
+    assert boot["window"] == "since-adoption"
+    assert boot["wall_s"] >= 600.0 - 1, "fixture sanity: the window starts at adoption"
+    assert set(boot["before_adoption"]) == _WINDOW_KEYS
+
+
+def test_note_adoption_snapshots_through_boot_cost(monkeypatch) -> None:
+    monkeypatch.setattr(journal, "_ADOPTION", None)
+    journal.note_adoption()
+    snap = journal.adoption_snapshot()
+    assert snap is not None and snap["cpu_s"] > 0
+
+
+def test_a_starved_window_and_a_blocked_window_split_differently() -> None:
+    """The split the record exists for, on synthetic counters (no clocks)."""
+    from local_operator.session.runtime import boot_cost
+
+    base = {"cpu_s": 1.0, "runnable_s": 1.1, "wall_s": 2.0}
+    base.update(voluntary_switches=0.0, involuntary_switches=0.0)
+    starved = boot_cost.window({**base, "cpu_s": 3.0, "runnable_s": 150.0, "wall_s": 152.0}, base)
+    blocked = boot_cost.window({**base, "cpu_s": 3.0, "runnable_s": 4.0, "wall_s": 152.0}, base)
+    assert starved["waited_for_cpu_s"] > 140 and starved["blocked_s"] < 3
+    assert blocked["blocked_s"] > 140 and blocked["waited_for_cpu_s"] < 2
+    # Clamping: clocks that disagree by a tick, or two threads' CPU exceeding
+    # wall, never yield a negative part.
+    skew = boot_cost.window({**base, "cpu_s": 1.0, "runnable_s": 0.9, "wall_s": 0.85})
+    assert skew["waited_for_cpu_s"] == 0.0 and skew["blocked_s"] == 0.0
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="rusage_info_v4 is a macOS struct")
+def test_the_darwin_struct_offsets_match_the_sdk_header() -> None:
+    """Offsets from a compiled ``offsetof`` probe against <sys/resource.h>.
+
+    A wrong pad reads a neighbouring counter as runnable time without error,
+    which is exactly the silent-wrong-reading failure this pin exists for.
+    """
+    from local_operator.session.runtime import boot_cost
+
+    resolved = boot_cost._darwin()
+    assert resolved
+    struct_type = resolved[1]
+    assert struct_type.ri_user_time.offset == 16
+    assert struct_type.ri_proc_start_abstime.offset == 80
+    assert struct_type.ri_runnable_time.offset == 288
+
+
+def test_an_unmeasurable_boot_still_writes_the_run_record(tmp_path: Path, monkeypatch) -> None:
+    """The run key is load-bearing for the listing; the boot cost is not."""
+    import resource
+
+    def boom(*_args):
+        raise OSError("no rusage here")
+
+    monkeypatch.setattr(resource, "getrusage", boom)
+    monkeypatch.setattr(journal, "_ADOPTION", None)
+    directory = _session_dir(tmp_path)
+    process._note_run_start(_Handle("abc123", directory), _Runtime("abc123", 42.0))
+
+    raw = json.loads(journal.run_record_path(directory).read_text())
+    assert "boot" not in raw, "absent, so the record is the shape it always was"
+    record = journal.read_run_record(directory)
+    assert record is not None and record.covers_run(os.getpid(), 42.0)
+
+
+def test_a_record_without_boot_cost_still_reads(tmp_path: Path) -> None:
+    """A record an older build wrote (no ``boot``) parses exactly as before."""
+    directory = _session_dir(tmp_path)
+    journal.run_record_path(directory).write_text(
+        json.dumps(
+            {"v": 1, "kind": "runtime-run", "session_id": "abc123", "pid": 7, "started_at": 9.0}
+        )
+    )
+    record = journal.read_run_record(directory)
+    assert record is not None and record.boot is None and record.covers_run(7, 9.0)
+
+
+def _fake_linux_proc(
+    monkeypatch, schedstat: dict[str, bytes | None], *, cpu_s: float = 1.0
+) -> None:
+    """Serve ``/proc/self/task/*/schedstat`` and ``/proc/self/stat`` from a dict.
+
+    A ``None`` row is a thread that exited between the listing and the read.
+    The stat row puts the start tick at 0 and ``CLOCK_BOOTTIME`` at 100 s, so the
+    process age is 100 s.
+
+    ``cpu_s`` IS PINNED TOO, because ``sample()`` reads it from the real
+    ``getrusage`` and the fail-closed guard compares it with the faked wall.
+    Unpinned, the test measured whichever process ran it: a fresh local run
+    has ~1 s of CPU (guard fires), while a CI xdist worker that has already run
+    thousands of tests had more than 100 s (the gap is not material, the guard
+    correctly declines, and the test failed on #3226's head ``5d237f1``).
+    """
+    import builtins
+    import io
+    import resource
+    import types
+
+    from local_operator.session.runtime import boot_cost
+
+    real_open = builtins.open
+    stat = b"99 (py thon) S " + b" ".join([b"0"] * 18) + b" 0 0\n"
+
+    def fake_open(path, mode="r", *args, **kwargs):
+        path = str(path)
+        if path == "/proc/self/stat":
+            return io.BytesIO(stat)
+        if path.startswith("/proc/self/task/"):
+            row = schedstat[path.split("/")[4]]
+            if row is None:
+                raise FileNotFoundError(path)
+            return io.BytesIO(row)
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(boot_cost.os, "listdir", lambda _p: list(schedstat))
+    monkeypatch.setattr(boot_cost.time, "CLOCK_BOOTTIME", 7, raising=False)
+    monkeypatch.setattr(boot_cost.time, "clock_gettime", lambda _c: 100.0)
+    monkeypatch.setattr(boot_cost.os, "sysconf", lambda _n: 100)
+    monkeypatch.setattr(boot_cost.sys, "platform", "linux")
+    real_getrusage = resource.getrusage
+
+    def pinned_getrusage(who):
+        real = real_getrusage(who)
+        return types.SimpleNamespace(
+            ru_utime=cpu_s,
+            ru_stime=0.0,
+            ru_nvcsw=real.ru_nvcsw,
+            ru_nivcsw=real.ru_nivcsw,
+        )
+
+    monkeypatch.setattr(resource, "getrusage", pinned_getrusage)
+
+
+def test_linux_without_run_queue_accounting_fails_closed(monkeypatch) -> None:
+    """Zero run-queue wait with wall >> CPU must not be reported as "blocked".
+
+    Round 2 of #3226: without schedstats the sum is on-CPU time only, so a
+    starved boot would read as blocked — the mislabel this record exists to stop.
+    """
+    from local_operator.session.runtime import boot_cost
+
+    _fake_linux_proc(monkeypatch, {"1": b"500000000 0 3\n", "2": b"10000000 0 1\n"})
+    sample = boot_cost.sample()
+    assert sample is not None and sample["wall_s"] == 100.0
+    assert sample["runnable_s"] is None
+    record = boot_cost.window(sample)
+    assert record["waited_for_cpu_s"] is None and record["blocked_s"] is None
+    assert record["wall_s"] == 100.0, "wall and CPU are still recorded"
+    assert record["cpu_s"] == 1.0
+
+
+def test_linux_zero_run_queue_with_no_material_gap_keeps_the_split(monkeypatch) -> None:
+    """The guard's other side: CPU ~= wall leaves nothing to misattribute.
+
+    This is the input the CI worker accidentally supplied to the test above
+    (process CPU above the faked 100 s wall); declining there is correct.
+    """
+    from local_operator.session.runtime import boot_cost
+
+    _fake_linux_proc(monkeypatch, {"1": b"99950000000 0 3\n"}, cpu_s=99.95)
+    sample = boot_cost.sample()
+    assert sample is not None and sample["runnable_s"] == 99.95
+
+
+def test_linux_thread_exiting_mid_scan_keeps_the_survivors(monkeypatch) -> None:
+    from local_operator.session.runtime import boot_cost
+
+    _fake_linux_proc(
+        monkeypatch,
+        {"1": b"2000000000 60000000000 9\n", "2": None, "3": b"1000000000 0 2\n"},
+    )
+    runnable, age, run_queue = boot_cost._linux_times()
+    assert runnable == 63.0, "threads 1 and 3 summed; the exited thread skipped"
+    assert run_queue == 60_000_000_000 and age == 100.0
+    assert boot_cost.sample()["runnable_s"] == 63.0  # type: ignore[index]
+
+
+def test_linux_with_no_readable_thread_has_no_runnable_figure(monkeypatch) -> None:
+    from local_operator.session.runtime import boot_cost
+
+    _fake_linux_proc(monkeypatch, {"1": None})
+    assert boot_cost._linux_times()[0] is None

@@ -1,0 +1,27 @@
+{
+  "locale": "vi",
+  "namespace": "cli.credential_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-050",
+      "severity": "MINOR",
+      "namespace": "cli.credential_help",
+      "key": "cli.credential_help.credential",
+      "english": "Manage API keys and credentials for different hosting platforms",
+      "current": "Quản lý khóa API và thông tin xác thực cho các nền tảng lưu trữ khác nhau",
+      "problem": "'nền tảng lưu trữ' means storage platform; 'hosting' here is the model provider (`--hosting`), which vi settings render 'Nhà cung cấp' (wire.settings.hosting.label). Wrong sense; same in global_help hosting/propagated_hosting/description, exec_worker_help hosting, credential_help credential.",
+      "suggested": "Quản lý khóa API và thông tin xác thực cho các nhà cung cấp khác nhau",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    }
+  ]
+}

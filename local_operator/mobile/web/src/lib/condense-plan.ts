@@ -1,6 +1,6 @@
 /**
  * THE COLLAPSE PLAN (Tier B), ported from the desktop.
- * Ported from `damianvtran/local-operator-ui` at sourceHash 47757620d75085ce…:src/renderer/src/features/chat/canonical/turn-collapse-model.ts:128-3335
+ * Ported from `damianvtran/local-operator-ui` at sourceHash f46617132a56fc69…:src/renderer/src/features/chat/canonical/turn-collapse-model.ts:128-3335
  *
  * WHAT IT DECIDES: which rows of a settled turn stay on screen and which hide
  * behind ONE bar per contiguous span, what each bar states (duration, action
@@ -56,7 +56,7 @@ import {
 	peerIdentity,
 } from "./condense-predicates";
 import type { FoldableAction, FoldCountSegment } from "./condense-fold";
-import { foldCountSegments, foldSummary, workedSeconds, workedSecondsOf } from "./condense-fold";
+import { bridgeOpOf, foldCountSegments, foldSummary, workedSeconds, workedSecondsOf } from "./condense-fold";
 export function staysVisibleWhileCollapsed(record: CondenseRecord): boolean {
 	/*
 	 * THE PIN LIST IS THE BOUNDARY VOCABULARY (`boundaryKindOf`): the same
@@ -315,12 +315,10 @@ function isInternalEpisodeOrigin(record: CondenseRecord): boolean {
 
 /** Both turn and action folds must retain actual material owners inline. */
 export function ownsMaterialArtifact(record: CondenseRecord): boolean {
-	/*
-	 * Two desktop arms are absent here: a `supplement` row and record-level
-	 * `images` are kinds this wire never carries (relay tool rows have no image
-	 * refs; only user and hub rows do, and those are not material owners). The
-	 * generating-card arm below IS kept - a phone renders those cards too.
-	 */
+	// Existing wire media owns its surface independently of receipt metadata.
+	// In particular, an incoming card's attachment_count cannot absorb a
+	// channel_history screenshot into a closed internal-action disclosure.
+	if ((record.kind === "tool" || record.kind === "custom") && (record.images?.length || record.videos?.length)) return true;
 	// Before output bytes exist, the generating card already owns loading/error
 	// and cancellation UI; keep ALL phases, not only successful picture rows.
 	return record.kind === "tool" && isImageGenTool(record.toolName);
@@ -1404,7 +1402,10 @@ function factsOf(
 	for (const row of workRows) {
 		if (row.record.kind !== "tool") continue;
 		const failedHere = isFailedCall(row.record);
-		actions.push({ name: ledgerName(row.record), failed: failedHere });
+		/* The op rides along so the turn bar splits `bridge` the way the fold
+		   group beside it does (the desktop's `toolOp` at the same site; the
+		   condense parity fixture's `Bp` cases pin it). */
+		actions.push({ name: ledgerName(row.record), failed: failedHere, op: bridgeOpOf(row) });
 		if (failedHere) {
 			failed += 1;
 			firstFailedId ??= row.record.id;

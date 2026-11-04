@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "audit_id": "w6a2",
+  "audit_round": 2,
+  "locale": "es",
+  "namespace": "tui.import",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), es-tui-r2-b",
+    "session_or_instance": "3add261f67ba",
+    "model": "radient/auto"
+  },
+  "seals": [
+    {
+      "path": "i18n/audits/evidence/es/tui.import/w6a2/record.json",
+      "sha256": "2b72395a5923d035041bcf591f1df6993d99552ccbb09a3db53963939c7115b8"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.import/w6a2/report.md",
+      "sha256": "f48187396161093577f2687cda33a197264a0e93f889290b01940cb687a95994"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.import/w6a2/audit.log",
+      "sha256": "9614f0f98e9b746fa1c9aeebb5589983d37c1894fe556dc682fcbfa2ba3cf355"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.import/w6a2/checks.py",
+      "sha256": "813c89aebf3aab4da43ec4ca584a1e47d7c0720ed31edeeea10aa7f0dafa5fe2"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.import/w6a2/probe_import_hints.py.txt",
+      "sha256": "c9d66eafe0d9e183ec03a77797e959f58c08bba249c4f8aec6922e08fb3a0f8a"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.import/w6a2/probe_error_select_wrap.py.txt",
+      "sha256": "cbc0d73a071dbfc3b2d073f7bda4456112f7c9d59d844f42f49d4cd59c6e1330"
+    }
+  ],
+  "verdict": "passed",
+  "unresolved_blocker_major_count": 0,
+  "note": "sealed at write time; a later edit to any companion invalidates its seal"
+}

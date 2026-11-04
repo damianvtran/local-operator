@@ -56,6 +56,26 @@ const PAGE = 120;
    it, only re-offer it to the merge's id de-dup. */
 const PROJECTION_ROWS = 80;
 
+/** Every row id the LIVE fold mints, which no journal row can ever match. The
+ *  fold creates them for content that is not a journal entry: reasoning
+ *  (`rz-`, never persisted), tool rows (`tc-`), notices (`nt-`, `rt-`, `err-`,
+ *  `rej-`), compaction (`cx-`) and the peer families' `peer-`/`nonpeer-`
+ *  fallbacks when a custom message carried no id — all timestamp- or
+ *  call-keyed (`local_operator/mobile/projection.py`, the `id=f"<p>-…"`
+ *  sites). The child sheet also synthesises a head row `prompt:<job_id>`
+ *  (`agent-view.tsx`). A cursor naming any of these is answered as
+ *  end-of-history. */
+const LIVE_ONLY_ROW_PREFIXES = ["rz-", "tc-", "nt-", "rt-", "err-", "rej-", "cx-", "peer-", "nonpeer-", "prompt:"];
+
+/** Whether a rendered row's id can name a journal entry — the only kind a
+ *  history cursor may use. Anything else is a cursor the daemon can only
+ *  answer as end-of-history. */
+function journalAddressableRow(entry: TranscriptEntry | undefined): boolean {
+	return entry !== undefined
+		&& entry.kind !== "reasoning"
+		&& !LIVE_ONLY_ROW_PREFIXES.some((prefix) => entry.id.startsWith(prefix));
+}
+
 /* Severity glyphs, matching the TUI's NOTICE_GLYPHS exactly (transcript.py).
    Severity was HUE-ONLY on this surface: measured against the theme tokens,
    `danger` and `ink-dim` sit at 1.30:1, and across all 31 themes those two are
@@ -176,8 +196,19 @@ function Entry({ entry, pid, condensed = false }: { entry: TranscriptEntry; pid:
 		case "steer":
 			return (
 				<div className="flex min-w-0 justify-end">
-					<div className="max-w-[85%] rounded-md border border-hairline px-3 py-1 text-body-sm text-ink-muted break-words whitespace-pre-wrap">
-						{entry.text}
+					<div className="flex max-w-[85%] flex-col gap-1.5 rounded-md border border-hairline px-3 py-1 text-body-sm text-ink-muted break-words">
+						{/* A steer can carry images exactly like a prompt (the composer
+						   sends them on the steer op while a turn runs). Rendering only
+						   the text left an image-only steer as an EMPTY bordered pill
+						   and hid the thumbnails of a captioned one. */}
+						{(entry.images ?? []).length > 0 ? (
+							<div className="flex flex-wrap gap-1.5">
+								{(entry.images ?? []).map((img) => (
+									<AttachmentImage key={img.index} pid={pid} entryId={entry.id} index={img.index} />
+								))}
+							</div>
+						) : null}
+						{entry.text ? <div className="whitespace-pre-wrap">{entry.text}</div> : null}
 					</div>
 				</div>
 			);
@@ -460,6 +491,7 @@ export function Transcript({
 	supplements,
 	projectionPid = 0,
 	peerCycles = false,
+	headPinned,
 	tailContent,
 	emptyContent,
 }: {
@@ -480,6 +512,11 @@ export function Transcript({
 	projectionPid?: number;
 	/** Explicit owner-channel negotiation; never inferred from an entry. */
 	peerCycles?: boolean;
+	/** The projection's `transcript_head_pinned`: the head row is the opening
+	 *  user message pinned ahead of a disjoint tail, so the first history cursor
+	 *  must start below it. Absent on an older daemon — the length/kind fallback
+	 *  then applies. */
+	headPinned?: boolean;
 	/** Commands this device sent that the session has not written a row for yet.
 	 *  Rendered as the LAST rows of the conversation, which is where the real rows
 	 *  will land, and boxed like the row each op settles into (`PendingEchoRow`)
@@ -576,7 +613,13 @@ export function Transcript({
 	   would create a hole and make a turn summary claim a shorter run. */
 	const heldMap = new Map<string, TranscriptEntry>();
 	for (const entry of [...older, ...heldLive]) heldMap.set(rowKey(entry), entry);
-	const cappedProjection = entries.length >= PROJECTION_ROWS;
+	/* THE PIN COMES FROM THE WIRE WHEN THE DAEMON SAYS SO. `headPinned` is the
+	   projection's own `transcript_head_pinned`; absent on an older daemon, where
+	   the length-and-kind test is the only signal available. Any user-headed
+	   projection is treated as pinned in that fallback: the opener is held either
+	   way, so the cost of a false positive is one row of overlap in the next
+	   page, which the merge's rowKey de-dup discards. */
+	const cappedProjection = headPinned ?? (entries.length >= PROJECTION_ROWS && entries[0]?.kind === "user");
 	const pinnedOpener = cappedProjection && entries.length > 1 && entries[0]?.kind === "user" ? entries[0] : null;
 	const liveTail = pinnedOpener ? entries.slice(1) : entries;
 	for (const entry of liveTail) heldMap.set(rowKey(entry), entry);
@@ -602,12 +645,27 @@ export function Transcript({
 	   reader then scrolls through as a conversation that repeats itself.
 	   `older[0]` is the oldest row this view actually holds, so the next page is
 	   the one immediately before it and paging is linear in the reader's taps. */
+	/* THE FIRST CURSOR MUST NAME A JOURNAL ROW, and not every rendered row does.
+	   The live fold mints ids the journal never holds — ``rz-`` reasoning, ``tc-``
+	   tool rows, ``nt-``/``rt-``/``err-``/``rej-`` notices, ``cx-`` compaction —
+	   and a served page names a tool row ``<message>:call_<call>``. The daemon
+	   answers a cursor it cannot locate as END OF HISTORY
+	   (``durable.py:_cursor_candidates`` / ``journal_rows_older_than``), so a
+	   cursor taken from one of these rows stops back-filling for good: the reader
+	   sees the pinned opening message, a gap, and the newest rows.
+
+	   AND THE PINNED HEAD IS NOT THE CURSOR. The daemon pins the opening user
+	   message ahead of a disjoint tail; paging from it asks for history older
+	   than the conversation's first message. The projection states the pin
+	   (``transcript_head_pinned``), which is the only reliable signal: the frame
+	   cap can publish a pinned tail of 16 rows, so length cannot stand in for it.
+	   Skipping the head costs at most one already-held row on a projection that
+	   merely STARTS with a user turn, which the merge's rowKey de-dup discards. */
+	const cursorStart = cappedProjection ? 1 : 0;
 	const oldestId =
 		older.length > 0
 			? older[0].id
-			: entries.length >= PROJECTION_ROWS && entries[0]?.kind === "user"
-				? entries[1]?.id ?? entries[0]?.id ?? null
-				: merged[0]?.id ?? null;
+			: merged.slice(cursorStart).find(journalAddressableRow)?.id ?? merged[0]?.id ?? null;
 
 	/* THE QUIET GROUPS over the rows on hand (design §5, slice S4): pure per
 	   render — rows only append, so a closed group's facts cannot move and the
@@ -952,6 +1010,19 @@ export function Transcript({
 		<div
 			ref={node => { scrollRef.current = node; return scrollCue(node); }}
 			onScroll={onScroll}
+			/* THE TRANSCRIPT KEEPS ITS OWN MOMENTUM (the "two scroll bars"
+			   report). `overscroll-behavior-y: contain` stops a drag that reaches
+			   either end of the conversation from chaining to the document, which
+			   is where a thumb on the composer or a flick at the top edge used to
+			   move the whole page instead. The window is locked at the stylesheet
+			   level too (`styles/index.css`, html/body); this is the half that
+			   belongs to the scroller, so a future shell that forgets the lock
+			   still cannot turn a conversation swipe into a page scroll.
+
+			   Inline rather than a class for the reason `lib/column.ts` spells
+			   out: the vitest layer has no stylesheet, so only an inline style
+			   RESOLVES and a test can fail when the property is dropped. */
+			style={{ overscrollBehaviorY: "contain" }}
 			className={cn(
 				/* overflow-x-hidden as the backstop: break-words on the rows should
 				   wrap everything, but a table or pre that still overflows scrolls

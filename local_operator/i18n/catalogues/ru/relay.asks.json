@@ -15,6 +15,7 @@
   "relay.asks.card.secret_notice_persisted": "секрет — отправлен напрямую, в транскрипте не отображается и сохранён в вашем хранилище учётных данных",
   "relay.asks.card.placeholder_secret": "вставьте секрет",
   "relay.asks.card.placeholder_answer": "ваш ответ",
+  "relay.asks.card.other": "Другое",
   "relay.asks.card.recommended": "· рекомендовано",
   "relay.asks.card.choose_any": "выберите все подходящие",
   "relay.asks.card.urgent": "· срочно",

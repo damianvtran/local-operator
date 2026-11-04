@@ -1,0 +1,73 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.errors.session_host",
+  "audit_id": "zh31a1",
+  "audit_date": "2026-10-31",
+  "key_count": 3,
+  "audit_pass": "first independent pass; separate high-visibility second pass pending",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "45153dd07ae1",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "d90daece65d4",
+    "actual_model_source": "Explicit runtime model-switch user notice: temporary fallback openai/gpt-6.1-sol after provider quota failure; audit performed after that notice. Earlier primary anthropic/claude-sonnet-5-5 and intermediate anthropic/claude-opus-5-5 were not the substantive audit model.",
+    "fallback": true
+  },
+  "source_audit_revision": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "translator_session": "d90daece65d4",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "zh-CN": {
+      "path": "local_operator/i18n/catalogues/zh-CN/wire.errors.session_host.json",
+      "sha256": "4205cc6feda10279c524d78ff95c450bbc50981a48d13e37f82849d1705860d4"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/report.md",
+      "sha256": "3294dcf52701f5cb1b745db43397f420d90dfb97a49b2e769e29e0992735ac83"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/audit.log",
+      "sha256": "a11d373e50a7de749e6a00a27156aa0f77cdb19cd096c87fff6b7ac62c493930"
+    },
+    {
+      "path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/ledger-proposal.json",
+      "sha256": "6fad6e56e9e466d79935b87d7523a4ace16c96bdf92b248bb6310ba6331c0bb3"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "audit_notes_not_execution_log": "report.md contains judgments and scope notes; audit.log records actual independent validator executions and mechanical checks.",
+  "mechanical_validator": {
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/check.py",
+      "--catalogues-only"
+    ],
+    "exit_code": 0,
+    "negative_control_exit_code": 1,
+    "final_restored_exit_code": 0,
+    "scope": "minimal pinned validator/runtime plus this single English/zh-CN namespace and sidecar"
+  },
+  "retention": {
+    "future_tracked_path": "i18n/audits/evidence/zh-CN/wire.errors.session_host/zh31a1/record.json",
+    "currently_tracked": false,
+    "currently_committed": false,
+    "actual_ledger_modified": false,
+    "scratch_pending_manager_preservation": true
+  },
+  "rendered_fit_verified": false,
+  "second_independent_audit_completed": false,
+  "shared_worktree_modified": false
+}

@@ -224,6 +224,7 @@ class PlacementState:
         block_scope: str,
         until: float,
         label: str = "",
+        rested_at: float | None = None,
     ) -> None:
         """Remember that the owner's row ``credential_id`` answered a usage limit.
 
@@ -243,6 +244,13 @@ class PlacementState:
         local row follows — so the two cannot drift. ``label`` is the account's
         non-secret identity label (email or account id), kept so the refusal can
         name WHICH account is resting; it is never a token.
+
+        ``rested_at`` is when the rest began: ``None`` means now, ``0.0`` unknown (a
+        row an older build wrote). It exists for the listing (review round 1, m2): a
+        grant recorded AFTER every rest began was lent from a sibling row — the
+        rested ones travel as exclusions — so the key is only partly rate-limited,
+        and without the start time "a sibling serves" and "the only account just hit
+        its limit" read the same. Routing never reads it.
         """
         from local_operator.providers.auth_store import MAX_CREDENTIAL_BLOCK_MS
 
@@ -260,6 +268,7 @@ class PlacementState:
             "block_scope": block_scope,
             "until": float(until),
             "label": label,
+            "rested_at": now if rested_at is None else float(rested_at),
         }
 
     def cooldowns(
@@ -291,6 +300,29 @@ class PlacementState:
             and row_owner == owner_device
             and float(row.get("until") or 0.0) > stamp
             and block_scope_gates(str(row.get("block_scope") or ""), model_id)
+        ]
+        return sorted(live, key=lambda row: float(row["until"]))
+
+    def resting_any_scope(
+        self, key: str, *, owner_device: str, now: float | None = None
+    ) -> list[dict[str, Any]]:
+        """Every live rest ``owner_device`` holds for ``key``, whatever its scope. DISPLAY ONLY.
+
+        ``lop network credentials`` lists a key, not a request, so it has no model to
+        test a ``model:<family>`` scope against — and :meth:`cooldowns` with ``""``
+        would show only account-wide rests. A SEPARATE METHOD rather than a nullable
+        ``model_id`` on :meth:`cooldowns` (review round 1, m3): that signature feeds the
+        grant frame's ``exclude_credential_ids``, and a routing caller that passed
+        ``None`` by accident would hide every rested row for every model. Nothing that
+        routes may call this. Owner-scoped for the same reason :meth:`cooldowns` is.
+        """
+        stamp = time.time() if now is None else now
+        live = [
+            dict(row)
+            for (row_key, row_owner, _id), row in self._cooldowns.items()
+            if row_key == key
+            and row_owner == owner_device
+            and float(row.get("until") or 0.0) > stamp
         ]
         return sorted(live, key=lambda row: float(row["until"]))
 
@@ -351,6 +383,13 @@ class PlacementState:
         for row in payload.get("cooldowns") or []:
             # A malformed row is skipped, never guessed at: the failure mode of a
             # bad cooldown must be one more ask of the owner, not a hidden login.
+            # ``rested_at`` is parsed OUTSIDE that rule (QA round 2, R2-Q3): it is a
+            # display field, and a garbled value must cost the "partly" reading,
+            # never the routing rest itself.
+            try:
+                rested_at = float(row.get("rested_at") or 0.0)
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                rested_at = 0.0
             try:
                 state.cool_down(
                     str(row["key"]),
@@ -359,6 +398,7 @@ class PlacementState:
                     block_scope=str(row.get("block_scope") or ""),
                     until=float(row["until"]),
                     label=str(row.get("label") or ""),
+                    rested_at=rested_at,
                 )
             except (KeyError, TypeError, ValueError):
                 continue

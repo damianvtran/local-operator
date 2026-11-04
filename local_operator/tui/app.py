@@ -51,6 +51,7 @@ from rich.cells import cell_len
 from rich.console import Group
 from rich.padding import Padding
 from rich.style import Style
+from rich.table import Table
 from rich.terminal_theme import TerminalTheme
 from rich.text import Text
 from textual import events
@@ -76,6 +77,7 @@ from textual.screen import Screen
 from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
+from textual.worker import Worker
 
 from local_operator import keymap as _keymap
 from local_operator.ansi import strip_control_sequences
@@ -136,8 +138,10 @@ from local_operator.i18n.keys import tui_asks as _ask_keys
 from local_operator.i18n.keys import tui_library
 from local_operator.i18n.keys import tui_projects as _pc
 from local_operator.i18n.keys import tui_projects_edit as _pe
+from local_operator.i18n.keys import tui_setup_cues as _setup_keys
+from local_operator.i18n.keys import tui_status_command as _sc_keys
 from local_operator.i18n.keys import tui_tags as _tag_keys
-from local_operator.i18n.text import tr
+from local_operator.i18n.text import register_refresh, tr
 from local_operator.logger import current_log_file
 
 # The `/mcp` verb helpers live with the verbs they serve, so the terminal and
@@ -224,6 +228,7 @@ from local_operator.slash_commands import (
 from local_operator.supplements.contract import SUPERSEDED_ERROR, reader_disposition
 from local_operator.team_bridge.card import bridge_card_sender, bridge_card_text
 from local_operator.tui import images as images_mod
+from local_operator.tui import status_command as status_command_mod
 from local_operator.tui import supplements as supplement_mod
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.ask_open_policy import (
@@ -607,6 +612,10 @@ _t_tags = tr("tui.tags")
 #: The queued-ask surfaces' own namespace (R5). Read through the binding at every
 #: use site, never copied: a language move re-materialises the catalogue.
 _t_asks = tr("tui.asks")
+#: First-run setup cues (the composer placeholder and the no-provider cue). Read
+#: through the binding at every use, never copied: ``_reload_setup_cues`` re-points
+#: the two module constants below on a live language move.
+_t_setup = tr("tui.setup_cues")
 #: Fixed-width, non-colour membership markers. Width is the point: six rows with
 #: `[x]`/`[ ]` line up in monochrome and in an ASCII fallback, where a bullet or
 #: a coloured dot would carry the only copy of the state.
@@ -1516,25 +1525,15 @@ def _looks_like_botched_count(arg: str) -> bool:
 def _skill_body_has_content(body: str | None) -> TypeGuard[str]:
     """Whether a resolved SKILL.md carries anything beyond its frontmatter.
 
-    ``resolve_skill_url`` returns the file verbatim, so a stub whose YAML block
-    is the entire file comes back as a NON-EMPTY string with zero instruction
-    in it. A plain truthiness check therefore called that a successful load and
-    sent the model a `<skill>` block containing only `name:` and
-    `description:` — which is the silent no-op this exists to catch.
+    The rule itself lives in :func:`local_operator.skills.invoke.skill_body_has_content`
+    because the mobile relay expands the same ``$name`` mentions and the two
+    surfaces must call "this skill has nothing to say" the same thing. A second
+    copy here is how the two would drift, and a skill that fires on the phone
+    but not in the terminal is a defect no single-surface test can see.
     """
-    if not body or not body.strip():
-        return False
-    text = body.lstrip()
-    if text.startswith("---"):
-        # Drop the leading YAML block, if it is terminated. An UNterminated one
-        # is malformed rather than empty, so it falls through and counts as
-        # content: the user should see the skill fire and read the odd result,
-        # not be told their skill is empty when it is broken.
-        rest = text[3:]
-        end = rest.find("\n---")
-        if end != -1:
-            text = rest[end + 4 :]
-    return bool(text.strip())
+    from local_operator.skills.invoke import skill_body_has_content
+
+    return skill_body_has_content(body)
 
 
 class _SkillExpansion(NamedTuple):
@@ -3157,7 +3156,7 @@ CREDENTIAL_PLACEHOLDER = "Type or paste the secret… — masked; Enter chips it
 
 #: The composer's placeholder in the first-run setup state (see
 #: ``_composer_placeholder_for``).
-SETUP_PLACEHOLDER = f"Type {RECOMMENDED_LOGIN_COMMAND} to begin"
+SETUP_PLACEHOLDER = _t_setup(_setup_keys.setup_placeholder(command=RECOMMENDED_LOGIN_COMMAND))
 
 #: How often the ask surfaces re-derive their countdown while a row is present.
 #:
@@ -4607,7 +4606,22 @@ class TranscriptScreen(Screen[None]):
 #: for someone who may have no AI account at all (audit D1/U2/U4/Q3). The
 #: command comes from ``providers.login_catalog`` so the splash, the hints,
 #: the CLI and the README cannot recommend different providers again.
-AIDA_NO_PROVIDER_CUE = f"Connect an AI account first: type {RECOMMENDED_LOGIN_COMMAND}"
+AIDA_NO_PROVIDER_CUE = _t_setup(_setup_keys.no_provider_cue(command=RECOMMENDED_LOGIN_COMMAND))
+
+
+def _reload_setup_cues() -> None:
+    """Follow backend locale moves for the two first-run cue constants.
+
+    They are module constants (tests and the e2e harness import them by name), so
+    a language change has to re-materialise them; every use site reads the module
+    global at call time and therefore sees the moved text.
+    """
+    global SETUP_PLACEHOLDER, AIDA_NO_PROVIDER_CUE
+    SETUP_PLACEHOLDER = _t_setup(_setup_keys.setup_placeholder(command=RECOMMENDED_LOGIN_COMMAND))
+    AIDA_NO_PROVIDER_CUE = _t_setup(_setup_keys.no_provider_cue(command=RECOMMENDED_LOGIN_COMMAND))
+
+
+register_refresh(_reload_setup_cues)
 
 
 def bridge_decision_target(
@@ -5218,6 +5232,18 @@ class OperatorApp(App[None]):
         self._session: SessionProtocol | None = None
         self._controller: EventController | None = None
         self._status: StatusLine | None = None
+        #: The ``(command, interval)`` the status-command timer was armed with,
+        #: ``None`` when no command is configured (`_arm_status_command`).
+        self._status_command_armed: tuple[str, int] | None = None
+        self._status_command_timer: Timer | None = None
+        #: The in-flight run, so a tick can skip while it is still going and a
+        #: command change can cancel it.
+        self._status_command_running: Worker[None] | None = None
+        #: Consecutive failed runs, and whether this armed command's failure
+        #: episode has been announced (`_apply_status_command_outcome`).
+        self._status_command_failures = 0
+        self._status_command_successes = 0
+        self._status_command_notified = False
         #: The park reason this app has already announced, so a 5-second poll
         #: raises one card per episode rather than holding the toast slot
         #: forever (see `_poll_tunnel_park`).
@@ -5678,6 +5704,12 @@ class OperatorApp(App[None]):
         #: Electron strip cannot disagree (design §5.1). ``None`` keeps every
         #: reader on its legacy path, which is what an old runtime gets.
         self._spend_channels_state: Any | None = None
+        #: The last BOUND frontend state painted per conversation id, and the
+        #: journal's checkpoint state read for a saved preview — the durable
+        #: facts a saved conversation's first frame paints as last-known
+        #: (TUI-FINALITY-DESIGN D2; see `_paint_last_known_band`). Bounded by
+        #: the conversations this process has opened, each one frozen state.
+        self._last_known_states: dict[str, Any] = {}
         #: Delegated spend, keyed by job id and holding the LAST cost observed
         #: for that child. A dict rather than a running sum because a child's
         #: figure grows while it works, so each tick has to replace its entry
@@ -8247,6 +8279,20 @@ class OperatorApp(App[None]):
                 cwd=await self._preview_cwd(directory, session_id),
                 takeover_factory=no_takeover,
             )
+            stored = self._last_known_states.get(session_id)
+            if stored is None:
+                stored = await asyncio.to_thread(
+                    _read_stored_frontend_state, directory / "sessions" / session_id, session_id
+                )
+                if stored is not None:
+                    self._last_known_states.setdefault(session_id, stored)
+            if stored is not None:
+                # ON THE FACADE, not only in the band: the dock's todo panel
+                # reads `session.frontend_state`, so a row painted into the band
+                # alone left the dock at its old height and the transcript
+                # viewport shrank at the bind (the residual half of D1 measured
+                # in the PR's evidence).
+                remote.install_saved_facts(stored)
         else:
             record, owner = await asyncio.to_thread(find_runtime_record, directory, session_id)
             if record is None or owner is None:
@@ -8576,6 +8622,8 @@ class OperatorApp(App[None]):
             with replay.view.batch_append():
                 for block in replay.blocks:
                     replay.view.append_block(block)
+            if refresh and self._interaction is source:
+                self._carry_open_groups(self._transcript_view(), replay.view.blocks())
             if not saved_position:
                 replay.view.follow_tail()
             # Retained/canonical views benefit from a measured parked layout.
@@ -10114,7 +10162,17 @@ class OperatorApp(App[None]):
         if len(appended) > _viewport_message_budget(self.size.height):
             return False
         older = history[: positions[0]]
-        if older and self._resume_head_notice is None:
+        # A view that deferred rows FORWARD (a saved anchor mid-history, pages
+        # still to come below it) is the one case where older rows can be taken on
+        # the chin: they join the head buffer and the existing scroll-up pages
+        # reach them, exactly as they do for a view that already carries the head
+        # notice. Declining here re-projected from scratch and threw away the
+        # reader's mounted window one frame after they saw it — measured on the
+        # bench's eligible fixture as 80 blocks/scroll 221 -> 51/61, 24 rendered
+        # lines moved (QA round 1, Q2). The clause this replaces was written as
+        # "never deferred any", which is literally `pending_tail` empty; testing
+        # only the notice made it fire on the anchored view that HAD deferred.
+        if older and self._resume_head_notice is None and not self._resume_pending_tail:
             return False
         if older:
             self._resume_pending_head = older + self._resume_pending_head
@@ -10915,8 +10973,85 @@ class OperatorApp(App[None]):
             # The glyph is what tells the user the app is working rather than
             # wedged; see `StatusLine.set_connecting`.
             self._status.set_connecting(connecting)
+            self._paint_last_known_band(source, connecting=bool(status) and connecting)
         editor = self._editor()
         editor.placeholder = self._composer_placeholder_for(editor, connection=status)
+
+    def _paint_last_known_band(self, source: SessionInteraction, *, connecting: bool) -> None:
+        """Paint a connecting saved conversation's STORED facts, marked last-known.
+
+        TUI-FINALITY-DESIGN D2. A saved facade's own frontend state is an empty
+        placeholder until the owner binds (``AttachedSession.saved_preview``
+        keeps config/auth resolution off the open path on purpose), so the band
+        used to show only ``Saved excerpt · Connecting…`` and then swap to the
+        full segment row at the bind — re-laying out every segment and
+        re-truncating the title for facts that had not changed. Those facts
+        are durable: this process painted them the last time the conversation
+        was bound (`_last_known_states`), or the journal's frontend checkpoint
+        carries them (`_read_stored_frontend_state`).
+
+        So for exactly the ordinary connecting state — not a verdict (failed,
+        stopped, answer-the-question), which keeps its whole-row sentence — the
+        band is put in its last-known mode: the ordinary ladder row, every value
+        in the AA-clear `muted` ink with the hollow model glyph, and the
+        connecting word in the reserved liveness slot. This method paints NO
+        facts of its own: the values are the facade's own state, which
+        `AttachedSession.install_saved_facts` filled at lease time with the same
+        durable facts the bound frame paints, so widths and truncation agree by
+        construction rather than by a second copy of the mapping. What that
+        install cleared, and what therefore cannot reach the band from here, is
+        live authority — see its docstring, which is the one place the field list
+        lives. The bind's own snapshot replaces all of it, and the mode clears on
+        the same call with ``connecting`` False.
+
+        A conversation with no stored state (a legacy journal with no
+        checkpoint, never bound here) keeps the whole-row connecting sentence:
+        there is nothing honest to paint in the slots.
+        """
+        if self._status is None:
+            return
+        # THE GATE READS THE FACADE'S OWN STATE, and must: the values on screen
+        # are that object's, and a memo consulted here could say "last-known" over
+        # a row painted from something else. `install_saved_facts` is what makes
+        # the facade's state durable, at lease time, before any of this runs.
+        stored = None
+        if connecting and source.display_only and not source.connection_error:
+            stored = getattr(source.session, "frontend_state", None)
+            if stored is not None and not _has_model_identity(stored):
+                # No model in the row means the install never ran (a journal with
+                # no checkpoint, or one the byte scan cannot spell): the facade
+                # still holds its empty placeholder, so the whole-row connecting
+                # sentence is the honest frame — and the row it paints is the one
+                # base painted, not a last-known row over an empty fact set.
+                #
+                # IDENTITY, NOT TRUTHINESS. The placeholder `saved_preview`
+                # installs is a `FrontendModelSpec(provider="", model_id="")`,
+                # and a Pydantic model is truthy however empty its fields are, so
+                # `not getattr(stored, "effective_model", None)` was dead code for
+                # the exact case it named (review R2-1 and design D6, reproduced:
+                # the row read `⌂ ~/Users/tester/work` where base read
+                # `Saved excerpt · Connecting…`).
+                stored = None
+        if stored is None:
+            self._status.set_last_known(False)
+            return
+        # `model_copy`, so the overrides never mutate the memo's object — which
+        # may be the bound store's own frozen snapshot. Every field
+        # `_apply_frontend_state` reads that is LIVE AUTHORITY or a live-only
+        # side effect is neutralised: the turn running (`streaming`, the
+        # in-flight clock), the attention receipt, the peer display records,
+        # the ask queue and the roster's running counts. The durable facts —
+        # model, effort, cwd, context, cost, title, team/agent, MCP roster —
+        # are what is left.
+        self._status.set_last_known(True)
+        # NO `_refresh_band()` HERE. The dock's height is settled by the adopt
+        # that ran BEFORE the reveal (`_apply_frontend_state` refreshes the band
+        # from the same stored state `install_saved_facts` installed, so the todo
+        # panel is up for the first frame), and a second settle from a post-paint
+        # callback is a layout the user can watch: QA's review round 1 measured a
+        # one-row shift of the whole transcript in a warm cell 100 ms after first
+        # paint. Anything this method changed in the band would also be a change
+        # the reader's eye has to follow for facts that did not change.
 
     def _gate_card_is_answerable(self, source: SessionInteraction) -> bool:
         """Whether an ANSWERABLE card is on screen for ``source``'s live gate.
@@ -12591,6 +12726,16 @@ class OperatorApp(App[None]):
         # splash once it lands (the read SKIPPED the row while the import
         # was in flight — see `tui/quota_notice`).
         self.run_worker(self._prewarm_quota_notice(), thread=False, group="quota-prewarm")
+        # THE TEAM BRIDGE RECEIVER CATCH-UP, the TUI's share of "every surface".
+        # A TUI does not host `lop serve` (its sessions are detached runtimes and
+        # the app never reaches ``server/app.py``'s lifespan), so a machine whose
+        # only surface is a terminal would otherwise never place the receiver
+        # that delivers bridge messages while nobody is looking. Same helper,
+        # same guards, same lock as the serve lifespan; a worker, so the
+        # supervisor's subprocess calls never touch the paint loop.
+        self.run_worker(
+            self._bridge_receiver_catch_up(), thread=False, group="bridge-receiver-catch-up"
+        )
         # An empty transcript is the boot layout's whole precondition, and the
         # session starts empty — so the app opens in it. Set here rather than in
         # the stylesheet's base rules because this is state, not style: it is the
@@ -12673,6 +12818,10 @@ class OperatorApp(App[None]):
         # sidebar — the state the leak was reported from — stops reaping
         # entirely and keeps every runtime they ever clicked.
         self.set_interval(SIDEBAR_IDLE_SWEEP_S, self._sweep_idle_sidebar_sources)
+        # The operator's status command (``display.composer.command``): armed
+        # here for its first run and re-armed by `_apply_composer_settings`
+        # whenever the command or its interval moves.
+        self._arm_status_command()
 
         # Await the session in a worker so the app paints first.
         self.run_worker(self._boot_session(), thread=False, group="session")
@@ -13080,6 +13229,7 @@ class OperatorApp(App[None]):
             model_name=_model_name(session),
             effort=_effort_label(session),
             fast=_fast_label(session),
+            saver=_saver_label(session),
             # The active /agent profile and /team roster segments (U2). Read
             # defensively via getattr: an embedded-SDK or test double may not
             # expose these accessors, and a missing one must leave the segment
@@ -13380,6 +13530,13 @@ class OperatorApp(App[None]):
     def _apply_frontend_state(self, state: Any) -> None:
         if self._status is None or state is None:
             return
+        if not self._interaction.display_only:
+            # Only a BOUND frame's state is recorded: a saved facade's own state
+            # is an empty placeholder, and remembering it would erase the facts
+            # this memo exists to keep.
+            session_id = str(getattr(state, "session_id", "") or "")
+            if session_id:
+                self._last_known_states[session_id] = state
         # Metadata can arrive without a new source row. The card-result hook
         # below retries against actual settled seats if this update won first.
         self._apply_peer_display_records(state)
@@ -13454,6 +13611,7 @@ class OperatorApp(App[None]):
             ),
             effort=_effort_label(state),
             fast=_fast_label(state),
+            saver=_saver_label(state),
             agent_profile=str(getattr(state, "active_agent", "") or ""),
             team=self._team_band_text(str(getattr(state, "active_team", "") or "")),
             cwd=str(getattr(state, "cwd", "") or ""),
@@ -13726,6 +13884,7 @@ class OperatorApp(App[None]):
             model_name=_model_name(session),
             effort=_effort_label(session),
             fast=_fast_label(session),
+            saver=_saver_label(session),
             # The profile/team segments must survive the swap: takeover is a
             # transport rotation, not a conversation change, so the band may
             # not drop (and later re-add) segments the canonical state never
@@ -14166,6 +14325,22 @@ class OperatorApp(App[None]):
 
         self.run_worker(_run(), exclusive=False)
 
+    async def _bridge_receiver_catch_up(self) -> None:
+        """Run the shared receiver catch-up for this TUI's config root.
+
+        ``catch_up_at_surface_start`` never raises; the ``try`` keeps an import
+        failure (a partial install) from surfacing as a worker error on screen.
+        """
+        try:
+            from local_operator.paths import config_dir
+            from local_operator.team_bridge.connector.install import (
+                catch_up_at_surface_start,
+            )
+
+            await catch_up_at_surface_start(config_dir(), surface="tui")
+        except Exception:  # noqa: BLE001 — a surface start never fails for this
+            pass
+
     async def _boot_session(self) -> None:
         """Await the session factory; on failure surface + offer /reload."""
         # Built as its own future and adopted from THIS frame: if the app quits
@@ -14313,7 +14488,10 @@ class OperatorApp(App[None]):
         for message in history:
             if getattr(message, "role", None) != "user":
                 continue
-            if is_harness_notice_row(message):
+            text = getattr(message, "text", "") or ""
+            if is_harness_notice_row(message) or (
+                isinstance(text, str) and is_harness_chrome(text)
+            ):
                 # A row the harness wrote — a stamped render of a
                 # ``CustomMessage`` (a failover model-switch notice, an
                 # incident), or a notice carried in from a compaction block —
@@ -14325,7 +14503,6 @@ class OperatorApp(App[None]):
                 # or with the elision notice's own prose, is the visible form of
                 # getting this wrong.
                 continue
-            text = getattr(message, "text", "") or ""
             if not isinstance(text, str) or not text.strip():
                 continue
             self._show_provisional_name(text)
@@ -14926,6 +15103,17 @@ class OperatorApp(App[None]):
             # Hidden, nothing locally pending, or a fetch already owns the gate.
             # The scheduled fill below still runs and reaches the same goal — or
             # stands down and remembers the view — by the ordinary route.
+            #
+            # DELIBERATELY NO `_settle_reveal_measurement` HERE (round 3 added it,
+            # round 4 removed it). It was justified by a warm-reopen shift that QA
+            # then re-diagnosed as the failed-open notice's own height, and the call
+            # is not neutral: it re-measures the parked view against a dock the
+            # adopt has only just changed, and it broke
+            # `test_first_paint_reveal::test_a_gate_the_app_already_holds_is_in_the_reveal_frame`
+            # — the reveal frame stopped being the settled one (measured: the test
+            # passes at d98b5e88a44, fails at d50fe8ca049, and the only difference
+            # is this call). The settle stays on the paths that MOUNT pages, where
+            # the viewport it corrects is the one the fill is about to fill.
             self._start_resume_fill()
             return
         # READ THE REAL VIEWPORT BEFORE THE FIRST CHECK — every burst, not only
@@ -14953,14 +15141,7 @@ class OperatorApp(App[None]):
         # round 1, D1, cold/draft2 f001 at dock 7 / editor 3 against a settled
         # 5 / 1). The layout is needed — it is the measurement — but its
         # intermediate arrangement must not reach the screen.
-        screen = self.screen
-        paint = screen._compositor_refresh
-        screen._compositor_refresh = _suppress_intermediate_paint
-        try:
-            screen._refresh_layout()
-        finally:
-            screen._compositor_refresh = paint
-        viewport = view.container_size.height or view.size.height
+        viewport = self._settle_reveal_measurement(view)
         if not view.size.height:
             # `container_size` survives hiding, the widget's own size does not: a
             # view under an ancestor that is not laid out keeps a stale
@@ -15027,14 +15208,7 @@ class OperatorApp(App[None]):
                 # Paint suppressed because the intermediate offsets this
                 # produces are not states the reader may see; the outgoing view
                 # is the one on screen.
-                screen = self.screen
-                paint = screen._compositor_refresh
-                screen._compositor_refresh = _suppress_intermediate_paint
-                try:
-                    screen._refresh_layout()
-                finally:
-                    screen._compositor_refresh = paint
-                viewport = view.container_size.height or view.size.height
+                viewport = self._settle_reveal_measurement(view)
                 pass_cost = time.monotonic() - started
         except Exception:
             # See the docstring: a projection failure must degrade to the
@@ -15068,6 +15242,92 @@ class OperatorApp(App[None]):
             # network fetch) is picked up by the same call: the fill tops the
             # view up on the next paint, which is the pre-existing behaviour.
             self._start_resume_fill()
+
+    @staticmethod
+    def _carry_open_groups(on_screen: TranscriptView, blocks: Sequence[Any]) -> None:
+        """Re-open, in a re-prepared replay, the quiet groups the reader has open.
+
+        TUI-FINALITY-DESIGN D5. The owner connect re-prepares the conversation
+        it is already showing (``refresh=True``) and commits a NEW view built
+        from the same history, and the replay fold forms every group collapsed.
+        So a group the reader opened while the conversation was still
+        connecting — a cold bind measured ~5 s after first paint on the bench's
+        real fixture — snapped shut at the bind: hidden rows 8 -> 11 with the
+        history unchanged, which is flicker by the design's own definition.
+
+        Carried by the group's KEY (``qg:<first row id>``), which is stable for
+        a given span by construction (see ``tui/quiet_groups.py``), so a group
+        the new history no longer forms is simply not matched and a newly
+        formed one keeps the fold's default: real changes still show. Only the
+        reader's expansion moves across; facts, spans and membership are the
+        fresh replay's own.
+        """
+        from local_operator.tui.widgets.transcript import QuietGroupBlock
+
+        open_keys = {
+            block.group.key
+            for block in on_screen.blocks()
+            if isinstance(block, QuietGroupBlock) and block.expanded
+        }
+        if not open_keys:
+            return
+        for block in blocks:
+            if isinstance(block, QuietGroupBlock) and block.group.key in open_keys:
+                block.adopt_members(block._members, expanded=True)
+
+    def _settle_reveal_measurement(self, view: TranscriptView) -> int:
+        """Lay the parked frame out against the dock as it is NOW, and read the viewport.
+
+        The pre-reveal burst fills against the viewport this returns, from a
+        paint-suppressed synchronous layout. That layout was not reading the
+        dock the adopt had just changed. Textual records a widget's "my size
+        changed" as ``_layout_required`` and only carries it up to its
+        ``height: auto`` ancestors — clearing their arrangement cache and
+        bumping their box-model key — from ``Widget._check_refresh``, which runs
+        on IDLE. `_commit_sidebar_session` adopts, `_refresh_band` shows the
+        incoming session's todo/subagent panels, and calls this in the same
+        tick, before any idle: so `Screen._refresh_layout` re-used
+        ``#input-dock``'s cached arrangement and box model from before the panels
+        existed, and the transcript kept its taller height. Repeating the layout
+        does not help, because nothing between two synchronous passes runs the
+        idle hook (measured: 33, 33, 33 rows across three passes in the unit
+        rig, against 19 after this flush).
+
+        What that cost (TUI-FINALITY-DESIGN D1, bench real fixture at 160x48):
+        the warm reopen filled a 39-row viewport where the settled frame has 24,
+        mounting one more page than the reserve needed (18 -> 38 blocks, virtual
+        height 51 -> 129). The FIRST frame painted those 38 blocks, and the
+        connect's ``refresh=True`` re-prepare, measuring the real 24, committed
+        18 — a trim after paint that moved the scrollbar thumb 76 -> 193 px
+        while the visible text stayed put.
+
+        So the invalidation `_check_refresh` WOULD perform is applied here
+        first, exactly as Textual applies it (the auto-dimension ancestor walk,
+        stopping at the first fixed-size ancestor), and the flags are left set so
+        the idle hook still posts its own ``Layout`` as before. This is the
+        Textual-private surface the burst already depends on
+        (``_refresh_layout``/``_compositor_refresh``), pinned by the version in
+        ``uv.lock``. Still pre-reveal and paint-suppressed: no frame is added and
+        no layout is forced after paint.
+        """
+        screen = self.screen
+        for widget in screen.walk_children(with_self=False):
+            if not getattr(widget, "_layout_required", False):
+                continue
+            for ancestor in widget.ancestors:
+                if not isinstance(ancestor, Widget):
+                    break
+                ancestor._clear_arrangement_cache()
+                ancestor._layout_updates += 1
+                if not ancestor.styles.auto_dimensions:
+                    break
+        paint = screen._compositor_refresh
+        screen._compositor_refresh = _suppress_intermediate_paint
+        try:
+            screen._refresh_layout()
+        finally:
+            screen._compositor_refresh = paint
+        return view.container_size.height or view.size.height
 
     def _start_resume_fill(self, *, target: float | None = None, attempt: int = 0) -> None:
         """Top up a newly revealed projection, not every subsequent resize.
@@ -19325,7 +19585,10 @@ class OperatorApp(App[None]):
                             remote = await AttachedSession.cold(
                                 concrete,
                                 config_dir=config_root,
-                                cwd=str(record.cwd or os.getcwd()),
+                                # A missing owner cwd is no opinion, not this
+                                # viewer's directory. Inventing one here can
+                                # supersede a recorded move when cold() engages.
+                                cwd=str(record.cwd or ""),
                                 takeover_factory=takeover_factory,
                             )
                             # Read by the engage that binds behind this paint,
@@ -19535,7 +19798,9 @@ class OperatorApp(App[None]):
         terminal, a peer session) writes the same file, and a cached set would
         make `/unarchive` refuse a conversation the store already holds it for —
         the user's own two windows disagreeing about a file one of them wrote.
-        The read is one small file, only on a command that names the state.
+        The read is one small file, but every composer refresh pays it: a
+        command that names the state, a session bind and a language move all
+        re-filter the offered list (``_offered_commands``).
         """
         from local_operator.paths import config_dir
         from local_operator.session.archived import archived_ids
@@ -24702,6 +24967,16 @@ class OperatorApp(App[None]):
         """
         logger.debug("runtime retired for a newer build; re-engaging")
         session = self._session
+        # A CWD MOVE ARRIVES HERE TOO, and it is the one retirement the operator
+        # must be told about: the session is about to restart in a different
+        # directory, so the conversation they are reading is the same one running
+        # somewhere else afterwards. Painted from the frame's own destination —
+        # the same string the successor will adopt — because by the time the
+        # successor binds, the band already shows the new directory and a notice
+        # would only repeat it (UX round 1, U3).
+        moved_to = str(getattr(session, "pending_move_cwd", "") or "")
+        if moved_to:
+            self._announce_cwd_move(moved_to)
         version = str(getattr(session, "runtime_version", "") or "")
         if version:
             from local_operator.update import BuildStamp
@@ -24789,6 +25064,24 @@ class OperatorApp(App[None]):
         )
         self._notice_for(self._interaction, notice, "note")
         self._announce_queued_elsewhere(self._interaction)
+
+    def _announce_cwd_move(self, destination: str) -> None:
+        """Say the session is restarting in ``destination`` as its runtime leaves.
+
+        The move itself was requested by an agent tool call, so the operator's own
+        screen is the only place the consequence is visible: everything else about
+        this retirement looks like a build refresh. Best-effort like every other
+        pump-time notice — no interaction attached means nobody is looking.
+        """
+        if self._interaction is None:
+            return
+        from local_operator.tui.move_targets import format_label
+
+        self._notice_for(
+            self._interaction,
+            f"this session is moving to {format_label(destination)} — it restarts there now",
+            "note",
+        )
 
     def _announce_queued_elsewhere(self, source: SessionInteraction) -> None:
         """Name the messages this session has queued that THIS surface did not send.
@@ -28900,9 +29193,16 @@ class OperatorApp(App[None]):
         is a separate, unrequested change.
 
         ``connection`` is the sidebar's connection sentence, and only the band
-        path passes one: it is a variant of the RESTING copy ("Draft a
-        message…" while a link is being re-dialled), so it sits below every
-        mode and above the resting invitation.
+        path passes one. It USED to swap the resting copy for "Draft a
+        message…" while a link was being re-dialled; the conversation-open
+        finality audit (TUI-FINALITY-DESIGN D3) measured that swap on 18/18
+        first frames and 9/9 warm settled frames as the one composer change
+        between a reopen's first paint and its bound frame. The composer
+        accepts a draft in both states, so the swap carried no information —
+        the connection state is already stated by the band row directly
+        beneath it — and it was pure post-paint motion. The parameter stays so
+        the band call site keeps naming the input it reacts to, and so a future
+        state that genuinely changes what Enter does has one place to go.
         """
         if editor.read_only:
             return READ_ONLY_PLACEHOLDER
@@ -28918,7 +29218,8 @@ class OperatorApp(App[None]):
             # placeholder measured 4.18:1 on the dark input surface and 3.46:1
             # on the light one, under the 4.5:1 a call to action needs.
             return SETUP_PLACEHOLDER
-        return "Draft a message…" if connection else editor.resting_placeholder
+        del connection  # see the docstring: one resting string across connection states
+        return editor.resting_placeholder
 
     def _drawable_questions(self, row: AskRow) -> list[Any] | None:
         """The row's questions as the CARD would draw them, or ``None`` when it cannot.
@@ -41707,6 +42008,14 @@ class OperatorApp(App[None]):
         """
         message.stop()
         try:
+            if message.key == "team_bridge.enabled":
+                # Terminal writes bypass the HTTP settings route; use the same
+                # guarded sync on this explicit event so Turn off stops it now.
+                self.run_worker(
+                    self._bridge_receiver_catch_up(),
+                    thread=False,
+                    group="bridge-receiver-setting",
+                )
             if message.key == "tui.theme" and message.value:
                 self._apply_theme(str(message.value))
             elif message.key in (
@@ -44104,6 +44413,26 @@ class OperatorApp(App[None]):
             self._cmd_effort(arg, notice)
         elif command == "/fast":
             self._cmd_fast(arg, notice)
+        elif command in {"/saver", "/radient"}:
+            if command == "/radient":
+                word, _, rest = arg.partition(" ")
+                if word != "saver":
+                    from local_operator.i18n.keys import wire_radient_saver
+                    from local_operator.i18n.text import tr
+
+                    self._system_notice(
+                        str(tr("wire.radient_saver")(wire_radient_saver.command_usage())), "warning"
+                    )
+                    return
+                # A BARE NAMESPACE FORM REPORTS, IT NEVER TOGGLES (QA round 3, Q1).
+                # `/radient` accepts only `saver <value>`, and the picker completes
+                # it to a subject-less `/radient saver` — so two Enters on a bare
+                # `/radient` used to land on the bare-toggle path and turn a
+                # money-affecting feature ON from nothing but return keys. The
+                # alias may toggle when typed whole (`/saver`), because typing the
+                # whole word is the intent; the namespace needs its value said.
+                arg = (rest or "").strip() or "status"
+            self._cmd_saver(arg, notice)
         elif command == "/theme":
             self._cmd_theme(arg, notice)
         elif command == "/language":
@@ -45810,6 +46139,7 @@ class OperatorApp(App[None]):
                 model_name=_model_name(session),
                 effort=_effort_label(session),
                 fast=_fast_label(session),
+                saver=_saver_label(session),
                 context_window=_context_window(session),
             )
         # The access note answers "can I use the model I just switched to". On
@@ -46501,6 +46831,45 @@ class OperatorApp(App[None]):
             return spec
         return spec.model_copy(update={"fast_mode": True})
 
+    def _cmd_saver(self, arg: str, notice: NoticeFn) -> None:
+        """Run the shared handler and publish ONLY after the journal write.
+
+        The handler is async because the write is. Painting the notice and the
+        band in the same tick as a scheduled write is what left both frontends
+        showing the pre-write state beside a notice claiming the new one
+        (review M2). The worker runs on this app's loop, so the notice, the
+        publish and the band update all land once the row exists.
+        """
+        if self._session is None:
+            # U11 (UX round 2): the worker dereferenced the session and killed the
+            # app with `AttributeError: 'NoneType' object has no attribute
+            # '_transcript'` — `/saver inherit` on the setup screen, `/saver off`
+            # on a signed-in but unbound session. The app already has ONE sentence
+            # for "no session yet", so this refuses with it instead of inventing a
+            # second wording.
+            self._system_notice(*self._no_session_notice())
+            return
+        self.run_worker(self._saver_command(arg, notice), thread=False, group="saver")
+
+    async def _saver_command(self, arg: str, notice: NoticeFn) -> None:
+        from dataclasses import dataclass
+
+        from local_operator.saver.command import saver_slash
+
+        @dataclass
+        class SaverNotice:
+            kind: str
+            text: str
+            style: str
+
+        result = await saver_slash(self._session, arg, SaverNotice)
+        self._system_notice(result.text, result.style)
+        # `_status` is built on mount; a slash that completes during teardown (or
+        # before the band exists) has no band to repaint, and the notice above is
+        # already the receipt, so skip the repaint rather than raise.
+        if self._status is not None:
+            self._status.update(saver=_saver_label(self._session))
+
     def _cmd_fast(self, arg: str, notice: NoticeFn) -> None:
         """``/fast`` — toggle fast mode; ``/fast on|off|status`` — set or report it.
 
@@ -46989,13 +47358,21 @@ class OperatorApp(App[None]):
         which is what lets the config watcher's echo of this process's own
         write call it unconditionally.
 
-        Not covered here, by design: the slash registry's descriptions, which
-        resolve through ``messages.render`` at import (the S2 seam note says
-        where that rework starts) — they move with their own slice.
+        Not covered by ``set_active_locale``: the slash picker, which holds a
+        COPY of the registry rather than the registry itself (see below).
         """
         from local_operator.i18n import text as i18n_text
 
         i18n_text.set_active_locale(locale)
+        # The slash registry re-materialises its own descriptions in place (its
+        # ``register_refresh`` hook), which reaches ``/help`` because that block
+        # reads ``SLASH_COMMANDS`` per render. The PICKER does not: the editor
+        # hands it a plain ``list(...)`` copy, so it would keep painting the boot
+        # language for the rest of the session. Re-handing the rows is the fix,
+        # and the editor re-derives an ALREADY OPEN list from its buffer on that
+        # call, so the rows on screen repaint rather than waiting for the next
+        # keystroke (QA round 1, Q1). Silent when no editor is mounted.
+        self._refresh_offered_commands()
         # Localized transcript furniture is baked into finalized blocks just as
         # theme ink is. Reuse that same rebuild sweep so a locale move repaints
         # mounted rows at their CURRENT width, with no resize or stale cache.
@@ -47015,6 +47392,14 @@ class OperatorApp(App[None]):
         view = self._notifications_view
         if view is not None:
             view._paint()
+        # The same debt on the settings page (QA round 1, Q2): an open page keeps
+        # its PAINTED rows and its composed-line caches between repaints, and the
+        # watcher path reaches here with no keypress to follow it. `_rows_key`
+        # and `_paint_token` carry the active locale, so this repaint recomposes
+        # the whole list in the new language rather than reusing the old strips.
+        settings_view = self._settings_view
+        if settings_view is not None:
+            settings_view._repaint()
 
     def _apply_theme(self, name: str, *, preview: bool = False) -> None:
         """Switch every rendering surface to ``name``, live.
@@ -47318,8 +47703,169 @@ class OperatorApp(App[None]):
             )
         except Exception:  # noqa: BLE001 — cosmetic; must never fail a boot
             logger.debug("composer settings: widget display not applied", exc_info=True)
+        self._arm_status_command()
         if self._status is not None:
             self._status.refresh()
+
+    def _arm_status_command(self) -> None:
+        """(Re)arm the status-command timer from the stored settings.
+
+        Idempotent like its caller: an unchanged ``(command, interval)`` pair
+        leaves the running timer alone, so the repaint every unrelated
+        ``display.composer.*`` edit triggers does not also reset the cadence
+        or fork a shell. A changed pair stops the old timer, clears a reading
+        when the command identity changes, and runs the new command at once
+        — waiting a full interval to see whether an edit worked is how a user
+        concludes it did not.
+        """
+        command = str(settings_get("display.composer.command", "") or "").strip()
+        interval = status_command_mod.clamp_interval(
+            settings_get("display.composer.command_interval", status_command_mod.DEFAULT_INTERVAL_S)
+        )
+        armed = (command, interval) if command else None
+        if armed == self._status_command_armed:
+            return
+        previous_command = self._status_command_armed[0] if self._status_command_armed else ""
+        self._status_command_armed = armed
+        # A reading belongs to its command, not the band: retaining it for a
+        # different account or script misrepresents the replacement's state.
+        if command != previous_command and self._status is not None:
+            self._status.update(custom="", custom_stale=False)
+        self._status_command_failures = 0
+        self._status_command_successes = 0
+        self._status_command_notified = False
+        if self._status_command_timer is not None:
+            self._status_command_timer.stop()
+            self._status_command_timer = None
+        if armed is None:
+            if self._status_command_running is not None:
+                self._status_command_running.cancel()
+                self._status_command_running = None
+            if self._status is not None:
+                self._status.update(custom="", custom_stale=False)
+            return
+        self._status_command_timer = self.set_interval(interval, self._tick_status_command)
+        self._restart_status_command()
+
+    def _tick_status_command(self) -> None:
+        """Interval callback: run the status command unless a run is in flight.
+
+        A tick that lands while the previous run is still going is SKIPPED, not
+        a cancellation: the runner's timeout (10 s) exceeds the shortest
+        interval (5 s), so cancelling on every tick meant a script slower than
+        its interval was killed every time and the segment never painted
+        (review round 1, m2). A run that hangs is still bounded by that
+        timeout. A COMMAND change does cancel (``_arm_status_command`` calls
+        :meth:`_restart_status_command`), because the old run's output is then
+        stale by definition.
+        """
+        if self._status_command_armed is None:
+            return
+        if (
+            self._status_command_running is not None
+            and not self._status_command_running.is_finished
+        ):
+            return
+        self._start_status_command_run()
+
+    def _restart_status_command(self) -> None:
+        """Cancel any in-flight run and start one for the newly armed command."""
+        if self._status_command_running is not None:
+            self._status_command_running.cancel()
+            self._status_command_running = None
+        self._start_status_command_run()
+
+    def _start_status_command_run(self) -> None:
+        assert self._status_command_armed is not None
+        command = self._status_command_armed[0]
+        # `exit_on_error=False`: this is a cosmetic surface, and Textual's
+        # default would end the whole app on an exception in it (review round
+        # 1, m1) — the cosmetic-worker rule the other band workers follow.
+        self._status_command_running = self.run_worker(
+            self._status_command_worker(command),
+            thread=False,
+            group="status-command",
+            exit_on_error=False,
+        )
+
+    async def _status_command_worker(self, command: str) -> None:
+        status = self._status
+        if status is None:
+            return
+        try:
+            # Guarded: `os.getcwd()` raises once the directory the TUI was
+            # started in is deleted (a removed git worktree), and the payload
+            # must never be the reason the segment stops updating.
+            cwd = _status_command_cwd()
+            facts = status.command_facts()
+            spec = _effective_spec(self._session)
+            payload = status_command_mod.build_payload(
+                session_id=str(getattr(self._session, "session_id", "") or ""),
+                cwd=cwd or "",
+                provider=str(getattr(spec, "provider", "") or ""),
+                model_id=str(getattr(spec, "model_id", "") or ""),
+                model_label=str(facts["model_label"]),
+                context_tokens=int(cast(int, facts["context_tokens"])),
+                context_window=int(cast(int, facts["context_window"])),
+                cost=str(facts["cost"]),
+                version=welcome_mod.app_version(),
+            )
+        except Exception:  # noqa: BLE001 — cosmetic; the segment just does not update
+            logger.debug("status command: payload not built", exc_info=True)
+            return
+        outcome = await status_command_mod.run(command, payload, cwd=cwd)
+        # The command may have been changed or removed while this run was in
+        # flight; its output must not overwrite the newer state.
+        if self._status_command_armed is None or self._status_command_armed[0] != command:
+            return
+        self._apply_status_command_outcome(command, outcome)
+
+    def _apply_status_command_outcome(
+        self, command: str, outcome: status_command_mod.Outcome
+    ) -> None:
+        """Paint one run's result, holding the last good line through a blip.
+
+        The band itself never paints an error (design round 1, T-2/T-3):
+
+        - success paints the line (or clears on empty output) and resets the
+          failure count;
+        - a failure KEEPS the last good line in the stale ink, so a flaky
+          network script does not make its siblings re-fit every interval,
+          and clears it only after ``STALE_AFTER_FAILURES`` in a row;
+        - the FIRST failure for an armed command raises one warning notice
+          naming why (``exit 127``, ``timed out after 10s``), so a mistyped
+          path is distinguishable from "not configured". Once per episode,
+          the ``_poll_tunnel_park`` rule: a script that keeps failing does not
+          re-announce itself every 30 s, and only ``STALE_AFTER_FAILURES``
+          successes in a row end the episode, so a flaky one does not either.
+        """
+        status = self._status
+        if status is None:
+            return
+        if not outcome.error:
+            self._status_command_failures = 0
+            # The episode ends only after a STREAK of successes (design round
+            # 2, T-9): resetting on every success let a script alternating
+            # success and failure write a warning per minute into the
+            # transcript. The same threshold that clears a stale reading
+            # re-arms the notice, so one number governs "this is flaky".
+            self._status_command_successes += 1
+            if self._status_command_successes >= status_command_mod.STALE_AFTER_FAILURES:
+                self._status_command_notified = False
+            status.update(custom=outcome.line, custom_stale=False)
+            return
+        self._status_command_successes = 0
+        self._status_command_failures += 1
+        if self._status_command_failures >= status_command_mod.STALE_AFTER_FAILURES:
+            status.update(custom="", custom_stale=False)
+        else:
+            status.update(custom_stale=True)
+        if not self._status_command_notified:
+            self._status_command_notified = True
+            self._notice(
+                tr("tui.status_command")(_sc_keys.failed(error=outcome.error)),
+                "warning",
+            )
 
     def action_keymap_new_session(self) -> None:
         """The remappable "new session" hotkey — ``ctrl+n`` unless remapped.
@@ -49181,11 +49727,14 @@ class OperatorApp(App[None]):
         driver's single decision, so it cannot be applied on one host and
         forgotten on the other.
         """
-        from local_operator.session.goal_judge import owns_the_session
+        from local_operator.session.goal_judge import (
+            owns_the_session,
+            quiet_completion_accepted,
+        )
 
         source = self._interaction
         session: Any = self._session
-        if session is None or not owns_the_session(session):
+        if quiet_completion_accepted(message) or session is None or not owns_the_session(session):
             return
         if source.goal.judge_in_flight:
             return
@@ -52484,6 +53033,13 @@ class OperatorApp(App[None]):
             label = getattr(self._session, "model_label", "") or "this model"
             picker.set_notice("" if levels else _effort_unavailable(label))
             return
+        if message.command in {"saver", "radient"}:
+            # Same reason `/fast` states its list here: the words ARE the
+            # command's whole argument grammar, and showing a provider list
+            # instead is what made `/saver on` unrunnable (UX round 1, U1).
+            picker.set_choices(self._saver_argument_choices(message.command))
+            picker.set_notice("")
+            return
         if message.command == "aida":
             # THE RESERVED WORDS, not the provider fall-through (UX round 1,
             # U1). The fall-through is the provider vocabulary and is wrong for
@@ -52541,6 +53097,44 @@ class OperatorApp(App[None]):
         # above.
         if message.command == "login" and choices:
             picker.set_notice_rungs(LOGIN_ORDERING_NOTICE_RUNGS)
+
+    def _saver_argument_choices(self, command: str) -> list[ArgumentChoice]:
+        """The words ``/saver`` accepts, offered at BOTH spellings (UX U1).
+
+        These commands had no branch in ``on_argument_query_opened``, so the
+        handler fell through to the PROVIDER list `/login` offers: typing
+        ``/saver on`` opened 16 providers, ``on`` fuzzy-matched a row, and Enter
+        rewrote the buffer to ``/saver openrouter``. The documented enable form
+        could not be typed at all. The `/aida` branch above is the same fix.
+
+        ``status`` sorts FIRST so Enter under ``/radient`` (where the rows are
+        compound, because the command takes its subcommand first) picks the
+        read-only word: filling ``saver status`` and running it reports state
+        instead of spending credit, which is the right default for a control
+        that changes what leaves the machine.
+        """
+        words = ("status", "on", "off", "inherit")
+        described = {
+            "status": "report this session's state, nothing changes",
+            "on": "shorten this conversation's history from the next turn",
+            "off": "send this conversation's full history",
+            "inherit": "follow the global setting and the agent's designation",
+        }
+        if command == "radient":
+            # ONE ROW, the word the handler parses (the `/aida` shape). The
+            # compound rows this replaced (`saver on`, `saver status`, …) made the
+            # first Enter complete FOUR TOKENS the user never typed — measured as
+            # `/radient` + Enter silently becoming `/radient saver status` (UX
+            # round 2, U9) — and then a second Enter ran a word they had not
+            # chosen. Offering only `saver` keeps the completion equal to what was
+            # asked for; the four words are `/saver `'s list, one command away.
+            return [
+                ArgumentChoice(
+                    name="saver",
+                    description="Radient Saver for this session: status, on, off or inherit",
+                )
+            ]
+        return [ArgumentChoice(name=word, description=described[word]) for word in words]
 
     def on_refresh_argument_choices(self, message: RefreshArgumentChoices) -> None:
         """Refill an open argument list whose rows depend on a sub-slot.
@@ -55909,12 +56503,32 @@ class OperatorApp(App[None]):
         # glued straight onto their descriptions. Derive one shared column and
         # preserve the two-cell gutter for every row.
         name_width = max((len(names) for names, _ in named_commands), default=0) + 2
-        lines = []
+        # The command table is a real GRID, not one composed ``Text`` per row.
+        # A composed row (``names.ljust(name_width) + description``) makes Rich
+        # restart a wrapped line at the Text's origin, i.e. at the name column:
+        # at 80 columns every French description over 54 cells painted its tail
+        # under the command names, where `navigateur` and `confirmation` read as
+        # commands with no description (design round 1, D1 — 8 continuations in
+        # 23 rows, en's `/fork` already one of them). A grid wraps INSIDE its
+        # second cell, so the tail hangs under the description and re-wraps on
+        # resize instead of freezing at the width the command ran at.
+        #
+        # ``padding=0`` keeps the two-cell gutter ``name_width`` already carries
+        # (a grid's default 1-cell column padding would widen the name column by
+        # one and move every description right); ``overflow="fold"`` keeps a
+        # word longer than the cell wrapping rather than ellipsizing, because
+        # this table is a reference and nothing in it may be silently cut.
+        command_rows = Table.grid(padding=0)
+        command_rows.add_column(width=name_width)
+        command_rows.add_column(ratio=1, overflow="fold")
         for names, command in named_commands:
-            line = Text()
-            line.append(names.ljust(name_width), style=muted)
-            line.append(command.description, style=dim)
-            lines.append(line)
+            command_rows.add_row(
+                Text(names, style=muted),
+                Text(command.description, style=dim),
+            )
+        # Rows and notes share one Group, so the list holds renderables rather
+        # than only Texts (the command table is the one non-Text entry).
+        lines: list[Text | Table] = [command_rows]
         # `ctrl+v` documented durably. It is not a slash command so it cannot
         # appear in the table above, and this app shows no key reference in the
         # footer - yet it is the one paste key that works on EVERY terminal.
@@ -56271,7 +56885,12 @@ class OperatorApp(App[None]):
             _t(_x.help_notify_note_more()),
             style=dim,
         )
-        if not lines or lines[-1].plain:
+        # A blank line before the notes, unless one is already there. The row
+        # list holds the command TABLE as well as Texts, so the "already blank"
+        # question only has an answer for a Text: a renderable that is not one
+        # always takes the separator.
+        last = lines[-1] if lines else None
+        if not isinstance(last, Text) or last.plain:
             lines.append(Text())
         lines.append(title_note)
         lines.append(title_note_more)
@@ -63073,7 +63692,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 148
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 149
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own
@@ -63296,6 +63915,20 @@ def _model_spec(session) -> Any | None:
     return getattr(session, "model", None)
 
 
+def _status_command_cwd() -> str | None:
+    """The TUI's working directory, or ``None`` once it has been deleted.
+
+    ``os.getcwd()`` raises after the directory the TUI started in is removed (a
+    deleted git worktree). The status command then runs without a ``cwd``
+    override and its payload carries an empty one, rather than the worker
+    failing every interval.
+    """
+    try:
+        return os.getcwd()
+    except OSError:
+        return None
+
+
 def _effective_spec(session) -> Any | None:
     """The spec of the model ACTUALLY serving requests, or ``None``.
 
@@ -63498,6 +64131,123 @@ def _fast_status_line(label: str, enabled: bool) -> str:
     if enabled:
         return f"fast mode: on for {label} — faster output at premium pricing"
     return f"fast mode: off for {label} — /fast turns it on at premium pricing"
+
+
+def _has_model_identity(state: Any) -> bool:
+    """Whether a frontend state names a model at all.
+
+    The one test for "did the durable-facts install actually run". A saved
+    preview's placeholder is a `FrontendModelSpec` with an EMPTY provider and
+    model id, so an object test cannot answer this — see
+    `_paint_last_known_band`'s call site. Read through `effective_model` first
+    (that is what the band paints) and fall back to the selected spec, the same
+    order `_effective_spec` uses.
+    """
+    # EITHER spec may name the model, and an EMPTY placeholder must not veto the
+    # other: the saved-facts install lands the empty `FrontendModelSpec` for a
+    # field the journal left null (QA round 3, Q4), and a journal can hold a
+    # selection while `effective_model` was never filled. Read both.
+    for name in ("effective_model", "selected_model"):
+        spec = getattr(state, name, None)
+        if spec is None:
+            continue
+        if str(getattr(spec, "provider", "") or "") or str(getattr(spec, "model_id", "") or ""):
+            return True
+    return False
+
+
+def _read_stored_frontend_state(directory: Path, session_id: str) -> Any | None:
+    """The journal's newest frontend checkpoint state, or ``None``.
+
+    The durable source of a COLD saved conversation's band facts
+    (TUI-FINALITY-DESIGN D2): the runtime appends this row at every turn end,
+    so it carries the model, effort, cwd, context, cost and title the bound
+    frame would paint. Read by ``find_row_for_custom_type``, the BYTE scan
+    (66 ms over a 118 MB journal, against 457 ms for the parse walk) that
+    decodes only the matching row and answers ``None`` — rather than a full
+    parse — for a journal with no checkpoint at all, which is the absence the
+    legacy fixture is. A journal written by something that re-serialized it
+    (non-compact separators) is the scan's documented blind spot; it answers
+    ``None`` here and the band keeps the pre-existing connecting row, which is
+    the safe direction for a cosmetic read.
+
+    THE FORK RULE IS THE RUNTIME'S, applied verbatim: a forked transcript
+    carries the PARENT's rows, and the runtime's own restore keeps their
+    durable facts (model, cost, title, cwd …) while re-stamping identity and
+    dropping the parent's children (``_inherited_identity_fixups``). The bound
+    frame therefore paints those same facts, so the last-known frame must too —
+    rejecting the row would make the bind a reflow for unchanged data. Never
+    raises: this is a first-frame nicety and must not be able to fail an open.
+    """
+    try:
+        from local_operator.session.frontend_state import (
+            FRONTEND_CHECKPOINT_CUSTOM_TYPE,
+            FrontendSessionState,
+            _inherited_identity_fixups,
+        )
+        from local_operator.session.transcript import find_row_for_custom_type
+
+        located = find_row_for_custom_type(directory, FRONTEND_CHECKPOINT_CUSTOM_TYPE)
+        if located is None:
+            return None
+        payload = (located[1].payload.get("details") or {}).get("state")
+        if not isinstance(payload, dict):
+            return None
+        state = FrontendSessionState.model_validate(payload)
+        return state.model_copy(update=_inherited_identity_fixups(state, session_id))
+    except Exception:  # noqa: BLE001 — a cosmetic read must never fail an open
+        logger.debug("stored frontend state unreadable for %s", session_id, exc_info=True)
+        return None
+
+
+def _saver_label(subject: Any) -> str:
+    """The localized Saver badge, or "" when the NEXT REQUEST will not splice.
+
+    ONE RULE (design round 1, D1 + UX U4): the word is painted iff Saver is on
+    for this session, and off paints NOTHING rather than a reserved gap. The
+    reserved-gap version shipped a dim glyph with an empty value in every band
+    for every user, which is the one thing a band segment must not do — its
+    presence is the message.
+
+    TWO SHAPES, ONE ANSWER (review round 2, M2-2). A routed session is a
+    ``FrontendSessionState``: it carries no routing settings, no credential and
+    no live resolver attributes, so the only thing it can read is the published
+    ``saver_on`` — and the previous version ignored that field entirely,
+    which is how a routed badge came to paint an EMPTY label while the owner was
+    on. The owner shape has no such field and derives the same answer from
+    ``command.request_state``, the reading the publish itself uses, so parent and
+    follower cannot disagree.
+
+    NEVER PAINTS EMPTY: an empty or missing badge string returns "" instead of a
+    bare glyph, because a glyph with no word beside it is unreadable rather than
+    compact (the round-1 D1 defect at a different level).
+    """
+    # The parameter is deliberately not named ``session``: it holds either a real
+    # session or a ``FrontendSessionState``, and the host-read guard treats every
+    # ``session.member`` in this file as a duck-typed session read that has to be
+    # declared on one of the protocols. Naming it for what it is keeps the read
+    # typed (an isinstance against the concrete state class) instead of forcing a
+    # session-protocol declaration that would be false for both classes.
+    if subject is None:
+        return ""
+    from local_operator.i18n.keys import wire_radient_saver
+    from local_operator.i18n.text import tr
+    from local_operator.saver.command import request_state
+
+    word = str(tr("wire.radient_saver")(wire_radient_saver.command_badge())).strip()
+    if not word:
+        # A catalogue that lost the word must not leave a mark that says nothing.
+        return ""
+    # A ROUTED surface hands this function a ``FrontendSessionState``, which is
+    # where the owner's answer is published; the owner shape is a real session
+    # and is resolved locally. Typed as an isinstance rather than a duck probe so
+    # the read is checked against the field's own declaration (the protocol test
+    # treats an undeclared duck-typed read as a silent-None hazard).
+    from local_operator.session.frontend_state import FrontendSessionState
+
+    if isinstance(subject, FrontendSessionState):
+        return word if subject.saver_on else ""
+    return word if request_state(subject).on else ""
 
 
 def _fast_label(session) -> str:

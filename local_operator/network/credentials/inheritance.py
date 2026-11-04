@@ -62,7 +62,6 @@ OP = "credential_inheritance"
 #: The one ``what`` shape this authoring flow mints. Anything else carrying the key (a
 #: supersede, a wildcard, an MCP selector, extra scope) is a record this build cannot
 #: DESCRIBE, so it is a record this build will not sign, apply or render as approvable.
-_ANCHOR_KEYS = {"key_id", "spki_fp", "statement_digest"}
 _FINGERPRINT = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 #: A state in which a request is still answerable/applicable (the window folded by
@@ -407,7 +406,7 @@ def request(
             "name": _plain(subject["member"].name),
             "fingerprint": subject["public_key_fingerprint"],
         },
-        what={OP: data, "anchor": {k: anchor[k] for k in sorted(_ANCHOR_KEYS)}},
+        what={OP: data, "anchor": {k: anchor[k] for k in sorted(approvals.ANCHOR_KEYS)}},
         credential_ref=None,
         created_at=now,
         expires_at=now + approvals.DEFAULT_EXPIRY_S,
@@ -440,7 +439,7 @@ def _parse(record: dict[str, Any]) -> dict[str, Any]:
     if data is None or not isinstance(what, dict) or set(what) != {OP, "anchor"}:
         raise bad
     anchor = what["anchor"]
-    if not isinstance(anchor, dict) or set(anchor) != _ANCHOR_KEYS:
+    if not isinstance(anchor, dict) or set(anchor) != approvals.ANCHOR_KEYS:
         raise bad
     try:
         if (

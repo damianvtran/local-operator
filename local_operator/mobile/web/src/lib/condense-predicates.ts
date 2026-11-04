@@ -2,7 +2,7 @@
  * THE DESKTOP PREDICATES THE CONDENSATION MODEL READS, lifted verbatim.
  *
  * SOURCES, at the desktop sourceHash `parity-sources.json` pins
- * (`47757620d75085ce…`), line ranges of THAT source (measured, round 2 - the round-1
+ * (`f46617132a56fc69…`), line ranges of THAT source (measured, round 2 - the round-1
  * ranges ended at the next function's start, not at its own end):
  * - `components/trace/tool-row-model.ts` — `isPartialDelivery` 554-574,
  *   `isFailedResult` 619-742, `displayName` 804-834.
@@ -106,6 +106,7 @@ export function receiptFamilyOf(record: {
 	if (record.kind !== "custom") return null;
 	switch (record.customType) {
 		case "hub_message":
+		case "team_bridge_message":
 			return "incoming";
 		case "job_result":
 			return "job_result";

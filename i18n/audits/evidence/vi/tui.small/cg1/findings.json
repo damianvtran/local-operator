@@ -1,0 +1,87 @@
+{
+  "locale": "vi",
+  "namespace": "tui.small",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 2,
+    "minor": 4,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-001",
+      "severity": "MAJOR",
+      "namespace": "tui.small",
+      "key": "tui.small.goal_panel.judge_absent",
+      "english": "judge: —",
+      "current": "giám khảo: —",
+      "problem": "Context sidecar: `judge:` is protocol vocabulary kept as-is; es/fr/zh-CN all keep 'judge:'. Translating it to 'giám khảo:' breaks the protocol label (translator's ambiguous.txt call rejected).",
+      "suggested": "judge: —",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-002",
+      "severity": "MAJOR",
+      "namespace": "tui.small",
+      "key": "tui.small.goal_panel.judge_line",
+      "english": "judge: {words}",
+      "current": "giám khảo: {words}",
+      "problem": "Same as judge_absent: `judge:` is a protocol word per the context note and must stay byte-identical; 'giám khảo' (exam examiner) is also the wrong sense.",
+      "suggested": "judge: {words}",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-003",
+      "severity": "MINOR",
+      "namespace": "tui.small",
+      "key": "tui.small.network_panel.relay_not_running",
+      "english": "  relay:      not running\n",
+      "current": "  chuyển tiếp: không chạy\n",
+      "problem": "Column padding: 'relay:' rows align the value at cell 14 like '  đã cài:     ' and '  danh tính:  '; '  chuyển tiếp: ' puts the value at cell 15, so the column is ragged. Context also calls `relay:` a protocol word (fr/zh-CN keep it).",
+      "suggested": "  relay:       không chạy\\n  (or keep 'chuyển tiếp:' and widen installed/identity padding to 15 so all rows align)",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-004",
+      "severity": "MINOR",
+      "namespace": "tui.small",
+      "key": "tui.small.network_panel.relay_running",
+      "english": "  relay:      running, pid {pid} — {state}\n",
+      "current": "  chuyển tiếp: đang chạy, pid {pid} — {state}\n",
+      "problem": "Same misalignment as relay_not_running (value column at 15 vs 14 on sibling rows).",
+      "suggested": "  relay:       đang chạy, pid {pid} — {state}\\n (or realign all rows to one column)",
+      "disposition": "declined: Same as VI-003: the sibling rows were realigned to cell 15, so this row's value is already in the shared column."
+    },
+    {
+      "round": 2,
+      "id": "R2-VI-004",
+      "severity": "MINOR",
+      "namespace": "tui.small",
+      "key": "tui.small.network_panel.relay_running",
+      "english": "  relay:      running, pid {pid} — {state}\n",
+      "current": "  chuyển tiếp: đang chạy, pid {pid} — {state}\n",
+      "problem": "Decline/alternative for VI-003/004: the column is now aligned (all four rows put the value at cell 15, measured), but the sidecar calls `relay:`, `installed:` and `identity:` protocol labels («kept as-is» for identity); fr/zh-CN keep them Latin. es on main translates them, so this is not blocking. The same applies to relay_not_running, relay_checking_indent, installed_row and identity_row.",
+      "suggested": "Preferred: revert all five rows together to Latin labels with English padding, e.g. «  relay:      đang chạy, pid {pid} — {state}\\n», «  installed:  {value}\\n», «  identity:   {identity}\\n». Otherwise record «chuyển tiếp/đã cài/danh tính» as a vi exception in the style guide.",
+      "disposition": "declined: Kept «chuyển tiếp:/đã cài:/danh tính:». Glossary §2 row 'relay | translate — identifiers stay' gives vi «chuyển tiếp» and the style guide lists relay → chuyển tiếp; these are human-read panel rows, not parsed identifiers, and es on main translates them. Columns stay aligned at cell 15. Recording the"
+    },
+    {
+      "round": 3,
+      "id": "R3-VI-001",
+      "severity": "MINOR",
+      "namespace": "tui.small",
+      "key": "tui.small.network_panel.relay_running (+relay_not_running, relay_checking_indent, installed_row, identity_row)",
+      "english": "  relay:      running, pid {pid} — {state}\n",
+      "current": "  chuyển tiếp: đang chạy, pid {pid} — {state}\n",
+      "problem": "Decline of R2-VI-004 is reasoned (glossary relay→«chuyển tiếp», es precedent, columns aligned at cell 15 — re-measured) but it contradicts the per-key sidecar: `relay:`/`pid` are 'protocol words', `identity:` is 'a protocol label kept as-is'. Meaning is intact, so not MAJOR; the exception is now only recorded in scratch ambiguous.txt, not in the style guide.",
+      "suggested": "Either revert all five rows together to Latin labels with English padding, or record «chuyển tiếp:/đã cài:/danh tính:» as a vi exception in i18n/style-guides/vi.md in the same PR that ships these values.",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ]
+}

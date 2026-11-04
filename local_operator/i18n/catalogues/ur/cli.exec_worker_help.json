@@ -1,0 +1,13 @@
+{
+  "cli.exec_worker_help.agent": "ایجنٹ کے نام کا سلیکٹر",
+  "cli.exec_worker_help.agent_id": "ایجنٹ id",
+  "cli.exec_worker_help.control": "اس رن کے لیے سیشن ریکارڈ شائع کریں اور کنٹرول ساکٹ چلائیں",
+  "cli.exec_worker_help.hosting": "ہوسٹنگ پلیٹ فارم اوور رائڈ",
+  "cli.exec_worker_help.job_id": "لیجر جاب id؛ سیٹ ہونے پر ورکر باہر نکلتے وقت JSONL لیجر میں اختتامی ریکارڈ (finished_at + exit_code) شامل کرتا ہے",
+  "cli.exec_worker_help.json": "ہر ایجنٹ ایونٹ کی ایک JSON لائن جاری کریں",
+  "cli.exec_worker_help.model": "ماڈل اوور رائڈ",
+  "cli.exec_worker_help.prompt": "چلانے والا پرامپٹ",
+  "cli.exec_worker_help.resume": "پچھلا سیشن id سے دوبارہ شروع کریں (یا ''@latest'')",
+  "cli.exec_worker_help.train": "ٹریننگ موڈ: ٹرانسکرپٹ ایجنٹ ڈائریکٹری میں شامل کریں (پرانا --train)",
+  "cli.exec_worker_help.yolo": "تمام ٹول درجوں کی خودکار منظوری"
+}

@@ -1,0 +1,49 @@
+{
+  "locale": "vi",
+  "namespace": "tui.transcript",
+  "en_sha256": "13915d6c6dcec0da9fd892c1cb74c23546045717c1d3400d264e8608e75876ba",
+  "target_sha256": "1c87fe027ba61f5c347df3c40439f9f4c0027376355f2ca83e4bb776753c170c",
+  "en_keys": 17,
+  "target_keys": 17,
+  "missing": [],
+  "unknown": [],
+  "arg_problems": [],
+  "render_errors": [],
+  "plural_cat_problems": [],
+  "not_nfc": [],
+  "backtick_diff": [],
+  "over_budget": [],
+  "typography": [],
+  "identical_to_en": [
+    [
+      "tui.transcript.sender.pid",
+      "pid {pid}"
+    ]
+  ],
+  "gloss_leads": [],
+  "empty": [],
+  "ws_edge": [],
+  "length_ratio_outliers": [],
+  "script_leads": [],
+  "excl_added": [],
+  "end_punct": [],
+  "counts": {
+    "missing": 0,
+    "unknown": 0,
+    "arg_problems": 0,
+    "render_errors": 0,
+    "plural_cat_problems": 0,
+    "not_nfc": 0,
+    "backtick_diff": 0,
+    "over_budget": 0,
+    "typography": 0,
+    "identical_to_en": 1,
+    "gloss_leads": 0,
+    "empty": 0,
+    "ws_edge": 0,
+    "length_ratio_outliers": 0,
+    "script_leads": 0,
+    "excl_added": 0,
+    "end_punct": 0
+  }
+}

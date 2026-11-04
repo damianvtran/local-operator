@@ -948,8 +948,6 @@ def test_type_action_text_is_never_case_folded() -> None:
 
 def test_user_facing_strings_and_identifiers_reject_whitespace_only_values() -> None:
     with pytest.raises(ValidationError):
-        TypeAction(observation_id="observation-7", text="   ")
-    with pytest.raises(ValidationError):
         AskUserAction(observation_id="observation-7", request_id="   ", question="Which one?")
     with pytest.raises(ValidationError):
         AskUserAction(observation_id="observation-7", request_id="request-1", question="\n")
@@ -1139,3 +1137,233 @@ def _fresh_import_modules(module: str) -> set[str]:
     )
     assert completed.returncode == 0, completed.stderr[-3000:]
     return set(json.loads(completed.stdout.strip().splitlines()[-1]))
+
+
+# ---------------------------------------------------------------------------
+# Action-contract refusals measured on the 2026-10-28 session-arm episodes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", ["\n", " ", "\t", "   ", "\r\n"])
+def test_type_accepts_whitespace_keystrokes(text: str) -> None:
+    """A newline presses Return and a space presses space: both are keystrokes.
+
+    Measured refused before this change: ``{"text": "\\n"}`` and ``{"text": " "}``.
+    The value round-trips byte-identically, so a sealed batch replays as typed.
+    """
+
+    action = TypeAction(observation_id="observation-7", text=text)
+    assert action.text == text
+    batch = _batch(action)
+    assert ActionBatch.from_canonical_json(batch.to_canonical_json()) == batch
+
+
+@pytest.mark.parametrize("text", ["\x0b", "\x0c", " \x0c", "\u00a0", "\u2003"])
+def test_whitespace_only_text_must_press_a_key(text: str) -> None:
+    """``\\x0b``/``\\x0c`` and Unicode spaces have no X11 key: refused, not no-op."""
+
+    with pytest.raises(ValidationError, match="space, tab, carriage return and newline"):
+        TypeAction(observation_id="observation-7", text=text)
+
+
+def test_mixed_text_with_other_whitespace_is_unchanged() -> None:
+    assert TypeAction(observation_id="observation-7", text="a\x0bb").text == "a\x0bb"
+
+
+def test_type_still_refuses_the_empty_string() -> None:
+    """Empty types nothing; it stays a refusal rather than a silent no-op."""
+
+    with pytest.raises(ValidationError, match="at least 1 character"):
+        TypeAction(observation_id="observation-7", text="")
+
+
+def test_a_literal_space_key_is_the_space_bar() -> None:
+    assert KeyAction(observation_id="observation-7", keys=("ctrl", " ")).keys == ("CTRL", "SPACE")
+    with pytest.raises(ValidationError, match="duplicate keys"):
+        KeyAction(observation_id="observation-7", keys=(" ", "space"))
+
+
+@pytest.mark.parametrize(
+    ("keys", "text"),
+    [
+        # Each is a chord that, pressed, would NOT type the text: an upper-case
+        # letter compiles lower-cased, a repeat cannot be pressed twice in one
+        # chord, and a literal " " was refused outright on base.
+        (("e", "c", "h", "o", " ", "a"), "echo a"),
+        (("e", "c", "h", "o", "space", "A"), "echo A"),
+        (("E", "N", "-", "M", "O", "D"), "EN-MOD"),
+        (("c", "a", "t", "space", ">", "space", "c", "o"), "cat > co"),
+        # A repeated letter is a typing attempt first, a duplicate second.
+        (("m", "p", ".", "s", "c", "m", "space", "<"), "mp.scm <"),
+    ],
+)
+def test_a_chord_that_spells_text_is_refused_with_the_type_action(
+    keys: tuple[str, ...], text: str
+) -> None:
+    with pytest.raises(ValidationError) as caught:
+        KeyAction(observation_id="observation-7", keys=keys)
+    message = str(caught.value)
+    assert "pressed together as one chord" in message
+    assert '{"kind": "type", "text": ' + json.dumps(text) + "}" in message
+    assert "duplicate" not in message
+
+
+@pytest.mark.parametrize(
+    "keys",
+    [
+        ("ctrl", "c"),
+        ("ctrl", "alt", "t"),
+        ("shift", "a"),
+        ("Super", "l"),
+        ("a",),
+        ("up", "left"),
+        ("space",),
+        ("1",),
+        ("shift", "A"),
+        # Lower-case, duplicate-free spellings ran as typed on base (QA round 1,
+        # Q1: ["t","e","r","m"] after Super launched Terminal) and stay accepted.
+        ("t", "e", "r", "m"),
+        ("l", "s"),
+        ("e", "c", "h", "o", "space", "a"),
+    ],
+)
+def test_real_chords_are_not_read_as_typing(keys: tuple[str, ...]) -> None:
+    """Every modifier chord, a lone key and named-key chords stay valid."""
+
+    KeyAction(observation_id="observation-7", keys=keys)
+
+
+@pytest.mark.parametrize(
+    ("keys", "name"),
+    [(("Page_Up", "Page_Up"), "pageup"), (("down",) * 3, "down"), (("Escape", "esc"), "esc")],
+)
+def test_a_repeated_key_refusal_shows_one_action_per_press(
+    keys: tuple[str, ...], name: str
+) -> None:
+    with pytest.raises(ValidationError) as caught:
+        KeyAction(observation_id="observation-7", keys=keys)
+    message = str(caught.value)
+    assert "a key chord cannot contain duplicate keys" in message
+    assert f"send {len(keys)} separate actions" in message
+    assert '{"kind": "key", "keys": [' + json.dumps(name) + "]}" in message
+
+
+def test_a_mixed_duplicate_chord_still_names_the_rule() -> None:
+    with pytest.raises(ValidationError) as caught:
+        KeyAction(observation_id="observation-7", keys=("ctrl", "a", "a"))
+    assert "in its own key action" in str(caught.value)
+
+
+@pytest.mark.parametrize("deltas", [{"delta_y": 0}, {"delta_x": 0, "delta_y": 0}, {}])
+def test_zero_scroll_is_still_refused_and_states_the_sign_convention(
+    deltas: dict[str, int],
+) -> None:
+    """No direction can be inferred from all-zero deltas, so it is not guessed."""
+
+    with pytest.raises(ValidationError) as caught:
+        ScrollAction.model_validate(
+            {"observation_id": "observation-7", "frame_id": "frame-1", "x": 1, "y": 1, **deltas}
+        )
+    message = str(caught.value)
+    assert "scroll requires a non-zero delta" in message
+    assert "delta_y > 0 scrolls up and < 0 scrolls down" in message
+
+
+def test_finish_behind_a_wait_is_still_refused_with_both_repairs() -> None:
+    """Never dropped-and-accepted: both measured cases were a step-0 placeholder."""
+
+    with pytest.raises(ValidationError) as caught:
+        _batch(
+            WaitAction(observation_id="observation-7", duration_ms=500),
+            FinishAction(observation_id="observation-7", status="infeasible", reason="placeholder"),
+        )
+    message = str(caught.value)
+    assert "finish and ask_user must be the only action in their batch" in message
+    assert "send the finish alone" in message
+
+
+# ---------------------------------------------------------------------------
+# Held modifiers on pointer actions. Sealed evidence (osworld-21 t25k3c-t004
+# steps 5-6, t25k3c-t022): a model wanting a shift-click range selection could
+# only send ``[click][key SHIFT][click]``; the standalone key is pressed and
+# released before the second click, so one item was selected.
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        ClickAction(observation_id="observation-7", frame_id="f", x=1, y=2, button="right"),
+        DoubleClickAction(observation_id="observation-7", frame_id="f", x=1, y=2),
+        DragAction(
+            observation_id="observation-7", frame_id="f", start_x=1, start_y=2, end_x=3, end_y=4
+        ),
+        ScrollAction(observation_id="observation-7", frame_id="f", x=1, y=2, delta_y=-3),
+    ],
+    ids=["click", "double_click", "drag", "scroll"],
+)
+def test_an_action_without_modifiers_keeps_its_exact_canonical_bytes(action: object) -> None:
+    """No ``modifiers`` key appears unless one was held.
+
+    Sealed records are compared byte-for-byte, so the field must be absent --
+    not ``[]`` -- from every action that holds nothing, and a canonical payload
+    spelling the empty default is not canonical.
+    """
+
+    assert action.modifiers == ()  # type: ignore[attr-defined]
+    dumped = action.model_dump(mode="json")  # type: ignore[attr-defined]
+    assert "modifiers" not in dumped
+    encoded = _batch(action).to_canonical_json()
+    assert b"modifiers" not in encoded
+    assert ActionBatch.from_canonical_json(encoded) == _batch(action)
+    spelled = encoded.replace(b'"kind"', b'"modifiers":[],"kind"', 1)
+    with pytest.raises(ValueError, match="modifiers must not be empty"):
+        ActionBatch.from_canonical_json(spelled)
+
+
+def test_modifiers_reuse_the_key_vocabulary_and_round_trip() -> None:
+    click = ClickAction.model_validate(
+        {
+            "observation_id": "observation-7",
+            "frame_id": "f",
+            "x": 1,
+            "y": 2,
+            "modifiers": ["Shift", "control_l", "super"],
+        }
+    )
+    # The SAME canonicalisation as ``KeyAction.keys``: aliases resolve, order
+    # is kept because it is the press order.
+    assert click.modifiers == ("SHIFT", "CTRL", "META")
+    encoded = _batch(click).to_canonical_json()
+    assert b'"modifiers":["SHIFT","CTRL","META"]' in encoded
+    assert ActionBatch.from_canonical_json(encoded) == _batch(click)
+
+
+@pytest.mark.parametrize(
+    ("modifiers", "message"),
+    [
+        (["hyper"], "unknown modifier: 'hyper'"),
+        (["a"], "not a modifier: 'a'"),
+        (["enter"], "not a modifier: 'enter'"),
+        (["shift", "SHIFT"], "duplicate"),
+        ("shift", "tuple"),
+    ],
+)
+def test_an_unusable_modifier_is_refused_at_admission(modifiers: object, message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        ClickAction.model_validate(
+            {
+                "observation_id": "observation-7",
+                "frame_id": "f",
+                "x": 1,
+                "y": 2,
+                "modifiers": modifiers,
+            }
+        )
+
+
+def test_explicit_empty_modifiers_are_refused_at_both_admission_surfaces() -> None:
+    from local_operator.evaluation.protocol import ClickAction
+
+    payload = dict(observation_id="obs", frame_id="screen", x=1, y=2, button="left", modifiers=[])
+    with pytest.raises(ValueError, match="modifiers must not be empty"):
+        ClickAction.model_validate(payload)

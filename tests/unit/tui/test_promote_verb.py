@@ -15,6 +15,8 @@ disk, not in the notice.
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -110,8 +112,45 @@ def _session_role(agents: Any, name: str, prompt: str = "Do it.\n") -> str:
 
 async def _run(pilot: Any, app: OperatorApp, command: str) -> None:
     app._run_slash_command(command)
-    for _ in range(4):
-        await pilot.pause()
+    # Promotion runs registry I/O through a worker and asyncio.to_thread; UI
+    # pauses drain messages, not the executor. Wait for completion before reading
+    # receipts so a busy CI executor cannot make an empty transcript look final.
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+async def test_receipt_wait_observes_the_worker(tmp_path, monkeypatch) -> None:
+    import local_operator.promote_slash as promote
+
+    session, app, _agents, _teams = setup(tmp_path, monkeypatch)
+    _session_role(session.agent_registry, "helper")
+    real = promote.promote_receipt
+    release = threading.Event()
+    started = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def gated(*args: Any, **kwargs: Any) -> Any:
+        loop.call_soon_threadsafe(started.set)
+        # A watchdog, not a timing assertion: the test releases this gate itself.
+        assert release.wait(10), "test did not release the promotion worker"
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(promote, "promote_receipt", gated)
+    async with app.run_test(size=(80, 30)) as pilot:
+        await _boot(pilot, app)
+        run = asyncio.create_task(_run(pilot, app, "/agent promote helper yes"))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            # More UI turns than the old helper waited: the real disk worker is
+            # still held, so the helper must not report that its receipt is ready.
+            for _ in range(6):
+                await pilot.pause()
+            assert not run.done(), "receipt helper returned before promotion completed"
+        finally:
+            release.set()
+            await run
+            await app.workers.wait_for_complete()
+        assert "Copied helper" in _notices(app)[-1]
 
 
 async def test_a_bare_promote_rehearses_and_writes_nothing(tmp_path, monkeypatch) -> None:

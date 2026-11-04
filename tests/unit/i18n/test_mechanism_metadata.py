@@ -13,9 +13,10 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from local_operator.i18n import locale_direction, resolve
+from local_operator.i18n import catalogues, locale_direction, resolve
 from local_operator.i18n.format import format_number, plural_category
 from local_operator.server.routes import capabilities, i18n
+from tests.unit.i18n import locale_coverage
 
 
 @pytest.mark.parametrize(
@@ -79,15 +80,16 @@ async def test_mounted_capabilities_metadata_and_catalogue_gate(
         result = response.json()["result"]
         assert result["language"] == expected
         assert result["language_direction"] == direction
-        for blocked_path in ("zh-CN/wire.settings.account_policy", "ur/wire.exec"):
-            blocked = await client.get(
-                f"/v1/i18n/catalogues/{blocked_path}", headers={"If-None-Match": "*"}
-            )
-            # Neither locale carries that namespace: account_policy is an
-            # approved English-only child, and Urdu does not carry wire.exec.
-            # The raw route serves committed namespaces only, not synthetic
-            # fallback files.
-            assert blocked.status_code == 404
+        # Exercise both raw-file outcomes without requiring translation debt
+        # to exist. Full coverage is a healthy tree, not lost test coverage.
+        for locale in locale_coverage.supported_targets():
+            for namespace in catalogues.namespaces("en"):
+                path = catalogues.catalogue_root() / locale / f"{namespace}.json"
+                response = await client.get(
+                    f"/v1/i18n/catalogues/{locale}/{namespace}",
+                    headers={"If-None-Match": "*"},
+                )
+                assert response.status_code == (304 if path.is_file() else 404), (locale, namespace)
         for shipped in ("ur", "zh-CN", "en"):
             control = await client.get(
                 f"/v1/i18n/catalogues/{shipped}/wire.errors", headers={"If-None-Match": "*"}

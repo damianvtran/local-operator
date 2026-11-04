@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field, StrictBool
 
 from local_operator.i18n.keys import wire_errors_desktop as _wd
-from local_operator.providers.usage import META_MUSE_USAGE_NOTES
+from local_operator.providers.usage import META_MUSE_USAGE_NOTES, usage_report_state
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.auth import get_desktop_auth
@@ -306,15 +306,7 @@ async def usage(
                 else None
             )
             row["age_ms"] = max(0, now - report.fetched_at) if report.fetched_at > 0 else None
-            row["state"] = (
-                "reauth_required"
-                if report.credential_invalid
-                else (
-                    "unavailable"
-                    if report.usage_unavailable or not report.limits
-                    else "partial" if report.consecutive_failures else "available"
-                )
-            )
+            row["state"] = usage_report_state(report)
             rows.append(row)
         return reply({"reports": rows, "source": "live" if live else "cached", "fetched_at": now})
     finally:

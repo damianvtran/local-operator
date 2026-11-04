@@ -89,14 +89,72 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Rolls back only the network-request-*.body files the same read created.",
     ),
-    # The bridge connector's LaunchAgent, in ~/Library/LaunchAgents. The path
-    # comes from ``launchd.plist_path_for(LABEL)`` -- a fixed label plus
-    # ``Path.home()`` -- so it is never a session directory or a transcript, and
-    # the unlink is how an opt-out removes the user's own plist (D2a).
+    # The session host's rendezvous and the engage's capture file (design-
+    # surface-independence slice 2). ``_bind`` unlinks only the unix SOCKET FILE at
+    # ``session_host.socket_path(root)`` -- a corpse a dead host left (after a
+    # connect probe proved nobody answers) -- and ``serve`` unlinks that same path
+    # on exit, by inode, only if it is still the socket this host bound. The path is
+    # ``<root>/run/session-host/host.sock`` (or its short ``lop-session-host-*``
+    # fallback under the temp dir): never under ``sessions/``, never a transcript.
+    # ``_spawn_runtime_hosted`` unlinks only the ``lop-runtime-*.log`` capture
+    # file its own ``mkstemp`` created a few lines earlier, on its two failure arms
+    # (host unavailable / any other error), so a refused spawn leaves no tempfile.
     (
-        "local_operator/team_bridge/connector/install.py::_remove",
+        "local_operator/session/runtime/host_service.py::_bind",
+        "<path>.unlink",
+        "Removes the stale host.sock a dead host left, after a connect probe found no listener.",
+    ),
+    (
+        "local_operator/session/runtime/host_service.py::serve",
+        "<path>.unlink",
+        "Removes this host's own host.sock on exit, only if the inode is still the one it bound.",
+    ),
+    (
+        "local_operator/session/runtime/launch.py::_spawn_runtime_hosted",
+        "<path>.unlink",
+        "Unlinks the mkstemp lop-runtime-*.log capture this call created, on its two failure arms.",
+        2,
+    ),
+    # The bridge connector's registration file, on all three receivers the
+    # cross-platform install added (the original entry covered macOS only). Each
+    # path is FIXED by the platform helper, never caller-supplied: ``plist_path()``
+    # is ``launchd.plist_path_for(LABEL)`` under ``Path.home()``,
+    # ``systemd_unit_path(SYSTEMD_UNIT)`` is the fixed per-user unit name, and
+    # ``task_record_path(config_dir)`` is ``<config_dir>/supervisor/<fixed
+    # name>.xml``. None can be a session directory or a transcript; the unlink is
+    # how an opt-out removes the user's own registration (D2a).
+    (
+        "local_operator/team_bridge/connector/install.py::_remove_launchd",
         "<path>.unlink",
         "Unlinks the LaunchAgent plist at the fixed per-user label path, never a session path.",
+    ),
+    (
+        "local_operator/team_bridge/connector/install.py::_remove_systemd",
+        "<path>.unlink",
+        "Unlinks the fixed systemd --user unit file, never a session path.",
+    ),
+    (
+        "local_operator/team_bridge/connector/install.py::_remove_task",
+        "<path>.unlink",
+        "Unlinks the task record under the config dir's supervisor/ dir, never a session path.",
+    ),
+    # The receiver's wake-diagnostics counter: a config-dir sidecar published by
+    # atomic replace. ``diagnostics_path()`` is ``<config_dir>/team_bridge/
+    # wake_diagnostics.json`` and its temp sibling is that same FIXED name plus
+    # ``.tmp`` — both are module constants under the config root's team_bridge/
+    # directory, so neither can be a session directory or a transcript, and no
+    # caller input (conversation id, message id, sender) reaches either path.
+    # The file records a count per closed code, never per-session state
+    # (QA round 2).
+    (
+        "local_operator/team_bridge/wake_diagnostics.py::record_woke_nobody",
+        "os.replace",
+        "Atomic swap of a fixed-name .tmp FILE onto the config dir's team_bridge/ counter",
+    ),
+    (
+        "local_operator/team_bridge/wake_diagnostics.py::record_woke_nobody",
+        "<path>.unlink",
+        "Clears only that write's own .tmp FILE beside the counter; never a session path",
     ),
     # Dedicated credential-root cache, never a transcript path: path_for hashes
     # the opaque session id under account-affinity/<auth-db namespace>/*.json.
@@ -391,6 +449,21 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         # and nothing here can name a directory at all. Reached only when the last
         # entry goes, which is why the record does not survive as an empty list.
         "Drops <config>/operator/revoked.json when its last entry is lifted",
+    ),
+    (
+        "local_operator/operator/handlers.py::_admission_install",
+        "<path>.unlink",
+        # The staged statement after a refused privileged step (agent review round
+        # 2, m4): a prompt the operator cancelled and a splint that exited non-zero
+        # both have to leave no bytes behind, because the next plain
+        # `lop operator install` would otherwise apply what this run did not.
+        # The path is `trust.staging_path(config_root)` =
+        # `operator_root(config_root)/"anchor.json"` — a LITERAL basename joined
+        # onto the literal segment "operator" under the CONFIG root, so it is a
+        # fixed sibling of `sessions/` and no input reaches it: no session id, no
+        # caller path, and the call can only ever name that one regular file.
+        "Drops <config>/operator/anchor.json, the staged statement this run wrote",
+        2,
     ),
     (
         "local_operator/tui/app.py::OperatorApp._release_sidebar_preparation",
@@ -1075,6 +1148,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "shape is an lstat-confirmed non-directory, and the caller only plans "
         "files whose shape+size+age passed",
     ),
+    #
+    # Two FILE unlinks, both named by the function that owns the sidecars' paths:
+    # the per-session scan cache and the spool write lock. Neither path can be a
+    # session directory — the first comes from `session_files.ledger.cache_path`
+    # (`<config>/cache/session_files/<id>.json`) and the second from
+    # `spooled.lock_name` (`<config>/wakes/spooled/.<id>.lock`) — and both are
+    # written OUTSIDE the session directory by the modules that own them. The
+    # call runs only after `_bounded_rmtree` has already removed THIS session's
+    # directory, and it is keyed by that session's id: a sidecar whose session
+    # directory still exists is never touched.
+    (
+        "local_operator/session/cleanup.py::_drop_session_sidecars",
+        "<path>.unlink",
+        "Unlinks the removed session's own file-scan cache entry and spool lock — "
+        "regular files named by the owning modules' path helpers, never a directory, "
+        "and only for a session whose directory this removal just deleted",
+        2,
+    ),
     # -- transcript compression ----------------------------------------------
     # The compression pass RENAMES nothing and REMOVES nothing but the two files
     # it owns, and both call sites are one function each so the argument can be
@@ -1309,6 +1400,65 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/agents.py::_write_text_atomically",
         "<path>.unlink",
         "only the same-directory temp FILE this write created",
+    ),
+    # -- agent pictures: agents/<id>/avatar.{png,jpg}, never sessions/ ---------
+    # ``agent_avatar`` owns two fixed basenames (``avatar.png`` / ``avatar.jpg``)
+    # joined onto an agent directory the REGISTRY resolved from a known agent id;
+    # no session id, no caller-supplied name and no directory is ever removed.
+    (
+        "local_operator/agent_avatar.py::_write_bytes_atomically",
+        "os.replace",
+        "temp FILE -> agents/<id>/avatar.png|jpg (os.replace onto a file); never sessions/",
+    ),
+    (
+        "local_operator/agent_avatar.py::_write_bytes_atomically",
+        "<path>.unlink",
+        "only the same-directory temp FILE this write created",
+    ),
+    (
+        "local_operator/agent_avatar.py::remove_siblings",
+        "<path>.unlink",
+        "the stale avatar.png|jpg FILE beside agent.yml (one of two fixed names); never sessions/",
+    ),
+    (
+        "local_operator/agent_avatar.py::remove",
+        "<path>.unlink",
+        "both fixed avatar.png|jpg FILEs in an agent dir, absent is fine; never sessions/",
+    ),
+    # The picture's size-variant cache (``.avatar.<sha12>.<size>.<ext>``) lives
+    # beside it in the same agent directory: built from verified original bytes,
+    # swept on set/clear. Names are derived from the sha and a fixed size set.
+    (
+        "local_operator/agent_avatar.py::_sized",
+        "os.replace",
+        "staging temp FILE -> agents/<id>/.avatar.<sha12>.<size>.<ext> variant; never sessions/",
+    ),
+    (
+        "local_operator/agent_avatar.py::_sized",
+        "<path>.unlink",
+        "only the same-directory variant staging temp FILE this write created",
+    ),
+    (
+        "local_operator/agent_avatar.py::remove_derivatives",
+        "<path>.unlink",
+        "cached .avatar.<sha12>.<size>.<ext> variant FILEs (and their staging temps) "
+        "in agents/<id>/, matched by _is_derivative_name; never sessions/",
+    ),
+    (
+        "local_operator/agent_avatar.py::subscribe._unsubscribe",
+        "<path>.remove",
+        "list.remove of a callback from the in-process subscriber list; not the filesystem",
+    ),
+    (
+        "local_operator/agents.py::AgentRegistry.set_agent_avatar",
+        "<path>.unlink",
+        "rollback drops only the new agents/<id>/avatar.png|jpg FILE after a failed "
+        "agent.yml write",
+    ),
+    (
+        "local_operator/agents.py::AgentRegistry.clear_agent_avatar",
+        "<path>.remove",
+        "calls agent_avatar.remove, which unlinks the two fixed avatar FILEs in agents/<id>/",
     ),
     (
         "local_operator/network/definitions.py::write_index",
@@ -2199,6 +2349,29 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/transcript_index.py::_sweep_missing",
         "<path>.unlink",
         "a *.json cache FILE whose session directory is gone; suffix-guarded",
+    ),
+    # The incremental store (snapshot + delta beside the head) lives in the same
+    # cache directory. `_publish_store` renames its own staged snapshot temp onto
+    # a `<sid>.snap.<32-hex>.snapshot` FILE and unlinks that temp on failure;
+    # `_retire` unlinks only names matching `_STORE_FILE` (that exact snapshot or
+    # delta FILE shape) for the head it just superseded. None is a directory, and
+    # every path is the cache root + a fixed shape, never a `sessions/` path.
+    (
+        "local_operator/session/transcript_index.py::_publish_store",
+        "<path>.replace",
+        "staged temp FILE -> <sid>.snap.<hex>.snapshot store FILE under the cache root",
+    ),
+    (
+        "local_operator/session/transcript_index.py::_publish_store",
+        "<path>.unlink",
+        "only its own staged snapshot temp FILE when the rename did not land",
+    ),
+    (
+        "local_operator/session/transcript_index.py::_retire",
+        "<path>.unlink",
+        "superseded <sid>.snap/.delta store FILEs (_STORE_FILE) and this session's "
+        "orphaned staged-snapshot temp FILEs (_STAGED_FILE, dead pid or past grace)",
+        2,
     ),
     (
         "local_operator/session/transcript.py::Transcript._write_entries",
@@ -3415,8 +3588,9 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._swap",
         "os.replace",
-        "Old-dir backup, edit restore and staged swap of <config_dir>/skills/<validated alias>",
-        3,
+        "Old-dir backup, edit restore, staged swap and raw_after-CAS backup restore of "
+        "<config_dir>/skills/<validated alias>; every destination comes from _locations()",
+        4,
     ),
     # LOCAL REMOVE. Same path construction as above: the source is
     # ``path(alias)`` (validated alias under <config_dir>/skills, symlinks
@@ -3425,6 +3599,39 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # is a single same-filesystem rename that KEEPS the bytes -- never an rmtree
     # -- and a linked alias is refused before it is reached. The same three
     # tests above drive ``remove_local`` at sessions/ and show it refused.
+    # Projection operations use a retained no-follow config/hub/projection
+    # directory FD, never a path reopened through a mutable hub ancestor. The
+    # adversarial projection tests replace each ancestor and leaf at check/use
+    # boundaries and assert the sessions-like victim tree stays byte-identical.
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._write_projection",
+        "os.replace",
+        "Own .projection-<uuid>.tmp to validated alias JSON, both relative to one retained FD",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._write_projection",
+        "os.unlink",
+        "Removes only this operation's temporary entry relative to its retained projection FD",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._retire_projection",
+        "os.unlink",
+        "Validated alias JSON entry relative to retained projection FD; "
+        "leaf symlinks never followed",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.adopt",
+        "os.replace",
+        "Original backup, concurrent-edit restore and staged install "
+        "through validated _locations()",
+        3,
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._recover_adoption",
+        "os.replace",
+        "Restores raw-hash-matching backup to the validated alias destination "
+        "supplied by _locations()",
+    ),
     (
         "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.remove_local",
         "os.replace",
@@ -3737,7 +3944,65 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Only the sibling .sidebar-tags-*.tmp leftover; never a session path",
     ),
+    (
+        "local_operator/session/transcript_index.py::write_index",
+        "<path>.unlink",
+        "Removes only the index's own sibling .tmp leftover when the commit did not land",
+    ),
+    # -- the immutable read model: cache FILES beside the index --------------
+    # `cache/transcript_index/read-models/<sid>/` holds SQLite companions and
+    # their naming sidecars. Every path below is built by `_path()` from the
+    # CONFIG ROOT plus a 32-hex token (`_token_for`), never from a caller string
+    # and never below `sessions/`: publishing writes a sibling temp FILE and
+    # renames it onto the companion, the sidecar does the same, the collector
+    # unlinks unreferenced cache FILES, and the orphan sweep deletes FILES in a
+    # directory whose own session has no index left. None of these can name a
+    # session directory, a transcript, or an entry inside `sessions/`.
+    (
+        "local_operator/session/index_read_model.py::publish",
+        "<path>.replace",
+        "tmp FILE -> the companion's 32-hex cache path under cache/, never a session path",
+    ),
+    (
+        "local_operator/session/index_read_model.py::publish",
+        "<path>.unlink",
+        "Removes only the sweep's own .tmp sibling when the publish did not commit",
+    ),
+    (
+        "local_operator/session/index_read_model.py::write_naming",
+        "<path>.replace",
+        "tmp FILE -> the naming sidecar's 32-hex cache path under cache/, never a session path",
+    ),
+    (
+        "local_operator/session/index_read_model.py::write_naming",
+        "<path>.unlink",
+        "Removes only the sidecar's own .tmp sibling; the token names a cache file",
+    ),
+    (
+        "local_operator/session/index_read_model.py::collect",
+        "<path>.unlink",
+        "Unlinks an unreferenced companion/sidecar cache FILE by its 32-hex stem",
+    ),
+    (
+        "local_operator/session/index_read_model.py::_sweep_orphans",
+        "<path>.unlink",
+        "Unlinks cache FILEs inside a read-models/<sid> directory whose session has no index; "
+        "the directory itself is left in place",
+    ),
+    # -- team-bridge moderation evaluation: a tmp world the harness built ------
+    # `teardown_fixture` deletes the fixture tree ONE eval case ran in, created by
+    # `build_fixture` under a caller-supplied tmp root (`tmp_path / "world"` in the
+    # tests). It requires the builder's provenance marker and both owned home/config
+    # directories, and reapplies the builder's operator-root refusal. The path is
+    # `world.root`, never a session id or directory, and evaluation reads no sessions/.
+    (
+        "local_operator/evaluation/team_bridge_moderation/fixture.py::teardown_fixture",
+        "shutil.rmtree",
+        "Deletes only a marked eval fixture with both owned directories; protected "
+        "operator/session roots are refused before removal",
+    ),
 )
+
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
 _ALLOWED_COUNTS: dict[str, int] = {
@@ -3929,6 +4194,11 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         # allow-list rows above for the full argument).
         "local_operator/session/compression.py::_publish",
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp FILE -> read-models/<32-hex>.sqlite / .naming.json under cache/: the
+        # receiver is a companion token path built from the config root, never a
+        # session directory (see the allow-list rows below for the full argument).
+        "local_operator/session/index_read_model.py::publish",
+        "local_operator/session/index_read_model.py::write_naming",
         # tmp FILE -> sessions/<id>/inbox.jsonl inside the session it was handed;
         # the commit swaps one spool file, never a directory.
         "local_operator/session/runtime/inbox.py::commit_inbox_batch",
@@ -3988,6 +4258,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE
         "local_operator/session/search_index.py::_save",  # tmp -> index FILE
         "local_operator/session/transcript_index.py::write_index",  # tmp -> index FILE
+        "local_operator/session/transcript_index.py::_publish_store",  # tmp -> snapshot FILE
         "local_operator/session/archived.py::_write_archived",  # tmp -> archive index FILE
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
         # tmp -> runtime-stall-<pid>.deadline FILE. Both paths are log_dir() + an int

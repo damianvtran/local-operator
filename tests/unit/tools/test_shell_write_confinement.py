@@ -53,9 +53,12 @@ DARWIN_ONLY = pytest.mark.skipif(
 
 #: A git environment that can never reach the operator's keychain or global
 #: config while the test BUILDS its fixture repository (outside the sandbox):
-#: the system gitconfig on this fleet carries ``credential.helper=osxkeychain``.
+#: the system gitconfig on this fleet carries ``credential.helper=osxkeychain``,
+#: and on macOS Apple Git reads a second system file that
+#: ``GIT_CONFIG_SYSTEM`` alone does not suppress.
 _GIT_ENV = {
     **os.environ,
+    "GIT_CONFIG_NOSYSTEM": "1",
     "GIT_CONFIG_SYSTEM": "/dev/null",
     "GIT_CONFIG_GLOBAL": "/dev/null",
     "GIT_TERMINAL_PROMPT": "0",

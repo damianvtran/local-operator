@@ -1,0 +1,9 @@
+{
+  "cli.refresh_help.refresh": "Pedir a las sesiones activas que pasen a la compilación del disco en su próximo punto de transición (sin señales)",
+  "cli.refresh_help.target": "nombre de conversación / ID de sesión / pid / subcadena de cwd (sin distinguir mayúsculas ni minúsculas)",
+  "cli.refresh_help.pid": "seleccionar por pid exacto",
+  "cli.refresh_help.session": "seleccionar por ID de sesión exacto",
+  "cli.refresh_help.all": "pedir el cambio a todas las sesiones activas de esta máquina (sin confirmación: no se termina nada)",
+  "cli.refresh_help.json": "resultado legible por máquina para cada destino",
+  "cli.refresh_help.timeout": "espera de respuesta por sesión (predeterminado: 10)"
+}

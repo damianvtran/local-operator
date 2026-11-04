@@ -1,0 +1,39 @@
+{
+  "locale": "hi",
+  "namespace": "cli.exec_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "HI-021",
+      "severity": "MINOR",
+      "namespace": "cli.exec_help",
+      "key": "cli.exec_help.control",
+      "english": "Route approvals and questions to an attached supervisor (may wait). Without this flag non-TTY approvals deny; discovery and live attachment are available either way. --yolo remains an explicit approval override.",
+      "current": "अनुमोदन और प्रश्न अटैच्ड सुपरवाइज़र को भेजें (प्रतीक्षा कर सकता है)। इस फ़्लैग के बिना non-TTY अनुमोदन अस्वीकृत होते हैं; डिस्कवरी और लाइव अटैचमेंट दोनों तरह उपलब्ध हैं। --yolo स्पष्ट अनुमोदन ओवरराइड बना रहता है।",
+      "problem": "\"approvals\" rendered \"अनुमोदन\" here and in tools/workstream; glossary + hi guide fix approvals → स्वीकृतियाँ/स्वीकृति, and the shipped wire.exec.approval_advisory (same exec surface, same rule) says \"स्वीकृति\". Meaning is intact, but the same --control/--yolo rule would have two terms.",
+      "suggested": "\"स्वीकृतियाँ और सवाल अटैच्ड सुपरवाइज़र को भेजें … इस फ़्लैग के बिना non-TTY स्वीकृतियाँ अस्वीकार होती हैं; … --yolo स्पष्ट स्वीकृति ओवरराइड बना रहता है।\" Likewise tools (\"स्वीकृति मानी जाती है\", \"स्वीकृति गेट\") and workstream (\"स्वीकृतियाँ कैसे संभाली जाती हैं\")",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    },
+    {
+      "round": 1,
+      "id": "HI-022",
+      "severity": "MINOR",
+      "namespace": "cli.exec_help",
+      "key": "cli.exec_help.tools",
+      "english": "Comma-separated tools this run may reach, and the ONLY ones. Excluded tools are unreachable, not merely unapproved. The declaration stands as the APPROVAL for its own members only where nobody can be asked — a non-tty run without --control; on a terminal, and under --control, every write/exec call is still decided by the approval gate. A name this build does not have is unreachable and reported",
+      "current": "अल्पविराम से अलग टूल जिन तक यह रन पहुँच सकता है, और केवल वही। बाहर रखे टूल पहुँच से बाहर हैं, केवल अस्वीकृत नहीं। घोषणा अपने सदस्यों के लिए तभी अनुमोदन मानी जाती है जहाँ किसी से पूछा नहीं जा सकता — --control के बिना non-tty रन; टर्मिनल पर, और --control के तहत, हर write/exec कॉल का निर्णय अब भी अनुमोदन गेट करता है। जो नाम इस बिल्ड में नहीं है वह पहुँच से बाहर है और रिपोर्ट किया जाता है",
+      "problem": "\"not merely unapproved\" became \"केवल अस्वीकृत नहीं\" (\"not merely rejected\"). \"Unapproved\" means not yet approved (it would be asked about), not denied, so the contrast the sentence draws gets blurred.",
+      "suggested": "\"…बाहर रखे टूल पहुँच से बाहर हैं, सिर्फ़ बिना स्वीकृति के नहीं।\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    }
+  ]
+}

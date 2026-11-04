@@ -1,0 +1,19 @@
+{
+  "wire.exec.approval_advisory": "Предупреждение: этот запуск не может запросить одобрение (терминал не подключён), поэтому любой вызов инструмента, требующий одобрения, будет отклонён.\n  Способы: --control откладывает карточки для супервизора; --yolo автоматически одобряет все уровни; --tools NAME[,NAME] заранее одобряет перечисленные инструменты и ограничивает ими доступ этого запуска; tool_approval_mode: auto в конфигурации отвечает на каждый вызов одинаково для каждого запуска.",
+  "wire.exec.clear_goal_needs_start": "--clear-goal корректирует запуск, но не начинает его. Сочетайте с --resume SESSION_ID и промптом или --loop.",
+  "wire.exec.error_line": "Ошибка: {error}",
+  "wire.exec.error_preflight": "Ошибка: предварительная проверка не пройдена: {error}",
+  "wire.exec.exec_epilog": "Примеры:\n  lop exec 'Review the change' --team release --background\n  printf 'Inspect this report' | lop exec --profile reviewer\n  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'\n  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'\n  lop exec --status JOB_ID\n\nСначала resume восстанавливает транскрипт, команду, профиль, цель и имя;\nявные флаги запуска переопределяют свои значения. Команда и профиль могут\nсосуществовать. Цикл выполняется после необязательного начального промпта;\n--loop N считает только продолжения. Сохранённый прогресс цикла виден при\nвозобновлении, но итерации никогда не повторяются автоматически.\nСама по себе цель не запускает модель. Промпты буквальные, не слеш-команды.\n--goal только ЗАДАЁТ цель; в отличие от /goal в TUI он не отправляет этот\nтекст ещё и как сообщение, потому что промпт — канал сообщений exec.\n--agent/--agent-id выбирают устаревшие данные агента и исключают друг друга.\nОдобрения без TTY по умолчанию отклоняются. --control может ждать супервизора;\n--yolo — явное переопределение, которое никогда не подразумевается\n--background или --team.\n--tools ограничивает доступное запуску: исключённые инструменты недостижимы.\nСобытия и текст переднего плана идут в stdout; квитанции — в stderr. Отсоединённые\nзапуски пишут оба потока в журнал и выводят различные ID задания и сессии.\nlop --resume SESSION_ID позволяет следить за живым запуском или возобновить\nзавершённый; exec отказывает, если есть живой владелец.",
+  "wire.exec.exec_help": "Выполнить задачу или цикл цели в сохраняемой сессии без запуска TUI",
+  "wire.exec.goal_only_sets_objective": "--goal задаёт цель, но не начинает работу (в отличие от /goal в TUI). Добавьте промпт, передайте его через stdin (или '-') либо запустите цикл с --loop N.",
+  "wire.exec.log_pointer": "Журнал: {log_path}",
+  "wire.exec.no_exec_job": "Задания exec {job_id} нет; ID заданий выводит --background и записывает в {jobs_path}",
+  "wire.exec.no_prompt": "нет промпта. Передайте его аргументом, через stdin (или '-') либо запустите цикл с --loop/--loop-goal",
+  "wire.exec.receipt_failure_suffix": " (квитанция выполнения) — {failure}",
+  "wire.exec.receipt_suffix": " (квитанция выполнения)",
+  "wire.exec.session_pointer": "Сессия: {session_id} (разговор) — подключиться или возобновить: lop --resume {session_id}",
+  "wire.exec.status_pointer": "Статус: lop exec --status {job_id}",
+  "wire.exec.tools_unreachable": "Предупреждение: --tools называет инструменты, которых этот запуск не мог достичь: {names}. Сессия достигла инструментов: {count}.",
+  "wire.exec.turn_did_not_complete": "ход не завершился",
+  "wire.exec.waiting_on_you": "Запуск ждёт вас? lop sessions показывает, что ему нужно"
+}

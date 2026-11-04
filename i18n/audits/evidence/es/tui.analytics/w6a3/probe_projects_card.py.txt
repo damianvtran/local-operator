@@ -1,0 +1,12 @@
+import os, sys
+sys.path.insert(0, os.getcwd())
+from local_operator.i18n import text
+text.set_active_locale(os.environ.get("PROBE_LOCALE","es"))
+from tests.unit.tui.test_projects_render import _view,_session,NOW
+from local_operator.tui.projects_render import render_project_board
+cases={"fresh,2 live":dict(age=7200,stale=False,live=2),"stale,1 live":dict(age=86400*3,stale=True,live=1),"fresh,12 live":dict(age=7200,stale=False,live=12),"fresh 99d? 10d,1 live":dict(age=86400*10,stale=False,live=1)}
+for name,c in cases.items():
+    v=_view("p",progress="x",progress_updated_at=NOW-c["age"],sessions=[_session(f"s{i}",state="live") for i in range(c["live"])])
+    v["progress_stale"]=c["stale"]
+    lines=render_project_board([v],now=NOW).text.plain.split("\n")
+    print(f"{name:24}", repr(lines[-1]), '| facts:', repr(lines[-2]))

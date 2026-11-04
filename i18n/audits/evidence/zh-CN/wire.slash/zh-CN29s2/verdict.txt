@@ -1,0 +1,2 @@
+PASS
+PASS — all five round-1 string findings (zhCN-wire-slash-01..05) are fixed on the bytes with no new defect and every value <= its English and <= 51 cells; the one open item is the round-1 NIT zhCN-wire-slash-06, recording 凭据 in i18n/glossary.md (zh-CN cell still an em dash), which is a locale-owner action outside these files.

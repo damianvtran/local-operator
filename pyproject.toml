@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.91.3"
+version = "0.96.3"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -29,7 +29,12 @@ dependencies = [
     "packaging>=24.0",
     # HTTP + data model. httpx drives every provider client and the OAuth
     # flows; pydantic is the schema layer the whole harness is typed against.
-    "httpx>=0.27",
+    # Exact environment routing uses one isolated HTTPX mount-pattern
+    # compatibility seam; verify proxy parity before widening this range.
+    "httpx>=0.27,<0.29",
+    # Listing deadlines wrap public network-backend APIs rather than httpx's
+    # private pools. Declare that direct contract instead of a transitive import.
+    "httpcore>=1.0.9,<2",
     # The <2.14 cap shipped in #2063 is lifted here: its named exit condition —
     # the two TypeAdapter sites (output_contract.py:303, frontend_state.py:7963)
     # — is discharged by this change (#2085), which migrates them to
@@ -70,6 +75,10 @@ dependencies = [
     "textual>=8.0.0",
     "rich>=13.7",
     "pygments>=2.13",
+    # Skill adoption relies on CommonMark physical source maps and the inspected
+    # 4.2 inline-backtick emission contract to protect raw authored payloads. This
+    # is our direct runtime API, not an incidental Rich transitive dependency.
+    "markdown-it-py>=4.2,<5",
     # The desktop UI's installer runs a BARE `pip install local-operator` and
     # then launches `local-operator serve`, so the default set must stay fully
     # functional (0.15.10 had these in base; splitting them into extras broke
@@ -378,6 +387,9 @@ local_operator = [
     "mobile/web/src/*.ts",
     "mobile/web/src/*.tsx",
     "mobile/web/src/components/*.tsx",
+    # Sheet components import pure .ts models too; the installed SPA repair
+    # build must receive these alongside the .tsx views that depend on them.
+    "mobile/web/src/components/*.ts",
     "mobile/web/src/components/ui/*.tsx",
     # The modal layer's own hook (`ui/use-modal-layer.ts`): drawer and sheet both
     # import it, and an omitted `.ts` glob here is the same omission class as the
@@ -438,7 +450,12 @@ lop = "local_operator.cli:main"
 line-length = 100
 target-version = ['py312']
 # Vendored release helpers stay byte-identical to their recorded upstream SHA.
-extend-exclude = "F401|benchmarks/osworld_v2_adapter/src/evaluation_examples/"
+# `i18n/audits/evidence` holds AUDIT EVIDENCE, not source: the bundles carry the
+# scripts an auditor actually ran, and reformatting them would edit the record a
+# ledger row points at. Renaming them to `*.py.txt` (the older convention) is not
+# enough on its own: flake8 and black skip by suffix, but isort parses by content
+# and keeps flagging them, so the directory is excluded from all three instead.
+extend-exclude = "F401|benchmarks/osworld_v2_adapter/src/evaluation_examples/|i18n/audits/evidence"
 
 [tool.pylint."messages control"]
 ignore = ["__init__.py"]
@@ -452,7 +469,9 @@ enable = [
 
 [tool.isort]
 profile = "black"
-extend_skip = ["benchmarks/osworld_v2_adapter/src/evaluation_examples"]
+# See the note in [tool.black]: audit evidence is data, and its scripts are kept
+# exactly as they were run.
+extend_skip = ["benchmarks/osworld_v2_adapter/src/evaluation_examples", "i18n/audits/evidence"]
 
 [tool.pyright]
 reportMissingTypeArgument = true
@@ -475,6 +494,16 @@ reportPrivateImportUsage = false
 # the ANALYZER, so the import resolves instead of being reported missing. Same reasoning
 # as the adapter entry above: a type-resolution path only, no runtime import change.
 extraPaths = ["benchmarks/osworld_v2_adapter/src", "packaging/macos"]
+# `i18n/audits/evidence` is AUDIT EVIDENCE, not source: each bundle carries the
+# `checks.py` an independent auditor ran, committed verbatim so a reader can
+# re-run the exact check. Those scripts are throwaway probes written by a
+# different agent per namespace and are never imported; making them satisfy
+# `reportMissingTypeArgument` would mean editing the evidence to look tidier,
+# which defeats the point of committing it. The same directory is already
+# excluded from flake8, black and isort for the same reason (see their entries
+# above); pyright was the one gate that had not been told, and the first
+# bundle with untyped `dict` annotations (390 errors across the Spanish TUI
+# audits) was what showed it.
 # `exclude` REPLACES pyright's built-in defaults, it does not extend them, so
 # the four defaults must be restated here alongside any addition of our own.
 # THE COUNT IS VERSION-COUPLED. It became FOUR at 1.1.414, which added
@@ -511,7 +540,7 @@ extraPaths = ["benchmarks/osworld_v2_adapter/src", "packaging/macos"]
 # code, and CI cannot catch the omission — it never builds a wheel before
 # type-checking — so the cost lands entirely on local runs of the gate command,
 # where `rm -rf build/` is folklore the next person re-derives from scratch.
-exclude = ["**/node_modules", "**/__pycache__", "**/.*", "**/__editable__.*", "docs", "benchmarks/osworld_v2_adapter/**/evaluation_examples", "build"]
+exclude = ["**/node_modules", "**/__pycache__", "**/.*", "**/__editable__.*", "docs", "benchmarks/osworld_v2_adapter/**/evaluation_examples", "build", "i18n/audits/evidence"]
 # NOTE: venvPath/venv are deliberately NOT set here, even though a bare local
 # `pyright` run resolves whatever interpreter it finds and reports spurious
 # "import could not be resolved" errors that bury the real ones.

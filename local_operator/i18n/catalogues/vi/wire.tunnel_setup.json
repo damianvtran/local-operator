@@ -1,0 +1,7 @@
+{
+  "wire.tunnel_setup.in_progress": "Thiết lập truy cập điện thoại đang diễn ra. Hãy kiểm tra trạng thái trước khi thử lại.",
+  "wire.tunnel_setup.deadline": "Hạn chót phản hồi của thiết lập đã hết sau khi phần việc nó sở hữu đã được xả xong. Hãy kiểm tra trạng thái và các bước đã hoàn tất trước khi thử lại.",
+  "wire.tunnel_setup.unavailable": "Thiết lập truy cập điện thoại không thể hoàn tất phản hồi này. Hãy kiểm tra trạng thái hiện tại trước khi thử lại; đừng cho rằng đã hoàn tác.",
+  "wire.tunnel_setup.checking": "Đang kiểm tra tài khoản đã chọn và các bước chuẩn bị cần thiết trước khi thay đổi.",
+  "wire.tunnel_setup.corrupt_intent": "Yêu cầu thiết lập điện thoại đã lưu không hợp lệ. Giữ nguyên create.json và nhờ tác nhân của bạn khôi phục yêu cầu gốc trước khi thử lại. Thiết lập chưa thay đổi gì."
+}

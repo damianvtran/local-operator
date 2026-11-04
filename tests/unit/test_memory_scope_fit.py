@@ -140,6 +140,223 @@ def test_personal_words_that_look_workish_store(tmp_path, text):
     assert store.put("global", {"title": "Note", "body": text, "tags": []})["scope"] == "global"
 
 
+# ---------------------------------------------------------------------------
+# The two directions, enumerated and COUNTED.
+#
+# The bias in doubt is STORE THE FACT (see the code comment above `_WORK_TOKEN`): a
+# work note that reaches global is caught later by `lop memory triage`, which lists it
+# and can move it; a personal fact a shape rule refuses is silent data loss. So every
+# false positive from review/QA rounds 1-2 is an accepted case here, every work shape
+# is a refused case with the name it reports, and `test_the_bias_is_store_the_fact`
+# pins BOTH lengths — a future widening cannot quietly invert the bias.
+# ---------------------------------------------------------------------------
+PERSONAL_PROSE: tuple[str, ...] = (
+    # --- the live bank's own personal rows ------------------------------------
+    "never force a shared tool's lock (uv cache prune --force while other lanes "
+    "hold the uv cache lock) - report the blocker instead",
+    "UI i18n PRs consolidate under one owner; shared-catalogue merge order: 1052 actions union.",
+    "assertion = Google ID token (RS256, aud=GOOGLE_VAULT_CLIENT_ID, iss accounts.google.com).",
+    "L4 remaining TODO: drawer tabs Asks|Updates|All (D9), transcript flag line "
+    "+ in-view auto-read.",
+    "never delete or move ~/worktrees/sdk-pr2 (717M).",
+    "I fitted MR16 LED bulbs in the kitchen downlights.",
+    "The next action is to renew the passport before March.",
+    "Session notes: the todo list for the trip is on the fridge.",
+    # --- review round 1, B-1: personal reference numbers ----------------------
+    # `PR` is Philippine Airlines' IATA code; policy, medical-record, bay and
+    # membership numbers take the same letter+digits form.
+    "Flight PR102 Manila to Sydney departs 22:40, seat 14A.",
+    "Boarding pass PR1842 - terminal 2, gate 14.",
+    "Insurance policy PR90021 renews 1 June, premium by direct debit.",
+    "Medical record MR204567 at St Vincent's (Dr Okafor).",
+    "I park in bay PR1234 at the office garage.",
+    "My gym membership number is MR98765.",
+    "The passport application (PR4431) is with the consulate.",
+    # The documented bound of the unspaced arm: only a LINE-OPENING ref is a marker.
+    "The build I mentioned is covered in PR3078.",
+    # --- review round 1, M-1: bare plan topics ---------------------------------
+    "Our workstreams at the charity are fundraising, events and grants.",
+    "I run three workstreams at the school: reading, sports and music.",
+    # --- QA round 1, Q-1/Q-2: person-level nouns -------------------------------
+    "Heavy snow can hold the branches down until it melts.",
+    "The next step is to check the branches for damage after the storm.",
+    "Please hold my tickets at the box office until Friday.",
+    "There is a HOLD on the concert tickets until payday.",
+    "The next step is to collect the tickets from the box office.",
+    "next action: book a ticket for the concert on Friday",
+    "next action: book tickets for the concert on Friday",
+    "Parking tickets: #4412 and #4413 are both paid.",
+    "My medical issues are listed in file #7.",
+    "The HOA has a hold on all issues of the newsletter until the AGM.",
+    # --- review round 2, M-1 / QA round 2, QA2-1: ordinary English verbs ------
+    # `push`, `squash` and `cherry-pick` are cooking, prams and fruit.
+    "Next step: push the button to confirm the transfer.",
+    "The next step is to push the pram to the corner shop.",
+    "next step: squash the tomatoes into the passata",
+    "Next step: squash the booking for the court on Tuesday.",
+    "The next step is to cherry-pick the ripe fruit for the jam.",
+    "next step: push the trolley round to the checkout",
+    "Next action: squash the aphids on the roses.",
+    # --- the operator's own durable preference, from the live bank (01a141b9) ------
+    # A prohibition list that MENTIONS the phrase is not a progress report. This row
+    # is why `_TASK_PROGRESS` keys on the report shape (`task progress:`, `… on …`).
+    "Global memory is only for durable user/personal facts, preferences, contacts and "
+    "environment-not task progress, release status, transient approvals, debug logs or "
+    "session resumption; those use session/team/agent work banks.",
+    "task progress, release status, transient approvals",
+    # Review round 2, m-1's third sentence: `against` is not the report shape, so this
+    # personal training report stores.
+    "task progress against the marathon milestones is on track",
+    # Review round 3, r3-1: `for` was one arm of the report shape and refused this
+    # personal statement, so the arm was dropped. It stores.
+    "my task progress for the 10k plan is fine",
+    # --- review round 2, m-1: plan nouns that are also personal vocabulary -----
+    "sprint training",
+    "marathon milestones",
+    "wedding deliverables",
+    # --- QA round 2, QA2-2: a ticket HOLD is a box office, not a review state ---
+    "There is a HOLD pending review on the concert ticket.",
+    "The box office has a hold pending their review of my tickets.",
+    # --- QA round 1's own passing controls -----------------------------------
+    "next action: call the plumber",
+    "dentist appointment on Thursday at 3pm",
+)
+
+WORK_SHAPES: tuple[tuple[str, str], ...] = (
+    # The five live global-bank rows, verbatim from the real store. Each was written
+    # by an agent that believed it was storing a durable fact; each refusal must also
+    # NAME the shape, never a coarse bucket (QA round 1, Q-4).
+    ("Saver releases so far: agent-server #233 live (image 20db00fc), #234 live", "tracker-ref"),
+    ("PR3078 R1 remediation: all source edits done (validate, chain, client)", "tracker-ref"),
+    # Review round 2, n-1: the list form an agent writes a session note in.
+    ("- PR3078 R1 remediation: done", "tracker-ref"),
+    ("1. PR3078 R1 remediation: done", "tracker-ref"),
+    ("Session todo: query Cloudflare MCP for radienthq.com zone id", "session-todo"),
+    (
+        "cloudflare-zone-lookup: next action is mcp__cloudflare_whoami then search zones",
+        "next-step",
+    ),
+    (
+        "Do not use memory recall for task progress on this workstream; project record",
+        "task-progress",
+    ),
+    # Operator decision on QA round 1, Q-3: session narration never belongs in global,
+    # even for an errand, and the refusal says how to keep the fact.
+    ("Session todo: dentist", "session-todo"),
+    # Review/QA round 1: the singular work shapes that must keep refusing.
+    ("HOLD pending review on the branch", "hold-branch"),
+    ("next step: rebase the branch", "next-step"),
+    ("the release lane next step is the merge", "next-step"),
+    ("next step: cut the release and tag v1.2.3", "release-cut"),
+    ("Merge PR #2463 after CI goes green", "tracker-ref"),
+    ("the PR was merged", "merge-status"),
+    # The DOCUMENTED line-opening bound (guide + `_WORK_REF` comment): a personal
+    # identifier that opens a line has the shape of a status line, so it is refused and
+    # the writer rephrases. Pinned so the bound cannot drift silently either way.
+    ("PR1234 is the bay I use at the office garage.", "tracker-ref"),
+    ("MR204567 at St Vincent's (Dr Okafor).", "tracker-ref"),
+)
+
+# Sentences that a literal-phrase rule refuses BY OPERATOR DECISION (round 3, item 2:
+# "`_TASK_PROGRESS` keys off the literal phrase `task progress` only"). They are
+# personal prose, so they are listed and asserted REFUSED rather than dropped: the cost
+# is visible here, and reversing the decision is a test change, not an excavation.
+#: Every arm of the report shape (`:`, `is`, `was`, `on`), plus two personal subjects.
+#: A report is a status line whatever it is about, so these refuse while the mentions in
+#: `PERSONAL_PROSE` store — `test_a_non_report_mention_of_the_phrase_stores` is the page.
+TASK_PROGRESS_REPORTS: tuple[tuple[str, str], ...] = (
+    ("task progress: shipped the first slice", ":"),
+    ("task progress is good on the proxy work", "is"),
+    ("task progress was slow on the kitchen renovation", "was"),
+    ("Task progress on this week's sprint training is good.", "on"),
+    ("task progress on the wedding deliverables: rings bought", "on"),
+)
+
+
+@pytest.mark.parametrize("text", PERSONAL_PROSE)
+def test_personal_prose_still_stores(tmp_path, text):
+    """Every one of these is a durable personal fact and must reach the global bank."""
+    store = _store(tmp_path)
+    assert store.put("global", {"title": "Note", "body": text, "tags": []})["scope"] == "global"
+
+
+@pytest.mark.parametrize("text,shape", WORK_SHAPES)
+def test_work_shapes_are_refused_and_named(text, shape):
+    with pytest.raises(MemoryError) as exc:
+        scope_fit("global", {"title": "x", "body": text, "tags": [], "aliases": [], "subject": ""})
+    assert shape in str(exc.value)
+
+
+@pytest.mark.parametrize("text,arm", TASK_PROGRESS_REPORTS)
+def test_each_task_progress_arm_refuses(text, arm):
+    """One arm of the report shape per case: `:`, `is`, `was`, `on` (review r3-1).
+
+    `for` was tried and dropped: it refused `my task progress for the 10k plan is fine`.
+    Every remaining arm is pinned here so the enumeration in the guide and the docstring
+    cannot drift from the code without a failure.
+    """
+    assert arm in (":", "is", "was", "on")
+    with pytest.raises(MemoryError) as exc:
+        scope_fit("global", {"title": "x", "body": text, "tags": [], "aliases": [], "subject": ""})
+    assert "task-progress" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "my task progress for the 10k plan is fine",  # the dropped `for` arm
+        "task progress, release status, transient approvals",  # prohibition list
+        "task progress against the marathon milestones is on track",  # not the shape
+    ],
+)
+def test_a_non_report_mention_of_the_phrase_stores(tmp_path, text):
+    """A mention is not a report. This is the other half of the r3-1 boundary."""
+    store = _store(tmp_path)
+    assert store.put("global", {"title": "Note", "body": text, "tags": []})["scope"] == "global"
+
+
+def test_the_bias_is_store_the_fact(tmp_path):
+    """Both directions, counted. A widening that inverts the bias fails HERE.
+
+    The numbers are deliberately exact: adding a sentence to either tuple without
+    deciding which way it should fall is the mistake this catches.
+    """
+    assert len(PERSONAL_PROSE) == 46
+    assert len(WORK_SHAPES) == 16
+    assert len(TASK_PROGRESS_REPORTS) == 5
+    store = _store(tmp_path)
+    for index, text in enumerate(PERSONAL_PROSE):
+        stored = store.put("global", {"title": f"note {index}", "body": text, "tags": []})
+        assert stored["scope"] == "global", text
+    for text, _shape in WORK_SHAPES:
+        with pytest.raises(MemoryError):
+            store.put("global", {"title": "work", "body": text, "tags": []})
+
+
+def test_session_todo_refusal_is_actionable_and_the_fact_itself_stores(tmp_path):
+    """QA round 1, Q-3: the refusal must say which shape fired AND what to do.
+
+    `scope="session"` alone is not the remedy the writer needs — a personal reminder
+    sent to a session bank dies with the conversation. The actionable advice is to
+    keep the fact and drop the session framing, so the same content without the
+    prefix must store in global.
+    """
+    store = _store(tmp_path)
+    with pytest.raises(MemoryError) as exc:
+        store.put(
+            "global",
+            {"title": "Cloudflare zone", "body": "Session todo: query the zone id", "tags": []},
+        )
+    message = str(exc.value)
+    assert "session-todo" in message
+    assert "drop the session framing" in message
+    assert "query the zone id" not in message  # still value-free
+    stored = store.put(
+        "global", {"title": "Cloudflare zone", "body": "query the zone id", "tags": []}
+    )
+    assert stored["scope"] == "global"
+
+
 @pytest.mark.parametrize(
     "fact",
     [

@@ -1,0 +1,39 @@
+{
+  "locale": "ur",
+  "namespace": "tui.app",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-007",
+      "severity": "MINOR",
+      "namespace": "tui.app",
+      "key": "tui.app.help.copy_note",
+      "english": "copies the highlighted range in the composer",
+      "current": "کمپوزر میں نمایاں کی گئی حد کاپی کرتا ہے",
+      "problem": "«حد» means 'limit/boundary'; a highlighted text range is a portion of text. Reads as 'copies the highlighted limit'.",
+      "suggested": "کمپوزر میں نمایاں کیا گیا حصہ کاپی کرتا ہے",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    },
+    {
+      "round": 1,
+      "id": "UR-008",
+      "severity": "NIT",
+      "namespace": "tui.app",
+      "key": "tui.app.help.notify_note_more",
+      "english": "or set `LOCAL_OPERATOR_NO_NOTIFICATIONS=1`; in-band ones wait for the terminal to be unfocused, detached ones click to reopen",
+      "current": "یا `LOCAL_OPERATOR_NO_NOTIFICATIONS=1` سیٹ کریں؛ ان-بینڈ اطلاعات ٹرمینل کے غیر فوکس ہونے کا انتظار کرتی ہیں، الگ کی گئی اطلاعات پر کلک سے دوبارہ کھلتی ہیں",
+      "problem": "'detached ones click to reopen' = clicking a detached-session toast reopens that session; «...پر کلک سے دوبارہ کھلتی ہیں» says the notifications themselves reopen.",
+      "suggested": "…، الگ کیے گئے سیشنز کی اطلاعات پر کلک کرنے سے سیشن دوبارہ کھلتا ہے",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    }
+  ]
+}

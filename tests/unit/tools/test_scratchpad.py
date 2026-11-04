@@ -434,6 +434,13 @@ def _pad(where: Path, *ancestors: str) -> Path:
         (("build.old", "x"), "build.old"),
         (("node_modules.bak", "x"), "node_modules.bak"),
         (("CMAKE-BUILD-RELEASE", "x"), "CMAKE-BUILD-RELEASE"),
+        # Go's build cache pointed at a pad-local directory (`disk reclaim`
+        # classifies these as reclaimable build/cache; the SAME vocabulary also
+        # refuses WRITING there, like every other cache name in the list).
+        ((".gocache", "ab", "entry"), ".gocache"),
+        (("gocache", "ab", "entry"), "gocache"),
+        (("GoCache", "ab", "entry"), "GoCache"),
+        (("gocache.bak", "x"), "gocache.bak"),
     ],
 )
 def test_a_refused_segment_is_refused_wherever_below_the_root_it_appears(

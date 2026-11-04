@@ -1,0 +1,50 @@
+# audit.log — fr / tui.usage / frbk1
+# commands are recorded verbatim; the text under each is the command's real output.
+
+$ git -C /Users/damian/lo-i18n-base status --porcelain | grep 'catalogues/fr/'
+?? local_operator/i18n/catalogues/fr/tui.usage.json
+
+$ git -C /Users/damian/lo-i18n-base rev-parse HEAD
+9495f8a6c3bf2b5438ef5c33d7274cf519435dda
+
+$ ls /Users/damian/lo-i18n-base/local_operator/i18n/catalogues/en/tui.usage.context.json
+/Users/damian/lo-i18n-base/local_operator/i18n/catalogues/en/tui.usage.context.json
+
+$ PYTHONPATH=/Users/damian/lo-i18n-base /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/d5db18882cb9/scratchpad/frbk1_audit_ns.py tui.usage
+namespace=tui.usage keys_en=21 keys_fr=21 context=present
+sidecar_keys=21 sidecar_missing=[] sidecar_extra=[]
+sha256 en=5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b
+sha256 context=bf599f5f161087b890e1e24434a03209fee286b865173af6b578da3133b6ef19
+sha256 fr=601947b30dceccb4e8c9874dca087423ab75553bbee4880ee479b162b8deeebc
+key_order_matches_en= True
+missing_in_fr= []
+extra_in_fr= []
+argument_tuple_diffs= NONE
+fr_plural_categories= ['many', 'one', 'other']
+plural_selectors_added_vs_en= 2
+  tui.usage.windows_count: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.usage.reported_balance: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+invalid_fr_selectors= NONE
+typography_strays= NONE
+u202f_total=1 u00a0_total=0
+whitespace_signature_diffs= NONE
+maxCells_rows= []
+over_budget= NONE
+largest_fr_minus_en  (plural=ICU template length, not rendered width):
+  + 29  tui.usage.windows_count                        en= 61 fr= 90 [plural-template]
+  + 29  tui.usage.reported_balance                     en= 81 fr=110 [plural-template]
+  + 28  tui.usage.paid.family_caps                     en= 29 fr= 57
+  + 22  tui.usage.refresh_failed                       en= 43 fr= 65
+  + 12  tui.usage.resets_in                            en= 19 fr= 31
+  + 10  tui.usage.paid.continue                        en= 42 fr= 52
+  +  8  tui.usage.paid.eligibility_unknown             en= 25 fr= 33
+  +  7  tui.usage.near_limit                           en= 18 fr= 25
+  +  7  tui.usage.unavailable                          en= 22 fr= 29
+  +  6  tui.usage.title                                en=  5 fr= 11
+  +  5  tui.usage.stale                                en= 13 fr= 18
+  +  4  tui.usage.paid.unlimited                       en= 24 fr= 28
+
+$ PYTHONPATH=/Users/damian/lo-i18n-base /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only; echo "exit=$?"
+check.py: catalogue checks: 0 problem(s)
+exit=0
+

@@ -70,3 +70,29 @@ def _connector_never_reaches_launchd(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
     monkeypatch.setattr(install, "_launchctl", forbidden, raising=False)
+
+    # The Linux and Windows arms have their own seams now (the receiver is
+    # cross-platform), and the same rule holds for them: no unit test may reach
+    # a developer's real `systemctl --user` instance or Task Scheduler, nor run
+    # `loginctl enable-linger` against the real account, through the connector.
+    def forbidden_systemctl(*args: str):
+        raise AssertionError(
+            "a unit test reached the connector's systemctl seam; inject "
+            "install._systemctl or leave the shared-label guard closed"
+        )
+
+    def forbidden_schtasks(*args: str):
+        raise AssertionError(
+            "a unit test reached the connector's schtasks seam; inject "
+            "install._schtasks or leave the shared-label guard closed"
+        )
+
+    def forbidden_linger() -> bool:
+        raise AssertionError(
+            "a unit test reached the connector's loginctl seam; inject install._enable_linger"
+        )
+
+    monkeypatch.setattr(install, "_systemctl", forbidden_systemctl, raising=False)
+    monkeypatch.setattr(install, "_schtasks", forbidden_schtasks, raising=False)
+    monkeypatch.setattr(install, "_enable_linger", forbidden_linger, raising=False)
+    monkeypatch.setattr(install, "_linger_enabled", lambda: False, raising=False)

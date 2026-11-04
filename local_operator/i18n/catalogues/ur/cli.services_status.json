@@ -1,0 +1,16 @@
+{
+  "cli.services_status.install_service": "`{command}` سے اسے انسٹال کریں",
+  "cli.services_status.install_service_help": "صرف Linux: serve کا systemd صارف یونٹ انسٹال اور فعال کریں",
+  "cli.services_status.restart_supervision_limit": "`lop services restart` اسے دوبارہ لوڈ کر سکتا ہے، مگر اسے زیرِ نگرانی نہیں لا سکتا",
+  "cli.services_status.serve_install_isolated_home": "یونٹ فائل لکھ دی گئی، مگر یہ HOME صارف کے systemd مینیجر کا ہوم نہیں؛ کچھ بھی فعال نہیں کیا گیا",
+  "cli.services_status.serve_install_linux_only": "serve سروس کی تنصیب کے لیے Linux پر systemd --user درکار ہے؛ macOS پر serve میں کوئی تبدیلی نہیں",
+  "cli.services_status.serve_install_not_serving": "serve یونٹ فعال ہو گئی، مگر اپنے عمل کو سروس نہیں دے رہی: {error}",
+  "cli.services_status.serve_install_wrong_cgroup": "serve یونٹ نے جواب دیا، مگر اس کے PID کا cgroup، local-operator-serve.service کی تصدیق نہیں کرتا",
+  "cli.services_status.serve_linger_required": "linger بند ہے: لاگ آؤٹ کے بعد یہ یونٹ برقرار رکھنے کے لیے `loginctl enable-linger` چلائیں",
+  "cli.services_status.serve_unit_enabled": "systemd صارف سروس فعال کر دی گئی: {unit}",
+  "cli.services_status.serve_unit_written": "یونٹ فائل لکھ دی گئی: {unit}",
+  "cli.services_status.supervised_by": "نگرانی میں: {unit}",
+  "cli.services_status.supervision_unknown": "نگرانی نامعلوم: کوئی systemd یونٹ معلوم نہیں ہو سکا",
+  "cli.services_status.unsupervised_scope": "نگرانی سے باہر: {scope}؛ systemd اسے دوبارہ شروع نہیں کر سکتا",
+  "cli.services_status.unsupervised_unknown": "نگرانی سے باہر: کوئی systemd یونٹ نہیں ملا؛ systemd اسے دوبارہ شروع نہیں کر سکتا"
+}

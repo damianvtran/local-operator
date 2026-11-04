@@ -1,0 +1,76 @@
+name: Windows anchor verifier
+
+# The operator trust anchor's Windows half (F4) is checked by advapi32 calls the
+# Linux suite can only drive with FAKE security descriptors. This job runs the
+# verifier against REAL ACLs on windows-latest: a default-ACL (user-writable)
+# anchor must be refused, an icacls-hardened one accepted, the Known Folder
+# lookup must ignore a hostile %PROGRAMDATA% and %SystemDrive%, and the PRINTED
+# install line must actually install from both PowerShell and cmd.exe, refusing a
+# pre-planted junction or foreign-owned target directory.
+#
+# A SEPARATE WORKFLOW rather than a ci.yml job, deliberately: it is paths-gated
+# to the operator package (ci.yml gates nothing by path, and every PR paying a
+# Windows runner for a file it cannot affect is waste), matching how
+# mobile-web.yml and extension.yml gate their own subtrees.
+#
+# WHAT IT CANNOT PROVE: a UAC prompt or secure-desktop behaviour — GitHub's
+# Windows runners run as an administrator with UAC off, so ``-Verb RunAs`` does
+# not prompt here. It proves the verifier and the elevated script, not the prompt.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'local_operator/operator/**'
+      - 'tests/unit/operator/test_anchor_windows_native.py'
+      - '.github/workflows/windows-anchor.yml'
+  pull_request:
+    paths:
+      - 'local_operator/operator/**'
+      - 'tests/unit/operator/test_anchor_windows_native.py'
+      - '.github/workflows/windows-anchor.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-anchor-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-anchor-verifier:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Verify the anchor DACL and path on native Windows
+        shell: pwsh
+        run: |
+          # Same sandbox shape as ci.yml's filesystem-boundaries-windows job: a
+          # scratch HOME so nothing reads or writes the runner profile.
+          $env:HOME = Join-Path $env:RUNNER_TEMP "lop-anchor-home"
+          $env:USERPROFILE = $env:HOME
+          $env:LOCAL_OPERATOR_CONFIG_DIR = Join-Path $env:HOME ".local-operator"
+          New-Item -ItemType Directory -Force $env:HOME | Out-Null
+          # `-rA -s`: the per-test reason lines are the evidence a reviewer reads.
+          # `--basetemp` under RUNNER_TEMP keeps the test files on an NTFS path
+          # the runner account created, so their default ACL is the user-writable
+          # one the first test must refuse.
+          python -m pytest tests/unit/operator/test_anchor_windows_native.py -n0 -rA -s -p no:cacheprovider --basetemp (Join-Path $env:RUNNER_TEMP "anchor-pytest")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # A collection that SKIPS every test would also exit 0 — refuse that.
+          # The count is matched EXACTLY on the summary line (an unanchored "4 passed"
+          # also matched "14 passed"), and the exit code is checked as well.
+          $out = python -m pytest tests/unit/operator/test_anchor_windows_native.py -n0 -q -p no:cacheprovider --basetemp (Join-Path $env:RUNNER_TEMP "anchor-pytest-2")
+          $rc = $LASTEXITCODE
+          $out
+          if ($rc -ne 0) { exit $rc }
+          if (-not ($out | Where-Object { $_ -match '^13 passed in ' })) { Write-Error "expected exactly 13 native tests to pass"; exit 1 }

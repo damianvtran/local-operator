@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "vi",
+  "namespace": "cli.aida_help",
+  "source_sha256": "31e8445b6d8a9540ef524988b0fca3efca111362188f2ba41d6f857499828423",
+  "target_sha256": "b8fa735b91fb8a1a47dab6492591989368644b1254b2b51bca7649e36904bc6f",
+  "hashes": {
+    "audit.log": "852b3236ff673f8b1b23c833354b1a8cd8f94cadd54308995588cb809436995e",
+    "findings.json": "c23a354a2aeca751fb520da0f63a9d90813f512c00786a0ee2ddc8c73ea8965e",
+    "record.json": "95a7fbabc093048c4b25a523b4668715a4ba1ecfb4f1fa03b662191a49a8db30",
+    "report.md": "9b7f9e68c59b940b18ab59c6f240bb3f9e6762917dbd1c72eba04f45274bb29e"
+  }
+}

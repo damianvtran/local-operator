@@ -1,0 +1,147 @@
+{
+ "schema": 1,
+ "audit_id": "w4a2",
+ "audit_round": 2,
+ "audit_kind": "independent_delta_reaudit",
+ "supersedes": "w4a1",
+ "supersedes_scope": [
+  "relay.session.list.empty_hint"
+ ],
+ "locale": "es",
+ "namespace": "relay.session",
+ "audit_date": "2026-10-29",
+ "audited_revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+ "audited_revision_note": "branch feat/i18n-es-wire-errors at HEAD 183f7a0537e4cee42fd82f25a21fe52953a81bdf. The TARGET catalogue is UNTRACKED (`?? local_operator/i18n/catalogues/es/...`), so this round binds to the on-disk sha256 in input_hashes, not to a commit.",
+ "verdict": "passed",
+ "result": {
+  "mechanical_checks": "pass",
+  "findings_total": 1,
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 0,
+  "closed_by_measurement": [
+   "S1"
+  ],
+  "not_closed": [],
+  "held_nits": []
+ },
+ "verdict_reason": "The single delta key is correct on the new bytes (S1 closed: `inicia una abajo…` matches the `iniciando…` verb) and the other 16 keys are unchanged by render comparison. No new finding.",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team), independent of the translating lane",
+  "session_or_instance": "744651c367e5",
+  "model": "radient/kimi-k2.5",
+  "actual_model_source": "this session's own model header (model-switch notices in-session)",
+  "model_fallback_notice": "FALLBACK, disclosed: the session's primary model anthropic/claude-sonnet-5-5 failed on provider quota; the harness fell back through openai/gpt-6-astra and kimi/k3.1-pro and all audit work, both rounds, was performed on radient/kimi-k2.5. No judgement here was produced by the primary model.",
+  "date": "2026-10-29",
+  "independence": "Translated none of this namespace and repaired nothing; verified every claim from the new bytes with the repo runtime rather than from the remediation description, including the one claim that did not survive (the 10^6 render). Wrote only inside its own evidence directories; no git writes."
+ },
+ "runtime": {
+  "renderer": "local_operator.i18n.runtime (in-house ICU subset, shipped render/envelope path)",
+  "locale_data": "local_operator.i18n.format (generated CLDR tables)",
+  "composition": "local_operator/mobile/web/src/components/usage-sheet.tsx (mirrored exactly for relay.shell)",
+  "phone_runtime": "intl-messageformat (not executed here; standard ICU, supports #, branch-nested args and CLDR many)",
+  "python": "3.14.7",
+  "counts_rendered": [
+   0,
+   1,
+   2,
+   21,
+   1000000,
+   1500000,
+   2000000
+  ]
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/relay.session.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "a4ae148de969d4a2e8541aca5b4b99ad311d9ef112a0d056fc21fcf90e7e0129"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/es/relay.session.json",
+   "sha256": "6812dca69e08ab9f1cf48f271e4db20263c7bbcb659d83a2f3c1a460122a2165",
+   "tracked": false,
+   "note": "UNTRACKED working-tree bytes at the audited revision"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/relay.session.context.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "8777c48c750d982f3f795c81d0a543e92000a3898223cfa60637f8a2edc1e2db"
+  }
+ },
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "audit.log",
+  "run-script.py.txt",
+  "receipt.json"
+ ],
+ "key_count": {
+  "en": 17,
+  "target": 17,
+  "delta_audited": 1,
+  "neighbours_checked": 16
+ },
+ "findings": [
+  {
+   "id": "S1",
+   "severity": "minor",
+   "status": "closed",
+   "key": "relay.session.list.empty_hint",
+   "current": "inicia una abajo o desde la TUI en tu máquina",
+   "previous": "empieza una abajo o desde la TUI en tu máquina",
+   "reason": "The hint now uses the same verb as the paired control label `list.start_busy` = `iniciando…`, so one English \"start\" no longer has two Spanish verbs. Rest of the sentence untouched; round-1 cleared items (no comma before `o`; `para empezar` is *to get started*) still hold.",
+   "evidence": [
+    "relay.session.list.empty_hint -> inicia una abajo o desde la TUI en tu máquina"
+   ]
+  }
+ ],
+ "neighbour_check": {
+  "method": "every non-delta key re-rendered and compared to w4a1's recorded output",
+  "reproduced": 16,
+  "changed": 0,
+  "unrecorded": 0,
+  "of": 16
+ },
+ "check_output": {
+  "path": "audit.log",
+  "kind": "auditor's own execution log (produced by running run-script.py.txt, not transcribed)",
+  "command": "python3 i18n/audits/evidence/es/relay.session/w4a2/run-script.py.txt relay.session i18n/audits/evidence/es/relay.session/w4a1/audit.log > …/w4a2/audit.log",
+  "contains": [
+   "HEAD/branch/tracked-state binding",
+   "sha256 of en, sidecar and target (round-2 bytes)",
+   "key parity 17/17",
+   "per-key argument names (0 diffs)",
+   "plural categories used vs selectable",
+   "Node Intl.PluralRules CLDR cross-check",
+   "delta key source and render",
+   "neighbour check against w4a1"
+  ],
+  "summary": {
+   "key_parity": "17/17",
+   "argument_set_diffs": 0,
+   "plural_categories": "none used in this namespace",
+   "cldr_cross_check": "agree=True vs Node Intl.PluralRules('es')",
+   "delta_render": "inicia una abajo o desde la TUI en tu máquina",
+   "neighbour_check": "16/16 unchanged"
+  }
+ },
+ "limitations": [
+  "Python runtime only; the phone's TypeScript runtime was not executed (no dependency tree here, no scratch installs). Nothing in this namespace uses ICU constructs.",
+  "No native-speaker review: the auditor is an LLM.",
+  "Fallback model disclosed; see auditor.model_fallback_notice."
+ ],
+ "noted_outside_scope": [],
+ "current_report_verdict": {
+  "status": "passed",
+  "unresolved_blocker_major_count": 0,
+  "blocker": 0,
+  "major": 0,
+  "minor": 0,
+  "nit": 0,
+  "rejected": 0,
+  "deferred": 0,
+  "findings_total": 0
+ }
+}

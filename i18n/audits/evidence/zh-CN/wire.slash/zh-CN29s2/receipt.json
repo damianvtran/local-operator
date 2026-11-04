@@ -1,0 +1,130 @@
+{
+  "locale": "zh-CN",
+  "scope": "local_operator/i18n/catalogues/zh-CN/wire.slash.json, all 52 keys, against local_operator/i18n/catalogues/en/wire.slash.json in the same tree. Read-only: nothing edited, no ledger row written (the tree is a scratch worktree and this audit is a file-level re-audit).",
+  "tree": "/Users/damian/lo-core-fix",
+  "tree_head": "7159e2a30927831f5dfb88f84c588eac07770e5d",
+  "tree_state": "commit 7159e2a309 + uncommitted remediation edits to zh-CN/wire.slash.json (5 values changed: agent, context, credential, highlights, hub). en is byte-identical to the file round 1 audited.",
+  "round": 2,
+  "audit_date": "2026-10-29",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "7b1ecf2ef33b",
+    "model": "radient/auto",
+    "actual_model_source": "fallback — provider quota switched this run from anthropic/claude-sonnet-5-5 through openai/gpt-6-astra and kimi/k3.1-pro to radient/auto",
+    "independent_from_translator_session": true,
+    "independent_from_round1_auditor": true
+  },
+  "input_sha256": {
+    "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+    "target": "ebc0ae0101022d4ff31ca7e54f0e0d34d000c7e3b46e62b54ac3ed132a88cd55"
+  },
+  "counts": {
+    "BLOCKER": 0,
+    "MAJOR": 0,
+    "MINOR": 0,
+    "NIT": 1
+  },
+  "verdict": "pass",
+  "instance": "7b1ecf2ef33b-slash2-zh-cn",
+  "previous_round": {
+    "receipt": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/slash-audit/zh-CN/receipt.json",
+    "instance": "a303f65af544-slash-zh-CN",
+    "verdict": "changes_requested",
+    "target_sha256_then": "b2628a8e7b49bc248b1778e6a179735a582b4c8a3afd358a553af8e3330e47a5",
+    "counts_then": {
+      "BLOCKER": 0,
+      "MAJOR": 1,
+      "MINOR": 3,
+      "NIT": 2
+    }
+  },
+  "previous_findings_open": 1,
+  "previous_findings": [
+    {
+      "id": "zhCN-wire-slash-01",
+      "key": "wire.slash.highlights",
+      "prior_severity": "MAJOR",
+      "status": "fixed",
+      "now": "取消、重试或调整回答下方的亮点",
+      "evidence": "亮点 is the settled feature name on the bytes: wire.settings.supplements.title and supplements_enabled.label are 亮点, and six *.help strings say 需开启亮点. A scoped grep of the whole zh-CN catalogue finds zero remaining 补充内容. The verb 调整 is corroborated independently of the predecessor's claim: the /highlights subverbs are cancel | retry | adjust (tui/app.py:62838, session/runtime/serving.py:8844), so 调整 renders the adjust action rather than paraphrasing 'steer'. 46 cells vs en 66."
+    },
+    {
+      "id": "zhCN-wire-slash-02",
+      "key": "wire.slash.hub",
+      "prior_severity": "MINOR",
+      "status": "fixed",
+      "now": "打开Hub链接，设置各链接的订阅与自动push策略",
+      "evidence": "Both substitutions match labels already shipped in this locale: 订阅 = tui.hub_links.policy.subscribe.label and tui.hub_links.hint.subscribe; 自动push = tui.hub_links.policy.auto_push.label, action.enable 开启自动push. Meaning preserved clause for clause: open Hub links (打开Hub链接) / per-link (各链接) / subscribe and auto-push (订阅与自动push) / policy (策略). 43 cells vs en 56."
+    },
+    {
+      "id": "zhCN-wire-slash-03",
+      "key": "wire.slash.context",
+      "prior_severity": "MINOR",
+      "status": "fixed",
+      "now": "显示提示词、工具的schema与消息的token用量",
+      "evidence": "schema is now the same Latin object name the catalogue uses elsewhere (wire.settings.tools_defer.label 按需加载罕用工具的schema, its .help, cli.exec_help.output_schema), and 工具定义 no longer occurs anywhere in the zh-CN catalogue. English source is 'tool-schema' — Latin kept, not transliterated, which the style guide's 'kept-English technical list' and the glossary's machine-token rule both permit. 49 cells vs en 67."
+    },
+    {
+      "id": "zhCN-wire-slash-04",
+      "key": "wire.slash.credential",
+      "prior_severity": "MINOR",
+      "status": "fixed",
+      "now": "空格后输入或粘贴凭据；输入内容不显示",
+      "evidence": "Value read by codepoint (U+7A7A U+683C U+540E U+8F93 U+5165 U+6216 U+7C98 U+8D34 U+51ED U+636E U+FF1B U+8F93 U+5165 U+5185 U+5BB9 U+4E0D U+663E U+793A) because the shell dump redacts this line; the allowlisted reader refused on a 10s git timeout, so the whole-file sha256 above covers the bytes actually judged. 密钥→凭据 aligns with shipped copy (wire.slash.accounts, wire.slash.logout, wire.errors.*, mobile.setup.*); 掩码→不显示 drops the bitmask word; the 'after a space' clause survives. Honesty note: the predecessor's premise that 掩码 is alien to this catalogue is overstated — wire.errors.desktop.masked_credential_form renders 掩码凭据表单 — but the replacement is accurate for the masked capture the app performs ('masked as you type', tui/app.py:3263-3265), so no defect either way. 36 cells vs en 44.",
+      "display_note": "The shell/git dump redacts this line because of its key name; the value was read by Unicode codepoint and confirmed character by character (7a74 683c 540e ... 4e0d 663e 793a), 36 cells vs en 44."
+    },
+    {
+      "id": "zhCN-wire-slash-05",
+      "key": "wire.slash.agent",
+      "prior_severity": "NIT",
+      "status": "fixed",
+      "now": "列出智能体、切换其类别，或以智能体身份与本会话对话",
+      "evidence": "Agency is now on the operator: 以智能体身份与本会话对话 = speak to this session in an agent's capacity, matching en 'or speak to this session as one'; the old line made the session the speaker. 智能体 is the locale's recorded call for agent. 50 cells vs en 69."
+    },
+    {
+      "id": "zhCN-wire-slash-06",
+      "key": "wire.slash.accounts",
+      "prior_severity": "NIT",
+      "status": "not fixed",
+      "now": "列出已保存的凭据",
+      "evidence": "Not a string defect and correctly left unchanged, but the bookkeeping action is still outstanding: i18n/glossary.md:66 still carries an em dash for the zh-CN credentials cell, and footnote 6 says the zh-CN/ur cells stay — until their wave records an endorsed rendering. The remediation raised the stakes: wire.slash.credential now uses 凭据 too, so every credential-facing drawer in this namespace leans on a term the glossary does not yet record. Locale-owner action, outside the two catalogues; it does not gate the verdict (no BLOCKER/MAJOR)."
+    }
+  ],
+  "namespaces": {
+    "wire.slash": {
+      "status": "pass",
+      "keys_audited": 52,
+      "sha256": {
+        "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+        "target": "ebc0ae0101022d4ff31ca7e54f0e0d34d000c7e3b46e62b54ac3ed132a88cd55"
+      },
+      "findings": [
+        {
+          "id": "zhCN2-wire-slash-01",
+          "key": "wire.slash.stop",
+          "severity": "NIT",
+          "class": "accuracy/budget",
+          "current": "结束本会话、按名称/pid指定会话或全部；/resume可重开",
+          "english": "End this session, another by name/pid, or all — /resume reopens it",
+          "problem": "The scoping word 'another' (a session OTHER than this one) is not rendered: 按名称/pid指定会话 reads as 'the session designated by name/pid', which can include this one. Behaviour is unaffected — naming or pid-ing a session is unambiguous, ending this one twice is harmless, and the destructive third arm ('or all', 或全部) is intact — so this is a nuance loss, not a misdirection. Reported because the line sits exactly at the 51-cell column limit and the omission is therefore a forced trade rather than an oversight a reader should assume away.",
+          "suggestion": "No in-budget fix exists. Measured alternatives: '结束本会话、按名称/pid结束其他会话或全部；/resume可重开' = 55 cells; '结束本会话、其他会话(按名称/pid)或全部；/resume可重开' and '结束本会话、按名称/pid的其他会话或全部；/resume可重开' = 53 cells each — every form that carries 'another' exceeds the 51-cell offer-view column by 2-4 cells, and each buys them by lengthening the tail the picker would then clip. Recommendation: accept as-is at this budget, or raise the description column width product-wide; do not truncate.",
+          "pre_existing": true,
+          "note": "The clause shape is inherited from 7159e2a309^ (…按名称/pid指定的会话…); the commit recompressed it to fit 51 cells without changing what it scopes. Not a defect introduced by this remediation."
+        }
+      ]
+    }
+  },
+  "method": {
+    "mechanical": "Both files parsed as JSON; 52/52 keys, identical order, no added/dropped key; zero ICU arguments and zero {placeholders} in the namespace; scenario token scan (--flags, /commands, <args>, 'words', uppercase acronyms) found no dropped flag, path, command or placeholder — the only scan hits are hyphenated compounds (-consumption, -schema, -link, -push) and acronyms or subverbs fused to neighbouring CJK (MCP服务器, OAuth授权, add/remove增删, UI语言), which is the fused-Latin convention and not token loss; no value identical to English; no leading/trailing or double spaces; LF endings, trailing newline present; ASCII punctuation confined to Latin fragments and to the file's consistent subverb lists.",
+    "semantics": "Every one of the 52 values read against its English source for dropped verbs, added claims, negation and scoping. Command behaviour checked where a rendering depends on it: /highlights subverbs adjustable (cancel|retry|adjust), /aida opens her session or sends her a request (_cmd_aida → _aida_open), /stop and /delete arms, /credential masked capture.",
+    "terminology": "Cross-catalogue check on the bytes, not from the predecessor's summary: 亮点, 订阅, 自动push, schema, 凭据, 工作流 (workstream, matching cli.exec_help.workstream), mesh kept Latin, 幕僚长 (chief of staff, matching wire.settings.aida*), 负责人 (matching tui.projects.form.owner_placeholder; 经理 never occurs), 会话/智能体/提示词/审批/用量/费用/压缩 per the style guide's locale calls.",
+    "style_guide": "i18n/style-guides/zh-CN.md read and applied: no space between CJK and Latin runs, full-width marks for prose, Latin punctuation only inside Latin/code fragments, no sentence-final 。 on labels, 你-form, no 您/你 repetition, Latin 'token' for LLM tokens.",
+    "width": "Cells counted as 2 for East Asian Wide/Fullwidth and 1 for ASCII, the accounting zh-CN.md itself prescribes and the same one the commit cites. Result: no zh value exceeds its English counterpart; max zh 51 cells vs max en 74; values over 51: none; at exactly 51: fork, stop (no headroom); next 50 agent, 49 project. Picker geometry verified in code rather than inherited: descriptions are clipped by truncate_cells with a dynamic column (command_picker.py:2455-2463), so an over-budget value loses its tail — which is why 'at budget' is reported as no headroom, not as comfortable.",
+    "not_run": "No test suite, no validator CLI, no ledger write, nothing edited in the checkout. The allowlisted public-copy reader refused twice on an internal 10s git timeout; the one redacted value was read by codepoint instead and is covered by the whole-file hash."
+  },
+  "notes": [
+    "No fix introduced a new defect: the five remediated values are all in-budget (36-50 cells), keep their technical tokens, and each reads as native terse zh-CN rather than a calque.",
+    "Deliberately not reported as defects, after checking each against the style guide: '--switch此处' / '--stop取消' / '--copy复制会话ID' (no space between CJK and Latin is the zh-CN rule, and stripping the space is what bought the 51-cell fit), '（esc关闭）' vs '继续(id)' (full-width marks wrap prose, half-width wrap a bare Latin token — both permitted), and 'auto', 'token', 'schema', 'mesh', 'Hub', 'read', 'list/show/new/delete/link/unlink', 'status/enable/stop/billing', 'shift+tab', 'esc' staying Latin (subverbs, config values and machine tokens, never translated).",
+    "The reference English file is byte-identical to the one round 1 audited, so the whole delta is the 5 zh-CN values; nothing else in the file moved."
+  ]
+}

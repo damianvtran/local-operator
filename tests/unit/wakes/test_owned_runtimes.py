@@ -17,6 +17,36 @@ from local_operator.session.runtime.reclaim import RUNTIME_MODULE
 from local_operator.wakes import owned_runtimes
 
 
+@pytest.fixture(autouse=True)
+def _published_records(monkeypatch):
+    """Give every candidate a PUBLISHED record, as a real store does.
+
+    The sweep now builds its marker from ``reclaim.read_fleet`` (the published run
+    record) rather than the 2-s-rounded census age, because coverage is strict to
+    1.0 s and an age-derived key can miss it — and a missed key means the runtime
+    refuses the supervisor's SIGTERM, which is #3028 exactly. A unit cell that faked
+    only the census would exercise a tree no real store has, so the fleet is stubbed
+    once, here, for every cell in this module.
+    """
+    from local_operator.session.runtime import reclaim
+
+    class _Records(dict[Any, Any]):
+        def get(self, pid, default=None):  # noqa: ANN001
+            row = reclaim.process_row(pid)
+            age = float(getattr(row, "age_s", 0.0) or 30.0)
+            return SimpleNamespace(
+                pid=pid,
+                session_id="",
+                started_at=time.time() - age,
+            )
+
+    monkeypatch.setattr(
+        reclaim,
+        "read_fleet",
+        lambda root=None, **kw: SimpleNamespace(records=_Records(), boots={}),
+    )
+
+
 def _row(pid: int, root: Path, owner: str, session_id: str, age: float = 30.0):
     env = (
         f"LOCAL_OPERATOR_CONFIG_DIR={root} LOP_MOBILE_CHILD_RESUME={session_id} "
@@ -447,3 +477,182 @@ def test_only_the_supervisor_process_itself_stamps(monkeypatch) -> None:
     monkeypatch.setenv(owned_runtimes.SUPERVISOR_PID_ENV, str(os.getpid()))
     owned_runtimes.stamp_child_env(child)
     assert child == {owned_runtimes.OWNER_ENV: "tok"}
+
+
+# ---------------------------------------------------------------------------
+# The victim-side sanction gate (docs/design-surface-independence.md, slice 1)
+#
+# The sweep was the ONE in-tree sender of a terminating signal to a runtime that
+# staged nothing. A runtime now REFUSES such a signal, so a bare sweep would
+# silently stop working — the exact opposite of what this unit's stop is for.
+# These cells pin the marker, its ORDER (before the signal), and its withdrawal
+# when the signal never lands.
+# ---------------------------------------------------------------------------
+
+
+def _seed_conversation(root: Path, session_id: str) -> Path:
+    """The conversation directory a staged marker is written into."""
+    from local_operator.session.runtime.types import session_dir
+
+    directory = session_dir(root, session_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def test_a_sweep_stages_a_marker_for_each_candidate_before_it_signals(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """ORDERING IS THE CONTRACT: the marker is on disk when the signal is sent.
+
+    The kill double reads the marker INSIDE the signal call, so a sweep that
+    staged afterwards (or not at all) fails here rather than passing on a file
+    written a moment later.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import session_dir
+
+    root = tmp_path / "root"
+    rows = [_row(111, root, "owner-a", "s1"), _row(222, root, "owner-a", "s2")]
+    for session_id in ("s1", "s2"):
+        _seed_conversation(root, session_id)
+    monkeypatch.setattr("local_operator.session.runtime.reclaim.runtime_processes", lambda: rows)
+    monkeypatch.setattr(
+        "local_operator.session.runtime.reclaim.process_row",
+        lambda pid: next(row for row in rows if row.pid == pid),
+    )
+
+    seen: list[tuple[int, dict[str, Any] | None]] = []
+
+    def _kill(pid: int, sig: int) -> None:
+        # Read at signal time, from the victim's own conversation directory.
+        session_id = "s1" if pid == 111 else "s2"
+        seen.append((pid, registry.read_stop_marker(session_dir(root, session_id))))
+
+    monkeypatch.setattr(owned_runtimes.os, "kill", _kill)
+
+    assert owned_runtimes.sweep(root, any_owner=True) == [111, 222]
+    assert [pid for pid, _ in seen] == [111, 222]
+    for pid, marker in seen:
+        assert marker is not None, f"pid {pid} was signalled with nothing staged"
+        assert marker["mechanism"] == owned_runtimes.SWEEP_MECHANISM
+        assert marker["deliberate"] is False, "a sweep must not read as a user's stop"
+        assert marker["actor"] == owned_runtimes.SWEEP_ATTEST_ACTOR
+        assert marker["pid"] == pid
+
+
+def test_a_signal_that_never_landed_takes_its_marker_back(tmp_path: Path, monkeypatch) -> None:
+    """A refused-by-the-kernel signal must not leave a marker narrating a death.
+
+    ``os.kill`` raising means the act was NOT taken, so the marker staged for it is
+    the only artifact left saying otherwise, and a later unrelated death of that
+    run would be narrated as this sweep's.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import session_dir
+
+    root = tmp_path / "root"
+    rows = [_row(111, root, "owner-a", "s1")]
+    _seed_conversation(root, "s1")
+    monkeypatch.setattr("local_operator.session.runtime.reclaim.runtime_processes", lambda: rows)
+    monkeypatch.setattr("local_operator.session.runtime.reclaim.process_row", lambda pid: rows[0])
+
+    def _kill(pid: int, sig: int) -> None:
+        raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(owned_runtimes.os, "kill", _kill)
+
+    assert owned_runtimes.sweep(root, owner="owner-a") == []
+    assert registry.read_stop_marker(session_dir(root, "s1")) is None
+
+
+def test_an_unwritable_conversation_does_not_stop_the_sweep(tmp_path: Path, monkeypatch) -> None:
+    """The unit's stop outranks the paperwork: no directory, still signalled.
+
+    A runtime whose conversation directory is gone is exactly the one ``lop stop``
+    cannot reach by record; leaving it alive because a sidecar could not be written
+    would be the failure this sweep exists to prevent.
+    """
+    root = tmp_path / "root"
+    rows = [_row(111, root, "owner-a", "no-such-session")]
+    monkeypatch.setattr("local_operator.session.runtime.reclaim.runtime_processes", lambda: rows)
+    monkeypatch.setattr("local_operator.session.runtime.reclaim.process_row", lambda pid: rows[0])
+    sent: list[int] = []
+    monkeypatch.setattr(owned_runtimes.os, "kill", lambda pid, sig: sent.append(pid))
+
+    assert owned_runtimes.sweep(root, owner="owner-a") == [111]
+    assert sent == [111]
+
+
+def test_a_candidate_with_no_published_record_is_still_stopped_with_an_unstamped_marker(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """Q3/R-3: a supervisor stop must still stop a runtime that has no published record.
+
+    The first cut skipped it ("no run key, no sanction"), which left the runtime
+    running where main signalled it. The candidate is one THIS unit started and
+    promised to stop, so the stop goes out with a marker staged without a start
+    stamp (session + pid + staging window still pair it, ``marker_covers_signal``),
+    and the gap is said in the log. The ``fleet.boots`` fallback the first cut also
+    had is gone: boot values are plain dicts (so ``getattr`` found nothing) and
+    their ``started_at`` differs from the runtime's own by 0.15-16 s.
+    """
+    import logging
+
+    from local_operator.session.runtime import reclaim, registry, signal_receipt
+    from local_operator.session.runtime.types import session_dir
+
+    root = tmp_path / "root"
+    rows = [_row(111, root, "owner-a", "s1")]
+    _seed_conversation(root, "s1")
+    monkeypatch.setattr(reclaim, "runtime_processes", lambda: rows)
+    monkeypatch.setattr(reclaim, "process_row", lambda pid: rows[0])
+    monkeypatch.setattr(
+        reclaim,
+        "read_fleet",
+        lambda root=None, **kw: SimpleNamespace(
+            records={}, boots={111: {"pid": 111, "started_at": 12345.0}}
+        ),
+    )
+    seen: list[dict[str, Any] | None] = []
+
+    def _kill(pid: int, sig: int) -> None:
+        seen.append(registry.read_stop_marker(session_dir(root, "s1")))
+
+    monkeypatch.setattr(owned_runtimes.os, "kill", _kill)
+    caplog.set_level(logging.WARNING, logger=owned_runtimes.logger.name)
+
+    assert owned_runtimes.sweep(root, owner="owner-a") == [111]
+    assert len(seen) == 1 and seen[0] is not None
+    marker = seen[0]
+    assert marker["started_at"] is None, "a boot record's start was used as the run key"
+    assert any("no published start" in r.getMessage() for r in caplog.records)
+    assert signal_receipt.marker_covers_signal(
+        marker, session_id="s1", pid=111, started_at=1.0, at=float(marker["at"])
+    )
+
+
+def test_a_candidate_with_only_a_run_record_is_keyed_from_it(tmp_path: Path, monkeypatch) -> None:
+    """No ``SessionRecord`` but a ``runtime-run.json`` for this pid: that start is the key."""
+    from local_operator.session.runtime import journal, reclaim, registry
+    from local_operator.session.runtime.types import session_dir
+
+    root = tmp_path / "root"
+    rows = [_row(111, root, "owner-a", "s1")]
+    directory = _seed_conversation(root, "s1")
+    assert journal.write_run_record(
+        "s1", conversation_dir=directory, pid=111, started_at=1_799_990_123.5
+    )
+    monkeypatch.setattr(reclaim, "runtime_processes", lambda: rows)
+    monkeypatch.setattr(reclaim, "process_row", lambda pid: rows[0])
+    monkeypatch.setattr(
+        reclaim, "read_fleet", lambda root=None, **kw: SimpleNamespace(records={}, boots={})
+    )
+    seen: list[dict[str, Any] | None] = []
+    monkeypatch.setattr(
+        owned_runtimes.os,
+        "kill",
+        lambda pid, sig: seen.append(registry.read_stop_marker(session_dir(root, "s1"))),
+    )
+
+    assert owned_runtimes.sweep(root, owner="owner-a") == [111]
+    assert seen[0] is not None and seen[0]["started_at"] == 1_799_990_123.5

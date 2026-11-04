@@ -1,0 +1,106 @@
+{
+  "locale": "ru",
+  "namespace": "tui.authoring",
+  "en_sha256": "7431acf3288cc3766cf37135badb29511737120ab52fc518bf514311ee488d13",
+  "target_sha256": "7c11cfbef7c700f5eab8173b064af41a33e6987b86ca181e4de093fe24702454",
+  "en_keys": 49,
+  "target_keys": 49,
+  "missing": [],
+  "unknown": [],
+  "arg_problems": [],
+  "render_errors": [],
+  "plural_cat_problems": [],
+  "not_nfc": [],
+  "backtick_diff": [],
+  "over_budget": [],
+  "typography": [],
+  "identical_to_en": [],
+  "gloss_leads": [
+    [
+      "tui.authoring.footer",
+      "agent"
+    ],
+    [
+      "tui.authoring.usage_edit",
+      "agent"
+    ],
+    [
+      "tui.authoring.usage_new",
+      "agent"
+    ]
+  ],
+  "empty": [],
+  "ws_edge": [],
+  "length_ratio_outliers": [],
+  "script_leads": [
+    [
+      "tui.authoring.footer",
+      [
+        "agent",
+        "new",
+        "agent",
+        "edit",
+        "name",
+        "agent",
+        "clear"
+      ]
+    ],
+    [
+      "tui.authoring.instructions_hint",
+      [
+        "Tab"
+      ]
+    ],
+    [
+      "tui.authoring.legend",
+      [
+        "ctrl",
+        "tab",
+        "esc"
+      ]
+    ],
+    [
+      "tui.authoring.promote_usage",
+      [
+        "replace",
+        "yes"
+      ]
+    ],
+    [
+      "tui.authoring.usage_edit",
+      [
+        "agent",
+        "edit",
+        "name"
+      ]
+    ],
+    [
+      "tui.authoring.usage_new",
+      [
+        "agent",
+        "new"
+      ]
+    ]
+  ],
+  "excl_added": [],
+  "end_punct": [],
+  "counts": {
+    "missing": 0,
+    "unknown": 0,
+    "arg_problems": 0,
+    "render_errors": 0,
+    "plural_cat_problems": 0,
+    "not_nfc": 0,
+    "backtick_diff": 0,
+    "over_budget": 0,
+    "typography": 0,
+    "identical_to_en": 0,
+    "gloss_leads": 3,
+    "empty": 0,
+    "ws_edge": 0,
+    "length_ratio_outliers": 0,
+    "script_leads": 6,
+    "excl_added": 0,
+    "end_punct": 0
+  }
+}

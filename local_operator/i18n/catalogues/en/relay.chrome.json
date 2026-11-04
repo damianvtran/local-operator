@@ -77,6 +77,8 @@
   "relay.chrome.session.resuming": "Resuming…",
   "relay.chrome.session.degraded": "Not answering — sends will wait",
   "relay.chrome.composer.label": "Message",
+  "relay.chrome.composer.placeholder.idle": "Ask anything…",
+  "relay.chrome.composer.placeholder.steer": "Steer the agent…",
   "relay.chrome.composer.folder_label": "Working folder: {name}",
   "relay.chrome.composer.model_label": "Model: {label}",
   "relay.chrome.composer.spend_label": "Spend & context: {label}",

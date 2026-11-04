@@ -1,0 +1,210 @@
+{
+ "schema": 1,
+ "audit_id": "w4a1",
+ "audit_round": 1,
+ "audit_kind": "independent_current_byte_namespace_audit",
+ "locale": "es",
+ "audit_date": "2026-10-29",
+ "audited_revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+ "audited_revision_note": "branch feat/i18n-es-wire-errors at HEAD 183f7a0537e4cee42fd82f25a21fe52953a81bdf. The TARGET catalogue is UNTRACKED in the worktree (`?? local_operator/i18n/catalogues/es/...`), so this audit binds to the on-disk sha256 recorded in input_hashes, not to a commit; a later commit that lands different bytes would not be covered by this verdict.",
+ "translator": {
+  "agent": "a different translator than the one that produced this audit (the W4 relay lane); identity not disclosed to the auditor",
+  "model": "unrecorded in the worktree (the catalogue is untracked working-tree bytes; no translator provenance file exists beside it)",
+  "date": "unrecorded"
+ },
+ "auditor": {
+  "agent": "translation-auditor (lopdev team), independent of the translating lane",
+  "session_or_instance": "744651c367e5",
+  "model": "radient/kimi-k2.5",
+  "actual_model_source": "this session's own model header (model-switch notices in-session)",
+  "model_fallback_notice": "FALLBACK, disclosed: the session's primary model anthropic/claude-sonnet-5-5 failed on provider quota at turn start; the harness fell back through openai/gpt-6-astra and kimi/k3.1-pro and all audit work was performed on radient/kimi-k2.5. No audit judgement here was produced by the primary model.",
+  "date": "2026-10-29",
+  "independence": "Translated none of this namespace; independent of the producing translator and of any implementation session. Read the en source and the context sidecar directly, formed this view before seeing any other auditor's findings for these namespaces (no w4a1 bundle existed), and wrote only inside its own evidence directory. The repository was not modified except under i18n/audits/evidence/es/."
+ },
+ "runtime": {
+  "renderer": "local_operator.i18n.runtime (in-house ICU subset, shipped render/envelope path)",
+  "locale_data": "local_operator.i18n.format (generated CLDR tables, golden-probed against Node Intl)",
+  "composition": "local_operator/mobile/web/src/components/usage-sheet.tsx (mirrored exactly for relay.shell)",
+  "python": "3.14.7",
+  "counts_rendered": [
+   0,
+   1,
+   2,
+   21,
+   1000000,
+   1500000
+  ]
+ },
+ "namespace": "relay.shell",
+ "key_count": {
+  "en": 44,
+  "target": 44
+ },
+ "verdict": "failed",
+ "result": {
+  "mechanical_checks": "pass",
+  "findings_total": 6,
+  "blocker": 0,
+  "major": 1,
+  "minor": 3,
+  "nit": 2,
+  "note": "no meaning/state-promise change, no broken placeholder or machine token, es plural categories correct; the failure is one agreement defect in a shipped usage row plus three minors."
+ },
+ "verdict_reason": "F1 is major: `relay.shell.usage.used` renders a fixed masculine plural participle against a variable {unit} label, so the composed phone row is ungrammatical for the whole feminine `requests` family at every count (0/2/21/1e6/1.5e6 rendered 'solicitudes usados') and for every unit kind at exactly 1 ('1 crédito usados'); the key's own sidecar explicitly permits rewording to avoid this. F2/F3/F4 and the two nits are secondary. Every connection/state distinction and every allowance/spend distinction the sidecar defines was verified intact by rendering at 0, 1, 2, 21, 1 000 000 and 1 500 000.",
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/relay.shell.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/es/relay.shell.json",
+   "sha256": "7bef1632cf4b503116725d409ebd3567213cf9322897672d188a3ff2ba602b7f",
+   "tracked": false,
+   "note": "UNTRACKED working-tree bytes at the audited revision"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/relay.shell.context.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "16746ecd1537006992935bb2aa88fe39c46700d9e0341e7aacd565e2366349ea"
+  }
+ },
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "audit.log",
+  "run-script.py.txt",
+  "receipt.json"
+ ],
+ "check_output": {
+  "path": "audit.log",
+  "kind": "auditor's own execution log (produced by running run-script.py.txt, not transcribed)",
+  "command": "python3 run-script.py.txt relay.shell > audit.log 2>&1",
+  "run_at_utc": "2026-10-29T22:05:33Z",
+  "contains": [
+   "HEAD/branch/tracked-state binding",
+   "sha256 of en, en-sidecar and target",
+   "key parity 44/44",
+   "ICU signature diff (3, all the sanctioned es `many` addition)",
+   "es plural categories selectable vs used (illegal_for_es: [])",
+   "rendered value of every non-parameterised key",
+   "the three unit-label plural messages at 0/1/2/21/1e6/1.5e6",
+   "72 composed usage rows: credits|tokens|requests|usd|percent|unknown x remaining|used x the six counts",
+   "reset / as_of / fraction renders and the two row templates with sentinel values"
+  ],
+  "summary": {
+   "key_parity": "44/44, no missing or extra keys",
+   "placeholders": "no renamed, dropped, reordered or re-suffixed argument; usage.reset/as_of keep {value} twice with date then time skeletons",
+   "machine_tokens": "usage.unit_usd byte-identical (USD); usage.row / usage.row_family byte-identical templates",
+   "plural_categories": "target uses many/one/other; es selectable categories many/one/other; none illegal",
+   "ellipsis": "U+2026 in list.connecting, session.waiting, session.connecting, usage.loading"
+  }
+ },
+ "findings": [
+  {
+   "id": "F1",
+   "severity": "major",
+   "key": "relay.shell.usage.used",
+   "current": "{value, number} {unit} usados",
+   "proposed": "{value, plural, one {Se usó # {unit}} other {Se usaron # {unit}}}",
+   "reason": "Fixed masculine plural participle against a {unit} label that varies in gender and number: the composed row is ungrammatical for the feminine `requests` label at every count and for every unit kind at exactly 1. The key's sidecar explicitly allows rewording to avoid forced agreement.",
+   "evidence": [
+    "requests used 0 -> 0 solicitudes usados",
+    "requests used 2 -> 2 solicitudes usados",
+    "requests used 21 -> 21 solicitudes usados",
+    "requests used 1000000 -> 1.000.000 de solicitudes usados",
+    "requests used 1500000 -> 1.500.000 solicitudes usados",
+    "credits used 1 -> 1 crédito usados",
+    "usd used 1 -> 1 USD usados"
+   ],
+   "remediation_verified_rendering": [
+    "credits 1 -> Se usó 1 crédito",
+    "credits 21 -> Se usaron 21 créditos",
+    "requests 0 -> Se usaron 0 solicitudes",
+    "requests 1 -> Se usó 1 solicitud",
+    "requests 1000000 -> Se usaron 1.000.000 de solicitudes",
+    "usd 1 -> Se usó 1 USD"
+   ]
+  },
+  {
+   "id": "F2",
+   "severity": "minor",
+   "key": "relay.shell.usage.remaining",
+   "current": "{value, number} {unit} restantes",
+   "proposed": "{value, plural, one {Queda # {unit}} other {Quedan # {unit}}} (or one {# {unit} restante} / other {# {unit} restantes})",
+   "reason": "`restante` is gender-invariant, so only number needs branching, but it does: at exactly 1 the row reads '1 crédito restantes' / '1 token restantes' / '1 USD restantes'.",
+   "evidence": [
+    "credits remaining 1 -> 1 crédito restantes",
+    "usd remaining 1 -> 1 USD restantes"
+   ]
+  },
+  {
+   "id": "F3",
+   "severity": "minor",
+   "key": "relay.shell.usage.remaining_unknown_unit, relay.shell.usage.used_unknown_unit",
+   "current": "{value, number} restantes / {value, number} usados",
+   "proposed": "{value, plural, one {Queda # restante} other {Quedan # restantes}} / {value, plural, one {Se usó #} other {Se usaron #}}",
+   "reason": "The unit is deliberately omitted, so no noun carries the plural and exactly 1 renders '1 restantes' / '1 usados'.",
+   "evidence": [
+    "unknown remaining 1 -> 1 restantes",
+    "unknown used 1 -> 1 usados"
+   ]
+  },
+  {
+   "id": "F4",
+   "severity": "minor",
+   "key": "relay.shell.usage.continue",
+   "current": "Cuota incluida agotada; continuará con créditos.",
+   "proposed": "Asignación incluida agotada; el uso continuará con créditos.",
+   "reason": "Two renderings of one product term inside one namespace ('Asignación incluida' in usage.included vs 'Cuota incluida' here) plus an elided subject for 'continuará'. Note: 'agotada' itself is correct and must not be softened — the banner only renders when the limit is exhausted."
+  },
+  {
+   "id": "F5",
+   "severity": "nit",
+   "key": "relay.shell.usage.window_lifetime",
+   "current": "Total",
+   "proposed": "Histórico (or De por vida where the width budget allows)",
+   "reason": "Every sibling window label is a period; 'Total' inside '{label} · {window}: {value}' can be read as the aggregate of the value rather than the window."
+  },
+  {
+   "id": "F6",
+   "severity": "nit",
+   "key": "relay.shell.usage.eligibility_unknown",
+   "current": "Elegibilidad para gasto desconocida",
+   "proposed": "Elegibilidad de gasto desconocida",
+   "reason": "'para gasto' reads as purpose; 'elegibilidad de gasto' is the usual collocation. Meaning unaffected."
+  }
+ ],
+ "noted_outside_scope": [
+  {
+   "namespace": "relay.account_policy",
+   "key": "relay.account_policy.title",
+   "observation": "en 'Computer settings' renders 'Ajustes del equipo'; the shipped core settings surface names this concept 'Política de cuentas' (wire.settings.account_policy.label, tracked at HEAD), and 'equipo' is this locale's glossary term for *team*. Reported for the owning lane; not audited or scored here."
+  }
+ ],
+ "limitations": [
+  "Rendered with the repository's Python runtime; the phone client's TypeScript runtime was not executed. Both are parity-tested in-repo, so plural selection and formatting match, but this is not a rendered-frame capture on a device.",
+  "No native-speaker review: the auditor is an LLM; 'would a native write this' judgements are recorded as model judgements.",
+  "No screen-width measurement: no maxCells is pinned for this namespace, so overflow was judged against the sidecar's stated budgets only.",
+  "Fallback model disclosed; see auditor.model_fallback_notice."
+ ],
+ "current_report_verdict": {
+  "status": "failed",
+  "unresolved_blocker_major_count": 1,
+  "blocker": 0,
+  "major": 1,
+  "minor": 3,
+  "nit": 2,
+  "rejected": 0,
+  "deferred": 0,
+  "findings_total": 6
+ },
+ "severity_notes": [
+  {
+   "finding": "F1",
+   "graded": "major",
+   "why": "An agreement defect is not a preference: it makes the shipped row wrong for an entire unit family (feminine `solicitudes`) at every sampled count, and for every unit kind at exactly 1, and the key's own sidecar explicitly instructs the translator to reword to avoid it. Graded major because the string is wrong as shipped rather than polishable later.",
+   "counter_read": "If the team reserves 'major' strictly for defects that change what the user does, F1 would be minor and `relay.shell` would be PASS with 0 blocking findings. Recorded so the call is visible, not hidden: the numbers are the same either way, only the gate outcome moves."
+  }
+ ]
+}

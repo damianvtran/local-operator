@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -130,11 +131,16 @@ def slow_runtime_child(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.Popen
         cwd: str,
         *,
         defer_materialise: bool,
+        config_dir: Path | None = None,
         warm: bool = False,
         initial_model: Any = None,
         model_selection_override: bool = False,
     ) -> subprocess.Popen[bytes]:
         env = dict(os.environ)
+        # Match the canonical fork boundary's explicit store argument. Failing
+        # its binding made engage return immediately, so the starting band
+        # disappeared before this slow-construction test could observe it.
+        assert config_dir is None or config_dir == Path(env["LOCAL_OPERATOR_CONFIG_DIR"])
         # A real runtime child (the wrapper execs the production entry point),
         # and the spec it runs is the test hosting unless a cell overrides it —
         # so the gate is re-asserted here rather than only inherited.
@@ -182,18 +188,25 @@ def slow_runtime_child(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.Popen
 @pytest.fixture
 def reap_candidates(slow_runtime_child: list[subprocess.Popen[bytes]]) -> Any:
     """Terminate every candidate the engage spawned, however the test ended."""
-    yield
+    yield slow_runtime_child
+    # Each candidate owns its group. Reap that group, not just the wrapper PID,
+    # even if a failing test runs long enough for the wrapper to exec its child.
     for process in slow_runtime_child:
-        with contextlib.suppress(Exception):
-            process.terminate()
+        if process.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
     for process in slow_runtime_child:
-        with contextlib.suppress(Exception):
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
 
 
 @pytest.mark.asyncio
 async def test_a_slow_runtime_start_clears_the_band_and_says_what_happened(
-    headless_tui_env: Path, workspace: Path, reap_candidates: Any
+    headless_tui_env: Path, workspace: Path, reap_candidates: list[subprocess.Popen[bytes]]
 ) -> None:
     """The band's two wait states must stop rendering identically.
 
@@ -256,6 +269,10 @@ async def test_a_slow_runtime_start_clears_the_band_and_says_what_happened(
             # Nothing bound: the deadline expired against a candidate that had
             # not published a record, which is the failure being reported.
             assert viewer.is_cold, "the viewer bound despite the candidate never publishing"
+            # A fast fixture binding error is not slow construction, even if a
+            # scheduler happens to render one frame of the starting band first.
+            assert reap_candidates, "the timeout must have waited on a real candidate"
+            assert all(process.poll() is None for process in reap_candidates)
 
             notices = [str(block._text) for block in app.query(NoticeBlock)]
             assert any(FAILURE_NOTICE_FRAGMENT in text for text in notices), (

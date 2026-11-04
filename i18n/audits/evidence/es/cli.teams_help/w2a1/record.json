@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "audit_id": "w2a1",
+  "audit_round": 1,
+  "locale": "es",
+  "namespace": "cli.teams_help",
+  "audit_date": "2026-10-29",
+  "audited_revision": "088699bfea0fc33d6b2f0748037dd7e89d85627d",
+  "audited_revision_note": "Target es file is UNTRACKED at this revision; HEAD does not bind its bytes. The exact audited on-disk target sha256 is below and in the final checks output.",
+  "key_count": {
+    "en": 34,
+    "target": 34,
+    "context": 34
+  },
+  "verdict": "passed",
+  "result": "passed — 0 blocker, 0 major, 1 minor, 0 nit",
+  "verdict_reason": "All 34 keys read. Roster -> plantilla and kept-English briefs preserve meaning; the three prose uses of tenant are an unrecorded borrowing. All flags, choice-like tokens, examples and exit codes match.",
+  "auditor": {
+    "agent": "translation-auditor (lopdev team), es-w2-auditor-a",
+    "session_or_instance": "d2377f5f44ec",
+    "model": "kimi/k3.1-pro (self-reported from the current session model-switch notice)",
+    "model_note": "Primary header: anthropic/claude-sonnet-5-5. Temporary provider-failure fallback: quota HTTP 429 via openai/gpt-6-astra to current kimi/k3.1-pro. All six namespace judgements were completed under the disclosed current fallback; no primary-model audit claim.",
+    "date": "2026-10-29",
+    "independence": "I authored none of this copy and repaired none. I compared every key against en source/context, shipped es terminology and the runtime parser/implementation. No catalogue, sidecar, ledger, allowance or generated file was edited."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.teams_help.json",
+      "revision": "088699bfea0fc33d6b2f0748037dd7e89d85627d",
+      "sha256": "400637df631f938b7c144cf500a64bd5976f3157b25944d4ea3b701d79c69738"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/cli.teams_help.json",
+      "sha256": "412c8119912d7672b4b7cdc7c3c97161b4dbd5d5c59db92a07d64ce284d37408",
+      "tracked": false
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.teams_help.context.json",
+      "sha256": "38cfbecb4f57e62b7bf73f00a241f40b74f212bbf82e6b0c5c61479b9288e0ae"
+    }
+  },
+  "findings": [
+    {
+      "id": "es-w2-A02",
+      "severity": "minor",
+      "status": "open",
+      "keys": [
+        "cli.teams_help.push_org",
+        "cli.teams_help.pull_org",
+        "cli.teams_help.link_org"
+      ],
+      "detail": "Current text starts each value with English 'Tenant de la organización...'. This is not a product surface name or in the es guide's kept-English technical list; it reads as an unnecessary borrowing beside the already Spanish 'organización'. The examples' <tenant_id> tokens correctly remain unchanged.",
+      "remediation": "Use 'Identificador de la organización...' (or record 'tenant' explicitly in the es style guide if the product intentionally keeps it). Do not change <tenant_id>."
+    }
+  ],
+  "check_output": [
+    {
+      "cmd": "git rev-parse HEAD; git status --porcelain -- <target>; sha256sum <inputs>",
+      "result": "HEAD 088699bfea0fc33d6b2f0748037dd7e89d85627d; each target ?? (untracked); all hashes listed in input_hashes"
+    },
+    {
+      "cmd": "isolated HOME/config, PYTHONPATH=$PWD python3 i18n/audits/evidence/es/cli.agents_help/w2a1/checks.py.txt",
+      "result": "exit 0; 155 keys; ordered en/es/context key parity; parser parse_message accepted all targets; ICU argument and plural-selector parity; no select arguments in these namespaces; flag, backtick-code-span and argparse printf parity; no maxCells declared; no few/zero/two"
+    },
+    {
+      "cmd": "render cli.wake_help.create_message with max=4000",
+      "result": "prompt automático que se entrega al activarse (como máximo 4000 caracteres)"
+    },
+    {
+      "cmd": "explicit ICU select-label negative control",
+      "result": "source action=start renders Start the daemon; translated branch labels fall through to other and render start el daemon"
+    },
+    {
+      "cmd": "read_public_copy (sanctioned reader)",
+      "result": "refused: workspace is not a git checkout; additionally untracked targets and context sidecars are unsupported. No masked value observed; no workaround used."
+    }
+  ],
+  "display_side_risk": "No value displayed as a redaction marker. The sanctioned reader was attempted and refused because this delegated workspace is not recognized as a git checkout; it also refuses untracked working-tree files and context sidecars. No workaround was used; this limitation is recorded.",
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation.",
+    "No rendered CLI frames were captured because the host is loaded and repo-wide/heavy runs were forbidden. No maxCells is declared; length changes were assessed but not labelled clipping defects.",
+    "No repo-wide tests or generator commands were run; the narrow parser probe is the mechanical check."
+  ]
+}

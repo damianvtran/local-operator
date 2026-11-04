@@ -1,0 +1,99 @@
+audit.log — es/tui.projects — audit id w6a2 (round 2) — 2026-10-30
+Auditor: translation-auditor (lopdev team), independent of the translator;
+authored none of this copy, repaired none of it, edited nothing outside
+i18n/audits/evidence/es/.
+Model ACTUALLY running: radient/auto (session header anthropic/claude-sonnet-5-5;
+provider-quota fallbacks openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto).
+All commands below were RUN in this worktree; output is verbatim.
+
+## CMD  git rev-parse HEAD && git branch --show-current
+$ git rev-parse HEAD
+b925c2e11be36653dfe88ac78f627bc2531427df
+$ git branch --show-current
+feat/i18n-es-tui
+
+## CMD  git status --porcelain -- <target>
+$ git status --porcelain -- local_operator/i18n/catalogues/es/tui.projects.json
+?? local_operator/i18n/catalogues/es/tui.projects.json
+
+## CMD  shasum -a 256 of en / target / context
+aeb473eb7de44143822962b44b6be239d63f930710e754ce5205781ca4b4ae91  local_operator/i18n/catalogues/en/tui.projects.json
+89b554319e7dfd8716e0e71d5031999e9f2b88f962d19a5953c3c41a9f79127f  local_operator/i18n/catalogues/es/tui.projects.json
+fa39ad8f21674a42e5218698d11396a08d47e2f82297467ad17bb1ab292bb1fe  local_operator/i18n/catalogues/en/tui.projects.context.json
+
+## CMD  repo validator (catalogue checks): python3 scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+## CMD  this bundle's checks: PYTHONPATH=$PWD /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.projects/w6a2/checks.py
+== es audit w6a2 :: namespace tui.projects
+repo            /Users/damian/lo-i18n-es
+en              local_operator/i18n/catalogues/en/tui.projects.json  sha256 aeb473eb7de44143822962b44b6be239d63f930710e754ce5205781ca4b4ae91  messages 97
+target          local_operator/i18n/catalogues/es/tui.projects.json  sha256 89b554319e7dfd8716e0e71d5031999e9f2b88f962d19a5953c3c41a9f79127f  messages 97
+context         local_operator/i18n/catalogues/en/tui.projects.context.json  sha256 fa39ad8f21674a42e5218698d11396a08d47e2f82297467ad17bb1ab292bb1fe  entries 97
+
+[PASS] C1 keys: 0 problem(s)
+[PASS] C2 arguments: 0 problem(s)
+[PASS] C3 plural categories: 0 problem(s)
+[PASS] C4 machine tokens: 0 problem(s)
+[PASS] C5 whitespace: 0 problem(s)
+[PASS] C6 maxCells: 0 problem(s)
+[PASS] C7 register/typography: 0 problem(s)
+[PASS] C8 english residue: 0 problem(s)
+[PASS] C10 remediation scope: 0 problem(s)
+[PASS] C11 changed-key widths: 0 problem(s)
+[PASS] C12 goal-panel pair: 0 problem(s)
+[PASS] C13 code_count constraint: 0 problem(s)
+
+maxCells budgets: none declared for this namespace (no usable sidecar)
+
+C11 changed-key widths, with placeholders substituted as the code supplies them:
+       tui.projects.binding_zoom_out                        no budget  en  12  es  13  [no arguments]
+       tui.projects.send.compose                            no budget  en  36  es  39  [SHORT_ID_CELLS = 12 -> the ◆ handle is 14 cells]
+
+C9 ship gate: resolve.eligible_locale('es') -> 'en' — the generated shipped.json in this working tree does not list es, so messages.render() would answer in ENGLISH. C9 therefore renders through the same catalogue lookup + ICU formatter render_record uses after the gate; the gate itself is a ledger state, not a property of these bytes.
+[PASS] C9 plural rendering (executed): 0 problem(s)
+        tui.projects.send.more [count=1] -> '+3 más'
+        tui.projects.send.more [count=3] -> '+3 más'
+        tui.projects.send.more [count=1000000] -> '+3 más'
+
+negative controls (each must be CAUGHT):
+  [CAUGHT] NC1 drop a placeholder (tui.projects.send.compose)
+           -> tui.projects.send.compose: arguments () != en's (('handle', 'simple'),)
+  [CAUGHT] NC2 relabel a plural branch as few (tui.projects.send.more)
+           -> tui.projects.send.more: plural 'count' carries ['few', 'one', 'other'], es requires exactly ['many', 'one', 'other']
+  [CAUGHT] NC3 strip a backtick code span (synthetic fixture)
+           -> nc.key: backtick code span [] != en's ['`browser`']
+  [CAUGHT] NC4 trim a load-bearing edge space (tui.projects.new_project)
+           -> tui.projects.new_project: edge whitespace/newlines (0, 0, 0) != en's (1, 0, 0) (en=' · new project', es='· proyecto nuevo')
+  [CAUGHT] NC5 inflate a value past a 4-cell budget (tui.projects.send.title)
+           -> tui.projects.send.title: es 8 cells > maxCells 4 (en 7) — 'enviar a'
+  [CAUGHT] NC6 use a forbidden glossary term
+           -> nc.key: contains 'demonio' — daemon stays English (es guide, W2 amendment)
+  [CAUGHT] NC7 leave English prose untranslated
+           -> nc.key: English word 'the' in 'Open the settings page'
+  [CAUGHT] NC8 drop a key from the target
+           -> missing key 'nc.other'
+  [CAUGHT] NC9 render a plural with no many arm at 10^6
+           -> nc.key: the 10^6 render '1.000.000 otros' lacks ' de ' — the `many` branch did not select
+
+round-2 negative controls (each must be CAUGHT):
+  [CAUGHT] C10 scope: one edit OUTSIDE the recorded delta
+           -> scope drift: reverting the recorded changes does not reproduce round-1 bytes (50830b123bec47f12249d2c9d0afdcd5a2bfb8538b7ec030273313b7aff216df != 4b6375ad8473afd927126efb535072f41426c80908f03c7a90834888f0264d76) — a value OUTSIDE the recorded delta changed
+  [CAUGHT] C10 scope: one recorded key left holding its round-1 value
+           -> tui.projects.binding_zoom_out: expected the remediated value 'Menos detalle', found 'Tiempo más grueso'
+  [CAUGHT] C2 arguments: the placeholder dropped from tui.projects.send.compose
+           -> tui.projects.send.compose: arguments () != en's (('handle', 'simple'),)
+  [CAUGHT] C7 typography: ASCII ellipsis reintroduced in a remediated key
+           -> tui.projects.send.compose: ASCII ellipsis instead of … — '... enviar a: {handle} · esc cancelar'
+
+checks.py: PASS (hard checks clean; controls all caught)
+EXIT=0
+
+## CMD  ship-gate state observed while running C9 (never modified by this audit)
+$ git status --porcelain -- local_operator/i18n/data/shipped.json
+ M local_operator/i18n/data/shipped.json
+$ git diff --stat -- local_operator/i18n/data/shipped.json
+ local_operator/i18n/data/shipped.json | 1 -
+ 1 file changed, 1 deletion(-)
+$ git show HEAD:local_operator/i18n/data/shipped.json | tr -d "\n "
+{"locales":["en","fr","es","zh-CN","ru","vi","ur","hi"],"schema":1}

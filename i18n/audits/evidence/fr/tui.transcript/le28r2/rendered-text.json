@@ -1,0 +1,72 @@
+{
+  "tui.transcript.attach.receipt": {
+    "0": "↑ 0 image jointe",
+    "1": "↑ 1 image jointe",
+    "2": "↑ 2 images jointes",
+    "3": "↑ 3 images jointes",
+    "4": "↑ 4 images jointes",
+    "5": "↑ 5 images jointes",
+    "11": "↑ 11 images jointes",
+    "21": "↑ 21 images jointes",
+    "22": "↑ 22 images jointes",
+    "25": "↑ 25 images jointes",
+    "1000000": "↑ 1 000 000 d’images jointes",
+    "1500000": "↑ 1 500 000 images jointes"
+  },
+  "tui.transcript.catchup.missed": {
+    "0": "0 réveil manqué",
+    "1": "1 réveil manqué",
+    "2": "2 réveils manqués",
+    "3": "3 réveils manqués",
+    "4": "4 réveils manqués",
+    "5": "5 réveils manqués",
+    "11": "11 réveils manqués",
+    "21": "21 réveils manqués",
+    "22": "22 réveils manqués",
+    "25": "25 réveils manqués",
+    "1000000": "1 000 000 de réveils manqués",
+    "1500000": "1 500 000 réveils manqués"
+  },
+  "tui.transcript.group.actions": {
+    "0": "0 action",
+    "1": "1 action",
+    "2": "2 actions",
+    "3": "3 actions",
+    "4": "4 actions",
+    "5": "5 actions",
+    "11": "11 actions",
+    "21": "21 actions",
+    "22": "22 actions",
+    "25": "25 actions",
+    "1000000": "1 000 000 actions",
+    "1500000": "1 500 000 actions"
+  },
+  "tui.transcript.group.reply_requested": {
+    "0": "0 demande de réponse",
+    "1": "1 demande de réponse",
+    "2": "2 demandes de réponse",
+    "3": "3 demandes de réponse",
+    "4": "4 demandes de réponse",
+    "5": "5 demandes de réponse",
+    "11": "11 demandes de réponse",
+    "21": "21 demandes de réponse",
+    "22": "22 demandes de réponse",
+    "25": "25 demandes de réponse",
+    "1000000": "1 000 000 demandes de réponse",
+    "1500000": "1 500 000 demandes de réponse"
+  },
+  "tui.transcript.group.steered": {
+    "0": "0 réorientation",
+    "1": "1 réorientation",
+    "2": "2 réorientations",
+    "3": "3 réorientations",
+    "4": "4 réorientations",
+    "5": "5 réorientations",
+    "11": "11 réorientations",
+    "21": "21 réorientations",
+    "22": "22 réorientations",
+    "25": "25 réorientations",
+    "1000000": "1 000 000 réorientations",
+    "1500000": "1 500 000 réorientations"
+  }
+}

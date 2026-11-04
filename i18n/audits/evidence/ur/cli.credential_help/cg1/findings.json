@@ -1,0 +1,27 @@
+{
+  "locale": "ur",
+  "namespace": "cli.credential_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-022",
+      "severity": "MINOR",
+      "namespace": "cli.credential_help",
+      "key": "cli.credential_help.credential",
+      "english": "Manage API keys and credentials for different hosting platforms",
+      "current": "مختلف ہوسٹنگ پلیٹ فارمز کی API کلیدیں اور اسناد منظم کریں",
+      "problem": "Mixed terms for one concept inside the same CLI: «اسناد» here and in cli.login_status_help/cli.logout_help/cli.mcp_help.logout, «کریڈینشل» in update/delete/key and mobile.setup and the ur neighbour (wire.settings…). Pick one (neighbour uses کریڈینشل).",
+      "suggested": "مختلف ہوسٹنگ پلیٹ فارمز کی API کلیدیں اور کریڈینشلز منظم کریں (and align login_status/logout/mcp.logout)",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    }
+  ]
+}

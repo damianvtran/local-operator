@@ -1,0 +1,11 @@
+{
+  "cli.stop_help.stop": "Detener una sesión de lop en ejecución (cierre controlado, luego señales)",
+  "cli.stop_help.target": "nombre de conversación / ID de sesión / pid / subcadena de cwd (sin distinguir mayúsculas ni minúsculas)",
+  "cli.stop_help.pid": "seleccionar por pid exacto",
+  "cli.stop_help.session": "seleccionar por ID de sesión exacto",
+  "cli.stop_help.all": "detener todas las sesiones de esta máquina (pregunta en una TTY; --yes para omitir)",
+  "cli.stop_help.yes": "omitir la confirmación de --all (obligatorio si stdin no es una TTY)",
+  "cli.stop_help.json": "resultado legible por máquina para cada destino",
+  "cli.stop_help.timeout": "espera de la operación controlada por sesión antes de escalar (predeterminado: 10)",
+  "cli.stop_help.force": "escalar tras un rechazo u omisión: enviar señales a un destino cuyo socket no pueda confirmar su identidad, que informe de un turno en curso o que ya esté saliendo tras una señal; cualquiera de estos casos puede cortar ese turno. No hace falta con un runtime cooperativo en pleno turno: la detención normal lo cierra de inmediato mediante su socket"
+}

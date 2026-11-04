@@ -1606,6 +1606,90 @@ class AskQueue:
             "details": {"ask_id": ask_id, "reason": reason},
         }
 
+    def clock_ms(self) -> int:
+        """This queue's clock (epoch ms) — the one ``created_at`` was stamped by."""
+        return int(self._now())
+
+    def add_context(
+        self,
+        ask_id: str,
+        *,
+        title: str,
+        body: str,
+        source: str,
+        item_id: str = "",
+    ) -> bool:
+        """Fold an update's text into an ask that is STILL OPEN (``asks/dedupe.py``).
+
+        An append-only ``context`` row, never a status change: the ask settles
+        when it settles, and the text settles with it. Every ``False`` means
+        "deliver the update normally", so no outcome of this method loses it.
+
+        FAIL-SAFE AGAINST A CONCURRENT SETTLE (review M1, rounds 1 and 2). The
+        caller matched the ask on an earlier read, and another surface (phone,
+        desktop, a cold CLI) may answer it at any moment. Three guards:
+
+        1. The ask-log lock must be ACTUALLY acquired; a contended lock refuses
+           rather than deciding on a read it cannot prove exclusive (the keyed
+           bridge door's TB-10 rule).
+        2. Under that lock the fold is re-read and anything but ``open`` refuses.
+        3. After the append the fold is read AGAIN, still under the lock, and a
+           settled ask returns ``False`` so the update is delivered as well.
+
+        Guard 3 exists because the lock is advisory for the settling writers:
+        ``store.append_event`` gives up after its ~95 ms retry budget and appends
+        UNLOCKED (deliberately — an answer must never be lost to a busy log), so
+        a settle can land while this method holds the lock. Making settles wait
+        or fail instead would change every answer path's contract to fix a
+        dedupe edge, so the cheaper and safer fix is here: detect it and deliver.
+        A settle that lands only after guard 3 is the ordinary "context settles
+        with its ask" case (part c of the design). The cost of a detected race
+        is a duplicate (the context row plus the delivered update), never a
+        loss. Everything is prepared before the lock so the hold stays short.
+        """
+        event: dict[str, Any] = {
+            "v": store.EVENT_SCHEMA,
+            "kind": store.EVENT_CONTEXT,
+            "ask_id": str(ask_id),
+            "title": str(title or ""),
+            "body": str(body or "")[: store.CONTEXT_BODY_MAX],
+            "source": source,
+        }
+        if item_id:
+            event["item_id"] = item_id
+
+        def is_open() -> bool:
+            for record in self.records(self._now()):
+                if record["ask_id"] == str(ask_id):
+                    return record.get("status") == store.STATUS_OPEN
+            return False
+
+        try:
+            self.session_dir.mkdir(parents=True, exist_ok=True)
+            fd = os.open(store.asks_log_path(self.session_dir), store.append_flags(), 0o600)
+        except OSError:
+            logger.debug("ask context: could not open the ask log", exc_info=True)
+            return False
+        try:
+            lock = store._NonBlockingLock(fd)
+            with lock:
+                if not lock.acquired or not is_open():
+                    return False
+                event["at"] = self._now()
+                os.write(
+                    fd,
+                    json.dumps(event, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                    + b"\n",
+                )
+                still_open = is_open()
+        except OSError:
+            logger.debug("ask context: append failed", exc_info=True)
+            return False
+        finally:
+            os.close(fd)
+        self._refresh()
+        return still_open
+
     def _settled(self, ask_id: str) -> None:
         """Post-write bookkeeping common to every terminal transition.
 

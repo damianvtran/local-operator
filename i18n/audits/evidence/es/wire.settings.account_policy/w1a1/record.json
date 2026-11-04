@@ -1,0 +1,130 @@
+{
+ "schema": 1,
+ "audit_id": "w1a1",
+ "audit_round": 1,
+ "locale": "es",
+ "namespace": "wire.settings.account_policy",
+ "audit_date": "2026-10-29",
+ "audited_revision": "efcfbe812609cbf228c01f11a1fb622f3555b487",
+ "audited_revision_note": "The es catalogue is UNTRACKED at this revision (`git status --porcelain` -> `?? <path>`), so HEAD cannot pin the audited bytes; input_hashes.target.sha256 is the exact on-disk hash and run-checks.sh re-hashes it.",
+ "key_count": {
+  "en": 14,
+  "target": 14,
+  "context": 14
+ },
+ "verdict": "passed",
+ "result": "passed — 0 blocker, 0 major, 1 minor, 2 nit",
+ "verdict_reason": "All 14 keys were read side by side with the source. Enum IDs and setting identifiers appear nowhere in the values, so nothing machine-facing could drift; the three policy labels every sentence points at ('Reinicio más próximo', 'Más margen', 'Reparto equitativo') are byte-identical to the references inside legacy.help — proven mechanically by legacy_refs.py.txt, not by eye — and the true/false behavioural promise of the legacy switch survives verbatim. Every label fits the declared 29-cell budget (widest: legacy.label at 27). The single minor finding is the label dropping 'policy'; the nits are idiom and an unrecorded term decision. Nothing here ships a lie.",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team)",
+  "session_or_instance": "4e01ec3a1b46",
+  "model": "radient/auto (self-reported)",
+  "model_note": "Session header names anthropic/claude-sonnet-5-5 as primary; three provider-failure switches fired on quota HTTP 429 (openai/gpt-6-astra, kimi/k3.1-pro, then radient/auto). This namespace was judged under radient/auto — a disclosed fallback.",
+  "date": "2026-10-29",
+  "independence": "I authored none of this copy and repaired none of it. Every es value here was written by a different translator agent. Findings are derived from the en source, the en sidecar, the es bytes and the renderer source at the audited revision. I edited no catalogue, sidecar, ledger, allowance or generated file; my only writes are this evidence directory."
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/wire.settings.account_policy.json",
+   "revision": "efcfbe812609cbf228c01f11a1fb622f3555b487",
+   "sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/es/wire.settings.account_policy.json",
+   "tracked": false,
+   "sha256": "ce1a2c0185b94c9118b6555b3c57ba0f328fc87e9b3b47d6100c542156c6169a"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/wire.settings.account_policy.context.json",
+   "sha256": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254"
+  }
+ },
+ "display_side_risk": "none observed — no value in the audited files displays as a redaction marker (grep 'redacted' found no match), so no sanctioned read_public_copy call was required. For the record: the sanctioned reader refuses *.context.json sidecars, so a masked sidecar note could not be recovered through it.",
+ "source_side_risks": [
+  "The sidecar note on every key reads 'English-only child namespace; missing locale uses English fallback.' It is untrue at this revision — an es candidate exists and is being wired — so the note no longer describes the surface; it should be corrected upstream rather than read as an instruction.",
+  "Out of scope but measured: 'request' is rendered both 'petición' (7 es files) and 'solicitud' (9 es files), and 'computer' is 'máquina' everywhere except wire.errors.notifications.store_full ('Este equipo'), where 'equipo' also means 'team' in this locale. Neither is this namespace's doing; both need a locale-wide decision."
+ ],
+ "findings": [
+  {
+   "id": "es-w1-B01",
+   "severity": "minor",
+   "status": "open",
+   "keys": [
+    "wire.settings.account_policy.label"
+   ],
+   "detail": "en 'account selection policy' (24 cells) -> es 'Selección de cuentas' (20): the word 'policy' is gone. The row is a policy selector, not an account list, and the es help then talks about 'políticas' ('Reinicio más próximo prefiere…', 'Una política explícita anula…') without the label ever having introduced a policy. The locale already settles this pattern: wire.settings.providers_openrouter_sort.label maps 'routing policy' -> 'política de enrutamiento'. Kept minor rather than major because the help text restores the meaning and no behaviour is misstated; the 29-cell maxCells is why the plain expansion 'Política de selección de cuentas' (32) cannot be used as-is.",
+   "remediation": "Within the declared 29-cell budget: 'Política de selección' (21) or 'Política de cuentas' (19). If the budget can rise, 'Política de selección de cuentas' (32) is the exact rendering."
+  },
+  {
+   "id": "es-w1-B02",
+   "severity": "nit",
+   "status": "open",
+   "keys": [
+    "wire.settings.account_policy.help"
+   ],
+   "detail": "'A compatible, unexpired lease from a successful request' -> 'Una concesión compatible y sin vencer de una petición con éxito'. 'con éxito' is a calque of 'successful'; a Spanish UI writes 'una petición correcta' or 'una petición que ha ido bien'. Meaning is intact — this is idiom, not accuracy.",
+   "remediation": "'Una concesión compatible y sin vencer de una petición correcta tiene prioridad en todas las políticas; …'."
+  },
+  {
+   "id": "es-w1-B03",
+   "severity": "nit",
+   "status": "open",
+   "keys": [
+    "wire.settings.account_policy.help"
+   ],
+   "detail": "'lease' -> 'concesión' is a new domain term with no glossary row and no other occurrence in the catalogue (grep 'lease' matches only this key). 'concesión' is defensible (a bounded grant); the risk is that the next wave picks a different word ( 'préstamo', 'cesión', or English 'lease').",
+   "remediation": "Record the call in i18n/style-guides/es.md (locale calls) or the glossary so wave 2+ inherits it."
+  }
+ ],
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "audit.log",
+  "parity.py.txt",
+  "run-checks.sh",
+  "labels.py.txt",
+  "legacy_refs.py.txt"
+ ],
+ "check_output": [
+  {
+   "cmd": "git rev-parse HEAD",
+   "result": "efcfbe812609cbf228c01f11a1fb622f3555b487"
+  },
+  {
+   "cmd": "git status --porcelain -- local_operator/i18n/catalogues/es/wire.settings.account_policy.json",
+   "result": "?? (untracked)"
+  },
+  {
+   "cmd": "sha256sum en / es / context",
+   "result": "see input_hashes"
+  },
+  {
+   "cmd": "python3 parity.py.txt wire.settings.account_policy",
+   "result": "key sets equal; placeholders identical in order; no code spans; no ICU; no illegal es plural category"
+  },
+  {
+   "cmd": "python3 labels.py.txt <ns>",
+   "result": "see audit.log"
+  },
+  {
+   "cmd": "python3 legacy_refs.py.txt",
+   "result": "all three es labels named verbatim inside es legacy.help -> True"
+  },
+  {
+   "cmd": "grep providers_openrouter_sort.label",
+   "result": "en 'routing policy' / es 'política de enrutamiento'"
+  },
+  {
+   "cmd": "grep -c petición | solicitud",
+   "result": "7 files use 'petición', 9 use 'solicitud' (locale-wide drift, outside this namespace)"
+  },
+  {
+   "cmd": "grep 'Este equipo'",
+   "result": "1 hit in wire.errors.notifications.store_full ('computer' -> 'equipo' vs the dominant 'máquina'); outside this namespace"
+  }
+ ],
+ "limitations": [
+  "No native-speaker judgement is part of this audit: the auditor is an LLM and claims no native review.",
+  "No rendered frame was captured (host under load; heavy runs forbidden). Width verdicts derive from renderer source quoted in audit.log, not from screenshots."
+ ]
+}

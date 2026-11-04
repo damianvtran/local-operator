@@ -1,0 +1,192 @@
+AUDIT LOG — es / tui.usage / w6a1
+date:         2026-10-30
+auditor:      independent translation auditor (lopdev team), i18n-auditor role; session 6a2f6fa808a7
+model:        radient/auto (the run's actual model; record.json auditor.model_note carries the fallback chain)
+independence: authored none of this copy; wrote no catalogue, sidecar, ledger or allowance
+
+All commands below were executed in /Users/damian/lo-i18n-es, branch feat/es-tui, on the date above.
+Probe interpreter: ~/local-operator/.venv/bin/python — this checkout has no .venv and that
+interpreter supplies rich.cells.cell_len, the ruler the repo itself measures text width
+with. Nothing was installed for this audit; the script also carries a local cell-width
+fallback (see cell_len()) for a machine without rich.
+
+=== 1. revision and identity of the exact inputs ===============================
+$ git rev-parse HEAD
+b925c2e11be36653dfe88ac78f627bc2531427df
+
+$ git status --porcelain -- <the three es targets>
+?? local_operator/i18n/catalogues/es/tui.app.json
+?? local_operator/i18n/catalogues/es/tui.hub_links.json
+?? local_operator/i18n/catalogues/es/tui.usage.json
+
+$ shasum -a 256 <en / context / es inputs for this namespace>
+5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b  local_operator/i18n/catalogues/en/tui.usage.json
+bf599f5f161087b890e1e24434a03209fee286b865173af6b578da3133b6ef19  local_operator/i18n/catalogues/en/tui.usage.context.json
+3cc8ea06555b0bfe52c732ec0bf1b9cf5e1ce76874bdfe10fde1ff3b4ad1f287  local_operator/i18n/catalogues/es/tui.usage.json
+
+NOTE: the three es targets are UNTRACKED at this revision, so HEAD does not bind their
+bytes; the sha256 lines above are the binding identity. Section A re-derives that digest
+through local_operator.i18n.catalogues.load_catalogue() and compares it with the file.
+
+=== 2. the repository's own validator ========================================
+$ python3 scripts/i18n/check.py        # repo-wide, run 2026-10-30
+exit 0. Final line:
+  check.py: ok — 191 file(s) scanned, 2348 literal(s) at or below the baseline, catalogues consistent; 51 advisory finding(s) (report-only until activated)
+
+WHAT THIS PROVES AND WHAT IT DOES NOT: check.py rejects a plural selector that
+is not a category of the locale, and a plural without `other`
+(scripts/i18n/check.py:_check_plural_categories). It does NOT require the locale's
+full category set — an es plural missing `many` passes it — and it never looks at
+what a branch RENDERS. Section A of the probe therefore adds full one/many/other
+coverage and per-branch argument parity, which the validator cannot see.
+
+=== 3. independent probe scoped to this namespace ============================
+$ PYTHONPATH=$PWD /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.usage/w6a1/checks.py --namespace tui.usage
+
+
+==============================================================================
+es TUI block w6a1 — independent audit probe (tui.usage)
+==============================================================================
+repo      /Users/damian/lo-i18n-es
+locale    es
+width     rich.cells.cell_len
+
+-- tui.usage: input provenance
+   HEAD b925c2e11be36653dfe88ac78f627bc2531427df
+   en/tui.usage.json: sha256 5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b | tracked/clean
+   en/tui.usage.context.json: sha256 bf599f5f161087b890e1e24434a03209fee286b865173af6b578da3133b6ef19 | tracked/clean
+   es/tui.usage.json: sha256 3cc8ea06555b0bfe52c732ec0bf1b9cf5e1ce76874bdfe10fde1ff3b4ad1f287 | ?? local_operator/i18n/catalogues/es/tui.usage.json
+
+==============================================================================
+A. MECHANICAL — tui.usage
+==============================================================================
+PASS  [tui.usage: catalogue loader accepts the file and agrees on its digest] loader 21 keys / api 3cc8ea06555b0bfe vs file 3cc8ea06555b0bfe
+
+-- tui.usage: 21 en / 21 target / 21 context keys
+PASS  [tui.usage: ordered key parity en==es] missing=[] extra=[]
+PASS  [tui.usage: context sidecar only describes real keys] unknown=[]
+INFO  [tui.usage: keys without a context entry] []
+INFO  [tui.usage: CLDR categories for es] ['many', 'one', 'other']
+PASS  [tui.usage: ICU argument tuples (name and kind) match en] 0 mismatch(es): []
+PASS  [tui.usage: plural selectors are es CLDR categories, all present, `other` defined] 0 mismatch(es): []
+PASS  [tui.usage: every plural branch renders its source's arguments] 0 mismatch(es): []
+PASS  [tui.usage: `#`/value rendering per plural branch matches en] 0 mismatch(es): []
+PASS  [tui.usage: printf tokens preserved] 0 mismatch(es): []
+PASS  [tui.usage: --flags preserved] 0 mismatch(es): []
+PASS  [tui.usage: backtick code spans byte-identical] 0 mismatch(es): []
+PASS  [tui.usage: machine tokens present in both or neither] 0 mismatch(es): []
+PASS  [tui.usage: layout punctuation/whitespace counts match en] 0 mismatch(es): []
+INFO  [tui.usage: plural arguments seen] 2
+
+==============================================================================
+B. FIT — tui.usage
+==============================================================================
+
+-- usage panel body at the 40x24 floor: 31 cells
+   tui.usage.paid.family_caps             en  31 | es  55
+FAIL  [tui.usage: tui.usage.paid.family_caps fits the floor body where en does] es 55 vs floor 31, en 31
+   tui.usage.paid.continue                en  44 | es  49 (en is over the floor too)
+PASS  [tui.usage: tui.usage.paid.continue fits the floor body where en does] es 49 vs floor 31, en 44
+   tui.usage.paid.eligibility_unknown     en  27 | es  37
+FAIL  [tui.usage: tui.usage.paid.eligibility_unknown fits the floor body where en does] es 37 vs floor 31, en 27
+   tui.usage.paid.unlimited               en  26 | es  30
+PASS  [tui.usage: tui.usage.paid.unlimited fits the floor body where en does] es 30 vs floor 31, en 26
+   tui.usage.paid.blocked                 en  19 | es  21
+PASS  [tui.usage: tui.usage.paid.blocked fits the floor body where en does] es 21 vs floor 31, en 19
+   mixed title row en:  28 cells  '2 sign-in expired  · 2 stale'
+   mixed title row es:  46 cells  '2 con inicio de sesión caducado  · 2 obsoletas'
+FAIL  [tui.usage: mixed title row fits the floor body where en does] es 46 vs floor 31, en 28
+
+==============================================================================
+C. SEMANTICS — tui.usage
+==============================================================================
+   witness relay.shell tracked=True — its es ledger row is `passed` at the CURRENT en source hash f53b23560b88, so this is shipped copy.
+
+-- reuse of the shipped relay.shell.usage phrasing
+   tui.usage.paid.continue            'cuota incluida agotada; continuará con créditos'
+   relay.shell.usage.continue         'Asignación incluida agotada; continuará con créditos.'   same=False
+   tui.usage.paid.family_caps         'siguen aplicándose los límites por familia de modelos'
+   relay.shell.usage.family_caps      'Siguen aplicándose los límites por familia de modelos.'   same=True
+   tui.usage.paid.blocked             'Gasto no disponible'
+   relay.shell.usage.blocked          'Gasto no disponible'   same=True
+   tui.usage.paid.eligibility_unknown 'Elegibilidad para gasto desconocida'
+   relay.shell.usage.eligibility_unknown 'Elegibilidad para gasto desconocida'   same=True
+   tui.usage.paid.unlimited           'Asignación de pago ilimitada'
+   relay.shell.usage.unlimited        'Asignación de pago ilimitada'   same=True
+   tui.usage.paid.continue noun {'cuota'} | relay {'asignación'} | tui.usage.paid.unlimited {'asignación'}
+FAIL  [tui.usage: paid.continue renders the included allowance with relay.shell's term] {'cuota'} vs relay {'asignación'}, same panel {'asignación'}
+PASS  [tui.usage: paid.continue still states credits continue] cuota incluida agotada; continuará con créditos
+PASS  [tui.usage: paid.blocked states unavailability only] Gasto no disponible
+PASS  [tui.usage: paid.eligibility_unknown does not imply enabled/disabled] Elegibilidad para gasto desconocida
+PASS  [tui.usage: paid.unlimited invents no number] Asignación de pago ilimitada
+
+-- tui.usage.exhausted at count 1: '1 agotadas'
+FAIL  [tui.usage: tui.usage.exhausted reads correctly at count 1] '1 agotadas'
+
+-- tui.usage.stale at count 1: '1 obsoletas'
+FAIL  [tui.usage: tui.usage.stale reads correctly at count 1] '1 obsoletas'
+   sign_in_expired at 1: '1 con inicio de sesión caducado' (masculine referent while its siblings are feminine)
+
+-- tui.usage: CLDR model for es — generated samples: 1 -> one, 2 -> other, 10^6 -> many; 1,500,000 -> other by the stated 10^6-multiple rule (table has no 1500000 row)
+PASS  [tui.usage: generated CLDR table says 1=one, 2=other, 10^6=many] one, other, many
+-- tui.usage: plural render matrix through the shipped runtime
+   tui.usage.windows_count: 1 -> '1 ventana' | 2 -> '2 ventanas' | 10^6 -> '1000000 de ventanas' | 1.5M -> '1500000 ventanas'
+PASS  [tui.usage: tui.usage.windows_count selects one at 1 and other at 2] identical text: '1 ventana'
+     many/other branches are distinct, so 10^6 vs 1.5M is observable
+   tui.usage.reported_balance: 1 -> '1 saldo informado' | 2 -> '2 saldos informados' | 10^6 -> '1000000 de saldos informados' | 1.5M -> '1500000 saldos informados'
+PASS  [tui.usage: tui.usage.reported_balance selects one at 1 and other at 2] identical text: '1 saldo informado'
+     many/other branches are distinct, so 10^6 vs 1.5M is observable
+
+==============================================================================
+D. NEGATIVE CONTROLS
+==============================================================================
+PASS  [control: renamed placeholder] caught — mark.available {item}->{elemento} -> arguments, got 'Actualizar {elemento} desde {source}'
+PASS  [control: dropped `many` branch] caught — parked.wakes -> '{count, plural, one {{shown} despertar} other {{shown} despertares}}'
+PASS  [control: added `few` branch] caught — parked.wakes -> '{count, plural, one {{shown} despertar} few {{shown} de despertares} other {{shown} despertares}}'
+PASS  [control: count dropped from a `many` branch] caught — parked.wakes -> '{count, plural, one {{shown} despertar} many {de despertares} other {{shown} despertares}}'
+PASS  [control: edited code span] caught — `lo ›` -> `lo ->` in help.title_note_more
+PASS  [control: ellipsis replaced by three dots] caught — notifications.more -> '  ...{shown} más'
+PASS  [control: trailing space dropped] caught — showing_prefix -> 'mostrando'
+PASS  [control: machine token re-cased] caught — sidebar_hint ctrl+b -> Ctrl+B
+PASS  [control: agreement predicate accepts `activada`] accepted — toggle_on -> 'búsqueda web activada — surte efecto desde tu próximo turno'
+PASS  [control: understated charge claim] caught — paid.continue -> 'cuota incluida agotada; se detendrá'
+
+==============================================================================
+SUMMARY
+==============================================================================
+tui.usage         22 pass /   6 fail
+    FAIL tui.usage: tui.usage.paid.family_caps fits the floor body where en does — es 55 vs floor 31, en 31
+    FAIL tui.usage: tui.usage.paid.eligibility_unknown fits the floor body where en does — es 37 vs floor 31, en 27
+    FAIL tui.usage: mixed title row fits the floor body where en does — es 46 vs floor 31, en 28
+    FAIL tui.usage: paid.continue renders the included allowance with relay.shell's term — {'cuota'} vs relay {'asignación'}, same panel {'asignación'}
+    FAIL tui.usage: tui.usage.exhausted reads correctly at count 1 — '1 agotadas'
+    FAIL tui.usage: tui.usage.stale reads correctly at count 1 — '1 obsoletas'
+control           10 pass /   0 fail
+
+TOTAL failures: 6
+Verdict input: every FAIL above is a finding in the audit report; sections A pass means the mechanical deck is clean.
+
+  (probe exit 1 — non-zero because this namespace has findings; the FAIL
+   lines above are the finding index for this audit)
+
+=== 4. negative controls (a check that cannot fail proves nothing) ===========
+$ PYTHONPATH=$PWD /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.usage/w6a1/checks.py          # full three-namespace run, section D
+Each control breaks ONE value in memory and re-runs the audit's own predicate on it.
+
+PASS  [control: renamed placeholder] caught — mark.available {item}->{elemento} -> arguments, got 'Actualizar {elemento} desde {source}'
+PASS  [control: dropped `many` branch] caught — parked.wakes -> '{count, plural, one {{shown} despertar} other {{shown} despertares}}'
+PASS  [control: added `few` branch] caught — parked.wakes -> '{count, plural, one {{shown} despertar} few {{shown} de despertares} other {{shown} despertares}}'
+PASS  [control: count dropped from a `many` branch] caught — parked.wakes -> '{count, plural, one {{shown} despertar} many {de despertares} other {{shown} despertares}}'
+PASS  [control: edited code span] caught — `lo ›` -> `lo ->` in help.title_note_more
+PASS  [control: ellipsis replaced by three dots] caught — notifications.more -> '  ...{shown} más'
+PASS  [control: trailing space dropped] caught — showing_prefix -> 'mostrando'
+PASS  [control: machine token re-cased] caught — sidebar_hint ctrl+b -> Ctrl+B
+PASS  [control: agreement predicate accepts `activada`] accepted — toggle_on -> 'búsqueda web activada — surte efecto desde tu próximo turno'
+PASS  [control: understated charge claim] caught — paid.continue -> 'cuota incluida agotada; se detendrá'
+
+Ten controls, ten behaved as required: eight deliberate breakages were CAUGHT
+(renamed placeholder, dropped `many` branch, added `few` branch, {shown} dropped from a
+branch, edited code span, ellipsis typography, trailing space, re-cased command token),
+and two controls must PASS to prove the predicates discriminate rather than always
+failing — the agreement check accepts `búsqueda web activada`, and the money predicate
+accepts `continuará con créditos` while rejecting the understated `se detendrá`.

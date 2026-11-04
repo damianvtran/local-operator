@@ -1,0 +1,13 @@
+{
+  "cli.agents_picture.error.no_agent": "No hay ningún agente con el nombre o ID {agent}.",
+  "cli.agents_picture.error.read_file": "No se pudo leer {path}: {error}",
+  "cli.agents_picture.help.agent": "Nombre o ID del agente",
+  "cli.agents_picture.help.file": "Ruta a una imagen PNG, JPEG, WebP, GIF o HEIC",
+  "cli.agents_picture.help.group": "Establecer, quitar o mostrar la imagen de perfil de un agente",
+  "cli.agents_picture.help.remove": "Quitar la imagen de un agente",
+  "cli.agents_picture.help.set": "Establecer la imagen de un agente a partir de un archivo de imagen",
+  "cli.agents_picture.help.show": "Mostrar los metadatos de la imagen de un agente en JSON",
+  "cli.agents_picture.remove.done": "Se quitó la imagen de {agent}.",
+  "cli.agents_picture.remove.none": "{agent} no tiene imagen que quitar.",
+  "cli.agents_picture.set.done": "Imagen establecida para {agent} ({mime}, {bytes} bytes)."
+}

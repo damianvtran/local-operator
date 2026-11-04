@@ -1,0 +1,38 @@
+$ env -i HOME=<iso> LOCAL_OPERATOR_CONFIG_DIR=<iso>/.lo PATH=$PATH PYTHONPATH=$PWD ~/local-operator/.venv/bin/python audit_checks.py  # after scripts/i18n/generate.py; exit=0
+en catalogue_sha256 1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707 raw 1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707 keys 55
+fr target_sha256 9ac121c77d9faff79009a5b270bc739405b159d91532fe2f7a8fce7404a48440 parity 55/55 OK
+  probe_suspected_title cf=[] nfc=True untranslated=False rendered_eq=True OK
+    Messages des agents : un expéditeur semble sonder votre agent
+  probe_suspected_body cf=[] nfc=True untranslated=False rendered_eq=True OK
+    La modération de votre agent a refusé plusieurs messages du même expéditeur au cours des dernières 24 heures. Ce comportement peut indiquer que quelqu’un teste ce que votre agent accepte. Cet expéditeur n’est plus informé de la raison de ces refus.
+es target_sha256 5d9eca07bd240c97e53d3ff503ac54a7563d5ddaa4e6da3382d271a0fe3b2530 parity 55/55 OK
+  probe_suspected_title cf=[] nfc=True untranslated=False rendered_eq=True OK
+    Mensajes de agentes: un remitente parece estar sondeando
+  probe_suspected_body cf=[] nfc=True untranslated=False rendered_eq=True OK
+    La moderación de tu agente rechazó varios mensajes del mismo remitente en las últimas 24 horas. Este patrón puede indicar que alguien está probando qué acepta tu agente. A ese remitente ya no se le dice por qué se rechazan sus mensajes.
+zh-CN target_sha256 4a61dfc4848c0e89ee7b74962432d33e6c3ef08530bf59dd7f2d8da8f0ae3125 parity 55/55 OK
+  probe_suspected_title cf=[] nfc=True untranslated=False rendered_eq=True OK
+    智能体消息：某个发送者疑似在试探
+  probe_suspected_body cf=[] nfc=True untranslated=False rendered_eq=True OK
+    过去一天内，你的智能体的内容审核拒绝了同一发送者的多条消息。这种模式可能意味着有人在试探你的智能体会接受什么内容。该发送者已不再获知其消息被拒绝的原因。
+ru target_sha256 8a394cd06240959a5b06c4925a6a19c0b46dd4a72aae925bd688c409c24abbe9 parity 55/55 OK
+  probe_suspected_title cf=[] nfc=True untranslated=False rendered_eq=True OK
+    Сообщения агентов: похоже, отправитель прощупывает агента
+  probe_suspected_body cf=[] nfc=True untranslated=False rendered_eq=True OK
+    За последние сутки модерация вашего агента отклонила несколько сообщений от одного и того же отправителя. Такая картина может означать, что кто-то проверяет, что готов принять ваш агент. Этому отправителю больше не сообщают, почему его сообщения отклоняются.
+vi target_sha256 055122579ce10958da610ea86dde356a38a9fefe5b7843a30675245748746b01 parity 55/55 OK
+  probe_suspected_title cf=[] nfc=True untranslated=False rendered_eq=True OK
+    Tin nhắn tác nhân: một người gửi có dấu hiệu dò thử
+  probe_suspected_body cf=[] nfc=True untranslated=False rendered_eq=True OK
+    Trong một ngày qua, bộ kiểm duyệt của tác nhân đã từ chối nhiều tin nhắn từ cùng một người gửi. Dấu hiệu này có thể cho thấy ai đó đang thử xem tác nhân của bạn chấp nhận những gì. Người gửi đó sẽ không còn được cho biết lý do tin nhắn của họ bị từ chối nữa.
+ur target_sha256 ef03fa7d3ecb23c4bdcd0cd14d77a552dac7f148a382188efeda229fe3919f46 parity 55/55 OK
+  probe_suspected_title cf=[] nfc=True untranslated=False rendered_eq=True OK
+    ایجنٹ کے پیغامات: ایک بھیجنے والا جانچ پڑتال کرتا لگتا ہے
+  probe_suspected_body cf=[] nfc=True untranslated=False rendered_eq=True OK
+    پچھلے ایک دن میں آپ کے ایجنٹ کی ماڈریشن نے ایک ہی بھیجنے والے کے کئی پیغامات مسترد کیے۔ اس انداز کا مطلب ہو سکتا ہے کہ کوئی پرکھ رہا ہے کہ آپ کا ایجنٹ کیا قبول کرتا ہے۔ اس بھیجنے والے کو اب یہ نہیں بتایا جاتا کہ اس کے پیغامات کیوں مسترد ہوئے۔
+hi target_sha256 7c27705c3f013b3b4cd0dfee3a5ff71480b1d500473833896abd787f04fd0694 parity 55/55 OK
+  probe_suspected_title cf=[] nfc=True untranslated=False rendered_eq=True OK
+    एजेंट संदेश: एक प्रेषक जाँच-पड़ताल करता लगता है
+  probe_suspected_body cf=[] nfc=True untranslated=False rendered_eq=True OK
+    पिछले एक दिन में आपके एजेंट के मॉडरेशन ने एक ही प्रेषक के कई संदेश अस्वीकार किए। इस पैटर्न का मतलब हो सकता है कि कोई परख रहा है कि आपका एजेंट क्या स्वीकार करता है। उस प्रेषक को अब यह नहीं बताया जाता कि उसके संदेश क्यों अस्वीकार हुए।
+RESULT PASS failures 0

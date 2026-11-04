@@ -54,10 +54,24 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.errors.agents",
         "wire.errors.auth",
         "wire.errors.desktop",
+        # Receipt-bound skill adoption owns its preview/consent vocabulary.
+        "wire.skill_adoption",
         "wire.errors.files",
+        # The owned "hosting is not configured" cause clause, composed INTO the
+        # startup refusals above: without its own key a locale that translates
+        # the frame still inherits that one English sentence mid-sentence.
+        "wire.errors.hosting",
         "wire.errors.media",
+        # Agent profile pictures: the refusals `PUT /v1/agents/{id}/avatar` returns
+        # (unsupported_type, too_large, too_many_pixels, undecodable, not_found,
+        # imaging_unavailable, empty_body), rendered by the desktop and phone
+        # surfaces from the reason word the envelope carries as `code`.
+        "wire.errors.agent_avatar",
         "wire.errors.sdk_spec",
         "wire.errors.sdk_startup",
+        # Host-start refusals cross the real cold-facade boundary; they must
+        # not be mistaken for a runtime reconnecting (#3222 R2-1/Q1).
+        "wire.errors.session_host",
         "wire.errors.settings",
         "wire.exec",
         "wire.incidents",
@@ -77,6 +91,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         # The OpenRouter host-speed settings row (English-only, own namespace so
         # the audited wire.settings hash is untouched).
         "wire.host_speed",
+        # Radient Saver's settings row and fail-open notices (own namespace so the
+        # audited wire.settings hash is untouched).
+        "wire.radient_saver",
         # Populated by the console-capacity slice (this PR), the same way the
         # extraction slices added wire.settings/wire.errors.*/wire.exec.
         "wire.console",
@@ -96,6 +113,16 @@ def test_shipped_wire_namespaces_exist() -> None:
         # locale ledger hashes do not move).
         "wire.errors.notifications",
         "wire.slash.notifications_page",
+        # The Team Bridge tool row (TUI card + phone projection): verbs, kind
+        # fallbacks, counts and outcome words keyed off `bridge_row` tokens.
+        # Its own namespace so no audited catalogue's hash moves; the
+        # translation wave lands its seven locales in a follow-up.
+        "wire.tool_rows.bridge",
+        # The sessions tool's own operator-visible stop receipts (agent review
+        # round 1 R2). Its own namespace, the `wire.host_speed` shape: the
+        # receipts are new copy, and adding them to a namespace fr/hi/vi CARRY
+        # would invalidate those locales' ledger rows.
+        "wire.sessions",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}
@@ -116,6 +143,7 @@ def test_shipped_wire_namespaces_exist() -> None:
     assert catalogues.load_catalogue("en", "wire.slash.library") != {}
     assert catalogues.load_catalogue("en", "wire.errors.notifications") != {}
     assert catalogues.load_catalogue("en", "wire.slash.notifications_page") != {}
+    assert catalogues.load_catalogue("en", "wire.tool_rows.bridge") != {}
     assert catalogues.load_catalogue("en", "wire.settings") != {}
     # The Aida cadence interval row is a small English-only addition carried in
     # its own `wire.*` namespace so already-audited `wire.settings` locale
@@ -169,95 +197,18 @@ def test_exact_wire_namespace_contract_rejects_mutations(
                 test_shipped_wire_namespaces_exist()
 
 
-def test_wave3_hindi_carries_its_namespace_snapshot_with_parity(i18n_check) -> None:
-    # Pin only the original ten Hindi groups plus each later reviewed slice.
-    # Analytics/desktop backfill is explicitly unfinished; mechanical parity is
-    # not full-surface coverage. `tui.review` is the LOH-19 slice's audited
-    # namespace, added here with its own ledger row; `tui.schedule` is P1's,
-    # carried only now that its audit row exists (the carried-namespace gate
-    # un-ships a locale for an unaudited file); `tui.projects_edit` is P2's
-    # audited namespace, carried the same way on top of the union. P3a adds
-    # `tui.authoring` only after its independent 40-key audit passed. P3b adds
-    # `tui.team_authoring` after its independent 35-key audit passed. P4a adds
-    # `tui.viewer` after its independent audit and keyboard-hint audit refresh.
-    # The wire.memory slice adds the independently audited `wire.memory`
-    # namespace, whose ledger row is what un-ships it. The LOH-11 relay-web
-    # tag slice adds `relay.session.tags` on the same terms: one audited
-    # namespace with its own fresh ledger row. The remote-compute wave (S3e)
-    # adds `cli.exec_remote_help` and `wire.remote_compute`, each carried only
-    # once its independent audit row passed against the current en bytes.
-    # The R5 stale-ask wave (2026-10-23) adds the two ask-surface namespaces,
-    # `relay.ask` and `tui.asks`, on the same terms: independently audited
-    # (round 1 raised 12 findings, round 2 passed all seven locales), one fresh
-    # ledger row each against the current en bytes. P5 adds `tui.palette` on
-    # the same terms: a 7-key namespace whose fresh, independently audited
-    # ledger row is what lets the locale carry it. The fast-mode fix adds
-    # `tui.notices` and `wire.errors.desktop`: Hindi had no file for either
-    # namespace, so the refusal notices fell back to English; now each carries
-    # a 30-key / 84-key catalogue with its own audited ledger row (see
-    # i18n/ledger.json), which is the same condition every namespace above was
-    # admitted on. The relay.asks slice adds the SPA's ask cards/sheet/dock
-    # namespace `relay.asks` on the same terms — it is a DIFFERENT namespace
-    # from R5's `relay.ask` (the dismiss reasons and stale-ask line), and
-    # `namespaces()` returns the files sorted, so `relay.asks` sorts before
-    # `relay.session.tags` rather than where the slice landed. The approvals
-    # slice adds `relay.approvals` (17 keys, the approval-scope copy main added
-    # as literals) on the same terms: carried only now that its independent
-    # audit row exists against the current en bytes. It sorts before
-    # `relay.ask`. The notifications-inbox wave adds `tui.notifications` (the
-    # inbox page's 72 keys) on exactly the same terms: six locales carry it
-    # only because their independent audit bundles and fresh ledger rows landed
-    # with the files in the same commit, and the seventh (ru) is still absent
-    # for want of its round-2 delta audit. Mechanical parity is asserted below
-    # for every namespace in this tuple, so the new one is checked too.
-    # `relay.ask`. The phone inbox adds `relay.notifications` (77 keys) with
-    # the other seven locales; it sorts after `relay.chrome`. Carrying it
-    # pins key/placeholder parity here, while shipping still waits on its
-    # independent audit row, exactly as each namespace above did.
+def test_hindi_carried_namespaces_follow_tree_with_parity(i18n_check) -> None:
+    # Catalogue additions are not regressions. Keep loader inventory and parity
+    # coverage, but derive the census from files instead of a wave-sized snapshot.
+    # Audit eligibility remains the generated shipment/ledger tests' contract.
     locale = "hi"
-    namespaces = (
-        "cli.exec_remote_help",
-        "relay.approvals",
-        "relay.ask",
-        "relay.asks",
-        # Borderless phone chrome carries its own audited namespace; existing
-        # English labels stay untouched while all seven locales join the wave.
-        "relay.chrome",
-        # The session status dot's 9-key namespace (round 2 added the
-        # reconnecting/dropped/quiet/ended copy), carried only with its
-        # doubly audited ledger row; it keeps relay.chrome's English bytes
-        # frozen, and sorts between relay.chrome and relay.session.tags.
-        "relay.health",
-        "relay.notifications",
-        "relay.session.tags",
-        # Audited relay condensation copy adds 19 keys; keep this census exact.
-        "relay.transcript",
-        "tui.asks",
-        "tui.authoring",
-        "tui.notices",
-        "tui.notifications",
-        "tui.palette",
-        "tui.projects_edit",
-        "tui.review",
-        "tui.schedule",
-        "tui.status",
-        "tui.tags",
-        "tui.team_authoring",
-        "tui.transcript",
-        "tui.viewer",
-        "tui.welcome",
-        "wire.errors",
-        "wire.errors.desktop",
-        "wire.errors.notifications",
-        "wire.errors.settings",
-        "wire.exec",
-        "wire.incidents",
-        "wire.memory",
-        "wire.notices",
-        "wire.remote_compute",
-        "wire.settings",
-        "wire.slash",
-        "wire.slash.notifications_page",
+    directory = catalogues.catalogue_root() / locale
+    namespaces = tuple(
+        sorted(
+            path.stem
+            for path in directory.glob("*.json")
+            if not path.name.endswith(".context.json")
+        )
     )
     assert catalogues.namespaces(locale) == namespaces
     for namespace in namespaces:
@@ -349,6 +300,11 @@ def test_context_sidecar_is_not_a_namespace_and_reads_when_present(
     assert catalogues.context("en", "missing") == {}
 
 
+#: The deferred set as committed: the test below promotes everything into the
+#: eager bundle, so it needs the set it started from independent of the dict.
+DEFERRED_AT_IMPORT = dict(catalogues.DEFERRED_NAMESPACES)
+
+
 def test_the_bundle_identity_covers_the_eager_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -365,8 +321,10 @@ def test_the_bundle_identity_covers_the_eager_set(
     eager = catalogues.wire_bundle("en")
 
     assert len(eager["messages"]) > len(deferred["messages"])
-    assert len(eager["messages"]) - len(deferred["messages"]) == len(
-        catalogues.load_catalogue("en", "wire.settings")
+    assert len(eager["messages"]) - len(deferred["messages"]) == sum(
+        len(catalogues.load_catalogue("en", namespace))
+        for namespace in catalogues.wire_namespaces("en")
+        if namespace in DEFERRED_AT_IMPORT
     )
     # Identical file bytes, different split: the identity must still differ.
     assert eager["content_sha256"] != deferred["content_sha256"]

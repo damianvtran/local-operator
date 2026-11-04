@@ -1,0 +1,669 @@
+"""UNRUN: S2 admission writes, plant monotonicity and migration guards.
+
+Written under the fleet disk/CI hold. These cells use only the in-process anchor
+root seam and fake root ownership; no OS prompt or real privileged write runs.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import shlex
+import subprocess
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from local_operator.operator import handlers, trust
+from local_operator.operator.elevate import ElevationResult
+from local_operator.operator.trust import anchor_bytes
+from local_operator.operator.verify import key_id_for
+
+ID_X, ID_Y = "a" * 32, "b" * 32
+
+
+def _anchor(**changes: Any) -> trust.OperatorAnchor:
+    spki = b"\x04" + bytes(range(64))
+    return replace(
+        trust.OperatorAnchor(
+            key_id=key_id_for(spki), spki=spki, backend="file-only", presence=False
+        ),
+        **changes,
+    )
+
+
+def _install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, anchor: trust.OperatorAnchor
+) -> tuple[Path, Path]:
+    root = tmp_path / "config"
+    anchor_root = tmp_path / "anchors"
+    anchor_root.mkdir(exist_ok=True)
+    monkeypatch.setattr(trust, "_ANCHOR_ROOT_OVERRIDE", anchor_root)
+    target = trust.anchor_path()
+    target.write_bytes(anchor_bytes(anchor))
+    real_open = trust._open_no_follow
+
+    def as_root(path: Path) -> Any:
+        opened = real_open(path)
+        assert opened is not None
+        descriptor, _ = opened
+        return descriptor, SimpleNamespace(st_uid=0, st_mode=0o100644)
+
+    monkeypatch.setattr(trust, "_open_no_follow", as_root)
+    return root, target
+
+
+def _plant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, anchor: trust.OperatorAnchor) -> Path:
+    source = tmp_path / "received.json"
+    source.write_bytes(anchor_bytes(anchor))
+    monkeypatch.setattr(handlers, "install_anchor", lambda *a, **k: 0)
+    return source
+
+
+def test_r1_refuses_revocation_lift_and_allow_control_admits_new_phone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    installed = _anchor(devices=({"device_id": ID_X, "revoked": True},))
+    root, target = _install(tmp_path, monkeypatch, installed)
+    staged = trust.staging_path(root)
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"sentinel")
+    incoming = replace(installed, devices=({"device_id": ID_Y},))
+    source = _plant(tmp_path, monkeypatch, incoming)
+
+    assert handlers.install_anchor_from(source, root) == 2
+    assert target.read_bytes() == anchor_bytes(installed)
+    assert staged.read_bytes() == b"sentinel", "R1 refusal happens before staging"
+    assert ID_X in capsys.readouterr().err
+
+    # ALLOW control: an ordinary incoming admission must propagate; R1 gates only
+    # the un-revoke half, not the statement's complete list.
+    retaining = replace(installed, devices=(*installed.devices, {"device_id": ID_Y}))
+    allowed = _plant(tmp_path, monkeypatch, retaining)
+    assert handlers.install_anchor_from(allowed, root) == 0
+    assert json.loads(staged.read_bytes())["devices"][-1] == {"device_id": ID_Y}
+
+    # The allow-control staged an ordinary admission; a repeated identical incoming
+    # statement is still accepted (idempotent), while the override keeps R1 bypassable
+    # only when the caller explicitly names it.
+    assert handlers.install_anchor_from(source, root, allow_revocation_lift=True) == 0
+    assert json.loads(staged.read_bytes())["devices"] == [
+        {"device_id": ID_X, "revoked": True},
+        {"device_id": ID_Y},
+    ]
+
+
+def test_plant_replaces_existing_list_verbatim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed = _anchor(devices=({"device_id": ID_X},), admission="")
+    root, _ = _install(tmp_path, monkeypatch, installed)
+    incoming = replace(
+        installed,
+        admission=trust.ADMISSION_LISTED,
+        devices=({"device_id": ID_Y}, {"device_id": ID_X, "revoked": True}),
+    )
+    source = _plant(tmp_path, monkeypatch, incoming)
+
+    assert handlers.install_anchor_from(source, root) == 0
+    assert trust.staging_path(root).read_bytes() == anchor_bytes(incoming)
+    assert {"admitted": True} not in json.loads(trust.staging_path(root).read_bytes())["devices"]
+
+
+def _confirm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    installed: trust.OperatorAnchor | None = None,
+    ids: list[str] | None = None,
+    sudo_secret: str = "",
+) -> tuple[int, list[list[list[str]]], Path, Path]:
+    anchor = installed or _anchor()
+    root, target = _install(tmp_path, monkeypatch, anchor)
+    monkeypatch.setattr(
+        "local_operator.operator.devices.list_devices",
+        lambda root: [SimpleNamespace(device_id=ID_X), SimpleNamespace(device_id=ID_Y)],
+    )
+    commands: list[list[list[str]]] = []
+
+    def succeed(command: list[list[str]]) -> ElevationResult:
+        commands.append(command)
+        target.write_bytes(trust.staging_path(root).read_bytes())
+        return ElevationResult(0)
+
+    code = handlers.confirm_devices(root, ids or [ID_X], runner=succeed, sudo_secret=sudo_secret)
+    return code, commands, root, target
+
+
+def test_confirm_is_idempotent_and_keeps_unselected_phone_listed_as_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, commands, root, target = _confirm(tmp_path, monkeypatch)
+    assert code == 0 and len(commands) == 1
+    installed = trust.OperatorAnchor.from_json(json.loads(target.read_bytes()))
+    assert installed is not None
+    assert installed.admission == trust.ADMISSION_LISTED
+    assert {"device_id": ID_X} in installed.devices
+    assert ID_Y not in trust.open_device_ids(installed)
+    assert all("admitted" not in entry for entry in installed.devices)
+
+    # A repeated selection produces exactly the old bytes and no second gesture.
+    code, commands, _, _ = _confirm(
+        tmp_path,
+        monkeypatch,
+        installed=installed,
+        ids=[ID_X, ID_X],
+    )
+    assert code == 0 and commands == []
+
+
+def test_admit_refuses_migration_when_existing_phone_would_be_de_admitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, target = _install(tmp_path, monkeypatch, _anchor())
+    old = target.read_bytes()
+    monkeypatch.setattr(
+        "local_operator.operator.devices.list_devices",
+        lambda root: [SimpleNamespace(device_id=ID_X)],
+    )
+
+    assert handlers.admit_device(root, ID_Y) == 2
+    assert target.read_bytes() == old
+    assert not trust.staging_path(root).exists()
+    assert "un-confirm the phones you already paired" in capsys.readouterr().err
+
+
+def test_cancelled_prompt_writes_nothing_and_leaves_no_installable_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed = _anchor()
+    root, target = _install(tmp_path, monkeypatch, installed)
+    monkeypatch.setattr(
+        "local_operator.operator.devices.list_devices",
+        lambda root: [SimpleNamespace(device_id=ID_X)],
+    )
+    calls: list[Any] = []
+
+    def cancelled(command: Any) -> ElevationResult:
+        calls.append(command)
+        return ElevationResult(1, cancelled=True)
+
+    assert handlers.confirm_devices(root, [ID_X], runner=cancelled) == (handlers.ADMIT_CANCELLED)
+    assert len(calls) == 1
+    assert target.read_bytes() == anchor_bytes(installed)
+    assert not trust.staging_path(root).exists(), "a later install must not apply a cancelled admit"
+
+
+def test_admit_refuses_a_phone_revoked_while_its_card_was_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """M1: the state the product creates — card open, revocation lands — must refuse.
+
+    THE CELL THIS REPLACES PASSED FOR THE WRONG REASON (agent review round 2, M1):
+    it asserted the refusal `admit_device` gives a phone with no pending request, so
+    a revocation would have gone unnoticed. Here every other guard is satisfied —
+    the statement enforces its list, the phone HAS a pending pairing request — and
+    the only thing that can refuse it is the revocation.
+    """
+    from local_operator.operator import devices
+
+    installed = _anchor(
+        admission=trust.ADMISSION_LISTED,
+        devices=(({"device_id": ID_X, "revoked": True}),),
+    )
+    root, target = _install(tmp_path, monkeypatch, installed)
+    devices.write_pending(root, device_id=ID_X, name="phone", spki="00", code="123456")
+    prompts: list[Any] = []
+
+    def succeed(command: Any) -> ElevationResult:
+        prompts.append(command)
+        target.write_bytes(trust.staging_path(root).read_bytes())
+        return ElevationResult(0)
+
+    assert handlers.admit_device(root, ID_X, runner=succeed) == handlers.ADMIT_REVOKED
+    assert prompts == [], "a revoked phone spent the administrator prompt"
+    assert target.read_bytes() == anchor_bytes(installed), "the revocation was rewritten"
+    assert not trust.staging_path(root).exists(), "a refused admit left an installable stage"
+    assert "--authorise" in capsys.readouterr().err
+
+
+def test_an_admission_never_replaces_a_revoked_entry() -> None:
+    """The second lock: the builder cannot lift a revocation even if a caller is wrong."""
+    installed = _anchor(
+        admission=trust.ADMISSION_LISTED,
+        devices=(({"device_id": ID_X, "revoked": True}),),
+    )
+    proposed = handlers._admission_anchor(installed, [ID_X])
+    assert proposed.devices == ({"device_id": ID_X, "revoked": True},)
+    assert trust.device_is_revoked(proposed, ID_X)
+
+
+def test_a_failed_prompt_leaves_no_installable_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """m4: a non-cancelled failure must not leave a statement a later install applies."""
+    installed = _anchor()
+    root, target = _install(tmp_path, monkeypatch, installed)
+    monkeypatch.setattr(
+        "local_operator.operator.devices.list_devices",
+        lambda root: [SimpleNamespace(device_id=ID_X)],
+    )
+
+    def failed(command: Any) -> ElevationResult:
+        # NOT a cancellation: pkexec/sh report a real failure the same way a
+        # non-zero exit always does, and the statement used to survive it.
+        return ElevationResult(1, cancelled=False)
+
+    assert handlers.confirm_devices(root, [ID_X], runner=failed) == (handlers.ADMIT_INSTALL_FAILED)
+    assert target.read_bytes() == anchor_bytes(installed)
+    assert not trust.staging_path(root).exists(), "a failed prompt left an installable stage"
+    assert capsys.readouterr().err, "a failed privileged step printed nothing"
+
+
+def test_authorise_passes_the_admit_purpose_so_stored_password_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F5 must cover authorise, not only the new confirm helper."""
+    installed = _anchor(
+        admission=trust.ADMISSION_LISTED,
+        devices=({"device_id": ID_X, "revoked": True},),
+    )
+    root, target = _install(tmp_path, monkeypatch, installed)
+    handlers.stage_anchor(root, _admission_anchor_for_test(installed, ID_X))
+    resolved: list[str] = []
+    monkeypatch.setattr(handlers, "_resolve_secret_bytes", lambda name: resolved.append(name))
+    monkeypatch.setattr(
+        "local_operator.operator.pair_handlers.devices.record_revocation", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        "local_operator.operator.pair_handlers.devices.is_revoked_here", lambda *a, **k: True
+    )
+    monkeypatch.setattr(
+        "local_operator.operator.pair_handlers.devices.forget_revocation",
+        lambda *a, **k: True,
+    )
+    monkeypatch.setattr("local_operator.operator.pair_handlers.devices.list_devices", lambda *a: [])
+    monkeypatch.setattr("local_operator.operator.pair_handlers.devices.list_pending", lambda *a: [])
+    from argparse import Namespace
+
+    from local_operator.operator.pair_handlers import describe_devices
+
+    assert (
+        describe_devices(
+            Namespace(
+                authorise=ID_X,
+                revoke="",
+                print_only=False,
+                sudo_secret="ADMIN_PW",
+            )
+        )
+        == 2
+    )
+    assert resolved == []
+    assert target.read_bytes() == anchor_bytes(installed)
+
+
+def _admission_anchor_for_test(installed: trust.OperatorAnchor, device_id: str) -> Any:
+    return replace(
+        installed,
+        devices=({"device_id": device_id},),
+    )
+
+
+def test_downgrade_refuses_sudo_secret_without_resolving_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root, target = _install(tmp_path, monkeypatch, _anchor(admission=trust.ADMISSION_LISTED))
+    handlers.stage_anchor(root, _anchor())
+    resolved: list[str] = []
+    monkeypatch.setattr(handlers, "_resolve_secret_bytes", lambda name: resolved.append(name))
+
+    assert handlers.install_anchor(root, sudo_secret="ADMIN_PW") == 2
+    assert resolved == []
+    assert target.read_bytes() == anchor_bytes(_anchor(admission=trust.ADMISSION_LISTED))
+    assert "turning off phone admission" in capsys.readouterr().err
+
+
+def test_admission_command_pins_installed_and_staged_digests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    installed = _anchor()
+    code, commands, root, target = _confirm(tmp_path, monkeypatch, installed=installed)
+    assert code == 0
+    final = commands[0][-1]
+    assert final[-1] == hashlib.sha256(anchor_bytes(installed)).hexdigest()
+    assert final[-3] == hashlib.sha256(target.read_bytes()).hexdigest()
+    assert commands[0][0][0] == "sudo"
+
+
+def _run_posix_install(
+    tmp_path: Path,
+    staged: Path,
+    target: Path,
+    old_hex: str,
+    staged_hex: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Execute the real root script with only ownership flags shimmed out."""
+    import shutil
+
+    shim = tmp_path / "bin"
+    shim.mkdir(parents=True)
+    real = shutil.which("install")
+    assert real is not None
+    executable = shim / "install"
+    # Ownership flags are the only part this unprivileged control removes.
+    executable.write_text(
+        '#!/bin/sh\nwhile [ $# -gt 0 ]; do case "$1" in -o|-g) shift 2;; '
+        "-m) shift 2;; *) break;; esac; done\n"
+        f'exec {shlex.quote(real)} "$@"\n'
+    )
+    executable.chmod(0o755)
+    command = trust.install_commands(
+        staged, target, staged_hex or hashlib.sha256(staged.read_bytes()).hexdigest(), old_hex
+    )[-1]
+    assert command[0] == "sudo"
+    return subprocess.run(
+        command[1:], capture_output=True, text=True, env={"PATH": f"{shim}:/usr/bin:/bin"}
+    )
+
+
+def test_privileged_cas_refuses_installed_swap_and_staged_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = _anchor()
+    _, target = _install(tmp_path, monkeypatch, original)
+    staged = tmp_path / "config" / "staged.json"
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_bytes(anchor_bytes(_anchor(admission=trust.ADMISSION_LISTED)))
+    old_hex = hashlib.sha256(target.read_bytes()).hexdigest()
+
+    target.write_bytes(anchor_bytes(replace(original, devices=({"device_id": ID_Y},))))
+    assert _run_posix_install(tmp_path / "one", staged, target, old_hex).returncode == 3
+    assert ID_Y in target.read_text()
+
+    target.write_bytes(anchor_bytes(original))
+    before = target.read_bytes()
+    staged_hex = hashlib.sha256(staged.read_bytes()).hexdigest()
+    result = _run_posix_install(tmp_path / "two", staged, target, old_hex, staged_hex)
+    # The unchanged control is the discriminating setup: it must be able to pass
+    # before its staged-file mutation proves the negative is not a broken rig.
+    assert result.returncode == 0, result.stderr
+    target.write_bytes(before)
+    staged.write_bytes(anchor_bytes(_anchor(devices=({"device_id": ID_Y},))))
+    assert (
+        _run_posix_install(tmp_path / "three", staged, target, old_hex, staged_hex).returncode == 3
+    )
+    assert target.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------
+# Design round 2 D8 / agent review round 3 m2–m5: what the verb prints, and when
+# ---------------------------------------------------------------------------
+
+_GESTURES = (
+    "Windows will ask you to allow this.",
+    "Your Mac will ask for your admin password.",
+    "Your computer will ask for your password.",
+)
+
+
+def _verb(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    installed: trust.OperatorAnchor,
+    *,
+    paired: tuple[str, ...] = (ID_X,),
+) -> tuple[Path, Path, list[Any]]:
+    """`lop operator devices` against a throwaway anchor; the OS prompt is a fake.
+
+    The fake records what stdout already held when it was called, which is the
+    reading order a person sees: the gesture line, then the OS sheet.
+    """
+    from local_operator.operator import elevate
+
+    root, target = _install(tmp_path, monkeypatch, installed)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.setattr(
+        "local_operator.operator.devices.list_devices",
+        lambda root: [SimpleNamespace(device_id=device_id) for device_id in paired],
+    )
+    prompts: list[Any] = []
+
+    def prompt(command: Any, **kwargs: Any) -> ElevationResult:
+        prompts.append(command)
+        target.write_bytes(trust.staging_path(root).read_bytes())
+        return ElevationResult(0)
+
+    monkeypatch.setattr(elevate, "run_elevated", prompt)
+    return root, target, prompts
+
+
+def _devices(**flags: Any) -> int:
+    from local_operator.operator.pair_handlers import describe_devices
+
+    args = {"revoke": "", "authorise": "", "approve": "", "confirm": False, "print_only": False}
+    args.update(flags)
+    return describe_devices(argparse.Namespace(**args))
+
+
+def _no_gesture(out: str) -> None:
+    assert not any(gesture in out for gesture in _GESTURES), out
+
+
+def test_d8_the_gesture_line_prints_right_before_a_prompt_that_happens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The ALLOW control for the four states below: a real prompt is announced first."""
+    from local_operator.operator import elevate
+
+    _, _, prompts = _verb(tmp_path, monkeypatch, _anchor())
+    seen: list[str] = []
+    real = elevate.run_elevated
+
+    def announce_then_prompt(command: Any, **kwargs: Any) -> ElevationResult:
+        seen.append(capsys.readouterr().out)
+        return real(command, **kwargs)
+
+    monkeypatch.setattr(elevate, "run_elevated", announce_then_prompt)
+    monkeypatch.setattr(elevate, "prompt_refusal", lambda **kwargs: None)
+    assert _devices(confirm=True) == 0
+    assert len(prompts) == 1
+    assert seen == [elevate.confirm_card_copy()[2] + "\n"], seen
+    assert capsys.readouterr().out.startswith("Confirmed on this computer."), "receipt"
+
+
+def test_d8_uac_off_prints_the_reason_and_no_gesture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.operator import elevate
+
+    root, target, prompts = _verb(tmp_path, monkeypatch, _anchor())
+    off = "Windows User Account Control is set not to ask for approval"
+    real = elevate.prompt_refusal
+    monkeypatch.setattr(elevate, "windows_uac_refusal", lambda: off + ", so …")
+    # ONLY the can-prompt question is Windows' here: flipping `trust._on_windows`
+    # would also move the anchor path the rest of the run reads.
+    monkeypatch.setattr(elevate, "prompt_refusal", lambda **kwargs: real(windows=True))
+
+    assert _devices(confirm=True) == handlers.ADMIT_NO_PROMPT
+    printed = capsys.readouterr()
+    _no_gesture(printed.out)
+    assert printed.out == "" and printed.err.startswith(off), printed
+    assert prompts == [] and not trust.staging_path(root).exists()
+    assert target.read_bytes() == anchor_bytes(_anchor())
+
+
+def test_d8_no_launcher_prints_the_next_step_and_no_gesture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from local_operator.operator import elevate
+
+    root, _, prompts = _verb(tmp_path, monkeypatch, _anchor())
+    monkeypatch.setattr(elevate, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(elevate.trust, "_on_windows", lambda: False)
+    monkeypatch.setattr(elevate.shutil, "which", lambda name: None)
+
+    assert _devices(confirm=True) == handlers.ADMIT_NO_PROMPT
+    printed = capsys.readouterr()
+    _no_gesture(printed.out)
+    assert printed.out == "" and printed.err.strip() == elevate.NO_LAUNCHER_REFUSAL, printed
+    assert "polkit" not in printed.err and "Install sudo" in printed.err
+    assert prompts == [] and not trust.staging_path(root).exists()
+
+
+def test_d8_a_revoked_phone_is_refused_with_no_gesture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    installed = _anchor(
+        admission=trust.ADMISSION_LISTED, devices=({"device_id": ID_X, "revoked": True},)
+    )
+    _, _, prompts = _verb(tmp_path, monkeypatch, installed)
+
+    assert _devices(approve=ID_X) == handlers.ADMIT_REVOKED
+    printed = capsys.readouterr()
+    _no_gesture(printed.out)
+    assert printed.out == "" and printed.err.startswith("this phone was removed"), printed
+    assert f"--authorise {ID_X}" in printed.err
+    assert prompts == []
+
+
+def test_d8_an_already_confirmed_confirm_asks_nothing_and_promises_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    installed = _anchor(admission=trust.ADMISSION_LISTED, devices=({"device_id": ID_X},))
+    _, _, prompts = _verb(tmp_path, monkeypatch, installed)
+
+    assert _devices(confirm=True) == 0
+    printed = capsys.readouterr()
+    _no_gesture(printed.out)
+    assert printed.out.startswith("Confirmed on this computer."), printed
+    assert printed.err == "" and prompts == []
+
+
+def test_m2_osascript_exit_1_is_a_cancel_only_with_its_cancel_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused install script (CAS `exit 3`) also exits osascript 1; it is no cancel."""
+    from local_operator.operator import elevate
+
+    monkeypatch.setattr(elevate, "sys", SimpleNamespace(platform="darwin"))
+    stderr = {"text": ""}
+    monkeypatch.setattr(
+        elevate.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, "", stderr["text"]),
+    )
+    command = [["install", "-m", "0644", "a", "b"]]
+
+    stderr["text"] = "0:120: execution error: User canceled. (-128)\n"
+    assert elevate.run_elevated(command, windows=False).cancelled is True
+    stderr["text"] = "0:120: execution error: the installed anchor changed (3)\n"
+    refused = elevate.run_elevated(command, windows=False)
+    assert refused.cancelled is False and refused.exit_code == 1
+
+
+def test_r4_m3_a_refused_install_script_says_why_and_a_cancel_says_nothing_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Capturing osascript's stderr must not swallow the install script's own refusal."""
+    from local_operator.operator import elevate
+
+    monkeypatch.setattr(elevate, "sys", SimpleNamespace(platform="darwin"))
+    monkeypatch.setattr(elevate, "prompt_refusal", lambda **kwargs: None)
+    reason = "the installed anchor changed after it was read; nothing was installed"
+    stderr = {"text": ""}
+    monkeypatch.setattr(
+        elevate.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, "", stderr["text"]),
+    )
+    command = [["install", "-m", "0644", "a", "b"]]
+
+    stderr["text"] = f"0:120: execution error: {reason} (3)\n"
+    refused = elevate.run_elevated(command, windows=False)
+    assert refused.cancelled is False and reason in refused.diagnosis
+    stderr["text"] = "0:120: execution error: User canceled. (-128)\n"
+    assert elevate.run_elevated(command, windows=False).diagnosis == ""
+
+    # ...and the verb prints it, ahead of the generic retry sentence.
+    installed = _anchor()
+    root, _ = _install(tmp_path, monkeypatch, installed)
+    monkeypatch.setattr(
+        "local_operator.operator.devices.list_devices",
+        lambda root: [SimpleNamespace(device_id=ID_X)],
+    )
+    assert (
+        handlers.confirm_devices(root, [ID_X], runner=lambda command: refused)
+        == handlers.ADMIT_INSTALL_FAILED
+    )
+    err = capsys.readouterr().err
+    assert reason in err and err.index(reason) < err.index("did not complete"), err
+    cancel = elevate.ElevationResult(1, cancelled=True)
+    assert handlers.confirm_devices(root, [ID_X], runner=lambda command: cancel) == (
+        handlers.ADMIT_CANCELLED
+    )
+    assert "-128" not in capsys.readouterr().err
+
+
+def test_m3_the_second_lock_refuses_a_revoked_id_on_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the first check bypassed, the statement's own revocation still refuses."""
+    installed = _anchor(
+        admission=trust.ADMISSION_LISTED, devices=({"device_id": ID_X, "revoked": True},)
+    )
+    root, target = _install(tmp_path, monkeypatch, installed)
+    monkeypatch.setattr(handlers, "_revoked_selection", lambda root, ids: [])
+    monkeypatch.setattr(
+        "local_operator.operator.devices.list_devices",
+        lambda root: [SimpleNamespace(device_id=ID_X)],
+    )
+
+    assert handlers.admit_device(root, ID_X) == handlers.ADMIT_REVOKED
+    assert handlers.confirm_devices(root, [ID_X]) == handlers.ADMIT_REVOKED
+    assert target.read_bytes() == anchor_bytes(installed)
+
+
+def test_m4_approve_confirms_its_phone_even_while_another_is_unconfirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    installed = _anchor(admission=trust.ADMISSION_LISTED, devices=())
+    _, target, prompts = _verb(tmp_path, monkeypatch, installed, paired=(ID_X, ID_Y))
+    from local_operator.operator import elevate
+
+    monkeypatch.setattr(elevate, "prompt_refusal", lambda **kwargs: None)
+
+    assert _devices(approve=ID_X) == 0
+    out = capsys.readouterr().out
+    confirmed = trust.OperatorAnchor.from_json(json.loads(target.read_bytes()))
+    assert confirmed is not None and len(prompts) == 1
+    assert ID_X in trust.open_device_ids(confirmed)
+    assert "Nothing needed confirming" not in out and "Confirmed on this computer." in out, out
+
+
+def test_m4_print_only_prints_the_command_and_no_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    installed = _anchor(admission=trust.ADMISSION_LISTED, devices=())
+    _, target, prompts = _verb(tmp_path, monkeypatch, installed)
+
+    assert _devices(approve=ID_X, print_only=True) == 0
+    out = capsys.readouterr().out
+    assert prompts == [] and target.read_bytes() == anchor_bytes(installed)
+    assert "Nothing needed confirming" not in out and "Confirmed" not in out, out
+    _no_gesture(out)
+    assert out.strip(), "print-only printed no command"
+
+
+def test_m5_a_bad_selection_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, _, prompts = _verb(tmp_path, monkeypatch, _anchor())
+
+    assert _devices(approve=ID_Y) == 2
+    assert "choose one or more paired phones" in capsys.readouterr().err
+    assert prompts == []

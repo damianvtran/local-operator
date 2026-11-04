@@ -43,9 +43,15 @@ def exec_server(tmp_path, monkeypatch):
             pass
 
         def do_GET(self):
-            body = json.dumps(
-                {"object": "list", "data": [{"id": "exec-fixture", "object": "model"}]}
-            ).encode()
+            if self.path.endswith("/tunnels/billing"):
+                # The Radient account half of the Saver gate (`saver.gate.
+                # read_availability`): a positive fresh balance. Only a test that
+                # points RADIENT_API_BASE_URL here ever reads it.
+                body = json.dumps({"result": {"balance_usd": "5.00"}}).encode()
+            else:
+                body = json.dumps(
+                    {"object": "list", "data": [{"id": "exec-fixture", "object": "model"}]}
+                ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -203,6 +209,7 @@ def exec_server(tmp_path, monkeypatch):
         return result
 
     setattr(run, "release", release)
+    setattr(run, "port", server.server_port)
     setattr(run, "env", env)
     setattr(run, "cwd", tmp_path)
     try:
@@ -224,7 +231,12 @@ def exec_server(tmp_path, monkeypatch):
                 and generation
                 and _owner_is_dead(state["pid"], generation) is False
             ):
-                os.kill(state["pid"], signal.SIGTERM)
+                # SIGKILL, not SIGTERM: since the victim-side sanction gate a bare
+                # SIGTERM is REFUSED, so a teardown that sent one would leak the worker
+                # past the test. This is teardown of a worker THIS fixture started under
+                # its private config; SIGKILL is the unrefusable rung and loses nothing
+                # the test still reads.
+                os.kill(state["pid"], signal.SIGKILL)
         server.shutdown()
         server.server_close()
         serving.join(timeout=5)
@@ -263,6 +275,7 @@ def _resume_preflight_environment(run, root):
             "LOCAL_OPERATOR_CONFIG_DIR": str(root),
             "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
             "TERM": "xterm-256color",
+            "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_SYSTEM": os.devnull,
             "GIT_TERMINAL_PROMPT": "0",
             **NO_NOTIFY_ENV,
@@ -392,6 +405,124 @@ def test_exec_team_count_loop_and_resume(exec_server):
     assert '"status": "completed"' in json.dumps(
         [json.loads(line) for line in persisted.splitlines()]
     )
+
+
+def _saver_choices(directory: Path) -> list[object]:
+    """Every journaled Saver choice in a session's transcript, in order."""
+    from local_operator.saver.command import SAVER_CUSTOM_TYPE
+
+    rows = [
+        json.loads(line)
+        for line in (directory / "transcript.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    return [
+        row["payload"]["details"]["enabled"]
+        for row in rows
+        if row.get("type") == "custom"
+        and row.get("payload", {}).get("custom_type") == SAVER_CUSTOM_TYPE
+    ]
+
+
+def _enable_can_run(run: Any, root: Path) -> None:
+    """Build the world in which the Saver gate HONOURS an enable.
+
+    WHY THIS EXISTS (PR #3143 rebase, bisected): ``fc32046`` made ``--saver on``
+    go through the real gate (``saver.command.set_saver_choice``), which refuses
+    and journals nothing unless every step of ``resolve_saver`` passes. The
+    fixture's fresh config fails the first step (``radient.saver.mode`` defaults
+    to ``off``), so the journaled-and-resumes test had been asserting a state the
+    product deliberately refuses to enter. The refusal is correct and has its own
+    test below; this sets up each step for real instead of patching the gate:
+
+    1. ``radient.saver.mode: opt_in`` in the isolated config (the setting a user
+       turns on in /settings);
+    2. one Radient OAuth row in the isolated ``auth.db`` (what ``lop login
+       radient`` leaves; ``tunnels.api.credential_id`` is the sign-in test);
+    3. the billing read answered by this fixture's loopback server with a
+       positive balance, which needs ``RADIENT_API_BASE_URL`` pointed at it and
+       ``RADIENT_ORG_ALLOW_NONCANONICAL_BASE=1`` — the documented opt-in for the
+       account bearer to travel to a non-canonical host (QA rigs, 127.0.0.1).
+    """
+    import secrets
+    import time
+
+    from local_operator.providers.auth_store import AuthStore
+
+    # `classification.auto: false` is not part of the gate: a Radient login
+    # makes the (default-on) classification layer call the PRODUCTION decisions
+    # route with this synthetic bearer, and a test must never reach production.
+    ConfigManager(root).update_config(
+        {
+            "radient": {"saver": {"mode": "opt_in"}},
+            "classification": {"auto": False},
+        }
+    )
+    store = AuthStore(db_path=root / "auth.db", config_dir=root)
+    try:
+        store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "access": secrets.token_hex(16),
+                "refresh": secrets.token_hex(16),
+                "expires": int(time.time() * 1000) + 3_600_000,
+            },
+        )
+    finally:
+        store.close()
+    run.env["RADIENT_API_BASE_URL"] = f"http://127.0.0.1:{run.port}/v1"
+    run.env["RADIENT_ORG_ALLOW_NONCANONICAL_BASE"] = "1"
+
+
+def test_exec_saver_on_is_refused_and_says_why_when_the_setting_is_off(exec_server):
+    """The half the journaling test was silently missing: global off + ``--saver on``.
+
+    The gate's first step refuses the enable, so nothing may be journaled (a
+    stored ``True`` would turn Saver on the moment the setting flips, without the
+    user asking again), and exec — which has no transcript notice — must say why
+    on stderr in the gate's own sentence, the one that names the setting.
+    """
+    from local_operator.saver.command import refusal_text
+    from local_operator.saver.gate import SaverDecision
+
+    run, _requests, root = exec_server
+    first = run("exec", "Turn Saver on", "--saver", "on", "--json", stdin="")
+    assert first.returncode == 0, "a refused enable is reported, not a failed run"
+    assert refusal_text(SaverDecision(False, "gate")) in first.stderr
+    session_id = first.stderr.split("session_id=", 1)[1].split()[0]
+    assert _saver_choices(root / "sessions" / session_id) == []
+
+
+def test_exec_saver_flag_is_journaled_and_resumes(exec_server):
+    """``--saver`` through the real CLI, a real session and a real transcript.
+
+    The unit half (``tests/unit/test_exec_startup.py``) only proves the flag
+    reaches a session object. What a headless runner needs is that the choice
+    SURVIVES, because an exec session is the one nobody watches turn by turn:
+    the run must journal it, and a later ``--resume`` with no flag must still
+    read it back.
+    """
+    run, _requests, root = exec_server
+    _enable_can_run(run, root)
+
+    choices = _saver_choices
+
+    first = run("exec", "Turn Saver on", "--saver", "on", "--json", stdin="")
+    assert first.returncode == 0
+    session_id = first.stderr.split("session_id=", 1)[1].split()[0]
+    directory = root / "sessions" / session_id
+    assert choices(directory) == [True], "the exec run journals the explicit choice"
+
+    resumed = run("exec", "--resume", session_id, "Still on?", "--json", stdin="")
+    assert resumed.returncode == 0
+    assert choices(directory) == [True], "a resume with no flag keeps the stored choice"
+
+    cleared = run(
+        "exec", "--resume", session_id, "Back to global", "--saver", "inherit", "--json", stdin=""
+    )
+    assert cleared.returncode == 0
+    assert choices(directory) == [True, None], "inherit is a durable decision, not an absence"
 
 
 def test_exec_team_with_a_profile_is_refused_at_preflight(exec_server):
@@ -857,12 +988,14 @@ async def test_exec_supervisor_approval_ui(exec_server, tmp_path, approve):
 
 @pytest.mark.parametrize(
     "termination,expected",
-    # `term` is an UNSANCTIONED SIGTERM (a bare os.kill, no stop marker), which is
-    # deliberately NOT a cancellation any more: nobody asked for it, and the ledger says
-    # so (`interrupted` + `stop_class: unattributed-signal`). `stop` is the supervisor's
-    # own control op and stays `cancelled`. `kill` is uncatchable, so the worker leaves
-    # no row and reconcile classifies it `unattributed-death`.
-    [("term", "interrupted"), ("kill", "interrupted"), ("stop", "cancelled")],
+    # `term` USED TO BE HERE: an unsanctioned SIGTERM (a bare os.kill, no stop marker)
+    # ended the worker as `interrupted` / `unattributed-signal`. Since the victim-side
+    # sanction gate that signal is REFUSED and the worker keeps its turn, so it has its
+    # own cell below (`test_an_unsanctioned_sigterm_is_refused_by_a_real_worker`).
+    # `stop` is the supervisor's own control op and stays `cancelled`. `kill` is
+    # uncatchable, so the worker leaves no row and reconcile classifies it
+    # `unattributed-death`.
+    [("kill", "interrupted"), ("stop", "cancelled")],
 )
 def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
     import signal
@@ -893,7 +1026,7 @@ def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
     else:
         # Only the worker created by THIS fixture, under its private config,
         # is signalled. Never target ambient session discovery or cmux state.
-        os.kill(status["pid"], signal.SIGTERM if termination == "term" else signal.SIGKILL)
+        os.kill(status["pid"], signal.SIGKILL)
     # THE WAIT IS CHEAP, AND LONG ENOUGH FOR THE POLL ITSELF (QA round 1, Q1).
     # ``job_status(reconcile=True)`` shells out to ``ps`` to prove the owner is
     # gone, and under fleet load one call measured 2.8-14 s — which is how a 15 s
@@ -914,7 +1047,6 @@ def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
     assert (
         status.get("stop_class")
         == {
-            "term": "unattributed-signal",
             "kill": "unattributed-death",
             "stop": "deliberate",
         }[termination]
@@ -924,6 +1056,65 @@ def test_exec_loop_lifecycle_outcomes(exec_server, termination, expected):
     assert len(requests) == before, "Status/reconciliation must never restart iterations"
     if termination != "kill":
         assert not Path(status["runtime_path"]).exists()
+
+
+def test_an_unsanctioned_sigterm_is_refused_by_a_real_worker(exec_server):
+    """The `term` row of the lifecycle table, rewritten for the sanction gate.
+
+    A REAL background worker receives a bare SIGTERM (nothing staged). It must keep
+    running its loop, say so in the ledger (an arrival row with `sanction: none` and
+    `action: refused`, no terminal row), and stay mortal to SIGKILL — which is then
+    classified `unattributed-death`, because the refused signal wrote no receipt of a
+    stop and a SIGKILL writes nothing.
+    """
+    import signal
+    import time
+
+    from local_operator.exec_mode import job_status, read_job_records
+
+    run, _requests, _root = exec_server
+    result = run(
+        "exec",
+        "--goal",
+        "HOLD_FIXTURE",
+        "--loop",
+        "2",
+        "--name",
+        "Refusal fixture",
+        "--background",
+        stdin="",
+    )
+    assert result.returncode == 0
+    job_id = result.stderr.split("Background job ", 1)[1].split(":", 1)[0]
+    status = _running_status(job_status, job_id)
+    assert status["status"] == "running"
+    pid = status["pid"]
+
+    # Only the worker created by THIS fixture, under its private config.
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 60
+    arrivals: list[dict[str, Any]] = []
+    while time.monotonic() < deadline and not arrivals:
+        arrivals = [r for r in read_job_records() if r.get("id") == job_id and "signal" in r]
+        time.sleep(0.1)
+    assert arrivals, "the refused arrival was never recorded"
+    assert arrivals[0]["signal"]["sanction"] == "none"
+    assert arrivals[0]["signal"]["action"] == "refused", arrivals[0]["signal"]
+    time.sleep(1.0)
+    assert job_status(job_id, reconcile=False)["status"] == "running", "the worker obeyed it"
+    os.kill(pid, 0)  # still alive: raises ProcessLookupError if it exited
+
+    os.kill(pid, signal.SIGKILL)
+    deadline = time.monotonic() + 90
+    reconciled = 0
+    while time.monotonic() < deadline:
+        status = job_status(job_id, reconcile=reconciled < 10)
+        if status["status"] not in ("starting", "running"):
+            break
+        reconciled += 1
+        time.sleep(0.1)
+    assert status["status"] == "interrupted", status
+    assert status.get("stop_class") == "unattributed-death", status
 
 
 def test_dash_leading_values_reach_the_detached_worker(exec_server):

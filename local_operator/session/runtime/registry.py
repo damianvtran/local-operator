@@ -59,6 +59,7 @@ from typing import Any, Callable, Literal, NamedTuple, TypeVar
 from local_operator import procstate
 from local_operator.paths import config_dir
 from local_operator.procstate import is_zombie, zombie_states
+from local_operator.session.runtime import artefact_names
 from local_operator.session.runtime.types import (
     HEARTBEAT_INTERVAL_S,
     HEARTBEAT_TIMEOUT_S,
@@ -359,6 +360,53 @@ def read_signal_receipt(conversation_dir: Path) -> dict[str, Any] | None:
     """
     try:
         data = json.loads(signal_receipt_path(conversation_dir).read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+#: THE REFUSALS FILE: arrivals a runtime recorded and then did NOT obey.
+#:
+#: WHY IT IS NOT IN THE RECEIPT. A receipt with no ``signals`` list is a shape today's
+#: tree does not produce (``merge_into`` always appends one), and the readers that
+#: consume the receipt treat it as impossible in ways that are deliberate:
+#: ``signal_receipt.covers_run`` refuses an empty-signal receipt so its caller falls
+#: through to other evidence, while ``rescue._receipt_covers_run`` accepts on the run
+#: key alone and ``rescue._death_class_receipt`` answers ``unclassified/
+#: receipt-no-signals`` — TERMINAL, refusing recovery — for exactly that shape. A run
+#: that refused an anonymous SIGTERM and was then SIGKILLed is precisely a run whose
+#: recovery matters, so the refusal must not be able to reach that classifier at all.
+#: Separate file, same directory, same run key: every existing reader is untouched by
+#: construction, and "the receipt exists" keeps meaning "a signal reached this run and
+#: its pairing is in here".
+#:
+#: COALESCED PER RUN by its writer (``signal_receipt.record_refusal``): a sender
+#: looping SIGTERM at one runtime must not grow a file on the signal path without
+#: limit. Never removed by a runtime, for the receipt's reason: evidence persists
+#: until a NEW run (different run key) replaces it.
+SIGNAL_REFUSALS_NAME = artefact_names.SIGNAL_REFUSALS_NAME
+
+
+def signal_refusals_path(conversation_dir: Path) -> Path:
+    """Where one conversation's refusal record lives."""
+    return conversation_dir / SIGNAL_REFUSALS_NAME
+
+
+def write_signal_refusals(conversation_dir: Path, payload: dict[str, Any]) -> Path:
+    """Stage-write the refusals record (0600, :func:`write_signal_receipt`'s shape).
+
+    Raises only when the write itself fails; ``signal_receipt.record_refusal`` is what
+    makes it best-effort, because this runs on a signal-arrival path.
+    """
+    target = signal_refusals_path(conversation_dir)
+    _staged_write(target, payload, prefix=f".{SIGNAL_REFUSALS_NAME}.")
+    return target
+
+
+def read_signal_refusals(conversation_dir: Path) -> dict[str, Any] | None:
+    """The refusal record as a dict, or ``None`` when there is none. Tolerant."""
+    try:
+        data = json.loads(signal_refusals_path(conversation_dir).read_text())
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None

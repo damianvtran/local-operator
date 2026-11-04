@@ -223,6 +223,14 @@ export async function click(
       // default actions (link navigation, form submit) on a background tab.
       // This runs in the page via OUR debugger session, not injected page
       // script, keeping it same-origin and agent-scoped.
+      //
+      // The same constraint is why this build serves NEITHER `hover` NOR `press`
+      // (both are DESKTOP_ONLY_METHODS in protocol.py): both need trusted
+      // Input.dispatch{Mouse,Key}Event, which is dropped here, and the in-page
+      // substitute above fires handlers but not CSS :hover or a key's default
+      // action. A lookalike that reports success while :hover never applied is
+      // worse than a typed refusal, and activating the tab to make real input
+      // land would break the no-focus-steal guarantee.
       await callOnNode<void>(
         surface.tabId,
         objectId,

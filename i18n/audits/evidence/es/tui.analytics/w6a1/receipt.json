@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "audit_id": "w6a1",
+  "audit_round": 1,
+  "locale": "es",
+  "namespace": "tui.analytics",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), es-tui-audit-b",
+    "session_or_instance": "60db1cb280ee",
+    "model": "radient/auto"
+  },
+  "seals": [
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a1/record.json",
+      "sha256": "4ea9ec943da3ed4b2b5be8ce3c98ada746090522d1d4157ce3b0c52a6e631f29"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a1/report.md",
+      "sha256": "7f1c0d11a7a5d4312952ea7a6ce77b281981473168aa6e1c684b159516eabc4e"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a1/audit.log",
+      "sha256": "4223a6cef639fdaa5031f602777456dbecb3dc9f67d250a62c120e54130d1c9b"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a1/checks.py",
+      "sha256": "5862a93debbbfb64ad8c6154fd2328e4e0058086041a02788feb9bc189d362af"
+    }
+  ],
+  "verdict": "passed",
+  "unresolved_blocker_major_count": 0,
+  "note": "sealed at write time; a later edit to any companion invalidates its seal"
+}

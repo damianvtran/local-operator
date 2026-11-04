@@ -96,6 +96,14 @@ _STEM: Final = re.compile(r"[A-Za-z0-9_-]{1,128}")
 #: and every request-path caller (the files route, the Library service's budgeted
 #: reads) must stay unpaused without having to say so. Being thread-local, a
 #: value set on the indexer thread is invisible to every other thread.
+#:
+#: The pause runs INSIDE :func:`refresh`, with that session's per-key ledger lock
+#: held. A budgeted reader that loses the lock serves the last published snapshot
+#: and does not wait, but an unbudgeted caller blocks on the lock -- the
+#: ``materialise`` POST (``service.materialise``, ``budget_s=None``) on the same
+#: session can wait up to the indexer batch's pause budget
+#: (``transcript_index._YIELD_BUDGET_S``) longer while a paint is held elsewhere
+#: (#3033 review m3).
 YIELD_TO: contextvars.ContextVar[Callable[[], None] | None] = contextvars.ContextVar(
     "session_files_ledger_yield_to", default=None
 )

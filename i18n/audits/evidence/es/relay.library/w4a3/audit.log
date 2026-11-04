@@ -1,0 +1,63 @@
+# Audit log — es / relay.library / round 2 (`w4a3`)
+
+Auditor: translation-auditor (lopdev team), session 8eb3b9c9a687, lane es-w4-auditor-b
+Model: radient/auto (self-reported). Primary is anthropic/claude-sonnet-5-5; provider-failure
+switches fired on quota before the catalogues were read (openai/gpt-6-astra, kimi/k3.1-pro, then
+radient/auto). Disclosed fallback. This round began after a session-runtime restart wiped the
+working context, so everything below was re-derived from disk rather than recalled.
+Date: 2026-10-29.
+Supersedes: the `w4a2` audit of relay.library.count, the whole namespace; superseded target sha256 `f2d5ab3a9a5660f94b7656324a4c1069c06d88c31e908a5df1226872cb7d1a71`.
+
+## 1. Orientation — read-only
+
+    cd ~/lo-i18n-es && git rev-parse HEAD
+    -> 183f7a0537e4cee42fd82f25a21fe52953a81bdf
+    git status --porcelain -- .../es/relay.account_policy.json .../es/relay.library.json .../es/relay.login.json
+    -> ?? .../relay.account_policy.json
+       ?? .../relay.library.json
+       ?? .../relay.login.json        (all three still UNTRACKED)
+
+    shasum -a 256:
+      relay.account_policy.json  67dbbf6a3bc75058b38f40a076de852c86c7d58004e938b43019513280e2a407
+      relay.library.json         0933a66475cf6b9b74bbf3befa849296f3fd5014a3707f27f451b6476b85e8bf
+      relay.login.json           b6e676acdc5cbb9a85423c458a19a5d6e5bc35594eb1dd21b23569af32f29658
+
+`relay.login` hashes IDENTICALLY to its w4a2 value, which is the mechanical proof that it was
+untouched and that its w4a2 record still binds. It is not audited again here.
+
+## 2. Mechanical pass
+
+    python3 i18n/audits/evidence/es/relay.library/w4a3/checks.py
+
+    exit 0 — ALL CHECKS PASS (17 assertions)
+
+    PASS  render 0 :: '0 recursos' (category other)
+    PASS  render 1 :: '1 recurso' (category one)
+    PASS  render 2 :: '2 recursos' (category other)
+    PASS  render 21 :: '21 recursos' (category other)
+    PASS  render 1000000 :: '1.000.000 de recursos' (category many)
+    PASS  render 1500000 :: '1.500.000 recursos' (category other)
+    PASS  control: superseded string rendered WRONG at 1000000 :: 1.000.000 recursos
+    PASS  control: old and new agree at a non-multiple of 10^6
+    PASS  every es plural message carries `many` :: 62/62
+
+## 3. What was read
+
+- The single value, against the English source and the sidecar (both unchanged, same sha256 as w4a2).
+- The repository's ICU runtime itself: `local_operator.i18n.runtime.render_message(src, {'count': n}, 'es')`
+  and `format.plural_category('es', n)`, at 0, 1, 2, 21, 1 000 000 and 1 500 000.
+- A same-code control rendering the superseded string at the same six counts, to isolate exactly
+  what the fix changes.
+- A census of ICU branches across every es catalogue.
+
+## 4. Judgement
+
+**PASSED.** es-w4a2-LB-01 closed by execution: all six rendered outputs match the claim, the control
+proves divergence only at exact multiples of 10\(^6\), and the key is no longer an outlier — 62/62 es
+plural messages now carry `many`. Nothing else outstanding on this namespace.
+
+## 5. Writes
+
+`record.json`, `report.md`, `audit.log`, `checks.py` in this directory. Nothing else. No catalogue,
+sidecar, ledger, allowance, guide or generated file touched; no git write; no file deleted, moved or
+renamed.

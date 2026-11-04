@@ -1,0 +1,191 @@
+{
+  "locale": "hi",
+  "scope": "local_operator/i18n/catalogues/hi/wire.slash.json — whole file, all 52 values, read from the working tree of /Users/damian/lo-core-fix on top of 7159e2a309 (uncommitted hi edit: 8 values across 7 keys); English reference local_operator/i18n/catalogues/en/wire.slash.json in the same tree. Independent second round: this session did not write these values and did not audit their previous revision; round-1 claims verified against the bytes, not taken as truth.",
+  "tree_head": "7159e2a30927831f5dfb88f84c588eac07770e5d",
+  "tree_state": "dirty working tree: 7 hi/es/fr/ru/ur/vi/zh-CN wire.slash.json catalogues modified, uncommitted. Target file sha256 da022ae8f9e0777ae0d7d7cb53e593a769400ace0a090f282cf79fe646a98b48 differs from the round-1 audited bytes (8d069437f4a51a61db732c60e7b4028b5ab2453790bd2c98c0ea9bd335455c28), so every round-1 finding was re-checked on today's bytes.",
+  "audit_date": "2026-10-29",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "80b132698268",
+    "model": "radient/auto",
+    "actual_model_source": "provider fallback chain, disclosed: anthropic/claude-sonnet-5-5 (session primary; provider quota failure) -> openai/gpt-6-astra (quota) -> kimi/k3.1-pro (quota) -> radient/auto (this audit). No model ran twice; all judgement below was done under radient/auto.",
+    "independent_from_translator_session": true,
+    "independence_note": "Cold second round: no value here was written by this session, and the round-1 audit was another session (610f8d957d36). Round-1 receipt read only as a claim list to verify. Judge-only: the checkout was not edited."
+  },
+  "input_sha256": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.json",
+      "sha256": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/hi/wire.slash.json",
+      "sha256": "da022ae8f9e0777ae0d7d7cb53e593a769400ace0a090f282cf79fe646a98b48"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.slash.context.json",
+      "sha256": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215"
+    }
+  },
+  "counts": {
+    "BLOCKER": 0,
+    "MAJOR": 0,
+    "MINOR": 1,
+    "NIT": 1
+  },
+  "verdict": "pass",
+  "instance": "80b132698268-slash2-hi",
+  "namespaces": {
+    "wire.slash": {
+      "status": "passed",
+      "keys_audited": 52,
+      "sha256": {
+        "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+        "target": "da022ae8f9e0777ae0d7d7cb53e593a769400ace0a090f282cf79fe646a98b48"
+      },
+      "previous_findings": [
+        {
+          "id": "hi-slash-M1",
+          "severity": "MAJOR",
+          "keys": [
+            "wire.slash.accounts",
+            "wire.slash.logout"
+          ],
+          "status": "fixed",
+          "evidence": "accounts now 'सहेजे गए क्रेडेंशियल्स दिखाएँ' and logout 'सहेजे गए प्रोवाइडर क्रेडेंशियल्स हटाएँ' — plural क्रेडेंशियल्स on both, matching glossary note 6 and wire.errors.settings usage. 18 and 25 cells."
+        },
+        {
+          "id": "hi-slash-m1",
+          "severity": "MINOR",
+          "keys": [
+            "wire.slash.agent"
+          ],
+          "status": "fixed",
+          "evidence": "object restored: 'किसी एजेंट का क्लास बदलें'. 52 cells, inside the 57-cell picker budget at 80 columns and the 60-cell /help description column; the restored noun cost 4 cells and the line still fits."
+        },
+        {
+          "id": "hi-slash-m2",
+          "severity": "MINOR",
+          "keys": [
+            "wire.slash.hub"
+          ],
+          "status": "fixed",
+          "evidence": "mixed-script 'ऑटो-push' replaced by 'अपने-आप push'; push stays Latin per glossary wave-2, अपने-आप is the corpus idiom (wire.settings 'हब अपडेट अपने-आप merge करें'). 45 cells. हब itself is corpus-consistent with wire.settings running copy."
+        },
+        {
+          "id": "hi-slash-m3",
+          "severity": "MINOR",
+          "keys": [
+            "wire.slash.mcp"
+          ],
+          "status": "fixed",
+          "evidence": "scoping restored: 'किसी एक को जोड़ें/हटाएँ, या OAuth अनुमति प्रबंधित करें'. The round-1 problem (object dropped) is resolved; the implementation traded the typeable subcommand tokens away, recorded separately below as hi-slash2-M1, which is a new finding, not this one left open."
+        },
+        {
+          "id": "hi-slash-n1",
+          "severity": "NIT",
+          "keys": [
+            "wire.slash.btw"
+          ],
+          "status": "fixed",
+          "evidence": "'रिकॉर्ड से बाहर' -> 'ऑफ़ द रिकॉर्ड'; reads as the borrowed phrase Hindi product copy uses, not a calque. 35 cells."
+        },
+        {
+          "id": "hi-slash-n2",
+          "severity": "NIT",
+          "keys": [
+            "wire.slash.usage"
+          ],
+          "status": "fixed",
+          "evidence": "'प्रोवाइडर के उपयोग का कोटा दिखाएँ' — postpositions restored, no bare noun stack. 22 cells."
+        },
+        {
+          "id": "hi-slash-n3",
+          "severity": "NIT",
+          "keys": [
+            "wire.slash.login"
+          ],
+          "status": "fixed",
+          "evidence": "'प्रोवाइडर में लॉग इन करें' — में frames the destination provider. 17 cells."
+        }
+      ],
+      "previous_open_count": 0,
+      "findings": [
+        {
+          "id": "hi-slash2-M1",
+          "severity": "MINOR",
+          "keys": [
+            "wire.slash.mcp"
+          ],
+          "current": "MCP सर्वर दिखाएँ; किसी एक को जोड़ें/हटाएँ, या OAuth अनुमति प्रबंधित करें",
+          "source": "List MCP servers; add/remove one, or manage an OAuth grant",
+          "problem": "`add` and `remove` are typeable /mcp subcommands, not prose verbs (local_operator/tui/app.py dispatches `if sub == \"add\"` / `if sub == \"remove\"` at 57340/57351 and 58148/58160). The round-1 width fix replaced both with Devanagari जोड़ें/हटाएँ, so the Hindi help line no longer shows the words the user must type. The style guide's product-name policy keeps 'commands' Latin, and this same file honours that in wire.slash.project (list, show, new, delete, link, unlink) and wire.slash.mobile (status, enable, stop, billing) — so the file is internally inconsistent about its own input grammar. Meaning ('add or remove one') is preserved and the /mcp argument picker still offers the real verbs, which is why this is MINOR and not MAJOR.",
+          "suggestion": "MCP सर्वर दिखाएँ; एक को add/remove करें, या OAuth अनुमति प्रबंधित करें",
+          "evidence": "Current 51 cells. A straight revert to the round-1 Latin form, 'MCP सर्वर दिखाएँ; किसी एक को add/remove करें, या OAuth अनुमति प्रबंधित करें', is 58 cells and would be cropped: at 80 columns the picker gives every row in the full list 57 description cells (name column 18 cells for '/settings  /config'; 80 - 3 gutter - 18 - 2 edge). The suggested wording keeps the object and both tokens at 55 cells, under the 57-cell picker budget and the 60-cell /help description column (80 - 20 name column) at 80 columns.",
+          "freshness": "introduced by this remediation; round-1 target read 'MCP सर्वर दिखाएँ; add/remove करें, या OAuth अनुमति प्रबंधित करें'"
+        },
+        {
+          "id": "hi-slash2-N1",
+          "severity": "NIT",
+          "keys": [
+            "wire.slash.effort"
+          ],
+          "current": "तर्क-प्रयास दिखाएँ या सेट करें (shift+tab बदलता है)",
+          "source": "Show or set reasoning effort (shift+tab cycles)",
+          "problem": "'cycles' is flattened to 'बदलता है' ('changes it'). The key still does what the line says, but a key hint exists to convey the interaction, and 'rotates through the levels' is that interaction. No wrong meaning, no unsafe wording — recorded, not demanded.",
+          "suggestion": "तर्क-प्रयास दिखाएँ या सेट करें (shift+tab घुमाता है)",
+          "evidence": "Current 39 cells; suggestion 38 cells, so the fix is free width-wise.",
+          "freshness": "pre-existing, unchanged by this remediation"
+        }
+      ],
+      "width_report": {
+        "measure": "rich.cells.cell_len, the same measure the model uses (local_operator/tui/widgets/command_picker.py: 'Widths are measured with rich.cells.cell_len only')",
+        "budget_picker": "At 80 columns the command picker gives the description column 57 cells for the full-match list: width - 3-cell gutter - 18-cell name column ('/settings  /config', the widest name+alias run) - 2-cell edge margin. Below DESCRIPTION_COLLAPSE_WIDTH (40) the description is dropped, and a description narrower than 10 cells is dropped rather than ellipsised.",
+        "budget_help": "The /help table is a Table.grid whose description column wraps (overflow='fold'), so it never truncates; at 80 columns that column is 60 cells (width - 20-cell name column, derived from '/settings, /config' + 2).",
+        "max_target_cells": 52,
+        "max_target_keys": [
+          "wire.slash.agent"
+        ],
+        "values_over_budget": [],
+        "longer_than_english": [],
+        "ratio_note": "Every hi value is at or under its English counterpart in cells — the only tie is wire.slash.exit (12 = 12); the largest saving is wire.slash.analytics (58 -> 27). Nothing is over either budget: the longest value (52) sits 5 cells under the picker budget and 8 under /help at 80 columns.",
+        "reverted_cuts": "None needed: this round's fixes restored content (agent object, mcp object, credentials plural, usage postpositions) without pushing any value over budget. The one cut still in force is the mcp subcommand tokens, which does not have to be a cut — see hi-slash2-M1."
+      },
+      "mechanical_checks": {
+        "keys": "52 in en, 52 in hi; identical key set and identical order",
+        "placeholders_and_flags": "per-key Latin token comparison: --switch, --window, <message>, /goal, --clear, /loop, <goal>, <n>, --stop, /model, --copy, /title, --refresh, /resume, ID, MCP, OAuth, PyPI, Radient, esc, shift+tab, 'focus', id, pid, auto, read all byte-identical to the English value on the same key. No ICU arguments in either file; braces absent from both.",
+        "latin_runs": "no invented Latin: the only two runs not literally present in the same English string are 'push' (inside en 'auto-push') and 'pid' (inside en 'name/pid'), both legitimate splits of an English token.",
+        "identical_to_english": "none",
+        "whitespace": "no leading/trailing spaces, no double spaces",
+        "punctuation": "no stray danda (these are fragments, not sentences); no '?' or '!' in en or hi; 13 semicolons and 2 em dashes mirroring the English clause structure; straight quotes only where the English quotes a literal token ('focus')",
+        "script_and_register": "Devanagari throughout except the sanctioned input grammar and product tokens; polite imperative (दिखाएँ, बदलें, हटाएँ, खोलें) consistent with the guide's आप register; no कृपया, no honorific padding, nukta kept (फ़, ज़)",
+        "terminology": "session सत्र, conversation बातचीत, skill कौशल, team टीम, manager मैनेजर, usage उपयोग, cost लागत, mesh मेश, device डिवाइस, network नेटवर्क, prompt प्रॉम्प्ट, transcript ट्रांसक्रिप्ट, compaction संपीडन, approvals स्वीकृति, credentials क्रेडेंशियल्स, workstream कार्यप्रवाह — all consistent with the glossary, the hi guide and the rest of the hi corpus (checked against wire.settings and tui.notifications).",
+        "safety_surfaces": "wire.slash.delete keeps irreversibility ('हमेशा के लिए मिटाएँ; पुष्टि माँगता है'), wire.slash.fast keeps the price warning ('प्रीमियम कीमत पर'), wire.slash.credential keeps the mask promise ('छिपा रहता है') — no scoping clause lost on any safety- or cost-bearing line."
+      },
+      "validator": {
+        "command": "scripts/i18n/check.py (ratchet + catalogue parity), run from /Users/damian/lo-core-fix with an isolated HOME and LOCAL_OPERATOR_CONFIG_DIR, using the primary checkout's venv (this worktree has no .venv of its own)",
+        "attempts": [
+          {
+            "mode": "foreground",
+            "timeout_s": 120,
+            "result": "killed at timeout, no output"
+          },
+          {
+            "mode": "background",
+            "timeout_s": 900,
+            "result": "killed at timeout; /tmp/i18ncheck.out is 0 bytes — the checker prints only at the end, so no partial findings exist"
+          }
+        ],
+        "result": "NOT RUN TO COMPLETION. The whole-tree AST ratchet did not finish inside 15 minutes under fleet load, twice.",
+        "what_substitutes_for_it": "Catalogue parity verified directly and byte-wise in this audit: 52 keys in both files, identical key set and identical order; no ICU arguments or plural structures in either file; the only bracketed tokens are the literal <message> in wire.slash.fork and <goal>/<n> in wire.slash.loop, byte-identical to en; every Latin run in hi is present in the same en value ('push' inside auto-push, 'pid' inside name/pid); both files parse as valid JSON.",
+        "honesty_note": "No validator 'pass' is claimed anywhere in this receipt. The two timeouts above are execution facts, not notes. If the ledger row requires a green scripts/i18n/check.py, rerun it in a quiet window; nothing in this audit's verdict depends on it."
+      }
+    }
+  },
+  "notes_not_execution_log": [
+    "Read-only audit: /Users/damian/lo-core-fix was not edited; no test suite, screenshot or UI session was run for this file. The width figures come from reading the render constants and the slash registry in this tree plus rich.cells.cell_len, not from rendering the picker.",
+    "The previous receipt was used only as a claim list; each of its 7 findings was re-derived from the bytes at sha256 da022ae8... before being marked fixed. Round-1's own width rationale was re-checked and largely holds: the Latin-verb mcp form really is 58 cells against a 57-cell picker budget at 80 columns, so the round-1 auditor was right that a straight revert does not fit — but a different wording fits with the tokens intact.",
+    "Not a finding, recorded for the requesting session: the en catalogue's wire.slash.notifications value in this tree ('Unread completions; read marks them read') differs from the live registry description ('Asks and agent updates; read marks all read') in local_operator/slash_commands.py, so the en source may be stale ahead of the hi line. That is a source-catalogue question, not a translation defect, and the hi value follows the catalogue it was given.",
+    "Sources consulted: the two catalogue files, the en context sidecar, i18n/style-guides/hi.md, i18n/glossary.md, local_operator/slash_commands.py (registry, argument modes, subcommand tables), local_operator/tui/widgets/command_picker.py (width constants and row arithmetic), local_operator/tui/app.py (help table layout and /mcp subcommand dispatch). No translation or MT service was used.",
+    "Validator execution status is recorded in namespaces.wire.slash.validator: two attempts (120 s and 900 s) were killed at timeout with zero output, so no validator exit code exists for this tree. The parity claims in the receipt come from the direct checks described there, run by this session."
+  ]
+}

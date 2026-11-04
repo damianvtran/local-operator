@@ -143,6 +143,13 @@ NERD_TOOL_ICONS: dict[str, str] = {
     # its own run; both were rendered for the design round (the alternate is
     # painted by ``scripts/sessions_tool_shot.py <out> nerd settled clone``).
     "sessions": "\uf2d2",
+    # nf-fa-comments (U+F086): two overlapping speech bubbles — a CONVERSATION
+    # among several members, which is what Team Bridge is (channels, DMs,
+    # threads). It pairs with the desktop's lucide `MessagesSquare`, already the
+    # Team Bridge nav icon, so one tool wears one metaphor on every surface; and
+    # it is deliberately not `send`'s paper plane, which is a one-way handoff to
+    # a local peer session rather than a post others in the room read.
+    "bridge": "\uf086",
 }
 
 #: Nerd Font glyph for any ``mcp__*`` tool: a plug, because what the row is
@@ -201,6 +208,12 @@ PLAIN_TOOL_ICONS: dict[str, str] = {
     # the circles), and deliberately not a second `»` (that mark is work passed
     # ONWARD, to a child, where a peer session is opened BESIDE this one).
     "sessions": "\u25a1",
+    # `↔` (U+2194, WGL4): a two-way exchange. `send`'s `→` and `peer`'s `←` are
+    # the two ENDS of a local handoff; a bridge row is the conversation
+    # itself, both directions at once, so the double arrow reads as their
+    # sibling without colliding with either. One cell in every repertoire this
+    # table targets, and no verdict-mark shape (the status column owns ✓/✗).
+    "bridge": "\u2194",
 }
 
 #: Plain fallback for ``mcp__*`` — a discrete module docked onto the harness.

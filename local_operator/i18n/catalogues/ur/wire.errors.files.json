@@ -1,0 +1,13 @@
+{
+  "wire.errors.files.audio_type": "فائل آڈیو کی اجازت یافتہ قسم نہیں: {mime_type}",
+  "wire.errors.files.heic_conversion": "HEIC/HEIF فائل تبدیل کرنے میں ناکامی: {error}",
+  "wire.errors.files.html_type": "فائل HTML کی اجازت یافتہ قسم نہیں: {mime_type}",
+  "wire.errors.files.html_utf8": "HTML فائل درست UTF-8 متن نہیں۔",
+  "wire.errors.files.image_type": "فائل تصویر کی اجازت یافتہ قسم نہیں: {mime_type}",
+  "wire.errors.files.internal_error": "اندرونی سرور کی خرابی: {error}",
+  "wire.errors.files.sign_auth": "مقامی رسائی ٹوکن یا ڈیسک ٹاپ bearer درکار ہے۔",
+  "wire.errors.files.sign_path": "path خالی نہیں ہونا چاہیے۔",
+  "wire.errors.files.sign_route": "route ان میں سے کوئی ایک ہونا چاہیے: {routes}",
+  "wire.errors.files.sign_ttl": "ttl_s کی قدر 1 اور {maximum} کے درمیان ہونی چاہیے۔",
+  "wire.errors.files.video_type": "فائل ویڈیو کی اجازت یافتہ قسم نہیں: {mime_type}"
+}

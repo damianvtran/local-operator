@@ -1,0 +1,159 @@
+"""Mechanical checks for the es mobile.setup audit (w5a1).
+
+Read-only over the repository: this script only reads catalogue files and prints
+a JSON digest. Negative controls are produced in memory (mutated copies), never
+written to the repo.
+"""
+from __future__ import annotations
+
+import json
+import re
+import sys
+import unicodedata
+
+BASE = "/Users/damian/lo-i18n-es/local_operator/i18n/catalogues"
+
+PH = re.compile(r"\{[^}]*\}")
+ICU = re.compile(r"\{\s*\w+\s*,\s*(plural|select|selectordinal)\s*,")
+NUM = re.compile(r"\d+(?:[.,]\d+)*")
+
+# Presence-of-negation patterns. The English side deliberately includes the
+# negative-laden adjectives (invalid, unavailable, unchanged, unconfirmed) so an
+# English adjective against a Spanish "no + adjective" is not read as a mismatch.
+NEG_EN = re.compile(
+    r"\b(not|never|no|without|invalid|unavailable|unchanged|unconfirmed|cannot)\b",
+    re.I,
+)
+NEG_ES = re.compile(
+    r"\b(no|nunca|ni|sin|ning[uú]n|ninguna|ninguna parte|no puede)\b",
+    re.I,
+)
+
+# Machine literals that must survive byte-identically from en to target.
+LITERALS = [
+    "lop login-status", "lop tunnel start", "lop tunnel setup", "lop tunnel stop",
+    "lop tunnel setup --json", "lop login radient",
+    "lop tunnel setup --credential-id <id>", "lop mobile install",
+    "--credential-id", "--json", "<id>", "[monthly price]",
+    "[--credential-id <id>]", "/mobile status", "/mobile enable", "/mobile stop",
+    "/login radient", "https://console.radienthq.com/dashboard/tunnels",
+    "cloudflared", "2025.4.0", "brew install cloudflared", "macOS",
+    "create.json", "Radient", "USD",
+]
+
+
+def cells(s: str) -> int:
+    n = 0
+    for ch in s:
+        if unicodedata.combining(ch):
+            continue
+        n += 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+    return n
+
+
+def check(en: dict, es: dict) -> dict:
+    problems: list[dict] = []
+
+    def add(kind, key, detail):
+        problems.append({"kind": kind, "key": key, "detail": detail})
+
+    # key-set parity
+    for k in en:
+        if k not in es:
+            add("missing_key", k, "")
+    for k in es:
+        if k not in en:
+            add("extra_key", k, "")
+
+    # order parity
+    if [k for k in en if k in es] != [k for k in es if k in en]:
+        add("order_mismatch", "<namespace>", "key order differs")
+
+    for k in en:
+        if k not in es:
+            continue
+        a, b = en[k], es[k]
+        # placeholders
+        if sorted(PH.findall(a)) != sorted(PH.findall(b)):
+            add("placeholder", k, f"{sorted(PH.findall(a))} vs {sorted(PH.findall(b))}")
+        # ICU category/argument shape
+        if ICU.findall(a) != ICU.findall(b):
+            add("icu", k, f"{ICU.findall(a)} vs {ICU.findall(b)}")
+        # ICU branch bodies must survive
+        ba = re.findall(r"\{(one|other|many|few|two|zero)\s*\{([^{}]*)\}\}", a)
+        bb = re.findall(r"\{(one|other|many|few|two|zero)\s*\{([^{}]*)\}\}", b)
+        if [x[0] for x in ba] != [x[0] for x in bb]:
+            add("icu_branches", k, f"{[x[0] for x in ba]} vs {[x[0] for x in bb]}")
+        # machine literals: present in en => present in target
+        for lit in LITERALS:
+            if lit in a and lit not in b:
+                add("literal_dropped", k, lit)
+            if lit in b and lit not in a:
+                add("literal_added", k, lit)
+        # digit sequences (outside placeholders)
+        da = NUM.findall(PH.sub("", a))
+        db = NUM.findall(PH.sub("", b))
+        if da != db:
+            add("digits", k, f"{da} vs {db}")
+        # dash / newline / whitespace hygiene
+        for ch, name in (("—", "em_dash"), ("–", "en_dash"), ("…", "ellipsis")):
+            if a.count(ch) != b.count(ch):
+                add("dash_or_ellipsis", k, f"{name} {a.count(ch)} vs {b.count(ch)}")
+        if a.count("\n") != b.count("\n"):
+            add("newline_count", k, "")
+        if a[:1].isspace() != b[:1].isspace() or a[-1:].isspace() != b[-1:].isspace():
+            add("edge_whitespace", k, "")
+        # Negation parity. A dropped negation is how a state promise inverts, so
+        # this compares PRESENCE, not counts. English encodes many negatives as
+        # one lexeme ("invalid", "unavailable", "unchanged", "unconfirmed") that
+        # Spanish renders analytically ("no valida", "no disponible",
+        # "no ha cambiado", "sin confirmar"); both spellings count as present, or
+        # five correct keys would report as false positives (observed, then
+        # refined - see check_output.negative_controls in the record).
+        na = bool(NEG_EN.search(a))
+        nb = bool(NEG_ES.search(b))
+        if na != nb:
+            add("negation", k, f"en_present={na} es_present={nb}")
+        # untranslated leftovers (whitespace-delimited English function words)
+        if re.search(r"\b(the|and|with|your|before|after|then|only)\b", b):
+            add("english_leftover", k, "english function word")
+        # punctuation hygiene
+        if "!" in b and "!" not in a:
+            add("exclamation", k, "")
+        if "..." in b:
+            add("ascii_ellipsis", k, "")
+
+    return {
+        "key_count": {"en": len(en), "target": len(es)},
+        "problems": problems,
+        "problem_count": len(problems),
+    }
+
+
+def widen(en: dict, es: dict) -> list[dict]:
+    rows = []
+    for k in en:
+        a, b = cells(en[k]), cells(es[k])
+        rows.append(
+            {
+                "key": k,
+                "en_cells": a,
+                "es_cells": b,
+                "delta": b - a,
+                "pct": round((b - a) / a * 100, 1) if a else 0.0,
+            }
+        )
+    return rows
+
+
+def main() -> int:
+    en = json.load(open(f"{BASE}/en/mobile.setup.json"))
+    es = json.load(open(f"{BASE}/es/mobile.setup.json"))
+    result = check(en, es)
+    result["width"] = sorted(widen(en, es), key=lambda r: -r["delta"])[:12]
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

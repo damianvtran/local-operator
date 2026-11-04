@@ -1,0 +1,27 @@
+{
+  "locale": "hi",
+  "namespace": "wire.errors.sdk_spec",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "HI-023",
+      "severity": "MINOR",
+      "namespace": "wire.errors.sdk_spec",
+      "key": "wire.errors.sdk_spec.attach_fields_unsupported",
+      "english": "mode=''attach'' opens a viewer for spec.resume; it does not attach teams, profiles, tools, names, goals or approval policies — that is the owner''s side. Set only resume on this spec (or use mode=''own''). Offending fields: {fields}.",
+      "current": "mode=''attach'' spec.resume के लिए एक व्यूअर खोलता है; यह टीम, प्रोफ़ाइल, टूल, नाम, लक्ष्य या अनुमोदन नीतियाँ अटैच नहीं करता — वह स्वामी का पक्ष है। इस spec पर केवल resume सेट करें (या mode=''own'' उपयोग करें)। आपत्तिजनक फ़ील्ड: {fields}।",
+      "problem": "\"approval policies\" → \"अनुमोदन नीतियाँ\" (glossary: स्वीकृति); also \"Offending fields\" → \"आपत्तिजनक फ़ील्ड\" reads as \"objectionable/obscene fields\".",
+      "suggested": "\"…लक्ष्य या स्वीकृति नीतियाँ अटैच नहीं करता… समस्या वाले फ़ील्ड: {fields}।\"",
+      "disposition": "fixed (remediation core-fix, session 76bcbfdf629d)"
+    }
+  ]
+}

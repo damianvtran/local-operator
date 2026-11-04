@@ -27,6 +27,19 @@ from local_operator.supplements.contract import (
     SUPPLEMENTS_FEATURE_VERSION,
 )
 
+#: Keys this map holds that ONLY the desktop routes serve. The phone relay
+#: (``mobile/daemon.py``) republishes this map as its own capabilities, but it
+#: validates notifications with the legacy ``NotificationsQuery`` (unknown keys
+#: ignored) and ``NotificationsPatch``: a relay ``preview=true`` answers a plain
+#: first page with no ``selection``, the silent first-page fallback the
+#: ``notification_bulk_selection`` key exists to rule out. The relay drops these
+#: keys rather than reshaping its validators, so its behaviour stays as it was.
+#: ``notification_bulk_ask_read`` is listed on its own because the contract
+#: calls it a SEPARATE additive capability a client may test without also
+#: checking ``notification_bulk_selection``; the relay's ``extra="ignore"`` query
+#: drops ``include_ask_reads`` and answers the same plain first page.
+DESKTOP_ONLY_FEATURES = frozenset({"notification_bulk_selection", "notification_bulk_ask_read"})
+
 
 def feature_flags() -> dict[str, Any]:
     """The versioned feature map, resolved per call.
@@ -341,6 +354,13 @@ def static_feature_flags() -> dict[str, Any]:
         # meaningful answer, which is why this is a plain integer
         # rather than a boolean with a default.
         "notification_contract": 1,
+        # Unlike the original observed-id writes, filtered selections cover
+        # unloaded pages and carry server-side Undo receipts. Clients must not
+        # silently fall back to a first-page action against an older backend.
+        "notification_bulk_selection": 1,
+        # V2 freezes ask notification read marks too, but never grants ask
+        # settlement authority. Older selection tokens retain update-only counts.
+        "notification_bulk_ask_read": 1,
         "mcp": 1,
         "mcp_auth": 1,
         # Sessionless MCP management: `GET/POST /v1/desktop/mcp` and
@@ -364,6 +384,9 @@ def static_feature_flags() -> dict[str, Any]:
         # every row would be invented client-side.
         "mcp_catalog": 2,
         "radient": 1,
+        # Human profile writes carry a durable login receipt and bounded image
+        # relay. Older daemons must not be mistaken for an editable account.
+        "account_profile": 1,
         # The organization surfaces on the Radient proxy (design §4.7):
         # the four closed operations `memberships.list`, `org_agents.list`,
         # `org_teams.list` and `org_team.get`, and the three frozen
@@ -415,10 +438,55 @@ def static_feature_flags() -> dict[str, Any]:
         # (including retry), join/read+notify/consent/admit, archive/unarchive,
         # member add/remove and leave. New renderers require this capability AND
         # supply expected_account_id + explicit target tenant_id on every write.
-        # Legacy omission remains compatible. Threads/reactions are not present
-        # in this runtime: feature branches must adopt the same guard before
-        # advertising their mutations alongside this capability.
+        # Legacy omission remains compatible on THESE routes. The thread and
+        # reaction routes are covered by their own keys below, where the receipt
+        # is REQUIRED rather than optional.
         "team_bridge_conversation_owner_guard": 1,
+        # THREADS: `GET .../conversations/{id}/messages/{message_id}/replies`
+        # (read one thread) plus `thread_root_id` on the send above. BOTH halves
+        # REQUIRE the captured-owner receipt (`expected_account_id` + explicit
+        # `tenant_id`), compared atomically against the exact dispatch bearer,
+        # and both answer `409 account_mismatch` when the machine has since
+        # signed in as someone else: a thread read (or a delayed retry of one)
+        # started as account A can never answer B's thread, and a reply composed
+        # as A is never posted as B. The UI held threads closed until this guard
+        # existed (`TEAM_BRIDGE_THREADS_SHIPPED_IN_THIS_BUILD`, the #1304
+        # cache/retry isolation defects), so this key PROMISES the guard, not
+        # only the route: never advertise it on a build whose replies read or
+        # threaded send accepts a receipt-less call. An ordinary top-level send
+        # keeps the legacy optional receipt under the owner-guard key above.
+        # `test_conversation_owner_guard.py` pins the pair.
+        # Its own key by the `radient_org` rule: a renderer that does not see it
+        # mounts no thread affordance and sends no thread request.
+        "team_bridge_threads": 1,
+        # REACTIONS: `PUT`/`DELETE .../messages/{message_id}/reactions/{emoji}`,
+        # the signed-in HUMAN's reaction only (no actor endpoint on this plane).
+        # Both REQUIRE the captured-owner receipt (PUT in the body, DELETE in
+        # the query) under the same atomic compare and the same coded refusal.
+        # Same promise as threads: this key means "reaction routes exist AND
+        # they refuse an unguarded or mismatched call", never route presence
+        # alone, because the UI's reaction hold was lifted on exactly that
+        # condition. A renderer that does not see it shows no reaction controls.
+        "team_bridge_reactions": 1,
+        # SEND MENTIONS: `mentions: [{kind, account_id, endpoint_id?}]` on the
+        # conversation send body (the @-mention autocomplete). Agents carry
+        # their `bep_` endpoint id, humans none; at most 50 distinct rows. The
+        # hub sets each named member's `mention` bit from it. The route's
+        # `_Strict` body refused the key before this, so a renderer that does
+        # not see this key must send none (it would be a 422). WRITE-only: the
+        # hub's message read view does not return `mentions`, so this key
+        # promises no readback highlight.
+        "team_bridge_send_mentions": 1,
+        # The owner's per-conversation wake level for THEIR agent (wake
+        # contract, 2026-10-30): `PUT /v1/desktop/team-bridge/conversations/
+        # {id}/agent-notify` with `notify` all|mention|mute plus the required
+        # owner/tenant receipt. Agents now default to waking on every
+        # message, so the UI offers "Every message / @-mentions and its threads /
+        # Never (muted)" — `mention` means direct or channel @-mentions AND
+        # replies in threads the agent follows, not mentions alone (wake
+        # contract, Amendment A1). A renderer that does not see this flag shows
+        # no such control.
+        "team_bridge_agent_notify": 1,
         # The OWNER AUDIT ("{chief of staff}'s messages"): the read-only
         # `/v1/desktop/team-bridge/owner-audit/...` family over agent-server
         # #221, where the signed-in owner reads every conversation their own
@@ -433,6 +501,13 @@ def static_feature_flags() -> dict[str, Any]:
         # the section over one conversation (#3022 R1-N2). A hub that predates
         # #221 is detected on the LIST route only (its 404 there).
         "team_bridge_owner_audit": 1,
+        # The chief-of-staff read grant (agent-server §17): `PUT`/`DELETE
+        # /v1/desktop/team-bridge/conversations/{id}/cos-read`, both guarded
+        # (tenant_id + expected_account_id required). The renderer shows
+        # "Share with my chief of staff" only when this key is present; a hub
+        # that predates §17 answers the PUT 404/405, which the UI reports as
+        # unsupported rather than hiding the conversation.
+        "team_bridge_cos_read": 1,
         # The owner's agent-invitation surface over agent-server #227: the
         # `GET /v1/desktop/team-bridge/agents/owned/invitations` read (metadata
         # only, receipt required, `private, no-store`) and `decision=withdraw`
@@ -444,6 +519,17 @@ def static_feature_flags() -> dict[str, Any]:
         # predates #227 answers either with 409 `outdated_hub`, which the
         # renderer shows as "the server needs an update" rather than probing.
         "team_bridge_owner_invitations": 1,
+        # `GET /v1/desktop/team-bridge/accounts/{id}/notification-avatar`: one
+        # precomposed PNG (photo or initials, LO corner badge, agent marker)
+        # for a Team Bridge OS notification's image slot. Own key so a desktop
+        # facing an older core keeps today's app icon instead of 404-probing.
+        "team_bridge_notification_avatar": 1,
+        # `GET /v1/desktop/team-bridge/endpoints/{id}/avatar` (an agent's OWN
+        # published picture, closed and hash-pinned like the account relay) and
+        # `avatar_endpoint_id` on the notification-avatar route. Its own key: a
+        # desktop facing an older core keeps drawing the agent glyph instead of
+        # 404-probing a route that does not exist.
+        "team_bridge_endpoint_avatar": 1,
         # Session code memory: GET/POST/PATCH/DELETE on
         # `/v1/desktop/sessions/{id}/variables`, reading and writing a
         # session's LIVE eval-kernel namespace by session id. Its OWN key
@@ -986,6 +1072,19 @@ def static_feature_flags() -> dict[str, Any]:
         # row (an additive field) rather than bump this key — a renderer that can read
         # link-only rows can read a fuller one.
         "code_requests": 1,
+        # AGENT PROFILE PICTURES: `GET/PUT/DELETE /v1/agents/{id}/avatar`, the `avatar`
+        # block on agent rows, `agent_id`/`avatar_sha256` on session rows and the
+        # `agent.avatar.changed` desktop-feed frame (contract: `local_operator.agent_avatar`).
+        # ADDITIVE; the key is how a renderer learns the editor's PUT exists before it
+        # offers an upload that would 404/405 on an older backend. Absent: glyph only.
+        "agent_avatar": 1,
+        # `?size=64|128|256` on `GET /v1/agents/{id}/avatar` (core and the phone
+        # relay): a LANCZOS-downscaled variant with an ETag of `"<sha>-<size>"`, so a
+        # client asks for the smallest variant >= CSS px x devicePixelRatio instead of
+        # the 512px original. Its own key, not a bump of `agent_avatar`: an older core
+        # ignores an unknown query and would silently serve the original, which is
+        # harmless, but a client must know to expect the sized ETag/body.
+        "agent_avatar_sizes": 1,
         # THE PER-SESSION FILE INDEX: `GET /v1/desktop/sessions/{id}/files` (the files this
         # conversation and its subagents produced: written, edited, command outputs,
         # screenshots, downloads, generated images/videos and Highlights callouts, derived

@@ -142,7 +142,9 @@ def section_header(label: str, count: int, width: int) -> Text:
     header = Text(no_wrap=True)
     header.append(" ── ", style=ink("dim"))
     header.append(label, style=ink("muted", bold=True))
-    header.append(f" · {count} ", style=ink("dim"))
+    # Counts carry information, unlike decorative rules; muted clears 4.5:1
+    # in light mode where dim does not (design round 3 D7).
+    header.append(f" · {count} ", style=ink("muted"))
     pad = width - cell_len(header.plain)
     if pad > 0:
         header.append(RULE_GLYPH * pad, style=ink("dim"))
@@ -163,6 +165,39 @@ def _seen_clause(row: dict[str, Any]) -> str:
     if via == "in_view":
         return _t(_k.seen_in_chat())
     return ""
+
+
+def _append_folded_context(text: Text, item: dict[str, Any], width: int) -> None:
+    """Same-topic updates folded into an ask (``asks/dedupe.py``), one block each.
+
+    Under the existing "Earlier updates" divider, so the operator sees the text
+    came from the agent's updates (design D4) with no new copy to translate. Each
+    entry: its title as a bold line, then its body with paragraph breaks KEPT
+    (a blank source line stays a blank row), one blank row between entries
+    (design D2). The count includes any entries the fold's cap dropped
+    (``context_dropped``, review m3), so a capped list never reads as complete.
+    """
+    ask = item.get("ask") or {}
+    entries = [c for c in (ask.get("context") or []) if isinstance(c, dict)]
+    if not entries:
+        return
+    total = len(entries) + int(ask.get("context_dropped") or 0)
+    text.append("\n")
+    text.append_text(section_header(_t(_k.section_history()), total, width))
+    text.append("\n")
+    for index, entry in enumerate(entries):
+        if index:
+            text.append("\n")
+        title = str(entry.get("title") or "").strip()
+        if title:
+            for line in wrap_cells(title, width - 4):
+                text.append("   " + line + "\n", style=ink("fg", bold=True))
+        for paragraph in str(entry.get("body_md") or "").strip().splitlines():
+            if not paragraph.strip():
+                text.append("\n")
+                continue
+            for line in wrap_cells(paragraph, width - 4):
+                text.append("   " + line + "\n", style=ink("fg"))
 
 
 def wrap_cells(text: str, cells: int) -> list[str]:
@@ -499,6 +534,10 @@ def detail_text(
     # that question — and dropped the context the row already knows. The body is
     # the update's prose; an ask's context is its expiry (in the meta line) and
     # its related projects below.
+    # An ask's markdown ``body_md`` (folded update text, built for the desktop
+    # and phone renderers) is never drawn here: this pane is plain text and
+    # would print its ``**`` literally (design D2 / QA Q2, #3094). The folded
+    # entries are drawn from ``ask.context`` below instead.
     body = str(item.get("body_md") or "") if not is_ask else ""
     if body.strip():
         # DT9: a wrapped paragraph lost its inset on every continuation line,
@@ -507,7 +546,9 @@ def detail_text(
         for paragraph in body.strip().splitlines():
             for line in wrap_cells(paragraph, width - 4):
                 text.append("   " + line + "\n", style=ink("fg"))
-    elif not is_ask:
+    if is_ask:
+        _append_folded_context(text, item, width)
+    elif not body.strip():
         # D7: "No details were attached." under an ask read like an ERROR — for
         # an ask the question IS the detail, so the line said the item was
         # broken when it was complete. An ask simply has no body row: its meta

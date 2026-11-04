@@ -1,0 +1,5 @@
+{
+  "wire.errors.session_host.unsupported": "Cet ordinateur ne peut pas exécuter l’hôte de sessions en arrière-plan. La session n’a donc pas été démarrée. Utilisez un ordinateur doté d’un gestionnaire de services en arrière-plan compatible.",
+  "wire.errors.session_host.unavailable": "L’hôte de sessions en arrière-plan n’a pas répondu. La session n’a donc pas été démarrée. Attendez un instant avant de réessayer.",
+  "wire.errors.session_host.refused": "L’hôte de sessions en arrière-plan a refusé de démarrer cette session. La session n’a pas été démarrée. Consultez logs/session-host.log dans votre dossier de configuration Local Operator avant de réessayer."
+}

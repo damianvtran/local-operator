@@ -393,6 +393,18 @@ def disabled() -> bool:
     """
     if os.name != "posix":
         return True
+    # THE SESSION HOST ROUTE SWITCHES WARMING OFF, and this is the one place that
+    # does it because ``disabled()`` is consulted by every entry point
+    # (``enable_warming``, ``notify_engage``, ``try_adopt``, ``adoption_possible``).
+    # A spare is a runtime image the CONSOLE forked, so under the host route it
+    # would be an app descendant -- the exact ancestry the host exists to remove
+    # (design §2: "no surface forks a runtime") -- and nothing on that route ever
+    # adopts it (``launch._spawn_runtime_hosted``), so it would also sit in RAM for
+    # nothing (#3222 R-3). Whether the HOST should own spares is a slice-3 call.
+    from local_operator.session.runtime import session_host
+
+    if session_host.spawn_authority() == session_host.AUTHORITY_HOST:
+        return True
     return os.environ.get(DISABLE_ENV, "") not in ("", "0", "false", "no", "off")
 
 
@@ -1721,28 +1733,40 @@ def _recv_request(sock: socket.socket) -> "tuple[dict[str, Any], list[int]]":
     Raises ``ValueError`` on EOF — the console having gone away, which the caller
     reads as this process's exit signal.
     """
-    header = b""
     fds: list[int] = []
-    while len(header) < 4:
-        chunk, received, _flags, _addr = socket.recv_fds(
-            sock, 4 - len(header), max(1, 4 - len(fds))
-        )
-        if not chunk:
-            for fd in fds:
-                os.close(fd)
-            raise ValueError("standby channel closed")
-        header += chunk
-        fds.extend(received)
-    size = int.from_bytes(header, "big")
-    if size > 1 << 20:
-        raise ValueError("standby frame too large")
-    body = b""
-    while len(body) < size:
-        chunk = sock.recv(size - len(body))
-        if not chunk:
-            raise ValueError("standby channel closed")
-        body += chunk
-    return json.loads(body.decode("utf-8")), fds
+    # EVERY DESCRIPTOR THAT ARRIVED IS CLOSED ON ANY FAILURE, not only on the
+    # first read's EOF. ``recv_fds`` hands the kernel's copies to THIS process the
+    # moment the message is read, so a torn body, an oversized or non-JSON frame, a
+    # read timeout or a hostile length prefix would otherwise strand them: the
+    # caller's ``finally`` only sees descriptors this function RETURNED. Measured
+    # by review of the session host (#3222 R-1): five torn requests each carrying
+    # one descriptor grew the host's table by five, and the descriptor is the
+    # child end of an operator-capability socketpair -- a leak is a capability
+    # outliving its request, and enough of them exhaust the process every runtime
+    # is spawned by. The standby shares this function and had the same leak.
+    try:
+        header = b""
+        while len(header) < 4:
+            chunk, received, _flags, _addr = socket.recv_fds(
+                sock, 4 - len(header), max(1, 4 - len(fds))
+            )
+            fds.extend(received)
+            if not chunk:
+                raise ValueError("standby channel closed")
+            header += chunk
+        size = int.from_bytes(header, "big")
+        if size > 1 << 20:
+            raise ValueError("standby frame too large")
+        body = b""
+        while len(body) < size:
+            chunk = sock.recv(size - len(body))
+            if not chunk:
+                raise ValueError("standby channel closed")
+            body += chunk
+        return json.loads(body.decode("utf-8")), fds
+    except BaseException:
+        _close_all(fds)
+        raise
 
 
 def _close_all(fds: "list[int]") -> None:
@@ -1931,6 +1955,13 @@ def _commit_adoption(sock: socket.socket, request: dict[str, Any]) -> int:
     ``id=``, so a platform that cannot rewrite argv still gets a working runtime
     (agent review round 2, nit).
     """
+    # FIRST, before any adoption work: the boundary between "CPU this process
+    # spent warming as a spare" and "CPU it spent booting the session". The run
+    # record (``process._boot_cost``) reports the two separately, because a slow
+    # adopted boot and a slow warm are different findings. Never raises.
+    from local_operator.session.runtime.journal import note_adoption
+
+    note_adoption()
     env = request.get("env")
     env = env if isinstance(env, dict) else {}
     # Recover the fd number this process was STARTED with, before the channel is
@@ -2101,6 +2132,16 @@ def _warm() -> None:
             importlib.import_module(name)
         except Exception:  # noqa: BLE001 — a warm-up must never be the failure
             logger.debug("standby warm skipped %s", name, exc_info=True)
+    try:
+        # The start record's instrument (``process._boot_cost``) resolves ctypes
+        # handles on first use (~1 ms median, up to ~7 ms on a loaded host);
+        # paying it here leaves ~0.04 ms on the adopted boot's critical path.
+        # Measured in #3226 round 1 (MINOR-2).
+        from local_operator.session.runtime import boot_cost
+
+        boot_cost.sample()
+    except Exception:  # noqa: BLE001
+        logger.debug("standby boot-cost warm skipped", exc_info=True)
     try:
         from local_operator.compaction.tokens import warm_tokenizer
 

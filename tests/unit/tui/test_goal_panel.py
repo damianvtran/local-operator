@@ -376,9 +376,9 @@ async def test_escape_closes_the_card_and_returns_focus() -> None:
     session = _armed()
     app = OperatorApp(lambda: _factory(session))
     async with app.run_test(size=(100, 40)) as pilot:
-        await pilot.pause()
-        app._cmd_goal("", lambda body, kind="info": None)
-        await pilot.pause()
+        # Escape must close a card that really opened, not pass vacuously
+        # after /goal was rejected while the app was still adopting a session.
+        await _open_card(pilot, app, session)
         await pilot.press("escape")
         await pilot.pause()
         assert app.query_one(GoalPanel).is_open is False
@@ -388,12 +388,70 @@ async def test_escape_closes_the_card_and_returns_focus() -> None:
         session = _armed()
         app = OperatorApp(lambda: _factory(session))
         async with app.run_test(size=(width, 40)) as pilot:
-            await pilot.pause()
-            app._cmd_goal("", lambda body, kind="info": None)
-            await pilot.pause()
+            await _open_card(pilot, app, session)
             region = app.query_one(GoalPanel).region
             assert region.width <= width, f"{width}: card is {region.width} cells wide"
             assert region.height > 0
+
+
+@pytest.mark.asyncio
+async def test_open_card_waits_for_deliberately_delayed_adoption(monkeypatch) -> None:
+    session = _armed()
+    adoption = asyncio.Event()
+    second_pause = asyncio.Event()
+    proceed = asyncio.Event()
+    commands = []
+
+    async def factory() -> FakeSession:
+        await adoption.wait()
+        return await _factory(session)
+
+    app = OperatorApp(factory)
+    original = app._cmd_goal
+
+    def command(*args, **kwargs):
+        commands.append(app._session is session)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(app, "_cmd_goal", command)
+    async with app.run_test(size=(100, 40)) as pilot:
+
+        class ControlledPilot:
+            calls = 0
+
+            async def pause(self):
+                self.calls += 1
+                if self.calls == 2:
+                    second_pause.set()
+                    await proceed.wait()
+                await pilot.pause()
+
+        # The second scheduling checkpoint distinguishes the historical
+        # pause/command/pause sequence without a clock-based adoption delay.
+        opening = asyncio.create_task(_open_card(ControlledPilot(), app, session))
+        checkpoint = asyncio.create_task(second_pause.wait())
+        try:
+            done, _ = await asyncio.wait((opening, checkpoint), return_when=asyncio.FIRST_COMPLETED)
+            assert checkpoint in done, "readiness returned before adoption"
+            assert app._session is None
+            assert commands == [], "the command must not run against an unadopted fixture"
+            adoption.set()
+            proceed.set()
+            panel = await opening
+            assert commands == [True]
+            assert app._session is session
+            assert panel.is_open and panel.region.height > 0
+            await pilot.press("escape")
+            await pilot.pause()
+            assert panel.is_open is False
+            assert app.focused is not None
+        finally:
+            adoption.set()
+            proceed.set()
+            for task in (opening, checkpoint):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(opening, checkpoint, return_exceptions=True)
 
 
 # --- the findings that needed the REAL card ---------------------------------
@@ -423,6 +481,47 @@ def test_a_done_card_at_80_columns_does_not_wrap_its_hint_row_away() -> None:
         # ...and the rows that used to vanish are still on the card.
         assert "c dismiss · q close" in body.plain
         assert "2026-09-21 11:30" in body.plain
+
+
+def test_a_longer_localised_done_tag_does_not_orphan_itself_on_a_second_line(monkeypatch) -> None:
+    """The ``  — done`` tag is a catalogue string, so its width is the locale's.
+
+    ``_GOAL_TAG_CELLS`` was tuned to English (8 cells) and subtracted from the
+    goal row's clip budget. Spanish ``  — hecho`` is 9 cells, so a goal clipped
+    to the full budget plus a 9-cell tag measured one cell over the box, wrapped,
+    and left ``hecho`` alone on a second line (found by a rendered frame at
+    100x40, not by a sidecar budget — none is declared for this key).
+
+    The row now reserves the width of the string it is about to append. This test
+    drives that with a 9-cell tag and a goal long enough to be clipped, so it
+    fails on the constant-only budget and passes on the measured one.
+    """
+    from local_operator.tui.widgets import goal_panel
+
+    real_t = goal_panel._t
+    suffix = "  — hecho"
+    assert cell_len(suffix) > goal_panel._GOAL_TAG_CELLS
+
+    def localised(msg):  # noqa: ANN001, ANN202
+        is_tag = getattr(msg, "code", "") == "tui.small.goal_panel.done_suffix"
+        return suffix if is_tag else real_t(msg)
+
+    monkeypatch.setattr(goal_panel, "_t", localised)
+    long_goal = " ".join(["objetivo"] * 12)
+    for screen in (60, 80, 100):
+        width = screen - PANEL_PADDING_CELLS
+        body = _body(
+            width=width,
+            goal=long_goal,
+            status="done",
+            judge={"state": "done", "verdict": "achieved", "reason": "met"},
+            history=[],
+        )
+        lines = body.plain.split("\n")
+        goal_row = next(line for line in lines if line.startswith("▌ "))
+        assert goal_row.endswith(suffix), f"{screen}: tag was not kept on the goal row"
+        assert cell_len(goal_row) <= width, f"{screen}: {cell_len(goal_row)} cells in {width}"
+        assert not any(line.strip() == "hecho" for line in lines), f"{screen}: orphaned tag"
 
 
 @pytest.mark.asyncio

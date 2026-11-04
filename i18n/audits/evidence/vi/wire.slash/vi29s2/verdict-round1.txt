@@ -1,0 +1,1 @@
+CHANGES_REQUESTED - vi wire.slash: /hub renders the product name 'Hub' as 'trung tâm' (and drops per-link) and /mcp drops the OAuth grant ('quản lý OAuth'); 0 BLOCKER, 2 MAJOR, 5 MINOR, 4 NIT.

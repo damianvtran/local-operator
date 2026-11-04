@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from typing import Any
 import pytest
 
 from local_operator.session.peer_rows import clear_cache
+from tests.unit.network import conftest as net_fixtures
 from tests.unit.network.test_relay_e2e import devices  # noqa: F401 — fixtures
 from tests.unit.network.test_session_plane import (
     Devices,
@@ -53,14 +55,25 @@ def _no_cached_rows() -> Any:
     clear_cache()
 
 
-async def _wait(predicate: Any, timeout_s: float = 30.0) -> bool:
+async def _wait(
+    predicate: Any, timeout_s: float = net_fixtures.NET_WAIT_BUDGET_S
+) -> net_fixtures.WaitResult:
+    """The async spelling of the shared wait: same budget, same reported outcome.
+
+    These predicates take locks the relay threads hold, so each poll runs off the loop;
+    the outcome is built by ``net_fixtures.wait_outcome`` so an expired wait here reports
+    the same elapsed/budget/predicate detail as its synchronous siblings.
+    """
+    started = time.monotonic()
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_s
     while loop.time() < deadline:
         if await asyncio.to_thread(predicate):
-            return True
+            return net_fixtures.wait_outcome(True, started, timeout_s, predicate)
         await asyncio.sleep(0.05)
-    return bool(await asyncio.to_thread(predicate))
+    return net_fixtures.wait_outcome(
+        bool(await asyncio.to_thread(predicate)), started, timeout_s, predicate
+    )
 
 
 def _user_texts(created: _NamedRemoteCreate) -> list[str]:
@@ -1204,7 +1217,7 @@ async def test_a_remote_viewer_reattaches_after_its_link_drops_and_returns(
                 with server_a._streams_lock:  # noqa: SLF001
                     return all(s.link is not dropped for s in server_a._streams.values())
 
-            assert await _wait(stream_ended, timeout_s=10.0)
+            assert await _wait(stream_ended)
 
             # RESTORE + RE-ATTACH with no user action: the viewer's recovery opens
             # a fresh stream (over a fresh link) and a prompt reaches the owner.

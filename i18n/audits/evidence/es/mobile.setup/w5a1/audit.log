@@ -1,0 +1,196 @@
+# audit.log — es mobile.setup, w5a1, 2026-10-29
+
+Read-only over the repository. Every command below was run from
+`/Users/damian/lo-i18n-es`. No catalogue, sidecar, ledger, allowance or git state was
+written; the only writes are this evidence directory.
+
+## 1. Bind the revision and the bytes
+
+```
+$ git rev-parse --abbrev-ref HEAD
+feat/i18n-es-wire-errors
+$ git rev-parse HEAD
+183f7a0537e4cee42fd82f25a21fe52953a81bdf
+$ git status --porcelain
+?? local_operator/i18n/catalogues/es/mobile.setup.json
+?? local_operator/i18n/catalogues/es/relay.account_policy.json
+?? local_operator/i18n/catalogues/es/relay.library.json
+?? local_operator/i18n/catalogues/es/relay.login.json
+?? local_operator/i18n/catalogues/es/relay.session.json
+?? local_operator/i18n/catalogues/es/relay.shell.json
+$ git ls-files --error-unmatch local_operator/i18n/catalogues/es/mobile.setup.json
+error: pathspec ... did not match any file(s) known to git   # confirms untracked
+
+$ shasum -a 256 <en> <es> <context>
+a488fa214a660045363b56d6edd5a6d6f2d0a2feb1d35c689cc47ccaf51cd535  es/mobile.setup.json
+6249b10379beb9b2433746416fa7baff061265a1b9315d47465140cd5fcf61e9  en/mobile.setup.json
+be33c74a329196fdbe78f11f015848ff4f9593add57eba414163d4042807c811  en/mobile.setup.context.json
+
+$ wc -l  (en 78, es 78, context 382, style-guide 107, glossary 173)
+$ python3 -c 'json.load ...'   -> 76 / 76 / 76 keys; missing=[] extra=[]; order identical
+$ python3 -c 'byte hygiene'    -> no BOM, no CRLF, trailing newline, valid JSON, 76 unique keys
+```
+
+The target is **untracked**, so the audit binds on-disk bytes, not a blob. Recorded in
+`audited_revision_note`.
+
+## 2. Read the governing material
+
+- `i18n/style-guides/es.md` — tú, neutral Spanish ("teléfono" reads everywhere; "celular"
+  and "móvil" each mark a region), infinitive action labels, terse, sentence case,
+  es plurals one/many/other (0 is `other`, `few` never), `caché` amendment.
+- `i18n/glossary.md` — product names kept, placeholders byte-exact, es cost = `coste`,
+  `daemon` and `tenant` kept English, per-locale guide owns the rest.
+- `en/mobile.setup.json` (76 values), `en/mobile.setup.context.json` (role/tone/note per
+  key; **no maxCells declared for any key** — verified, not assumed).
+
+## 2b. Read direction of the check
+
+Source en vs target es read side by side, all 76 pairs, in five contiguous batches
+(0–14, 14–28, 28–42, 42–56, 56-76), each printed as KEY / EN / ES / role.
+
+## 3. Mechanical checker — 76 keys
+
+```
+$ python3 $LOCAL_OPERATOR_SCRATCHPAD/audit_w5a1.py
+{"key_count":{"en":76,"target":76},"problems":[],"problem_count":0,...}
+```
+
+The checker and the control harness are kept beside this log as
+`scripts/audit_w5a1.py.txt` and `scripts/negative_controls.py.txt`, so the numbers above
+stay reproducible after the session scratchpad is gone.
+
+Checks: key-set + key-order parity; placeholder set per key; ICU construct parity; ICU
+branch labels; 25 machine literals in both directions; digit sequences outside
+placeholders; em/en dash and ellipsis counts; newline count; edge whitespace; negation
+presence; English-leftover scan; exclamation and ASCII-ellipsis hygiene.
+
+Em dash and ellipsis presence by key: identical.
+Straight apostrophes in es: 0 (English `account’s` correctly has none in Spanish).
+`!` in es: 0. ASCII `...` in es: 0. Double spaces: 0.
+
+## 4. Negative controls — the detectors are proved, not assumed
+
+Fourteen mutations applied to in-memory copies, then checked (14/14 detected, unmutated
+control 0 problems):
+
+```
+placeholder dropped                        -> 1 ['placeholder']
+placeholder renamed                        -> 1 ['placeholder']
+command placeholder mangled                -> 1 ['placeholder']
+URL altered                                -> 1 ['literal_dropped']
+sentence dropped                           -> 1 ['literal_dropped']
+negation flipped                           -> 1 ['negation']
+version changed (2025.4.0 -> 2025.4.1)     -> 2 ['digits','literal_dropped']
+command renamed (lop login-status -> lo ...)-> 1 ['literal_dropped']
+key removed                                -> 1 ['missing_key']
+extra key added                            -> 1 ['extra_key']
+english leftover                           -> 4 ['literal_dropped','negation']
+stray exclamation                          -> 1 ['exclamation']
+em dash -> hyphen on verifying             -> 1 ['dash_or_ellipsis']
+ascii ellipsis on reserving                -> 2 ['ascii_ellipsis','dash_or_ellipsis']
+UNMUTATED control                          -> 0 problems
+```
+
+## 5. Detector refinement, recorded honestly
+
+The first negation detector compared the word "no" in en against "no" in es and reported
+five keys: `invalid_response`, `price_unavailable`, `activated`, `identity_unavailable`,
+`reservation_unconfirmed`. Reading each pair in full:
+
+```
+invalid_response     : invalid setup response       / respuesta ... no válida
+price_unavailable    : price is unavailable         / ... no está disponible
+activated            : owning credential unchanged   / ... no ha cambiado
+identity_unavailable : identity unavailable          / identidad no disponible
+reservation_unconfirmed: outcome unconfirmed         / resultado ... sin confirmar
+```
+
+English encodes these as single lexemes; Spanish renders them analytically. All five are
+detector false positives, **not** translation defects, and the semantics match in every
+case. The detector was changed to compare presence-of-negation with the English
+adjectives included; re-run gave 0 mismatches. No finding was manufactured from it.
+
+## 6. Cross-namespace consistency against the shipped es copy
+
+```
+$ python3 - (identical-en-string scan over every en/es catalogue pair)
+cross-namespace identical EN strings: 1
+SAME  wire.tunnel_setup.corrupt_intent <-> mobile.setup.corrupt_intent
+      shipped ES == ours ES : True   (byte-identical)
+
+mobile.setup.in_progress  vs shipped wire.tunnel_setup.in_progress
+  shipped: La configuración del acceso telefónico ya está en curso. Comprueba su estado ...
+  ours   : La configuración del acceso telefónico ya está en curso; comprueba su estado ...
+  -> differs only by ; / . , the same difference the two English strings have.
+
+"acceso telefónico"      : ours 6 uses; shipped wire.slash.mobile = "Acceso telefónico de Radient: ..."
+"no des por hecho que se haya revertido" : ours billing_unconfirmed; shipped wire.tunnel_setup.unavailable (same wording)
+```
+
+Term sweep across every es catalogue (`grep -o`): `cotización` **0 hits** — "quote" has no
+shipped precedent, so the namespace's rendering of quote as `precio (vigente)` could not
+contradict prior copy (the sidecar itself defines quote as "fresh USD monthly activation
+price"). `activar` for "enable" **is** shipped practice (cli.global_help.debug,
+cli.mcp_help.add_oauth, cli.serve_help.reload, wire.memory.enabled.help, wire.errors.*), so
+`quote_unread`'s "activar" is consistent with the locale — the drift is `configuring`'s
+one-off "habilitando" (filed as minor, finding 2). `facturación`, `crédito`, `conector`,
+`túnel`, `en la nube`, `segundo plano` — no contradicting shipped rendering found.
+`cli.mobile_help.mobile` renders "Phone access" as "Acceso desde el teléfono" — a second
+naming of the feature in **shipped** copy, outside this namespace; noted, not filed here.
+
+## 7. Runtime argument parity (would the copy break at render time?)
+
+```
+$ python3 - (parse Msg("mobile.setup.*", {args}) in local_operator/i18n/keys/mobile_setup.py)
+Msg() calls parsed: 76
+argument/placeholder mismatches: 0     # against BOTH en and es
+```
+
+So the accessors' kwargs and the catalogue placeholders agree exactly; no KeyError, no
+unformatted brace can reach a user.
+
+## 8. Width
+
+Cell counts (unicodedata east_asian_width; no wide chars present, so this equals
+`rich.cells.cell_len` for these strings):
+
+```
+mean growth +24.6%   (guide's expected band 15-25%)
+widest: supervisor_tui 191->253 (+32.5%)  corrupt_intent 165->221  mobile_bundle 127->180
+titles: title_login 36->60 (+67%)  title_apply 31->49  title_cloudflared 37->57
+        title_supervisor 39->58  title_failed 35->54  title_balance 33->50
+```
+
+No key declares `maxCells`. Rendering probe:
+
+```
+$ grep -rn "title_login|title_owner_choice" --include=*.py local_operator/
+local_operator/tunnels/setup.py:571   "login": ms.title_login,
+local_operator/tui/app.py:53687       notice(mobile_text(ms.applying() ...))
+$ sed -n '540,600p' local_operator/tunnels/setup.py   -> text() builds lines = [title, account, price, ...]
+```
+
+The title is the **first line of a wrapped text block** handed to `notice(...)`, not a
+fixed-width label, so 60 cells is not a clip. Recorded as a rendered-check flag, not a
+defect — I have cell counts, not a frame.
+
+## 9. Semantic pass — state machine
+
+Read as: checking → applying → activating/reserving/configuring/installing → verifying →
+complete | failed, with parallel billing states (not activated / already active / activated
+not undone / unconfirmed) and reservation states (saved / existing / unconfirmed).
+No state moved sides. Negation presence identical on all 76 keys. Details in `report.md`
+and `record.safety_adjacent_verdict`.
+
+## 10. Environment note (not a finding)
+
+`df -h /` reports 117 MiB free on a 460 GiB volume (100% capacity) during this audit.
+Evidence writes are small; nothing was written to the repo root. Flagged to the manager
+because other work in this window may fail on disk, not on code.
+
+## 11. What was NOT done
+
+- No repo-wide tests, no `make check-changed`, no build: out of scope for this role.
+- No git writes of any kind; evidence is written but uncommitted.
+- No native-speaker attestation; no rendered frame; no runtime service.

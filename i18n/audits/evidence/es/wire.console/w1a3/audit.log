@@ -1,0 +1,133 @@
+AUDIT LOG — es / wire.console / w1a3 (round 2)
+============================================================
+
+Every command below was run in /Users/damian/lo-i18n-es and the output shown is the real
+captured output, not a reconstruction.
+
+=== provenance and the renderer's constraints ===
+$ grep -n "^_ROW_INDENT\|^_VALUE_COLUMN\|^_MARKER_WIDTH\|^_LABEL_BUDGET" local_operator/tui/widgets/settings_view.py
+396:_ROW_INDENT = 2
+400:_VALUE_COLUMN = 34
+426:_MARKER_WIDTH = 2
+434:_LABEL_BUDGET = _VALUE_COLUMN - _ROW_INDENT - _MARKER_WIDTH - 1
+$ sed -n "4018,4021p" local_operator/tui/widgets/settings_view.py
+# Fit registry source first; projection controls must never be sliced.
+        label = _paint(
+            truncate_cells(setting.label, _LABEL_BUDGET),
+            source_locale="en",
+$ grep -n "BRIDGE_SECTION = " local_operator/team_bridge/availability.py && sed -n "86,92p" local_operator/team_bridge/availability.py
+33:BRIDGE_SECTION = "team_bridge"
+    observed as ``messaging_unavailable``) and "never observed at all" all read
+    as invisible, which is the direction the contract asks for.
+    """
+
+    if name != BRIDGE_SECTION:
+        return True
+    record_ = _STATE.get(_key(config_dir))
+$ sed -n "4776,4806p" local_operator/settings_io.py | grep -n "key=\|label="
+2:        label=_t(_cs.max_live_label()),
+10:        key="console.max_owner",
+13:        label=_t(_cs.max_owner_label()),
+21:        key="console.user_reserved",
+24:        label=_t(_cs.user_reserved_label()),
+
+=== mechanical checks and width measurements ===
+$ python3 $LOCAL_OPERATOR_SCRATCHPAD/audit_es_w1a3.py wire.console
+# namespace wire.console
+# en  local_operator/i18n/catalogues/en/wire.console.json  sha256 1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b
+# es  local_operator/i18n/catalogues/es/wire.console.json  sha256 dc48616e35230a56fe064693f8ce8db34e3710c25f51f3cb5eedee5ab369257a
+# ctx local_operator/i18n/catalogues/en/wire.console.context.json  sha256 453aadc8095e93122719cef9b8da2ed9f8b57170449804e6af716fe684ef2dd9
+
+PARITY en=8 es=8 identical_key_sets=True
+PARITY missing_in_target=[] extra_in_target=[]
+
+PER-KEY MECHANICAL CHECKS (failures only)
+  failures=0
+
+WIDTH: every .label measured with the renderer's own truncate_cells(., 29)
+  wire.console.max_live.label: 28 cells -> 'Máximo de terminales activas'  [no-op (fits)]  (en 21)
+  wire.console.max_owner.label: 37 cells -> 'Terminales de agente por con…'  [CLIPS -> 'Terminales de agente por con…']  (en 32)
+  wire.console.user_reserved.label: 32 cells -> 'Ranuras de terminales de usu…'  [CLIPS -> 'Ranuras de terminales de usu…']  (en 33)
+
+WIDTH: help/description/note strings against declared budget and the detail band
+  wire.console.description: es 166, en 134, declared maxCells=None -> no declared budget
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+      truncates at 100 cols -> 'Admisión de terminales activas. El historial completado no consume ranuras de proceso. Los cambio…'
+      truncates at 80 cols  -> 'Admisión de terminales activas. El historial completado no consume ranuras de…'
+  wire.console.max_live.help: es 187, en 151, declared maxCells=None -> no declared budget
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+      truncates at 100 cols -> '32–256; por defecto 128. La memoria gestionada, las celdas de terminal y los recursos nativos dis…'
+      truncates at 80 cols  -> '32–256; por defecto 128. La memoria gestionada, las celdas de terminal y los…'
+  wire.console.max_owner.help: es 125, en 102, declared maxCells=None -> no declared budget
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+      truncates at 100 cols -> '1–32; por defecto 8. Cada conversación comparte la cuota global de terminales activas; las termin…'
+      truncates at 80 cols  -> '1–32; por defecto 8. Cada conversación comparte la cuota global de terminales…'
+      fits whole only on a terminal of >= 127 columns
+  wire.console.user_reserved.help: es 171, en 133, declared maxCells=None -> no declared budget
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+      truncates at 100 cols -> '4–32; por defecto 16, limitado a un cuarto del máximo de terminales activas. Los inicios de agent…'
+      truncates at 80 cols  -> '4–32; por defecto 16, limitado a un cuarto del máximo de terminales activas.…'
+
+=== negative controls ===
+$ # negative controls — the same checker, pointed at deliberately broken bytes
+$ AUDIT_DATA_ROOT=<scratch control tree> python3 audit_es_w1a3.py wire.exec
+PER-KEY MECHANICAL CHECKS (failures only)
+  FAIL wire.exec.approval_advisory: machine literal lost '--yolo'
+  FAIL wire.exec.error_preflight: placeholder ['{error}'] -> []
+  FAIL wire.exec.exec_epilog: newline count 20 -> 24
+  FAIL wire.exec.session_pointer: placeholder ['{session_id}', '{session_id}'] -> ['{session}', '{session}']; em/en dash 1/0 -> 0/0
+  failures=4
+
+$ AUDIT_DATA_ROOT=<scratch control tree> python3 audit_es_w1a3.py wire.console
+WIDTH: every .label measured with the renderer's own truncate_cells(., 29)
+  wire.console.max_live.label: 39 cells -> 'Máximo de terminales activas…'  [CLIPS -> 'Máximo de terminales activas…']  (en 21)
+  wire.console.max_owner.label: 37 cells -> 'Terminales de agente por con…'  [CLIPS -> 'Terminales de agente por con…']  (en 32)
+  wire.console.user_reserved.label: 32 cells -> 'Ranuras de terminales de usu…'  [CLIPS -> 'Ranuras de terminales de usu…']  (en 33)
+
+$ AUDIT_DATA_ROOT=<scratch control tree> python3 audit_es_w1a3.py wire.settings.hub_defaults
+  wire.settings.hub_defaults.agents.help: es 146, en 69, declared maxCells=72 -> OVER DECLARED BUDGET
+      detail band: 98 cells at 100 cols, 78 at 80 cols
+      truncates at 100 cols -> 'Desactivado pausa las actualizaciones de TODOS los vínculos de agentes y habilidades del hub; act…'
+      truncates at 80 cols  -> 'Desactivado pausa las actualizaciones de TODOS los vínculos de agentes y habi…'
+
+CONTROL VERDICT: placeholder dropped / placeholder renamed / machine literal renamed / em dash -> hyphen
+                 / label over the 29-cell budget / declared maxCells breached: ALL DETECTED.
+CONTROL LIMIT: the exec_epilog newline counter also fires on the REAL data (en 20 -> es 24); that
+               difference was judged a legitimate reflow by reading the geometry, not by trusting
+               the counter (the geometry evidence in the wire.exec log). A counter firing is a prompt to look,
+               not a finding.
+
+=== judgement notes ===
+Both clipping findings are mechanical: cells > 29 and settings_view.py:4020 truncates every row
+label unconditionally, with no wrap path. Round 1 raised only an expansion-percentage nit here
+and proposed a 32-cell replacement that would itself have clipped; it never measured
+max_owner.label.
+
+=== writes performed by this audit ===
+Only this directory: record.json, report.md, audit.log. No catalogue, sidecar, ledger, allowance or
+generated file was edited and no git command was run.
+
+=== AMENDMENT A1 — the same-code control the original audit failed to run ===
+$ python3 -  # en and es through the identical truncate_cells(x, 29)
+  wire.console.max_live.label
+    en  21 cells -> 'Live terminal ceiling'   clips=False
+    es  28 cells -> 'Máximo de terminales activas'   clips=False   delta=+7
+  wire.console.max_owner.label
+    en  32 cells -> 'Agent terminals per conversa…'   clips=True
+    es  37 cells -> 'Terminales de agente por con…'   clips=True   delta=+5
+  wire.console.user_reserved.label
+    en  33 cells -> 'Slots reserved for user term…'   clips=True
+    es  32 cells -> 'Ranuras de terminales de usu…'   clips=True   delta=-1
+
+CONTROL VERDICT: the clip on max_owner.label and user_reserved.label is PRE-EXISTING and
+locale-independent: the English labels are 32 and 33 cells against the same 29-cell budget and
+are cut by the same helper. On user_reserved.label the Spanish is 1 cell SHORTER than English.
+Discrepancy noted for the record: the delegation quoted the English max_owner cut as
+'Agent terminals per conver...'; the real helper yields 'Agent terminals per conversa...' (29 cells).
+
+=== post-audit drift observed while amending (NOT re-audited here) ===
+$ shasum -a 256 local_operator/i18n/catalogues/es/wire.settings.{hub_defaults,account_policy}.json
+0816c139dda2caf2055e7b395a4bd0563c7c145a9508e9f0dc8bc757cfe01753  local_operator/i18n/catalogues/es/wire.settings.hub_defaults.json
+f5824ce686fde85dea395fbca9d91d7354bea0cd8a4a4bbe545dc9b1ed24d04c  local_operator/i18n/catalogues/es/wire.settings.account_policy.json
+  (hub_defaults and account_policy both changed after their w1a3 binding; account_policy moved twice
+   while this amendment was being written, so no binding is claimed for either current file)

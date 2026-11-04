@@ -4961,7 +4961,15 @@ def scrub_shapes_with_hits(
         return text, hits
     # Key material first: a PEM body spans lines, so it is the one pass that has
     # to see the whole text, and it must run before anything takes it apart.
-    text = _run_shapes(_MULTILINE_SHAPES, text, hits, reject)
+    # Every multiline rule requires either the PEM label ``PRIVATE KEY`` or
+    # a JSON private-key field. Search only those fixed-width anchors in
+    # bounded windows first, with overlap for a label straddling a window.
+    # The expensive patterns still see whole text when an anchor is present;
+    # PEM/JSON values spanning lines are never independently redacted chunks.
+    if _has_multiline_shape_anchor(text):
+        text = _run_shapes(_MULTILINE_SHAPES, text, hits, reject)
+    else:
+        text = _close_partial_masks(text)
     if len(_LINE_SHAPES) == 0:  # pragma: no cover - the table would be empty
         return text, hits
     # Then line by line, gated per line: the rules that remain are line-anchored
@@ -5784,7 +5792,40 @@ _INCOMPLETE_MASK_LEFT_RE = re.compile(
 
 
 def _close_partial_masks(text: str) -> str:
-    """Mask the readable tail (or head) of a credential whose mask stopped at a quote."""
+    """Close partial masks without a long GIL-held scan of an ordinary paste.
+
+    Both patterns REQUIRE the literal marker. Skipping a marker-free string
+    is therefore equivalent, not a heuristic credential filter. This matters
+    to Saver's off-loop projection: the old left-pattern scan held the GIL for
+    48 ms on a 1.1 MiB paste even when no mask existed, stalling the loop from
+    its worker thread (PR #3078, S-1 follow-up).
+
+    For a long masked paste, only this cleanup is split at LF boundaries.
+    Neither pattern consumes LF: their material classes exclude it, and the
+    only whitespace tests are lookarounds. At a cut, ``^`` is equivalent to
+    the original preceding LF, and the right delimiter still sees that LF
+    because it stays in the chunk. The multiline credential rules still run
+    on WHOLE text before this function; chunking those would leak split keys.
+    A single long line is deliberately not split: its mask can span any
+    arbitrary byte boundary, so there is no correctness-preserving hard cap.
+    """
+    if REDACTION_MARKER not in text:
+        return text
+    if len(text) <= 64 * 1024:
+        return _close_partial_mask_chunk(text)
+    chunks: list[str] = []
+    start = 0
+    while start < len(text):
+        end = text.find("\n", start + 64 * 1024)
+        end = len(text) if end < 0 else end + 1
+        chunks.append(_close_partial_mask_chunk(text[start:end]))
+        start = end
+    return "".join(chunks)
+
+
+def _close_partial_mask_chunk(text: str) -> str:
+    if REDACTION_MARKER not in text:
+        return text
     for _ in range(3):
         closed = _INCOMPLETE_MASK_RE.sub(REDACTION_MARKER, text)
         closed = _INCOMPLETE_MASK_LEFT_RE.sub(REDACTION_MARKER, closed)
@@ -6002,6 +6043,27 @@ _MULTILINE_LABELS = frozenset(
 )
 _MULTILINE_SHAPES = tuple(s for s in CREDENTIAL_SHAPES if s.label in _MULTILINE_LABELS)
 _LINE_SHAPES = tuple(s for s in CREDENTIAL_SHAPES if s.label not in _MULTILINE_LABELS)
+
+# A necessary condition, not a substitute for the patterns: PEM requires the
+# case-sensitive label, while all three service-account patterns require the
+# case-insensitive field name. Preserve Python re.I's Unicode case folding,
+# including dotted/dotless I; lowercasing and a literal search is NOT equivalent.
+_MULTILINE_ANCHOR_RE = re.compile(r"PRIVATE KEY|(?i:private[_-]?key)")
+
+
+def _has_multiline_shape_anchor(text: str) -> bool:
+    """Bound each GIL-held anchor scan; never truncate the eventual match.
+
+    The longest anchor is eleven characters. Twelve characters of overlap is
+    enough to recognise an anchor at every cut without changing its spelling.
+    This removed three 15–19 ms full-paste scans from Saver's cold projection
+    (S-1), in addition to the partial-mask cleanup's 48 ms no-op scan.
+    """
+    window = 64 * 1024
+    return any(
+        _MULTILINE_ANCHOR_RE.search(text, start, min(len(text), start + window + 12))
+        for start in range(0, len(text), window)
+    )
 
 
 def _apply_guarded(

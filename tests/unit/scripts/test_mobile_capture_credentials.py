@@ -36,6 +36,7 @@ PASSWORD_SOURCES = (
     # helper. Both are entry points that touch the credential, so both are scanned.
     "mobile_asks_open_capture.py",
     "mobile_asks_open_fixture.py",
+    "mobile_ask_other_capture.py",
 )
 
 PASSWORD_ENV = "LOP_MOBILE_FIXTURE_PASSWORD"

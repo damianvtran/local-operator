@@ -35,6 +35,7 @@ import logging
 import os
 import signal
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
@@ -43,14 +44,6 @@ if TYPE_CHECKING:
     from local_operator.session.protocol import SessionProtocol
 
 from local_operator.i18n.keys import cli_exec_worker_help as _ehw
-from local_operator.i18n.text import tr
-
-#: RFC §3.1 render point for this slice's copy (the mirror flags' help text).
-#: The worker's parser is built for a HUMAN running
-#: ``python -m local_operator.exec_worker --help``; a spawned worker never
-#: renders it, so resolving through the process's active locale is enough and
-#: needs no locale parameter (``exec_mode``'s shape).
-_t = tr("cli.exec_worker_help")
 
 #: Exit code for an interrupted (SIGTERM/SIGINT) run — distinct from the
 #: engine's 0/1 success/error codes so job ledgers can tell them apart.
@@ -58,46 +51,80 @@ EXIT_INTERRUPTED = 130
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Parse the worker's mirror flags (see ``exec_mode.build_worker_argv``)."""
+    """Parse the worker's mirror flags (see ``exec_mode.build_worker_argv``).
+
+    HELP RESOLVES ITS OWN LOCALE, the way ``cli.build_cli_parser`` and
+    ``exec_startup.add_startup_arguments`` already do: ``--help`` exits inside
+    ``parse_args``, before any boot activation could run, so a parser that read
+    the process's active locale rendered English for a human whose ``lop exec
+    --help`` beside it was Spanish. One reader (``i18n.cli_help``), one shape.
+    """
+    from local_operator.i18n.cli_help import help_locale as resolve_help_locale
+
+    help_locale = resolve_help_locale()
     parser = argparse.ArgumentParser(
         prog="local_operator.exec_worker",
         description="Run one local-operator prompt headless (background exec worker)",
     )
-    parser.add_argument("--prompt", type=str, required=True, help=_t(_ehw.prompt()))
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        required=True,
+        help=_ehw.prompt().envelope(locale=help_locale)["text"],
+    )
     parser.add_argument(
         "--json",
         action="store_true",
         dest="json_mode",
-        help=_t(_ehw.json()),
+        help=_ehw.json().envelope(locale=help_locale)["text"],
     )
-    parser.add_argument("--yolo", action="store_true", help=_t(_ehw.yolo()))
+    parser.add_argument(
+        "--yolo",
+        action="store_true",
+        help=_ehw.yolo().envelope(locale=help_locale)["text"],
+    )
     parser.add_argument(
         "--train",
         action="store_true",
-        help=_t(_ehw.train()),
+        help=_ehw.train().envelope(locale=help_locale)["text"],
     )
-    parser.add_argument("--agent", type=str, default=None, help=_t(_ehw.agent()))
+    parser.add_argument(
+        "--agent",
+        type=str,
+        default=None,
+        help=_ehw.agent().envelope(locale=help_locale)["text"],
+    )
     parser.add_argument(
         "--agent-id",
         type=str,
         default=None,
         dest="agent_id",
-        help=_t(_ehw.agent_id()),
+        help=_ehw.agent_id().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--job-id",
         type=str,
         default=None,
         dest="job_id",
-        help=_t(_ehw.job_id()),
+        help=_ehw.job_id().envelope(locale=help_locale)["text"],
     )
     parser.add_argument(
         "--control",
         action="store_true",
-        help=_t(_ehw.control()),
+        help=_ehw.control().envelope(locale=help_locale)["text"],
     )
-    parser.add_argument("--hosting", type=str, default=None, help=_t(_ehw.hosting()))
-    parser.add_argument("--model", type=str, default=None, help=_t(_ehw.model()))
+    parser.add_argument(
+        "--hosting",
+        type=str,
+        default=None,
+        help=_ehw.hosting().envelope(locale=help_locale)["text"],
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help=_ehw.model().envelope(locale=help_locale)["text"],
+    )
     parser.add_argument(
         "--resume",
         type=str,
@@ -107,7 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
         # to continue a session. Without this the flag was accepted by the front
         # end, dropped at the process boundary, and the worker started a fresh
         # session while reporting success.
-        help=_t(_ehw.resume()),
+        help=_ehw.resume().envelope(locale=help_locale)["text"],
     )
     from local_operator.exec_startup import add_startup_arguments
 
@@ -116,7 +143,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _record_arrival(
-    session_box: list[SessionProtocol], job_id: str | None, stop_facts: dict[str, Any]
+    session_box: list[SessionProtocol],
+    job_id: str | None,
+    stop_facts: dict[str, Any],
+    *,
+    refused_action: str | None = None,
 ) -> None:
     """Record that SIGTERM arrived: the exec worker's signal receipt. NEVER RAISES.
 
@@ -154,6 +185,12 @@ def _record_arrival(
             number=int(signal.SIGTERM.value),
             in_flight=session is not None,
             action="stop",
+            # THE GATE'S OWN RECORD, in the one write that records the arrival: a
+            # refused arrival is written ``refused`` here, so the ledger row a later
+            # reader finds cannot disagree with what the handler did. ``None`` in the
+            # DISCOVERY WINDOW, where the gate cannot ask and today's behaviour
+            # stands (see ``_gate_applies``).
+            refused_action=refused_action,
         )
         entry.setdefault("at", _time.time())
         # LATEST WINS, the rule ``signal_receipt.cut_off_verdict`` states for every
@@ -200,6 +237,94 @@ def _note_stop_cause(session: Any, signal_entry: dict[str, Any] | None, count: i
         logging.getLogger(__name__).debug("could not note the stop cause", exc_info=True)
 
 
+def _refused_action(gated: bool) -> str | None:
+    """The action word for an arrival the gate is allowed to judge, else ``None``.
+
+    ``None`` means "leave the row as the arrival would have written it", which is what
+    keeps a discovery-window row byte-identical to today's.
+    """
+    from local_operator.session.runtime import signal_receipt
+
+    return signal_receipt.ACTION_REFUSED if gated else None
+
+
+def _gate_applies(session: Any) -> bool:
+    """Whether the victim gate CAN ask: the worker's run key exists yet.
+
+    THE CONTRACT'S "WHERE THE GATE CANNOT ASK, BEHAVE AS TODAY" (design §7 step 4 at
+    ``3ba837e6d9e``). A worker has no conversation directory during provider
+    discovery — ``_record_arrival`` says so and records ``sanction: none`` — so there
+    is no marker store to pair against and nothing to refuse on: it keeps today's
+    behaviour (abort, exit 130) and the attempt is recorded in the job ledger.
+
+    CLOSING THAT WINDOW IS DELIBERATELY NOT IN THIS SLICE. It needs a run key the
+    worker holds before its session exists (its ``exec-jobs.jsonl`` arrival row, or
+    the job id off argv), which makes the job ledger a second sanction store — a real
+    change with its own review, not a widening of this one.
+    """
+    if session is None:
+        return False
+    directory = getattr(getattr(session, "_transcript", None), "directory", None)
+    if directory is None:
+        return False
+    try:
+        return Path(directory).is_dir()
+    except (TypeError, OSError):
+        return False
+
+
+def _refuse_unsanctioned(facts: dict[str, Any], job_id: str | None = None) -> bool:
+    """True when this SIGTERM must be REFUSED: it is recorded and the turn runs on.
+
+    THE VICTIM-SIDE GATE, the same rule the session runtime applies
+    (``process._route_signal``): no terminating signal ends this worker unless a
+    durable stop marker covers the run. Read off the entry ``_record_arrival`` has
+    just written, so the decision and the durable row come from one pairing pass
+    (``signal_receipt.is_sanctioned``).
+
+    WHY THE WORKER NEEDS IT AT ALL: exit 130 is unconditional today, and the
+    measured 2026-10-30 21:57:52 event ended twelve background workers inside
+    1.33 s with every receipt saying ``sender: unavailable`` and nothing staged —
+    so the workers were the largest single population the anonymous sweep took.
+
+    BOTH KINDS OF MARKER PASS: a deliberate stop (a person asked) and an
+    involuntary one (``owned_runtimes.sweep`` on the wake supervisor's way out,
+    which stages one before signalling). Only "nothing staged" is refused.
+
+    A SUPERVISOR ``stop`` IS NOT AFFECTED and never reaches here: it CANCELS the
+    worker's lifetime over the control socket rather than signalling the process,
+    and the ledger records it as ``via: control-stop``. ``lop stop --force`` and
+    ``kill -9`` also still end this worker — SIGKILL has no handler by design.
+
+    WHERE IT CANNOT ASK, IT DOES NOT ACT: during provider discovery the worker has
+    no conversation directory, so there is no marker store to pair against — that
+    window keeps today's behaviour and is recorded (see ``_gate_applies``). The caller
+    consults this function only when the gate applies.
+
+    NEVER RAISES: this runs in a signal handler, where an exception would turn a
+    refusal into the hard exit the whole function exists to prevent.
+    """
+    try:
+        from local_operator.session.runtime import signal_receipt
+
+        entry = facts.get("signal") if isinstance(facts.get("signal"), dict) else None
+        if signal_receipt.is_sanctioned(entry):
+            return False
+        facts["refused"] = int(facts.get("refused") or 0) + 1
+        logging.getLogger(__name__).warning(
+            "exec worker: SIGTERM REFUSED (pid %d, job %s, session %s): no stop marker "
+            "covers this run, so the turn keeps running. A sanctioned stop stages a "
+            "marker first; SIGKILL is unrefusable. Arrival recorded in the job ledger.",
+            os.getpid(),
+            job_id or "<unknown>",
+            facts.get("session_id") or "<unknown>",
+        )
+        return True
+    except Exception:  # noqa: BLE001 — a handler must never fail on the gate itself
+        logging.getLogger(__name__).debug("could not read the signal's sanction", exc_info=True)
+        return True
+
+
 def _install_sigterm_handler(
     loop: asyncio.AbstractEventLoop,
     session_box: list[SessionProtocol],
@@ -221,10 +346,22 @@ def _install_sigterm_handler(
     facts = stop_facts if stop_facts is not None else {}
 
     def handler() -> None:
+        session = session_box[0] if session_box else None
+        # THE GATE ONLY WHERE IT CAN ASK: a run key is the session's conversation
+        # directory, absent during provider discovery (see ``_gate_applies``).
+        gated = _gate_applies(session)
         # FIRST: the arrival receipt (see ``_record_arrival``). Every arrival is
         # recorded, and the LATEST becomes the cause (see ``_record_arrival``).
-        _record_arrival(session_box, job_id, facts)
-        session = session_box[0] if session_box else None
+        _record_arrival(
+            session_box,
+            job_id,
+            facts,
+            refused_action=_refused_action(gated),
+        )
+        # THEN THE GATE, before anything acts on the signal: an unsanctioned
+        # arrival has been recorded, is said out loud, and ends nothing.
+        if gated and _refuse_unsanctioned(facts, job_id):
+            return
         if session is not None:
             _note_stop_cause(session, facts.get("signal"), int(facts.get("signal_count") or 1))
             try:
@@ -236,9 +373,47 @@ def _install_sigterm_handler(
     try:
         loop.add_signal_handler(signal.SIGTERM, handler)
     except (NotImplementedError, RuntimeError):
-        # Non-POSIX or pre-loop environments: fall back to a plain handler
-        # that cannot schedule into the loop.
-        signal.signal(signal.SIGTERM, lambda *_: sys.exit(EXIT_INTERRUPTED))
+        # Non-POSIX or pre-loop environments: fall back to a plain handler that
+        # cannot schedule into the loop. THE GATE STILL HOLDS on this arm — the
+        # arrival and its pairing are a synchronous write (``_record_arrival`` is
+        # called from the async handler too), so a signal nothing sanctioned is
+        # refused here as well, and only a sanctioned one raises ``SystemExit``.
+        def plain_handler(*_: object) -> None:
+            session = session_box[0] if session_box else None
+            gated = _gate_applies(session)
+            _record_arrival(session_box, job_id, facts, refused_action=_refused_action(gated))
+            if gated and _refuse_unsanctioned(facts, job_id):
+                return
+            sys.exit(EXIT_INTERRUPTED)
+
+        signal.signal(signal.SIGTERM, plain_handler)
+    # AFTER THE HANDLER, ALWAYS: both branches above reach ``sigaction``
+    # themselves, so arming first would let this worker's own install replace the
+    # sensor and the receipt would say ``sender: unavailable`` for the life of
+    # the process (``siginfo.arm``'s docstring states the order; this is one of
+    # its two callers).
+    _arm_sender_capture()
+
+
+def _arm_sender_capture() -> None:
+    """Arm ``siginfo``'s one-shot sender sensor over the SIGTERM handler. Never raises.
+
+    WHY THE EXEC WORKER NEEDS ITS OWN CALL: it installs SIGTERM directly rather
+    than through ``procstate.install_loop_signal_handlers`` (the runtime's path),
+    and twelve of these workers were in the 2026-10-30 21:57 fleet kill — every
+    one of their arrival rows said ``no-siginfo``. With the sensor armed, the
+    row the worker appends to ``exec-jobs.jsonl`` at arrival names the pid that
+    sent the signal.
+
+    BEST-EFFORT AND NON-RAISING, on the same rule as the handler above: a
+    capture that cannot be armed costs a fact, never a worker.
+    """
+    try:
+        from local_operator import siginfo
+
+        siginfo.arm(signal.SIGTERM)
+    except Exception:  # noqa: BLE001 — an instrument must never fail a worker boot
+        logging.getLogger(__name__).debug("could not arm the sender capture", exc_info=True)
 
 
 def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:
@@ -465,6 +640,17 @@ def main() -> int:
     the same about the runtime's entry.
     """
     parsed = build_parser().parse_args()
+    # THE WORKER'S RUNTIME LANGUAGE. A spawned (``--background``) worker is its
+    # own process: ``cli.main``'s boot activation belongs to the launcher, so
+    # nothing here had moved off the renderer's ``en`` default and the
+    # ``cli.exec_runtime`` chrome ``headless_print`` materialises at import
+    # rendered English under an ``es`` config. AFTER the parse, like the CLI,
+    # because a ``--json`` worker's stdout is one ``printable_event`` document
+    # per line and a machine-readable payload must not vary with the language.
+    if not getattr(parsed, "json_mode", False):
+        from local_operator.i18n.boot import activate_resolved_locale
+
+        activate_resolved_locale()
     # THE JOB LOG IS THIS PROCESS'S STDERR, so console logging is what makes the
     # worker's diagnostics reach the record a person reads — including the
     # one-shot SIGHUP survival line, which was silently discarded before this

@@ -63,6 +63,8 @@ _TOOL_TYPE_CHANNELS = {
     "embeddings": "other",
     "decisions": "classification",
     "email": "other",
+    # Radient Saver's prepare fee (contract §5a: ``ToolType: "context_saver"``).
+    "context_saver": "saver",
 }
 
 #: Wire ``unit`` -> our unit spelling (plural, human-facing).

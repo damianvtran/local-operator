@@ -1,0 +1,23 @@
+=== transcript (7 paths) ===
+transcript exit=0 receipts=5
+=== authoring (7 paths) ===
+authoring exit=0 receipts=26
+=== team_authoring (7 paths) ===
+team_authoring exit=0 receipts=26
+=== palette (6 paths) ===
+palette exit=0 receipts=54
+=== ws_en (1 paths) ===
+ws_en exit=0 receipts=14
+=== ws_context (1 paths) ===
+ws_context exit=0 receipts=42
+=== ws_es (1 paths) ===
+ws_es exit=0 receipts=118
+=== ws_fr (1 paths) ===
+ws_fr exit=0 receipts=66
+=== ws_ru (1 paths) ===
+ws_ru exit=0 receipts=1
+=== ws_vi (1 paths) ===
+ws_vi exit=0 receipts=1
+=== ws_hi (1 paths) ===
+ws_hi exit=0 receipts=9
+DRIVER-DONE

@@ -244,7 +244,12 @@ def configure_parser(parser: argparse.ArgumentParser) -> None:
         "consolidate: max groups (1–50, default 10)",
     )
     parser.add_argument(
-        "--json", dest="raw", action="store_true", help="print machine-readable JSON"
+        # The dest is argparse's default (``json``) so the boot activation's
+        # machine-readable predicate sees this flag like every other one;
+        # it was ``raw``, which also matched ``fetch test --raw`` (TEXT).
+        "--json",
+        action="store_true",
+        help="print machine-readable JSON",
     )
 
 
@@ -1807,7 +1812,7 @@ def render_human(text: str, failed: bool = False, prefix: str = "/memory") -> st
 def main(args: argparse.Namespace) -> int:
     try:
         result = execute(args, prefix="lop memory")
-        if args.raw:
+        if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             print(render_human(json.dumps(result), prefix="lop memory"))

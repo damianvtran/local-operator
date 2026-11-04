@@ -22,14 +22,17 @@ from local_operator.teams import Team
 ROOT = Path(__file__).resolve().parents[2]
 # Budgets cover the installed body, not YAML metadata, and allow small edits
 # without letting an incident archive grow into every delegated turn again.
+# The review-economy pointers (context contract, scope, freshness, round
+# hygiene) raised coder/manager/designer/ux/qa slightly after trimming the
+# duplicated coverage prose; reviewer stayed inside its 3500 by trimming.
 BUDGETS = {
-    "coder": 2200,
-    "reviewer": 3300,
-    "manager": 3300,
-    "designer": 5300,
-    "ux-reviewer": 4300,
+    "coder": 2400,
+    "reviewer": 3500,
+    "manager": 3450,
+    "designer": 5650,
+    "ux-reviewer": 4650,
     "aida": 8000,
-    "qa-tester": 2400,
+    "qa-tester": 2700,
 }
 
 
@@ -56,9 +59,17 @@ def test_delivery_authority_keeps_cost_and_safety_controls_together():
         "BLOCKER",
         "byte-identical",
         "actual served model",
+        "Review economy",
+        "Context contract",
+        "pre-existing",
+        "merge of main",
     ):
         assert required in policy
-    assert len(policy) < 6500
+    # Raised from 6800 for the review-economy section: measured review churn
+    # (median 6-7 rounds/PR, ~55% no-BLOCKER/MAJOR re-runs after a clean round) costs far more
+    # tokens than ~1.7k always-loaded chars. Still a hard cap: detail belongs
+    # in AGENTS.md, not here.
+    assert len(policy) < 8500
 
 
 def test_root_instructions_link_detail_instead_of_duplicating_it():

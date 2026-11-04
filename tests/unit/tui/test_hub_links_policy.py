@@ -1193,8 +1193,21 @@ async def test_second_press_during_the_grant_write_cannot_cancel_its_reread(
         assert mid["auto_push"] is True, "the grant must persist (its re-read was not cancelled)"
         assert mid["subscribe"] is True, "the mid-write press must not have written"
         await pilot.press("s")
-        await pilot.pause()
-        await pilot.pause()
+        # THE SETTLE, NOT A PAUSE COUNT. This press's write and its post-write
+        # re-read cross a real ``asyncio.to_thread`` hop, so the two
+        # ``pilot.pause()`` calls that used to sit here were a bet on thread
+        # scheduling: CI run 40807337514 job 123237346609 read the config after
+        # ~40 ms of pumping and failed "the settled press must use the served
+        # revision" with the write simply not landed yet. ``_refreshing`` is the
+        # panel's own publication that both halves settled — set by the press
+        # before its message is handled, cleared only by an installed snapshot
+        # (``show_links``), the terminal ``show_save_failed``, or the panel's own
+        # lifecycle — so wait on it rather than on the clock.
+        await _await_settle(
+            pilot,
+            lambda: not panel._refreshing,
+            what="the settled press to reach the served revision",
+        )
     values = _policy_values(tmp_path, identity.link_id)
     assert values["subscribe"] is False, "the settled press must use the served revision"
     assert values["auto_push"] is True

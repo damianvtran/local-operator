@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "audit_id": "ur29s2",
+  "scope_kind": "round_2_independent_audit_of_rewritten_descriptions",
+  "locale": "ur",
+  "namespace": "wire.slash",
+  "namespace_total_keys": 52,
+  "keys_read": 52,
+  "keys_changed_in_this_commit": 8,
+  "changed_keys": [
+    "wire.slash.archive",
+    "wire.slash.fork",
+    "wire.slash.hub",
+    "wire.slash.keys",
+    "wire.slash.notifications",
+    "wire.slash.stop",
+    "wire.slash.team",
+    "wire.slash.usage"
+  ],
+  "audited_revision": "7159e2a30927831f5dfb88f84c588eac07770e5d",
+  "audited_bytes_state": "uncommitted working-tree edits in /Users/damian/lo-core-fix on branch fix/i18n-slash-descriptions-locale; the audit receipts record tree_head 7159e2a309 with 7 modified catalogue files and no other change",
+  "sha256": {
+    "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+    "context": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+    "target": "7c950b38d91902600488c29a5f13fbdaaf52f5fd8af69001fb9803e448a80959"
+  },
+  "findings": {
+    "round_2": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 3,
+      "NIT": 3
+    }
+  },
+  "findings_round_1": {
+    "BLOCKER": 1,
+    "MAJOR": 0,
+    "MINOR": 5,
+    "NIT": 4
+  }
+}

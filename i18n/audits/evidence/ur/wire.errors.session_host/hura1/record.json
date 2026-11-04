@@ -1,0 +1,89 @@
+{
+  "locale": "ur",
+  "namespace": "wire.errors.session_host",
+  "audit_id": "hura1",
+  "audit_date": "2026-10-31",
+  "key_count": 3,
+  "audit_pass": "first independent copy audit; second independent high-visibility pass pending",
+  "source_commit": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "task": "host-ur-audit-a",
+    "session": "a8ce9efa0b57",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "50b1205a23e1",
+    "actual_model_source": "Host model-switch notices: anthropic/claude-sonnet-5-5 -> anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; provider failure quota; audit reasoning under final fallback.",
+    "same_actual_model_as_translator": true
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "ur": {
+      "path": "local_operator/i18n/catalogues/ur/wire.errors.session_host.json",
+      "sha256": "311ea5428af42db26ff461969d40d5e0198907a5c21d24da643c11cf64c35622"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ur/wire.errors.session_host/hura1/report.md",
+      "sha256": "c54194b99c1c4decc8432a91925ad0d8cc394ddaf2cc533c316a7a7872a40ed9",
+      "kind": "audit_notes_not_execution_log"
+    },
+    {
+      "path": "i18n/audits/evidence/ur/wire.errors.session_host/hura1/audit.log",
+      "sha256": "981fac3868f0dec381a4931a9ad645850964625428b0f4ec0146e51827a0017c",
+      "kind": "execution_log"
+    }
+  ],
+  "planned_canonical_record_path": "i18n/audits/evidence/ur/wire.errors.session_host/hura1/record.json",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "findings": [],
+  "per_key_verdicts": {
+    "wire.errors.session_host.unsupported": {
+      "status": "passed",
+      "finding_ids": []
+    },
+    "wire.errors.session_host.unavailable": {
+      "status": "passed",
+      "finding_ids": []
+    },
+    "wire.errors.session_host.refused": {
+      "status": "passed",
+      "finding_ids": []
+    }
+  },
+  "report_kind": "audit_notes_not_execution_log",
+  "execution_log": "audit.log",
+  "limitations": [
+    "Second independent error-copy audit remains required.",
+    "No rendered terminal, bidi shaping or runtime flow validation.",
+    "Canonical tracked bundle and ledger write not performed; scratch handoff only."
+  ],
+  "ledger_written": false,
+  "integration": {
+    "integrated_from_session": "a8ce9efa0b57",
+    "original_record_sha256": "bf2cf1be18d354aa63adf5de3b995fadb2f9f1862ac38ada4113781419ac65f3",
+    "original_receipt_sha256": "5f6964d716c491e2db7b23994abff744f02c2a56056e0baf9d1cf26e1658237c",
+    "canonical_record": "i18n/audits/evidence/ur/wire.errors.session_host/hura1/record.json",
+    "canonical_translator_provenance": "i18n/audits/evidence/ur/wire.errors.session_host/hura1/translator/provenance.json",
+    "retention": "Retained in this PR; not claimed merged or on main. Historical commands/cwd/scratch input paths are preserved as executed, not claimed tracked.",
+    "integration_judgment": "No new audit; semantic pass/finding facts copied from independent original records.",
+    "retained_script_snapshots": [
+      {
+        "original_bundle_name": "translator/check_committed.py",
+        "retained_snapshot": "translator/check_committed.py.txt",
+        "sha256": "98dee7f1112848163c7a3365c39668118caa4bfe13e3afee4b137478d0bf39fb"
+      }
+    ]
+  }
+}

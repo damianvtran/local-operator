@@ -155,6 +155,13 @@ class SettingView(BaseModel):
     #: The stored value is always in this unit. Additive on the same terms as
     #: the fields above: an older app ignores it, an older server omits it.
     unit: str = ""
+    #: The row's own extra search words (``tui.theme`` also answers to
+    #: "color", the keymap rows to "keyboard"). MATCHED in the client, never
+    #: rendered: search lives in the app, but the vocabulary has to stay in the
+    #: same declaration as the row or a new setting ships unsearchable.
+    #: Additive on the same terms as the fields above - an older app ignores
+    #: it, an older server omits it, and the default is empty.
+    synonyms: list[str] = []
 
 
 class SettingsView(BaseModel):
@@ -215,6 +222,7 @@ def _view(manager: ConfigManager, setting: settings_io.Setting) -> SettingView:
         gated_by=setting.gated_by,
         hotkey_scope=setting.hotkey_scope,
         unit=setting.unit,
+        synonyms=list(setting.synonyms),
         state_note=state_note,
         read_only=read_only,
     )

@@ -1,0 +1,19 @@
+{
+  "cli.failure_details.unrecognized": "نامعلوم آرگومنٹس: {arguments}",
+  "cli.failure_details.argument": "آرگومنٹ {argument}: {message}",
+  "cli.failure_details.expected_one": "ایک آرگومنٹ درکار ہے",
+  "cli.failure_details.expected_optional": "زیادہ سے زیادہ ایک آرگومنٹ درکار ہے",
+  "cli.failure_details.expected_some": "کم از کم ایک آرگومنٹ درکار ہے",
+  "cli.failure_details.expected_count": "{count, plural, one {# آرگومنٹ درکار ہے} other {# آرگومنٹس درکار ہیں}}",
+  "cli.failure_details.invalid_number": "{type} کی غلط قدر: {value}",
+  "cli.failure_details.ambiguous": "مبہم آپشن: {option} کا مطلب {matches} ہو سکتا ہے",
+  "cli.failure_details.required_group": "ان آرگومنٹس میں سے ایک درکار ہے: {names}",
+  "cli.failure_details.conflict": "آرگومنٹ {argument} کے ساتھ اجازت نہیں",
+  "cli.failure_details.ignored_value": "واضح طور پر دیا گیا آرگومنٹ {value} نظر انداز کر دیا گیا",
+  "cli.failure_details.not_seconds": "{value} سیکنڈز کی عددی تعداد نہیں ہے",
+  "cli.failure_details.finite_seconds": "سیکنڈز کی تعداد محدود عدد ہونی چاہیے",
+  "cli.failure_details.positive_seconds": "صفر سے زیادہ ہونا چاہیے",
+  "cli.failure_details.positional_pair": "{first} اور {last}",
+  "cli.failure_details.exec_two": "exec صرف ایک پوزیشنل پرامپٹ لیتا ہے، مگر {count} پوزیشنل آرگومنٹس ملے: {received}۔\nپہلا پوزیشنل آرگومنٹ پرامپٹ ہے، عنوان نہیں۔ رن کا نام دینے کے لیے عنوان --name کے ذریعے دیں:\n  {command}\n(--workstream ایک فلیگ ہے — یہ رن شائع کرتا ہے اور کوئی قدر نہیں لیتا۔)",
+  "cli.failure_details.exec_many": "exec صرف ایک پوزیشنل پرامپٹ لیتا ہے، مگر {count} پوزیشنل آرگومنٹس ملے: {received}۔\nپہلا پوزیشنل آرگومنٹ پرامپٹ ہے، عنوان نہیں: عنوان --name کے ذریعے دیں، اور پرامپٹ کو اقتباسی نشانوں میں واحد پوزیشنل آرگومنٹ کے طور پر دیں — اضافی پوزیشنل آرگومنٹس استعمال نہیں ہوتے۔\n(--workstream ایک فلیگ ہے — یہ رن شائع کرتا ہے اور کوئی قدر نہیں لیتا۔)"
+}

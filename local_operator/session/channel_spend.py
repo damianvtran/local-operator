@@ -158,6 +158,10 @@ CHANNELS = frozenset(
         "search",
         "read",
         "classification",
+        # Radient Saver's prepare fee (contract §5a): a Radient-billed tool row
+        # (``tool_type: context_saver`` on the wire, mapped in
+        # ``clients/radient_cost.py``), never inference money.
+        "saver",
         "other",
     }
 )
@@ -177,6 +181,7 @@ CHANNEL_LABELS: Mapping[str, str] = {
     "search": "Search",
     "read": "Read",
     "classification": "Classification",
+    "saver": "Radient Saver",
     "other": "Other",
 }
 
@@ -913,10 +918,10 @@ def _inference_rows(inference: InferenceSnapshot) -> list[dict[str, Any]]:
 
 #: Display order of channels: the hierarchy the design note states
 #: (inference → image → audio → tts → stt → search → read → classification →
-#: other). The panel sorts wire rows by this; keeping it here means every
+#: saver → other). The panel sorts wire rows by this; keeping it here means every
 #: surface that groups by channel ages its rows the same way (design round 1,
-#: D9). ``audio`` was inserted before ``other`` in the change that registered
-#: the channel, so the pre-existing ids keep their relative order.
+#: D9). ``audio`` and later ``saver`` were inserted before ``other`` in the
+#: changes that registered them, so the pre-existing ids keep their relative order.
 CHANNEL_ORDER = (
     CHANNEL_INFERENCE,
     "image",
@@ -926,6 +931,7 @@ CHANNEL_ORDER = (
     "search",
     "read",
     "classification",
+    "saver",
     "other",
 )
 

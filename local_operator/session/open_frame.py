@@ -38,10 +38,13 @@ import json
 import logging
 from bisect import bisect_right
 from dataclasses import dataclass
-from typing import Any, Final, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Final, Iterable, Mapping, Sequence
 
 from local_operator.harness.rows import is_harness_chrome, is_harness_injection
 from local_operator.session.transcript_index import RunRecord, TranscriptIndex
+
+if TYPE_CHECKING:
+    from local_operator.session.index_read_model import FrameSelection, FrameSummary
 
 logger = logging.getLogger(__name__)
 
@@ -392,8 +395,85 @@ def strip_entry(entry: Mapping[str, Any], *, supplements: bool = False) -> dict[
     return {**entry, "payload": payload}
 
 
+class StripMemo:
+    """One request's :func:`strip_entry` results, keyed by the row object itself.
+
+    WHY THIS EXISTS (conversation-first-paint, openframe-cpu, 2026-10-31). One
+    open strips the SAME rows again and again: every head-hunt attempt calls
+    :func:`align_page` and :func:`paintable` over the whole of ``collected``
+    (twice for ``paintable``), and the final cut runs :func:`align_page` then
+    :func:`build_frame`, which strips each row twice more. On a cProfile of 210
+    warm ``limit=100`` opens over 42 real journals that was ~1,310
+    ``strip_entry`` calls per open for 150-250 rows, and 40% of the open-frame
+    build's CPU. The strip is a pure function of (row, ``supplements``), so the
+    repeats are pure waste.
+
+    THE CONSTRAINTS that make memoising it safe, and that a change here must keep:
+
+    - SCOPED TO ONE REQUEST. The memo dies with the request, so a later
+      journal state can never be answered from it.
+    - WHAT IS PER-REQUEST AND WHAT IS SHARED. On the desktop frame
+      (``DesktopSessionBridge._wire_rows(copy=False)``) only the OUTER row dict
+      is built per request: its ``payload`` IS the page cache's object, and
+      :func:`strip_entry` takes a one-level ``dict(payload)``, so every NESTED
+      value of a raw row or of a stripped result — content blocks,
+      ``details``, tool arguments, ``provider_payload`` members — is shared
+      with ``page_cache``. (The relay twin's rows are a fresh ``json.loads``
+      and share nothing.) THE CONSTRAINT: neither the rows passed in nor the
+      dicts this memo returns may be modified in place anywhere between
+      ``_wire_rows`` and ``DesktopSessionBridge._frame_answer``, which
+      deep-copies the served rows and is the first point a mutation is safe.
+      An in-place edit before that writes into the cache and is served to the
+      next open of the conversation. Guarded by
+      ``test_an_open_frame_leaves_the_page_cache_untouched``.
+    - KEYED BY IDENTITY, HOLDING THE ROW. ``id()`` alone could be reused by a
+      new object once the old one is freed, so each entry keeps its row alive
+      and a hit also checks ``is``; an equal-but-distinct row is stripped anew.
+    - THE SAME ``supplements`` FOR EVERY CALL. It is fixed at construction,
+      because the strip's answer depends on it and a memo shared across two
+      values would serve one value's answer for the other.
+    - A HIT RETURNS THE SAME DICT a miss returned. Every caller in this module
+      only reads a stripped row (counts, sizes, the user-row test) or serves it
+      as is, which is why sharing it cannot change a byte of the page; a caller
+      that MUTATES a stripped row must not take a memo (and, per the rule above,
+      must not mutate it at all before ``_frame_answer``).
+    """
+
+    __slots__ = ("supplements", "_seen")
+
+    def __init__(self, *, supplements: bool = False) -> None:
+        self.supplements = supplements
+        self._seen: dict[int, tuple[Mapping[str, Any], dict[str, Any] | None]] = {}
+
+    def __call__(self, row: Mapping[str, Any]) -> dict[str, Any] | None:
+        hit = self._seen.get(id(row))
+        if hit is not None and hit[0] is row:
+            return hit[1]
+        stripped = strip_entry(row, supplements=self.supplements)
+        self._seen[id(row)] = (row, stripped)
+        return stripped
+
+
+def _stripper(
+    supplements: bool, memo: StripMemo | None
+) -> Callable[[Mapping[str, Any]], dict[str, Any] | None]:
+    """The strip a pure helper uses: the request's memo, or the plain function.
+
+    A memo built for the other ``supplements`` value is a caller bug that would
+    serve the wrong rows, so it is refused rather than silently used.
+    """
+    if memo is None:
+        return lambda row: strip_entry(row, supplements=supplements)
+    if memo.supplements is not supplements:
+        raise ValueError("StripMemo built for a different supplements value")
+    return memo
+
+
 def paintable(
-    rows: Iterable[Mapping[str, Any]], *, supplements: bool = False
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    supplements: bool = False,
+    memo: StripMemo | None = None,
 ) -> list[dict[str, Any]]:
     """The rows of ``rows`` a transcript paints, in order, stripped.
 
@@ -404,16 +484,17 @@ def paintable(
     caller, which is why this is a pure filter over the strip and not a second
     predicate beside it.
     """
+    strip = _stripper(supplements, memo)
     out: list[dict[str, Any]] = []
     for row in rows:
-        stripped = strip_entry(row, supplements=supplements)
+        stripped = strip(row)
         if stripped is not None:
             out.append(stripped)
     return out
 
 
 def tail_head_reachable(
-    index: TranscriptIndex,
+    index: TranscriptIndex | FrameSummary,
     *,
     limit: int,
     extra_rows: int = OPEN_FRAME_MAX_EXTRA_ROWS,
@@ -450,9 +531,10 @@ def late_index_stop(
     page_rows: Sequence[int],
     collected: Sequence[Mapping[str, Any]],
     *,
-    index: TranscriptIndex | None,
+    index: TranscriptIndex | FrameSummary | None,
     limit: int,
     supplements: bool = False,
+    memo: StripMemo | None = None,
 ) -> int | None:
     """How many of the hunt's pages a read WITH the index would have kept, or ``None``.
 
@@ -486,7 +568,10 @@ def late_index_stop(
     taken = 0
     for pages, rows in enumerate(page_rows, start=1):
         taken += rows
-        if taken and len(paintable(collected[-taken:], supplements=supplements)) >= limit:
+        if (
+            taken
+            and len(paintable(collected[-taken:], supplements=supplements, memo=memo)) >= limit
+        ):
             return pages
     return None
 
@@ -535,6 +620,7 @@ def align_page(
     *,
     extra_rows: int = OPEN_FRAME_MAX_EXTRA_ROWS,
     supplements: bool = False,
+    memo: StripMemo | None = None,
 ) -> tuple[list[Mapping[str, Any]], bool]:
     """Cut ``rows`` to the page the contract promises: (kept rows, head reached).
 
@@ -564,9 +650,8 @@ def align_page(
     if limit < 1:
         return list(rows), True
     order = list(rows)
-    painted = [
-        (index, strip_entry(row, supplements=supplements)) for index, row in enumerate(order)
-    ]
+    strip = _stripper(supplements, memo)
+    painted = [(index, strip(row)) for index, row in enumerate(order)]
     paintable = [(index, entry) for index, entry in painted if entry is not None]
     if not paintable:
         return order, True
@@ -600,7 +685,7 @@ def _run_start_ordinal(runs: Sequence[RunRecord], seq: int) -> int:
 
 
 def publish_runs(
-    index: TranscriptIndex,
+    index: TranscriptIndex | FrameSelection,
     *,
     first_seq: int | None,
     last_seq: int | None,
@@ -702,8 +787,9 @@ def run_payload(run: RunRecord) -> dict[str, Any]:
 def build_frame(
     raw_entries: Iterable[Mapping[str, Any]],
     *,
-    index: TranscriptIndex | None = None,
+    index: TranscriptIndex | FrameSummary | None = None,
     bounds: tuple[int | None, int | None] | None = None,
+    resolved_runs: list[dict[str, Any]] | None = None,
     runs_state: str | None = None,
     head_cut: bool = False,
     has_more: bool = True,
@@ -711,6 +797,7 @@ def build_frame(
     has_newer: bool | None = None,
     anchor_id: str | None = None,
     supplements: bool = False,
+    memo: StripMemo | None = None,
 ) -> FrameResult:
     """Strip, cap and publish one page from rows already read, newest last.
 
@@ -729,7 +816,8 @@ def build_frame(
     """
     ordered = list(raw_entries)
     raw_rows = len(ordered)
-    dropped = sum(1 for raw in ordered if strip_entry(raw, supplements=supplements) is None)
+    strip = _stripper(supplements, memo)
+    dropped = sum(1 for raw in ordered if strip(raw) is None)
     # FROM THE NEWEST END, because the caps decide what a page can hold and the
     # rows a reader cannot lose are the recent ones: a page truncated at its
     # OLDEST end is a page with a short tail, which is the defect this contract
@@ -737,11 +825,7 @@ def build_frame(
     # exceeds the cap by itself is still served, because a page with no rows is
     # not a smaller page, it is a blank transcript, and today's reader serves
     # that row too.
-    painted = [
-        stripped
-        for stripped in (strip_entry(raw, supplements=supplements) for raw in ordered)
-        if stripped is not None
-    ]
+    painted = [stripped for stripped in (strip(raw) for raw in ordered) if stripped is not None]
     sizes = [len(json.dumps(entry, separators=(",", ":"))) for entry in painted]
     anchor_index = None
     if anchor_id is not None:
@@ -772,6 +856,10 @@ def build_frame(
         entries.reverse()
     runs: list[dict[str, Any]] = []
     state = runs_state or "unavailable"
+    if index is not None and not isinstance(index, (TranscriptIndex,)):
+        # A tail summary participates only in the head hunt; it is not a complete
+        # run/checkpoint index. Facts arrive separately through resolved_runs.
+        index = None
     if index is not None:
         # ``bounds is None`` with an index in hand is not a failure: it is a page
         # that holds no run a client could match a fact by (see
@@ -784,6 +872,11 @@ def build_frame(
             if bounds is not None
             else []
         )
+        state = "ready"
+    elif resolved_runs is not None:
+        # A witnessed worker projection already ran the SAME publish_runs
+        # helper. It supplies facts, not a partial index or a lazy disk accessor.
+        runs = resolved_runs
         state = "ready"
     return FrameResult(
         entries=entries,
@@ -845,7 +938,10 @@ def _window_around(
 
 
 def page_seq_bounds(
-    index: TranscriptIndex, entries: Sequence[Mapping[str, Any]], *, reaches_eof: bool
+    index: TranscriptIndex | FrameSelection,
+    entries: Sequence[Mapping[str, Any]],
+    *,
+    reaches_eof: bool,
 ) -> tuple[int | None, int | None] | None:
     """The row-ordinal window the runs of this page are found in.
 

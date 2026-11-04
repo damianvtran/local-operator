@@ -1,0 +1,14 @@
+{
+  "cli.hub_help.hub": "Estado de las actualizaciones de Agent Hub",
+  "cli.hub_help.status": "Mostrar los agentes y equipos obtenidos con pull que tienen actualizaciones en el hub",
+  "cli.hub_help.status_json": "Emitir el payload de la ruta de escritorio",
+  "cli.hub_help.links": "Listar todos los vínculos del hub, estén disponibles o no, con su origen, ámbito y política",
+  "cli.hub_help.links_json": "Emitir el payload de vínculos de escritorio",
+  "cli.hub_help.link": "Editar la política independiente de un vínculo del hub",
+  "cli.hub_help.link_set": "Establecer la política subscribe y/o auto_push de este vínculo",
+  "cli.hub_help.link_set_link_id": "ID del vínculo que muestra `lop hub links`",
+  "cli.hub_help.link_set_subscribe": "Sincronización entrante desatendida para este vínculo",
+  "cli.hub_help.link_set_auto_push": "Publicación saliente desatendida para este vínculo",
+  "cli.hub_help.link_set_expected_revision": "Revisión de la política que viste por última vez (CAS); si se omite, primero se lee la vigente",
+  "cli.hub_help.link_set_confirm_public_egress": "Consentimiento explícito para publicar cambios creados por ti en un origen PUBLIC"
+}

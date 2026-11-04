@@ -16,10 +16,14 @@ initWideView();
 /* The copy's language and the document's `lang`/`dir` are resolved BEFORE the
    first content paint (i18n review round 1, QA Q-2): the backend's resolved
    language arrives on the config stream's baseline frame, and painting before
-   it left a cold deep link showing English copy under Urdu metadata. What is
-   painted is still decided by the audited owned bundle — `resolveInitialLocale`
-   only tells the store which backend preference to test against, and a missing
-   or stalled stream keeps the English default rather than a device guess. */
+   it left a cold deep link showing English copy under Urdu metadata. A locale
+   whose owned copy is a lazily loaded chunk is awaited in the same window
+   (i18n review round 2, #3165): resolving only the preference would have
+   re-created that flip, with the first frame complete English and the flip
+   landing when the import resolved. What is painted is still decided by the
+   audited owned copy — under budget it is the locale's own map, and a missing,
+   failed or slow stream/chunk keeps the English default rather than a device
+   guess. */
 void (async () => {
 	try {
 		await resolveInitialLocale();

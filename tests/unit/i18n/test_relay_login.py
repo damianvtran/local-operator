@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 from pathlib import Path
 
@@ -52,19 +53,88 @@ def test_english_login_and_auth_contract() -> None:
     assert client.get("/api/sessions").status_code == 401
 
 
-@pytest.mark.parametrize("locale", ["en", "fr", "es", "ru", "vi"])
-def test_actual_shipped_missing_namespace_uses_english_metadata(
-    monkeypatch, tmp_path, locale: str
-) -> None:
-    # Real resolver/catalogues, not a mocked language string: these are the
-    # committed shipped tags while relay.login currently carries English only.
-    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    (tmp_path / "config.yml").write_text(f"values:\n  language: {locale}\n")
+_LOGIN_KEYS = (
+    "relay.login.page.title",
+    "relay.login.password.label",
+    "relay.login.submit.label",
+    "relay.login.error.password",
+)
+
+
+def _login_client(monkeypatch, tmp_path, locale: str) -> TestClient:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+    (config_dir / "config.yml").write_text(f"values:\n  language: {locale}\n")
     assert daemon.resolve_language() == locale
-    client = TestClient(
+    return TestClient(
         daemon.build_app(daemon.MobileDaemon(port=0, password="fixture-password")),
         follow_redirects=False,
     )
+
+
+@pytest.mark.parametrize("locale", resolve.shipped_locales())
+def test_actual_shipped_missing_namespace_uses_english_metadata(
+    monkeypatch, tmp_path, locale: str
+) -> None:
+    """Every shipped locale's login page matches what the COMMITTED TREE says it carries.
+
+    A locale whose ``relay.login.json`` holds all four keys must render its own copy
+    with its own ``lang``/``dir``; one that does not must render the English page
+    whole (English metadata, never English words under a foreign ``lang``). The
+    expectation is read from the catalogues, not from a hand-kept locale list: the
+    list is what reddened every translation wave (ru/vi/hi/ur) that landed this
+    namespace. The test id keeps its historical name so recorded evidence that cites
+    it stays resolvable. The absent path is pinned independently of the tree by
+    ``test_absent_namespace_falls_back_to_english_page`` below.
+    """
+    client = _login_client(monkeypatch, tmp_path, locale)
+    try:
+        own = catalogues.load_catalogue(locale, "relay.login")
+    except (catalogues.CatalogueNotFound, catalogues.CatalogueInvalid):
+        own = {}
+    carried = locale != "en" and all(key in own for key in _LOGIN_KEYS)
+    wanted = own if carried else catalogues.load_catalogue("en", "relay.login")
+    lang = locale if carried else "en"
+    # `dir` is stated, not computed through the resolver under test: only Urdu is RTL.
+    direction = "rtl" if lang == "ur" else "ltr"
+    for response in [client.get("/login"), client.post("/login", data={"password": "wrong"})]:
+        assert f'<html lang="{lang}" dir="{direction}">' in response.text
+        assert f"<title>{html.escape(wanted[_LOGIN_KEYS[0]])}</title>" in response.text
+        assert f'<label for="password">{html.escape(wanted[_LOGIN_KEYS[1]])}</label>' in (
+            response.text
+        )
+        assert f'<button type="submit">{html.escape(wanted[_LOGIN_KEYS[2]])}</button>' in (
+            response.text
+        )
+    assert client.get("/login").status_code == 200
+    refused = client.post("/login", data={"password": "wrong"})
+    assert refused.status_code == 401
+    assert (
+        f'<p class="error" role="alert">{html.escape(wanted[_LOGIN_KEYS[3]])}</p>' in refused.text
+    )
+
+
+@pytest.mark.parametrize("locale", [loc for loc in resolve.shipped_locales() if loc != "en"])
+def test_absent_namespace_falls_back_to_english_page(monkeypatch, tmp_path, locale: str) -> None:
+    """The fallback itself, with the absence CONSTRUCTED rather than read off the tree.
+
+    The tree-derived test above stops exercising the English fallback for a locale
+    once it ships ``relay.login``; this one keeps proving the mechanism (English
+    copy, ``lang=en``/``dir=ltr``, unchanged auth statuses) whatever the catalogues
+    contain. The locale stays *shipped* so the resolver really selects it, and gets
+    an unrelated sibling file so the lookup misses on the NAMESPACE, not the locale.
+    """
+    root = tmp_path / "catalogues"
+    (root / "en").mkdir(parents=True)
+    (root / "en/relay.login.json").write_text(
+        (ROOT / "local_operator/i18n/catalogues/en/relay.login.json").read_text()
+    )
+    (root / locale).mkdir()
+    (root / locale / "relay.unrelated.json").write_text('{"relay.unrelated.x": "x"}')
+    monkeypatch.setattr(catalogues, "catalogue_root", lambda: root)
+    client = _login_client(monkeypatch, tmp_path, locale)
+    assert "relay.login" not in catalogues.namespaces(locale)
     for response in [client.get("/login"), client.post("/login", data={"password": "wrong"})]:
         assert '<html lang="en" dir="ltr">' in response.text
         assert "<title>local operator — sign in</title>" in response.text
@@ -312,3 +382,23 @@ def test_mutation_fails_normal_checker(i18n_check, monkeypatch, tmp_path) -> Non
 def test_scanner_missing_or_dynamic_template_fails() -> None:
     assert check_login_source("_LOGIN_HTML = build_template()")
     assert check_login_source("x = 'not the template'")
+
+
+def test_spanish_login_page_renders_its_own_metadata(monkeypatch, tmp_path) -> None:
+    # The other half of the fallback contract: a locale that DOES carry
+    # relay.login must not render the English page.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "config.yml").write_text("values:\n  language: es\n")
+    assert daemon.resolve_language() == "es"
+    client = TestClient(
+        daemon.build_app(daemon.MobileDaemon(port=0, password="fixture-password")),
+        follow_redirects=False,
+    )
+    page = client.get("/login")
+    assert '<html lang="es" dir="ltr">' in page.text
+    assert "local operator — iniciar sesión" in page.text
+    assert "contraseña" in page.text
+    assert '<button type="submit">iniciar sesión</button>' in page.text
+    refused = client.post("/login", data={"password": "wrong"})
+    assert refused.status_code == 401
+    assert "incorrecta." in refused.text

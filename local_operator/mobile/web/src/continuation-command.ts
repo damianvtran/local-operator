@@ -1,5 +1,5 @@
 import { sendCommand } from "./api";
-import type { InputMode, PromptImage } from "./types";
+import type { InputMode, PromptImage, SkillExpansionReceipt } from "./types";
 
 /*
  * ============================================================================
@@ -57,12 +57,25 @@ export interface ContinuationEnvelope {
 	    whatever the composer holds at retry time. Absent = the legacy reading. */
 	input_mode?: InputMode;
 	input_path?: string;
+	/** Ask the server to expand `$skill` references in `text` before delivery
+	    (SKILL invocation). Present only when the body that was accepted carried
+	    `$` and the session's capability said the backend understands it. Like
+	    every other field here, it is part of the envelope's identity: a retry
+	    replays the same request, so a retry after the skill catalogue changed
+	    still asks the server to expand (the expansion itself is re-derived on
+	    the server at delivery time, which is the intended behaviour). */
+	expand_skills?: boolean;
 }
 
 export interface ContinuationReceipt {
 	ok: boolean;
 	detail: string;
 	envelope: ContinuationEnvelope;
+	/** The additive `skills` block the relay returns when it honoured the
+	    envelope's `expand_skills`: what attached and what was skipped. Absent
+	    on every other reply (and on an older relay), so a caller cannot mistake
+	    "nothing expanded" for "the relay does not expand". */
+	skills?: SkillExpansionReceipt;
 }
 
 interface StoredContinuation {
@@ -126,7 +139,10 @@ function validEnvelope(value: Partial<ContinuationEnvelope>): value is Continuat
 			value.input_mode === "mixed") &&
 		(value.input_path === undefined ||
 			(typeof value.input_path === "string" &&
-				value.input_path.length <= MAX_COMMAND_INPUT_PATH_CHARS))
+				value.input_path.length <= MAX_COMMAND_INPUT_PATH_CHARS)) &&
+		/* Absent is the legacy reading (a draft typed before this field existed),
+		   so an older stored envelope upgrades in place instead of being retired. */
+		(value.expand_skills === undefined || typeof value.expand_skills === "boolean")
 	);
 }
 
@@ -230,7 +246,13 @@ export interface SendAnnotation {
 
 /** Retain the exact producer envelope until acknowledgement. The UUID is the
  * identity of this body, not a mutable composer slot: after uncertain delivery,
- * retries replay these bytes while later edits remain a separate draft.
+ * retries replay these bytes while later edits stay a fresh draft.
+ *
+ * `expand_skills` is a FRESH-SEND ONLY flag: only used when minting a new
+ * envelope, because a stored envelope already carries the flag the accepted
+ * body asked for. It is a separate argument rather than part of `annotation`
+ * because it is not provenance — it is a request to the server for this body,
+ * and on a retry the envelope's own value wins.
  *
  * ``onEnvelope`` is called with the resolved envelope BEFORE the round trip,
  * which is the one moment a caller can paint a row for a command whose
@@ -252,6 +274,7 @@ export async function submitContinuation(
 	images?: PromptImage[],
 	annotation?: SendAnnotation,
 	onEnvelope?: (envelope: ContinuationEnvelope) => void,
+	expandSkills = false,
 ): Promise<ContinuationReceipt> {
 	const key = commandStorageKey(sessionId);
 	const stored = storedEnvelope(key);
@@ -261,6 +284,7 @@ export async function submitContinuation(
 		text,
 		images: images?.map((image) => ({ ...image })),
 		...(annotation ?? {}),
+		...(expandSkills ? { expand_skills: true } : {}),
 	};
 	if (!validEnvelope(envelope)) {
 		clearPendingContinuation(sessionId);

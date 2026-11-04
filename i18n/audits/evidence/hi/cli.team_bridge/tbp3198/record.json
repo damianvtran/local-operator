@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "audit_id": "tbp3198",
+  "locale": "hi",
+  "namespace": "cli.team_bridge",
+  "audit_date": "2026-10-30",
+  "key_count": 2,
+  "auditor": {
+    "agent": "task (lopdev team i18n auditor; did not translate)",
+    "session": "709e5957cc3c",
+    "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+    "independence": "Distinct agent and session from the PR #3198 coder that authored the translations; this auditor's copy edits are listed in report.md."
+  },
+  "source_audit_revision": "1b4e042d7b35670b33c30877f5ab9a8271188e07",
+  "input_hashes": {
+    "en": "1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707",
+    "context": "e5abe8540e96a39aed7304ce18555b81071487ca41e749188f1156be9ef3648d",
+    "target": "7c27705c3f013b3b4cd0dfee3a5ff71480b1d500473833896abd787f04fd0694",
+    "style_guide": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5",
+    "glossary": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+  },
+  "current_bytes_match_audited_hashes": true,
+  "source_sha256": "1eee3ff395d8a346dee9574283af593c36a0953c4798db0077446e1903770707",
+  "target_sha256": "7c27705c3f013b3b4cd0dfee3a5ff71480b1d500473833896abd787f04fd0694",
+  "current_report_verdict": "PASS; 0 unresolved blocker/major",
+  "ledger_status": "passed",
+  "unresolved_blocker_major": 0,
+  "artifacts": [
+    "audit_checks.py.txt",
+    "audit.log",
+    "receipt.json",
+    "record.json",
+    "report.md"
+  ]
+}

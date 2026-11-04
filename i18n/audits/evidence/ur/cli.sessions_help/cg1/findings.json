@@ -1,0 +1,51 @@
+{
+  "locale": "ur",
+  "namespace": "cli.sessions_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "UR-019",
+      "severity": "MINOR",
+      "namespace": "cli.sessions_help",
+      "key": "cli.sessions_help.cleanup_max_total_bytes",
+      "english": "trim the least recently active sessions past this store size (overrides config)",
+      "current": "اس اسٹور سائز سے آگے سب سے کم حالیہ فعال سیشنز کاٹ دیں",
+      "problem": "Omission: '(overrides config)' dropped, unlike every sibling cleanup_* flag. The user loses the fact that this flag beats session.cleanup.* for a destructive trim.",
+      "suggested": "اس اسٹور سائز سے آگے سب سے کم حالیہ فعال سیشنز کاٹ دیں (کنفیگ کو اوور رائڈ کرتا ہے)",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    },
+    {
+      "round": 1,
+      "id": "UR-020",
+      "severity": "NIT",
+      "namespace": "cli.sessions_help",
+      "key": "cli.sessions_help.reclaim_confirm_s",
+      "english": "how long to watch before signalling (default: 60, minimum: 50). The window is the safety property: a runtime that gains a record, an attach or CPU inside it is dropped from the pass, and a window too short to measure CPU would drop one of the four refusals",
+      "current": "سگنل بھیجنے سے پہلے کتنی دیر نگرانی کی جائے (ڈیفالٹ: 60، کم از کم: 50)۔ یہی مدت حفاظتی خاصیت ہے: جس رن ٹائم کو اس دوران ریکارڈ، attach یا CPU مل جائے وہ اس مرحلے سے نکال دیا جاتا ہے، اور CPU ناپنے کے لیے بہت چھوٹی مدت چار میں سے ایک انکار کو ختم کر دیتی",
+      "problem": "English is counterfactual ('would drop'); «ختم کر دیتی» is a truncated habitual. Reads unfinished.",
+      "suggested": "…اور CPU ناپنے کے لیے بہت چھوٹی مدت چار میں سے ایک انکار کو بے اثر کر دے گی",
+      "disposition": "fixed (remediation core-fix, session be04c022ebd4)"
+    },
+    {
+      "round": 2,
+      "id": "UR2-002",
+      "severity": "MINOR",
+      "namespace": "cli.sessions_help",
+      "key": "cli.sessions_help.move_queue",
+      "english": "wait for the next safe point instead of refusing a busy conversation: the move is queued durably on the conversation's device and runs when its turn ends (attached clients there are announced and given a window to follow or detach). Ignored with --keep",
+      "current": "مصروف گفتگو کو مسترد کرنے کے بجائے اگلے محفوظ نقطے کا انتظار کریں: منتقلی گفتگو کی ڈیوائس پر پائیدار طور پر قطار میں لگتی ہے اور ٹرن ختم ہونے پر چلتی ہے (وہاں منسلک کلائنٹس کو اطلاع دی جاتی ہے اور پیروی یا ڈیٹیچ کرنے کی مہلت ملتی ہے)۔ --keep کے ساتھ نظر انداز",
+      "problem": "Sweep recurrence of the UR-009 class: «اگلے محفوظ نقطے» can be read as 'the next saved point' (a checkpoint) rather than 'the next safe point' (a turn boundary where moving is safe).",
+      "suggested": "مصروف گفتگو کو مسترد کرنے کے بجائے اگلے بے خطر موقع کا انتظار کریں: …",
+      "disposition": "open at PASS: minor/nit accepted, value unchanged"
+    }
+  ]
+}

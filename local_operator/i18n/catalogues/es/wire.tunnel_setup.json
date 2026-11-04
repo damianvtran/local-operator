@@ -1,0 +1,7 @@
+{
+  "wire.tunnel_setup.in_progress": "La configuración del acceso telefónico ya está en curso. Comprueba su estado antes de reintentar.",
+  "wire.tunnel_setup.deadline": "El plazo de respuesta de la configuración venció una vez vaciado el trabajo que tenía a su cargo. Comprueba el estado y los pasos completados antes de reintentar.",
+  "wire.tunnel_setup.unavailable": "La configuración del acceso telefónico no pudo terminar esta respuesta. Comprueba el estado actual antes de reintentar; no des por hecho que se haya revertido.",
+  "wire.tunnel_setup.checking": "Comprobando la cuenta seleccionada y la preparación necesaria antes de hacer cambios.",
+  "wire.tunnel_setup.corrupt_intent": "La solicitud guardada de configuración del acceso telefónico no es válida. Deja create.json sin cambios y pide a tu agente que recupere la solicitud original antes de reintentar. No se hizo ningún cambio de configuración."
+}

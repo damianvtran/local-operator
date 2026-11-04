@@ -317,6 +317,31 @@ def peer_credential_ids(value: Any) -> tuple[int, ...]:
     return tuple(ids[:MAX_EXCLUDED_CREDENTIAL_IDS])
 
 
+def peer_affinity(value: Any) -> tuple[int, int] | None:
+    """A peer's ``affinity`` anchor: ``(account_id, account_created_at)`` or ``None``.
+
+    The same strictness as :func:`peer_credential_ids`, for the same reason: both
+    numbers are an IDENTITY (an owner row and its immutable creation stamp), so a
+    coerced ``"1"`` or ``1.0`` is not one an honest borrower sends. Anything
+    malformed reads as "no anchor", which is the pre-affinity lend \u2014 the
+    anchor is only ever a preference among rows the peer may already be lent.
+    """
+    if not isinstance(value, dict):
+        return None
+    account_id = value.get("account_id")
+    created_at = value.get("account_created_at")
+    if not (
+        isinstance(account_id, int)
+        and isinstance(created_at, int)
+        and not isinstance(account_id, bool)
+        and not isinstance(created_at, bool)
+        and 0 < account_id <= PEER_NUMBER_CEILING
+        and 0 < created_at <= PEER_NUMBER_CEILING
+    ):
+        return None
+    return (account_id, created_at)
+
+
 def _bounded_narrowing(value: Any) -> dict[str, Any]:
     """A ``Grant.narrowing`` map a peer sent, bounded to shapes this build reads.
 
@@ -528,6 +553,20 @@ BROKER_ERROR_CODES: frozenset[str] = frozenset(BROKER_ERROR_TTL_MS)
 #: loop that asks a rate-limited owner on every provider call.
 DEFAULT_RETRY_AFTER_MS = 60_000
 
+#: ``BrokerError.reason`` values, a closed set (anything else reads as absent).
+#:
+#: WHY A MARKER (review round 1 on #3108, m1): ``quota_blocked`` with no
+#: remainder used to have ONE producer, the owner's holder-exclusion arm, so a
+#: borrower read "0 ms" as "your own cooldowns emptied the pool" and rendered
+#: those, uncached. A spent pool whose reopening is unproven now also refuses
+#: with 0, and that is the OWNER's state. The two arms name themselves; an
+#: older owner sends neither, and the borrower keeps today's 0-remainder rule.
+QUOTA_REASON_HOLDER_EXCLUDED = "holder_excluded"
+QUOTA_REASON_POOL_DEPLETED = "pool_depleted"
+BROKER_ERROR_REASONS: frozenset[str] = frozenset(
+    {QUOTA_REASON_HOLDER_EXCLUDED, QUOTA_REASON_POOL_DEPLETED}
+)
+
 
 @dataclasses.dataclass
 class BrokerError:
@@ -546,6 +585,28 @@ class BrokerError:
     owner_device: str = ""
     owner_device_name: str = ""
     retry_after_ms: int = 0
+    #: Which arm produced this refusal, from :data:`BROKER_ERROR_REASONS`; "" when
+    #: the producer did not say (every code but ``quota_blocked``, and older owners).
+    reason: str = ""
+    #: ``retry_after_ms`` is a FLOOR, not the owner's reset (#3108 review r2 m1): the
+    #: owner stated a longer wait than ``MAX_PEER_RETRY_AFTER_MS``, which the boundary
+    #: clamps. The clamp is a safety bound on this device's cache and retry, not a
+    #: promise about the owner's account — a proven 3 h reopening would otherwise be
+    #: rendered "for another 5 min", and repeated every 5 min. Never on the wire.
+    retry_after_is_floor: bool = False
+
+    @property
+    def is_holder_exclusion(self) -> bool:
+        """Did the owner refuse because the HOLDER's exclusions emptied the pool?
+
+        The marked arms answer for themselves. An unmarked ``quota_blocked`` with no
+        remainder is an older owner, whose only 0-remainder producer was this arm.
+        """
+        if self.code != "quota_blocked":
+            return False
+        if self.reason:
+            return self.reason == QUOTA_REASON_HOLDER_EXCLUDED
+        return not self.retry_after_ms
 
     @property
     def cache_ttl_ms(self) -> int:
@@ -568,10 +629,13 @@ class BrokerError:
             detail["owner_device_name"] = self.owner_device_name
         if self.retry_after_ms:
             detail["retry_after_ms"] = self.retry_after_ms
+        if self.reason:
+            detail["reason"] = self.reason
         return detail
 
     @classmethod
     def from_detail(cls, detail: dict[str, Any]) -> BrokerError:
+        stated = peer_int(detail.get("retry_after_ms"))
         return cls(
             code=str(detail.get("code") or "internal"),
             message=str(detail.get("message") or ""),
@@ -579,6 +643,12 @@ class BrokerError:
             owner_device=str(detail.get("owner_device") or ""),
             owner_device_name=str(detail.get("owner_device_name") or ""),
             retry_after_ms=peer_int(detail.get("retry_after_ms"), maximum=MAX_PEER_RETRY_AFTER_MS),
+            retry_after_is_floor=stated >= MAX_PEER_RETRY_AFTER_MS,
+            reason=(
+                str(detail.get("reason"))
+                if str(detail.get("reason") or "") in BROKER_ERROR_REASONS
+                else ""
+            ),
         )
 
 
@@ -591,6 +661,12 @@ class CredentialRef:
     provider: str
     kind: str  # 'oauth' | 'api_key' | 'mcp-oauth' | 'github-app'
     credential_id: int
+    #: The owner row's immutable ``created_at`` (ms). With ``credential_id`` it is
+    #: the identity a borrower's account-affinity receipt names, so a row deleted
+    #: and re-created under a reused id can never be anchored by an old receipt.
+    #: ``0`` from an owner that predates it: the borrower then records no receipt
+    #: and sends no anchor, which is the pre-affinity behaviour.
+    account_created_at: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -693,6 +769,7 @@ class Grant:
                 provider=str(ref_row.get("provider") or ""),
                 kind=str(ref_row.get("kind") or "oauth"),
                 credential_id=peer_int(ref_row.get("credential_id")),
+                account_created_at=peer_int(ref_row.get("account_created_at")),
             ),
             served_by=str(detail.get("served_by") or ""),
             refreshed=bool(detail.get("refreshed")),

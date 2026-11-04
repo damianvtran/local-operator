@@ -47,7 +47,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, NamedTuple, Optional
 
 # stdlib-only and import-cheap by construction (os/sys/pathlib/logging), so it
 # does not violate this module's no-heavy-module-level-imports rule.
@@ -60,6 +60,9 @@ from local_operator.agent_profiles import (
 from local_operator.agent_shell import exec_session_refusal, interactive_session_refusal
 from local_operator.config import ConfigManager
 from local_operator.env import get_env_config
+from local_operator.i18n.boot import activate_resolved_locale
+from local_operator.i18n.cli_failures import LocalizedArgumentParser
+from local_operator.i18n.cli_help import help_text as _tr
 from local_operator.i18n.keys import cli_agents_help as _ag
 from local_operator.i18n.keys import cli_aida_help as _ad
 from local_operator.i18n.keys import cli_browser as _b
@@ -67,7 +70,9 @@ from local_operator.i18n.keys import cli_browser_help as _bh
 from local_operator.i18n.keys import cli_config_help as _cf
 from local_operator.i18n.keys import cli_credential_help as _cr
 from local_operator.i18n.keys import cli_exec_help as _eh
+from local_operator.i18n.keys import cli_failure_details as _failure_details
 from local_operator.i18n.keys import cli_global_help as _gh
+from local_operator.i18n.keys import cli_group_help as _gg
 from local_operator.i18n.keys import cli_hub_help as _hu
 from local_operator.i18n.keys import cli_hub_shared_help as _hs
 from local_operator.i18n.keys import cli_install_help as _in
@@ -85,6 +90,7 @@ from local_operator.i18n.keys import cli_resume_click_help as _rc
 from local_operator.i18n.keys import cli_send_help as _se
 from local_operator.i18n.keys import cli_serve_help as _sv
 from local_operator.i18n.keys import cli_services_help as _sr
+from local_operator.i18n.keys import cli_services_status as _svc
 from local_operator.i18n.keys import cli_sessions_help as _sh
 from local_operator.i18n.keys import cli_stop_help as _st
 from local_operator.i18n.keys import cli_teams_help as _th
@@ -137,16 +143,18 @@ def _positive_seconds(text: str) -> float:
     try:
         value = float(text)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds") from None
+        raise argparse.ArgumentTypeError(
+            _tr(_failure_details.not_seconds(value=repr(text)))
+        ) from None
     if not math.isfinite(value):
         # ``nan``/``inf``/``1e400`` passed the ``<= 0`` test below, because every
         # comparison against ``nan`` is False. Measured by review round 10: the
         # relocation poll never expired against ``nan`` (51 polls, 10.4 s, deadline
         # never fired), and the echo printed "within nans" — so the validator admitted
         # exactly the budget it exists to refuse.
-        raise argparse.ArgumentTypeError("must be a finite number of seconds")
+        raise argparse.ArgumentTypeError(_tr(_failure_details.finite_seconds()))
     if value <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
+        raise argparse.ArgumentTypeError(_tr(_failure_details.positive_seconds()))
     return value
 
 
@@ -156,7 +164,7 @@ _t = tr("wire.exec")
 _bt = tr("cli.browser")
 
 
-def build_cli_parser() -> argparse.ArgumentParser:
+def build_cli_parser() -> LocalizedArgumentParser:
     """
     Build and return the CLI argument parser.
 
@@ -165,7 +173,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     subcommands are additive only (docs/REWRITE.md section E).
 
     Returns:
-        argparse.ArgumentParser: The CLI argument parser
+        LocalizedArgumentParser: The CLI argument parser with keyed usage failures
     """
     from local_operator.i18n.cli_help import help_locale as resolve_help_locale
     from local_operator.update import installed_version
@@ -176,7 +184,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     help_locale = resolve_help_locale()
 
     # Create parent parser with common arguments
-    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser = LocalizedArgumentParser(add_help=False)
     parent_parser.add_argument(
         "--debug",
         action="store_true",
@@ -196,7 +204,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     )
 
     # Main parser
-    parser = argparse.ArgumentParser(
+    parser = LocalizedArgumentParser(
         description=_gh.description().envelope(locale=help_locale)["text"], parents=[parent_parser]
     )
 
@@ -515,6 +523,12 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help=_ag.pull_org().envelope(locale=help_locale)["text"],
     )
     # Sync command
+    # Picture command: profile pictures (``lop agents picture set|remove|show``).
+    from local_operator import cli_agent_picture  # small; keyed copy lives there
+
+    cli_agent_picture.add_parser(
+        agents_subparsers, parent_parser=parent_parser, help_locale=help_locale
+    )
     sync_parser = agents_subparsers.add_parser(
         "sync",
         help=_ag.sync().envelope(locale=help_locale)["text"],
@@ -764,13 +778,9 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # the publisher confirmation on public pulls). It drives the SAME service
     # functions the desktop routes use -- there is no second sync engine.
     skills_parser = subparsers.add_parser(
-        # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "skills",
-        help="Publish, pull and synchronize hub skills (documents and bundles)",
-        description=(
-            "Bundle skills may not contain executables (any execute bit is refused), "
-            "and installing one never runs code."
-        ),
+        help=_gg.skills().envelope(locale=help_locale)["text"],
+        description=_gg.skills_description().envelope(locale=help_locale)["text"],
         parents=[parent_parser],
     )
     skills_subparsers = skills_parser.add_subparsers(dest="skills_command", required=True)
@@ -830,6 +840,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Print the machine-readable JSON result",
     )
 
+    from local_operator.i18n.keys import wire_skill_adoption as _adoption_copy
+
     skills_pull = skills_subparsers.add_parser(
         # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "pull",
@@ -884,7 +896,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
         # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "--yes",
         action="store_true",
-        help="Confirm the bundle publisher and hash shown by this command",
+        help=_adoption_copy.yes_help().envelope(locale=help_locale)["text"],
     )
     skills_pull.add_argument(
         # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
@@ -892,6 +904,27 @@ def build_cli_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Bundle links only: discard local changes, re-fetch and re-pin the hub's "
         "current archive (accepts a changed publisher after the confirmation)",
+    )
+    skills_pull.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=_adoption_copy.dry_run_help().envelope(locale=help_locale)["text"],
+    )
+    skills_pull.add_argument(
+        "--adopt-receipt",
+        default=None,
+        help=_adoption_copy.receipt_help().envelope(locale=help_locale)["text"],
+    )
+    skills_pull.add_argument(
+        "--strategy",
+        choices=("merge", "keep-local", "take-hub"),
+        default="merge",
+        help=_adoption_copy.strategy_help().envelope(locale=help_locale)["text"],
+    )
+    skills_pull.add_argument(
+        "--no-llm",
+        action="store_true",
+        help=_adoption_copy.no_llm_help().envelope(locale=help_locale)["text"],
     )
     skills_pull.add_argument(
         # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
@@ -996,6 +1029,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help=_sv.reload().envelope(locale=help_locale)["text"],
     )
     serve_parser.add_argument(
+        "--install-service",
+        action="store_true",
+        help=_svc.install_service_help().envelope(locale=help_locale)["text"],
+    )
+    serve_parser.add_argument(
         "--listener-fd",
         type=int,
         default=None,
@@ -1083,14 +1121,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # so an ordinary terminal session pays no tunnel startup cost.
     from local_operator.tunnels.arguments import add_parser as add_tunnel_parser
 
-    add_tunnel_parser(subparsers)
+    add_tunnel_parser(subparsers, help_locale=help_locale)
 
     # Encrypted secret store. Same discipline: argument registration is
     # stdlib-only, so `--version` and `--help` never load the crypto stack that
     # the handlers import at the point of use.
     from local_operator.secrets.cli import add_parser as add_secret_parser
 
-    add_secret_parser(subparsers)
+    add_secret_parser(subparsers, help_locale=help_locale)
 
     # Mesh networks (design: docs/design/mesh-network.md). Same stdlib-only
     # registration rule as tunnels/secrets: the peer listener, the crypto and the
@@ -1099,7 +1137,24 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # position-independent globals (--debug, --agent) working on these subcommands.
     from local_operator.network.cli import add_parser as add_network_parser
 
-    add_network_parser(subparsers, parent_parser)
+    add_network_parser(subparsers, parent_parser, help_locale=help_locale)
+
+    # Agent messages' background receiver (Team Bridge connector): status,
+    # install, remove, logs for a backend-only machine (guide://team-bridge).
+    # Same stdlib-only registration rule as the groups above: the installer,
+    # the store and sqlite are imported by the verb that runs.
+    from local_operator.team_bridge_arguments import (
+        add_parser as add_team_bridge_parser,
+    )
+
+    add_team_bridge_parser(subparsers, parent_parser, help_locale=help_locale)
+
+    # `lop disk reclaim` (issue #2676): the sanctioned disk-pressure front door.
+    # Stdlib-only registration for the same reason as `network`: the planner is
+    # imported by the handler, never while the parser is built.
+    from local_operator.disk_cli import add_parser as add_disk_parser
+
+    add_disk_parser(subparsers, parent_parser, help_locale=help_locale)
 
     # Operator authority (issue #1310, revision 2). Registration is stdlib-only
     # for the same reason `secret`'s is: `lop --version` must not load
@@ -1107,7 +1162,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # live in `operator/handlers.py`, imported only when a verb is dispatched.
     from local_operator.operator.cli import add_parser as add_operator_parser
 
-    add_operator_parser(subparsers)
+    add_operator_parser(subparsers, help_locale=help_locale)
 
     # Device pairing (stage D of the same design). Registered beside
     # `operator` because it is the same trust root seen from the other end — the
@@ -1115,7 +1170,7 @@ def build_cli_parser() -> argparse.ArgumentParser:
     # for the identical reason: `lop --version` must not load the keychain.
     from local_operator.operator.pair import add_parser as add_pair_parser
 
-    add_pair_parser(subparsers)
+    add_pair_parser(subparsers, help_locale=help_locale)
 
     # QwenCloud console session cookie: the credential the personal Token Plan
     # usage window needs and no login flow can mint (a browser session cookie
@@ -2248,12 +2303,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
         parents=[parent_parser],
     )
 
+    # wire.exec is deferred from client bundles: render these plain-string
+    # argparse consumers in-process, using the parser build's locale snapshot.
     exec_parser = subparsers.add_parser(
         "exec",
-        help=_t(_wd.exec_help()),
+        help=_tr(_wd.exec_help(), help_locale),
         parents=[parent_parser],
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=_t(_wd.exec_epilog()),
+        epilog=_tr(_wd.exec_epilog(), help_locale),
     )
     exec_parser.add_argument(
         "command",
@@ -2450,8 +2507,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
     from local_operator.web_fetch.cli import add_fetch_subparser
     from local_operator.web_search.cli import add_search_subparser
 
-    add_search_subparser(subparsers, parent_parser)
-    add_fetch_subparser(subparsers, parent_parser)
+    add_search_subparser(subparsers, parent_parser, help_locale=help_locale)
+    add_fetch_subparser(subparsers, parent_parser, help_locale=help_locale)
 
     # CL-04: ``--yolo`` is accepted on every subcommand too (additive). The
     # root flag keeps its default; subparsers get a SUPPRESS copy so parsing
@@ -2881,6 +2938,14 @@ def config_edit_command(args: argparse.Namespace) -> int:
         # out-of-range number is now refused here instead of being stored and
         # silently clamped by whichever consumer reads it.
         settings_io.write_setting(config_manager, setting, value)
+        if setting.key == "team_bridge.enabled":
+            # CLI edits do not visit the desktop settings route. Reconcile at
+            # this same explicit event, not on a poll or only at next startup.
+            from local_operator.team_bridge.connector.install import (
+                sync_connector_service,
+            )
+
+            sync_connector_service(config_manager.config_dir)
 
         # Report what was STORED, not what was typed. `write_setting` may
         # normalize (a hotkey's `CTRL+G` is stored as `ctrl+g`), and echoing
@@ -3366,6 +3431,135 @@ def _ago(stamp: object) -> str:
     if seconds < 172800:
         return f"{int(seconds // 3600)}h ago"
     return f"{int(seconds // 86400)}d ago"
+
+
+def _browser_pair(pairing_status: Callable[[], dict[str, Any]]) -> int:
+    """`lop browser pair`: get a code for every connected, unpaired install and say where it goes.
+
+    THE FLOW IS CLI-FIRST (operator requirement, 2026-11-02). Local Operator
+    gives the code first; only then does the person go to the browser and type
+    it. So this must work from ANY state — the extension connected an hour ago
+    and its code expired, the popup closed, the popup never opened — and it must
+    never ask the person to open or keep open the popup for the CLI to succeed.
+    The old flow printed "no extension is waiting to pair. Open the extension
+    popup, then retry." about an extension `lop browser status` showed connected,
+    because a code was minted only at the extension's handshake.
+
+    It asks the DAEMON (`request_pairing_codes`, session-key authenticated) to
+    make sure each connected, unpaired install has a live code — reusing one
+    that is still live, so running this twice prints the same code — and to put
+    each install's pairing page in front. Every outcome is a short,
+    self-contained block, because the usual reader is an agent that quotes it
+    to a person who never sees this terminal: the code, where to type it, how
+    long it lasts, and what happens next.
+
+    Falls back to the pairing FILE only for a daemon that predates the endpoint,
+    which is what this command read before.
+    """
+    from local_operator.browser_bridge import install as browser_install
+    from local_operator.browser_bridge.daemon import PAIR_TTL_S
+    from local_operator.browser_bridge.protocol import (
+        EXPECTED_EXTENSION_VERSION,
+        SHOW_PAIRING_MIN_EXTENSION_VERSION,
+        extension_older,
+    )
+
+    minutes: int | None = int(PAIR_TTL_S // 60)
+    answer = browser_install.request_pairing_codes()
+    if not answer.get("ok"):
+        reason = answer.get("reason")
+        if reason == "no_daemon":
+            print(_bt(_b.pair_no_daemon()))
+            return 1
+        if reason == "unreachable":
+            print(_bt(_b.pair_unreachable(detail=str(answer.get("detail", "")))))
+            return 1
+        # An older daemon: no endpoint, so the file is all there is. It cannot
+        # open the pairing page either, so the toolbar-icon wording applies.
+        pair = pairing_status()
+        codes = [
+            {**item, "extension_version": "", "update_available": False}
+            for item in (pair.get("pending") or [])
+        ]
+        paired_connected = 1 if pair.get("paired") else 0
+        page_opened = False
+        # That daemon minted the code with ITS lifetime, not ours (review R3a):
+        # say how long is actually left on the code, rounded down, or nothing.
+        left = [
+            float(item.get("expires_at", 0) or 0) - time.time()
+            for item in codes
+            if item.get("expires_at")
+        ]
+        minutes = int(min(left) // 60) if left and min(left) >= 60 else None
+    else:
+        codes = list(answer.get("codes") or [])
+        paired_connected = int(answer.get("paired_connected_count", 0))
+        page_opened = True
+
+    if not codes:
+        # Paired on file counts too: a paired browser that is closed right now
+        # needs no code, and "install the extension" would be wrong advice.
+        if paired_connected or pairing_status().get("paired"):
+            # Names BOTH routes (UX round 3, U3): a second browser is paired by
+            # running this again once ITS extension is connected, and `--reset`
+            # revokes the working one too, so it is the second option, not the
+            # first.
+            print(_bt(_b.already_paired()))
+            return 0
+        print(_bt(_b.no_extension_waiting()))
+        return 1
+
+    def _opens_page(item: dict[str, Any]) -> bool:
+        version = str(item.get("extension_version", ""))
+        # Unknown version: say "page" only when the daemon could ask for one;
+        # the icon fallback line is printed in every case anyway.
+        return page_opened and not extension_older(version, SHOW_PAIRING_MIN_EXTENSION_VERSION)
+
+    if len(codes) == 1:
+        item = codes[0]
+        print(_bt(_b.pairing_code(code=str(item.get("code", "")))))
+        if _opens_page(item):
+            print(_bt(_b.enter_code()))
+            print(_bt(_b.pair_no_page_hint()))
+        else:
+            print(_bt(_b.enter_code_icon()))
+    else:
+        # Two installs waiting at once cannot be told apart by a bare code. Each
+        # line names its install from the label the daemon recorded when the
+        # code was minted (design §3.4) plus the short id, because two installs
+        # of the SAME build share a label byte for byte (copy review C6).
+        print(_bt(_b.pair_several_header()))
+        for item in codes:
+            print(
+                _bt(
+                    _b.pairing_code_labeled(
+                        code=str(item.get("code", "")), label=_waiting_label(item)
+                    )
+                )
+            )
+        # The tab wording only when EVERY install will open its tab (review
+        # R3b): an older daemon cannot ask, and an extension older than
+        # SHOW_PAIRING_MIN_EXTENSION_VERSION ignores the request.
+        if all(_opens_page(item) for item in codes):
+            print(_bt(_b.enter_each_code()))
+            print(_bt(_b.pair_no_page_hint()))
+        else:
+            print(_bt(_b.enter_each_code_icon()))
+    if minutes is not None:
+        print(_bt(_b.pair_code_lifetime(minutes=minutes)))
+    for item in codes:
+        if item.get("update_available"):
+            print(
+                _bt(
+                    _b.pair_outdated(
+                        label=_waiting_label(item),
+                        want=str(
+                            answer.get("expected_extension_version") or EXPECTED_EXTENSION_VERSION
+                        ),
+                    )
+                )
+            )
+    return 0
 
 
 def _waiting_label(item: dict[str, Any]) -> str:
@@ -4006,49 +4200,14 @@ def browser_command(args: argparse.Namespace) -> int:
             # only at its next reconnect (findings A5/U1).
             reset_pairing()
             print(_bt(_b.revoked_browser()))
-            # A successful revoke must not report failure to a wrapping script
-            # even when no extension is currently waiting to pair (UX-N1).
-            pair = pairing_status()
-            code = pair.get("pending_code")
-            if code:
-                print(_bt(_b.pairing_code(code=code)))
-                print(_bt(_b.enter_code()))
-            else:
-                print(_bt(_b.open_popup()))
+            # No code here on purpose: the revoked install is still connected
+            # as PAIRED for a few seconds (until the watcher severs it and it
+            # re-dials unpaired), so asking the daemon for codes now would find
+            # nothing to mint for. The next `pair` run is what mints it. Exit 0:
+            # a successful revoke must not read as a failure to a script (UX-N1).
+            print(_bt(_b.pair_after_reset()))
             return 0
-        pair = pairing_status()
-        pending = pair.get("pending") or []
-        if len(pending) > 1:
-            # Two installs waiting at once cannot be told apart by a bare code:
-            # the user is looking at two popups and a terminal. Name the install
-            # each code belongs to, from the label the daemon recorded when the
-            # code was minted (design §3.4) — and the short id as well, because
-            # two installs running the SAME build share a label byte for byte
-            # (copy review C6), which is precisely when "the matching popup" has
-            # no referent and the id prefix is the only token that resolves.
-            for item in pending:
-                print(
-                    _bt(_b.pairing_code_labeled(code=item.get("code"), label=_waiting_label(item)))
-                )
-            print(_bt(_b.enter_each_code()))
-            return 0
-        code = pair.get("pending_code")
-        if code:
-            print(_bt(_b.pairing_code(code=code)))
-            print(_bt(_b.enter_code()))
-            return 0
-        if pair.get("paired"):
-            # Names BOTH routes, because the old wording offered only `--reset`
-            # (UX round 3, U3): a second install whose popup is showing the
-            # pairing form reaches here too, and `--reset` — which revokes the
-            # WORKING install as well — is not the answer the user wants. The
-            # code for that install appears here once it connects, so the honest
-            # line points at its popup first. "Connects" rather than "its worker
-            # dials" (copy review C9): a compliance analyst has no worker.
-            print(_bt(_b.already_paired()))
-            return 0
-        print(_bt(_b.no_extension_waiting()))
-        return 1
+        return _browser_pair(pairing_status)
     if command == "drive":
         result = browser_install.pin_driver(args.target)
         if not result.get("ok"):
@@ -12407,7 +12566,7 @@ def _bundle_lines(
     return lines
 
 
-def _skills_scope(args: argparse.Namespace) -> tuple[str, str | None]:
+def _skills_scope(args: argparse.Namespace) -> tuple[Literal["public", "org"], str | None]:
     """``--public`` / ``--org TENANT`` as the paired scope the service requires."""
 
     public = bool(getattr(args, "public", False))
@@ -12523,6 +12682,38 @@ def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
     return 0
 
 
+def _print_skill_adoption(preview: dict[str, Any]) -> None:
+    """Render ALL reviewed bytes/diffs; do not truncate a consent boundary.
+
+    Each physical line is sanitized independently: terminal controls in remote
+    content cannot erase the prompt or forge a prior line. JSON clients receive
+    the complete structured proposal instead of this terminal projection.
+    """
+    import json as _json
+
+    from local_operator.i18n.keys import wire_skill_adoption as copy
+
+    print(copy.preview_title().envelope()["text"])
+    snapshot = preview.get("snapshot") or {}
+    print(
+        copy.backup_label(
+            path=str(snapshot.get("path") or ""), hash=str(snapshot.get("tree_hash") or "")
+        ).envelope()["text"]
+    )
+    proposal = preview["adoption"]
+    for row in proposal.get("files", []):
+        # Technical field labels stay machine vocabulary. File content includes
+        # both-sided provenance and full diffs, so the CLI is a review surface,
+        # not a claim that the preview exists elsewhere.
+        rendered = _json.dumps(row, ensure_ascii=False, indent=2)
+        for line in rendered.splitlines():
+            print(_safe(line, limit=len(line) + 1))
+    print(copy.receipt_label(receipt=preview["adoption_receipt"]).envelope()["text"])
+    if proposal.get("state") == "needs-choice":
+        print(copy.needs_choice().envelope()["text"])
+    print(copy.no_apply().envelope()["text"])
+
+
 def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
     import json as _json
 
@@ -12543,6 +12734,35 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
     ctx = svc.sync_context(ConfigManager(base_dir))
     alias = getattr(args, "alias", None)
     hub_source = canonical_hub_source(ctx.config_manager) or ""
+    adoption_receipt = getattr(args, "adopt_receipt", None)
+    if adoption_receipt:
+        from local_operator.i18n.keys import wire_skill_adoption as adoption_copy
+
+        if not getattr(args, "yes", False) or getattr(args, "dry_run", False):
+            return _skills_fail(
+                args,
+                LinkError(
+                    "confirmation-required", adoption_copy.preview_required().envelope()["text"]
+                ),
+            )
+        try:
+            adopted = svc.install_skill(
+                ctx,
+                hub_source=hub_source,
+                hub_id=args.hub_id,
+                visibility=visibility,
+                tenant_id=tenant_id,
+                alias=alias,  # type: ignore[arg-type]
+                subscribe=subscribe,
+                confirm=True,
+                adoption_receipt=adoption_receipt,
+                adoption_strategy=getattr(args, "strategy", "merge"),
+                allow_llm=not getattr(args, "no_llm", False),
+            )
+        except LinkError as error:
+            return _skills_fail(args, error)
+        print(_json.dumps(adopted, indent=2))
+        return 0
     try:
         preview = svc.install_skill(
             ctx,
@@ -12554,11 +12774,25 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
             subscribe=subscribe,
             dry_run=True,
             reinstall=reinstall,
+            adoption_strategy=getattr(args, "strategy", "merge"),
+            allow_llm=not getattr(args, "no_llm", False),
         )
     except LinkError as error:
         return _skills_fail(args, error)
     bundle = preview.get("bundle")
     publisher = preview.get("publisher")
+    if preview.get("adoption"):
+        # An authored collision is reviewed separately from an ordinary new
+        # install. --yes cannot skip that review: a subsequent command must
+        # name the durable receipt bound to these exact proposed bytes.
+        if getattr(args, "json", False):
+            print(_json.dumps(preview, indent=2))
+        else:
+            _print_skill_adoption(preview)
+        return 0
+    if getattr(args, "dry_run", False):
+        print(_json.dumps(preview, indent=2))
+        return 0
     confirm_publisher = getattr(args, "confirm_publisher", None)
     confirm_hash = getattr(args, "confirm_hash", None)
     if not getattr(args, "json", False):
@@ -12819,6 +13053,7 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
             ),
             bundle_attested=not is_bundle or svc._capability_bundle(ctx.store().load(), identity),
             bundle_upload=(svc.bundle_upload_hook(ctx, identity, record) if is_bundle else None),
+            org_skill=identity.visibility == "org",
         )
     )
     svc.record_push_outcome(ctx, check, outcome)
@@ -12830,6 +13065,8 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
         "revision": outcome.revision,
         "operation_id": outcome.operation_id,
     }
+    if outcome.reason in _SKILL_RECONCILIATION_REASONS:
+        payload["recovery_guide"] = "guide://extensions"
     if getattr(args, "json", False):
         print(_json.dumps(payload, indent=2))
     else:
@@ -12840,12 +13077,18 @@ def _skills_push(args: argparse.Namespace, base_dir: Path) -> int:
     return 0 if outcome.state in ("pushed", "no-op") else 1
 
 
+_SKILL_RECONCILIATION_REASONS = frozenset(
+    {"legacy-reconciliation-required", "prior-version-reconciliation-required"}
+)
+
+
 def _reason_error(code: str) -> Any:
     """A named push refusal as the LinkError the shared wording helper expects."""
 
     from local_operator.hub_sync.identity import LinkError
 
-    return LinkError(code, code)
+    detail = f"{code} — guide://extensions" if code in _SKILL_RECONCILIATION_REASONS else code
+    return LinkError(code, detail)
 
 
 def _skills_sync(args: argparse.Namespace, base_dir: Path) -> int:
@@ -16896,6 +17139,63 @@ def _is_daemon_launch(args: argparse.Namespace) -> bool:
     )
 
 
+def _machine_readable(args: argparse.Namespace) -> bool:
+    """Whether this invocation's stdout is a machine contract, not a sentence.
+
+    ``--json`` wherever a subcommand family declares it, and ``exec``'s own
+    ``--json`` (dest ``json_mode``: one ``printable_event`` line per event and
+    no chrome at all). A document a script parses must not vary with the
+    operator's language: the refusal documents below carry a ``message`` field,
+    and a translated one would make the payload locale-dependent with no way
+    for a consumer to say which locale it holds.
+
+    Two families used to declare ``--json`` under a different dest — ``memory``
+    as ``raw`` and ``search test`` as ``as_json`` — so this predicate silently
+    missed them. Both now use argparse's default (``json``); the alternative,
+    matching on ``raw``, would have caught ``fetch test --raw``, which is TEXT
+    output and must keep its localized copy.
+    """
+
+    return bool(getattr(args, "json", False) or getattr(args, "json_mode", False))
+
+
+def _install_headless_locale(args: argparse.Namespace) -> None:
+    """Activate the resolved language ONCE for the command this process runs.
+
+    THE ROOT CAUSE THIS CLOSES. ``i18n.text`` starts at ``en`` and only moves
+    when a surface calls ``set_active_locale``; until this call the only
+    callers were the TUI's boot and ``--remote`` dispatch, so every headless
+    ``lop <command>`` rendered its keyed copy in English whatever
+    ``language:`` said — while ``lop <command> --help`` in the same shell was
+    translated, because help resolves through its own read-only locale reader.
+    Measured: with ``language: fr`` (a locale whose ``cli.browser`` wave has
+    shipped) ``lop browser status`` printed every line in English beside a
+    French ``--help``.
+
+    WHERE IT RUNS. :func:`main` calls this after the config store this process
+    will read is final (``config_dir()`` plus the startup migrations) and
+    before the first dispatch branch, so every command below, the headless
+    REPL and the local ``exec`` run inherit the one move. It is deliberately
+    not per-command: one move per process is the contract ``set_active_locale``
+    documents, and a second call would only pay another config read.
+
+    THE TWO EXCLUSIONS, both of them reasoned in ``i18n.boot``:
+
+    * machine-readable output — a payload a script parses must not change with
+      the language;
+    * the full-screen TUI — ``OperatorApp.on_mount`` resolves and applies it
+      itself, and owns the repaint that follows a move. ``_startup_surface``
+      is the same helper ``main``'s ``use_tui`` decision reads, so the two
+      cannot disagree about which launch this is. (A ``--tui`` launch whose
+      build lacks the app falls back to the REPL and keeps English copy — the
+      single accepted drift ``_startup_surface`` already documents.)
+    """
+
+    if _machine_readable(args) or _startup_surface(args) == "tui":
+        return
+    activate_resolved_locale()
+
+
 def _startup_surface(args: argparse.Namespace) -> str:
     """The surface the startup seam tags its notices for: "tui", "cli" or "daemon".
 
@@ -16969,34 +17269,22 @@ def _reject_extra_positionals(parser: Any, args: Any) -> None:
     if not extras:
         return
     quoted = [repr(part) for part in (args.command, *extras)]
-    received = (
-        ", ".join(quoted[:-1]) + f" and {quoted[-1]}" if len(quoted) > 2 else " and ".join(quoted)
-    )
+    received = _tr(_failure_details.positional_pair(first=", ".join(quoted[:-1]), last=quoted[-1]))
     # Exactly two positionals is the common shape — a title mistaken for the
     # prompt — and can be repaired with a concrete command. Three or more cannot:
     # a `--name <title> <prompt>` example would silently DROP the tail, handing
     # the caller a valid command that runs a different brief than the one they
     # composed. Those get the rule instead of a misleading example.
     if len(quoted) == 2:
-        hint = (
-            "The first positional is the prompt, not a title. To name the run, "
-            "pass the title via --name:\n"
-            # shlex.quote, not repr: the suggestion is composed to be pasted into
-            # a shell, and repr's escaping is Python's, not the shell's (a title
-            # like `O'Brien's audit` renders differently under each).
-            f"  lop exec --name {shlex.quote(args.command)} {shlex.quote(extras[0])}\n"
+        # Keep shell syntax out of the catalogue: translators must never alter
+        # quoting, since this example is intended to be pasted into a shell.
+        command = f"lop exec --name {shlex.quote(args.command)} {shlex.quote(extras[0])}"
+        message = _failure_details.exec_two(
+            count=str(len(quoted)), received=received, command=command
         )
     else:
-        hint = (
-            "The first positional is the prompt, not a title: pass the title via "
-            "--name, and quote the prompt as the ONE positional — the extra "
-            "positionals are not consumed.\n"
-        )
-    parser.error(
-        f"exec takes ONE positional prompt, got {len(quoted)} positionals: "
-        f"{received}.\n{hint}"
-        "(--workstream is a flag — it publishes the run and takes no value.)"
-    )
+        message = _failure_details.exec_many(count=str(len(quoted)), received=received)
+    parser.error(_tr(message))
 
 
 def main() -> int:
@@ -17012,7 +17300,9 @@ def main() -> int:
     configure_cli_logging()
     try:
         parser = build_cli_parser()
-        args = parser.parse_args()
+        from local_operator.exec_startup import fold_saver_argv
+
+        args = parser.parse_args(fold_saver_argv(sys.argv[1:]))
 
         # macOS: replace this process with a branded image so Activity Monitor
         # stops showing a wall of `python3.x`. NEVER RETURNS when it brands;
@@ -17243,6 +17533,18 @@ def main() -> int:
             surface=_startup_surface(args),
             command=_seed_sync_command(args),
         )
+        # THE HEADLESS COMMAND'S LANGUAGE, ONCE, BEFORE THE FIRST BRANCH BELOW.
+        # Every dispatch branch below renders keyed copy, and until this call
+        # nothing had moved the process off the renderer's `en` default — so a
+        # command whose namespace HAS a shipped translation wave (French
+        # `cli.browser`, say) still printed English, while `--help` in the same
+        # locale was translated. Here rather than earlier because this is the
+        # first point where the config store this process will read is final;
+        # here rather than per command because one move per process is the
+        # renderer's contract. The `--remote` dispatch above returns into its own
+        # activation (it must: it runs before this), and `_install_headless_locale`
+        # leaves `--json` and the TUI alone — see its docstring.
+        _install_headless_locale(args)
         # The agent home is NO LONGER created here. Creating it unconditionally
         # before dispatch meant `config list`, `login`, `--version` and every
         # other non-session subcommand created a workspace directory they never
@@ -17262,7 +17564,7 @@ def main() -> int:
             elif args.credential_command == "git-helper":
                 return _credential_git_helper_command(args)
             else:
-                parser.error(f"Invalid credential command: {args.credential_command}")
+                parser.fail_invalid_command("credential", args.credential_command)
         elif args.subcommand == "config":
             if args.config_command == "create":
                 return config_create_command()
@@ -17275,12 +17577,12 @@ def main() -> int:
             elif args.config_command == "instructions":
                 return config_instructions_command(args)
             else:
-                parser.error(f"Invalid config command: {args.config_command}")
+                parser.fail_invalid_command("config", args.config_command)
         elif args.subcommand == "aida":
             if args.aida_command == "note":
                 return aida_note_command(args)
             else:
-                parser.error(f"Invalid aida command: {args.aida_command}")
+                parser.fail_invalid_command("aida", args.aida_command)
         elif args.subcommand == "search":
             from local_operator.web_search.cli import search_command
 
@@ -17299,6 +17601,10 @@ def main() -> int:
                 return agents_create_command(args.name, agent_registry)
             elif args.agents_command == "delete":
                 return agents_delete_command(args, agent_registry, base_dir)
+            elif args.agents_command == "picture":
+                from local_operator import cli_agent_picture
+
+                return cli_agent_picture.run(args, agent_registry)
             elif args.agents_command == "push":
                 # Push agent to Radient
                 if getattr(args, "org", None) is not None:
@@ -17457,7 +17763,7 @@ def main() -> int:
                 # shared sync functions, not in this branch.
                 return agents_sync_command(args, agent_registry, base_dir)
             else:
-                parser.error(f"Invalid agents command: {args.agents_command}")
+                parser.fail_invalid_command("agents", args.agents_command)
         elif args.subcommand == "teams":
             # U5-1: every teams subcommand can hit the registry lock, and lock
             # contention is a recoverable state — print one concise line here
@@ -17495,11 +17801,20 @@ def main() -> int:
                 elif args.teams_command == "link":
                     return teams_link_command(args, team_registry, base_dir)
                 else:
-                    parser.error(f"Invalid teams command: {args.teams_command}")
+                    parser.fail_invalid_command("teams", args.teams_command)
             except (TeamRegistryLockTimeout, TeamRegistryRecoveryError) as e:
                 print(f"\n\033[1;31mError: {str(e)}\033[0m", file=sys.stderr)
                 return 1
         elif args.subcommand == "serve":
+            if args.install_service:
+                # Installation returns before warming a runtime: this command's
+                # product is the user unit, not a second foreground API listener.
+                from local_operator import services
+
+                result = services.install_linux_serve_service(args.port)
+                for line in result["lines"]:
+                    print(line)
+                return 0 if result["ok"] else 1
             # The desktop daemon engages a runtime for every conversation the app
             # opens cold, so it keeps ONE pre-imported standby for its root (see
             # ``session/runtime/standby.py`` for the cost it removes and the
@@ -17522,8 +17837,8 @@ def main() -> int:
             if args.hub_command == "link":
                 if args.hub_link_command == "set":
                     return hub_link_set_command(args, base_dir)
-                parser.error(f"Invalid hub link command: {args.hub_link_command}")
-            parser.error(f"Invalid hub command: {args.hub_command}")
+                parser.fail_invalid_command("hub link", args.hub_link_command)
+            parser.fail_invalid_command("hub", args.hub_command)
         elif args.subcommand == "skills":
             return skills_command(args, base_dir)
         elif args.subcommand == "mobile":
@@ -17532,6 +17847,22 @@ def main() -> int:
             from local_operator.tunnels.cli import main as tunnel_main
 
             return tunnel_main(args)
+        elif args.subcommand == "team-bridge":
+            if getattr(args, "team_bridge_command", None) == "avatar":
+                from local_operator.team_bridge.cli import main as team_bridge_avatar
+
+                return team_bridge_avatar(args)
+            if getattr(args, "team_bridge_command", None) == "setup":
+                from local_operator.team_bridge.setup_cli import (
+                    main as team_bridge_setup,
+                )
+
+                return team_bridge_setup(args)
+            from local_operator.team_bridge.connector.cli import (
+                main as team_bridge_main,
+            )
+
+            return team_bridge_main(args)
         elif args.subcommand == "secret":
             from local_operator.secrets.cli import main as secret_main
 
@@ -17556,6 +17887,10 @@ def main() -> int:
             return send_command(args)
         elif args.subcommand == "model":
             return model_command(args)
+        elif args.subcommand == "disk":
+            from local_operator.disk_cli import main as disk_main
+
+            return disk_main(args)
         elif args.subcommand == "sessions":
             return sessions_command(args)
         elif args.subcommand == "stop":
@@ -17820,6 +18155,12 @@ def main() -> int:
                 loop_goal=args.loop_goal,
                 name=args.name,
                 effort=args.effort,
+                # getattr for the same reason as the additive flags below: a
+                # Namespace without it must read as "no choice", never raise.
+                # Omitting this line is the defect the supervisor_fd comment
+                # below records — the flag parsed, validated, then did nothing
+                # (caught by test_exec_saver_flag_is_journaled_and_resumes).
+                saver=getattr(args, "saver", None),
                 agent_name=args.agent_name,
                 agent_id=getattr(args, "agent_id", None),
                 yolo=args.yolo,
@@ -18292,6 +18633,9 @@ def main() -> int:
                     # The owner's directory, not this terminal's: the band paints
                     # it before the bind lands, and a live conversation's cwd is
                     # the one it is working in.
+                    # CLI invocation is a deliberate local directory choice:
+                    # unlike a remote engage, its shell cwd is not a placeholder.
+                    # Keep intentional HOME resumes winning over a recorded move.
                     paint_first_cwd = str(record.cwd or os.getcwd())
                     record = None
                 if record is not None:
@@ -18340,6 +18684,8 @@ def main() -> int:
                 viewer = await AttachedSession.cold(
                     session_id,
                     config_dir=config_directory,
+                    # No remote omission here: this is the user's CLI shell
+                    # directory, including an intentional HOME (see above).
                     cwd=paint_first_cwd or os.getcwd(),
                     takeover_factory=take_over,
                     initial_model=initial_model,

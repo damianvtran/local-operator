@@ -1,0 +1,201 @@
+{
+  "schema": 1,
+  "audit_id": "w6a2",
+  "audit_round": 2,
+  "locale": "es",
+  "namespace": "tui.app",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "The es target is UNTRACKED at this revision, so HEAD does not bind its bytes. The on-disk sha256 in input_hashes.target is the binding identity; the probe re-reads the same files and prints their digests at the top of its run (audit.log §3).",
+  "branch_checked_out": "feat/i18n-es-tui",
+  "branch_note": "the task brief named `tui-wip`; `git rev-parse --abbrev-ref HEAD` reports feat/i18n-es-tui, recorded here as found",
+  "key_count": {
+    "en": 46,
+    "target": 46,
+    "context": 46
+  },
+  "verdict": "passed",
+  "result": "passed — all six w6a1 defects closed (APP-1/2/3/4/5/7), 0 new findings (2 nits unchanged, accepted)",
+  "verdict_reason": "Every round-1 major and minor is closed on the current bytes: the config receipt now agrees with both feminine labels (re-verified against the two _x.config_label_* builders in app.py), the goals heading is 'objetivos finalizados' and matches tui.small, and the three /help rows compose to 68/73/72 against the pinned 74 at 80 columns (name_width derived from the live registry, not assumed). The count-neutral stop_all qualifier composes to 57 of the 70-cell notice body. APP-6 (label_web_fetch) was a preference and APP-8 an extraction-scope question for logging strings; both unchanged, neither a defect.",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), independent Spanish translation auditor",
+    "session_or_instance": "7fa3a39af5d9",
+    "model": "radient/auto",
+    "model_note": "Model as actually run, not the session header. The header named anthropic/claude-sonnet-5-5; provider quota failures switched the session to openai/gpt-6-astra, then kimi/k3.1-pro, then radient/auto before any audit work began. Every check, measurement and finding in this bundle was produced under radient/auto. No claim is made for the primary model.",
+    "date": "2026-10-30",
+    "independent_from_translator_session": true,
+    "independent_of_round_1_session": "6a2f6fa808a7 (the w6a1 auditor session; different session, same inputs re-read)",
+    "actual_model_source": "session model-switch events in the run transcript (quota fallbacks), disclosed verbatim",
+    "independence": "I authored none of this copy and repaired none of it. I wrote no catalogue, sidecar, ledger, allowance or generated file; only this evidence directory. Judgement is LLM reasoning against the en source, the context sidecar, the shipped es catalogues and the rendering code. No translation/memory/MT service was used to compare or back-translate."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.app.json",
+      "sha256": "7e5f39df72438663a66afca0e5338e90b7b984bdca6b562195ce976945bd7875",
+      "tracked": true
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.app.context.json",
+      "sha256": "a840ac61e3c1e1178825257c1b9ebaa6ebfef500df4f3a29e8c463b50eef42fa",
+      "tracked": true
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.app.json",
+      "sha256": "6afd01d6d0aff0b21827da64e6b525dc9e42ef7071cf4767ca0a46f6f14250b5",
+      "tracked": false
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.app/w6a2/record.json",
+      "role": "record",
+      "sha256": "self"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.app/w6a2/report.md",
+      "role": "audit report (findings, measurements, limitations)",
+      "sha256": "0531200b9de2149e7dba4ff491aa08a9cf9b77878b7ba5b026165b4a6dea621f"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.app/w6a2/audit.log",
+      "role": "execution log: validator + probe + measurement commands and their actual output",
+      "sha256": "9ae664f87ee0754c1ae37e6ae61beb7ff1a3d72a1d2fb6b8bf82c63e7861669d"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.app/w6a2/checks.py",
+      "role": "the probe that produced sections A-D, including the negative controls",
+      "sha256": "cd4b5f867beacc48eaa16ea2b29ce4335210cadcfae5c2a16381dc8954123278"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "APP-1",
+      "APP-2",
+      "APP-3",
+      "APP-4",
+      "APP-5",
+      "APP-6",
+      "APP-7",
+      "APP-8"
+    ]
+  },
+  "findings": [
+    {
+      "id": "APP-1",
+      "severity": "major",
+      "status": "closed",
+      "key": "tui.app.config.toggle_on / toggle_off",
+      "en": "{label} on — takes effect from your next turn",
+      "current": "{label} activada — surte efecto desde tu próximo turno",
+      "problem": "Closed: feminine agreement matches both builders' labels (búsqueda web, consulta web); the off-state warning is as strong as en.",
+      "suggestion": "none",
+      "evidence": "app.py:42825-42826 (exactly two config_label_* builders); probe C4"
+    },
+    {
+      "id": "APP-2",
+      "severity": "major",
+      "status": "closed",
+      "key": "tui.app.goals.settled_heading",
+      "en": "settled goals",
+      "current": "objetivos finalizados",
+      "problem": "Closed: agrees with tui.small.goal_panel.settled_heading ('finalizados') and more_settled ('… más finalizados').",
+      "suggestion": "none",
+      "evidence": "probe C5; tui.small es catalogue"
+    },
+    {
+      "id": "APP-3",
+      "severity": "major",
+      "status": "closed",
+      "key": "tui.app.help.paste_note / skill_note / cmd_paste_note",
+      "en": "attaches an image or file from the system clipboard / runs a named skill on the rest of the line / same, where the terminal forwards it; not Terminal.app",
+      "current": "adjunta una imagen o un archivo del portapapeles / ejecuta la habilidad indicada en el resto de la línea / igual, si la terminal lo reenvía; no en Terminal.app",
+      "problem": "Closed: composed 68/73/72 ≤ 74 at 80 columns, so no row wraps into the key gutter.",
+      "suggestion": "none (help.skill_note has 1 cell of headroom; copy_note_more, unchanged, sits exactly at 74)",
+      "evidence": "app.py:56171 name_width derivation; probe A0/B2; audit.log §4"
+    },
+    {
+      "id": "APP-4",
+      "severity": "minor",
+      "status": "closed",
+      "key": "tui.app.stop_all.already_leaving",
+      "en": "{shown} already leaving — asked again, then left alone",
+      "current": "{shown} ya saliendo — se volvió a pedir y no se insistió más",
+      "problem": "Closed: count-neutral, one and many both parse; 57 cells inside the 70-cell notice body at a two-digit count.",
+      "suggestion": "none",
+      "evidence": "app.py:45302-45318; probe B3/C7"
+    },
+    {
+      "id": "APP-5",
+      "severity": "minor",
+      "status": "closed",
+      "key": "tui.app.help.cmd_paste_note (mood)",
+      "en": "same, where the terminal forwards it",
+      "current": "igual, si la terminal lo reenvía",
+      "problem": "Closed: indicative 'reenvía', conditional 'si' kept.",
+      "suggestion": "none",
+      "evidence": "probe C6"
+    },
+    {
+      "id": "APP-6",
+      "severity": "nit",
+      "status": "unchanged, accepted",
+      "key": "tui.app.config.label_web_fetch",
+      "en": "web fetch",
+      "current": "consulta web",
+      "problem": "Preference only; the label is now load-bearing for the feminine agreement, so changing it would need a fresh agreement check.",
+      "suggestion": "leave",
+      "evidence": "probe C4 asserts the label set"
+    },
+    {
+      "id": "APP-7",
+      "severity": "nit",
+      "status": "closed",
+      "key": "tui.app.help.skill_note (idiom)",
+      "en": "a named skill",
+      "current": "la habilidad indicada",
+      "problem": "Closed: the 'con nombre' calque is gone.",
+      "suggestion": "none",
+      "evidence": "probe C6"
+    },
+    {
+      "id": "APP-8",
+      "severity": "nit",
+      "status": "unchanged, recorded",
+      "key": "tui.app.sidebar.why_retry_budget / why_retired / why_left_screen",
+      "en": "retry budget exhausted / source retired / source left the screen",
+      "current": "presupuesto de reintentos agotado / origen retirado / origen fuera de pantalla",
+      "problem": "Consumed only by a logger.warning line; the glossary keeps developer logs English. A catalogue-scope question for the extraction wave, not a translation defect.",
+      "suggestion": "raise in the extraction wave",
+      "evidence": "app.py:11503-11511"
+    }
+  ],
+  "round_1_bundle": "i18n/audits/evidence/es/tui.app/w6a1/",
+  "check_output": [
+    {
+      "cmd": "python3 scripts/i18n/check.py",
+      "result": "exit 0 — 'check.py: ok — 191 file(s) scanned, 2348 literal(s) at or below the baseline, catalogues consistent; 51 advisory finding(s)'"
+    },
+    {
+      "cmd": "~/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.hub_links/w6a2/checks.py",
+      "result": "exit 1 — 3 failing checks across the three namespaces (1 hub_links, 0 app, 2 usage); 11/11 negative controls behaved as required (10 breakages caught, 1 intended pass accepted)"
+    },
+    {
+      "cmd": "~/local-operator/.venv/bin/python - <<'PY' (measurement block captured in audit.log §4)",
+      "result": "cell_len from rich.cells; name_width derived from the live SLASH_COMMANDS registry (20); /help rows 68/73/72 vs 74; stop_all 57 vs 70; usage counters 27 vs 31 floor and 42 vs en 45; paid notes continue 54/44, family_caps 55/31, eligibility 37/27"
+    },
+    {
+      "cmd": "python3 (term counts over 95 es catalogue files, audit.log §5)",
+      "result": "diálogo: 1 occurrence (the audited key); prompt: 38 occurrences in 36 values"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md and verdict_reason are reasoning; audit.log holds the captured command output and is the execution record.",
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation, and native review is not claimed as a gate.",
+    "No rendered TUI frame captured: widths are computed with rich.cells.cell_len against the geometry the source documents, and truncation points are computed from Text.truncate(..., overflow='ellipsis').",
+    "No repo-wide pytest suite or generator was run; the validator plus the probe are the mechanical evidence.",
+    "audit_notes_not_execution_log: report.md is reasoning; audit.log is the captured command output and is the execution record."
+  ],
+  "no_writes": "No catalogue, sidecar, ledger, allowance, baseline or generated file was written by this audit; only this evidence directory."
+}

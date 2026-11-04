@@ -41,9 +41,16 @@ from local_operator.browser_bridge.protocol import (
     CAPABILITY_SWITCH_PERMISSION,
     DESKTOP_ONLY_METHODS,
     EXPECTED_EXTENSION_VERSION,
+    EXTENSION_UPDATE_HOW,
     EXTENSION_UPDATE_NOTE,
     METHODS,
     ORIGIN_PROMPT_TIMEOUT_MS,
+    PAIR_ASK_PHRASE,
+    PAIR_EXPIRED_MESSAGE,
+    PAIR_LOCKED_MESSAGE,
+    PAIR_MISMATCH_MESSAGE,
+    PAIR_NO_CODE_MESSAGE,
+    PAIR_TTL_MINUTES,
     PROTO_VERSION,
     ErrorCode,
 )
@@ -108,6 +115,19 @@ export const EXPECTED_EXTENSION_VERSION = {EXPECTED_EXTENSION_VERSION!r} as cons
 // store currently offers. Nothing is blocked by an older extension — the copy
 // says so, and must keep saying so.
 export const EXTENSION_UPDATE_NOTE = {EXTENSION_UPDATE_NOTE!r};
+// How to update an older extension, as one instruction (protocol.py).
+export const EXTENSION_UPDATE_HOW = {EXTENSION_UPDATE_HOW!r};
+// The pairing-result sentences. The DAEMON sends them in `pair_result.message`;
+// the extension uses the same constants as its fallback when a message is
+// absent, so one spelling reaches the person whichever side wrote it.
+export const PAIR_MISMATCH_MESSAGE = {PAIR_MISMATCH_MESSAGE!r};
+export const PAIR_EXPIRED_MESSAGE = {PAIR_EXPIRED_MESSAGE!r};
+export const PAIR_LOCKED_MESSAGE = {PAIR_LOCKED_MESSAGE!r};
+export const PAIR_NO_CODE_MESSAGE = {PAIR_NO_CODE_MESSAGE!r};
+// What the pairing form tells a person to say to the agent, and how long a
+// code lasts (the daemon's PAIR_TTL_S, in minutes, for copy only).
+export const PAIR_ASK_PHRASE = {PAIR_ASK_PHRASE!r};
+export const PAIR_TTL_MINUTES = {PAIR_TTL_MINUTES} as const;
 // How long the approval popup waits for a human origin decision before
 // auto-denying. Generated so the daemon's prompt window (this + margin) and
 // the session client's HTTP timeout can never drift below it (finding A3).
@@ -132,9 +152,11 @@ export const CAPABILITY_SWITCHES: Record<string, {{ label: string; permission: s
 export type Method = {methods};
 // Wire methods ONLY the desktop app's browser host serves. They are in `Method`
 // because the vocabulary is shared, but this build must not serve or advertise
-// them: its debugger is attached for one action, so it has no standing session a
-// `Network` subscription could live on. Generated from Python's
-// `DESKTOP_ONLY_METHODS` so the handler-parity test needs no hand-kept exemption.
+// them: network capture needs a standing channel the extension's worker lifetime
+// does not give it, and recording must write a destination Chrome refuses a
+// tab-scoped session (D10 keeps that one desktop-only until its probe and consent
+// switch land). Generated from Python's `DESKTOP_ONLY_METHODS` so the
+// handler-parity test needs no hand-kept exemption.
 export type DesktopOnlyMethod = {desktop_only};
 // One buffered console/runtime log line, as `logs` returns it (newest last).
 // `level` is normalized to the error/warning/info/log vocabulary the tool
@@ -193,6 +215,9 @@ export interface HelloAck {{
 // an existing model, so a released daemon that does not know it ignores the
 // frame instead of closing the socket.
 export interface Role {{ event: 'role'; role: 'driver' | 'standby'; }}
+// Daemon -> extension: open the pairing tab (sent by `lop browser pair` to a
+// connected, unpaired install). Carries NO code, by design.
+export interface ShowPairing {{ event: 'show_pairing'; }}
 export interface PairRequest {{ event: 'pair'; code: string; }}
 export interface PairResult {{ event: 'pair_result'; ok: boolean; token: string; message: string; }}
 export interface Ping {{ event: 'ping'; }}
@@ -224,7 +249,7 @@ export interface OriginDecision {{
 export type ExtensionEvent =
   | Hello | PairRequest | Pong | TabClosed | TabUpdate | AwaitingOrigin | AwaitingOriginCleared
   | Unpair | OriginDecision | Capabilities | CapabilitySwitches;
-export type DaemonMessage = HelloAck | PairResult | Ping | Request | Role;
+export type DaemonMessage = HelloAck | PairResult | Ping | Request | Role | ShowPairing;
 """
 
 

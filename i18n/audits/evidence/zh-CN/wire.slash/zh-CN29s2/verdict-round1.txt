@@ -1,0 +1,2 @@
+CHANGES_REQUESTED
+CHANGES_REQUESTED — 1 MAJOR (wire.slash.highlights calls the Highlights feature 补充内容 where the catalogue says 亮点), 3 MINOR, 2 NIT; width passes (max 51 cells, every value <= its English) and the commit's own two values (fork, stop) are clean.

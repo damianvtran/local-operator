@@ -1,0 +1,19 @@
+{
+  "cli.global_help.debug": "تفصیلی آؤٹ پٹ کے لیے ڈیبگ موڈ فعال کریں",
+  "cli.global_help.agent": "ایک پرانا نام والا ایجنٹ منتخب کریں (موجود نہ ہو تو بناتا ہے)۔ --train کے بغیر الگ محفوظ سیشن استعمال ہوتا ہے؛ exec --profile اس کی جگہ دوبارہ استعمال ہونے والا رول منسلک کرتا ہے۔",
+  "cli.global_help.train": "الگ سیشن کے بجائے پرانے ایجنٹ کی ہسٹری ڈائریکٹری (یا آٹو سیو ایجنٹ) استعمال کریں۔ عام سیشنز بھی محفوظ اور قابلِ بحالی ہوتے ہیں؛ --resume اس ڈائریکٹری کے انتخاب پر مقدم ہے۔",
+  "cli.global_help.description": "\n    Local Operator - مقامی ڈیوائس پر کام انجام دینے کے لیے ایجنٹک AI ماڈلز کا ماحول۔\n\n    DeepSeek، OpenAI، Anthropic، Ollama، Kimi اور Alibaba سمیت متعدد ہوسٹنگ پلیٹ فارمز\n    کی معاونت۔ خصوصیات میں انٹرایکٹو چیٹ، محفوظ کوڈ ایگزیکیوشن، کانٹیکسٹ سے باخبر\n    گفتگو کی ہسٹری اور بلٹ اِن حفاظتی جانچیں شامل ہیں۔\n\n    اپنا پسندیدہ ماڈل اور ہوسٹنگ پلیٹ فارم کمانڈ لائن آرگومنٹس سے کنفیگر کریں۔ آپ کی\n    کنفیگریشن فائل ~/.local-operator/config.yml پر ہے اور براہ راست ایڈٹ کی جا سکتی ہے۔\n",
+  "cli.global_help.resume": "پچھلا سیشن id سے دوبارہ شروع کریں اور اس کا ٹرانسکرپٹ دوبارہ چلائیں۔ یہ وہی id ہے جو Ctrl+C دو بار دبا کر سیشن روکنے پر چھپتا ہے، اور ~/.local-operator/sessions کے تحت ڈائریکٹری کا نام ہے۔ تازہ ترین سیشن دوبارہ کھولنے کے لیے --resume بغیر id کے دیں۔",
+  "cli.global_help.version": "پروگرام کا ورژن نمبر دکھائیں اور باہر نکل جائیں",
+  "cli.global_help.hosting": "استعمال ہونے والا ہوسٹنگ پلیٹ فارم (radient, deepseek, openai, anthropic, ollama, kimi, alibaba, google, mistral, test, openrouter, xai, zai)",
+  "cli.global_help.model": "استعمال ہونے والا ماڈل (مثلاً gpt-6-astra, claude-opus-5-5, deepseek-flash, grok-4.7, glm-5.3, gemini-3.8-flash, qwen3.8-max, kimi-k3, mistral-medium-latest, anthropic/claude-opus-5.5)۔ اختیاری: چھوڑنے پر فراہم کنندہ کا تجویز کردہ ماڈل استعمال ہوتا ہے۔",
+  "cli.global_help.run_in": "وہ ورکنگ ڈائریکٹری جس میں آپریٹر چلانا ہے۔ درست ڈائریکٹری ہونی چاہیے۔",
+  "cli.global_help.yolo": "بغیر پوچھے تمام ٹول ایگزیکیوشنز (read/write/exec درجے) کی خودکار منظوری",
+  "cli.global_help.no_tui": "فل اسکرین TUI بند کریں؛ اس کی جگہ سادہ ہیڈ لیس REPL استعمال کریں",
+  "cli.global_help.tui": "stdout کے tty نہ ہونے پر بھی فل اسکرین TUI زبردستی چلائیں (TUI بغیر tty نہ چل سکے تو واضح خرابی دیتا ہے)",
+  "cli.global_help.yolo_conditional": "اس کمانڈ کے peer create کے لیے مشروط: سیشن صرف تب بغیر نگرانی شروع ہوتا ہے جب ہدف ڈیوائس اس ڈیوائس کو `unattended` صلاحیت دے",
+  "cli.global_help.propagated_resume": "پچھلا سیشن id سے دوبارہ شروع کریں۔ تازہ ترین کے لیے بغیر id کے دیں۔",
+  "cli.global_help.propagated_hosting": "اس رن کے لیے ہوسٹنگ پلیٹ فارم (مثلاً anthropic, openai, openrouter)",
+  "cli.global_help.propagated_model": "اس رن کے لیے استعمال ہونے والا ماڈل",
+  "cli.global_help.propagated_run_in": "وہ ورکنگ ڈائریکٹری جس میں آپریٹر چلانا ہے"
+}

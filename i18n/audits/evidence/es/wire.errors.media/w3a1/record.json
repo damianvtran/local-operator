@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "audit_id": "w3a1",
+  "audit_round": 1,
+  "locale": "es",
+  "namespace": "wire.errors.media",
+  "audit_date": "2026-10-29",
+  "audited_revision": "66da866475f3e74553196a3167c18c6125141844",
+  "audited_revision_note": "Target es file is UNTRACKED at this revision; HEAD does not bind its bytes. The exact audited on-disk target sha256 is recorded below and in audit.log.",
+  "key_count": {
+    "en": 20,
+    "target": 20
+  },
+  "verdict": "passed",
+  "result": "clean — 0 blocker, 0 major, 0 minor, 0 nit",
+  "verdict_reason": "All 20 keys read against en. Credential absence, rejected credential, insufficient credit, temporary unavailability, missing temporary file, upstream failure and unknown provider/model retain their distinct causes and remedies. Retryable speech failures remain retryable and no failure reads as success. No English context sidecar exists, so register was judged against shipped Spanish error copy rather than an invented role/tone/width contract.",
+  "auditor": {
+    "agent": "translation-auditor (lopdev team), es-w3-auditor-a",
+    "session_or_instance": "c328736e07e9",
+    "model": "kimi/k3.1-pro (self-reported from the current session model-switch notice)",
+    "model_note": "Primary header: anthropic/claude-sonnet-5-5. Temporary provider-failure fallback: quota via openai/gpt-6-astra to current kimi/k3.1-pro. The semantic judgements and evidence were produced under the disclosed current fallback; no primary-model audit claim.",
+    "date": "2026-10-29",
+    "independence": "I authored none of this copy and repaired none. I compared every key against en source, the es style guide/glossary and shipped Spanish error register. No catalogue, sidecar, ledger, allowance or generated file was edited; only audit evidence was written."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.media.json",
+      "revision": "66da866475f3e74553196a3167c18c6125141844",
+      "sha256": "1c109f63b8d3ce00657a47836199ce8ff924bb8e4bd999fda9f1d64f760a823b"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/wire.errors.media.json",
+      "sha256": "5d31f81759f001777e8d1e0dbde8b5c60525acb0de1f5e886dd66e8fff21d3b8",
+      "tracked": false
+    },
+    "context": null,
+    "context_absent_reason": "local_operator/i18n/catalogues/en/wire.errors.media.context.json does not exist; there is no role/tone/width contract to apply."
+  },
+  "findings": [],
+  "check_output": [
+    {
+      "cmd": "git rev-parse HEAD; git status --short -- <en and es inputs>; sha256sum <inputs>",
+      "result": "HEAD 66da866475f3e74553196a3167c18c6125141844; target ?? (untracked); hashes exactly match input_hashes."
+    },
+    {
+      "cmd": "isolated HOME/config, PYTHONPATH=$PWD python3 $LOCAL_OPERATOR_SCRATCHPAD/es-w3a1-checks.py",
+      "result": "exit 0; 64 keys across both assigned namespaces; this namespace 20/20 ordered-key parity and 15 source ICU arguments; real parser accepted every target; argument, plural-selector, select-label, flag, code-span and checked machine-literal parity passed; no plural branches occur; no few/zero/two."
+    },
+    {
+      "cmd": "render wire.errors.media.unknown_model and speech_vendor_key_refused with synthetic values",
+      "result": "Modelo desconocido openai/tts-1: not found; ElevenLabs rechazó tu clave de API. Sustitúyela. Provider/model path is intact and refusal still directs replacement."
+    },
+    {
+      "cmd": "compare English/Spanish string lengths (no sidecar width budget)",
+      "result": "Largest ratio 1.477x for temp_audio_missing, 44 -> 65 characters. Measured and reviewed; no clipping finding because no maxCells contract exists and the phrase remains concise."
+    },
+    {
+      "cmd": "read_public_copy through lop exec for en/wire.errors.media.json speech_no_credential",
+      "result": "Sanctioned reader returned exactly: Sign in to Radient in Settings to enable speaking aloud. It cannot read untracked Spanish targets or absent sidecars; no workaround used."
+    }
+  ],
+  "display_side_risk": "An unrelated zh-CN speech_no_credential row displayed as [redacted] during a broad grep; it was not judged from that display or used as evidence. The sanctioned reader verified the tracked English source directly. It cannot read these untracked targets or sidecars.",
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation.",
+    "No English context sidecar exists. Register was compared with shipped es/wire.errors.desktop, es/wire.errors.settings, es/wire.errors.notifications and es/wire.exec; no role/tone/maxCells contract was invented.",
+    "Static copy and narrow runtime parser/render checks only; no rendered UI fit, native review, release eligibility or repo-wide test claim."
+  ]
+}

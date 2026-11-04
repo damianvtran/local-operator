@@ -1,0 +1,22 @@
+{
+  "wire.errors.media.media_refusal": "{error}",
+  "wire.errors.media.provider_model_pair": "provider và model phải được cung cấp cùng nhau, hoặc không cung cấp cả hai.",
+  "wire.errors.media.radient_key_missing": "Chưa cấu hình khóa API Radient trên máy chủ.",
+  "wire.errors.media.save_audio_failed": "Không lưu được tệp âm thanh đã tải lên: {error}",
+  "wire.errors.media.speech_generate_failed": "Không tạo được giọng nói: {error}",
+  "wire.errors.media.speech_no_credential": "Hãy đăng nhập Radient trong Cài đặt để bật đọc to.",
+  "wire.errors.media.speech_radient_credit_low": "Số dư tín dụng Radient của bạn quá thấp để tạo giọng nói. Hãy nạp thêm tín dụng trong Radient Console để tiếp tục.",
+  "wire.errors.media.speech_radient_sign_in_failed": "Phiên đăng nhập Radient của bạn không còn hoạt động. Hãy đăng nhập lại trong Cài đặt.",
+  "wire.errors.media.speech_temporarily_unavailable": "Giọng nói tạm thời không khả dụng. Hãy thử lại sau giây lát.",
+  "wire.errors.media.speech_unavailable": "Giọng nói hiện không khả dụng. Hãy thử lại sau giây lát.",
+  "wire.errors.media.speech_unknown_agent": "Tác nhân của cuộc trò chuyện này không còn khả dụng.",
+  "wire.errors.media.speech_upstream_no_response": "Tạo giọng nói thất bại ở phía thượng nguồn: Không có phản hồi từ thượng nguồn: {error}",
+  "wire.errors.media.speech_upstream_reported_error": "Tạo giọng nói thất bại ở phía thượng nguồn: Radient báo lỗi (HTTP {status}): {error}",
+  "wire.errors.media.speech_upstream_responded": "Tạo giọng nói thất bại ở phía thượng nguồn: Thượng nguồn phản hồi {status}: {error}",
+  "wire.errors.media.speech_vendor_credit_low": "Số dư tín dụng {vendor} của bạn quá thấp để tạo giọng nói. Hãy nạp thêm tín dụng với {vendor} để tiếp tục.",
+  "wire.errors.media.speech_vendor_key_refused": "{vendor} đã từ chối khóa API của bạn. Hãy thay khóa khác.",
+  "wire.errors.media.temp_audio_missing": "Không tìm thấy tệp âm thanh tạm sau khi lưu.",
+  "wire.errors.media.transcription_unexpected": "Đã xảy ra lỗi không mong muốn khi phiên âm: {error}",
+  "wire.errors.media.unknown_model": "Mô hình {provider}/{model} không xác định: {error}",
+  "wire.errors.media.unknown_provider": "Nhà cung cấp {provider} không xác định."
+}

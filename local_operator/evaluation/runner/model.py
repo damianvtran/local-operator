@@ -22,6 +22,7 @@ from local_operator.evaluation.action_surface import ActionSurface
 from local_operator.evaluation.evidence.models import RouteIdentity
 from local_operator.evaluation.protocol import ActionBatch, Observation, ProtocolModel
 from local_operator.evaluation.receipts import SafeCount, StrictIdentifier
+from local_operator.evaluation.runner.step_budget import StepPosition
 
 
 class ModelUsage(ProtocolModel):
@@ -93,6 +94,8 @@ class ModelDecision(ProtocolModel):
     route: RouteIdentity
     usage: ModelUsage = Field(default_factory=ModelUsage)
     cost_micros: SafeCount = 0
+    # This is an internal subtotal, not a claim that missing prices were free.
+    cost_known: bool = True
     stop_reason: StrictIdentifier = "stop"
     provider_request_id: StrictIdentifier = "unknown"
     tool_call_count: SafeCount = 0
@@ -192,6 +195,11 @@ class EpisodeTurn(ProtocolModel):
     #: state it applies to. Empty for an ordinary turn.
     tolerated_field_names: tuple[str, ...] = ()
     ask_answer: str | None = None
+    #: The step budget's position when this turn's observation was shown, read
+    #: by the runner from the counter it ENFORCES (``runner.step_budget``).
+    #: ``None`` for any turn without a step budget, which renders exactly as a
+    #: turn did before the field existed.
+    step_budget: StepPosition | None = None
 
 
 class StreamShape(ProtocolModel):
@@ -277,6 +285,7 @@ class DecisionRejected(Exception):
         route: RouteIdentity | None = None,
         usage: ModelUsage | None = None,
         cost_micros: int = 0,
+        cost_known: bool = True,
         stop_reason: str = "stop",
         provider_request_id: str = "unknown",
         tool_call_count: int = 0,
@@ -386,6 +395,7 @@ class DecisionRejected(Exception):
         self.route = route
         self.usage = usage or ModelUsage()
         self.cost_micros = cost_micros
+        self.cost_known = cost_known
         self.stop_reason = stop_reason
         self.provider_request_id = provider_request_id
         self.tool_call_count = tool_call_count

@@ -1,0 +1,28 @@
+"""Mechanical checks for the cli.team_bridge probe-notification audit (PR #3198).
+Run from the repo root with the repo .venv python."""
+import json, sys, unicodedata, hashlib
+from local_operator.i18n import catalogues, messages
+NS = "cli.team_bridge"
+KEYS = ("cli.team_bridge.notify.probe_suspected_title", "cli.team_bridge.notify.probe_suspected_body")
+LOCALES = ("fr", "es", "zh-CN", "ru", "vi", "ur", "hi")
+en = catalogues.load_catalogue("en", NS)
+raw = hashlib.sha256(open(f"local_operator/i18n/catalogues/en/{NS}.json", "rb").read()).hexdigest()
+print("en catalogue_sha256", catalogues.catalogue_sha256("en", NS), "raw", raw, "keys", len(en))
+fail = 0
+for loc in LOCALES:
+    cat = catalogues.load_catalogue(loc, NS)
+    parity = set(cat) == set(en)
+    print(f"{loc} target_sha256 {catalogues.catalogue_sha256(loc, NS)} parity {len(cat)}/{len(en)} {'OK' if parity else 'FAIL'}")
+    fail += not parity
+    for k in KEYS:
+        v = cat[k]
+        cf = [hex(ord(c)) for c in v if unicodedata.category(c) == "Cf"]
+        nfc = unicodedata.normalize("NFC", v) == v
+        same = v == en[k]
+        rendered = messages.render(k, {}, locale=loc)
+        ok = not cf and nfc and not same and "{" not in v and rendered == v
+        fail += not ok
+        print(f"  {k.rsplit('.',1)[1]} cf={cf} nfc={nfc} untranslated={same} rendered_eq={rendered == v} {'OK' if ok else 'FAIL'}")
+        print(f"    {rendered}")
+print("RESULT", "FAIL" if fail else "PASS", "failures", fail)
+sys.exit(1 if fail else 0)

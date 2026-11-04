@@ -505,7 +505,12 @@ def _tree_identity() -> dict[str, str]:
             capture_output=True,
             text=True,
             timeout=10,
-            env={**_child_env(), "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_TERMINAL_PROMPT": "0"},
+            env={
+                **_child_env(),
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+                "GIT_TERMINAL_PROMPT": "0",
+            },
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         sha = ""

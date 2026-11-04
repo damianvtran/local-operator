@@ -1,0 +1,158 @@
+# w4a3 round-3 audit run — relay.shell
+run_at_utc: 2026-10-29T22:22:24Z
+host: damians-MacBook-Pro / macOS-27.0.1-arm64-arm-64bit-Mach-O
+python: 3.14.7
+repo: /Users/damian/lo-i18n-es   branch: feat/i18n-es-wire-errors
+HEAD: 183f7a0537e4cee42fd82f25a21fe52953a81bdf
+tracked_state (target): ?? local_operator/i18n/catalogues/es/relay.shell.json
+references: i18n/audits/evidence/es/relay.shell/w4a1/audit.log , i18n/audits/evidence/es/relay.shell/w4a2/record.json
+
+## input hashes (sha256) of the ROUND-3 bytes
+  en                                 f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560  local_operator/i18n/catalogues/en/relay.shell.json
+  en.context                         16746ecd1537006992935bb2aa88fe39c46700d9e0341e7aacd565e2366349ea  local_operator/i18n/catalogues/en/relay.shell.context.json
+  es                                 1c7a98ad133f4a3f8339b6d465b7692806639bc278ffe5e2607863d8e36d9c2f  local_operator/i18n/catalogues/es/relay.shell.json
+  session es (untouched this round)  6812dca69e08ab9f1cf48f271e4db20263c7bbcb659d83a2f3c1a460122a2165  local_operator/i18n/catalogues/es/relay.session.json
+
+## key parity: en=44 es=44 missing=[] extra=[]
+
+## branch inventory of the four delta keys
+  relay.shell.usage.used
+    one    -> 'Se usó # {unit}'
+    many   -> 'Se usaron # {unit}'
+    other  -> 'Se usaron # {unit}'
+    selectors=['one', 'many', 'other'] es_categories=['many', 'one', 'other'] missing=[] illegal=[]
+    many_is_alias_of_other=True
+    every_branch_renders_the_number=True
+  relay.shell.usage.remaining
+    one    -> 'Queda # {unit} restante'
+    many   -> 'Quedan # {unit} restantes'
+    other  -> 'Quedan # {unit} restantes'
+    selectors=['one', 'many', 'other'] es_categories=['many', 'one', 'other'] missing=[] illegal=[]
+    many_is_alias_of_other=True
+    every_branch_renders_the_number=True
+  relay.shell.usage.remaining_unknown_unit
+    one    -> 'Queda # restante'
+    many   -> 'Quedan # restantes'
+    other  -> 'Quedan # restantes'
+    selectors=['one', 'many', 'other'] es_categories=['many', 'one', 'other'] missing=[] illegal=[]
+    many_is_alias_of_other=True
+    every_branch_renders_the_number=True
+  relay.shell.usage.used_unknown_unit
+    one    -> 'Se usó #'
+    many   -> 'Se usaron #'
+    other  -> 'Se usaron #'
+    selectors=['one', 'many', 'other'] es_categories=['many', 'one', 'other'] missing=[] illegal=[]
+    many_is_alias_of_other=True
+    every_branch_renders_the_number=True
+
+## composed-path matrix vs grammar oracle (PASS/FAIL per row)
+  [PASS] credits   remaining         0  got='Quedan 0 créditos restantes'
+  [PASS] credits   remaining         1  got='Queda 1 crédito restante'
+  [PASS] credits   remaining         2  got='Quedan 2 créditos restantes'
+  [PASS] credits   remaining        21  got='Quedan 21 créditos restantes'
+  [PASS] credits   remaining   1000000  got='Quedan 1.000.000 de créditos restantes'
+  [PASS] credits   remaining   1500000  got='Quedan 1.500.000 créditos restantes'
+  [PASS] credits   remaining   2000000  got='Quedan 2.000.000 de créditos restantes'
+  [PASS] credits   used              0  got='Se usaron 0 créditos'
+  [PASS] credits   used              1  got='Se usó 1 crédito'
+  [PASS] credits   used              2  got='Se usaron 2 créditos'
+  [PASS] credits   used             21  got='Se usaron 21 créditos'
+  [PASS] credits   used        1000000  got='Se usaron 1.000.000 de créditos'
+  [PASS] credits   used        1500000  got='Se usaron 1.500.000 créditos'
+  [PASS] credits   used        2000000  got='Se usaron 2.000.000 de créditos'
+  [PASS] tokens    remaining         0  got='Quedan 0 tokens restantes'
+  [PASS] tokens    remaining         1  got='Queda 1 token restante'
+  [PASS] tokens    remaining         2  got='Quedan 2 tokens restantes'
+  [PASS] tokens    remaining        21  got='Quedan 21 tokens restantes'
+  [PASS] tokens    remaining   1000000  got='Quedan 1.000.000 de tokens restantes'
+  [PASS] tokens    remaining   1500000  got='Quedan 1.500.000 tokens restantes'
+  [PASS] tokens    remaining   2000000  got='Quedan 2.000.000 de tokens restantes'
+  [PASS] tokens    used              0  got='Se usaron 0 tokens'
+  [PASS] tokens    used              1  got='Se usó 1 token'
+  [PASS] tokens    used              2  got='Se usaron 2 tokens'
+  [PASS] tokens    used             21  got='Se usaron 21 tokens'
+  [PASS] tokens    used        1000000  got='Se usaron 1.000.000 de tokens'
+  [PASS] tokens    used        1500000  got='Se usaron 1.500.000 tokens'
+  [PASS] tokens    used        2000000  got='Se usaron 2.000.000 de tokens'
+  [PASS] requests  remaining         0  got='Quedan 0 solicitudes restantes'
+  [PASS] requests  remaining         1  got='Queda 1 solicitud restante'
+  [PASS] requests  remaining         2  got='Quedan 2 solicitudes restantes'
+  [PASS] requests  remaining        21  got='Quedan 21 solicitudes restantes'
+  [PASS] requests  remaining   1000000  got='Quedan 1.000.000 de solicitudes restantes'
+  [PASS] requests  remaining   1500000  got='Quedan 1.500.000 solicitudes restantes'
+  [PASS] requests  remaining   2000000  got='Quedan 2.000.000 de solicitudes restantes'
+  [PASS] requests  used              0  got='Se usaron 0 solicitudes'
+  [PASS] requests  used              1  got='Se usó 1 solicitud'
+  [PASS] requests  used              2  got='Se usaron 2 solicitudes'
+  [PASS] requests  used             21  got='Se usaron 21 solicitudes'
+  [PASS] requests  used        1000000  got='Se usaron 1.000.000 de solicitudes'
+  [PASS] requests  used        1500000  got='Se usaron 1.500.000 solicitudes'
+  [PASS] requests  used        2000000  got='Se usaron 2.000.000 de solicitudes'
+  [PASS] usd       remaining         0  got='Quedan 0 USD restantes'
+  [PASS] usd       remaining         1  got='Queda 1 USD restante'
+  [PASS] usd       remaining         2  got='Quedan 2 USD restantes'
+  [PASS] usd       remaining        21  got='Quedan 21 USD restantes'
+  [PASS] usd       remaining   1000000  got='Quedan 1.000.000 USD restantes'
+  [PASS] usd       remaining   1500000  got='Quedan 1.500.000 USD restantes'
+  [PASS] usd       remaining   2000000  got='Quedan 2.000.000 USD restantes'
+  [PASS] usd       used              0  got='Se usaron 0 USD'
+  [PASS] usd       used              1  got='Se usó 1 USD'
+  [PASS] usd       used              2  got='Se usaron 2 USD'
+  [PASS] usd       used             21  got='Se usaron 21 USD'
+  [PASS] usd       used        1000000  got='Se usaron 1.000.000 USD'
+  [PASS] usd       used        1500000  got='Se usaron 1.500.000 USD'
+  [PASS] usd       used        2000000  got='Se usaron 2.000.000 USD'
+  [PASS] unknown   remaining         0  got='Quedan 0 restantes'
+  [PASS] unknown   remaining         1  got='Queda 1 restante'
+  [PASS] unknown   remaining         2  got='Quedan 2 restantes'
+  [PASS] unknown   remaining        21  got='Quedan 21 restantes'
+  [PASS] unknown   remaining   1000000  got='Quedan 1.000.000 restantes'
+  [PASS] unknown   remaining   1500000  got='Quedan 1.500.000 restantes'
+  [PASS] unknown   remaining   2000000  got='Quedan 2.000.000 restantes'
+  [PASS] unknown   used              0  got='Se usaron 0'
+  [PASS] unknown   used              1  got='Se usó 1'
+  [PASS] unknown   used              2  got='Se usaron 2'
+  [PASS] unknown   used             21  got='Se usaron 21'
+  [PASS] unknown   used        1000000  got='Se usaron 1.000.000'
+  [PASS] unknown   used        1500000  got='Se usaron 1.500.000'
+  [PASS] unknown   used        2000000  got='Se usaron 2.000.000'
+  [PASS] percent   remaining         0  got='0\xa0% restante'
+  [PASS] percent   remaining         1  got='1\xa0% restante'
+  [PASS] percent   remaining         2  got='2\xa0% restante'
+  [PASS] percent   remaining        21  got='21\xa0% restante'
+  [PASS] percent   remaining   1000000  got='1.000.000\xa0% restante'
+  [PASS] percent   remaining   1500000  got='1.500.000\xa0% restante'
+  [PASS] percent   remaining   2000000  got='2.000.000\xa0% restante'
+  [PASS] percent   used              0  got='0\xa0% usado'
+  [PASS] percent   used              1  got='1\xa0% usado'
+  [PASS] percent   used              2  got='2\xa0% usado'
+  [PASS] percent   used             21  got='21\xa0% usado'
+  [PASS] percent   used        1000000  got='1.000.000\xa0% usado'
+  [PASS] percent   used        1500000  got='1.500.000\xa0% usado'
+  [PASS] percent   used        2000000  got='2.000.000\xa0% usado'
+  matrix: 84 PASS / 0 FAIL of 84
+
+## regression substrings (must be absent everywhere)
+  'de de': ABSENT
+  'de restantes': ABSENT
+  'de usados': ABSENT
+  'de USD': ABSENT
+
+## neighbour check
+  plain keys reproducing w4a1 (or w4a2 for usage.continue) recorded text: 30, differing: 0, parameterised (covered by the matrix): 10
+
+## row / timestamp re-renders vs w4a1 (non-delta templates)
+  [PASS] row        got='L · W: V'
+  [PASS] row_family got='L (fam) · W: V'
+  [PASS] reset      got='Se restablece el 11 oct 2026 a las 9:00'
+  [PASS] as_of      got='A fecha de 11 oct 2026, 9:00.'
+  [PASS] fraction   got='29\xa0% usado'
+
+## verdict inputs
+  delta_keys_checked=['relay.shell.usage.used', 'relay.shell.usage.remaining', 'relay.shell.usage.remaining_unknown_unit', 'relay.shell.usage.used_unknown_unit']
+  composed_failures=0
+
+## independent mechanical confirmation (executed after the harness above)
+$ python3 scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit_code=0

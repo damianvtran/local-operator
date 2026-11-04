@@ -1,0 +1,14 @@
+{
+  "wire.errors.auth.account_not_found": "प्रोवाइडर खाता नहीं मिला",
+  "wire.errors.auth.auth_refusal": "{error}",
+  "wire.errors.auth.credentials_missing": "इस प्रोवाइडर के लिए कोई संग्रहीत क्रेडेंशियल नहीं मिला।",
+  "wire.errors.auth.input_invalid": "अधिकतम 32768 अक्षरों का गैर-खाली मान दर्ज करें।",
+  "wire.errors.auth.key_not_accepted": "यह प्रोवाइडर API कुंजी स्वीकार नहीं करता।",
+  "wire.errors.auth.key_rejected": "प्रोवाइडर ने इस API कुंजी को अस्वीकार कर दिया।",
+  "wire.errors.auth.local_server_only": "केवल लोकल प्रोवाइडर के सर्वर का परीक्षण किया जा सकता है।",
+  "wire.errors.auth.provider_refusal": "{error}",
+  "wire.errors.auth.server_address_missing": "इस प्रोवाइडर के पास परीक्षण के लिए कोई सर्वर पता नहीं है।",
+  "wire.errors.auth.sign_in_missing": "यह साइन-इन अब उपलब्ध नहीं है। फिर से शुरू करें।",
+  "wire.errors.auth.sign_in_not_waiting": "यह साइन-इन इनपुट की प्रतीक्षा में नहीं है।",
+  "wire.errors.auth.store_unreadable": "क्रेडेंशियल स्टोर पढ़ा नहीं जा सका — प्रोवाइडर गणना को इसकी ज़रूरत है।"
+}

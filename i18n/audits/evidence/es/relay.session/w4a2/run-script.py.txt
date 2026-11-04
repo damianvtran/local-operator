@@ -1,0 +1,295 @@
+"""es W4 / w4a2 round-2 audit run: re-measures the delta keys on the new bytes.
+
+Usage: python3 w4a2_run.py <namespace> <w4a1 audit.log path>
+Read-only on the repository; prints the evidence the w4a2 bundle logs.
+"""
+from __future__ import annotations
+
+import ast
+import hashlib
+import json
+import platform
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+REPO = Path("/Users/damian/lo-i18n-es")
+sys.path.insert(0, str(REPO))
+from local_operator.i18n import format as fmt  # noqa: E402
+from local_operator.i18n import runtime as rt  # noqa: E402
+
+CAT = REPO / "local_operator/i18n/catalogues"
+COUNTS = [0, 1, 2, 21, 1_000_000, 1_500_000]
+EXTRA = [2_000_000]
+NS = sys.argv[1]
+W4A1_LOG = Path(sys.argv[2])
+DELTA = {
+    "relay.shell": [
+        "relay.shell.usage.used",
+        "relay.shell.usage.remaining",
+        "relay.shell.usage.remaining_unknown_unit",
+        "relay.shell.usage.used_unknown_unit",
+        "relay.shell.usage.continue",
+    ],
+    "relay.session": ["relay.session.list.empty_hint"],
+}[NS]
+
+
+def sh(*args: str) -> str:
+    return subprocess.run(args, cwd=REPO, capture_output=True, text=True).stdout.strip()
+
+
+def sha(p: Path) -> str:
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def args_of(src: str) -> list[str]:
+    """Every argument name reachable in the message, in first-seen order."""
+    out: list[str] = []
+
+    def walk(parts):
+        for node in parts:
+            if type(node).__name__ == "_Arg":
+                if node.name not in out:
+                    out.append(node.name)
+                for _, sub in node.parts:
+                    walk(sub)
+
+    walk(rt.parse_message(src))
+    return out
+
+
+def plural_cats(src: str) -> list[str]:
+    out: list[str] = []
+    stack = [rt.parse_message(src)]
+    while stack:
+        for node in stack.pop():
+            if type(node).__name__ == "_Arg" and node.kind == "plural":
+                out.extend(name for name, _ in node.parts)
+                for _, sub in node.parts:
+                    stack.append(sub)
+    return out
+
+
+def render(src: str, params: dict) -> str:
+    try:
+        return rt.render_message(src, params, "es")
+    except Exception as exc:  # noqa: BLE001 - the log records the failure
+        return f"<ERROR {type(exc).__name__}: {exc}>"
+
+
+def compose(es: dict[str, str], kind: str, remaining: bool, count: int) -> str:
+    unit = None
+    if kind in ("credits", "tokens", "requests"):
+        unit = render(es[f"relay.shell.usage.unit_{kind}"], {"count": count})
+    elif kind == "usd":
+        unit = render(es["relay.shell.usage.unit_usd"], {})
+    if kind == "percent":
+        return render(es["relay.shell.usage.remaining_percent" if remaining
+                        else "relay.shell.usage.used_percent"], {"value": count / 100})
+    if unit is not None:
+        return render(es["relay.shell.usage.remaining" if remaining
+                        else "relay.shell.usage.used"], {"value": count, "unit": unit})
+    return render(es["relay.shell.usage.remaining_unknown_unit" if remaining
+                    else "relay.shell.usage.used_unknown_unit"], {"value": count})
+
+
+def parse_w4a1(path: Path) -> dict:
+    plain, plural, rows, specials = {}, {}, {}, {}
+    for line in path.read_text().splitlines():
+        m = re.match(r"^  (relay\.[\w.]+) = (.*)$", line)
+        if m:
+            plain[m.group(1)] = ast.literal_eval(m.group(2))
+            continue
+        m = re.match(r"^  (relay\.shell\.usage\.unit_\w+): (\{.*\})$", line)
+        if m:
+            plural[m.group(1)] = ast.literal_eval(m.group(2))
+            continue
+        m = re.match(r"^  (\w+)\s+(remaining|used)\s+(\d+) -> (.*)$", line)
+        if m:
+            rows[(m.group(1), m.group(2), int(m.group(3)))] = m.group(4)
+            continue
+        m = re.match(r"^  (reset|as_of|fraction|row|row_family) = (.*)$", line)
+        if m:
+            specials[m.group(1)] = m.group(2)
+    return {"plain": plain, "plural": plural, "rows": rows, "specials": specials}
+
+
+def main() -> None:
+    en = json.loads((CAT / "en" / f"{NS}.json").read_text())
+    es = json.loads((CAT / "es" / f"{NS}.json").read_text())
+    old = parse_w4a1(W4A1_LOG)
+
+    print(f"# w4a2 round-2 audit run — {NS}")
+    print(f"run_at_utc: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}")
+    print(f"host: {platform.node()} / {platform.platform()}")
+    print(f"python: {sys.version.split()[0]}")
+    print(f"repo: {REPO}   branch: {sh('git','rev-parse','--abbrev-ref','HEAD')}")
+    print(f"HEAD: {sh('git','rev-parse','HEAD')}")
+    print("tracked_state (target): "
+          + (sh("git", "status", "--porcelain", "--",
+                f"local_operator/i18n/catalogues/es/{NS}.json") or "clean"))
+    print(f"w4a1 log read for the neighbour comparison: {W4A1_LOG.name}")
+
+    print("\n## input hashes (sha256) of the ROUND-2 bytes")
+    for label, p in (("en", CAT / "en" / f"{NS}.json"),
+                     ("en.context", CAT / "en" / f"{NS}.context.json"),
+                     ("es", CAT / "es" / f"{NS}.json")):
+        print(f"  {label:11} {sha(p)}  {p.relative_to(REPO)}")
+    print(f"\n## key parity: en={len(en)} es={len(es)} "
+          f"missing={sorted(set(en)-set(es))} extra={sorted(set(es)-set(en))}")
+    print(f"## delta keys claimed by this round: {DELTA}")
+
+    print("\n## independent CLDR cross-check — Node Intl.PluralRules vs the repo tables")
+    try:
+        node_out = subprocess.run(
+            ["node", "-e",
+             "const r=new Intl.PluralRules('es');"
+             "console.log(JSON.stringify([0,1,2,21,1000000,1500000,2000000]"
+             ".map(n=>[n,r.select(n)])))"],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+        node_map = {int(n): c for n, c in json.loads(node_out)}
+        repo_map = {n: fmt.plural_category("es", n) for n in node_map}
+        print(f"  node={node_map}")
+        print(f"  repo={repo_map}")
+        print(f"  agree={node_map == repo_map}")
+    except Exception as exc:  # noqa: BLE001 - recorded, not swallowed silently
+        print(f"  cross-check unavailable: {type(exc).__name__}: {exc}")
+
+    print("\n## argument names per key (en vs es, recursive through every branch)")
+    bad = 0
+    for key in en:
+        a, b = args_of(en[key]), args_of(es[key])
+        if a != b:
+            bad += 1
+            print(f"  MISMATCH {key}: en={a} es={b}")
+    print(f"  argument_set_diffs={bad}")
+
+    print("\n## plural categories used by the target")
+    used = sorted({c for v in es.values() for c in plural_cats(v)})
+    print(f"  categories_used={used} selectable={list(fmt.plural_categories('es'))} "
+          f"illegal={sorted(set(used) - set(fmt.plural_categories('es')))}")
+
+    if NS == "relay.shell":
+        print("\n## DELTA renders — full composition, exactly usage-sheet.tsx's path")
+        for kind in ("credits", "tokens", "requests", "usd", "percent", "unknown"):
+            for remaining in (True, False):
+                for c in COUNTS + EXTRA:
+                    print(f"  {kind:8} {'remaining' if remaining else 'used':9} {c:>9} -> "
+                          f"{compose(es, kind, remaining, c)}")
+
+        print("\n## CONTROL — the same messages with a NOMINATIVE unit string")
+        print("  (what a hand-run that skips unit_credits' own `many` branch measures)")
+        for key, ph in (("relay.shell.usage.used", "{value, plural, one {Se usó # {unit}} "
+                                                   "many {Se usaron # de {unit}} other {Se usaron # {unit}}}"),
+                        ("relay.shell.usage.remaining", None)):
+            src = es[key]
+            for unit_text in ("créditos", "de créditos"):
+                print(f"  {key} unit={unit_text!r} 1000000 -> "
+                      f"{render(src, {'value': 1000000, 'unit': unit_text})}")
+
+        print("\n## CANDIDATE REMEDY (auditor proposal, one/other only; {unit} carries `de`)")
+        cand = {
+            "relay.shell.usage.used": "{value, plural, one {Se usó # {unit}} other {Se usaron # {unit}}}",
+            "relay.shell.usage.remaining": "{value, plural, one {Queda # {unit} restante} other {Quedan # {unit} restantes}}",
+            "relay.shell.usage.remaining_unknown_unit": "{value, plural, one {Queda # restante} other {Quedan # restantes}}",
+            "relay.shell.usage.used_unknown_unit": "{value, plural, one {Se usó #} other {Se usaron #}}",
+        }
+        saved = dict(es)
+        for k, v in cand.items():
+            es[k] = v
+        for kind in ("credits", "requests", "usd", "unknown"):
+            for remaining in (True, False):
+                for c in (0, 1, 21, 1_000_000, 1_500_000, 2_000_000):
+                    print(f"  {kind:8} {'remaining' if remaining else 'used':9} {c:>9} -> "
+                          f"{compose(es, kind, remaining, c)}")
+        es.clear()
+        es.update(saved)
+
+        print("\n## timestamp keys")
+        when = datetime(2026, 10, 11, 9, 0)
+        for k, v in (("reset", es["relay.shell.usage.reset"]),
+                     ("as_of", es["relay.shell.usage.as_of"])):
+            print(f"  {k} = {render(v, {'value': when})}")
+        print(f"  fraction = {render(es['relay.shell.usage.fraction'], {'value': 0.29})}")
+        print(f"  row = {render(es['relay.shell.usage.row'], {'label': 'L', 'window': 'W', 'value': 'V'})}")
+        print(f"  row_family = {render(es['relay.shell.usage.row_family'], {'label': 'L', 'family': 'fam', 'window': 'W', 'value': 'V'})}")
+
+    print("\n## delta keys, rendered in place")
+    for key in DELTA:
+        print(f"  {key}\n    src: {es[key]!r}")
+        if "{value" in es[key]:
+            for c in COUNTS + EXTRA:
+                print(f"    {c:>9} -> {render(es[key], {'value': c, 'unit': 'X'})}")
+        else:
+            print(f"    -> {render(es[key], {})!r}")
+
+    print("\n## neighbour check: every non-delta key reproduces w4a1's recorded render")
+    ok = miss = diff = 0
+    problems = []
+    for key in en:
+        if key in DELTA:
+            continue
+        if key in old["plain"]:
+            now = render(es[key], {})
+            if now == old["plain"][key]:
+                ok += 1
+            else:
+                diff += 1
+                problems.append((key, old["plain"][key], now))
+        elif key in old["plural"]:
+            now = {c: render(es[key], {"count": c}) for c in COUNTS}
+            if str(now) == str(old["plural"][key]):
+                ok += 1
+            else:
+                diff += 1
+                problems.append((key, old["plural"][key], now))
+        elif key in ("relay.shell.usage.row", "relay.shell.usage.row_family"):
+            now = render(es[key], {"label": "L", "family": "fam", "window": "W", "value": "V"})
+            if now == old["specials"][key.split(".")[-1]]:
+                ok += 1
+            else:
+                diff += 1
+                problems.append((key, old["specials"][key.split(".")[-1]], now))
+        elif key == "relay.shell.usage.reset":
+            now = render(es[key], {"value": datetime(2026, 10, 11, 9, 0)})
+            if now == old["specials"]["reset"]:
+                ok += 1
+            else:
+                diff += 1
+                problems.append((key, old["specials"]["reset"], now))
+        elif key == "relay.shell.usage.as_of":
+            now = render(es[key], {"value": datetime(2026, 10, 11, 9, 0)})
+            if now == old["specials"]["as_of"]:
+                ok += 1
+            else:
+                diff += 1
+                problems.append((key, old["specials"]["as_of"], now))
+        elif key == "relay.shell.usage.fraction":
+            now = render(es[key], {"value": 0.29})
+            if now == old["specials"]["fraction"]:
+                ok += 1
+            else:
+                diff += 1
+                problems.append((key, old["specials"]["fraction"], now))
+        elif key in ("relay.shell.usage.remaining_percent", "relay.shell.usage.used_percent"):
+            idx = ("percent", "remaining" if key.endswith("remaining_percent") else "used")
+            now = [compose(es, "percent", idx[1] == "remaining", c) for c in COUNTS]
+            was = [old["rows"][(idx[0], idx[1], c)] for c in COUNTS]
+            if now == was:
+                ok += 1
+            else:
+                diff += 1
+                problems.append((key, was, now))
+        else:
+            miss += 1
+            problems.append((key, "<no w4a1 record for this key>", ""))
+    print(f"  reproduced={ok} changed={diff} unrecorded={miss} of {len(en)-len(DELTA)} non-delta keys")
+    for p in problems:
+        print(f"  !! {p[0]}\n     w4a1: {p[1]}\n     now : {p[2]}")
+
+
+if __name__ == "__main__":
+    main()

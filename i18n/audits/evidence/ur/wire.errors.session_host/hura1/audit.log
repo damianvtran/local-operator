@@ -1,0 +1,11 @@
+EXECUTION: committed scripts/i18n/check.py main(["--catalogues-only"]); isolated en+ur namespace; primary-checkout runtime imports
+checker_sha256=98dee7f1112848163c7a3365c39668118caa4bfe13e3afee4b137478d0bf39fb
+check.py: catalogue checks: 0 problem(s)
+exit_code=0
+Exact key parity: PASS (3 keys); JSON decoding: PASS
+wire.errors.session_host.unsupported: no placeholders/plural/select/markup; no bidi controls; no maxCells/maxChars hint; chars=165
+wire.errors.session_host.unavailable: no placeholders/plural/select/markup; no bidi controls; no maxCells/maxChars hint; chars=122
+wire.errors.session_host.refused: no placeholders/plural/select/markup; no bidi controls; no maxCells/maxChars hint; chars=184
+Literal path and product preservation: PASS
+Negative control (one missing target key): detected; ["ur/wire.errors.session_host: missing key 'wire.errors.session_host.refused'"]
+Restored candidate: 311ea5428af42db26ff461969d40d5e0198907a5c21d24da643c11cf64c35622

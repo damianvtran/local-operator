@@ -1,0 +1,43 @@
+{
+  "locale": "fr",
+  "namespace": "relay.library",
+  "audit_date": "2026-10-29",
+  "key_count": 1,
+  "translator": {
+    "agent": "translator (lopdev team)",
+    "model": "radient/auto",
+    "date": "2026-10-29"
+  },
+  "auditor": {
+    "agent": "translation-auditor (lopdev team)",
+    "session": "ab2610514b4d",
+    "model": "radient/auto",
+    "independence": "not the translator; edited nothing",
+    "date": "2026-10-29"
+  },
+  "input_hashes": {
+    "en": "ad478c433a4db3e725994766c724a2e8e92176f015f8283e71dc13b87185466a",
+    "context": "877b88290cf14602e63b2bb1c58719fac96a20ae53ff04b147e21de23df93c54",
+    "target_locale": "ab64d2fb171c78e79ac689d49da261474e4eaf687cbfbf113d28345234302ea2"
+  },
+  "remediation": {
+    "note": "Findings were remediated after the audit. input_hashes.target_locale binds the FINAL shipped bytes; input_hashes.context is the sidecar hash the auditor worked from where it changed afterwards. target_sha_at_audit keeps the bytes the auditor actually read.",
+    "target_sha_at_audit": "ab64d2fb171c78e79ac689d49da261474e4eaf687cbfbf113d28345234302ea2",
+    "target_sha_after_remediation": "ab64d2fb171c78e79ac689d49da261474e4eaf687cbfbf113d28345234302ea2",
+    "context_sha_at_audit": "877b88290cf14602e63b2bb1c58719fac96a20ae53ff04b147e21de23df93c54",
+    "context_sha_after_remediation": "877b88290cf14602e63b2bb1c58719fac96a20ae53ff04b147e21de23df93c54"
+  },
+  "artifacts": [
+    "report.md",
+    "record.json",
+    "audit.log"
+  ],
+  "current_report_verdict": "clean",
+  "findings": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "masking_note": "Verified by ordinal enumeration over the namespace bytes, not by reading the rendered transcript: no value contains U+003D, so no name=value run exists that the harness could mask, and no U+FFFD appears. The non-ASCII inventory is exactly the French letters present plus U+2019, U+2026, U+202F and U+2014 where the source calls for them (enumerated in audit.log). A masking marker inside a French value would be a blocker; none exists, and the codepoint enumeration rules out one having been hidden from this audit."
+}

@@ -1,0 +1,169 @@
+{
+  "schema": 1,
+  "audit_id": "w6a3",
+  "audit_round": 3,
+  "locale": "es",
+  "namespace": "tui.hub_links",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "The es target is UNTRACKED at this revision, so HEAD does not bind its bytes. The on-disk sha256 in input_hashes.target is the binding identity; the probe re-reads the same three files and prints their digests at the top of its run (audit.log §3).",
+  "branch_checked_out": "feat/i18n-es-tui",
+  "branch_note": "matches the brief's branch name; `git rev-parse --abbrev-ref HEAD` reports feat/i18n-es-tui",
+  "key_count": {
+    "en": 56,
+    "target": 56,
+    "context": 55
+  },
+  "audit_scope": "Narrow convergence round 3: exactly one value changed after round 2. The other 55 values are not re-audited; only the file's mechanical integrity around the edit is re-checked.",
+  "verdict": "passed",
+  "result": "passed — 0 blocker, 0 major, 0 minor, 0 nit; round-2 HL-1 closed; no new findings",
+  "verdict_reason": "The revised refusal names `el prompt`, the glossary's settled es rendering for the inline consent prompt, and no longer names `el aviso` (the notice line it is painted on) or `el diálogo` (a modal surface this card does not have). The claim that prompt is not a coinage is verified: 36 values / 38 lowercase occurrences across the es catalogues after excluding the two `\"prompt\":` JSON-key examples, glossary §2 and the es guide's kept-English list both fix it, and `diálogo` now occurs zero times. Mechanical checks are clean, the one-value delta is proved by reproducing round 2's file hash, and both required negative controls (el aviso, el diálogo) are caught.",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), independent Spanish translation auditor",
+    "session_or_instance": "c0b953a7c12a",
+    "model": "radient/auto",
+    "model_note": "Model as actually run, not the session header. The header named anthropic/claude-sonnet-5-5; provider quota failures moved the session through openai/gpt-6-astra and kimi/k3.1-pro to radient/auto before any audit work. The last active_model_route record in this run's transcript (line 7) names radient/auto as the active selector; lines 5-7 record the chain, and the assistant usage records provider=radient, model_id=auto. Every check, measurement and finding in this bundle was produced under radient/auto. No claim is made for the primary model.",
+    "date": "2026-10-30",
+    "independent_from_translator_session": true,
+    "independent_of_round_2_session": "7fa3a39af5d9 (the w6a2 auditor session; different session, same inputs re-read)",
+    "actual_model_source": "session model-switch events in this run's transcript (last active_model_route record, line 7) plus assistant usage provider=radient/model_id=auto",
+    "independence": "I authored none of this copy and repaired none of it. I wrote no catalogue, sidecar, ledger, allowance or generated file; only this evidence directory. Judgement is LLM reasoning against the en source, the context sidecar, the shipped es catalogues and the rendering code. No translation/memory/MT service was used to compare or back-translate."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.hub_links.json",
+      "sha256": "7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb",
+      "tracked": true
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.hub_links.context.json",
+      "sha256": "9b81676163337d8a93e38138909dbd4801f8edd8416075c6efb994f9870c682e",
+      "tracked": true
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.hub_links.json",
+      "sha256": "ff50b7cd5e4ab165969fe3f9f9167635bd4966b495a06b59444345d4a0ee19f3",
+      "tracked": false
+    }
+  },
+  "references": {
+    "style_guide": {
+      "path": "i18n/style-guides/es.md",
+      "sha256": "01e40d5f6d81cc80811902a29bf23a191f897b6dfd54a2aa3611c67e13f85f07"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.hub_links/w6a3/record.json",
+      "role": "record",
+      "sha256": "self"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.hub_links/w6a3/report.md",
+      "role": "audit report (findings, measurements, limitations)",
+      "sha256": "da7a015f98bbea086e0cb0ba2824a0adcb13e4ec8b7689f9c04ff5bf26f3679a"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.hub_links/w6a3/audit.log",
+      "role": "execution log: validator, probe and measurement commands with their actual output",
+      "sha256": "227a426bf58255bc78e2fa2e027a7af50144eb0e187f5b87bb6c09e4f8210fd6"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.hub_links/w6a3/checks.py",
+      "role": "the read-only probe that produced sections A-B, E-F, including the negative controls",
+      "sha256": "c7254e0c0d8926b0e6463c4040c9b05a2036309873bcd2d62f790a294a358026"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "HL-1"
+    ]
+  },
+  "findings": [
+    {
+      "id": "HL-1",
+      "severity": "major",
+      "status": "closed",
+      "key": "tui.hub_links.refusal.revision_moved",
+      "en": "This link changed while you were reviewing it. Reopen the prompt to confirm the latest.",
+      "round_2_value": "Este vínculo cambió mientras lo revisabas. Vuelve a abrir el diálogo y confirma la versión más reciente.",
+      "round_1_value": "Este vínculo cambió mientras lo revisabas. Vuelve a abrir el aviso para confirmar la última versión.",
+      "current": "Este vínculo cambió mientras lo revisabas. Vuelve a abrir el prompt y confirma la versión más reciente.",
+      "problem": "Closed: the string names the inline consent prompt that must be re-armed. `prompt` is the glossary's es rendering (glossary §2; the es guide's kept-English list), used in 36 values / 38 lowercase occurrences across the es catalogues; `diálogo` now occurs zero times and `aviso` zero times in this key. The panel is a Static overlay, not a ModalScreen; the prompt is the inline `_consent_link_id` block completed by ctrl+y. The rest of the sentence is correct and has no placeholder or polarity change.",
+      "suggestion": "none",
+      "evidence": "audit.log §3 (B1-B6, E1-E2, F1-F2); hub_links_panel.py:102-103 (Static overlay), 565-577 (consent arming), 605 (refusal paint), 819 and 873-895 (_notice_lines and height budget)"
+    }
+  ],
+  "measurements": {
+    "prompt_term": {
+      "values_excluding_machine_tokens": 36,
+      "lowercase_occurrences_excluding_machine_tokens": 38,
+      "raw_values": 38,
+      "raw_occurrences": 40,
+      "case_insensitive_values": 40,
+      "case_insensitive_occurrences": 42,
+      "machine_tokens_excluded": [
+        "wire.settings.providers_openrouter_max_price.help",
+        "wire.settings.providers_openrouter_max_price.placeholder"
+      ],
+      "dialogo_occurrences_all_es": 0,
+      "aviso_occurrences_in_key": 0
+    },
+    "fit": {
+      "cell_len_es": 103,
+      "cell_len_en": 87,
+      "cell_len_old_dialogo": 104,
+      "wrap_lines_at_32_52_72": [
+        4,
+        2,
+        2
+      ],
+      "max_cells": null,
+      "note": "no maxCells in the sidecar; _notice_lines wraps and folds the line count into _body_budget"
+    },
+    "mechanical": {
+      "key_parity": "56/56",
+      "context_keys": 55,
+      "placeholder_tuple_mismatches": 0,
+      "plural_messages": 0,
+      "validator_catalogue_checks": "0 problem(s)",
+      "validator_full": "exit 0 — 191 file(s), 2348 literal(s), catalogues consistent, 51 advisory finding(s)"
+    }
+  },
+  "round_2_bundle": "i18n/audits/evidence/es/tui.hub_links/w6a2/",
+  "delta_proof": {
+    "method": "Restore the round-2 value in the current es object, dump with json.dumps(ensure_ascii=False, indent=2) + newline, sha256 the bytes.",
+    "restored_round_2_sha256": "f3bde8f887ec44c2ab4b1fd79ac0d227fdb96561d3c4b992076157f6bc239c76",
+    "round_2_record_sha256": "f3bde8f887ec44c2ab4b1fd79ac0d227fdb96561d3c4b992076157f6bc239c76",
+    "current_sha256": "ff50b7cd5e4ab165969fe3f9f9167635bd4966b495a06b59444345d4a0ee19f3",
+    "conclusion": "exactly one value changed in this file after round 2; no other value was touched"
+  },
+  "check_output": [
+    {
+      "cmd": "python3 scripts/i18n/check.py --catalogues-only",
+      "result": "exit 0 — 'check.py: catalogue checks: 0 problem(s)'"
+    },
+    {
+      "cmd": "python3 scripts/i18n/check.py",
+      "result": "exit 0 — 'check.py: ok — 191 file(s) scanned, 2348 literal(s) at or below the baseline, catalogues consistent; 51 advisory finding(s) (report-only until activated)'"
+    },
+    {
+      "cmd": "~/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.hub_links/w6a3/checks.py --namespace tui.hub_links",
+      "result": "exit 0 — all A/B/E/F checks PASS; 2/2 negative controls caught (el aviso, el diálogo); delta proof reproduces round 2's hash"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md and verdict_reason are reasoning; audit.log holds the captured command output and is the execution record. The full validator advisory list is report-only and does not gate catalogues.",
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation, and native review is not claimed as a gate.",
+    "No rendered TUI frame was captured: widths are computed with rich.cells.cell_len against the geometry the source documents, and the notice wrap is computed with rich.text.Text.wrap, not photographed.",
+    "No repo-wide pytest suite or generator was run; the repository validator plus the read-only probe are the mechanical evidence.",
+    "Narrow round: the other 55 values in this namespace were not re-audited; round 2 passed them."
+  ],
+  "no_writes": "No catalogue, sidecar, ledger, allowance, style guide, baseline or generated file was written by this audit; only this evidence directory."
+}

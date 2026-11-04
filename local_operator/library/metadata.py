@@ -36,6 +36,13 @@ from typing import Any, Final
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION: Final = 1
+
+#: The authoritative table whose presence proves the schema exists in the file a
+#: connection has open. ``tags`` is the smallest of the four (``assets``,
+#: ``asset_tags``, ``chats``, ``tags``) and every derived trigger attaches to one
+#: of them, so its absence is the state that used to surface as a bare
+#: ``no such table: tags`` out of a metadata-first read.
+SCHEMA_SENTINEL: Final = "tags"
 DB_DIRNAME: Final = "library"
 DB_FILENAME: Final = "library.sqlite3"
 
@@ -193,6 +200,45 @@ class MetadataStore:
 
     # -- connection / schema -------------------------------------------------
 
+    def _schema_present(self, connection: sqlite3.Connection) -> bool:
+        """Is the authoritative schema present in the file THIS handle opened?
+
+        WHY THE CONNECTION AND NOT THE PATH. ``_ready_paths`` is keyed by PATH,
+        but schema readiness belongs to the FILE, and a path outlives its file: a
+        config root cleared under a live process, a stale-tmp reaper, a cache
+        reset, a crash recovery that swings a rebuilt database in. The next
+        ``sqlite3.connect`` CREATES an empty database there, and a verdict keyed
+        by path then skips every CREATE — so ``ensure_schema()`` answered ``True``
+        without running DDL and the first read raised a bare
+        ``sqlite3.OperationalError: no such table: tags`` (review round 1, R1-2).
+        A stat of the path cannot fix that and introduces its own window; the
+        open handle is the only thing that names the file about to be read.
+
+        The version row is part of the question: a newer local-operator's schema
+        answered ``False`` from ``_ensure_schema`` (serve empty, never guess at
+        columns), and the probe must not report that file as ready.
+        """
+        if self._key not in self._ready_paths:
+            return False
+        try:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (SCHEMA_SENTINEL,),
+            ).fetchone()
+            if table is None:
+                return False
+            row = connection.execute(
+                "SELECT value FROM state WHERE key = 'schema_version'"
+            ).fetchone()
+        except sqlite3.DatabaseError as error:
+            # A file that is not a database at all is the typed refusal, not a
+            # bare sqlite error reaching a route.
+            raise MetadataUnavailable(str(error)) from error
+        try:
+            return row is not None and int(row["value"]) == SCHEMA_VERSION
+        except (TypeError, ValueError):
+            return False
+
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         """A connection ready for one call. ``MetadataUnavailable`` on any failure."""
@@ -213,6 +259,14 @@ class MetadataStore:
             except sqlite3.DatabaseError as error:
                 # A corrupt file may fail here (``file is not a database``).
                 raise MetadataUnavailable(str(error)) from error
+            if not self._schema_present(connection):
+                # Migrate on the handle we are about to serve from: the stored
+                # verdict was about a file, and this is the file that will be
+                # read. A ``False`` from ``_ensure_schema`` means "newer schema,
+                # serve empty" and is left to the caller as before — it is not
+                # this layer's job to turn a downgrade into an exception.
+                self._ready_paths.discard(self._key)
+                self._ensure_schema(connection)
             yield connection
         finally:
             try:

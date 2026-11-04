@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "audit_id": "w6a1",
+  "locale": "es",
+  "namespace": "tui.library",
+  "audit_date": "2026-10-30",
+  "generated_by": "translation-auditor (lopdev team), independent of the translator",
+  "model": "radient/auto (fallback disclosed in record.json)",
+  "files": [
+    {
+      "path": "i18n/audits/evidence/es/tui.library/w6a1/report.md",
+      "sha256": "159501cd830e785d6fb9f4d43ab9f8de1868a0a8af606bae99520461e147a23b"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.library/w6a1/audit.log",
+      "sha256": "fc601033a3bea9707e8d8b424d0fe92d602d9213c854dd99d8889d2200d21f13"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.library/w6a1/checks.py",
+      "sha256": "3161f166ce85788db00742560940f4aef2a7cb9d9e8f00df87db9edd3650e414"
+    }
+  ],
+  "note": "Hash of the companions this bundle's record.json describes. The record lists this receipt's own sha256, so the receipt does not hash the record (that would be circular)."
+}

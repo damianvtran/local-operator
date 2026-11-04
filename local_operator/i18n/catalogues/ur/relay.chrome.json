@@ -77,6 +77,8 @@
   "relay.chrome.session.resuming": "جاری ہو رہا…",
   "relay.chrome.session.degraded": "جواب نہیں دے رہا — پیغامات رکے ہیں",
   "relay.chrome.composer.label": "پیغام",
+  "relay.chrome.composer.placeholder.idle": "کچھ بھی پوچھیں…",
+  "relay.chrome.composer.placeholder.steer": "ایجنٹ کو ہدایت دیں…",
   "relay.chrome.composer.folder_label": "ورکنگ فولڈر: {name}",
   "relay.chrome.composer.model_label": "ماڈل: {label}",
   "relay.chrome.composer.spend_label": "خرچ اور سیاق و سباق: {label}",

@@ -27,6 +27,7 @@ vi.mock("./api", () => ({
 	getSubagentDetail: vi.fn(async () => null),
 	imageUrl: vi.fn(() => ""),
 	getCommands: vi.fn(async () => ({ commands: [] })),
+	getSkills: vi.fn(async () => ({ skills: [] })),
 	getModels: vi.fn(async () => ({ models: [] })),
 	// THE CHIP'S TWO CALLS (the composer's working-directory cluster). Stubbed
 	// like every other api function here rather than spread from the real module,
@@ -183,7 +184,7 @@ describe("SessionScreen and queued asks", () => {
 		   1, D1) and is `aria-hidden` + disabled, so the ACTIONABLE field is the
 		   one without the marker. */
 		const field = screen
-			.getAllByPlaceholderText("Message…")
+			.getAllByPlaceholderText("Ask anything…")
 			.find((el) => !el.hasAttribute("aria-hidden")) as HTMLElement;
 		fireEvent.change(field, { target: { value: "an ordinary message" } });
 		fireEvent.keyDown(field, { key: "Enter" });

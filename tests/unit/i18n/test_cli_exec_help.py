@@ -21,6 +21,9 @@ import pytest
 
 from local_operator import config
 from local_operator.i18n import messages, resolve, runtime, text
+from tests.unit.i18n import locale_coverage
+
+NAMESPACE = "cli.exec_help"
 
 
 def _bootstrap():
@@ -230,32 +233,22 @@ def test_twenty_generated_zero_argument_messages_and_english_fallback():
     _bootstrap()
     from local_operator.i18n import catalogues
     from local_operator.i18n.keys import cli_exec_help as keys
-    from local_operator.i18n.runtime import render_message
 
-    source = catalogues.load_catalogue("en", "cli.exec_help")
-    french = catalogues.load_catalogue("fr", "cli.exec_help")
-    chinese = catalogues.load_catalogue("zh-CN", "cli.exec_help")
-    assert set(french) == set(source) == set(chinese)
+    source = catalogues.load_catalogue("en", NAMESPACE)
     functions = [f for _, f in inspect.getmembers(keys, inspect.isfunction)]
     assert len(source) == len(functions) == 20
     for function in functions:
         assert not inspect.signature(function).parameters
-        msg = function()
-        assert msg.params == {}
-        en = messages.render(msg.code, msg.params, locale="en")
-        fr = messages.render(msg.code, msg.params, locale="fr")
-        # fr carries this namespace: its rendered bytes are the catalogue value,
-        # not the English source.
-        assert fr == render_message(french[msg.code], msg.params, "fr")
-        assert fr != en
-        zh = messages.render(msg.code, msg.params, locale="zh-CN")
-        # zh-CN carries this namespace after its disposition: the rendered
-        # bytes are its catalogue value, not the English source.
-        assert zh == render_message(chinese[msg.code], msg.params, "zh-CN")
-        assert zh != en
-        # A locale without the namespace still falls back to the English source.
-        for locale in ("es", "ru", "vi", "hi", "unknown"):
-            assert messages.render(msg.code, msg.params, locale=locale) == en
+        message = function()
+        assert message.params == {}
+        for locale in locale_coverage.supported_targets():
+            expected = locale_coverage.expected_message(
+                locale, NAMESPACE, message.code, message.params
+            )
+            assert messages.render(message.code, message.params, locale=locale) == expected, locale
+        assert messages.render(message.code, message.params, locale="unknown") == messages.render(
+            message.code, message.params, locale="en"
+        )
     assert "{'required_sections': [...]}" in keys.output_schema().envelope(locale="en")["text"]
 
 
@@ -293,7 +286,9 @@ def test_extracted_sites_ratchet_without_activating_legacy_cli(i18n_check):
     # CLI20 into a whole-CLI extraction. Scan only these existing sink calls
     # with the production scanner and prove a reintroduced literal is rejected.
     calls = _help_calls()
-    assert len(calls) == 20
+    # 21 since LO2 added `exec --saver`: the census counts the help call
+    # SITES in `add_startup_arguments`, so a new flag moves it by one.
+    assert len(calls) == 21
     source = "\n".join(ast.unparse(call) for call in calls)
     assert i18n_check.scan_source("local_operator/cli.py", source) == []
     next(k for k in calls[0].keywords if k.arg == "help").value = ast.Constant(

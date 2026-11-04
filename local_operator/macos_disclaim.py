@@ -45,10 +45,13 @@ disappeared on darwin: that is an OS change, and a runtime that silently
 stopped disclaiming would put the incident back with nothing to notice it.
 
 SPAWN-CHAIN EVIDENCE (the same incident's second half). The runtime's signal
-receipt could not name any sender, so a sweep read as "SIGTERM … from an
-unidentified sender". Every spawn this module makes records the chain it was
-born into (spawner pid + argv0, plus the spawner's own chain where it has one)
-into ``LOP_SPAWN_CHAIN`` — bounded per entry (``MAX_ENTRY_CHARS``) and in hops
+receipt could not name any sender — that gap is closed separately, by
+``local_operator/siginfo.py``, which reads the sender out of the kernel's
+``siginfo_t`` — so what this module adds is DIRECTION: a sweep that named no
+party still read as "SIGTERM … from an unidentified sender", with no way to say
+which app it was descending from. Every spawn this module makes records the
+chain it was born into (spawner pid + argv0, plus the spawner's own chain where
+it has one) into ``LOP_SPAWN_CHAIN`` — bounded per entry (``MAX_ENTRY_CHARS``) and in hops
 (``MAX_CHAIN``) — which the runtime reads into its boot record and snapshots
 into its signal receipt. Each entry carries the member's liveness AT RECORD
 TIME (``alive_at_spawn``); the arrival snapshot adds a second reading

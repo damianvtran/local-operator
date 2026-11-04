@@ -87,6 +87,12 @@ _Q_TOKEN: Final = re.compile(r"[^\W_]+", re.UNICODE)
 #: thousand-term MATCH expression (the route already caps the string at 256).
 _MAX_Q_TERMS: Final = 16
 
+#: The derived table whose presence proves the migration ran for the file a
+#: connection has open. ``idx_sessions`` is the one every read touches first
+#: (``reconcile`` opens with ``sessions()``), so its absence is the state that
+#: used to surface as ``no such table: idx_sessions``.
+_SCHEMA_SENTINEL: Final = "idx_sessions"
+
 
 #: One whole-database rebuild per process at a time. Two requests that both see
 #: a broken file must not build two replacements and swap them in some order.
@@ -553,7 +559,9 @@ class LibraryStore:
     _bootstrap_lock = threading.Lock()
     #: Paths whose derived schema this PROCESS has verified. Class-level for
     #: the same reason as ``MetadataStore._ready_paths``: one store per list
-    #: request must not re-run DDL on the read path.
+    #: request must not re-run DDL on the read path. A stored verdict is only
+    #: ever trusted for a connection whose file proves it — see
+    #: :meth:`_schema_present`.
     _ready_paths: set[str] = set()
     #: Paths whose recovery FAILED. A torn authoritative table leaves the derived
     #: tables empty and readable, so a request would otherwise answer an endless
@@ -567,6 +575,44 @@ class LibraryStore:
         self._key = str(self.path.resolve())
 
     # -- connections --------------------------------------------------------
+
+    def _schema_present(self, connection: sqlite3.Connection) -> bool:
+        """Is the derived schema present in the file THIS handle has open?
+
+        WHY THE CONNECTION AND NOT THE PATH. ``_ready_paths`` is keyed by PATH,
+        but readiness belongs to the FILE, and the path outlives it: a config
+        root cleared under a live process, a stale-tmp reaper, a cache reset, a
+        crash recovery swinging a rebuilt database in, a test removing its own
+        root. ``sqlite3.connect`` then creates an EMPTY database, and a cached
+        verdict keyed by path skips every CREATE — the first read answers ``no
+        such table: idx_sessions`` for an index that only needs its migration.
+        A stat of ``self.path`` cannot close that: it describes a path that may
+        no longer be the file ``_connect`` opens a moment later, in either
+        direction — the check can pass and the file be replaced before the open
+        (one failing read), or the DDL can commit and the file be replaced
+        before a path-level record is written, which marks the REPLACEMENT as
+        migrated and makes the bad state durable. Asking the open handle
+        (``SELECT 1 FROM sqlite_master``) is atomic with respect to the file
+        being read, and costs single-digit microseconds against the ~1.4 ms
+        connect it follows.
+
+        The version row is part of the question: a move to a new derived schema
+        by another process drops and recreates these tables, and a table-only
+        probe would serve the old projection until the next process.
+        """
+        if self._key not in self._ready_paths:
+            return False
+        try:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (_SCHEMA_SENTINEL,),
+            ).fetchone()
+            if table is None:
+                return False
+            version = self._state_value(connection, STATE_SCHEMA)
+        except sqlite3.DatabaseError as error:
+            raise IndexUnavailable(str(error), corrupt=_is_corruption(error)) from error
+        return version is not None and version.isdigit() and int(version) == SCHEMA_VERSION
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -591,9 +637,16 @@ class LibraryStore:
                 connection.execute("PRAGMA synchronous=NORMAL")
             except sqlite3.DatabaseError as error:
                 raise IndexUnavailable(str(error)) from error
-            # ``_ensure_schema`` answers True or raises; a False return would be
-            # a silent "serve an empty index" that no caller can distinguish.
-            self._ensure_schema(connection)
+            if not self._schema_present(connection):
+                # The verdict this process stored was about a file, and this
+                # handle names the file that is about to be read. Discard and
+                # migrate HERE, inside the same connection, so no window exists
+                # between deciding the schema is there and using it.
+                self._ready_paths.discard(self._key)
+                # ``_ensure_schema`` answers True or raises; a False return
+                # would be a silent "serve an empty index" no caller could
+                # distinguish.
+                self._ensure_schema(connection)
             yield connection
         finally:
             try:

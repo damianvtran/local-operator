@@ -29,6 +29,7 @@ from local_operator.team_bridge.reconcile_plan import (
 
 V1 = "bridge_consent_v1"
 V2 = "bridge_consent_v2"
+V3 = "bridge_consent_v3"
 HUB = "https://hub.example"
 
 
@@ -114,6 +115,20 @@ def test_existing_v1_receipt_and_new_v2_offer_are_independent() -> None:
     assert new.kind is IntentKind.CREATE and new.offer_version == V2
 
 
+def test_a_validated_v3_offer_plans_a_new_enrollment_like_v2() -> None:
+    """bridge_consent_v3 (the #general disclosure) keeps v2's default-on
+    sentence, so a validated, accepted v3 offer is automatic exactly as v2's."""
+
+    existing, new = plan_reconciliation(
+        _snapshot(
+            offer=Offer(V3, "sha256:v3", True, True),
+            tenants=(_tenant(binding=_binding()), _tenant("tnt_2")),
+        )
+    )
+    assert existing.kind is IntentKind.ATTACH_CURRENT
+    assert new.kind is IntentKind.CREATE and new.offer_version == V3
+
+
 @pytest.mark.parametrize(
     "offer",
     [
@@ -123,6 +138,10 @@ def test_existing_v1_receipt_and_new_v2_offer_are_independent() -> None:
         Offer(V2, "sha256:v2", True, False),
         Offer(V2, "", True, True),
         Offer("unrecognized_future_version", "sha256:future", True, True),
+        # Exact membership, never ordering.
+        Offer("bridge_consent_v4", "sha256:v4", True, True),
+        Offer("bridge_consent_v10", "sha256:v10", True, True),
+        Offer(V3, "sha256:v3", False, True),
     ],
 )
 def test_missing_v1_unaccepted_or_unvalidated_offer_holds_new_only(offer) -> None:
@@ -470,7 +489,15 @@ def test_repeated_snapshot_is_deterministic_immutable_and_decision_only(
         if isinstance(node, (ast.Import, ast.ImportFrom))
         for alias in node.names
     }
-    assert imports <= {"__future__", "dataclasses", "enum", "json"}
+    # ``consent_versions`` is an import-free leaf of constants (the ONE
+    # default-on set), so allowing it adds no service/config/timer access.
+    assert imports <= {
+        "__future__",
+        "dataclasses",
+        "enum",
+        "json",
+        "local_operator.team_bridge.consent_versions",
+    }
     calls = {
         node.func.id
         for node in ast.walk(tree)

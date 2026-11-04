@@ -1,0 +1,17 @@
+{
+  "cli.mobile_help.mobile": "Acceso desde el teléfono: controlar las sesiones de lop de esta máquina",
+  "cli.mobile_help.install": "Instalar el daemon, la contraseña y el LaunchAgent",
+  "cli.mobile_help.status": "Estado del daemon, control de acceso y sesiones activas",
+  "cli.mobile_help.daemon_action": "{action, select, start{Iniciar} stop{Detener} restart{Reiniciar} other{{action}}} el daemon",
+  "cli.mobile_help.logs": "Mostrar el final de los registros del daemon y de los runtimes",
+  "cli.mobile_help.logs_lines": "Líneas por archivo (se leen hasta dos)",
+  "cli.mobile_help.logs_follow": "Seguir por nombre para ver los registros creados o rotados mientras miras (seguir el descriptor se pierde ambos)",
+  "cli.mobile_help.password": "Mostrar o rotar la contraseña del portal",
+  "cli.mobile_help.devices": "Listar los dispositivos push de esta máquina o revocar/anular la revocación de uno",
+  "cli.mobile_help.devices_command": "list (predeterminado), revoke <device_id> o unrevoke <device_id>",
+  "cli.mobile_help.devices_device_id": "El device_id que muestra `lop mobile devices`; obligatorio para revoke/unrevoke",
+  "cli.mobile_help.devices_port": "Puerto del daemon móvil (por defecto, el del propio daemon)",
+  "cli.mobile_help.uninstall": "Eliminar el LaunchAgent",
+  "cli.mobile_help.uninstall_purge": "Eliminar también la contraseña",
+  "cli.mobile_help.serve": "Ejecutar el daemon (en primer plano)"
+}

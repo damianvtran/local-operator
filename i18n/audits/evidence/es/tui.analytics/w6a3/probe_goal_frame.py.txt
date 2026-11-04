@@ -1,0 +1,22 @@
+import asyncio, os, sys
+sys.path.insert(0, os.getcwd())
+from local_operator.i18n import text
+text.set_active_locale("es")
+from local_operator.tui.app import OperatorApp
+from local_operator.tui.widgets.goal_panel import GoalPanel
+from tests.unit.tui.test_app_pilot import FakeSession,_factory
+GOAL="Migrar el servicio de pagos al nuevo proveedor y verificar cada cobro con el equipo de finanzas antes del cierre trimestral del año"
+async def main():
+    s=FakeSession(); s.arm_goal(GOAL); app=OperatorApp(lambda:_factory(s))
+    async with app.run_test(size=(100,40)) as pilot:
+        for _ in range(300):
+            if app._session is not None: break
+            await pilot.pause(); await asyncio.sleep(0.01)
+        await pilot.pause(); app._cmd_goal("",lambda b,kind="info":None); await pilot.pause()
+        await pilot.press("d"); await pilot.pause(); await pilot.pause()
+        for strip in app.screen._compositor.render_strips():
+            t=strip.text.rstrip()
+            if t.strip() and any(k in t for k in ("Goal","▌","hecho","judge","done","c ","q close","cerrar","─")): print("|"+t)
+try: asyncio.run(asyncio.wait_for(main(),40))
+except BaseException as e: print("ERR",e)
+os._exit(0)

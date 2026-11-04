@@ -47,6 +47,7 @@ from local_operator.harness.secret_sinks import (
 )
 from local_operator.harness.types import AbortSignal, ToolContext
 from local_operator.tools import builtin
+from local_operator.tools import eval as eval_tool
 from local_operator.tools.eval import execute_eval
 from local_operator.variables import VariableStore
 
@@ -421,7 +422,22 @@ async def test_execute_eval_refuses_a_printing_cell_before_the_kernel_sees_it(
 async def test_execute_eval_still_runs_a_consuming_cell(tmp_path: Path) -> None:
     """The refusal must not have become a ban on retrieving a value at all."""
     code = 'blob = "not-a-secret"\nprint(len(blob))'
-    result = await execute_eval("eval-ok", {"code": code}, AbortSignal(), None, _context(tmp_path))
+    context = _context(tmp_path)
+    try:
+        result = await execute_eval("eval-ok", {"code": code}, AbortSignal(), None, context)
+    finally:
+        # This is the one test here whose cell RUNS, so it leaves a live worker in
+        # the process-global ``eval._KERNELS``, and that worker's subprocess
+        # transport is bound to THIS test's event loop. Left behind, the next
+        # test in the same xdist worker that reaps the registry (e.g.
+        # ``test_owner_audit_model_reach``'s ``clean_kernels``) awaits that
+        # transport from its own loop and errors at teardown with "got Future
+        # attached to a different loop". CI hit that 2 of 2 times on PR #3076,
+        # whose new files re-dealt the shards so the two shared a worker. Reap it
+        # here, on the loop that owns it.
+        kernel = eval_tool._KERNELS.pop(eval_tool._session_key(context), None)
+        if kernel is not None:
+            await eval_tool._close_kernel(kernel)
     assert not result.is_error
 
 

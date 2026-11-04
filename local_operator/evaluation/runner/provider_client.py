@@ -23,6 +23,7 @@ is documented on :meth:`_ContextBuilder.build`.
 
 from __future__ import annotations
 
+import ast
 import base64
 import difflib
 import json
@@ -30,9 +31,12 @@ import logging
 import re
 import textwrap
 import time
+import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Sequence, get_args, get_origin
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Sequence, get_args, get_origin
 
 from pydantic import ValidationError
 
@@ -43,7 +47,14 @@ from local_operator.evaluation.action_surface import (
 )
 from local_operator.evaluation.adapters.supervisor import verify_artifact
 from local_operator.evaluation.evidence.models import RouteIdentity
-from local_operator.evaluation.protocol import ActionBatch, FinishAction, Observation
+from local_operator.evaluation.protocol import (
+    MAX_BATCH_SIZE,
+    ActionBatch,
+    FinishAction,
+    KeyAction,
+    Observation,
+    canonical_key,
+)
 from local_operator.evaluation.runner.completion import finish_claim
 from local_operator.evaluation.runner.model import (
     CompactionRecord,
@@ -86,6 +97,7 @@ from local_operator.evaluation.runner.public_reply import (
     read_action_sequence,
     tolerated_fields_note,
 )
+from local_operator.evaluation.runner.step_budget import step_budget_line
 from local_operator.harness.reply_channel import (
     REPLY_CHANNEL_TOOL_NAME,
     envelope_from_tool_call,
@@ -158,6 +170,65 @@ UNCHANGED_FRAMES_NOTE = (
 )
 
 
+#: What the observation markers above MEAN, for the model. ONE definition, read
+#: by both engagements: the reply arm's system prompt (``build_system_prompt``)
+#: and the session arm's first-prompt header (``session_arm.render_prompt_header``)
+#: embed this exact text, because both render observations through the same
+#: ``_ContextBuilder`` and so show the model the same markers.
+#:
+#: WHY IT IS SHARED (measured 2026-10-28). The session arm used to render the
+#: markers without ever explaining them: on a sealed screenshot-only episode
+#: the model was delivered 239 image blocks and still ended with "this
+#: session's observations contained no textual state at all, so I was working
+#: blind"; on another it read the marker as a dead channel. The reply arm's
+#: explanation existed, it just lived inside one arm's prompt.
+#:
+#: CONSTRAINTS. The text is the reply arm's pre-extraction paragraph, byte for
+#: byte: it sits in that arm's cached system prompt, pinned by digest in
+#: ``test_compact_action_binding``, and rewording it would make every reply-arm
+#: run after the change incomparable with the ones before. So edit it only as a
+#: deliberate prompt change for BOTH arms.
+#:
+#: WHICH ARM SHOWS WHICH MARKER. The text is SHARED, not universal: every marker
+#: it names is real on at least one arm, and a reader must not assume each one
+#: reaches every arm. The split, checked in code and against the sealed corpus:
+#:
+#: * ``(unchanged)``, ``(no textual state)`` and the byte-identical notice are
+#:   rendered by ``_ContextBuilder``, which BOTH arms use -- these are the three
+#:   an episode session actually shows.
+#: * ``[screenshot omitted ...]`` is the reply arm's (``STALE_FRAME_NOTICE``).
+#:   The session side emits it only from ``prune_stale_frames_in_place``, which
+#:   needs a ``browser`` tool result the episode inventory does not carry, or
+#:   from the compaction-prune pass, gated on ``keep_recent_frames is not
+#:   None`` -- ``None`` by default for an ordinary session, and the reply arm's
+#:   client is what overrides it.
+#: * ``<previous-context-summary>`` is the reply arm's too: only
+#:   ``render_compaction_marker``'s ``context-full`` branch writes it, and an
+#:   episode resolves to ``snapcompact``, whose archive is ``[User]`` /
+#:   ``[Assistant]``-tagged text.
+#:
+#: Two inert sentences on an episode are the price of byte-identity with the
+#: reply arm's pinned prompt, and deleting them is NOT the fix: the shared
+#: explanation is worth more than two lines that arm never rendered, and this is
+#: the one place both arms' vocabulary is stated. Its one generic
+#: "screenshot-only benchmark" phrase names no benchmark, so the session
+#: header's no-benchmark vocabulary rule is checked on the header's OWN text,
+#: with this guide removed.
+OBSERVATION_MARKER_GUIDE = f"""\
+"{UNCHANGED_OBSERVATION}" means the observation's TEXT repeats the
+previous one's; "{NO_TEXTUAL_STATE}" means the adapter published no text for
+this step, which is normal for a screenshot-only benchmark and means the
+screenshot is the whole state; "[screenshot omitted ...]" marks an older
+screenshot that a newer one has replaced. A message starting
+<previous-context-summary> summarises turns that are no longer shown.
+
+An observation that says the screenshot is byte-identical to the previous
+one's is telling you your last action did nothing. Treat that as evidence, not
+noise: repeating an action that already had no effect wastes the step budget.
+Change something -- a different target, a different action kind, a "wait" if
+the surface may still be painting, or a scroll to bring the target into view."""
+
+
 def unchanged_frames_note(streak: int) -> str:
     """Escalate evidence, not enforcement: legitimate loading may stay static.
 
@@ -205,7 +276,7 @@ def _action_schema_lines(surface: ActionSurface = LEGACY_ACTION_SURFACE) -> list
     for action in surface.models:
         fields: list[str] = []
         for name, field in action.model_fields.items():
-            if name in ("kind", "observation_id"):
+            if name in ("kind", "observation_id") or not surface.offers_field(name):
                 continue
             choices = get_args(field.annotation)
             if choices and all(isinstance(choice, str) for choice in choices):
@@ -710,7 +781,16 @@ _ENTRY_LOCATION = re.compile(
     re.MULTILINE,
 )
 _VALUE_ERROR_RULE = re.compile(r"Value error, (.+?) \[type=")
-_UNKNOWN_KEY_NAME = re.compile(r"unknown key: '(.*?)' \[type=")
+#: An unknown-key ENTRY: the action's index from its location line and the
+#: refused name as the validator's own ``repr``. Read whole-line and decoded
+#: with ``ast.literal_eval`` because ``repr`` switches to double quotes for a
+#: name holding ``'`` -- the old single-quote pattern skipped ``"<<'SCM'"``
+#: and quoted the NEXT bad action's key instead (round 1, Q2).
+_UNKNOWN_KEY_ENTRY = re.compile(
+    r"^actions\.(?P<index>\d+)\.[A-Za-z0-9_-]+\.keys\n"
+    r"Value error, unknown key: (?P<name>.+) \[type=value_error[,\]]",
+    re.MULTILINE,
+)
 _QUOTED_TAG = re.compile(r"Input tag '(.*?)' found using 'kind'")
 _MAX_RULE_CHARS = 200
 
@@ -987,6 +1067,11 @@ def _example_action(
     for name, field in fields.items():
         if name == "kind" or name in shape.omitted_action_fields:
             continue
+        if not field.is_required() and field.default == ():
+            # An optional EMPTY array (``modifiers``) has no placeholder that
+            # parses: ``"<value>"`` is not an array and ``[]`` is not canonical.
+            # Its absence is the default, so the example states it by omission.
+            continue
         action[name] = _example_field_value(name, field, observation)
     return action
 
@@ -1058,6 +1143,14 @@ def _action_field(surface: ActionSurface, kind: str, name: str) -> Any | None:
 
 def _action_kind_of(model: Any) -> str:
     return str(model.model_fields["kind"].default)
+
+
+def _action_index(path: tuple[str, ...]) -> str:
+    """`` (action index N)`` for an ``actions.N.<kind>`` path, else empty."""
+
+    if len(path) >= 2 and path[1].isdigit():
+        return f" (action index {path[1]})"
+    return ""
 
 
 def _field_shape(field: Any, *, name: str) -> str:
@@ -1138,14 +1231,22 @@ def _field_invalid_hint(
             # (main16 evidence: two such refusals re-sent the same shape).
             rule_text = f" The rule it broke: {quoted_rule}." if quoted_rule else ""
             return (
-                f'"{name}" in a "{kind}" action was refused: it takes '
+                f'"{name}" in a "{kind}" action was refused{_action_index(path)}: it takes '
                 f"{_field_shape(field, name=name)}.{rule_text} "
                 f"The kind's full shape is {_action_line(surface, kind, shape)}."
             )
         rule_text = f" The rule it broke: {quoted_rule}." if quoted_rule else ""
         return (
-            f'a "{kind}" action was refused.{rule_text} '
+            f'a "{kind}" action was refused{_action_index(path)}.{rule_text} '
             f"Its accepted shape is {_action_line(surface, kind, shape)}."
+        )
+    if path == ("actions",) and "[type=too_long]" in reason:
+        # The batch bound, stated: following one repair per refused action can
+        # grow a batch past it, and the shape example alone never says so
+        # (round 1, Q3).
+        return (
+            f"the batch has more than {MAX_BATCH_SIZE} actions and was refused before "
+            f"anything was executed: send at most {MAX_BATCH_SIZE}, and the rest next turn"
         )
     if quoted_rule:
         # A batch-level rule from one of the protocol's own model validators.
@@ -1290,7 +1391,9 @@ def _action_line(surface: ActionSurface, kind: str, shape: HintShape = HintShape
             fields = [
                 f'"{name}": {_field_shape(field, name=name)}'
                 for name, field in model.model_fields.items()
-                if name != "kind" and name not in shape.omitted_action_fields
+                if name != "kind"
+                and name not in shape.omitted_action_fields
+                and surface.offers_field(name)
             ]
             return "{" + ", ".join(fields) + "}"
     return 'a JSON object whose "kind" is one of the accepted action kinds'
@@ -1357,14 +1460,24 @@ def _unknown_key_hint(reason: str, surface: ActionSurface) -> str:
     own alphabet.
     """
 
-    match = _UNKNOWN_KEY_NAME.search(reason)
-    sent = match.group(1) if match is not None else ""
+    sent, index = _unknown_key_entry(reason)
     named = {key.upper() for key in surface.named_keys}
     parts = []
+    # The index says WHICH action to fix: a long key-by-key batch otherwise
+    # reads as "some key somewhere" (round 1, Q2: 54 key actions).
+    where = f" (action index {index})" if index is not None else ""
     if sent and is_quotable_key(sent):
-        parts.append(f"{sent!r} is not an accepted key name")
+        parts.append(f"{sent!r} is not an accepted key name{where}")
         meanings = [key for key in _AMBIGUOUS_KEY_NAMES.get(sent.casefold(), ()) if key in named]
-        if len(meanings) == 2:
+        chord = _joined_chord(sent)
+        if chord is not None:
+            # ``"ctrl+t"`` is a chord written as one string. Answered BEFORE
+            # the near-match, which used to say 'use "ctrl" instead' (measured
+            # 2026-10-28) -- a real key, and the wrong repair. Not split
+            # silently: a key named ``+`` exists, so the string is the model's
+            # to restate, and the example is built from its own parts.
+            parts.append(f'a chord lists each key separately: send "keys": {json.dumps(chord)}')
+        elif len(meanings) == 2:
             parts.append(
                 f"it names no single key: use {json.dumps(meanings[0].lower())} for the "
                 "application shortcut modifier (Ctrl+A, Ctrl+C on Linux and Windows), "
@@ -1374,14 +1487,77 @@ def _unknown_key_hint(reason: str, surface: ActionSurface) -> str:
             nearest = _near_match(sent.upper(), sorted(named))
             if nearest is not None:
                 parts.append(f"use {json.dumps(nearest.lower())} instead")
+            elif len(sent) > 1:
+                # No key is near it, so it is most likely text (``"cat"``,
+                # ``"comp.scm"`` in the 2026-10-28 evidence) -- but it may be an
+                # unsupported key name (``"Next"``, ``"Control_R"``), so the
+                # repair is CONDITIONAL and never applied for the model.
+                parts.append(
+                    f'if you meant to type this text, use a "type" action: '
+                    f'{{"kind": "type", "text": {json.dumps(sent)}}}'
+                )
     else:
-        parts.append("The reply used an unknown key name")
+        parts.append(f"The reply used an unknown key name{where}")
     parts.append(
         f"the key-chord field takes {_keys_shape(surface)} written directly, "
         f"e.g. {json.dumps(_keys_example(surface))}; named keys are "
         "case-insensitive, and a single printable character is accepted as itself"
     )
     return ". ".join(parts)
+
+
+def _unknown_key_entry(reason: str) -> tuple[str, int | None]:
+    """The first refused key name and its action index, or ``("", None)``.
+
+    ``literal_eval`` decodes only the validator's ``repr`` of a string and
+    nothing else; anything that does not decode to one is treated as absent.
+    """
+
+    match = _UNKNOWN_KEY_ENTRY.search(reason)
+    if match is None:
+        return "", None
+    try:
+        name = ast.literal_eval(match.group("name"))
+    except (ValueError, SyntaxError):
+        return "", int(match.group("index"))
+    return (name if isinstance(name, str) else ""), int(match.group("index"))
+
+
+def _joined_chord(sent: str) -> list[str] | None:
+    """The chord a ``+``-joined key string spells, when that chord would be accepted.
+
+    ``+`` is both the separator and a key, so a ``+`` where a part should start
+    IS the key: ``"ctrl++"`` is Ctrl and ``+``, not Ctrl and two empty parts
+    (round 1, M1). A trailing or doubled separator anywhere else spells nothing.
+
+    The WHOLE chord is validated with ``KeyAction`` -- the validator itself --
+    so the suggestion can never be refused in turn: every part is a key AND the
+    chord passes the duplicate and typed-text rules (round 1, M2). Parts are
+    echoed in the model's own spelling, lower-cased when they are names.
+    """
+
+    parts: list[str] = []
+    index, length = 0, len(sent)
+    while index < length:
+        if sent[index] == "+":
+            parts.append("+")
+            index += 1
+        else:
+            end = sent.find("+", index)
+            end = length if end == -1 else end
+            parts.append(sent[index:end])
+            index = end
+        if index < length:
+            index += 1  # the separator
+            if index == length:
+                return None
+    if len(parts) < 2 or any(canonical_key(part) is None for part in parts):
+        return None
+    try:
+        KeyAction(observation_id="suggestion", keys=tuple(parts))
+    except ValidationError:
+        return None
+    return [part.lower() if len(part) > 1 else part for part in parts]
 
 
 def _coordinate_bounds(observation: Observation) -> str:
@@ -1574,23 +1750,21 @@ def build_system_prompt(
         if compact
         else '{"actions": [ ... ], "public_observations": ""}'
     )
+    modifier_text = (
+        '\n\n* "modifiers" on a pointer action holds keys DOWN for that one action and\n'
+        '  releases them after it: "modifiers": ["shift"] on a "click" is a shift-click\n'
+        '  (range select), ["ctrl"] a ctrl-click. A "key" action cannot do this -- its\n'
+        "  keys are released before the next action runs. Only shift, ctrl, alt and\n"
+        "  meta can be held."
+        if surface.modifiers
+        else ""
+    )
     return f"""You are operating a computer to complete one task.
 
 Each user message is one observation of the screen: its text, and a screenshot
 when one is attached. Your own earlier replies contain the actions you already
 took and any public factual observations you recorded.
-"{UNCHANGED_OBSERVATION}" means the observation's TEXT repeats the
-previous one's; "{NO_TEXTUAL_STATE}" means the adapter published no text for
-this step, which is normal for a screenshot-only benchmark and means the
-screenshot is the whole state; "[screenshot omitted ...]" marks an older
-screenshot that a newer one has replaced. A message starting
-<previous-context-summary> summarises turns that are no longer shown.
-
-An observation that says the screenshot is byte-identical to the previous
-one's is telling you your last action did nothing. Treat that as evidence, not
-noise: repeating an action that already had no effect wastes the step budget.
-Change something -- a different target, a different action kind, a "wait" if
-the surface may still be painting, or a scroll to bring the target into view.
+{OBSERVATION_MARKER_GUIDE}
 
 Every observation lists its frames on a "Frames:" line as "<frame_id>
 (<width>x<height>)", one per attached screenshot, in order. Any action that
@@ -1649,7 +1823,7 @@ name all require typing.
   synonym is rejected -- "ctrl" not "control", "esc" not "escape", "enter"
   not "return":
 
-{_named_keys_line(surface)}
+{_named_keys_line(surface)}{modifier_text}
 
 A batch may contain SEVERAL actions and they execute in order against the
 screen you are looking at, with one new observation at the end. That is how a
@@ -1756,6 +1930,7 @@ def parse_decision(
     route: RouteIdentity,
     usage: ModelUsage | None = None,
     cost_micros: int = 0,
+    cost_known: bool = True,
     stop_reason: str = "stop",
     provider_request_id: str = "unknown",
     tool_call_count: int = 0,
@@ -1970,6 +2145,7 @@ def parse_decision(
         route=route,
         usage=usage or ModelUsage(),
         cost_micros=cost_micros,
+        cost_known=cost_known,
         stop_reason=stop_reason,
         provider_request_id=provider_request_id,
         tool_call_count=tool_call_count,
@@ -2085,6 +2261,10 @@ def _bounded_call_names(calls: Sequence[Any]) -> str:
     return rendered
 
 
+class AuxiliaryStreamAborted(RuntimeError):
+    """A paid summary stream ended before its result could be trusted."""
+
+
 class ProviderStreamAbortedError(RuntimeError):
     """The stream ended abnormally without producing any usable content.
 
@@ -2140,6 +2320,7 @@ class ProviderStreamAbortedError(RuntimeError):
         route: RouteIdentity | None = None,
         usage: ModelUsage | None = None,
         cost_micros: int = 0,
+        cost_known: bool = True,
         stop_reason: str = _UNSPECIFIED_STOP,
         provider_request_id: str = "unknown",
         tool_call_count: int = 0,
@@ -2154,6 +2335,7 @@ class ProviderStreamAbortedError(RuntimeError):
         self.route = route
         self.usage = usage or ModelUsage()
         self.cost_micros = cost_micros
+        self.cost_known = cost_known
         self.stop_reason = stop_reason
         self.provider_request_id = provider_request_id
         self.tool_call_count = tool_call_count
@@ -2296,6 +2478,12 @@ class _ContextBuilder:
             # cached prefix; repeating it per turn would be tokens spent on a
             # fact the model already has.
             lines.insert(0, f"Task: {observation.task_id}")
+        budget_line = step_budget_line(turn.step_budget)
+        if budget_line is not None:
+            # Stated per observation because the count changes per step; a
+            # turn without a budget gets nothing, so its render (and every
+            # cached prefix built from it) is byte-identical to before.
+            lines.append(budget_line)
         if previous is not None and previous.ask_answer is not None:
             # The answer to the previous turn's ask_user reaches the model as
             # part of the observation that followed it -- "the state after
@@ -2463,10 +2651,12 @@ class _StreamOutcome:
     text: str
     usage: ModelUsage
     cost_micros: int
+    cost_known: bool
     stop_reason: str
     provider_request_id: str
     context_tokens: int | None
     stream_error: str | None
+    interrupted: bool
     channel_reply: str | None
     tool_call_count: int
     shape: StreamShape
@@ -2546,6 +2736,10 @@ class ProviderModelClient:
         from local_operator.compaction.thresholds import CompactionSettings
 
         self._stream_fn = stream_fn
+        # Concurrent tasks must never borrow another episode's budget authority.
+        self._dispatch_account: ContextVar[Any] = ContextVar(
+            "evaluation_dispatch_account", default=None
+        )
         self._route = route
         self._model_spec = model_spec
         if action_binding not in (LEGACY_ACTION_BINDING, COMPACT_ACTION_BINDING):
@@ -2639,7 +2833,10 @@ class ProviderModelClient:
         from local_operator.harness.types import ChatRequest
 
         self._context.append_new_turns(history)
-        compaction, extra_usage, extra_cost = await self._maybe_compact()
+        compaction, extra_usage, extra_cost, extra_cost_known = await self._maybe_compact()
+        account = self._dispatch_account.get()
+        if account is not None:
+            account.compaction = compaction
 
         # The system prompt rides in ``system_blocks`` rather than as a message
         # so the provider can place a cache breakpoint after this stable block;
@@ -2793,6 +2990,7 @@ class ProviderModelClient:
         text = outcome.text
         usage = outcome.usage
         cost_micros = outcome.cost_micros
+        cost_known = outcome.cost_known and extra_cost_known
         stop_reason = outcome.stop_reason
         provider_request_id = outcome.provider_request_id
         context_tokens = outcome.context_tokens
@@ -2860,7 +3058,9 @@ class ProviderModelClient:
         # ``stop_reason`` alone would swallow the recoverable case where the
         # provider refused only AFTER streaming a parseable batch -- that text
         # is real model output and stays on the correctable rejection path.
-        if (stream_error or stop_reason not in _NORMAL_CONTENT_STOPS) and not text.strip():
+        if outcome.interrupted or (
+            (stream_error or stop_reason not in _NORMAL_CONTENT_STOPS) and not text.strip()
+        ):
             raise ProviderStreamAbortedError(
                 stream_error or f"provider ended the stream as '{stop_reason}' with no content",
                 # The same billing provenance a rejection carries, and for the
@@ -2869,6 +3069,7 @@ class ProviderModelClient:
                 route=self._route,
                 usage=usage,
                 cost_micros=cost_micros,
+                cost_known=cost_known,
                 stop_reason=stop_reason,
                 provider_request_id=provider_request_id,
                 prompt_cache_key=self._prompt_cache_key,
@@ -2935,6 +3136,7 @@ class ProviderModelClient:
                 route=self._route,
                 usage=usage,
                 cost_micros=cost_micros,
+                cost_known=cost_known,
                 stop_reason=stop_reason,
                 provider_request_id=provider_request_id,
                 prompt_cache_key=self._prompt_cache_key,
@@ -3057,6 +3259,7 @@ class ProviderModelClient:
                 route=self._route,
                 usage=usage,
                 cost_micros=cost_micros,
+                cost_known=cost_known,
                 stop_reason=stop_reason,
                 provider_request_id=provider_request_id,
                 # The rejection path is where this number matters MOST: a reply
@@ -3112,7 +3315,7 @@ class ProviderModelClient:
         self._context.append_challenge(shown, challenge, observation)
         return challenge
 
-    async def _maybe_compact(self) -> tuple[CompactionRecord | None, ModelUsage | None, int]:
+    async def _maybe_compact(self) -> tuple[CompactionRecord | None, ModelUsage | None, int, bool]:
         """Run one compaction pass when the frame budget or the resolved trigger says so.
 
         Two inputs, one pass. The frame budget (``rebuild_due``) is the usual
@@ -3152,7 +3355,7 @@ class ProviderModelClient:
 
         messages = self._context.messages
         if not messages:
-            return None, None, 0
+            return None, None, 0, True
         frame_due = self._context.rebuild_due()
         # The trigger judges what the provider will BILL for this request, not
         # what the local ruler counts: the provider's last figure described the
@@ -3184,14 +3387,16 @@ class ProviderModelClient:
             tokens_before, window, self._compaction, wire_bytes=wire_before
         )
         if not (frame_due or threshold_due):
-            return None, None, 0
+            return None, None, 0, True
         threshold = resolve_threshold_tokens(window, self._compaction) if token_due else None
 
         summary_usage: ModelUsage | None = None
         summary_cost = 0
+        summary_cost_known = True
+        summary_failure: AuxiliaryStreamAborted | None = None
 
         async def summarize(prompt: str) -> str:
-            nonlocal summary_usage, summary_cost
+            nonlocal summary_usage, summary_cost, summary_cost_known, summary_failure
             # TODO(F3, review round 2): this path discards ``_err`` and
             # ``_stop``, so a compaction summary call that the provider REFUSED
             # returns empty text and is folded into the context as a legitimate
@@ -3204,9 +3409,18 @@ class ProviderModelClient:
             # The summary request offers no tools (``_summary_request`` sends
             # ``tool_choice="none"`` with an empty list), so the channel fields
             # are inert here — a summary is prose by definition.
-            summary = await self._stream(self._summary_request(prompt))
+            summary = await self._stream(self._summary_request(prompt), purpose="compaction")
             summary_usage = summary.usage
             summary_cost = summary.cost_micros
+            summary_cost_known = summary.cost_known
+            if summary.interrupted:
+                # A partial summary is not a valid context, even when the
+                # monetary budget is uncapped. Its receipt is journaled by the
+                # runner separately because no decision request was sent.
+                # The shared compaction pass logs this exception before the
+                # runner's redactor sees it; provider error text may be secret.
+                summary_failure = AuxiliaryStreamAborted("summary stream interrupted")
+                raise summary_failure
             return summary.text
 
         before = len(messages)
@@ -3243,6 +3457,10 @@ class ProviderModelClient:
             # (contract amendment 8).
             world_root=None,
         )
+        # The shared pass normally degrades a failed summarizer to a refusal;
+        # this host must not then dispatch on an incomplete paid summary.
+        if summary_failure is not None:
+            raise summary_failure
         # The pass returns the pruned list even when it refused to summarize; either
         # way it is the prefix to send from now on.
         self._context.replace(result.messages)
@@ -3292,7 +3510,7 @@ class ProviderModelClient:
         # of that (review round 4, m8). Returning nothing here would hide it
         # behind a bare ``message_count`` drop.
         if shed == 0 and frames_dropped == 0 and not result.ran and not result.pruned:
-            return None, None, 0
+            return None, None, 0, True
         record = CompactionRecord(
             strategy=result.strategy or "prune",
             # The pass measures its own "before" AFTER its prune step (that is
@@ -3311,7 +3529,7 @@ class ProviderModelClient:
             messages_after=len(self._context.messages),
             summary_text=result.summary_text,
         )
-        return record, summary_usage, summary_cost
+        return record, summary_usage, summary_cost, summary_cost_known
 
     def _priced_estimate(self, messages: Sequence[Any]) -> int:
         """The local estimate corrected to what the provider will bill for frames.
@@ -3488,16 +3706,38 @@ class ProviderModelClient:
             replayable=True,
         )
 
-    async def _stream(self, request: Any) -> _StreamOutcome:
+    @contextmanager
+    def bind_dispatch_account(self, account: Any) -> Any:
+        """Borrow episode authority only during its own decision, even on errors."""
+        token = self._dispatch_account.set(account)
+        try:
+            yield
+        finally:
+            self._dispatch_account.reset(token)
+
+    async def _stream(
+        self, request: Any, *, purpose: Literal["decision", "compaction"] = "decision"
+    ) -> _StreamOutcome:
+        account = self._dispatch_account.get()
+        dispatch_id = uuid.uuid4().hex
+        if account is not None:
+            account.before_dispatch()
+            # A dispatched call with no final usage is incomplete, not free.
+            account.record(dispatch_id, cost_micros=0, cost_known=False)
         text = ""
         usage = ModelUsage()
         cost_micros = 0
+        # No usage receipt is not evidence that the provider billed zero.
+        cost_known = False
         # A stream that never emits an ``end`` event never told us how it
         # ended, so it starts abnormal and only a real marker makes it normal.
         stop_reason = _UNSPECIFIED_STOP
         provider_request_id = "unknown"
         context_tokens: int | None = None
         stream_error: str | None = None
+        interrupted = False
+        terminal_seen = False
+        stream_completed = False
         # Per-event counters, kept for the rejection artifact. They are what
         # makes "the model generated nothing visible" distinguishable from
         # "the client dropped what it generated": a refusal with a large
@@ -3512,52 +3752,96 @@ class ProviderModelClient:
         # is the harness loop's, so the two agree on what a provider's fragments
         # add up to (``LoopRunner._assemble_tool_call``).
         channel_calls: dict[int, dict[str, Any]] = {}
-        async for event in self._stream_fn(request, None):
-            if event.type == "text_delta":
-                content_deltas += 1
-                text += event.delta
-            elif event.type == "reasoning_delta":
-                # Counted, never read into ``text``: private reasoning is not a
-                # decision channel, and treating it as one would parse a
-                # model's thinking as its answer.
-                reasoning_deltas += 1
-            elif event.type == "tool_call_delta":
-                tool_call_deltas += 1
-                state = channel_calls.setdefault(event.index, {"name": "", "arg_parts": []})
-                if event.name:
-                    state["name"] += event.name
-                if event.argument_delta:
-                    state["arg_parts"].append(event.argument_delta)
-            elif event.type == "usage":
-                usage, cost_micros = _usage_from(
-                    event.usage,
-                    requested_provider=self._model_spec.provider,
-                    requested_model_id=self._model_spec.model_id,
-                )
-                context_tokens = _context_tokens_from(event.usage)
-            elif event.type == "end":
-                # NOT ``or "stop"``. An empty marker is an ABSENT marker, and
-                # normalizing it to a normal content stop would let a stream
-                # that said nothing about how it ended take the parse path --
-                # the exact misdiagnosis the allow-list below exists to stop.
-                stop_reason = event.stop_reason or _UNSPECIFIED_STOP
-                if event.usage is not None:
-                    usage, cost_micros = _usage_from(
+        try:
+            async for event in self._stream_fn(request, None):
+                if event.type == "text_delta":
+                    content_deltas += 1
+                    text += event.delta
+                elif event.type == "reasoning_delta":
+                    # Counted, never read into ``text``: private reasoning is not a
+                    # decision channel, and treating it as one would parse a
+                    # model's thinking as its answer.
+                    reasoning_deltas += 1
+                elif event.type == "tool_call_delta":
+                    tool_call_deltas += 1
+                    state = channel_calls.setdefault(event.index, {"name": "", "arg_parts": []})
+                    if event.name:
+                        state["name"] += event.name
+                    if event.argument_delta:
+                        state["arg_parts"].append(event.argument_delta)
+                elif event.type == "usage":
+                    usage, cost_micros, cost_known = _usage_from(
                         event.usage,
                         requested_provider=self._model_spec.provider,
                         requested_model_id=self._model_spec.model_id,
                     )
                     context_tokens = _context_tokens_from(event.usage)
-                # The provider's own request id is the only handle that ties a
-                # bundle's model_response back to the provider's records, so it
-                # is worth carrying when the wire client reports one.
-                provider_request_id = _provider_request_id(event.provider_payload)
-                # The wire clients are the ONLY layer where the provider's
-                # actual terminal marker (``content_filter``, ``refusal``,
-                # ``SAFETY``…) is still visible; downstream sees only the
-                # normalized stop. Dropping this field is what left a refused
-                # episode's evidence blaming the model's JSON.
-                stream_error = event.error
+                    if account is not None:
+                        # A stream can still terminate without a final receipt.
+                        account.record(dispatch_id, cost_micros=cost_micros, cost_known=False)
+                elif event.type == "end":
+                    terminal_seen = True
+                    # NOT ``or "stop"``. An empty marker is an ABSENT marker, and
+                    # normalizing it to a normal content stop would let a stream
+                    # that said nothing about how it ended take the parse path --
+                    # the exact misdiagnosis the allow-list below exists to stop.
+                    stop_reason = event.stop_reason or _UNSPECIFIED_STOP
+                    if event.usage is not None:
+                        usage, cost_micros, cost_known = _usage_from(
+                            event.usage,
+                            requested_provider=self._model_spec.provider,
+                            requested_model_id=self._model_spec.model_id,
+                        )
+                        context_tokens = _context_tokens_from(event.usage)
+                    if account is not None:
+                        # A normal terminal event can confirm the latest usage
+                        # trailer even when it carries no second usage object.
+                        account.record(dispatch_id, cost_micros=cost_micros, cost_known=cost_known)
+                    # The provider's own request id is the only handle that ties a
+                    # bundle's model_response back to the provider's records, so it
+                    # is worth carrying when the wire client reports one.
+                    provider_request_id = _provider_request_id(event.provider_payload)
+                    # The wire clients are the ONLY layer where the provider's
+                    # actual terminal marker (``content_filter``, ``refusal``,
+                    # ``SAFETY``…) is still visible; downstream sees only the
+                    # normalized stop. Dropping this field is what left a refused
+                    # episode's evidence blaming the model's JSON.
+                    stream_error = event.error
+            stream_completed = True
+        except Exception as error:
+            # Keep observed token and subtotal evidence, but a broken stream
+            # cannot prove that the final provider charge was reported.
+            cost_known = False
+            if account is not None:
+                account.record(dispatch_id, cost_micros=cost_micros, cost_known=False)
+            interrupted = True
+            stop_reason = _UNSPECIFIED_STOP
+            stream_error = f"{type(error).__name__}: {error}"
+        finally:
+            # This is synchronous: cancellation must preserve the observed
+            # snapshot without waiting or replacing the original exception.
+            final_known = stream_completed and terminal_seen and cost_known
+            if account is not None:
+                account.record(dispatch_id, cost_micros=cost_micros, cost_known=final_known)
+                # Normal/aborted decision outcomes already carry a request
+                # triple. Cancellation escapes before one can be written, so
+                # only that unreturned decision needs an auxiliary receipt.
+                if purpose == "compaction" or (not stream_completed and not interrupted):
+                    from local_operator.evaluation.runner.dispatch_account import (
+                        SummaryCharge,
+                    )
+
+                    account.record_summary(
+                        SummaryCharge(
+                            dispatch_id=dispatch_id,
+                            usage=usage.model_copy(deep=True),
+                            cost_micros=cost_micros,
+                            cost_known=final_known,
+                            provider_request_id=provider_request_id,
+                            purpose=purpose,
+                        )
+                    )
+        cost_known = stream_completed and terminal_seen and cost_known
         from local_operator.harness.types import ToolCall
 
         # THE REPLY-ASSEMBLY BOUNDARY, and the only place a reply is rewritten.
@@ -3649,10 +3933,12 @@ class ProviderModelClient:
             text=text,
             usage=usage,
             cost_micros=cost_micros,
+            cost_known=cost_known,
             stop_reason=stop_reason,
             provider_request_id=provider_request_id,
             context_tokens=context_tokens,
             stream_error=stream_error,
+            interrupted=interrupted,
             channel_reply=channel_reply,
             # Every call the stream carried, including any the model made to a
             # name we never offered. Counted for the evidence bundle, and now
@@ -3761,7 +4047,11 @@ def build_completion_challenge(
     observation: Observation,
     reply_guidance: str | None = None,
 ) -> str:
-    """The user turn that asks the model to check a ``done`` claim.
+    """The user turn that asks the model to check a terminal claim.
+
+    A ``done`` claim gets the completion challenge below; a ``failed`` or
+    ``infeasible`` claim reaches here only from the premature-terminal gate and
+    gets its neutral variant (see the branch).
 
     ``reply_guidance`` is the ONE sentence that states HOW to answer, and it is
     a parameter because the channel differs while the challenge's substance
@@ -3799,6 +4089,28 @@ def build_completion_challenge(
         f"(Observation ID: {observation.observation_id}; Frames: "
         f"{_frames_line(observation)}) and nothing else."
     )
+
+    if claim.status != "done":
+        # THE PREMATURE-TERMINAL CHALLENGE (``runner.completion``, second rule):
+        # a non-done finish declared before any action executed. The only
+        # caller that reaches this branch is that gate, so the text is built
+        # from the claim's own status rather than a separate parameter -- the
+        # protocol's ``challenge_completion`` signature stays unchanged and
+        # every client gets the right words for free. The wording is NEUTRAL
+        # on purpose: it states the one fact the model may have missed (nothing
+        # has run), restates the task, and names keeping the status as an equal
+        # reply. It must never imply the task is feasible -- some are not, and
+        # an infeasible task has to be able to end ``infeasible``.
+        return (
+            f'You declared this task "{claim.status}" before any action has been '
+            "executed in this episode. No action has been executed yet.\n\n"
+            f'Your stated reason was: "{_bounded_quote(claim.reason)}"\n\n'
+            "The task you were given was:\n"
+            f"{_bounded_quote(instruction)}\n\n"
+            "Reply in exactly one of these two ways:\n"
+            f'* the SAME finish action, unchanged, to confirm "{claim.status}"; or\n'
+            "* a batch of actions to proceed with the task.\n\n" + guidance
+        )
 
     return (
         "You declared this task finished. That declaration is a CLAIM, and it is "
@@ -3996,7 +4308,7 @@ def _usage_from(
     *,
     requested_provider: str = "",
     requested_model_id: str = "",
-) -> tuple[ModelUsage, int]:
+) -> tuple[ModelUsage, int, bool]:
     """Copy provider counts and price the call, clamped to the evidence range.
 
     ``reasoning_tokens`` is a SUBSET of ``output_tokens`` in the harness's
@@ -4016,10 +4328,8 @@ def _usage_from(
     wrong zero and an honest one: only aggregators precompute ``usage.cost``,
     so reading the receipt alone priced every DIRECT-provider request at 0
     while its token counts were real -- and the episode's budget caps key on
-    this figure. An unpriced model still yields 0, because the evidence payload
-    has no "unknown" encoding: the distinction upstream between ``None`` and a
-    real ``0.0`` cannot be represented here, and inventing a price would be
-    worse than under-reporting one.
+    this figure. An unpriced model yields a zero subtotal and a separate false
+    coverage flag: the subtotal alone is not evidence that the call was free.
     """
 
     model_usage = ModelUsage(
@@ -4038,17 +4348,29 @@ def _usage_from(
 
     reported = _usage_cost(usage)
     if reported is not None:
-        return model_usage, max(0, round(reported * 1_000_000))
+        return model_usage, max(0, round(reported * 1_000_000)), True
+    # An estimate needs both billed token components. Wire adapters stamp
+    # completeness before replacing missing counters with display-safe zeros;
+    # manual clients must have explicitly provided both fields themselves.
+    receipt_complete = getattr(usage, "_token_counts_reported", None)
+    if receipt_complete is False or (
+        receipt_complete is None
+        and not {"input_tokens", "output_tokens"}.issubset(
+            getattr(usage, "model_fields_set", set())
+        )
+    ):
+        return model_usage, 0, False
     # The stamp is the spec that ACTUALLY served (``stream_with_failover``
     # rewrites the request to a fallback and stamps the on-the-wire spec onto
     # the usage for exactly this reason); the request is the honest fallback
     # when nothing stamped one.
     provider = getattr(usage, "provider", None) or requested_provider
     model_id = getattr(usage, "model_id", None) or requested_model_id
-    return model_usage, _table_cost_micros(usage, provider=provider, model_id=model_id)
+    cost = _table_cost_micros(usage, provider=provider, model_id=model_id)
+    return model_usage, cost if cost is not None else 0, cost is not None
 
 
-def _table_cost_micros(usage: Any, *, provider: str, model_id: str) -> int:
+def _table_cost_micros(usage: Any, *, provider: str, model_id: str) -> int | None:
     """Micro-USD for one call the provider did not bill, from the shared table.
 
     WHY this exists: only some routes state a dollar amount on the wire
@@ -4071,16 +4393,12 @@ def _table_cost_micros(usage: Any, *, provider: str, model_id: str) -> int:
     resolver answers from the warm memo or the static registry and schedules an
     off-loop refresh on a miss, which is the same policy the TUI prices with.
     The registry row is not a guess dressed as data: a row with no prices
-    returns 0 here, exactly as a failed lookup does.
-
-    TOTAL and NON-RAISING: an unpriced or unknown model is legitimate (the
-    evidence reads 0, which the payload's missing "unknown" encoding already
-    requires), while a wrong zero for a route the registry prices is not -- so
-    "unknown" must degrade here rather than abort an episode.
+    returns None here, exactly as a failed lookup does. An unpriced or unknown
+    model is legitimate, and must stay unknown rather than become a free call.
     """
 
     if not provider or not model_id:
-        return 0
+        return None
     try:
         from local_operator.model.configure import (
             cost_for_usage,
@@ -4095,8 +4413,8 @@ def _table_cost_micros(usage: Any, *, provider: str, model_id: str) -> int:
             # pricing concern can never delay or fail the episode's stream.
             refresh_model_info_background(provider, model_id)
         if not (info.input_price or info.output_price):
-            return 0
+            return None
         return max(0, round(cost_for_usage(provider, info, usage) * 1_000_000))
     except Exception:  # noqa: BLE001 -- an unpriceable call is not an episode error
         logger.debug("eval evidence: cost table lookup failed for %s/%s", provider, model_id)
-        return 0
+        return None

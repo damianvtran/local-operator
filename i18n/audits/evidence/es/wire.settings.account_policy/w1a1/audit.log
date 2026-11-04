@@ -1,0 +1,87 @@
++ cd /Users/damian/lo-i18n-es
++ git rev-parse HEAD
+efcfbe812609cbf228c01f11a1fb622f3555b487
++ git status --porcelain -- local_operator/i18n/catalogues/es/wire.settings.account_policy.json
+?? local_operator/i18n/catalogues/es/wire.settings.account_policy.json
++ sha256sum local_operator/i18n/catalogues/en/wire.settings.account_policy.json local_operator/i18n/catalogues/en/wire.settings.account_policy.context.json local_operator/i18n/catalogues/es/wire.settings.account_policy.json
+1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25  local_operator/i18n/catalogues/en/wire.settings.account_policy.json
+ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254  local_operator/i18n/catalogues/en/wire.settings.account_policy.context.json
+ce1a2c0185b94c9118b6555b3c57ba0f328fc87e9b3b47d6100c542156c6169a  local_operator/i18n/catalogues/es/wire.settings.account_policy.json
++ python3 i18n/audits/evidence/es/wire.settings.account_policy/w1a1/parity.py.txt wire.settings.account_policy
+== wire.settings.account_policy ==
+keys: en=14 es=14 context=14
+missing_in_es: []
+extra_in_es:   []
+en_keys_without_context_sidecar_entry: 0
+WIDTH wire.settings.account_policy.fair.label: maxCells=29 es_max_line=18 en_max_line=11 -> ok
+WIDTH wire.settings.account_policy.headroom.label: maxCells=29 es_max_line=10 en_max_line=13 -> ok
+WIDTH wire.settings.account_policy.label: maxCells=29 es_max_line=20 en_max_line=24 -> ok
+WIDTH wire.settings.account_policy.legacy.label: maxCells=29 es_max_line=27 en_max_line=23 -> ok
+WIDTH wire.settings.account_policy.reset_soonest.label: maxCells=29 es_max_line=20 en_max_line=13 -> ok
+placeholders_compared=0
+mechanical_failures=0
++ python3 i18n/audits/evidence/es/wire.settings.account_policy/w1a1/labels.py.txt wire.settings.account_policy
+== wire.settings.account_policy label budget 29 cells ==
+wire.settings.account_policy.fair.label: es=18 en=11 maxCells=29 -> fits
+wire.settings.account_policy.headroom.label: es=10 en=13 maxCells=29 -> fits
+wire.settings.account_policy.label: es=20 en=24 maxCells=29 -> fits
+wire.settings.account_policy.legacy.label: es=27 en=23 maxCells=29 -> fits
+wire.settings.account_policy.reset_soonest.label: es=20 en=13 maxCells=29 -> fits
++ python3 i18n/audits/evidence/es/wire.settings.account_policy/w1a1/legacy_refs.py.txt
+== label references inside legacy.help ==
+reset_soonest: en label 'Reset soonest' named in en legacy.help -> True
+reset_soonest: es label 'Reinicio más próximo' named in es legacy.help -> True
+reset_soonest: es label matches the reading auditor's expectation 'Reinicio más próximo' -> True
+headroom: en label 'Most headroom' named in en legacy.help -> True
+headroom: es label 'Más margen' named in es legacy.help -> True
+headroom: es label matches the reading auditor's expectation 'Más margen' -> True
+fair: en label 'Fair spread' named in en legacy.help -> True
+fair: es label 'Reparto equitativo' named in es legacy.help -> True
+fair: es label matches the reading auditor's expectation 'Reparto equitativo' -> True
+label cell widths vs declared maxCells 29: reset_soonest=20, headroom=10, fair=18
++ echo '--- "policy" rendered as a settings label elsewhere in es ---'
+--- "policy" rendered as a settings label elsewhere in es ---
++ grep -n providers_openrouter_sort.label local_operator/i18n/catalogues/en/wire.settings.json local_operator/i18n/catalogues/es/wire.settings.json
+local_operator/i18n/catalogues/en/wire.settings.json:488:  "wire.settings.providers_openrouter_sort.label": "routing policy",
+local_operator/i18n/catalogues/es/wire.settings.json:488:  "wire.settings.providers_openrouter_sort.label": "política de enrutamiento",
++ echo '--- "headroom" rendered elsewhere in es ---'
+--- "headroom" rendered elsewhere in es ---
++ grep -n retry_usagereservepercent local_operator/i18n/catalogues/en/wire.settings.json local_operator/i18n/catalogues/es/wire.settings.json
+local_operator/i18n/catalogues/en/wire.settings.json:537:  "wire.settings.retry_usagereservepercent.help": "Headroom below which an account counts as low; a running session stays on it.",
+local_operator/i18n/catalogues/en/wire.settings.json:538:  "wire.settings.retry_usagereservepercent.label": "Usage reserve (%)",
+local_operator/i18n/catalogues/es/wire.settings.json:537:  "wire.settings.retry_usagereservepercent.help": "Margen por debajo del cual una cuenta se considera baja; una sesión en ejecución permanece en ella.",
+local_operator/i18n/catalogues/es/wire.settings.json:538:  "wire.settings.retry_usagereservepercent.label": "Reserva de uso (%)",
++ echo '--- "request" drift across the es locale (petición vs solicitud) ---'
+--- "request" drift across the es locale (petición vs solicitud) ---
++ grep -v :0
++ grep -c petición local_operator/i18n/catalogues/es/cli.exec_remote_help.json local_operator/i18n/catalogues/es/relay.approvals.json local_operator/i18n/catalogues/es/relay.ask.json local_operator/i18n/catalogues/es/relay.asks.json local_operator/i18n/catalogues/es/relay.chrome.json local_operator/i18n/catalogues/es/relay.health.json local_operator/i18n/catalogues/es/relay.notifications.json local_operator/i18n/catalogues/es/relay.session.tags.json local_operator/i18n/catalogues/es/relay.transcript.json local_operator/i18n/catalogues/es/tui.asks.json local_operator/i18n/catalogues/es/tui.authoring.json local_operator/i18n/catalogues/es/tui.notices.json local_operator/i18n/catalogues/es/tui.notifications.json local_operator/i18n/catalogues/es/tui.palette.json local_operator/i18n/catalogues/es/tui.projects_edit.json local_operator/i18n/catalogues/es/tui.review.json local_operator/i18n/catalogues/es/tui.schedule.json local_operator/i18n/catalogues/es/tui.status.json local_operator/i18n/catalogues/es/tui.tags.json local_operator/i18n/catalogues/es/tui.team_authoring.json local_operator/i18n/catalogues/es/tui.transcript.json local_operator/i18n/catalogues/es/tui.viewer.json local_operator/i18n/catalogues/es/tui.welcome.json local_operator/i18n/catalogues/es/wire.aida_cadence.json local_operator/i18n/catalogues/es/wire.console.json local_operator/i18n/catalogues/es/wire.errors.desktop.json local_operator/i18n/catalogues/es/wire.errors.json local_operator/i18n/catalogues/es/wire.errors.notifications.json local_operator/i18n/catalogues/es/wire.errors.settings.json local_operator/i18n/catalogues/es/wire.exec.json local_operator/i18n/catalogues/es/wire.host_speed.json local_operator/i18n/catalogues/es/wire.incidents.json local_operator/i18n/catalogues/es/wire.memory.json local_operator/i18n/catalogues/es/wire.notices.json local_operator/i18n/catalogues/es/wire.remote_compute.json local_operator/i18n/catalogues/es/wire.settings.account_policy.json local_operator/i18n/catalogues/es/wire.settings.hub_defaults.json local_operator/i18n/catalogues/es/wire.settings.json local_operator/i18n/catalogues/es/wire.slash.json local_operator/i18n/catalogues/es/wire.slash.library.json local_operator/i18n/catalogues/es/wire.slash.notifications_page.json local_operator/i18n/catalogues/es/wire.tunnel_setup.json
+local_operator/i18n/catalogues/es/tui.authoring.json:1
+local_operator/i18n/catalogues/es/tui.notices.json:4
+local_operator/i18n/catalogues/es/wire.errors.desktop.json:3
+local_operator/i18n/catalogues/es/wire.host_speed.json:1
+local_operator/i18n/catalogues/es/wire.settings.account_policy.json:1
+local_operator/i18n/catalogues/es/wire.settings.json:11
+local_operator/i18n/catalogues/es/wire.slash.json:2
++ grep -v :0
++ grep -c solicitud local_operator/i18n/catalogues/es/cli.exec_remote_help.json local_operator/i18n/catalogues/es/relay.approvals.json local_operator/i18n/catalogues/es/relay.ask.json local_operator/i18n/catalogues/es/relay.asks.json local_operator/i18n/catalogues/es/relay.chrome.json local_operator/i18n/catalogues/es/relay.health.json local_operator/i18n/catalogues/es/relay.notifications.json local_operator/i18n/catalogues/es/relay.session.tags.json local_operator/i18n/catalogues/es/relay.transcript.json local_operator/i18n/catalogues/es/tui.asks.json local_operator/i18n/catalogues/es/tui.authoring.json local_operator/i18n/catalogues/es/tui.notices.json local_operator/i18n/catalogues/es/tui.notifications.json local_operator/i18n/catalogues/es/tui.palette.json local_operator/i18n/catalogues/es/tui.projects_edit.json local_operator/i18n/catalogues/es/tui.review.json local_operator/i18n/catalogues/es/tui.schedule.json local_operator/i18n/catalogues/es/tui.status.json local_operator/i18n/catalogues/es/tui.tags.json local_operator/i18n/catalogues/es/tui.team_authoring.json local_operator/i18n/catalogues/es/tui.transcript.json local_operator/i18n/catalogues/es/tui.viewer.json local_operator/i18n/catalogues/es/tui.welcome.json local_operator/i18n/catalogues/es/wire.aida_cadence.json local_operator/i18n/catalogues/es/wire.console.json local_operator/i18n/catalogues/es/wire.errors.desktop.json local_operator/i18n/catalogues/es/wire.errors.json local_operator/i18n/catalogues/es/wire.errors.notifications.json local_operator/i18n/catalogues/es/wire.errors.settings.json local_operator/i18n/catalogues/es/wire.exec.json local_operator/i18n/catalogues/es/wire.host_speed.json local_operator/i18n/catalogues/es/wire.incidents.json local_operator/i18n/catalogues/es/wire.memory.json local_operator/i18n/catalogues/es/wire.notices.json local_operator/i18n/catalogues/es/wire.remote_compute.json local_operator/i18n/catalogues/es/wire.settings.account_policy.json local_operator/i18n/catalogues/es/wire.settings.hub_defaults.json local_operator/i18n/catalogues/es/wire.settings.json local_operator/i18n/catalogues/es/wire.slash.json local_operator/i18n/catalogues/es/wire.slash.library.json local_operator/i18n/catalogues/es/wire.slash.notifications_page.json local_operator/i18n/catalogues/es/wire.tunnel_setup.json
+local_operator/i18n/catalogues/es/relay.approvals.json:1
+local_operator/i18n/catalogues/es/relay.chrome.json:1
+local_operator/i18n/catalogues/es/tui.transcript.json:1
+local_operator/i18n/catalogues/es/wire.errors.desktop.json:3
+local_operator/i18n/catalogues/es/wire.remote_compute.json:3
+local_operator/i18n/catalogues/es/wire.settings.json:1
+local_operator/i18n/catalogues/es/wire.tunnel_setup.json:1
++ echo '--- "computer" drift across the es locale (máquina vs equipo) ---'
+--- "computer" drift across the es locale (máquina vs equipo) ---
++ grep -v :0
++ grep -c máquina local_operator/i18n/catalogues/es/cli.exec_remote_help.json local_operator/i18n/catalogues/es/relay.approvals.json local_operator/i18n/catalogues/es/relay.ask.json local_operator/i18n/catalogues/es/relay.asks.json local_operator/i18n/catalogues/es/relay.chrome.json local_operator/i18n/catalogues/es/relay.health.json local_operator/i18n/catalogues/es/relay.notifications.json local_operator/i18n/catalogues/es/relay.session.tags.json local_operator/i18n/catalogues/es/relay.transcript.json local_operator/i18n/catalogues/es/tui.asks.json local_operator/i18n/catalogues/es/tui.authoring.json local_operator/i18n/catalogues/es/tui.notices.json local_operator/i18n/catalogues/es/tui.notifications.json local_operator/i18n/catalogues/es/tui.palette.json local_operator/i18n/catalogues/es/tui.projects_edit.json local_operator/i18n/catalogues/es/tui.review.json local_operator/i18n/catalogues/es/tui.schedule.json local_operator/i18n/catalogues/es/tui.status.json local_operator/i18n/catalogues/es/tui.tags.json local_operator/i18n/catalogues/es/tui.team_authoring.json local_operator/i18n/catalogues/es/tui.transcript.json local_operator/i18n/catalogues/es/tui.viewer.json local_operator/i18n/catalogues/es/tui.welcome.json local_operator/i18n/catalogues/es/wire.aida_cadence.json local_operator/i18n/catalogues/es/wire.console.json local_operator/i18n/catalogues/es/wire.errors.desktop.json local_operator/i18n/catalogues/es/wire.errors.json local_operator/i18n/catalogues/es/wire.errors.notifications.json local_operator/i18n/catalogues/es/wire.errors.settings.json local_operator/i18n/catalogues/es/wire.exec.json local_operator/i18n/catalogues/es/wire.host_speed.json local_operator/i18n/catalogues/es/wire.incidents.json local_operator/i18n/catalogues/es/wire.memory.json local_operator/i18n/catalogues/es/wire.notices.json local_operator/i18n/catalogues/es/wire.remote_compute.json local_operator/i18n/catalogues/es/wire.settings.account_policy.json local_operator/i18n/catalogues/es/wire.settings.hub_defaults.json local_operator/i18n/catalogues/es/wire.settings.json local_operator/i18n/catalogues/es/wire.slash.json local_operator/i18n/catalogues/es/wire.slash.library.json local_operator/i18n/catalogues/es/wire.slash.notifications_page.json local_operator/i18n/catalogues/es/wire.tunnel_setup.json
+local_operator/i18n/catalogues/es/cli.exec_remote_help.json:1
+local_operator/i18n/catalogues/es/relay.asks.json:3
+local_operator/i18n/catalogues/es/relay.chrome.json:1
+local_operator/i18n/catalogues/es/relay.health.json:4
+local_operator/i18n/catalogues/es/relay.notifications.json:2
+local_operator/i18n/catalogues/es/wire.settings.account_policy.json:1
+local_operator/i18n/catalogues/es/wire.settings.json:4
+local_operator/i18n/catalogues/es/wire.slash.json:1
++ grep -n 'este equipo' local_operator/i18n/catalogues/es/cli.exec_remote_help.json local_operator/i18n/catalogues/es/relay.approvals.json local_operator/i18n/catalogues/es/relay.ask.json local_operator/i18n/catalogues/es/relay.asks.json local_operator/i18n/catalogues/es/relay.chrome.json local_operator/i18n/catalogues/es/relay.health.json local_operator/i18n/catalogues/es/relay.notifications.json local_operator/i18n/catalogues/es/relay.session.tags.json local_operator/i18n/catalogues/es/relay.transcript.json local_operator/i18n/catalogues/es/tui.asks.json local_operator/i18n/catalogues/es/tui.authoring.json local_operator/i18n/catalogues/es/tui.notices.json local_operator/i18n/catalogues/es/tui.notifications.json local_operator/i18n/catalogues/es/tui.palette.json local_operator/i18n/catalogues/es/tui.projects_edit.json local_operator/i18n/catalogues/es/tui.review.json local_operator/i18n/catalogues/es/tui.schedule.json local_operator/i18n/catalogues/es/tui.status.json local_operator/i18n/catalogues/es/tui.tags.json local_operator/i18n/catalogues/es/tui.team_authoring.json local_operator/i18n/catalogues/es/tui.transcript.json local_operator/i18n/catalogues/es/tui.viewer.json local_operator/i18n/catalogues/es/tui.welcome.json local_operator/i18n/catalogues/es/wire.aida_cadence.json local_operator/i18n/catalogues/es/wire.console.json local_operator/i18n/catalogues/es/wire.errors.desktop.json local_operator/i18n/catalogues/es/wire.errors.json local_operator/i18n/catalogues/es/wire.errors.notifications.json local_operator/i18n/catalogues/es/wire.errors.settings.json local_operator/i18n/catalogues/es/wire.exec.json local_operator/i18n/catalogues/es/wire.host_speed.json local_operator/i18n/catalogues/es/wire.incidents.json local_operator/i18n/catalogues/es/wire.memory.json local_operator/i18n/catalogues/es/wire.notices.json local_operator/i18n/catalogues/es/wire.remote_compute.json local_operator/i18n/catalogues/es/wire.settings.account_policy.json local_operator/i18n/catalogues/es/wire.settings.hub_defaults.json local_operator/i18n/catalogues/es/wire.settings.json local_operator/i18n/catalogues/es/wire.slash.json local_operator/i18n/catalogues/es/wire.slash.library.json local_operator/i18n/catalogues/es/wire.slash.notifications_page.json local_operator/i18n/catalogues/es/wire.tunnel_setup.json
+local_operator/i18n/catalogues/es/tui.team_authoring.json:25:  "tui.team_authoring.revision_changed": "Alguien modificó este equipo; vuelve a abrirlo para editarlo.",

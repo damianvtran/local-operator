@@ -1,0 +1,158 @@
+AUDIT LOG — es / tui.hub_links / w6a1
+date:         2026-10-30
+auditor:      independent translation auditor (lopdev team), i18n-auditor role; session 6a2f6fa808a7
+model:        radient/auto (the run's actual model; record.json auditor.model_note carries the fallback chain)
+independence: authored none of this copy; wrote no catalogue, sidecar, ledger or allowance
+
+All commands below were executed in /Users/damian/lo-i18n-es, branch feat/es-tui, on the date above.
+Probe interpreter: ~/local-operator/.venv/bin/python — this checkout has no .venv and that
+interpreter supplies rich.cells.cell_len, the ruler the repo itself measures text width
+with. Nothing was installed for this audit; the script also carries a local cell-width
+fallback (see cell_len()) for a machine without rich.
+
+=== 1. revision and identity of the exact inputs ===============================
+$ git rev-parse HEAD
+b925c2e11be36653dfe88ac78f627bc2531427df
+
+$ git status --porcelain -- <the three es targets>
+?? local_operator/i18n/catalogues/es/tui.app.json
+?? local_operator/i18n/catalogues/es/tui.hub_links.json
+?? local_operator/i18n/catalogues/es/tui.usage.json
+
+$ shasum -a 256 <en / context / es inputs for this namespace>
+7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb  local_operator/i18n/catalogues/en/tui.hub_links.json
+9b81676163337d8a93e38138909dbd4801f8edd8416075c6efb994f9870c682e  local_operator/i18n/catalogues/en/tui.hub_links.context.json
+1d87b68b9a249b223af91a03bb51dd9bd05e62f23a1308ed05b10261d2d5312d  local_operator/i18n/catalogues/es/tui.hub_links.json
+
+NOTE: the three es targets are UNTRACKED at this revision, so HEAD does not bind their
+bytes; the sha256 lines above are the binding identity. Section A re-derives that digest
+through local_operator.i18n.catalogues.load_catalogue() and compares it with the file.
+
+=== 2. the repository's own validator ========================================
+$ python3 scripts/i18n/check.py        # repo-wide, run 2026-10-30
+exit 0. Final line:
+  check.py: ok — 191 file(s) scanned, 2348 literal(s) at or below the baseline, catalogues consistent; 51 advisory finding(s) (report-only until activated)
+
+WHAT THIS PROVES AND WHAT IT DOES NOT: check.py rejects a plural selector that
+is not a category of the locale, and a plural without `other`
+(scripts/i18n/check.py:_check_plural_categories). It does NOT require the locale's
+full category set — an es plural missing `many` passes it — and it never looks at
+what a branch RENDERS. Section A of the probe therefore adds full one/many/other
+coverage and per-branch argument parity, which the validator cannot see.
+
+=== 3. independent probe scoped to this namespace ============================
+$ PYTHONPATH=$PWD /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.hub_links/w6a1/checks.py --namespace tui.hub_links
+
+
+==============================================================================
+es TUI block w6a1 — independent audit probe (tui.hub_links)
+==============================================================================
+repo      /Users/damian/lo-i18n-es
+locale    es
+width     rich.cells.cell_len
+
+-- tui.hub_links: input provenance
+   HEAD b925c2e11be36653dfe88ac78f627bc2531427df
+   en/tui.hub_links.json: sha256 7fbe6713f8ac8f312884476c498c3b74e76c5f0853bdd027f25fc47d489311bb | tracked/clean
+   en/tui.hub_links.context.json: sha256 9b81676163337d8a93e38138909dbd4801f8edd8416075c6efb994f9870c682e | tracked/clean
+   es/tui.hub_links.json: sha256 1d87b68b9a249b223af91a03bb51dd9bd05e62f23a1308ed05b10261d2d5312d | ?? local_operator/i18n/catalogues/es/tui.hub_links.json
+
+==============================================================================
+A. MECHANICAL — tui.hub_links
+==============================================================================
+PASS  [tui.hub_links: catalogue loader accepts the file and agrees on its digest] loader 56 keys / api 1d87b68b9a249b22 vs file 1d87b68b9a249b22
+
+-- tui.hub_links: 56 en / 56 target / 55 context keys
+PASS  [tui.hub_links: ordered key parity en==es] missing=[] extra=[]
+PASS  [tui.hub_links: context sidecar only describes real keys] unknown=[]
+INFO  [tui.hub_links: keys without a context entry] ['tui.hub_links.hint.engage']
+INFO  [tui.hub_links: CLDR categories for es] ['many', 'one', 'other']
+PASS  [tui.hub_links: ICU argument tuples (name and kind) match en] 0 mismatch(es): []
+PASS  [tui.hub_links: plural selectors are es CLDR categories, all present, `other` defined] 0 mismatch(es): []
+PASS  [tui.hub_links: every plural branch renders its source's arguments] 0 mismatch(es): []
+PASS  [tui.hub_links: `#`/value rendering per plural branch matches en] 0 mismatch(es): []
+PASS  [tui.hub_links: printf tokens preserved] 0 mismatch(es): []
+PASS  [tui.hub_links: --flags preserved] 0 mismatch(es): []
+PASS  [tui.hub_links: backtick code spans byte-identical] 0 mismatch(es): []
+PASS  [tui.hub_links: machine tokens present in both or neither] 0 mismatch(es): []
+PASS  [tui.hub_links: layout punctuation/whitespace counts match en] 0 mismatch(es): []
+INFO  [tui.hub_links: plural arguments seen] 0
+
+==============================================================================
+B. FIT — tui.hub_links
+==============================================================================
+
+-- tui.hub_links.hint.failed: maxCells 48
+   reason='provider error'             en  28 | es  36  'comprobación fallida: provider error'
+PASS  [tui.hub_links: tui.hub_links.hint.failed <= 48 cells incl. reason='provider error'] 36 cells
+   reason='unsupported precondition'   en  38 | es  46  'comprobación fallida: unsupported precondition'
+PASS  [tui.hub_links: tui.hub_links.hint.failed <= 48 cells incl. reason='unsupported precondition'] 46 cells
+   reason='baseline unknown'           en  30 | es  38  'comprobación fallida: baseline unknown'
+PASS  [tui.hub_links: tui.hub_links.hint.failed <= 48 cells incl. reason='baseline unknown'] 38 cells
+
+==============================================================================
+C. SEMANTICS — tui.hub_links
+==============================================================================
+
+-- terminology: configured link is `vínculo`, hyperlink is `enlace`
+   vínculo in 7 keys: ['tui.hub_links.reason.baseline_unknown', 'tui.hub_links.refusal.ineligible', 'tui.hub_links.refusal.resolve_first', 'tui.hub_links.refusal.revision_moved', 'tui.hub_links.state.empty', 'tui.hub_links.state.loading', 'tui.hub_links.state.unavailable']
+   enlace in 0 keys: []
+PASS  [tui.hub_links: configured hub links use `vínculo`, never `enlace`] enlace=[] vínculo_count=7
+   witness: 'Suscribir vínculos de equipo' (tracked=True, ledger passed at the current en hash)
+
+-- recovery referent: 'Este vínculo cambió mientras lo revisabas. Vuelve a abrir el aviso para confirmar la última versión.'
+FAIL  [tui.hub_links: revision_moved names the consent prompt, not the notice line] says `el aviso`, which is the panel's own notice line
+PASS  [tui.hub_links: unsubscribed keeps both halves (inbound paused, outbound may publish)] Actualizaciones entrantes en pausa. Los cambios salientes aún pueden publicarse en {source}.
+
+-- tui.hub_links: CLDR model for es — generated samples: 1 -> one, 2 -> other, 10^6 -> many; 1,500,000 -> other by the stated 10^6-multiple rule (table has no 1500000 row)
+PASS  [tui.hub_links: generated CLDR table says 1=one, 2=other, 10^6=many] one, other, many
+-- tui.hub_links: no plural messages in this namespace
+
+==============================================================================
+D. NEGATIVE CONTROLS
+==============================================================================
+PASS  [control: renamed placeholder] caught — mark.available {item}->{elemento} -> arguments, got 'Actualizar {elemento} desde {source}'
+PASS  [control: dropped `many` branch] caught — parked.wakes -> '{count, plural, one {{shown} despertar} other {{shown} despertares}}'
+PASS  [control: added `few` branch] caught — parked.wakes -> '{count, plural, one {{shown} despertar} few {{shown} de despertares} other {{shown} despertares}}'
+PASS  [control: count dropped from a `many` branch] caught — parked.wakes -> '{count, plural, one {{shown} despertar} many {de despertares} other {{shown} despertares}}'
+PASS  [control: edited code span] caught — `lo ›` -> `lo ->` in help.title_note_more
+PASS  [control: ellipsis replaced by three dots] caught — notifications.more -> '  ...{shown} más'
+PASS  [control: trailing space dropped] caught — showing_prefix -> 'mostrando'
+PASS  [control: machine token re-cased] caught — sidebar_hint ctrl+b -> Ctrl+B
+PASS  [control: agreement predicate accepts `activada`] accepted — toggle_on -> 'búsqueda web activada — surte efecto desde tu próximo turno'
+PASS  [control: understated charge claim] caught — paid.continue -> 'cuota incluida agotada; se detendrá'
+
+==============================================================================
+SUMMARY
+==============================================================================
+tui.hub_links     18 pass /   1 fail
+    FAIL tui.hub_links: revision_moved names the consent prompt, not the notice line — says `el aviso`, which is the panel's own notice line
+control           10 pass /   0 fail
+
+TOTAL failures: 1
+Verdict input: every FAIL above is a finding in the audit report; sections A pass means the mechanical deck is clean.
+
+  (probe exit 1 — non-zero because this namespace has findings; the FAIL
+   lines above are the finding index for this audit)
+
+=== 4. negative controls (a check that cannot fail proves nothing) ===========
+$ PYTHONPATH=$PWD /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.hub_links/w6a1/checks.py          # full three-namespace run, section D
+Each control breaks ONE value in memory and re-runs the audit's own predicate on it.
+
+PASS  [control: renamed placeholder] caught — mark.available {item}->{elemento} -> arguments, got 'Actualizar {elemento} desde {source}'
+PASS  [control: dropped `many` branch] caught — parked.wakes -> '{count, plural, one {{shown} despertar} other {{shown} despertares}}'
+PASS  [control: added `few` branch] caught — parked.wakes -> '{count, plural, one {{shown} despertar} few {{shown} de despertares} other {{shown} despertares}}'
+PASS  [control: count dropped from a `many` branch] caught — parked.wakes -> '{count, plural, one {{shown} despertar} many {de despertares} other {{shown} despertares}}'
+PASS  [control: edited code span] caught — `lo ›` -> `lo ->` in help.title_note_more
+PASS  [control: ellipsis replaced by three dots] caught — notifications.more -> '  ...{shown} más'
+PASS  [control: trailing space dropped] caught — showing_prefix -> 'mostrando'
+PASS  [control: machine token re-cased] caught — sidebar_hint ctrl+b -> Ctrl+B
+PASS  [control: agreement predicate accepts `activada`] accepted — toggle_on -> 'búsqueda web activada — surte efecto desde tu próximo turno'
+PASS  [control: understated charge claim] caught — paid.continue -> 'cuota incluida agotada; se detendrá'
+
+Ten controls, ten behaved as required: eight deliberate breakages were CAUGHT
+(renamed placeholder, dropped `many` branch, added `few` branch, {shown} dropped from a
+branch, edited code span, ellipsis typography, trailing space, re-cased command token),
+and two controls must PASS to prove the predicates discriminate rather than always
+failing — the agreement check accepts `búsqueda web activada`, and the money predicate
+accepts `continuará con créditos` while rejecting the understated `se detendrá`.

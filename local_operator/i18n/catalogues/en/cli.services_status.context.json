@@ -1,0 +1,58 @@
+{
+  "cli.services_status.supervised_by": {
+    "note": "Indented below a serve daemon row. unit is the actual systemd unit resolved from this PID's cgroup, not an inferred or installed unit name.",
+    "role": "Supervision evidence for one serve daemon"
+  },
+  "cli.services_status.unsupervised_scope": {
+    "note": "scope is the transient or login session scope read from /proc/PID/cgroup. Saying unsupervised is a safety-relevant distinction: restart cannot make this daemon persistent.",
+    "role": "Warning below an unsupervised serve daemon"
+  },
+  "cli.services_status.unsupervised_unknown": {
+    "note": "Used only when cgroup membership was READ and showed no service. Unknown procfs must use supervision_unknown instead, never this negative claim.",
+    "role": "Supervision result after a successful cgroup read with no service"
+  },
+  "cli.services_status.supervision_unknown": {
+    "note": "Used when /proc/PID/cgroup could not be read. Do not add claims about whether systemd can restart the process; only evidence is absent. The following install line remains appropriate.",
+    "role": "Supervision is unknown because the process cgroup was unreadable"
+  },
+  "cli.services_status.install_service": {
+    "note": "command is the complete CLI command with its current daemon port. It installs a separate serve unit, not the relay unit.",
+    "role": "Action that installs supervision for an unsupervised serve daemon"
+  },
+  "cli.services_status.install_service_help": {
+    "note": "One-line help for the lop serve --install-service flag. Kept in this namespace because cli.services_help is already carried by fr and zh-CN; a new key there would stale both ledger rows and force allowance growth in the five locales that do not carry it. Technical names (Linux, serve, systemd) stay as written; CLI help wraps, so there is no cell budget.",
+    "role": "CLI flag help for lop serve --install-service"
+  },
+  "cli.services_status.restart_supervision_limit": {
+    "note": "Distinguishes an in-place build reload from adding a systemd supervisor; restart semantics themselves do not change.",
+    "role": "Limit of the services restart remedy"
+  },
+  "cli.services_status.serve_install_linux_only": {
+    "note": "Refusal on non-Linux hosts. macOS has no new serve supervisor in this change.",
+    "role": "Unsupported serve installation platform"
+  },
+  "cli.services_status.serve_unit_written": {
+    "note": "unit is the absolute path of the new systemd user unit file.",
+    "role": "Unit file installation receipt"
+  },
+  "cli.services_status.serve_install_isolated_home": {
+    "note": "The file write is separated from enablement: a redirected HOME cannot be managed by the real user's systemd manager.",
+    "role": "Failed enablement under an isolated HOME"
+  },
+  "cli.services_status.serve_unit_enabled": {
+    "note": "unit is local-operator-serve.service.",
+    "role": "Successful user-unit enablement"
+  },
+  "cli.services_status.serve_linger_required": {
+    "note": "The install is successful but not durable across logout; loginctl enable-linger remains a prerequisite. Must fit the repo's 80-column status budget without wrapping.",
+    "role": "Durability warning after enabling a serve unit"
+  },
+  "cli.services_status.serve_install_not_serving": {
+    "note": "error is the last active/health identity observation. Enablement alone is not accepted when an old daemon might hold the port.",
+    "role": "Serve installation failed readiness or PID identity verification"
+  },
+  "cli.services_status.serve_install_wrong_cgroup": {
+    "note": "The responding MainPID must also be in local-operator-serve.service's cgroup; do not downgrade this to success.",
+    "role": "Serve installation cgroup verification failure"
+  }
+}

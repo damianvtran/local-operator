@@ -1,0 +1,248 @@
+{
+ "schema": 1,
+ "audit_id": "w4a2",
+ "audit_round": 2,
+ "audit_kind": "independent_delta_reaudit",
+ "supersedes": "w4a1",
+ "supersedes_scope": [
+  "relay.shell.usage.used",
+  "relay.shell.usage.remaining",
+  "relay.shell.usage.remaining_unknown_unit",
+  "relay.shell.usage.used_unknown_unit",
+  "relay.shell.usage.continue"
+ ],
+ "locale": "es",
+ "namespace": "relay.shell",
+ "audit_date": "2026-10-29",
+ "audited_revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+ "audited_revision_note": "branch feat/i18n-es-wire-errors at HEAD 183f7a0537e4cee42fd82f25a21fe52953a81bdf. The TARGET catalogue is UNTRACKED (`?? local_operator/i18n/catalogues/es/...`), so this round binds to the on-disk sha256 in input_hashes, not to a commit.",
+ "verdict": "failed",
+ "result": {
+  "mechanical_checks": "pass",
+  "findings_total": 6,
+  "blocker": 0,
+  "major": 1,
+  "minor": 3,
+  "nit": 2,
+  "closed_by_measurement": [
+   "F4 (term drift half)"
+  ],
+  "not_closed": [
+   "F1",
+   "F2",
+   "F3"
+  ],
+  "held_nits": [
+   "F5",
+   "F6"
+  ]
+ },
+ "verdict_reason": "F1 (major) is not closed: the shipped composition renders a doubled `de` at exact multiples of 10^6, and F2/F3 carry the same defect from the same cause. The agreement fix itself is correct and `{unit}` is passed through untouched. One tested remedy (drop `many` from the four composing keys) closes F1-F3; the J10^6 defect, not the agreement, is the gating item.",
+ "auditor": {
+  "agent": "translation-auditor (lopdev team), independent of the translating lane",
+  "session_or_instance": "744651c367e5",
+  "model": "radient/kimi-k2.5",
+  "actual_model_source": "this session's own model header (model-switch notices in-session)",
+  "model_fallback_notice": "FALLBACK, disclosed: the session's primary model anthropic/claude-sonnet-5-5 failed on provider quota; the harness fell back through openai/gpt-6-astra and kimi/k3.1-pro and all audit work, both rounds, was performed on radient/kimi-k2.5. No judgement here was produced by the primary model.",
+  "date": "2026-10-29",
+  "independence": "Translated none of this namespace and repaired nothing; verified every claim from the new bytes with the repo runtime rather than from the remediation description, including the one claim that did not survive (the 10^6 render). Wrote only inside its own evidence directories; no git writes."
+ },
+ "runtime": {
+  "renderer": "local_operator.i18n.runtime (in-house ICU subset, shipped render/envelope path)",
+  "locale_data": "local_operator.i18n.format (generated CLDR tables)",
+  "composition": "local_operator/mobile/web/src/components/usage-sheet.tsx (mirrored exactly for relay.shell)",
+  "phone_runtime": "intl-messageformat (not executed here; standard ICU, supports #, branch-nested args and CLDR many)",
+  "python": "3.14.7",
+  "counts_rendered": [
+   0,
+   1,
+   2,
+   21,
+   1000000,
+   1500000,
+   2000000
+  ]
+ },
+ "input_hashes": {
+  "en": {
+   "path": "local_operator/i18n/catalogues/en/relay.shell.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560"
+  },
+  "target": {
+   "path": "local_operator/i18n/catalogues/es/relay.shell.json",
+   "sha256": "fdc0d458f441d6e2097ff0f69722025c1b6f7294089ad9886827ec0c2fd3fde2",
+   "tracked": false,
+   "note": "UNTRACKED working-tree bytes at the audited revision"
+  },
+  "context": {
+   "path": "local_operator/i18n/catalogues/en/relay.shell.context.json",
+   "revision": "183f7a0537e4cee42fd82f25a21fe52953a81bdf",
+   "sha256": "16746ecd1537006992935bb2aa88fe39c46700d9e0341e7aacd565e2366349ea"
+  }
+ },
+ "artifacts": [
+  "record.json",
+  "report.md",
+  "audit.log",
+  "run-script.py.txt",
+  "receipt.json"
+ ],
+ "key_count": {
+  "en": 44,
+  "target": 44,
+  "delta_audited": 5,
+  "neighbours_checked": 39
+ },
+ "findings": [
+  {
+   "id": "F1",
+   "severity": "major",
+   "status": "not_closed",
+   "key": "relay.shell.usage.used",
+   "current": "{value, plural, one {Se usó # {unit}} many {Se usaron # de {unit}} other {Se usaron # {unit}}}",
+   "proposed": "{value, plural, one {Se usó # {unit}} other {Se usaron # {unit}}}",
+   "reason": "The round-1 gender/number defect is fixed at 0/1/2/21/1.5e6, but the added `many` branch supplies a second `de`: `unit_credits`' own `many` branch already yields `de créditos`, so at an exact multiple of 10^6 the shipped row reads `Se usaron 1.000.000 de de créditos`.",
+   "evidence": [
+    "credits used 1000000 -> Se usaron 1.000.000 de de créditos",
+    "credits used 2000000 -> Se usaron 2.000.000 de de créditos",
+    "credits used 1 -> Se usó 1 crédito (fixed half)"
+   ]
+  },
+  {
+   "id": "F2",
+   "severity": "minor",
+   "status": "not_closed",
+   "key": "relay.shell.usage.remaining",
+   "current": "{value, plural, one {Queda # {unit} restante} many {Quedan # de {unit} restantes} other {Quedan # {unit} restantes}}",
+   "proposed": "{value, plural, one {Queda # {unit} restante} other {Quedan # {unit} restantes}}",
+   "reason": "Same cause as F1: `Quedan 1.000.000 de de créditos restantes` at exact multiples of 10^6; the one/other agreement is fixed.",
+   "evidence": [
+    "credits remaining 1000000 -> Quedan 1.000.000 de de créditos restantes",
+    "credits remaining 1 -> Queda 1 crédito restante"
+   ]
+  },
+  {
+   "id": "F3",
+   "severity": "minor",
+   "status": "not_closed",
+   "key": "relay.shell.usage.remaining_unknown_unit, relay.shell.usage.used_unknown_unit",
+   "current": "{value, plural, one {Queda # restante} many {Quedan # de restantes} other {Quedan # restantes}} / {value, plural, one {Se usó #} many {Se usaron # de usados} other {Se usaron #}}",
+   "proposed": "{value, plural, one {Queda # restante} other {Quedan # restantes}} / {value, plural, one {Se usó #} other {Se usaron #}}",
+   "reason": "Same cause, and worse here because there is no unit noun to take the `de`: the unknown-unit rows read `Quedan 1.000.000 de restantes` and `Se usaron 1.000.000 de usados` at exact multiples of 10^6.",
+   "evidence": [
+    "unknown remaining 1000000 -> Quedan 1.000.000 de restantes",
+    "unknown used 1000000 -> Se usaron 1.000.000 de usados"
+   ]
+  },
+  {
+   "id": "F4",
+   "severity": "minor",
+   "status": "partially_closed",
+   "key": "relay.shell.usage.continue",
+   "current": "Asignación incluida agotada; continuará con créditos.",
+   "proposed": "Asignación incluida agotada; el uso continuará con créditos.",
+   "reason": "CLOSED: the second rendering of the included allowance is gone — the sheet now says `Asignación incluida` everywhere, and `agotada` is kept as required. STILL HELD: the subject of `continuará` is elided, so it is not stated what continues.",
+   "evidence": [
+    "relay.shell.usage.continue -> Asignación incluida agotada; continuará con créditos."
+   ]
+  },
+  {
+   "id": "F5",
+   "severity": "nit",
+   "status": "held_unchanged",
+   "key": "relay.shell.usage.window_lifetime",
+   "current": "Total",
+   "proposed": "Histórico (or De por vida where the width budget allows)",
+   "reason": "Bytes unchanged from w4a1; still held as a nit. Non-gating.",
+   "evidence": []
+  },
+  {
+   "id": "F6",
+   "severity": "nit",
+   "status": "held_unchanged",
+   "key": "relay.shell.usage.eligibility_unknown",
+   "current": "Elegibilidad para gasto desconocida",
+   "proposed": "Elegibilidad de gasto desconocida",
+   "reason": "Bytes unchanged from w4a1; still held as a nit. Non-gating.",
+   "evidence": []
+  }
+ ],
+ "root_cause": {
+  "summary": "The `de` belongs to exactly one side of the composition. It already lives in `unit_credits|unit_tokens|unit_requests`' `many` branch, so a `many` branch in the composing message duplicates it. One fix closes F1-F3.",
+  "affected_keys": [
+   "relay.shell.usage.used",
+   "relay.shell.usage.remaining",
+   "relay.shell.usage.remaining_unknown_unit",
+   "relay.shell.usage.used_unknown_unit"
+  ],
+  "tested_remedy": {
+   "relay.shell.usage.used": "{value, plural, one {Se usó # {unit}} other {Se usaron # {unit}}}",
+   "relay.shell.usage.remaining": "{value, plural, one {Queda # {unit} restante} other {Quedan # {unit} restantes}}",
+   "relay.shell.usage.remaining_unknown_unit": "{value, plural, one {Queda # restante} other {Quedan # restantes}}",
+   "relay.shell.usage.used_unknown_unit": "{value, plural, one {Se usó #} other {Se usaron #}}"
+  },
+  "remedy_verified_renders": [
+   "credits used 1000000 -> Se usaron 1.000.000 de créditos",
+   "credits remaining 1000000 -> Quedan 1.000.000 de créditos restantes",
+   "requests remaining 1000000 -> Quedan 1.000.000 de solicitudes restantes",
+   "unknown remaining 1000000 -> Quedan 1.000.000 restantes",
+   "unknown used 1000000 -> Se usaron 1.000.000",
+   "credits used 2000000 -> Se usaron 2.000.000 de créditos",
+   "credits used 1 -> Se usó 1 crédito",
+   "usd remaining 1500000 -> Quedan 1.500.000 USD restantes"
+  ],
+  "why_the_report_differed": "Rendering `usage.used` with a NOMINATIVE unit reproduces the reported string (`Se usaron 1.000.000 de créditos`); through usage-sheet.tsx `{unit}` is the rendered `unit_credits` message, which is `de créditos` at 10^6, giving the doubled `de`. The control is in audit.log."
+ },
+ "neighbour_check": {
+  "method": "every non-delta key re-rendered and compared to w4a1's recorded output",
+  "reproduced": 39,
+  "changed": 0,
+  "unrecorded": 0,
+  "of": 39
+ },
+ "check_output": {
+  "path": "audit.log",
+  "kind": "auditor's own execution log (produced by running run-script.py.txt, not transcribed)",
+  "command": "python3 i18n/audits/evidence/es/relay.shell/w4a2/run-script.py.txt relay.shell i18n/audits/evidence/es/relay.shell/w4a1/audit.log > …/w4a2/audit.log",
+  "contains": [
+   "HEAD/branch/tracked-state binding",
+   "sha256 of en, sidecar and target (round-2 bytes)",
+   "key parity 44/44",
+   "per-key argument names recursive through every branch (0 diffs)",
+   "plural categories used vs selectable",
+   "Node Intl.PluralRules CLDR cross-check",
+   "full composition of credits|tokens|requests|usd|percent|unknown x remaining|used at 0/1/2/21/1e6/1.5e6/2e6",
+   "CONTROL renders with a nominative unit",
+   "CANDIDATE REMEDY renders",
+   "delta-key sources and in-place renders",
+   "neighbour check against w4a1"
+  ],
+  "summary": {
+   "key_parity": "44/44",
+   "argument_set_diffs": 0,
+   "plural_categories": "many/one/other used, all selectable, none illegal",
+   "cldr_cross_check": "agree=True vs Node Intl.PluralRules('es') (many only at exact multiples of 10^6)",
+   "delta_renders": "summary in root_cause; full matrix in audit.log",
+   "neighbour_check": "39/39 unchanged"
+  }
+ },
+ "limitations": [
+  "Python runtime only; the phone's TypeScript runtime (intl-messageformat) was not executed — no dependency tree in this worktree and no scratch installs. The branch shape is standard ICU, so this is a text defect, not a runtime-capability risk; the phone render itself is unproven.",
+  "No native-speaker review: the auditor is an LLM.",
+  "No screen-width measurement.",
+  "Fallback model disclosed; see auditor.model_fallback_notice."
+ ],
+ "noted_outside_scope": [],
+ "current_report_verdict": {
+  "status": "failed",
+  "unresolved_blocker_major_count": 1,
+  "blocker": 0,
+  "major": 1,
+  "minor": 3,
+  "nit": 2,
+  "rejected": 0,
+  "deferred": 0,
+  "findings_total": 6
+ }
+}

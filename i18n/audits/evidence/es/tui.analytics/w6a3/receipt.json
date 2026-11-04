@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "audit_id": "w6a3",
+  "audit_round": 3,
+  "locale": "es",
+  "namespace": "tui.analytics",
+  "audit_date": "2026-10-30",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), es-tui-r3-analytics",
+    "session": "13ac587c68a7",
+    "model": "anthropic/claude-sonnet-5-5"
+  },
+  "files": [
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/audit.log",
+      "sha256": "10bb0168956567e3f0b6766e404fe1a2f3117ee12ed91fa1ba381424e3896f39"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/checks.py",
+      "sha256": "77e2d9ed075a03a86a924e2ad73feb4f4eb7e685cd103f815994425ed4659b64"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/probe_analytics_frame.py.txt",
+      "sha256": "621d15e500a2a925f04e878388f4a12f5328be8332a58f2a44db1dc4e637e3ad"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/probe_goal_frame.py.txt",
+      "sha256": "b07ece3f54508823d6c860d2648697be3c3cfe57f4c8c126a4336c40a414c7a7"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/probe_goal_wrap.py.txt",
+      "sha256": "fc7a0c3ef58f9bb7901588f63a692b562f700d48b7b1ad510dd07e82f996ccdd"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/probe_library_rail.py.txt",
+      "sha256": "d66fd957f5355a65c7af0dc10b820d02686c94decc7fd1cd3b9460253c996832"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/probe_projects_card.py.txt",
+      "sha256": "167e11f8f7bb845bbdb8268596a4148ede71fc1fb13821cf230c609c0efdbe28"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.analytics/w6a3/report.md",
+      "sha256": "a568cbaab9b03eb22b6fc8392d4d11a2830a98841bde6a95504017b593afac55"
+    }
+  ],
+  "note": "Hashes of the companions record.json describes. The record's artifacts list the same files; the receipt does not hash record.json (circular)."
+}

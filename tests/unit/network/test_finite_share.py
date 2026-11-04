@@ -468,7 +468,15 @@ async def test_desktop_finite_refusal_precedes_signer_and_validator(
         response = await client.post(f"/v1/desktop/approvals/{record['approval_id']}/approve")
         assert response.status_code == 409, response.text
         detail = response.json()["detail"]
-        unsafe = shape in {"malformed-operation", "mixed-unknown", "mixed-install"}
+        # ``empty-withdrawals`` joined the unsafe set in #3087 r1 (R1-1): the row count is
+        # part of the shared ``exact_shape``, so ``/approve`` now gives the CLI's own answer
+        # instead of directing the operator to a CLI whose disclosure then refuses it.
+        unsafe = shape in {
+            "empty-withdrawals",
+            "malformed-operation",
+            "mixed-unknown",
+            "mixed-install",
+        }
         expected_code = (
             "finite_disclosure_invalid" if unsafe else "finite_terminal_approval_required"
         )

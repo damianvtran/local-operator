@@ -1,0 +1,6 @@
+{
+  "cli.failures.error_line": "{prog}: त्रुटि: {message}",
+  "cli.failures.required": "इन आर्ग्युमेंट की ज़रूरत है: {names}",
+  "cli.failures.invalid_choice": "आर्ग्युमेंट {argument}: अमान्य विकल्प: {value} ({choices} में से चुनें)",
+  "cli.failures.invalid_command": "अमान्य {group} कमांड: {command}"
+}

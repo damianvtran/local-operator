@@ -1,0 +1,74 @@
++ cd /Users/damian/lo-i18n-es
++ git rev-parse HEAD
+efcfbe812609cbf228c01f11a1fb622f3555b487
++ git status --porcelain -- local_operator/i18n/catalogues/es/wire.exec.json
+?? local_operator/i18n/catalogues/es/wire.exec.json
++ ls local_operator/i18n/catalogues/en/wire.exec.context.json
+ls: local_operator/i18n/catalogues/en/wire.exec.context.json: No such file or directory
++ sha256sum local_operator/i18n/catalogues/en/wire.exec.json local_operator/i18n/catalogues/es/wire.exec.json
+041ca802dd4e1329cf1f1b2984311c628f314223f5941b35a7007f5b3d198c94  local_operator/i18n/catalogues/en/wire.exec.json
+6f9df86c94723eb655c0deed39d298e073c2b7f120c961ac794a0ce435af96e8  local_operator/i18n/catalogues/es/wire.exec.json
++ python3 i18n/audits/evidence/es/wire.exec/w1a1/parity.py.txt wire.exec
+== wire.exec ==
+keys: en=17 es=17 context=0
+missing_in_es: []
+extra_in_es:   []
+en_keys_without_context_sidecar_entry: 17
+NEWLINE_COUNT wire.exec.exec_epilog: en=20 es=24
+placeholders_compared=11
+mechanical_failures=0
++ python3 i18n/audits/evidence/es/wire.exec/w1a1/tokens.py.txt wire.exec
+CAPS_DIFF wire.exec.exec_epilog: en=['SESSION_ID', 'JOB_ID', 'SETS', 'TUI', 'TTY', 'SESSION_ID'] es=['SESSION_ID', 'JOB_ID', 'FIJA', 'TUI', 'TTY', 'SESSION_ID']
+keys_compared=17 token_diffs=1
+en flags: ['--agent', '--agent-id', '--background', '--clear-goal', '--control', '--goal', '--loop', '--loop-goal', '--name', '--profile', '--resume', '--status', '--team', '--tools', '--yolo']
+es flags: ['--agent', '--agent-id', '--background', '--clear-goal', '--control', '--goal', '--loop', '--loop-goal', '--name', '--profile', '--resume', '--status', '--team', '--tools', '--yolo']
+es flags equal to en flags: True
++ python3 i18n/audits/evidence/es/wire.exec/w1a1/epilog.py.txt
+== exec_epilog structure ==
+en: 21 lines, blank at [7], max 84 cells
+es: 25 lines, blank at [7], max 78 cells
+blank-line positions identical: True
+== command lines (must be byte-identical) ==
+line 2: identical=True |   lop exec 'Review the change' --team release --background
+line 3: identical=True |   printf 'Inspect this report' | lop exec --profile reviewer
+line 4: identical=True |   lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'
+line 5: identical=True |   lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'
+line 6: identical=True |   lop exec --status JOB_ID
+== title line ==
+en 'Examples:' / es 'Ejemplos:'  (translated title expected; no colon change)
+== prose: en 15 lines -> es 19 lines (rewrap, not structure) ==
+es[07] 
+es[08] Al reanudar se restauran primero la transcripción, el equipo, el perfil, el
+es[09] objetivo y el nombre; las opciones de inicio explícitas anulan sus propios
+es[10] campos. Equipo y perfil pueden coexistir. Un bucle se ejecuta después del
+es[11] prompt inicial opcional; --loop N solo cuenta continuaciones. El progreso
+es[12] guardado del bucle se ve al reanudar, pero las iteraciones nunca se repiten
+es[13] automáticamente. Un objetivo por sí solo no ejecuta ningún modelo. Los
+es[14] prompts son literales, no comandos slash. --goal solo FIJA el objetivo; a
+es[15] diferencia de /goal de la TUI, no envía además ese texto como mensaje,
+es[16] porque el prompt es el canal de mensajes de exec. --agent/--agent-id
+es[17] seleccionan datos de agente heredados y son mutuamente excluyentes. Sin
+es[18] TTY, las aprobaciones se deniegan de forma predeterminada. --control puede
+es[19] esperar a un supervisor; --yolo es una anulación explícita, nunca implícita
+es[20] por --background o --team. --tools limita a qué puede llegar la ejecución:
+es[21] las herramientas excluidas quedan fuera de alcance. Los eventos y el texto
+es[22] en primer plano usan stdout; los recibos usan stderr. Las ejecuciones en
+es[23] segundo plano registran ambos flujos e imprimen IDs de trabajo y de sesión
+es[24] distintos. Usa lop --resume SESSION_ID para ver una ejecución en vivo o
+es[25] reanudar una terminada; exec rechaza a un propietario activo.
++ echo '--- render site of waiting_on_you (stderr receipt, not a tip slot) ---'
+--- render site of waiting_on_you (stderr receipt, not a tip slot) ---
++ grep -rn waiting_on_you '--include=*.py' local_operator/
+local_operator/i18n/keys/wire_exec.py:77:def waiting_on_you() -> Msg:
+local_operator/i18n/keys/wire_exec.py:78:    return Msg("wire.exec.waiting_on_you", {})
+local_operator/exec_mode.py:838:        print(_t(_wd.waiting_on_you()), file=sys.stderr)
++ sed -n 833,841p local_operator/exec_mode.py
+    print(_t(_wd.log_pointer(log_path=str(log_path))), file=sys.stderr)
+    if getattr(exec_args, "control", False):
+        # A supervised run can park on a gate and sit at `running` indefinitely.
+        # `lop sessions` is the one command that shows what a run NEEDS, and it
+        # was the one command this receipt never mentioned.
+        print(_t(_wd.waiting_on_you()), file=sys.stderr)
+    elif status in ("starting", "running"):
+        # The receipt is where a launch is read back, so a run nobody can
+        # approve has to say so HERE rather than only in a transcript of

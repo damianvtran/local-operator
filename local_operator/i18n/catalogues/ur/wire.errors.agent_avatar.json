@@ -1,0 +1,9 @@
+{
+  "wire.errors.agent_avatar.empty_body": "کوئی تصویر نہیں بھیجی گئی۔ تصویر کے بائٹس درخواست کی باڈی میں بھیجیں۔",
+  "wire.errors.agent_avatar.imaging_unavailable": "تصاویر کے لیے امیج سپورٹ درکار ہے جو انسٹال نہیں ہے۔ Local Operator کو images ایکسٹرا کے ساتھ دوبارہ انسٹال کریں۔",
+  "wire.errors.agent_avatar.not_found": "اس ایجنٹ کی کوئی تصویر نہیں ہے۔",
+  "wire.errors.agent_avatar.too_large": "یہ تصویر بہت بڑی ہے۔ {limit_mib} MB سے چھوٹی تصویر منتخب کریں۔",
+  "wire.errors.agent_avatar.too_many_pixels": "اس تصویر میں بہت زیادہ پکسلز ہیں۔ {limit_mp} میگاپکسل سے کم کی تصویر منتخب کریں۔",
+  "wire.errors.agent_avatar.undecodable": "یہ تصویر پڑھی نہیں جا سکی۔ ہو سکتا ہے فائل خراب ہو۔",
+  "wire.errors.agent_avatar.unsupported_type": "یہ تصویر استعمال نہیں ہو سکتی۔ PNG، JPEG، WebP، GIF یا HEIC تصویر منتخب کریں۔"
+}

@@ -65,11 +65,53 @@ export const SHORT_COLUMN_PX = 480;
 export const PENDING_CARD_FRACTION = 0.6;
 export const PANEL_FRACTION = 0.4;
 
+/**
+ * The `$skill` tray's share of the column.
+ *
+ * Shown while the keyboard is up by definition, so a `vh` cap measured the
+ * wrong box: on a 390x844 phone the old `min(45vh, 22rem)` resolved to its
+ * `22rem` term while the keyboard-shrunk column was 508 px, leaving the tray
+ * 69 % of the column and the composer's send disc 12 of its 44 px on screen
+ * (design D1 / agent review M2). 0.45 of the COLUMN leaves the composer's own
+ * height plus the above-composer slot the rest at every keyboard size the
+ * product supports, and the tray scrolls rather than growing.
+ */
+export const SKILL_TRAY_FRACTION = 0.45;
+
 /** `max-height` in column units — see the module docstring for why not `dvh`. */
 export function columnCap(fraction: number): { maxHeight: string } {
 	return {
 		maxHeight: `calc(var(${COLUMN_HEIGHT_VAR}, 100dvh) * ${fraction})`,
 	};
+}
+
+/**
+ * The `$skill` tray's cap while a question is waiting — TWO rows, not a share
+ * of the column (design D5).
+ *
+ * A question outranks a list (branding §7), and 45 % of the column did not
+ * leave it room. Measured on this branch with a pending approval and the tray
+ * at eight rows: the slot was 29.4 px at a 508 px column, 52.5 at 470, 54.2 at
+ * 553 and 62.4 at 320x568, while the card's question needs ~114 px — so the
+ * question started ABOVE the slot and only the green decision row stayed on
+ * screen (at 508 even that row was 14.4 px clipped). The user was asked to
+ * approve something they could not read.
+ *
+ * Two rows keep `$name` discoverable, the list scrolls inside them, and the
+ * card gets the rest: the same columns then land at 162/168/207/222.
+ *
+ * Rows rather than a fraction because the bound is a COUNT. A row's floor is
+ * the repo's 44 px touch target (`min-h-11`) and the tray adds `py-1`, so the
+ * cap is `2 x 44 + 8` = 96 px — written in rem so a reader who scales the root
+ * type still gets exactly two rows rather than two-and-a-bit.
+ */
+export const SKILL_TRAY_ASK_ROWS = 2;
+
+/** `max-height` while an ask or approval is pending, else the usual fraction. */
+export function skillTrayCap(questionPending: boolean): { maxHeight: string } {
+	return questionPending
+		? { maxHeight: `calc(${SKILL_TRAY_ASK_ROWS} * 2.75rem + 0.5rem)` }
+		: columnCap(SKILL_TRAY_FRACTION);
 }
 
 /**

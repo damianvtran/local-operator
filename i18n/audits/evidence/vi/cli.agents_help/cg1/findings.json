@@ -1,0 +1,111 @@
+{
+  "locale": "vi",
+  "namespace": "cli.agents_help",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 8,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-030",
+      "severity": "MAJOR",
+      "namespace": "cli.agents_help",
+      "key": "cli.agents_help.push",
+      "english": "Push (upload) an agent to Radient; `--org` and `--hub-id` push through the preview/confirm flow (exit codes: 0 published, 1 error, 2 preview-only with changes pending, 3 declined, 130 cancelled)",
+      "current": "Đẩy (tải lên) một tác nhân lên Radient; `--org` và `--hub-id` đẩy qua luồng xem trước/xác nhận (mã thoát: 0 đã xuất bản, 1 lỗi, 2 chỉ xem trước còn thay đổi đang chờ, 3 bị từ chối, 130 đã hủy)",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "Push (tải lên) một tác nhân lên Radient; `--org` và `--hub-id` push qua luồng xem trước/xác nhận (mã thoát: …)",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-031",
+      "severity": "MAJOR",
+      "namespace": "cli.agents_help",
+      "key": "cli.agents_help.push_name",
+      "english": "Name of the agent to push to Radient",
+      "current": "Tên tác nhân cần đẩy lên Radient",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "Tên tác nhân cần push lên Radient",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-032",
+      "severity": "MAJOR",
+      "namespace": "cli.agents_help",
+      "key": "cli.agents_help.push_id",
+      "english": "ID of the agent to push to Radient (explicit overwrite)",
+      "current": "ID tác nhân cần đẩy lên Radient (ghi đè tường minh)",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "ID tác nhân cần push lên Radient (ghi đè tường minh)",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-033",
+      "severity": "MAJOR",
+      "namespace": "cli.agents_help",
+      "key": "cli.agents_help.pull",
+      "english": "Pull (download) an agent from Radient",
+      "current": "Kéo (tải xuống) một tác nhân từ Radient",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "Pull (tải xuống) một tác nhân từ Radient",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-034",
+      "severity": "MAJOR",
+      "namespace": "cli.agents_help",
+      "key": "cli.agents_help.pull_id",
+      "english": "ID of the agent to pull from Radient",
+      "current": "ID tác nhân cần kéo từ Radient",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "ID tác nhân cần pull từ Radient",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-035",
+      "severity": "MAJOR",
+      "namespace": "cli.agents_help",
+      "key": "cli.agents_help.pull_org",
+      "english": "Pull from this organization's workspace instead of the public hub (Agent Hub org sharing; requires `lop login radient`)",
+      "current": "Kéo từ không gian làm việc của tổ chức này thay vì hub công khai (chia sẻ theo tổ chức của Agent Hub; cần `lop login radient`)",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "Pull từ không gian làm việc của tổ chức này thay vì hub công khai (…)",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-036",
+      "severity": "MAJOR",
+      "namespace": "cli.agents_help",
+      "key": "cli.agents_help.sync",
+      "english": "Update installed starters and hub-pulled agents to their latest text",
+      "current": "Cập nhật các bản khởi đầu đã cài và tác nhân kéo từ hub lên văn bản mới nhất",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "Cập nhật các bản khởi đầu đã cài và tác nhân đã pull từ hub lên văn bản mới nhất",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    },
+    {
+      "round": 1,
+      "id": "VI-037",
+      "severity": "MAJOR",
+      "namespace": "cli.agents_help",
+      "key": "cli.agents_help.sync_all",
+      "english": "Sync every installed starter and hub-pulled agent (default when --name is absent)",
+      "current": "Đồng bộ mọi bản khởi đầu đã cài và tác nhân kéo từ hub (mặc định khi không có --name)",
+      "problem": "Glossary §2 wave-2 kept-English set: `push`/`pull`/`merge` (git/hub operations) stay English and are inflected around, never translated; these help lines describe the `lop … push/pull` subcommands, so 'đẩy'/'kéo'/'hợp nhất' also diverge from the command names the user types.",
+      "suggested": "Đồng bộ mọi bản khởi đầu đã cài và tác nhân đã pull từ hub (mặc định khi không có --name)",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    }
+  ]
+}

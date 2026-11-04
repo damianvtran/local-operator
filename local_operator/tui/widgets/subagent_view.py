@@ -77,7 +77,7 @@ from local_operator.harness.hub_receipts import (
 )
 from local_operator.harness.jobs import CANCELLED_BEFORE_START, TRAJECTORY_SEQ_KEY
 from local_operator.harness.message_types import HUB_MESSAGE_TYPE
-from local_operator.harness.rows import is_harness_notice_row
+from local_operator.harness.rows import is_harness_chrome, is_harness_notice_row
 from local_operator.harness.types import FAULT_KEY, INTERRUPTED_FAULTS
 
 # i18n: the title row's surface name and swept-job phrase are user-facing
@@ -785,7 +785,7 @@ def fold_transcript_entries(
         role = payload.get("role")
         text = strip_control_sequences(_content_text(payload)).strip()
         if role == "user":
-            if is_harness_notice_row(payload):
+            if is_harness_notice_row(payload) or is_harness_chrome(text):
                 # A row the harness wrote — the `harness_injected` stamp, or a
                 # notice a compaction block carried forward without one — is
                 # not the parent's words. A SUBAGENT fails over too

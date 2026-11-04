@@ -8,14 +8,19 @@ signature, a roster identity, and the queue that turns a burst into one scan.
 from __future__ import annotations
 
 import json
+import logging
+import sqlite3
+import threading
 import time
 import types
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from local_operator.library import indexer, service
 from local_operator.library.metadata import MetadataStore
-from local_operator.library.store import LibraryStore
+from local_operator.library.store import IndexUnavailable, LibraryStore
 from local_operator.session.attachments import cache_media
 
 from ._fixtures import (
@@ -428,14 +433,38 @@ def test_the_thumbnail_queue_is_deduplicated(tmp_path, monkeypatch) -> None:
     image.write_bytes(png())
     session(root, SESSION, write_rows("w1", 1.0, image))
     indexer.rebuild_now(root)
+    # Hold the real worker inside its thumbnail write: queue membership and the
+    # pending set must not change while the enqueue contract is under inspection.
+    worker_at_write = threading.Event()
+    release_worker = threading.Event()
+    real_ensure_thumbnail = indexer.LibraryStore.ensure_thumbnail
+
+    def held_ensure_thumbnail(self: indexer.LibraryStore, *args: Any, **kwargs: Any) -> str | None:
+        # Only the real worker is gated: a read-path caller must not be able to
+        # satisfy the handshake on the worker's behalf.
+        if threading.current_thread().name != "library-thumbs":
+            return real_ensure_thumbnail(self, *args, **kwargs)
+        worker_at_write.set()
+        if not release_worker.wait(timeout=60):
+            raise AssertionError("thumbnail worker was not released from its write gate")
+        return real_ensure_thumbnail(self, *args, **kwargs)
+
+    monkeypatch.setattr(indexer.LibraryStore, "ensure_thumbnail", held_ensure_thumbnail)
     index = indexer.ensure_started(root)
     try:
+        # The startup sweep owns this read; without its handshake the assertion
+        # races that unrelated thumbnail instead of measuring the three enqueues.
+        assert worker_at_write.wait(timeout=60), (
+            f"thumbnail worker {index._thumb_thread} never reached its write gate; "
+            f"pending={sorted(index._thumb_pending)} queued={index._thumb_queue.qsize()}"
+        )
         index.enqueue_thumbnail("la_0123456789abcdef", 480)
         index.enqueue_thumbnail("la_0123456789abcdef", 480)
         index.enqueue_thumbnail("la_0123456789abcdef", 240)
         assert index._thumb_queue.qsize() == 2, "one entry per (asset, width)"
         assert ("la_0123456789abcdef", 480) in index._thumb_pending
     finally:
+        release_worker.set()
         index.stop()
 
 
@@ -772,3 +801,215 @@ def test_a_synchronous_rebuild_never_pauses(tmp_path, monkeypatch) -> None:
     _big_session(root)
     wall, scanned = _held(lambda: indexer.LibraryIndexer(root).rebuild())
     assert scanned == 1 and wall < 3.0
+
+
+def test_reconcile_over_a_replaced_index_heals_without_a_warning(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """The reconciler must not report a recoverable, expected state as a failure.
+
+    CI 40812326996 failed an entrypoint test whose only sin was asserting that
+    the CLI writes nothing to stderr: a library worker leaked by an earlier test
+    woke on its 60 s reconcile tick against a file whose derived schema was gone
+    and logged ``library: periodic reconcile failed`` with a traceback. The
+    tick's job in that state is to re-run the migration and carry on — the index
+    is derived and empty is a valid answer — so anything at WARNING here is a
+    regression, not a cosmetic difference.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    first = written(root, "first.txt")
+    session(root, SESSION, write_rows("w1", 1.0, first))
+    indexer.rebuild_now(root)
+    assert names(root) == {"first.txt"}
+
+    # The file the process verified is gone: the config root was cleared under a
+    # live process, which is what the failing shard's worker met.
+    LibraryStore(root).path.unlink()
+
+    # Only the reconcile is under test: the rebuild above may already have said
+    # something about this host (an absent watchdog downgrades the watcher).
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="local_operator.library"):
+        indexer.LibraryIndexer(root).reconcile()
+
+    # Scoped to THIS thread: the reconcile runs synchronously here, so a record
+    # from it is ours, while a worker or plugin thread from another test is not
+    # evidence about this call. Real stderr is proven end-to-end by the
+    # entrypoint test in CI and by the harness in the PR description, which is
+    # where a `capsys` assertion would have to live to mean anything.
+    noisy = [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and record.thread == threading.get_ident()
+    ]
+    assert noisy == [], [record.getMessage() for record in noisy]
+    # ...and it healed rather than merely keeping quiet: the recreated file is
+    # migrated, which is what the next scan writes into.
+    with LibraryStore(root).read() as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert "idx_sessions" in tables and "idx_state" in tables
+
+
+def test_a_dropped_derived_table_is_migrated_rather_than_reported(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """A table missing from the OPEN file is a migration to run, not an error.
+
+    Round 1 (R1-1) moved the readiness verdict from a ``stat`` of the path to a
+    probe of the connection about to be read, which tightens this case too: the
+    derived table can vanish under a live process (a version move in another
+    process, a partial restore, a manual ``DROP``) and the next read now
+    re-creates it in the same call instead of raising.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    store = LibraryStore(root)
+    assert store.ensure_schema()
+    raw = sqlite3.connect(store.path)
+    try:
+        raw.execute("DROP TABLE idx_sessions")
+        raw.commit()
+    finally:
+        raw.close()
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="local_operator.library"):
+        indexer.LibraryIndexer(root).reconcile()
+
+    noisy = [
+        record
+        for record in caplog.records
+        if record.levelno >= logging.WARNING and record.thread == threading.get_ident()
+    ]
+    assert noisy == [], [record.getMessage() for record in noisy]
+    assert LibraryStore(root).sessions() == {}
+
+
+def test_a_missing_derived_table_is_one_actionable_line_not_a_traceback(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """An unmigrated index must say which table and which migration, on one line.
+
+    Not silence: a store whose derived schema is absent is a real condition a
+    user can hit, and the warning has to name what is missing and what creates
+    it. Not a traceback either: thirty frames ending in ``IndexUnavailable`` is
+    what the CLI's stderr saw in CI, and it tells nobody which table to
+    recreate.
+
+    This pins the FORMATTER's contract for the residual window, not the common
+    path: since round 1 the store heals a missing table from the open handle
+    (above), so the only way this reaches the worker is a cross-process race —
+    another connection dropping the derived tables mid version-move after this
+    one's probe passed. Provoking that window deterministically would need a
+    mock, so the typed error the store raises is constructed directly and the
+    CONTRAST is asserted too: every other failure must keep its traceback.
+    """
+    root = config_root(monkeypatch, tmp_path)
+    store = LibraryStore(root)
+    assert store.ensure_schema()
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="local_operator.library.indexer"):
+        indexer._log_worker_failure(
+            "periodic reconcile failed", IndexUnavailable("no such table: idx_sessions"), store
+        )
+        indexer._log_worker_failure(
+            "periodic reconcile failed", IndexUnavailable("database disk image is malformed"), store
+        )
+        indexer._log_worker_failure("periodic reconcile failed", RuntimeError("boom"), store)
+
+    missing = caplog.records[0]
+    assert missing.levelno == logging.WARNING
+    assert missing.exc_info is None, "a missing derived table is not an unexpected failure"
+    message = missing.getMessage()
+    assert message.startswith("library: periodic reconcile failed")
+    assert "idx_sessions" in message
+    assert str(store.path) in message
+    assert "LibraryStore.ensure_schema" in message and "derived schema v" in message
+
+    # Nothing silenced: a damaged file and an unknown error still say so, with
+    # the traceback that makes them diagnosable.
+    damaged, unexpected = caplog.records[1], caplog.records[2]
+    assert damaged.exc_info is not None
+    assert unexpected.exc_info is not None
+
+
+def test_a_periodic_reconcile_over_a_broken_index_still_warns(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """The WORKER still reaches the warning from a real file, not just the formatter.
+
+    The test above pins the formatter's contract by constructing the typed error,
+    because the store heals a table it finds missing from the handle it opens.
+    That leaves one arm unexercised: nothing proved the worker's own
+    ``periodic reconcile failed`` branch still fires against a file that is
+    genuinely broken, which is the arm that contaminated another test's captured
+    stderr in CI.
+
+    So this test breaks the file the way a live process meets one — a config root
+    restored from somewhere else, or another connection moving the derived schema
+    while this worker is parked on its timer — and drives ``_run``: the reconcile
+    raises out of a real SQLite handle, the handler logs, and the loop survives
+    the failure. ``idx_occurrences`` is the table dropped, never ``idx_sessions``:
+    the latter is the schema sentinel, so dropping it makes the next read migrate
+    the file instead of failing (see ``test_a_dropped_derived_table_is_migrated…``).
+    """
+    import shutil
+
+    root = config_root(monkeypatch, tmp_path)
+    directory = session(root, SESSION, write_rows("w1", 1.0, written(root, "keep.txt")))
+    indexer.rebuild_now(root)
+
+    index = indexer.LibraryIndexer(root)
+    ticks: list[int] = []
+
+    def the_file_changes_under_the_worker() -> None:
+        """Stand in for the observer: the session and a derived table both go."""
+        shutil.rmtree(directory)
+        raw = sqlite3.connect(index.store.path)
+        try:
+            raw.execute("DROP TABLE idx_occurrences")
+            raw.commit()
+        finally:
+            raw.close()
+        index.observer_failed = True
+
+    def idle() -> float:
+        # No clock anywhere: the idle arm is taken on the FIRST wait and the
+        # SECOND tick parks the worker, so exactly one periodic reconcile runs.
+        ticks.append(1)
+        if len(ticks) > 1:
+            index._stop.set()
+        return 0.0
+
+    monkeypatch.setattr(index, "_start_observer", the_file_changes_under_the_worker)
+    monkeypatch.setattr(index, "_idle_timeout", idle)
+    # Not this test's subject, and a real thumb worker would need its own reap.
+    monkeypatch.setattr(index, "_start_thumb_worker", lambda: None)
+
+    caplog.clear()
+    try:
+        with caplog.at_level(logging.WARNING, logger="local_operator.library.indexer"):
+            index._run()
+    finally:
+        index.stop()
+
+    failures = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and record.getMessage().startswith("library: periodic reconcile failed")
+    ]
+    assert len(failures) == 1, [record.getMessage() for record in caplog.records]
+    failure = failures[0]
+    assert failure.exc_info is None, "a missing derived table is not a traceback"
+    message = failure.getMessage()
+    assert "idx_occurrences" in message
+    assert str(index.store.path) in message
+
+    # The failure the worker logged is the product's typed refusal, raised by the
+    # store, not an arbitrary exception the worker happened to catch.
+    with pytest.raises(IndexUnavailable, match="no such table: idx_occurrences"):
+        index.reconcile()

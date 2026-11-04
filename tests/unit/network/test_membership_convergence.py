@@ -325,7 +325,9 @@ def _events(device: Device) -> list[str]:
     return [str(row.get("event")) for row in device.server.audit.tail(limit=500)]
 
 
-def _recorded(device: Device, word: str, *, timeout_s: float = 15.0) -> bool:
+def _recorded(
+    device: Device, word: str, *, timeout_s: float = net_fixtures.NET_WAIT_BUDGET_S
+) -> net_fixtures.WaitResult:
     """Wait until ``device``'s own trail carries ``word``; report whether it arrived.
 
     THE TRAIL IS WRITTEN BY WHICHEVER THREAD DID THE ACT, AND AFTER THE ACT. The
@@ -337,7 +339,9 @@ def _recorded(device: Device, word: str, *, timeout_s: float = 15.0) -> bool:
     ended at ``trust_changed`` and no ``pairing_refused`` ever appeared), and 1 ms is
     well inside the 525-668 ms starvation gaps this fleet measures. The bound is the
     backstop for a row that genuinely never arrives — which then fails the assertion
-    below with the whole trail in the message.
+    below with the whole trail in the message, and it is the SHARED backstop
+    (``net_fixtures.NET_WAIT_BUDGET_S``): the row is not shorter-latency by construction,
+    so this helper must not carry a private 15 s of its own.
     """
     return net_fixtures.wait_for(lambda: word in _events(device), timeout_s=timeout_s)
 
@@ -1321,17 +1325,17 @@ def test_a_status_read_asks_for_the_pass_it_reports(
     # a pass this fixture or the read itself runs — the cadence is parked for
     # the whole test lifetime.
     assert net_fixtures.wait_for(
-        lambda: a_link.member_pulled_at > 0.0, timeout_s=10.0
+        lambda: a_link.member_pulled_at > 0.0
     ), "a's establishment pull never stamped the link"
     assert net_fixtures.wait_for(
-        lambda: a.server._membership_seq > admit_seq, timeout_s=10.0  # noqa: SLF001
+        lambda: a.server._membership_seq > admit_seq  # noqa: SLF001
     ), "a's admit-time contact_peers pass never completed"
 
     def _all_inbound_done() -> bool:
         return a.server._handshake_slots._value == a.server.settings.max_handshakes  # noqa: SLF001
 
     assert net_fixtures.wait_for(
-        _all_inbound_done, timeout_s=10.0
+        _all_inbound_done
     ), "an inbound handshake can still restamp the link"
 
     # THE BASELINE, made deterministic instead of assumed: one completed pass
@@ -1399,7 +1403,7 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     # is the event: it is written exactly once per establishment pull, so waiting for
     # it leaves no other writer racing the arm.
     assert net_fixtures.wait_for(
-        lambda: a_link.member_pulled_at > 0.0, timeout_s=10.0
+        lambda: a_link.member_pulled_at > 0.0
     ), "a's establishment pull never stamped the link"
 
     # AND LET THE ADMIT-TIME PASS COMPLETE TOO, or one writer the test does not
@@ -1413,7 +1417,7 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     # stamped, so waiting for the bump leaves no unprompted pass in flight when the
     # due window is armed.
     assert net_fixtures.wait_for(
-        lambda: a.server._membership_seq > admit_seq, timeout_s=10.0
+        lambda: a.server._membership_seq > admit_seq
     ), "a's admit-time contact_peers pass never completed"
 
     # AND NO INBOUND HANDSHAKE MAY STILL BE IN FLIGHT EITHER, closing the sibling
@@ -1433,7 +1437,7 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
         return a.server._handshake_slots._value == a.server.settings.max_handshakes  # noqa: SLF001
 
     assert net_fixtures.wait_for(
-        _all_inbound_done, timeout_s=10.0
+        _all_inbound_done
     ), "an inbound handshake can still restamp the link"
 
     # A completed pass first: the fallback must BE this one, so make it answer with
@@ -1474,9 +1478,7 @@ def test_a_status_read_does_not_wait_out_a_hung_pass(
     assert table["answered"] == [b.device_id], table
     assert table["complete"] is True
     assert ("just now" in table["sentence"]) or ("s ago" in table["sentence"]), table["sentence"]
-    assert net_fixtures.wait_for(
-        entered.is_set, timeout_s=10.0
-    ), "the kicked pass never entered the pull"
+    assert net_fixtures.wait_for(entered.is_set), "the kicked pass never entered the pull"
     assert inflight, "the read waited the hung pass out instead of returning with it in flight"
 
 
@@ -1504,17 +1506,17 @@ def test_a_status_read_with_a_pass_still_running_says_so_not_the_last_failure(
     # Quiesce unprompted writers (same derivation as the hung-pass sibling):
     # establishment stamp, admit-time pass, and every inbound handshake.
     assert net_fixtures.wait_for(
-        lambda: a_link.member_pulled_at > 0.0, timeout_s=10.0
+        lambda: a_link.member_pulled_at > 0.0
     ), "a's establishment pull never stamped the link"
     assert net_fixtures.wait_for(
-        lambda: a.server._membership_seq > admit_seq, timeout_s=10.0  # noqa: SLF001
+        lambda: a.server._membership_seq > admit_seq  # noqa: SLF001
     ), "a's admit-time contact_peers pass never completed"
 
     def _all_inbound_done() -> bool:
         return a.server._handshake_slots._value == a.server.settings.max_handshakes  # noqa: SLF001
 
     assert net_fixtures.wait_for(
-        _all_inbound_done, timeout_s=10.0
+        _all_inbound_done
     ), "an inbound handshake can still restamp the link"
 
     def _row(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1559,7 +1561,7 @@ def test_a_status_read_with_a_pass_still_running_says_so_not_the_last_failure(
 
     # After the pull lands, the next read is the verified completed pass.
     assert net_fixtures.wait_for(
-        lambda: a.server._membership_seq > seq_before, timeout_s=10.0  # noqa: SLF001
+        lambda: a.server._membership_seq > seq_before  # noqa: SLF001
     ), "the blocked pass never completed after release"
     after = _row(a.server.status(refresh=True))["membership"]["table"]  # noqa: SLF001
     assert after["complete"] is True, after
@@ -1667,14 +1669,13 @@ def _status_pair_after_admit(
         current = a.server._link_for(b.device_id)  # noqa: SLF001
         return current is not None and current.member_pulled_at > 0.0
 
-    assert net_fixtures.wait_for(_pulled, timeout_s=10.0), "a's establishment pull never stamped"
+    assert net_fixtures.wait_for(_pulled), "a's establishment pull never stamped"
     assert net_fixtures.wait_for(
-        lambda: a.server._membership_seq > admit_seq, timeout_s=10.0  # noqa: SLF001
+        lambda: a.server._membership_seq > admit_seq  # noqa: SLF001
     ), "a's admit-time contact_peers pass never completed"
     assert net_fixtures.wait_for(
         lambda: a.server._handshake_slots._value  # noqa: SLF001
         == a.server.settings.max_handshakes,
-        timeout_s=10.0,
     ), "an inbound handshake can still restamp the link"
     settled = a.server._link_for(b.device_id)  # noqa: SLF001 — resolved AFTER quiescence
     assert settled is not None, "a holds no live link to b after the handshakes settled"

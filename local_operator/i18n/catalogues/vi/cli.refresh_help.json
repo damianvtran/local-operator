@@ -1,0 +1,9 @@
+{
+  "cli.refresh_help.refresh": "Yêu cầu các phiên đang chạy chuyển sang bản dựng trên đĩa ở ranh giới kế tiếp của chúng (không dùng tín hiệu)",
+  "cli.refresh_help.target": "tên cuộc trò chuyện / id phiên / pid / chuỗi con của cwd (không phân biệt hoa thường)",
+  "cli.refresh_help.pid": "chọn theo đúng pid",
+  "cli.refresh_help.session": "chọn theo đúng id phiên",
+  "cli.refresh_help.all": "yêu cầu mọi phiên đang chạy trên máy này (không xác nhận: không có gì bị kết thúc)",
+  "cli.refresh_help.json": "kết quả máy đọc được cho từng mục tiêu",
+  "cli.refresh_help.timeout": "thời gian chờ câu trả lời của mỗi phiên (mặc định 10)"
+}

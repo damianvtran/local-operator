@@ -1,0 +1,189 @@
+{
+  "schema": 1,
+  "audit_id": "w6a1",
+  "audit_round": 1,
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "es",
+  "namespace": "tui.small",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "b925c2e11be36653dfe88ac78f627bc2531427df on branch feat/es-tui. The TARGET catalogue is UNTRACKED in the worktree (`?? local_operator/i18n/catalogues/es/tui.small.json`), so this audit binds to the on-disk sha256 in input_hashes, not to a commit; a later commit that lands different bytes is not covered by this verdict.",
+  "key_count": {
+    "en": 137,
+    "target": 137,
+    "context": 137
+  },
+  "verdict": "passed",
+  "result": {
+    "mechanical_checks": "pass — 8/8 in checks.py; repo validator --catalogues-only reports 0 problem(s) tree-wide",
+    "findings_total": 5,
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 3,
+    "note": "No blocker or major. Minors and nits are recorded for the wave's remediation round and do not gate the passed verdict; none of them changes a money claim, a destructive action or a placeholder."
+  },
+  "verdict_reason": "All 137 keys read twice. The spend ladder keeps the four English states distinct (failed/mixed/cancelled/partial) with a systematic cargo/cobro/precio mapping, no rung understates a possible charge, and every one of the sixteen maxCells budgets is met. Placeholders, ICU categories and load-bearing whitespace are intact. The two minors are a grammar stumble and a dropped quantifier on the partial rung; neither changes a money claim.",
+  "auditor": {
+    "agent": "translation-auditor (lopdev team), independent of the translator",
+    "session_or_instance": "b4822b7b44ff",
+    "model": "radient/auto",
+    "actual_model_source": "this session's own model-switch notices (header said anthropic/claude-sonnet-5-5 at turn start)",
+    "model_note": "FALLBACK, disclosed: the session's primary header is anthropic/claude-sonnet-5-5, but provider quota failures moved this run through openai/gpt-6-astra and kimi/k3.1-pro before radient/auto, and ALL work recorded in this bundle was performed under radient/auto. No primary-model audit claim is made.",
+    "date": "2026-10-30",
+    "independence": "I translated none of this copy and repaired none of it. I read the en source, the context sidecar and the render/consumer code directly, formed the verdict before seeing any other auditor's notes for these namespaces (no w6a1 bundle existed), and wrote only inside i18n/audits/evidence/es/. No catalogue, sidecar, ledger or allowance file was touched."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.small.json",
+      "revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+      "sha256": "16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.small.json",
+      "sha256": "c48357ff20fcacfe996b687a2d035645639a8a6621d79ecf6b1436ca763ed145",
+      "tracked": false,
+      "note": "UNTRACKED working-tree bytes at the audited revision"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.small.context.json",
+      "revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+      "sha256": "1e3d6785f78126b8389b2acbcc081d5bf782fbaf744114e47611fbff3c45dde1"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.small/w6a1/report.md",
+      "sha256": "8b337f48d56c87f3de9738a194532431646ee1c570c8eba2f9c32cdb4440db79"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.small/w6a1/audit.log",
+      "sha256": "c9398dd2c86f87d59ea1e22e2f5e96d396ffd6d4eba21deb2a75d1289f5418a7"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.small/w6a1/checks.py",
+      "sha256": "3161f166ce85788db00742560940f4aef2a7cb9d9e8f00df87db9edd3650e414"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.small/w6a1/receipt.json",
+      "sha256": "73013ca877bbd439b600fd293d52195085b57119583a7177880d40b889f26ba7"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "blocker": 0,
+    "major": 0,
+    "minor": 2,
+    "nit": 3,
+    "rejected": 0,
+    "deferred": 0,
+    "findings_total": 5,
+    "finding_ids": [
+      "F1",
+      "F2",
+      "F3",
+      "F4",
+      "F5"
+    ]
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "minor",
+      "key": "tui.small.info_panel.deeper_below_depth",
+      "current": "  +{deeper} más abajo (bajo profundidad {depth})",
+      "proposed": "  +{deeper} más abajo (bajo la profundidad {depth})",
+      "reason": "`bajo` followed by a bare noun without an article reads as a calque of 'below depth N'; Spanish needs the article here. A native reader stumbles in a row that is otherwise terse and clean. No maxCells is declared for this key, so the three extra cells cost nothing structural.",
+      "evidence": [
+        "current: 48 cells (en 40); proposed: 51 cells; tighter alternative '(por debajo de {depth})' = 45",
+        "sidecar: the two leading spaces are the row's base indent and are preserved"
+      ],
+      "disposition": "open — carried by the wave's remediation round (does not gate)"
+    },
+    {
+      "id": "F2",
+      "severity": "minor",
+      "key": "tui.small.spend.unpriced_partial",
+      "current": "peticiones sin precio",
+      "proposed": "algunas sin precio",
+      "reason": "For 'some requests unpriced'. The quantifier is what tells the reader the shown figure is a LOWER BOUND (sidecar: 'the figure shown is a lower bound'); without it the note reads as 'requests [are] unpriced', which can be taken as the whole row. The narrower rungs keep the partiality ('precio parcial', 'incompleto'), so this is the odd rung, not a systematic choice. The proposed wording still fits the 24-cell budget (18 cells).",
+      "evidence": [
+        "current 21 cells, budget 24 (en 22)",
+        "proposed 'algunas sin precio' 18 cells; 'algunas peticiones sin precio' 29 cells would exceed the budget",
+        "no money claim is understated by the current wording — this is precision, not safety"
+      ],
+      "disposition": "open — carried by the wave's remediation round (does not gate)"
+    },
+    {
+      "id": "F3",
+      "severity": "nit",
+      "key": "tui.small.network_panel.suspect_tag",
+      "current": "  [sospechoso: puede que la clave se haya copiado]",
+      "proposed": "  [sospechoso: clave quizá copiada]",
+      "reason": "50 cells against en's 30 (+67%). The network panel's own module measures frames at 56x20 and 60x20, where en already wraps this marker to one continuation line and es wraps to two. The proposed form (35 cells) keeps every element: suspect, key, may be copied.",
+      "evidence": [
+        "en 30 cells / es 50 cells (rich.cells.cell_len)",
+        "proposed 35 cells"
+      ],
+      "disposition": "open — nit, no gate"
+    },
+    {
+      "id": "F4",
+      "severity": "nit",
+      "key": "tui.small.copy.code_count",
+      "current": "{shown} código",
+      "proposed": "",
+      "reason": "Renders '3 código'. Recorded as a CONSTRAINT, not an oversight: the sidecar forbids a plural branch, and the repo's argument-parity rule refuses a simple->plural upgrade (verified: \"argument 'shown' changed kind 'simple' -> 'plural'\"), so no legal ICU rendering exists. The translator mirrored the English compromise ('3 code'). No change requested; a future edit should be deliberate rather than silent.",
+      "evidence": [
+        "scripts/i18n/check.py arguments_match(simple -> plural) = False",
+        "sidecar: 'this key deliberately has NO plural branch — adding one would change bytes'"
+      ],
+      "disposition": "accepted — no change requested"
+    },
+    {
+      "id": "F5",
+      "severity": "nit",
+      "key": "tui.small.goal_panel.more_settled",
+      "current": "… {hidden} finalizados más",
+      "proposed": "… {hidden} más finalizados",
+      "reason": "Trailing 'más' after the participle is understandable but not the natural order; the proposed order is idiomatic and measures the same 26 cells. Applies identically to tui.small.goal_panel.more_settled_indent.",
+      "evidence": [
+        "both forms 26 cells"
+      ],
+      "disposition": "open — nit, no gate"
+    }
+  ],
+  "audit_notes_not_execution_log": [
+    "checks.py produced three false positives on its first run against these same bytes and each rule was tightened before the logged run (column padding after 'relé:'/'instalado:', the two-space row indent, and the shared 'search  /' design; 'no' as a Spanish word in the residue list; controls that could not fire without a real instance). The logged run is the post-fix run and all eight controls fire.",
+    "Two independent passes were made on the Spanish text: es against en + sidecar key by key, then the Spanish values alone in file order. This finding list is the union of both.",
+    "Meaning, register and terminology verdicts come from reading; the script proves only the mechanical floor.",
+    "No catalogue, sidecar, ledger or allowance file was modified by this audit; the ledger row below is a PROPOSAL because the brief forbids editing the ledger."
+  ],
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation (the team's gate is this independent audit).",
+    "No rendered TUI frames: widths were measured with rich.cells.cell_len; the two rows at exactly 100% of budget (spend.no_charge 9/9, spend.unpriced_cancelled 30/30) are at the cap, not over it.",
+    "Plural SELECTION was executed through the shipped renderer at 0/1/2/1.000.000 (C9 in checks.py): the ICU layer is exercised, not just parsed. What is NOT captured is a widget-level frame — no Textual app was driven, so panel layout and colour are measured, not rendered.",
+    "The target file is untracked at the audited revision; this verdict binds the recorded sha256, not a commit."
+  ],
+  "proposed_ledger_row": {
+    "_status": "PROPOSAL ONLY — the brief forbids editing i18n/ledger/es.json; the wave appends this row.",
+    "_missing": [
+      "translator.agent",
+      "translator.model",
+      "translator.date"
+    ],
+    "locale": "es",
+    "namespace": "tui.small",
+    "source_sha256": "16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75",
+    "auditor": {
+      "agent": "translation-auditor (lopdev team), independent of the translator",
+      "model": "radient/auto",
+      "date": "2026-10-30",
+      "result": "passed",
+      "findings": 0
+    },
+    "status": "passed",
+    "note": "Independent audit w6a1 (radient/auto, fallback disclosed): 0 blocker, 0 major, 2 minor, 3 nit. Record: i18n/audits/evidence/es/tui.small/w6a1/record.json"
+  }
+}

@@ -1,0 +1,53 @@
+import hashlib
+import json
+import os
+from pathlib import Path
+import runpy
+import sys
+
+root = Path(__file__).resolve().parent
+snapshot = root / 'validation'
+sys.path.insert(0, str(snapshot))
+checker = runpy.run_path(str(snapshot / 'scripts/i18n/check.py'))
+cat = checker['catalogues']
+assert Path(cat.__file__).resolve().is_relative_to(snapshot)
+assert Path(checker['msg_runtime'].__file__).resolve().is_relative_to(snapshot)
+cat._CATALOGUES = snapshot / 'catalogues'
+source = cat._CATALOGUES / 'en/wire.errors.session_host.json'
+context = cat._CATALOGUES / 'en/wire.errors.session_host.context.json'
+target = root / 'wire.errors.session_host.json'
+sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+assert sha(source) == 'b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0'
+assert list(json.loads(source.read_text())) == list(json.loads(target.read_text()))
+problems = checker['check_catalogues']()
+print('Committed scripts/i18n/check.py::check_catalogues(), scoped isolated en/es fixture:')
+print(json.dumps(problems, ensure_ascii=False))
+assert not problems
+print('PASS: 3 keys; source SHA verified; exact key order; ICU syntax, arguments, context parity validated')
+print('No semantic audit claimed; whole-repository CLI/generation checks deferred to manager integration.')
+provenance = {
+    'locale': 'es', 'namespace': 'wire.errors.session_host', 'key_count': 3,
+    'date': '2026-10-31', 'commit': '9c979a03d55',
+    'translator': {'agent': 'i18n-translator', 'session': '056852035b33',
+        'model': 'openai/gpt-6.1-sol', 'date': '2026-10-31',
+        'actual_model_source': 'host model-switch notice: temporary fallback for provider quota; anthropic/claude-sonnet-5-5 -> anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol; translation reasoning and writing performed on openai/gpt-6.1-sol'},
+    'input_hashes': {
+        'en': {'path': 'local_operator/i18n/catalogues/en/wire.errors.session_host.json', 'sha256': sha(source)},
+        'context': {'path': 'local_operator/i18n/catalogues/en/wire.errors.session_host.context.json', 'sha256': sha(context)},
+        'es': {'path': 'local_operator/i18n/catalogues/es/wire.errors.session_host.json', 'sha256': sha(target)}},
+    'status': 'translated', 'independent_audit': 'pending',
+    'ambiguities': ['host is rendered servidor de sesiones, not anfitrión: a background service/process, not a physical host; no new implementation detail added.'],
+    'glossary_proposals': {'background session host': 'servidor de sesiones en segundo plano', 'background service manager': 'gestor de servicios en segundo plano'},
+    'width': 'No maxChars/maxCells declared in committed context.',
+    'validation': 'Committed check_catalogues() on isolated namespace fixture, not full CLI or semantic audit.'
+}
+(root / 'provenance.json').write_text(json.dumps(provenance, ensure_ascii=False, indent=2) + '\n')
+row = {
+    'locale': 'es', 'namespace': 'wire.errors.session_host', 'source_sha256': sha(source),
+    'translator': provenance['translator'], 'status': 'translated',
+    'context_sha256': sha(context), 'target_sha256': sha(target),
+    'note': '3 keys translated; independent audit pending. Session 056852035b33; actual openai/gpt-6.1-sol (provider-quota fallback). Source/context/target hashes and model history in supplied provenance.json. No audit approval claimed.'
+}
+assert len(row['note']) <= 280
+(root / 'ledger-row-proposal.json').write_text(json.dumps(row, ensure_ascii=False, indent=2) + '\n')
+print(json.dumps(provenance['input_hashes'], indent=2))

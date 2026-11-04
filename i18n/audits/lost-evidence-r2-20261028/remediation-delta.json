@@ -1,0 +1,29 @@
+{
+  "commit": "4d38a1d4b8e9a36fa0a38f4833ecf86263da45db",
+  "parent": "9495f8a6c3bf2b5438ef5c33d7274cf519435dda",
+  "locales": {
+    "fr": {
+      "keys": 2,
+      "verdict": "PASS"
+    },
+    "ru": {
+      "keys": 4,
+      "verdict": "PASS"
+    },
+    "vi": {
+      "keys": 3,
+      "verdict": "PASS"
+    },
+    "hi": {
+      "keys": 2,
+      "verdict": "PASS"
+    }
+  },
+  "value_replacements": 11,
+  "files": [
+    "local_operator/i18n/catalogues/fr/wire.settings.json",
+    "local_operator/i18n/catalogues/hi/wire.settings.json",
+    "local_operator/i18n/catalogues/ru/wire.settings.json",
+    "local_operator/i18n/catalogues/vi/wire.settings.json"
+  ]
+}

@@ -968,6 +968,66 @@ def _dial_candidates(member: MemberRecord) -> list[str]:
     return candidates
 
 
+def _reaches_own_listener(endpoint: str, own_port: int, listen_address: str = "0.0.0.0") -> bool:
+    """Whether dialling ``endpoint`` would connect to THIS relay's own listener.
+
+    THE SELF-RACE (2026-11-02, Mac ⇄ lop-remote-node-2). ``probe_candidates`` races
+    every candidate in parallel and takes the first connect. A peer row carrying an
+    address of THIS host on OUR listen port (a poisoned ``observed_endpoint`` —
+    there it was the Mac's own LAN ``10.0.2.169:4097``) is answered by our own
+    listener in well under a millisecond, so it beats the real peer's 15–100 ms WAN
+    leg on every round; the handshake then runs against ourselves (``self_link``)
+    and the real peer's connected socket is discarded. Reordering or serialising
+    the race does not help: whenever the self candidate is tried it answers. The
+    only fix is never to dial it.
+
+    The bound address matters as well as the port: a wildcard IPv4 listener
+    accepts every local IPv4 address, but a specific bind accepts only that
+    address. Two same-host relays can share a port on DISTINCT bound addresses;
+    neither is self merely because the interface table contains the other's IP.
+    Different ports stay dialable too. ``bind()`` records the effective port in
+    settings, including when the kernel chooses it for a configured zero.
+
+    The interface table is read NOW, on every call, never cached: sleep/wake and
+    network changes rewrite it, and an address that was a foreign host's an hour
+    ago can be ours after a Wi-Fi rejoin — that is exactly how the 2026-11-02 link
+    broke. An unreadable table (``interface_for_address`` → ``None``) filters
+    nothing: dropping a candidate on a guess could strand a reachable peer.
+    """
+    host, sep, port = str(endpoint or "").rpartition(":")
+    loopback = _is_loopback_endpoint(endpoint)
+    if not sep or not port.isdigit():
+        return loopback and listen_address == "0.0.0.0"
+    if int(port) != own_port:
+        return False
+    host = host.strip("[]").lower()
+    if listen_address != "0.0.0.0":
+        # No DNS lookup: the listener is AF_INET and the observation is an IP
+        # literal. Preserve the existing localhost spelling for same-host rigs.
+        bound = listen_address.lower()
+        return ("127.0.0.1" if host == "localhost" else host) == (
+            "127.0.0.1" if bound == "localhost" else bound
+        )
+    if loopback:
+        return True
+    return addresses.interface_for_address(host) is not None
+
+
+def _dialable_candidates(
+    member: MemberRecord, own_port: int, listen_address: str = "0.0.0.0"
+) -> list[str]:
+    """``_dial_candidates`` minus every address that would reach this relay itself.
+
+    The redial schedule, session/listing dial and doctor share this filter, so
+    "which candidates are us" has one answer even for a poisoned stored hint.
+    """
+    return [
+        endpoint
+        for endpoint in _dial_candidates(member)
+        if not _reaches_own_listener(endpoint, own_port, listen_address)
+    ]
+
+
 def _host_only(address: str) -> str:
     """``host`` of ``host:port`` (IPv6 brackets stripped); the input when unsplittable."""
     text = str(address or "")
@@ -1553,6 +1613,13 @@ def _own_relay_listen(root: Path | None) -> dict[str, Any]:
     return record.listen if isinstance(record.listen, dict) else {}
 
 
+#: Declared addresses ``advertise_endpoints`` has already warned about skipping in
+#: this process. Process-lifetime and never pruned: the set holds only the handful
+#: of addresses an operator declared, and a fresh process (an upgrade, a restart)
+#: should say it once again.
+_STALE_ADVERTISED_WARNED: set[str] = set()
+
+
 def advertise_endpoints(settings: NetworkSettings, *, declared: Sequence[str] = ()) -> list[str]:
     """Where peers should TRY to reach a device, in preference order.
 
@@ -1599,7 +1666,13 @@ def advertise_endpoints(settings: NetworkSettings, *, declared: Sequence[str] = 
         text = str(host or "").strip()
         reason = addresses.stale_declared_address_reason(text)
         if reason is not None:
-            logger.warning("Skipping advertised address %s: %s.", text, reason)
+            # Logged once per address per process: this runs on every advertisement
+            # refresh, and a stale declaration that outlives a network change
+            # repeated the same line 28k+ times in the live log, burying everything
+            # else. The skip itself still happens on every call.
+            if text not in _STALE_ADVERTISED_WARNED:
+                _STALE_ADVERTISED_WARNED.add(text)
+                logger.warning("Skipping advertised address %s: %s.", text, reason)
             continue
         add(text)
     live = _own_relay_listen(settings.root)
@@ -5943,10 +6016,20 @@ class RelayServer:
         is not written, because an ephemeral port is a closed door by the time anyone
         dials it (the reason ``_note_peer_endpoints`` refuses to write it at all).
 
-        Loopback sources are skipped (a same-host rig is not an address). Never raises.
+        Loopback sources are skipped (a same-host rig is not an address), and so is
+        any source that is one of THIS host's own interface addresses, read live:
+        a link arriving from our own address (a same-host forwarder, a hairpin NAT,
+        a peer relayed through this box) says nothing about where the member is,
+        and recording it is the poison behind the 2026-11-02 self-race — the Mac
+        held ``observed_endpoint = 10.0.2.169:4097``, its own LAN address, and
+        every dial reached its own listener first (``_reaches_own_listener``).
+        The field is only rewritten when the member dials IN, which a NAT'd peer
+        never does, so a bad value written here is never healed. Never raises.
         """
         host = _host_only(peer_addr)
         if not host or _is_loopback_endpoint(f"{host}:0"):
+            return
+        if addresses.interface_for_address(host) is not None:
             return
         ports = []
         for endpoint in declared or ():
@@ -6307,17 +6390,21 @@ class RelayServer:
 
         A dial-only device declares loopback (``advertise_endpoints``: "do not try
         to call me first"); on the default port that is OUR OWN listener, and a
-        redial there is a ``self_link`` row per attempt. Loopback on another port
-        stays (a same-host pair of relays, as every two-relay rig is).
+        redial there is a ``self_link`` row per attempt. Another port stays, as
+        does the same port on a different IP when our listener binds specifically.
+
+        A wildcard listener also accepts this host's own interface addresses on
+        our port: a poisoned ``observed_endpoint`` naming us would otherwise keep
+        this member "redialable" forever while every dial self-links.
         """
-        own_port = int(self.settings.port or 0)
-        keep: list[str] = []
-        for endpoint in _dial_candidates(member):
-            _host, _sep, port = endpoint.rpartition(":")
-            if _is_loopback_endpoint(endpoint) and (not port.isdigit() or int(port) == own_port):
-                continue
-            keep.append(endpoint)
-        return keep
+        # Prefer the socket's actual bind (including hostname resolution); settings
+        # are the pre-bind fallback used by admission checks and isolated rigs.
+        listener = getattr(self, "_listener", None)
+        if listener is not None:
+            host, port = listener.getsockname()[:2]
+        else:
+            host, port = self.settings.listen_address, int(self.settings.port or 0)
+        return _dialable_candidates(member, int(port), str(host))
 
     def _membership_loop(self) -> None:
         """The scheduled half of membership convergence, with no surface involved.
@@ -7986,6 +8073,7 @@ class RelayServer:
                     # ``_row_binding``): the origin's sidebar paints a team
                     # badge from it exactly as it does for a local row.
                     "binding": self._row_binding(record.session_id),
+                    **self._row_avatar(record.session_id),
                 }
             )
         for row in self._stored_rows():
@@ -8008,6 +8096,20 @@ class RelayServer:
         for row in self._mesh_hosted_rows(seen):
             rows.append(row)
         return rows
+
+    def _row_avatar(self, session_id: str) -> dict[str, str | None]:
+        """``agent_id``/``avatar_sha256`` for an outbound peer row (additive).
+
+        The same resolver the local listing uses (``agent_avatar.session_row_fields``,
+        memoised per store), so a peer's row names its agent the way that device's
+        own sidebar would. The id is THIS device's registry id: an origin cannot
+        fetch the bytes through the mesh today, so it draws the glyph -- the pair
+        is carried so a later picture channel needs no row-shape change. Team
+        Bridge/notification avatar fields are a separate lane and untouched here.
+        """
+        from local_operator.agent_avatar import session_row_fields
+
+        return session_row_fields(self.root, session_id)
 
     def _row_binding(self, session_id: str) -> dict[str, str | None]:
         """The agent/team this session is attached to, for its listing row.
@@ -8112,6 +8214,7 @@ class RelayServer:
                     "origin": dict(stamp.origin) if stamp.origin else None,
                     "archived": None,
                     "binding": self._row_binding(entry.name),
+                    **self._row_avatar(entry.name),
                 }
             )
         return rows
@@ -8221,6 +8324,7 @@ class RelayServer:
                     "origin": (dict(stamp.origin) if stamp is not None and stamp.origin else None),
                     "archived": None,
                     "binding": self._row_binding(session_id),
+                    **self._row_avatar(session_id),
                 }
             )
         return rows
@@ -9167,10 +9271,9 @@ class RelayServer:
         which is why the move's step calls this method rather than reaching for
         ``_engage_locally`` beside it.
 
-        Both callers go through ``_engage_locally``, the single entry point every
-        engage path in the product uses (a viewer's first message, a wake,
-        ``lop exec``), so INV-1's guard and the lease arbitration that decides WHO
-        RUNS (``launch.engage_runtime``) apply here unchanged. A caller that arrives
+        Both callers go through ``_engage_locally``, which delegates to the
+        canonical ``launch.engage_runtime`` arbitration. INV-1's guard and the
+        transcript lease that decides WHO RUNS therefore apply here unchanged. A caller that arrives
         after a runtime already holds the lease therefore loses there — by joining
         the winner or by a sentence — rather than by a check of its own.
 
@@ -9427,11 +9530,13 @@ class RelayServer:
         "there is more above this page".
         """
         from local_operator.harness.rows import visible_transcript_rows
+        from local_operator.session import index_read_model
         from local_operator.session.open_frame import (
             OPEN_FRAME_MAX_BYTES,
             OPEN_FRAME_MAX_EXTRA_ROWS,
             OPEN_FRAME_MAX_RAW_PAGES,
             OPEN_FRAME_MAX_ROWS,
+            StripMemo,
             align_page,
             build_frame,
             late_index_stop,
@@ -9474,6 +9579,12 @@ class RelayServer:
         page_rows: list[tuple[int, bool, int]] = []
         index_at_first_page = False
         frame_at = time.monotonic()
+        # ONE STRIP PER ROW PER OPEN — the desktop twin's rule (``StripMemo``).
+        # Every row is this read's own ``json.loads``, so nothing is shared.
+        # ``supplements=False`` is spelled out for parity with the desktop twin:
+        # this read never paints supplements (``align_page``/``build_frame``
+        # below take their default), and a memo must match that value.
+        strip_memo = StripMemo(supplements=False)
         for attempt in range(OPEN_FRAME_MAX_RAW_PAGES):
             read_at = time.monotonic()
             try:
@@ -9541,9 +9652,9 @@ class RelayServer:
                 break
             collected = rows + collected
             page_rows.append((len(rows), page.has_more, len(sources)))
-            kept, reached = align_page(collected, limit)
-            paintable_rows = paintable(collected)
-            if reached and len(paintable(kept)) >= limit:
+            kept, reached = align_page(collected, limit, memo=strip_memo)
+            paintable_rows = paintable(collected, memo=strip_memo)
+            if reached and len(paintable(kept, memo=strip_memo)) >= limit:
                 break
             # THE INDEX IS FETCHED AFTER THE FIRST PAGE, DELIBERATELY — the same
             # ordering the desktop twin documents: the page is what the client
@@ -9555,7 +9666,8 @@ class RelayServer:
             # the journal's END, and a ``before_id`` page is owed its rows.
             if attempt == 0 and index is None and before_id is None:
                 index_at = time.monotonic()
-                index = self._stored_frame_index(session_id)
+                source = sources[0] if sources and all(s == sources[0] for s in sources) else None
+                index = self._stored_frame_source(session_id, source)
                 index_at_first_page = index is not None
                 if open_trace.enabled():
                     open_trace.mark(
@@ -9588,7 +9700,8 @@ class RelayServer:
                 break
         if index is None:
             index_at = time.monotonic()
-            index = self._stored_frame_index(session_id)
+            source = sources[0] if sources and all(s == sources[0] for s in sources) else None
+            index = self._stored_frame_source(session_id, source)
             if open_trace.enabled():
                 open_trace.mark(
                     "b.index",
@@ -9608,16 +9721,43 @@ class RelayServer:
                     collected,
                     index=index,
                     limit=limit,
+                    memo=strip_memo,
                 )
                 if stop is not None and stop < len(page_rows):
                     keep = sum(rows for rows, _more, _sources in page_rows[:stop])
                     collected = collected[-keep:]
                     has_more = page_rows[stop - 1][1]
                     sources = sources[: page_rows[stop - 1][2]]
-        kept, reached = align_page(collected, limit)
+        source = sources[0] if sources and all(s == sources[0] for s in sources) else None
+        facts = None
+        if isinstance(index, index_read_model.FrameSummary):
+            projected = self._stored_projection(
+                index_read_model.frame_facts,
+                self.root,
+                session_id,
+                collected_ids=[row["id"] for row in collected],
+                reaches_eof=before_id is None,
+                order_ids=order_ids or [],
+                source=source,
+            )
+            if projected.state == "ready":
+                facts, index = projected.value, None
+            else:
+                # The original no-wait fallback remains admitted when a summary
+                # was valid but the selected projection cannot prove completeness.
+                index = self._stored_frame_index(session_id)
+        if index is not None and source != (
+            index.sig.get("inode"),
+            index.sig.get("size"),
+            index.sig.get("mtime"),
+        ):
+            index = None
+        kept, reached = align_page(collected, limit, memo=strip_memo)
         result = build_frame(
             kept,
+            memo=strip_memo,
             index=index,
+            resolved_runs=facts.runs if facts is not None else None,
             # ``building`` is what a cold index answers (see
             # ``_stored_frame_index``); ``build_frame`` replaces it with
             # ``ready`` whenever an index was in hand, whatever the run list
@@ -9658,8 +9798,9 @@ class RelayServer:
         # may then have dropped the oldest rows — the page's user row first — so
         # a page could report ``head_cut: false`` while its oldest run WAS cut.
         answer["head_cut"] = (not reached or result.capped) and answer["has_more"]
-        if journal_order:
-            source = sources[0] if sources and all(s == sources[0] for s in sources) else None
+        if journal_order and not (
+            facts is not None and index_read_model.apply_order(answer, facts)
+        ):
             self._stored_journal_order(
                 answer, session_id, source, order_ids or [], complete=complete
             )
@@ -9874,6 +10015,50 @@ class RelayServer:
             # refused by name, never trimmed.
             raise MeshRefusal("page_too_large", "this source read cannot fit one link record")
         return detail
+
+    def _stored_frame_source(self, session_id: str, source: tuple[int, int, float] | None) -> Any:
+        """Already on the owner request worker: bounded immutable projection first.
+
+        Keep relay's no-wait policy and resident fast path. Summary success is
+        not selection authority; the caller must resolve its exact frame later.
+        """
+        from local_operator.session import index_read_model, transcript_index
+
+        resident = transcript_index.fresh_resident(self.root, session_id)
+        if resident is not None:
+            expected = (
+                resident.sig.get("inode"),
+                resident.sig.get("size"),
+                resident.sig.get("mtime"),
+            )
+            return resident if source == expected else None
+        projected = self._stored_projection(index_read_model.summary, self.root, session_id, source)
+        if projected.state == "ready":
+            return projected.value
+        return self._stored_frame_index(session_id)
+
+    def _stored_projection(self, operation: Any, *args: Any, **kwargs: Any) -> Any:
+        """Run SQLite through the relay's existing page worker, never its link reader.
+
+        THE WAIT IS THE READ MODEL'S OWN, NOT THE PAGE READ'S. This hop runs on a
+        LINK thread, and ``SESSION_HISTORY_PAGE_READ_BOUND_S`` is 60 s: a broken
+        or slow companion could therefore park a peer's link thread for a minute
+        for an optimization it can simply skip. When the bound expires the caller
+        falls back to the original rederive path, which is the answer it would
+        have produced anyway.
+        """
+        from local_operator.session import index_read_model as rm
+
+        with self._page_loop_lock:
+            loop = self._page_loop_locked()
+            future = asyncio.run_coroutine_threadsafe(
+                asyncio.to_thread(operation, *args, **kwargs), loop
+            )
+        try:
+            return future.result(timeout=rm.READ_MODEL_WAIT_S)
+        except TimeoutError:
+            future.cancel()
+            return rm.Result("stale", reason="read-model wait bound")
 
     def _stored_frame_index(self, session_id: str) -> Any:
         """The transcript-index facts for one open-frame page, or ``None`` (cold).
@@ -10205,10 +10390,12 @@ class RelayServer:
         two callers (create, engage) can put the sentence in their own frame
         without either of them inventing a second error vocabulary.
 
-        ``cwd`` defaults to this device's home when the caller supplied none —
-        §5.3 step 2: an omitted working directory means "the peer decides", and
-        the peer's decision is its own home rather than the requesting
-        device's path, which would not exist here.
+        ``cwd=""`` means "the peer decides" (§5.3 step 2), NOT an explicit
+        request for this device's home. Preserve that sentinel to the spawn
+        boundary: converting omission to HOME here destroys a recorded move,
+        because the resolver must honour a deliberate HOME request unchanged.
+        The spawn boundary chooses the recorded destination first, and home
+        only when no directory has been recorded or explicitly requested.
 
         ``initial_model`` is the BIRTH SAMPLE the desktop's draft chip already
         sends (``launch.WarmErrand.initial_model``), and a create that names an
@@ -10238,12 +10425,11 @@ class RelayServer:
             errand = WarmErrand(initial_model=initial_model)
         if not (self.root / "sessions" / session_id).is_dir():
             return f"{self._own_label()} does not hold a session {session_id}"
-        started = cwd or str(Path.home())
         try:
             asyncio.run(
                 engage(
                     session_id,
-                    started,
+                    cwd,
                     # Delivers nothing: warming is the whole job here, and the
                     # runtime materialises what it needs when real work arrives.
                     errand,
@@ -10819,7 +11005,10 @@ class RelayServer:
             member = record.member(device_id)
             if member is None or not member.active:
                 continue
-            candidates = _dial_candidates(member)
+            # Our own listener answers a self-addressed candidate before any real
+            # peer can (the self-race, ``_reaches_own_listener``), so those are
+            # dropped before the race rather than lost to it.
+            candidates = self._redial_candidates(member)
             if not candidates:
                 reason = "no_endpoint"
                 continue
@@ -13910,8 +14099,13 @@ class RelayServer:
                     "detail": "no_endpoint",
                 }
             ]
+        # Waiting for all sockets does not change the first-connect winner:
+        # doctor must exclude the same self-listener targets as ordinary dials.
+        # Keep a skipped row rather than pretending the discarded hint was tried.
+        candidates = self._redial_candidates(member)
+        skipped = [endpoint for endpoint in _dial_candidates(member) if endpoint not in candidates]
         probe = probe_candidates(
-            _dial_candidates(member),
+            candidates,
             deadline=deadline,
             connect_cap=PROBE_CONNECT_TIMEOUT_S,
             wait_all=True,
@@ -13936,7 +14130,18 @@ class RelayServer:
                 )
             else:
                 winner_row = self._handshake(record, member, probe.winner, probe.sock, remaining)
-        rows: list[dict[str, Any]] = []
+        rows: list[dict[str, Any]] = [
+            {
+                "check": "reachability",
+                "device_id": member.device_id,
+                "endpoint": endpoint,
+                "ok": True,
+                "code": "self_listener",
+                "detail": "not_attempted",
+                "observed": {"out_of_scope": True},
+            }
+            for endpoint in skipped
+        ]
         for attempt in probe.attempts:
             if attempt.endpoint == probe.winner and winner_row is not None:
                 rows.append(winner_row)
@@ -14625,12 +14830,38 @@ def _unit_config_root() -> Path | None:
     # escaped inside one pair of quotes), so it is decoded by inverting exactly
     # that, never by a looser guess that would misread a path with a quote or a
     # percent sign in it.
-    found = re.search(
-        rf'^Environment="{re.escape(CONFIG_DIR_ENV)}=((?:[^"\\]|\\.)*)"\s*$', text, re.M
-    )
-    if not found:
+    # THE LAST ASSIGNMENT WINS (deferred m5 from the #3075 review): systemd
+    # resolves a variable assigned more than once to its LAST value, so reading
+    # the FIRST would put a deliberate-stop marker in a root the running relay no
+    # longer reads -- the marker would exist, nothing would act on it, and a stop
+    # the operator asked for would be reported as a crash. findall over the same
+    # anchored pattern, then take [-1].
+    #
+    # A LATER LINE THE PATTERN CANNOT READ IS A REFUSAL, NOT A FALLBACK (review r1,
+    # MINOR-1): systemd also accepts an unquoted ``Environment=NAME=value``, which is
+    # the shape an operator hand-editing a unit is most likely to write, and it is
+    # invisible to the anchored quoted pattern. Returning an EARLIER root then would
+    # be the same "marker in a root the relay never reads" failure this function
+    # exists to avoid -- so any line after the last match that names the variable
+    # makes the answer unknown, and the docstring's "no marker at all rather than one
+    # in a root no supervised relay reads" is what the caller already handles.
+    pattern = re.compile(rf'^Environment="{re.escape(CONFIG_DIR_ENV)}=((?:[^"\\]|\\.)*)"\s*$', re.M)
+    matched: list[re.Match[str]] = list(pattern.finditer(text))
+    if not matched:
         return None
-    value = re.sub(r"\\(.)", r"\1", found.group(1)).replace("%%", "%")
+    last = matched[-1]
+    tail = text[last.end() :]
+    # A COMMENTED line is not an assignment: systemd ignores it, so refusing on one
+    # would turn a determinately pinned unit into "unknown" and label an ordinary
+    # stop as a crash -- the very symptom this reader exists to prevent. Only lines
+    # systemd would read are allowed to make the answer unknown.
+    if any(
+        CONFIG_DIR_ENV in line
+        for line in tail.splitlines()
+        if not line.lstrip().startswith(("#", ";"))
+    ):
+        return None
+    value = re.sub(r"\\(.)", r"\1", last.group(1)).replace("%%", "%")
     return Path(value) if value else None
 
 

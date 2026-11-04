@@ -1,0 +1,57 @@
+{
+  "cli.agents_picture.error.no_agent": {
+    "role": "CLI output (lop agents picture)",
+    "tone": "plain",
+    "note": "CLI error when the agent argument matches no agent by name or id. {agent} is what the user typed."
+  },
+  "cli.agents_picture.error.read_file": {
+    "role": "CLI output (lop agents picture)",
+    "tone": "plain",
+    "note": "CLI error when the image path can't be read. {path} is a filesystem path, {error} an OS error string (English, untranslated)."
+  },
+  "cli.agents_picture.help.agent": {
+    "role": "CLI output (lop agents picture)",
+    "tone": "plain",
+    "note": "argparse help for the positional agent argument."
+  },
+  "cli.agents_picture.help.file": {
+    "role": "CLI output (lop agents picture)",
+    "tone": "plain",
+    "note": "argparse help for the image path argument. Format names stay as-is."
+  },
+  "cli.agents_picture.help.group": {
+    "role": "CLI output (lop agents picture)",
+    "tone": "plain",
+    "note": "argparse help for `lop agents picture`."
+  },
+  "cli.agents_picture.help.remove": {
+    "role": "CLI output (lop agents picture)",
+    "tone": "plain",
+    "note": "argparse help for `lop agents picture remove <agent>`."
+  },
+  "cli.agents_picture.help.set": {
+    "role": "CLI output (lop agents picture)",
+    "tone": "plain",
+    "note": "argparse help for `lop agents picture set <agent> <file>`."
+  },
+  "cli.agents_picture.help.show": {
+    "role": "CLI output (lop agents picture)",
+    "tone": "plain",
+    "note": "argparse help for `lop agents picture show <agent>`; JSON is literal."
+  },
+  "cli.agents_picture.remove.done": {
+    "role": "CLI output (lop agents picture)",
+    "tone": "plain",
+    "note": "CLI success line after removing an agent's picture. {agent} is a name."
+  },
+  "cli.agents_picture.remove.none": {
+    "role": "CLI output (lop agents picture)",
+    "tone": "plain",
+    "note": "CLI line when the agent had no picture. {agent} is a name."
+  },
+  "cli.agents_picture.set.done": {
+    "role": "CLI output (lop agents picture)",
+    "tone": "plain",
+    "note": "CLI success line. {agent} is the agent's name, {mime} a MIME type like image/png (literal), {bytes} an integer byte count (already formatted digits)."
+  }
+}

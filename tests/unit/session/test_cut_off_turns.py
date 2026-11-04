@@ -1429,7 +1429,7 @@ class _RecordingLoop:
 
 
 async def _sigterm_a_session_mid_turn(
-    directory: Path, *, marker: dict[str, Any] | None = None
+    directory: Path, *, marker: dict[str, Any] | None = None, expect: str = "cut"
 ) -> dict[str, Any]:
     """Park a real turn, deliver the exec worker's SIGTERM handler, return the row.
 
@@ -1471,6 +1471,18 @@ async def _sigterm_a_session_mid_turn(
     install: Any = exec_worker._install_sigterm_handler
     install(loop, sessions, interrupted, facts, None)
     loop.callbacks[_signal.SIGTERM]()
+    if expect == "refused":
+        # THE VICTIM-SIDE SANCTION GATE (slice 1): nothing staged means nothing obeyed,
+        # so the worker records the arrival and keeps the turn — which is still parked
+        # in the never-yielding stream, exactly as a live turn would be. It is CANCELLED
+        # here rather than awaited: a turn nothing cut does not end on its own.
+        assert not interrupted.is_set(), "an unsanctioned SIGTERM ended the turn"
+        assert facts["signal"]["action"] == "refused", facts["signal"]
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(session.dispose(), timeout=30)
+        return {"refused": True, "aborted": False, "facts": facts}
     assert interrupted.is_set()
     await asyncio.wait_for(task, timeout=30)
     identity = conversation_identity(directory)
@@ -1481,24 +1493,26 @@ async def _sigterm_a_session_mid_turn(
 
 
 @pytest.mark.asyncio
-async def test_a_raw_external_sigterm_mid_turn_is_never_the_users_stop(tmp_path: Path) -> None:
-    """THE REGRESSION: no marker, no ladder — the row must tell the signal story.
+async def test_a_raw_external_sigterm_mid_turn_is_refused_and_cuts_nothing(
+    tmp_path: Path,
+) -> None:
+    """THE REGRESSION, EVOLVED: no marker, no ladder — nothing is cut at all.
 
-    Before the fix this cell read ``interrupted`` / ``user-stop`` (captured by running it
-    against the unfixed handler: ``kind='interrupted', cause='user-stop'``). The fixed
-    row is a cut-off ``error`` carrying the receipt's sentence: the signal, that it came
-    from an unidentified sender, and that nobody asked for a stop.
+    This cell used to assert the cut-off ROW (``error`` / ``runtime-shutdown`` carrying
+    "nobody asked for a stop"). That assertion encoded the old rule — any SIGTERM ends
+    the runtime — and the wave-B guarantee it protected is now stronger: an arrival
+    nothing staged is REFUSED before any cause is armed, so there is no row to brand and
+    the turn keeps running. What it still proves, and what must not regress, is that a
+    raw external signal can never be recorded as the USER's stop: there is no cut, so
+    there is no verdict to mislabel. The sanctioned shapes that DO cut are the two cells
+    below (deliberate → ``user-stop``, involuntary → ``runtime-killed``).
     """
-
-    result = await _sigterm_a_session_mid_turn(tmp_path / "sessions" / "raw-sigterm")
-    for phase in ("abort", "dispose"):
-        state = result[phase]
-        assert state["kind"] == "error", (phase, state)
-        assert state["cause"] != "user-stop", (phase, state)
-        assert state["cause"] == "runtime-shutdown", (phase, state)
-        assert "SIGTERM received" in state["reason"], (phase, state)
-        assert "nobody asked for a stop" in state["reason"], (phase, state)
+    result = await _sigterm_a_session_mid_turn(
+        tmp_path / "sessions" / "raw-sigterm", expect="refused"
+    )
+    assert result["aborted"] is False
     assert result["facts"]["signal"]["sanction"] == "none"
+    assert result["facts"]["signal"]["action"] == "refused"
 
 
 @pytest.mark.asyncio
@@ -1616,12 +1630,34 @@ async def test_the_real_routing_arms_the_cause_on_a_busy_session_and_the_row_agr
         _record = _Record()
         _boot_build = None
 
+    # AN INVOLUNTARY MARKER, staged by the production writer: since slice 1 a raw
+    # SIGTERM is REFUSED and arms nothing (test_signal_sanction_gate.py), so the only
+    # arrivals that reach this branch are sanctioned ones. This cell is about the
+    # arming and the published row, and an involuntary act is the kind that still
+    # earns a cut-off cause.
+    from types import SimpleNamespace
+
+    from local_operator.session.runtime import control
+
+    # THE RUN KEY MUST BE THE REAL ONE: the victim pairs on session + pid + started_at,
+    # and the router's receipt is built from the session and the runtime record, so a
+    # marker staged for any other key would (correctly) sanction nothing.
+    assert control.note_involuntary_stop(
+        SimpleNamespace(
+            session_id=session.session_id,
+            pid=os.getpid(),
+            started_at=_Runtime._Record.started_at,
+        ),
+        tmp_path,
+        mechanism="reclaim",
+        actor="runtime residency sweep",
+    )
     state = process._SignalState(stop=asyncio.Event(), trigger={})
     process._route_signal(_Handle(), _Runtime(), process.signal.SIGTERM, state=state)
     assert state.draining is not None
     # THE CAUSE IS ARMED, on the real session, before any ending:
-    assert session._cut_off_cause == "runtime-shutdown", session._cut_off_cause
-    assert "nobody asked for a stop" in session._cut_off_detail
+    assert session._cut_off_cause == "runtime-killed", session._cut_off_cause
+    assert "runtime residency sweep" in session._cut_off_detail
 
     # ... and an ending that never went through a dispose rung still reads the signal.
     state.draining.cancel()
@@ -1630,5 +1666,5 @@ async def test_the_real_routing_arms_the_cause_on_a_busy_session_and_the_row_agr
     session.abort("terminated")
     await asyncio.wait_for(task, timeout=30)
     state_row = AttentionStore().state(conversation_identity(directory))
-    assert (state_row["kind"], state_row["cause"]) == ("error", "runtime-shutdown"), state_row
-    assert "SIGTERM received" in state_row["reason"]
+    assert (state_row["kind"], state_row["cause"]) == ("error", "runtime-killed"), state_row
+    assert "runtime residency sweep" in state_row["reason"], state_row

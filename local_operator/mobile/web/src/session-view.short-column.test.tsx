@@ -15,6 +15,7 @@ vi.mock("./api", async () => ({
 	getSubagentDetail: vi.fn(async () => null),
 	imageUrl: vi.fn(() => ""),
 	getCommands: vi.fn(async () => ({ commands: [] })),
+	getSkills: vi.fn(async () => ({ skills: [] })),
 	getModels: vi.fn(async () => ({ models: [] })),
 	getDirectories: vi.fn(async () => ({ home: "/", recent: [], tmp: "" })),
 	changeDirectory: vi.fn(async () => ({ ok: true })),

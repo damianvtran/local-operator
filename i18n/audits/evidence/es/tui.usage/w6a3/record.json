@@ -1,0 +1,260 @@
+{
+  "schema": 1,
+  "audit_id": "w6a3",
+  "audit_round": 3,
+  "locale": "es",
+  "namespace": "tui.usage",
+  "audit_date": "2026-10-30",
+  "audited_revision": "b925c2e11be36653dfe88ac78f627bc2531427df",
+  "audited_revision_note": "The es target is UNTRACKED at this revision, so HEAD does not bind its bytes. The on-disk sha256 in input_hashes.target is the binding identity; the probe re-reads the same three files and prints their digests at the top of its run (audit.log §3).",
+  "branch_checked_out": "feat/i18n-es-tui",
+  "branch_note": "matches the brief's branch name; `git rev-parse --abbrev-ref HEAD` reports feat/i18n-es-tui",
+  "key_count": {
+    "en": 21,
+    "target": 21,
+    "context": 21
+  },
+  "audit_scope": "Narrow convergence round 3: exactly one catalogue value changed after round 2. The other 20 values are not re-audited; only the file's mechanical integrity around the edit is re-checked. The two style-guide width exceptions for this wave are re-measured because the task asks for their numbers, not trusted.",
+  "verdict": "passed",
+  "result": "passed — 0 blocker, 0 major; round-2 F-U1 closed; 1 minor + 2 nits in the style-guide width record (SG-1/2/3), no new catalogue finding",
+  "verdict_reason": "`caducadas: {value}` is the count-neutral, label-first shape the two sibling counters already use. It renders `caducadas: 1`, `caducadas: 2` and multi-digit counts; its counters segment is 28 cells at 1/2 and 31 at 1,000 against the 31-cell floor body, and the full chrome row is two cells shorter than en at every count (it truncates at 40 columns in both locales, by design). F-U1 is closed. The style-guide paid exception records the right decision (keep relay wording and accept clipping) but says 'at 60+ columns all three fit' when family_caps needs 64 and paid.continue 63; that is SG-1, a MINOR record error, not a catalogue defect. SG-2 (en comparator 25, guide says 23) and SG-3 ('byte-identical' overstates family_caps' case/period adaptation) are nits. keys_bare's 14/13/12 numbers and crop behaviour are correct.",
+  "auditor": {
+    "agent": "i18n-auditor (lopdev team), independent Spanish translation auditor",
+    "session_or_instance": "c0b953a7c12a",
+    "model": "radient/auto",
+    "model_note": "Model as actually run, not the session header. The header named anthropic/claude-sonnet-5-5; provider quota failures moved the session through openai/gpt-6-astra and kimi/k3.1-pro to radient/auto before any audit work. The last active_model_route record in this run's transcript (line 7) names radient/auto as the active selector; lines 5-7 record the chain, and the assistant usage records provider=radient, model_id=auto. Every check, measurement and finding in this bundle was produced under radient/auto. No claim is made for the primary model.",
+    "date": "2026-10-30",
+    "independent_from_translator_session": true,
+    "independent_of_round_2_session": "7fa3a39af5d9 (the w6a2 auditor session; different session, same inputs re-read)",
+    "actual_model_source": "session model-switch events in this run's transcript (last active_model_route record, line 7) plus assistant usage provider=radient/model_id=auto",
+    "independence": "I authored none of this copy and repaired none of it. I wrote no catalogue, sidecar, ledger, allowance or generated file; only this evidence directory. Judgement is LLM reasoning against the en source, the context sidecar, the shipped es catalogues and the rendering code. No translation/memory/MT service was used to compare or back-translate."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/tui.usage.json",
+      "sha256": "5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b",
+      "tracked": true
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/tui.usage.context.json",
+      "sha256": "bf599f5f161087b890e1e24434a03209fee286b865173af6b578da3133b6ef19",
+      "tracked": true
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/tui.usage.json",
+      "sha256": "52166a416bf6d49ab61138e7bd285fe5099710008127d3761a6e2fc298ac6776",
+      "tracked": false
+    }
+  },
+  "references": {
+    "style_guide": {
+      "path": "i18n/style-guides/es.md",
+      "sha256": "01e40d5f6d81cc80811902a29bf23a191f897b6dfd54a2aa3611c67e13f85f07"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/es/tui.usage/w6a3/record.json",
+      "role": "record",
+      "sha256": "self"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.usage/w6a3/report.md",
+      "role": "audit report (findings, measurements, limitations)",
+      "sha256": "43c33318802247cb8b047362e67d456b79e22dc4a0c3e58f947b501fed45f1da"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.usage/w6a3/audit.log",
+      "role": "execution log: validator, probe and measurement commands with their actual output",
+      "sha256": "0deb28fd8b88eda87a0bd88392a6f8a294950b06147ab34513f0b674f6fdff09"
+    },
+    {
+      "path": "i18n/audits/evidence/es/tui.usage/w6a3/checks.py",
+      "role": "the read-only probe that produced sections A-D, E-F, including the negative controls",
+      "sha256": "c7254e0c0d8926b0e6463c4040c9b05a2036309873bcd2d62f790a294a358026"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "F-U1",
+      "SG-1",
+      "SG-2",
+      "SG-3"
+    ]
+  },
+  "findings": [
+    {
+      "id": "F-U1",
+      "severity": "minor",
+      "status": "closed",
+      "key": "tui.usage.sign_in_expired",
+      "en": "{value} sign-in expired",
+      "round_2_value": "{value} caducadas",
+      "current": "caducadas: {value}",
+      "problem": "Closed: the count is now a label, not a bare number a feminine plural participle must agree with. `1 caducadas` is gone; the value is the same shape as `agotadas: {value}` and `obsoletas: {value}`, and still renders at 1, 2 and multi-digit counts.",
+      "suggestion": "none",
+      "evidence": "audit.log §3 (C1-C7, E1-E3, F1-F2); usage_panel.py:1742-1801 (_title_row); render_message at 1/2/12/100/1000/1e6"
+    },
+    {
+      "id": "SG-1",
+      "severity": "minor",
+      "status": "open (recorded; style guide not edited)",
+      "key": "i18n/style-guides/es.md — tui.usage paid annotation width exception",
+      "problem": "The guide says 'at 60+ columns all three fit'. At 60 columns the body is 51; family_caps is 55 and paid.continue 54, so both clip. family_caps needs 64 columns and paid.continue 63; only eligibility_unknown (37) fits at 60. The same paragraph already states paid.continue needs 63, so the threshold sentence contradicts its own numbers. The accepted disposition (keep relay wording, accept clipping) is otherwise recorded and stands.",
+      "suggestion": "Replace 'at 60+ columns all three fit' with 'at 64+ columns all three fit; in the 60-63 band family_caps and paid.continue still clip'. Keep the exception itself.",
+      "evidence": "probe D1/SG-1; rich.cells.cell_len; usage_panel.py geometry (panel = columns - 4, content = panel - 4, body = content - 1)"
+    },
+    {
+      "id": "SG-2",
+      "severity": "nit",
+      "status": "open (recorded; style guide not edited)",
+      "key": "i18n/style-guides/es.md — paid.eligibility_unknown comparator",
+      "problem": "The guide says es 35 against en 23. es 35 is correct; en 'Spend eligibility unknown' measures 25 with both rich.cells.cell_len and len. The exception still stands (35 > 25), but the comparator is understated by two cells.",
+      "suggestion": "Change '35 against 23' to '35 against 25'.",
+      "evidence": "probe D1/SG-2; en catalogues/tui.usage.json and relay.shell.json both carry the 25-cell string"
+    },
+    {
+      "id": "SG-3",
+      "severity": "nit",
+      "status": "open (recorded; style guide not edited)",
+      "key": "i18n/style-guides/es.md — tui.usage paid annotation exception rationale",
+      "problem": "The guide says both strings are byte-identical to the shipped relay.shell.usage family. eligibility_unknown is identical; family_caps is not: relay is 'Siguen aplicándose los límites por familia de modelos.' and TUI is 'siguen aplicándose los límites por familia de modelos' (initial capital and final period differ). The relay-matching decision is sound; the wording 'byte-identical' overstates it.",
+      "suggestion": "Say 'relay wording, adapted to the TUI sentence case and final period' instead of 'byte-identical'.",
+      "evidence": "probe D1/SG-3; es/relay.shell.json vs es/tui.usage.json"
+    }
+  ],
+  "measurements": {
+    "renders": {
+      "1": "caducadas: 1",
+      "2": "caducadas: 2",
+      "12": "caducadas: 12",
+      "100": "caducadas: 100",
+      "1000": "caducadas: 1000",
+      "1000000": "caducadas: 1000000"
+    },
+    "fit": {
+      "floor_columns": 40,
+      "floor_content": 32,
+      "floor_body": 31,
+      "wide_columns": 60,
+      "wide_content": 52,
+      "wide_body": 51,
+      "counters_segment": {
+        "1": 28,
+        "2": 28,
+        "12": 29,
+        "100": 30,
+        "1000": 31,
+        "1000000": 34
+      },
+      "full_row_es": {
+        "1": 43,
+        "2": 43,
+        "12": 44,
+        "100": 45,
+        "1000": 46,
+        "1000000": 49
+      },
+      "full_row_en": {
+        "1": 45,
+        "2": 45,
+        "12": 46,
+        "100": 47,
+        "1000": 48,
+        "1000000": 51
+      },
+      "round_2_projection": {
+        "counters_segment": 29,
+        "full_row": 44,
+        "note": "round 2 counted an extra space after the separator; the renderer uses '  · ' (two before, one after), so the shipped values are 28/43 at count 2"
+      }
+    },
+    "style_guide": {
+      "paid_family_caps": {
+        "es_raw": 53,
+        "en_raw": 29,
+        "es_composed": 55,
+        "en_composed": 31,
+        "columns_needed": 64
+      },
+      "paid_eligibility_unknown": {
+        "es_raw": 35,
+        "en_raw": 25,
+        "guide_says_en": 23,
+        "es_composed": 37,
+        "en_composed": 27,
+        "columns_needed": 46
+      },
+      "paid_continue": {
+        "es_raw": 52,
+        "en_raw": 42,
+        "es_composed": 54,
+        "en_composed": 44,
+        "columns_needed": 63
+      },
+      "at_60_body": 51,
+      "at_60_fit": {
+        "family_caps": false,
+        "eligibility_unknown": true,
+        "paid_continue": false
+      },
+      "keys_bare": {
+        "es_cells": 14,
+        "en_cells": 13,
+        "maxCells": 12,
+        "crop": "Text(no_wrap=True, overflow=\"crop\") at analytics_panel.py:3091-3093"
+      }
+    },
+    "mechanical": {
+      "key_parity": "21/21",
+      "context_keys": 21,
+      "placeholder_tuple_mismatches": 0,
+      "plural_messages": 2,
+      "plural_categories_es": "one/many/other, no empty branch",
+      "validator_catalogue_checks": "0 problem(s)",
+      "validator_full": "exit 0 — 191 file(s), 2348 literal(s), catalogues consistent, 51 advisory finding(s)"
+    }
+  },
+  "not_addressed": [
+    {
+      "topic": "Block-level sign-in note is English-only",
+      "detail": "Round 2's F-U1 rationale said the body blocks carry `inicio de sesión caducado`; the es catalogue has no such string (grep -r caducad over catalogues/es finds only this key and an unrelated relay.asks line). `_account_status_note` returns f\"sign-in expired — /login {report.provider}\" directly from source (usage_panel.py:635), so the Spanish user sees the English phrase in the block. This is a pre-existing extraction gap in the panel, outside this namespace and not a w6a3 delta; it does not change the verdict on `caducadas: {value}`, but it should not be described as already translated."
+    }
+  ],
+  "round_2_bundle": "i18n/audits/evidence/es/tui.usage/w6a2/",
+  "delta_proof": {
+    "method": "Restore the round-2 value in the current es object, dump with json.dumps(ensure_ascii=False, indent=2) + newline, sha256 the bytes.",
+    "restored_round_2_sha256": "e2ab2abd3d581eb5c093cb3148b4beede61a3ed518b9b9de39c3361309c01a48",
+    "round_2_record_sha256": "e2ab2abd3d581eb5c093cb3148b4beede61a3ed518b9b9de39c3361309c01a48",
+    "current_sha256": "52166a416bf6d49ab61138e7bd285fe5099710008127d3761a6e2fc298ac6776",
+    "conclusion": "exactly one catalogue value changed in this file after round 2; no other value was touched. The style guide is a separate modified file, not part of this target."
+  },
+  "check_output": [
+    {
+      "cmd": "python3 scripts/i18n/check.py --catalogues-only",
+      "result": "exit 0 — 'check.py: catalogue checks: 0 problem(s)'"
+    },
+    {
+      "cmd": "python3 scripts/i18n/check.py",
+      "result": "exit 0 — 'check.py: ok — 191 file(s) scanned, 2348 literal(s) at or below the baseline, catalogues consistent; 51 advisory finding(s) (report-only until activated)'"
+    },
+    {
+      "cmd": "~/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.usage/w6a3/checks.py --namespace tui.usage",
+      "result": "exit 1 — all translation checks A1-A7, B/C, D2-D3 and F pass; SG-1 FAIL (style-guide threshold sentence, MINOR), SG-2/SG-3 WARN (nits); 3/3 negative controls caught ({value} agotadas, {value} caducadas, {count}); delta proof reproduces round 2's hash"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md and verdict_reason are reasoning; audit.log holds the captured command output and is the execution record. The full validator advisory list is report-only and does not gate catalogues.",
+  "limitations": [
+    "LLM semantic judgement; no native-speaker attestation, and native review is not claimed as a gate.",
+    "No rendered TUI frame was captured: widths are computed with rich.cells.cell_len against the geometry the source documents, and truncation is computed with rich.text.Text.truncate(..., overflow='ellipsis'), not photographed.",
+    "No repo-wide pytest suite or generator was run; the repository validator plus the read-only probe are the mechanical evidence.",
+    "Narrow round: the other 20 catalogue values were not re-audited; round 2 passed them. The style-guide findings are documentation records, not catalogue copy."
+  ],
+  "no_writes": "No catalogue, sidecar, ledger, allowance, style guide, baseline or generated file was written by this audit; only this evidence directory."
+}

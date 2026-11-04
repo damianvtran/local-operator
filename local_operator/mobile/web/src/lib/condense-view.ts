@@ -15,6 +15,7 @@ import {
 	type Row,
 } from "./condense-rows";
 import {
+	bridgeOpOf,
 	foldRuns,
 	latchFoldedRuns,
 	receiptFoldUnits,
@@ -25,6 +26,7 @@ import { isFailedResult, isInternalReceipt } from "./condense-predicates";
 import { isQuietTurnCall } from "./condense-segments";
 import {
 	collapsePlan,
+	ownsMaterialArtifact,
 	runIsCondensed,
 	type RunCollapsePlan,
 	type SegmentPlan,
@@ -57,14 +59,14 @@ export function relayFoldOptions(liveTurn: boolean, latchedFoldIds: ReadonlySet<
 		summaryOf: (row: Row) => row.record.kind === "tool" ? (row.record.summary ?? "") : "",
 		// The relay wire can omit args under frame pressure. An absent op is the
 		// model's documented generic-label fallback, never an invented operation.
-		opOf: () => "",
+		opOf: bridgeOpOf,
 		failedOf: (row: Row) =>
 			row.record.kind === "tool" && isFailedResult(row.record.isError, undefined),
 		runningOf: (row: Row) => row.record.kind === "tool" && row.record.phase !== "done",
 		executingOf: (row: Row) => row.record.kind === "tool" && row.record.phase === "running",
 		startedAtOf: () => null,
 		endedAtOf: () => null,
-		isFoldable: (row: Row) => row.record.kind === "tool" && !isQuietTurnCall(row.record),
+		isFoldable: (row: Row) => row.record.kind === "tool" && !isQuietTurnCall(row.record) && !ownsMaterialArtifact(row.record),
 		isReceipt: (row: Row) => isInternalReceipt(row.record),
 		receiptSummaryOf: (rows: Row[]) => receiptFoldUnits(rows),
 		liveTurn,
@@ -101,7 +103,7 @@ export function composeCondensedEntries(
 	const quietRowIds = options.quietRowIds ?? new Set<string>();
 	const folds = foldRuns(rows, {
 		...relayFoldOptions(options.live, options.latchedFoldIds ?? new Set()),
-		isFoldable: (row: Row) => !quietRowIds.has(row.record.id) && row.record.kind === "tool" && !isQuietTurnCall(row.record),
+		isFoldable: (row: Row) => !quietRowIds.has(row.record.id) && row.record.kind === "tool" && !isQuietTurnCall(row.record) && !ownsMaterialArtifact(row.record),
 		isReceipt: (row: Row) => !quietRowIds.has(row.record.id) && isInternalReceipt(row.record),
 	});
 	const foldIds = latchFoldedRuns(

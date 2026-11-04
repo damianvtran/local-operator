@@ -248,7 +248,7 @@ def _describe_sound_effect_approval(args: dict[str, Any], cwd: str) -> str:
         # each server receipt remains authoritative for billing and the ledger.
         estimates = [
             pricing.sound_effect_estimate(
-                "elevenlabs" if route == AudioRoute.RADIENT else str(route),
+                str(route),
                 None if route == AudioRoute.RADIENT else params.model,
                 item.duration_s,
             )
@@ -261,7 +261,12 @@ def _describe_sound_effect_approval(args: dict[str, Any], cwd: str) -> str:
             else f"estimated known subtotal ${sum(e.amount_usd for e in known):.4f}; "
             f"{len(estimates) - len(known)} item(s) unpriced "
         )
-        total += f"({pricing.PRICE_VERSION}); per-item billed figures are authoritative"
+        version = (
+            pricing.SOUND_EFFECT_PRICE_VERSION
+            if route == AudioRoute.RADIENT
+            else pricing.PRICE_VERSION
+        )
+        total += f"({version}); per-item billed figures are authoritative"
         noun = "sound effect" if len(estimates) == 1 else "sound effects"
         return f"Generate {len(estimates)} {noun} via {label} — {total}."
     prompt = args.get("prompt")

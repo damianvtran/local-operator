@@ -42,12 +42,14 @@ import { describe, expect, it } from "vitest";
 import { buildRows, ledgerName } from "./condense-rows";
 import {
 	FOLD_MIN_ACTIONS,
+	bridgeOpOf,
 	foldRuns,
 	latchFoldedRuns,
 	receiptFoldUnits,
 	workedSecondsOf,
 } from "./condense-fold";
 import { collapsePlan } from "./condense-plan";
+import { composeCondensedEntries } from "./condense-view";
 import { isQuietTurnCall } from "./condense-segments";
 import { isFailedResult, isInternalReceipt } from "./condense-predicates";
 import { toCondenseRecords, rowKey, type CondenseRecord } from "./condense-records";
@@ -169,6 +171,7 @@ const RECORDS: Record<string, (id: string, i: number) => CondenseRecord> = {
 	}),
 	J: (id, i) => custom(id, i, "job_result"),
 	H: (id, i) => custom(id, i, "hub_message"),
+	Bi: (id, i) => custom(id, i, "team_bridge_message"),
 	X: (id, i) => custom(id, i, "monitor_prompt"),
 	Q: (id, i) => custom(id, i, "session_mcp_unavailable"),
 	I: (id, i) => custom(id, i, "session_incident", "error"),
@@ -231,6 +234,18 @@ const RECORDS: Record<string, (id: string, i: number) => CondenseRecord> = {
 	Td: (id, i) => foldTool(id, i, "todo"),
 	Fa: (id, i) => ({ ...foldTool(id, i, "bash"), isError: true }),
 	Du: (id, i) => ({ ...foldTool(id, i, "bash"), durationS: 7 }),
+	/* Team Bridge's split noun: a POST (`kind:bridge:post`) and an ACTION
+	   (`kind:bridge`). The split reads the call's op from its args, which the
+	   relay record carries from `details.args` - the same args as the desktop's
+	   tokens, so the port reproduces the same keys from the same op. */
+	Bp: (id, i) => ({
+		...foldTool(id, i, "bridge"),
+		args: { op: "channel_post", channel_id: "bcv_1", body: "b" },
+	}),
+	Ba: (id, i) => ({
+		...foldTool(id, i, "bridge"),
+		args: { op: "channel_history", channel_id: "bcv_1" },
+	}),
 };
 
 /** A settled tool record, as the desktop's token grammar builds them. */
@@ -257,13 +272,15 @@ const seq = (spec: string): CondenseRecord[] =>
  * The production fold wiring, ported from `canonical-transcript.tsx`'s call site.
  * These are inputs to the model, not decisions of it, so the relay passes the same
  * ones the desktop's generator does - `summaryOf` and `opOf` are the live clause's
- * WORDS (surface copy) and the relay's own row supplies them, so both stay "".
+ * WORDS (surface copy) and the relay's own row supplies them, so `summaryOf`
+ * stays "". `opOf` is production's `bridgeOpOf`: the bridge split is a
+ * DECISION (which noun key a call counts under), so the fixture pins it.
  */
 const foldOptions = (liveTurn: boolean, latchedFoldIds: ReadonlySet<string>) => ({
 	nameOf: (row: Row) => ledgerName(row.record),
 	durationOf: workedSecondsOf,
 	summaryOf: () => "",
-	opOf: () => "",
+	opOf: bridgeOpOf,
 	failedOf: (row: Row) =>
 		row.record.kind === "tool" && isFailedResult(row.record.isError, undefined),
 	runningOf: (row: Row) => row.record.kind === "tool" && row.record.phase !== "done",
@@ -388,7 +405,9 @@ describe("the condense parity fixture", () => {
 		/*
 		 * AND THE SIZE IS PINNED, so a desktop change that adds a wall of quiet
 		 * cases shows up as a diff in review instead of quietly shrinking what this
-		 * suite proves. `-27` is read from the corpus this copy pins.
+		 * suite proves. 27 is independently counted from this corpus's Z/R
+		 * tokens (28 before incoming Bi reseeded the property sequences). No new
+		 * unexpressible token or skip predicate is added by the incoming port.
 		 */
 		expect(fromHelper.length).toBe(27);
 		/* Every skip carries the quiet pair, and none is skipped for another reason:
@@ -563,6 +582,10 @@ const WIRE: Record<string, WireToken> = {
 	Py: (id) => wireTool("eval", { id }),
 	Ak: (id) => wireTool("agent", { id }),
 	Td: (id) => wireTool("todo", { id }),
+	/* Bridge rides its args in `details.args`, which is where the relay record
+	   reads the op from (`toCondenseRecord`). */
+	Bp: (id) => wireTool("bridge", { id, details: { args: { op: "channel_post", channel_id: "bcv_1", body: "b" } } }),
+	Ba: (id) => wireTool("bridge", { id, details: { args: { op: "channel_history", channel_id: "bcv_1" } } }),
 	Fa: (id) => wireTool("bash", { id, tool_state: "failed" }),
 	Du: (id) => wireTool("bash", { id, elapsed_s: 7 }),
 	N: (id) => wireEntry({ id, kind: "assistant", text: "text", calls_tools: true }),
@@ -577,6 +600,7 @@ const WIRE: Record<string, WireToken> = {
 		wireEntry({ id, kind: "peer_message", text: "peer", details: { sender: {} } }),
 	J: (id) => wireEntry({ id, kind: "notice", text: "t", custom_type: "job_result" }),
 	H: (id) => wireEntry({ id, kind: "notice", text: "t", custom_type: "hub_message" }),
+	Bi: (id) => wireEntry({ id, kind: "notice", text: "t", custom_type: "team_bridge_message" }),
 	X: (id) => wireEntry({ id, kind: "notice", text: "t", custom_type: "monitor_prompt" }),
 	Q: (id) =>
 		wireEntry({ id, kind: "notice", text: "t", custom_type: "session_mcp_unavailable" }),
@@ -667,4 +691,21 @@ describe("the quiet-closed fallback the skip-list names", () => {
 		 * lost, only deferred to the merged run's settlement. */
 		expect(wire.runs[0].segments.length).toBeGreaterThan(0);
 	});
+});
+
+describe("incoming Bridge receipt wire mapping", () => {
+	it("keeps typed Bridge receipts in incoming action aggregation, not generic notices", () => {
+		const records = toCondenseRecords([wireEntry({ id: "incoming", kind: "notice", custom_type: "team_bridge_message", text: "metadata only" })]);
+		expect(records[0]?.kind).toBe("custom");
+		expect(isInternalReceipt(records[0]!)).toBe(true);
+		const boundary = toCondenseRecords([wireEntry({ id: "generic", kind: "notice", text: "team_bridge_message" })]);
+		expect(isInternalReceipt(boundary[0]!)).toBe(false);
+	});
+});
+
+it("keeps admitted history media as a visible source row while incoming Bridge work folds", () => {
+	const incoming = (id: string) => wireEntry({ id, kind: "notice", custom_type: "team_bridge_message", text: "Metadata only" });
+	const history = wireTool("bridge", { id: "history-image", images: [{ index: 0, mime_type: "image/png" }], details: { args: { op: "channel_history" } } });
+	const view = composeCondensedEntries([incoming("receipt-1"), history, incoming("receipt-2"), wireTool("bridge", { id: "post", details: { args: { op: "channel_post" } } }), wireTool("send", { id: "send" })], { live: true });
+	expect(view.entries.some(item => item.kind === "row" && item.entry.id === "history-image")).toBe(true);
 });

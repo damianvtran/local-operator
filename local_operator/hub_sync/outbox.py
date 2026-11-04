@@ -213,6 +213,34 @@ class Outbox:
                     fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
+    @contextlib.contextmanager
+    def org_skill_operation(self, operation_id: str) -> Iterator[bool]:
+        """Fence one org-skill dispatch across processes; kernel releases on death.
+
+        This lock is separate from the short outbox metadata lock: it serializes
+        only this operation while a network call is in flight, allowing recovery
+        to distinguish a dead owner from another active dispatcher.
+        """
+        import fcntl
+
+        path = self._path(operation_id)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path.with_suffix(".operation.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        acquired = False
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except OSError as exc:
+                if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                    raise
+            yield acquired
+        finally:
+            if acquired:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
     def _atomic_write(self, record: OutboxRecord) -> None:
         path = self._path(record.operation_id)
         fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=f".{record.operation_id}.", suffix=".tmp")
@@ -401,6 +429,7 @@ class Outbox:
         max_attempts: int = PUSH_MAX_ATTEMPTS,
         now: str | None = None,
         input_fp: str | None = None,
+        recover_org_skill_intent: bool = False,
     ) -> "Attempt | None":
         """Start (or resume) an attempt; ``None`` = skip this tick.
 
@@ -454,6 +483,21 @@ class Outbox:
                     replay=record.intent,
                 )
             if record.state == "pending":
+                # Only the holder of the per-operation OS lock may recover an
+                # org intent: another live dispatcher could still own a pending
+                # row. Preserve the exact request and generation after a crash.
+                if (
+                    recover_org_skill_intent
+                    and record.kind == "skill"
+                    and isinstance(record.intent, Mapping)
+                    and record.intent.get("unpinned_org_skill") is True
+                ):
+                    self._atomic_write(dataclasses.replace(record, state="pending-reconciliation"))
+                    return Attempt(
+                        generation=record.generation,
+                        attempts=record.attempts,
+                        replay=record.intent,
+                    )
                 # An abandoned attempt (crash between begin and settle): fence it.
                 attempts = record.attempts + 1
                 if attempts > max_attempts and not changed:
@@ -609,9 +653,36 @@ class AsyncDispatcher:
         """
         remaining = budget.require(stage)
         client = self._ensure()
+        # WHY the commit read timeout is the budget, not ``read_timeout``: a
+        # commit legitimately waits on SERVER-SIDE moderation (observed 19s in
+        # production against a 15s socket read limit). The write has usually
+        # ALREADY landed by then, so cutting the read early turned a successful
+        # publication into a false failure. The attempt budget is the one
+        # authority on how long a commit may run (and its expiry is already the
+        # uncertain, reconcilable outcome), so the transport belt must never be
+        # shorter than it. Connect stays short: a connect that has not completed
+        # proves the request was never sent. Preview keeps the short read limit:
+        # nothing is written by a preview, so a timeout there is a plain retry.
+        per_request: Any = (
+            httpx.Timeout(
+                connect=self.connect_timeout,
+                read=remaining,
+                write=self.read_timeout,
+                pool=self.connect_timeout,
+            )
+            if stage == "commit"
+            else httpx.USE_CLIENT_DEFAULT
+        )
         try:
             return await asyncio.wait_for(
-                client.request(method, url, json=json_body, headers=headers, params=params),
+                client.request(
+                    method,
+                    url,
+                    json=json_body,
+                    headers=headers,
+                    params=params,
+                    timeout=per_request,
+                ),
                 timeout=remaining,
             )
         except asyncio.TimeoutError:

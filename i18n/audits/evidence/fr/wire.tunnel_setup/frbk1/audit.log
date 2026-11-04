@@ -1,0 +1,47 @@
+# fr-wire-audit-b — audit.log — fr/wire.tunnel_setup
+# audit id frbk1 | 2026-10-29 | session 500e883ce1b1 | served model radient/auto
+# audited revision 9495f8a6c3bf2b5438ef5c33d7274cf519435dda on branch feat/i18n-core-fr-backfill
+# The target catalogue is an untracked working-tree file, so the bytes audited
+# are bound by sha256 below rather than by a commit of their own.
+
+$ git rev-parse HEAD
+9495f8a6c3bf2b5438ef5c33d7274cf519435dda
+
+$ git branch --show-current
+feat/i18n-core-fr-backfill
+
+$ shasum -a 256 local_operator/i18n/catalogues/{en,fr}/wire.tunnel_setup*.json
+# cross-checked in this audit run: shasum and Python hashlib agree on every file
+en      3854be7dce54dd3aeb9564921ed6a50f0560b32c7ac40955d81be93acd7e2ac1  en/wire.tunnel_setup.json
+context 0ff6f387f29ff89b62aa96c73aaffdb47f18ec775588043b63ea56ecd25c4457  en/wire.tunnel_setup.context.json
+fr      b79e45fca2a5bee0e23c22395c82affd57f8ce40014ff84647b97d913c8bdfb5  fr/wire.tunnel_setup.json
+
+$ ~/local-operator/.venv/bin/python  # parity + ICU through the repo parser
+from local_operator.i18n.runtime import message_arguments, plural_selectors
+key parity              : en=5 fr=5; missing in fr=none; extra in fr=none
+key order vs english    : identical
+argument tuple mismatches: 0
+keys carrying ICU arguments: 0
+keys carrying plural selectors: 0   (nothing for a plural branch to diverge on)
+
+$ ~/local-operator/.venv/bin/python  # typography by codepoint
+prose anomalies (outside quoted/code spans): 0
+hits inside quoted/code spans (must stay byte-identical): 0
+
+$ ~/local-operator/.venv/bin/python  # masking scan, ordinal comparison
+marker sequence found in any of the 5 French values: NO
+values containing '[' or ']': 0
+
+$ ~/local-operator/.venv/bin/python  # identifier tokens from English kept in French
+keys with an English identifier token missing from the French: 0
+
+$ ~/local-operator/.venv/bin/python  # width against declared maxCells
+    no maxCells in en/wire.tunnel_setup.context.json (sidecar present, no budgets)
+    widest values (fr cells, en cells, key):
+        234   165  wire.tunnel_setup.corrupt_intent
+        174   115  wire.tunnel_setup.unavailable
+        164   119  wire.tunnel_setup.deadline
+
+$ ~/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit 0

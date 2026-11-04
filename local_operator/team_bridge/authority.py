@@ -20,7 +20,10 @@ WHAT IT CHECKS (all persisted, no network):
 - the runtime's bound binding still matches EXACTLY: canonical base, account,
   tenant, endpoint, credential row, enrollment generation;
 - tenant consistency (``runtime.tenant_id`` == the committed owner's tenant);
-- the runtime's session is still the NATIVE designated session.
+- the runtime's session is non-empty and, except for explicitly outbound
+  operations/admission, still the NATIVE designated session (a mismatch there is
+  `not_designated`, not `owner_changed`: the binding is intact, the session is
+  simply not the inbox reader).
 ANY miss returns a typed refusal (``feature_off`` / ``owner_changed`` /
 ``consent_revoked``) and the caller performs NO fetch, NO mutation, NO POST.
 
@@ -43,6 +46,7 @@ from typing import Any
 
 __all__ = [
     "authority_fence",
+    "outbound_authority_fence",
     "scope_from_runtime",
     "scope_matches_runtime",
 ]
@@ -50,6 +54,24 @@ __all__ = [
 
 def _refusal(code: str, error: str) -> dict[str, str]:
     return {"code": code, "error": error}
+
+
+def _not_designated() -> dict[str, str]:
+    """A live binding, but this session is not the account's inbox reader.
+
+    A DISTINCT code (review round 1 MAJOR 2): `owner_changed` says the Radient
+    binding drifted and invites a re-link, which is false and alarming for an
+    ordinary task session that simply asked a mailbox/owner-shared op. Those ops
+    belong to the designated chief-of-staff session; nothing is wrong with this
+    one.
+    """
+
+    return _refusal(
+        "not_designated",
+        "this session is not the account's chief-of-staff session, so the mailbox and "
+        "owner-shared conversations belong to that session; from here use directory, dm, "
+        "channel_create, channel_post, channel_history, channel_thread or react",
+    )
 
 
 def _owner_changed() -> dict[str, str]:
@@ -61,7 +83,24 @@ def _owner_changed() -> dict[str, str]:
 
 
 def authority_fence(runtime: Any) -> dict[str, str] | None:
-    """``None`` when this runtime is still authorized; else a typed refusal."""
+    """Strict authority for inbound delivery, asks, and body consumption."""
+
+    return _authority_fence(runtime, require_designation=True)
+
+
+def outbound_authority_fence(runtime: Any) -> dict[str, str] | None:
+    """Authorize outbound operations/admission without granting inbound authority.
+
+    Writer sessions share the enrolled owner but are not the inbox recipient.
+    Only designation is relaxed: every persisted binding and consent check
+    remains shared with the strict fence, including a non-empty session id.
+    """
+
+    return _authority_fence(runtime, require_designation=False)
+
+
+def _authority_fence(runtime: Any, *, require_designation: bool) -> dict[str, str] | None:
+    """Keep the binding checks identical across the two authority scopes."""
 
     from local_operator.config import read_config_values
 
@@ -106,8 +145,10 @@ def authority_fence(runtime: Any) -> dict[str, str] | None:
         if str(getattr(runtime, "tenant_id", "")) != str(owner.tenant_id):
             return _owner_changed()
         session_id = str(getattr(runtime, "session_id", "") or "")
-        if not session_id or store.designated_session_for(owner) != session_id:
+        if not session_id:
             return _owner_changed()
+        if require_designation and store.designated_session_for(owner) != session_id:
+            return _not_designated()
         return None
     except (StoreRefused, sqlite3.Error, OSError, UnicodeDecodeError):
         # TB-12: a decode error is store/config damage in the fence's terms —

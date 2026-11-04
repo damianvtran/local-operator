@@ -1,0 +1,22 @@
+{
+  "cli.browser_help.browser": "براؤزر ٹول کو Chromium ایکسٹینشن سے جوڑیں",
+  "cli.browser_help.install": "برج ڈیمن انسٹال کریں",
+  "cli.browser_help.status": "ڈیمن، ایکسٹینشن اور جوڑنے کی حالت دکھائیں",
+  "cli.browser_help.status_repair": "اعلان شدہ حالت کو حقیقت سے ہم آہنگ کریں: موجود نہ رہنے والے ٹیبز ہٹائیں اور نیا ہارٹ بیٹ دوبارہ شائع کریں۔ سیشنز فعال ہونے پر بھی محفوظ۔",
+  "cli.browser_help.json": "مشین کے پڑھنے کے قابل آؤٹ پٹ",
+  "cli.browser_help.cleanup": "دوبارہ توثیق کے بعد ایک ثابت شدہ ختم شدہ براؤزر مالک کو بند کریں",
+  "cli.browser_help.cleanup_yes": "اس عین صفائی کی منظوری دیں",
+  "cli.browser_help.daemon_action": "{action, select, start{ڈیمن شروع کریں} stop{ڈیمن روکیں} restart{ڈیمن دوبارہ شروع کریں} other{{action} ڈیمن}}",
+  "cli.browser_help.pair": "ایکسٹینشن جوڑنے کا کوڈ دکھائیں",
+  "cli.browser_help.pair_reset": "پہلے جوڑا گیا براؤزر منسوخ کریں",
+  "cli.browser_help.pair_list": "مجاز براؤزر ایکسٹینشنز کی فہرست دکھائیں، اور یہ کہ کون سی چلا رہی ہے",
+  "cli.browser_help.pair_revoke": "ایک مجاز ایکسٹینشن منسوخ کریں (اس کا id، واضح id پریفکس، یا لیبل کا کچھ حصہ)، باقی سب جڑی رہتی ہیں",
+  "cli.browser_help.drive": "منتخب کریں کہ کون سی مجاز ایکسٹینشن براؤزر چلائے",
+  "cli.browser_help.drive_target": "ایکسٹینشن id (یا واضح پریفکس)، یا اس کے لیبل کا کچھ حصہ",
+  "cli.browser_help.logs": "ڈیمن لاگ کا آخری حصہ دکھائیں",
+  "cli.browser_help.uninstall": "برج ڈیمن ہٹائیں",
+  "cli.browser_help.uninstall_purge": "جوڑنے کی حالت بھی حذف کریں",
+  "cli.browser_help.serve": "برج ڈیمن چلائیں (فورگراؤنڈ)",
+  "cli.browser_help.tabs": "پائیدار ملکیتی ریکارڈز اور فعال ٹیبز کی فہرست دکھائیں (صرف پڑھنے کے لیے)",
+  "cli.browser_help.reconcile": "'tabs' کا متبادل: کچھ بند کیے بغیر ملکیت کا معائنہ کریں"
+}

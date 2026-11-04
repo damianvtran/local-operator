@@ -1,0 +1,84 @@
+# hi/cli.send_help audit.log: records the audit sessions kept, verbatim; nothing here is a replayed command.
+# The auditors wrote findings.jsonl / progress.log / summary.md (read-only brief), not a shell log.
+
+## round 1: audit dir core-audit/hi, auditor session 68a6549527ad
+verdict.txt:
+CHANGES_REQUESTED
+BLOCKER=0 MAJOR=2 MINOR=17 NIT=9 (28 findings; 1294 values across 55 namespaces)
+progress.log:
+tui.small 137 6
+tui.library 108 2
+tui.analytics 98 1
+tui.projects 97 3
+tui.import 87 0
+mobile.setup 76 2
+cli.browser 64 2
+tui.hub_links 56 0
+tui.app 46 2
+cli.sessions_help 47 2
+wire.errors.agents 44 0
+cli.teams_help 34 0
+wire.errors.media 20 0
+cli.agents_help 21 0
+tui.usage 21 0
+cli.browser_help 20 0
+cli.exec_help 20 2
+wire.errors.sdk_spec 21 1
+cli.aida_help 4 0
+cli.config_help 9 0
+cli.credential_help 5 0
+cli.exec_runtime 11 0
+cli.hub_shared_help 12 0
+cli.exec_worker_help 11 0
+cli.global_help 17 1
+cli.hub_help 12 1
+cli.install_help 5 0
+cli.login_help 2 0
+cli.login_status_help 2 0
+cli.logout_help 2 0
+cli.mcp_help 19 0
+cli.memory_help 1 0
+cli.model_help 5 0
+cli.monitor_help 6 0
+cli.qwencloud_help 5 0
+cli.refresh_help 7 0
+cli.resume_click_help 1 0
+cli.mobile_help 15 2
+cli.send_help 7 0
+cli.serve_help 5 0
+cli.services_help 9 0
+cli.stop_help 9 0
+cli.update_help 6 0
+cli.wake_help 17 0
+relay.login 4 0
+wire.aida_cadence 2 0
+wire.console 8 0
+wire.errors.auth 12 0
+wire.errors.files 11 0
+wire.errors.sdk_startup 4 0
+wire.host_speed 2 0
+wire.settings.hub_defaults 9 0
+wire.slash.library 2 0
+wire.tunnel_setup 5 0
+wire.settings.account_policy 14 1
+
+## round 2: audit dir core-audit2/hi, auditor session e9c85b728add
+verdict.txt:
+PASS
+BLOCKER 0 · MAJOR 0 · MINOR 1 · NIT 3 (96 changed keys judged; 0 declined; 28/28 round-1 findings addressed)
+progress.log:
+loaded 55 patch namespaces (1294 values), en + context via git cat-file origin/main (7 namespaces lack sidecar)
+read glossary.md + style-guides/hi.md (origin/main)
+(A) judged all 96 changes.jsonl AFTER values against English: all acceptable
+(B) declined.jsonl empty; translator judgement call on cli.mobile_help.devices (पुश डिवाइस = push notifications) reviewed: accepted
+(C) swept classes: approval/अनुमोद, प्रदाता, प्रश्न, वार्तालाप, माइलस्टोन, अलग से, सर्विस, हिला, चाल, टूडू, push/pull/merge/commit/endpoint/extra Latin, X में से Y order, slash gender forms, आपत्तिजनक/सेहत/अदावा, polarity of अस्वीकृत, protocol tokens -> 1 MINOR (sessions sync pull), 1 NIT
+(D) mechanical: placeholders, plural arms one/other+other present, braces, NFC, LF-only, no bidi/ZW/control, ANSI/backticks/%s/Rich, NBSP; widths on 30 maxCells keys with Mc=1 count and rich.cell_len: 0 over
+ru wire.settings.hub_defaults.agents.help: 60 cells / limit 72 (earlier 76 figure stale)
+wrote findings.jsonl, verdict.txt, summary.md
+
+## applier-computed (apply_locale.py, run against the worktree at 137984daf98e6491dfd97cb6812d51c1a98abe6c)
+keys merged for this namespace: 7
+sha256 en  local_operator/i18n/catalogues/en/cli.send_help.json = ab7d3c4a3ac0696b935d613c2b7596c56dbd3b32a8fdabe29ff2bc3a93a1bfb9
+sha256 tgt local_operator/i18n/catalogues/hi/cli.send_help.json = b983763ac2a8dc16fd9c4a615a959289960f94926dad35a6be0182b5c37d8e12
+sha256 audited patch file (scratchpad core-i18n/hi/cli.send_help.json) = 19ce909b5a866d122880b0d31978578d3347c17341a6d0bf8ac8b0effdfc804f
+assertions passed: patch keys subset of en, every en key present, English key order, patch values byte-equal to catalogue values, no pre-existing value changed

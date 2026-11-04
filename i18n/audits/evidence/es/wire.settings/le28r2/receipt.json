@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2",
+  "locale": "es",
+  "namespace": "wire.settings",
+  "source_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+  "target_sha256": "0315208baf769f89249fa6acbabe4508c6495c7fe0af0c0a2ca2d67ead199bb7",
+  "hashes": {
+    "audit.log": "f84205d105b48b0368ec72f5adfff464597d80e36de047ef037d7e28cf0b0af6",
+    "coverage.json": "f4415d6a5c9545554bb1b02e6d92ffcc26a756f5fbbe0efa694abe494acb3df5",
+    "extra_checks.py.txt": "021b80e6a99f447fe6973af5c655c123750f7c042f1c5e8cb38c410e5e226d39",
+    "findings.json": "68db1b9705ff63eb3acbf538a57a0095badecf23180e96169e965f7a41a22367",
+    "mech_sweep.py.txt": "3905b1630aea590646fccb31b2628de7519a93fb4a443a62d9a0e161ba400348",
+    "mechanical.json": "14c2ec43f12ac32809cbcb29b6f953a6e98bfb5d2e3788fce7e812ec47766e61",
+    "prior-ledger.json": "73bbc1613c60b4c9768edaa4064f7fcb2df18c1dc2c3888a2e1b3c010ebd38da",
+    "probe.py.txt": "a431d62529197feec3f74988f1a19cefb5acfbf90e836f7fc382beb574517f31",
+    "record.json": "e92fb72d88cc7562552d062510970876a20f38cb7bd9f3738618f352b4119057",
+    "rendered-text.json": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+    "renders.py.txt": "7cd2c376d3c59183f6fc60155dce9f6c2d514b10e58ce4da1f4dec49d657bf33",
+    "report.md": "a2be4fb63f7368daa857a53c7d168a030050345cc72a40e13b2c0db4bd4cfbc6",
+    "route-receipts.json": "2aa6c79aa7dbac42325535cdccc99e31e9da040d4ad674a33ddd7af83aa8588c",
+    "subaudit-original.json": "ad213f56c421a392e8eea08aa7ce82f37e0aede8f92121ec3974301217f24270",
+    "subaudit-original.md": "bba4252ca1828ed8eacf77dd7e08bc83168ac709be681da22162981428311f56",
+    "widths-and-rederivations.json": "05c86247feab5726aafbcaab8e75eb1a225edfcd4ce6a3bc47b89f36f2f4bea6"
+  }
+}

@@ -1,0 +1,272 @@
+audit.log — tui.import (es) — audit id w6a2 — round 2 — 2026-10-30
+This file is the EXECUTION log: each block is a command and its real output.
+Judgements live in report.md and record.json; those are notes, not evidence.
+All commands run from the repository root.
+
+### 0. environment
+$ /Users/damian/local-operator/.venv/bin/python --version
+Python 3.12.13
+$ /Users/damian/local-operator/.venv/bin/python -c 'from importlib.metadata import version; print("rich", version("rich"))'
+rich 15.0.0
+[exit 0]
+
+### audited revision
+$ git rev-parse HEAD
+b925c2e11be36653dfe88ac78f627bc2531427df
+[exit 0]
+
+### the two target files are untracked in this worktree, so HEAD does not bind their bytes
+$ git status --porcelain -- local_operator/i18n/catalogues/es/tui.analytics.json local_operator/i18n/catalogues/es/tui.import.json
+?? local_operator/i18n/catalogues/es/tui.analytics.json
+?? local_operator/i18n/catalogues/es/tui.import.json
+[exit 0]
+
+### input hashes (en / target / context) recorded in record.json
+$ shasum -a 256 local_operator/i18n/catalogues/en/tui.analytics.json local_operator/i18n/catalogues/es/tui.analytics.json local_operator/i18n/catalogues/en/tui.analytics.context.json local_operator/i18n/catalogues/en/tui.import.json local_operator/i18n/catalogues/es/tui.import.json
+aa5221066aa84eedf0f924628d51bc8f08ccf5f26b5075638b9d40062f7b617e  local_operator/i18n/catalogues/en/tui.analytics.json
+0496f1b123ab06e0aee3c991f8551c0013f77b3b1fff77230b876ec4e9143657  local_operator/i18n/catalogues/es/tui.analytics.json
+04356facdf1802a34a4be9ab6d3255cc9e92826d2b4e9ae917c43f687a9325eb  local_operator/i18n/catalogues/en/tui.analytics.context.json
+932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2  local_operator/i18n/catalogues/en/tui.import.json
+17a4dec148f5de8bfb07e79c35e0b84eaa02da13bbf713676c42dbaa4d840725  local_operator/i18n/catalogues/es/tui.import.json
+[exit 0]
+
+### tui.import has no English context sidecar (no per-key maxCells)
+$ ls -la local_operator/i18n/catalogues/en/tui.import.context.json
+ls: local_operator/i18n/catalogues/en/tui.import.context.json: No such file or directory
+[exit 1]
+
+### the repository's own catalogue validator (the checkout's interpreter: /usr/bin/python3 is 3.9 and has no tomllib)
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+[exit 0]
+
+### the widget's own documented row budget and the show_move gate
+$ grep -n 'The hint row still fits at 80x24' -B2 -A6 local_operator/tui/widgets/harness_import_view.py
+506-        state = self._state
+507-        labels: dict[HintButton, str] = {}
+508:        # The hint row still fits at 80x24 (76 cells); only the 60x20 row needs
+509-        # to shed it. Gate on the measured page width, not the pane breakpoint.
+510-        show_move = state in ("sources", "sessions") and (not self._narrow or self.size.width >= 74)
+511-        if show_move:
+512-            labels[self._hint_move] = _t(_kt.hint_move())
+513-        if state == "sources":
+514-            labels[self._hint_enter] = _t(_kt.hint_open())
+[exit 0]
+
+### the two paddings that turn an 80-column terminal into a 76-cell hint row
+$ grep -n '^Screen {' -A 9 local_operator/tui/local_operator.tcss; grep -n '^\.settings-view {' -A 3 local_operator/tui/local_operator.tcss
+161:Screen {
+162-    background: $lo-bg;
+163-    color: $lo-fg;
+164-    /* Outer inset for the WHOLE app, matching the omp reference: the chrome is
+165-     * borderless, so the breathing room at the terminal's edges is what makes
+166-     * it read as a deliberate surface rather than text that ran out of room.
+167-     * One row top and bottom, one cell left and right. Children then only
+168-     * manage spacing BETWEEN themselves. */
+169-    padding: 1;
+170-    /* A second layer for the toast overlay. Layers are arranged independently
+2111:.settings-view {
+2112-    height: 1fr;
+2113-    padding: 1 1 1 1;
+2114-}
+[exit 0]
+
+### the hint seam (' · ') and the key/label join the assembler reproduces
+$ grep -n 'The seam belongs to the ROW' -B 4 -A 8 local_operator/tui/widgets/subagent_view.py
+1785-        dim = Style(color=theme_mod.semantic_color(key_token))
+1786-        faint = Style(color=theme_mod.semantic_color(label_token))
+1787-        row = Text(no_wrap=True, overflow="ellipsis")
+1788-        if lead:
+1789:            # The seam belongs to the ROW, not to the hint that follows it, so
+1790-            # it keeps its resting tone even while that hint is hovered — a
+1791-            # punctuation mark must not read as part of a control.
+1792-            row.append(" · ", style=Style(color=theme_mod.semantic_color("faint")))
+1793-        if self._key:
+1794-            row.append(self._key, style=dim)
+1795-        if label:
+1796-            row.append(f" {label}" if self._key else label, style=faint)
+1797-        return row
+[exit 0]
+
+### the per-state hint subsets and the show_move gate the rows are assembled from
+$ sed -n '505,530p' local_operator/tui/widgets/harness_import_view.py
+    def _hint_labels(self) -> dict[HintButton, str]:
+        state = self._state
+        labels: dict[HintButton, str] = {}
+        # The hint row still fits at 80x24 (76 cells); only the 60x20 row needs
+        # to shed it. Gate on the measured page width, not the pane breakpoint.
+        show_move = state in ("sources", "sessions") and (not self._narrow or self.size.width >= 74)
+        if show_move:
+            labels[self._hint_move] = _t(_kt.hint_move())
+        if state == "sources":
+            labels[self._hint_enter] = _t(_kt.hint_open())
+            labels[self._hint_reload] = _t(_kt.hint_reload())
+        elif state == "sessions":
+            labels[self._hint_space] = _t(_kt.hint_select())
+            labels[self._hint_all] = _t(_kt.all_none())
+            labels[self._hint_enter] = _t(_kt.hint_preview())
+        elif state == "preview":
+            labels[self._hint_enter] = (
+                _t(_kt.hint_confirm()) if self._only_metadata_only() else _t(_kt.hint_import())
+            )
+        elif state == "progress":
+            labels[self._hint_cancel] = _t(_kt.hint_cancel())
+        elif state == "result":
+            labels[self._hint_enter] = _t(_kt.hint_list())
+        labels[self._hint_esc] = _t(_kt.hint_back())
+        return labels
+[exit 0]
+
+### A1 cross-file evidence: razonamiento is the established es term for reasoning
+$ grep -rn 'pensamiento\|razonamiento' local_operator/i18n/catalogues/es/*.json | wc -l; grep -on 'razonamiento' local_operator/i18n/catalogues/es/*.json | cut -d: -f1 | sort | uniq -c | sort -rn
+      21
+  11 local_operator/i18n/catalogues/es/wire.settings.json
+   4 local_operator/i18n/catalogues/es/tui.notices.json
+   1 local_operator/i18n/catalogues/es/wire.slash.json
+   1 local_operator/i18n/catalogues/es/wire.errors.desktop.json
+   1 local_operator/i18n/catalogues/es/tui.analytics.json
+   1 local_operator/i18n/catalogues/es/relay.chrome.json
+   1 local_operator/i18n/catalogues/es/cli.exec_help.json
+[exit 0]
+
+### where the other word survives, and for what (the model's streamed thought, not the token class)
+$ grep -on 'pensamiento' local_operator/i18n/catalogues/es/*.json | cut -d: -f1 | sort | uniq -c
+   1 local_operator/i18n/catalogues/es/tui.notices.json
+   1 local_operator/i18n/catalogues/es/wire.settings.json
+[exit 0]
+
+### this bundle's checks — round-2 additions: augmenting rows, ladder order, the round-1 dispositions, and every negative control
+$ env PYTHONPATH=/Users/damian/lo-i18n-es /Users/damian/local-operator/.venv/bin/python /Users/damian/lo-i18n-es/i18n/audits/evidence/es/tui.import/w6a2/checks.py
+namespace : tui.import
+locale    : es
+repo root : /Users/damian/lo-i18n-es
+en        : tui.import.json exists=True
+target    : es/tui.import.json exists=True
+context   : tui.import.context.json exists=False
+cell_len  : rich.cells.cell_len (the function the TUI measures with)
+
+key counts: en=87 target=87 context=0
+
+== blocking checks ==
+  0 failure(s) so far
+
+== measurements ==
+  plural messages checked: 15
+  render tui.import.pending_count: 1->1 sesión pendiente | 0->0 sesiones pendientes | 2->2 sesiones pendientes | 1000000->1.000.000 de sesiones pendientes | 2000000->2.000.000 de sesiones pendientes | 1500000->1.500.000 sesiones pendientes
+  render tui.import.preview_memory: 1->1 registro de memoria · ~1 tokens · 1 tokens globales | 0->0 registros de memoria · ~0 tokens · 0 tokens globales | 2->2 registros de memoria · ~2 tokens · 2 tokens globales | 1000000->1.000.000 de registros de memoria · ~1.000.000 tokens · 1.000.000 tokens globales | 2000000->2.000.000 de registros de memoria · ~2.000.000 tokens · 2.000.000 tokens globales | 1500000->1.500.000 registros de memoria · ~1.500.000 tokens · 1.500.000 tokens globales
+  render tui.import.preview_narrow: 1->1 seleccionada · Aún no se ha importado nada; enter importa. | 0->0 seleccionadas · Aún no se ha importado nada; enter importa. | 2->2 seleccionadas · Aún no se ha importado nada; enter importa. | 1000000->1.000.000 de seleccionadas · Aún no se ha importado nada; enter importa. | 2000000->2.000.000 de seleccionadas · Aún no se ha importado nada; enter importa. | 1500000->1.500.000 seleccionadas · Aún no se ha importado nada; enter importa.
+  render tui.import.preview_narrow_metadata: 1->1 seleccionada · No se importará nada. | 0->0 seleccionadas · No se importará nada. | 2->2 seleccionadas · No se importará nada. | 1000000->1.000.000 de seleccionadas · No se importará nada. | 2000000->2.000.000 de seleccionadas · No se importará nada. | 1500000->1.500.000 seleccionadas · No se importará nada.
+  render tui.import.preview_summary: 1->1 sesión · 1 mensaje (estimado) · 1 compactación | 0->0 sesiones · 0 mensajes (estimado) · 0 compactaciones | 2->2 sesiones · 2 mensajes (estimado) · 2 compactaciones | 1000000->1.000.000 de sesiones · 1.000.000 de mensajes (estimado) · 1.000.000 de compactaciones | 2000000->2.000.000 de sesiones · 2.000.000 de mensajes (estimado) · 2.000.000 de compactaciones | 1500000->1.500.000 sesiones · 1.500.000 mensajes (estimado) · 1.500.000 compactaciones
+  render tui.import.preview_warnings: 1->1 aviso | 0->0 avisos | 2->2 avisos | 1000000->1.000.000 de avisos | 2000000->2.000.000 de avisos | 1500000->1.500.000 avisos
+  render tui.import.result_detail: 1->1 · 1 mensaje | 0->0 · 0 mensajes | 2->2 · 2 mensajes | 1000000->1.000.000 · 1.000.000 de mensajes | 2000000->2.000.000 · 2.000.000 de mensajes | 1500000->1.500.000 · 1.500.000 mensajes
+  render tui.import.result_summary: 1->1 · 1 sesión · 1 mensaje | 0->0 · 0 sesiones · 0 mensajes | 2->2 · 2 sesiones · 2 mensajes | 1000000->1.000.000 · 1.000.000 de sesiones · 1.000.000 de mensajes | 2000000->2.000.000 · 2.000.000 de sesiones · 2.000.000 de mensajes | 1500000->1.500.000 · 1.500.000 sesiones · 1.500.000 mensajes
+  render tui.import.result_warnings: 1->1 aviso | 0->0 avisos | 2->2 avisos | 1000000->1.000.000 de avisos | 2000000->2.000.000 de avisos | 1500000->1.500.000 avisos
+  render tui.import.session_meta: 1->1 mensaje · 1 compactación · 1 | 0->0 mensajes · 0 compactaciones · 0 | 2->2 mensajes · 2 compactaciones · 2 | 1000000->1.000.000 de mensajes · 1.000.000 de compactaciones · 1.000.000 | 2000000->2.000.000 de mensajes · 2.000.000 de compactaciones · 2.000.000 | 1500000->1.500.000 mensajes · 1.500.000 compactaciones · 1.500.000
+  render tui.import.source_row: 1->1  1 sesión  1 | 0->0  0 sesiones  0 | 2->2  2 sesiones  2 | 1000000->1.000.000  1.000.000 de sesiones  1.000.000 | 2000000->2.000.000  2.000.000 de sesiones  2.000.000 | 1500000->1.500.000  1.500.000 sesiones  1.500.000
+  protected-token comparison on 87 shared keys
+  no maxCells declared in this sidecar — widths are advisory only
+  polarity: 0 lost negation(s); 2 key(s) where es adds a negative marker (reviewed by hand, not auto-failed): ['tui.import.rerun_hint', 'tui.import.review_memory']
+  byte-identical prose values: 0
+  semantic assertions evaluated: 33
+  infinitive action labels asserted on 9 hint keys
+  assembler control: EN sessions row reproduced byte-identically from the EN catalogue (62 cells, widget-measured 62)
+  row[sources]: es=48 en=42 budget=76 :: ↑↓ mover · enter abrir · r recargar · esc volver
+  row[sessions]: es=75 en=62 budget=76 :: ↑↓ mover · space elegir · a todas/ninguna · enter vista previa · esc volver
+  row[preview_import]: es=27 en=23 budget=76 :: enter importar · esc volver
+  row[preview_confirm]: es=28 en=24 budget=76 :: enter confirmar · esc volver
+  row[progress]: es=23 en=19 budget=76 :: c cancelar · esc volver
+  row[result]: es=25 en=21 budget=76 :: enter listar · esc volver
+  row[loading]: es=10 en=8 budget=76 :: esc volver
+  sessions row ends with 'esc volver' (10 cells); row=75 <= 76, spare=1
+  gate boundary (measured, not gated): show_move paints down to a 74-cell box = a 78-column terminal; the row is +1 against that box, so 1 trailing cell(s) of 'esc volver' clip at exactly that width
+  I1: sessions row MATCHES the round-1 suggestion (75 cells)
+  I2: APPLIED — tui.import.hint_list
+  I3: APPLIED — tui.import.error_select
+  N1: NOT APPLIED — tui.import.result_memory
+  N2: NOT APPLIED — tui.import.selected_count
+  N3: recorded-only nit (no fixed wording requested) — judgement in report.md
+
+== negative controls (each MUST trip its check) ==
+  negative control [keys] dropped one key: CAUGHT
+      -> [keys] 1 key(s) missing from target: ['tui.import.all_none']
+  negative control [icu] renamed a placeholder argument: CAUGHT
+      -> [icu] tui.import.empty_sessions: argument tuple differs — en=(('source', 'simple'),) target=(('renombrado', 'simple'),)
+  negative control [plural] deleted a 'many' branch: CAUGHT
+      -> [plural] tui.import.pending_count: argument count has ['one', 'other']; es requires at least ['many', 'one', 'other']
+  negative control [plural] emptied a branch: CAUGHT
+      -> [plural] tui.import.pending_count: empty branch/branches ['other']
+  negative control [plural] added a 'few' category: CAUGHT
+      -> [plural] tui.import.pending_count: ['few'] is not a Spanish CLDR category (argument count)
+  negative control [tokens] translated the <source> machine token: CAUGHT
+      -> [tokens] tui.import.error_source_required: protected tokens differ — en=['/command:/import', '<angle-token>:<source>', '[bracket-token]:[id]'] target=['/command:/import', '<angle-token>:<origen>', '[bracket-token]:[id]']
+  negative control [budget] injected maxCells=8 on tui.import.all_none (en fits, es does not): CAUGHT
+      -> [budget] tui.import.all_none: 13 cells exceeds maxCells 8 (en 8 fits)
+  negative control [polarity] dropped 'nothing has been imported': CAUGHT
+      -> [polarity] tui.import.preview_confirm: EN negates, target carries no negative marker
+  negative control [semantics] dropped the rewritten-source behaviour: CAUGHT
+      -> [semantics] tui.import.rerun_hint: expected 'copia nueva|nueva copia' (rerun: rewritten sources get a NEW COPY); got 'Repetir es seguro: las fuentes sin cambios se omiten y las que han crecido se reanudan.'
+  negative control [terms] used 'demonio' for daemon: CAUGHT
+      -> [terms] tui.import.all_none: 'demonio' — daemon stays English (§2 amendment)
+  negative control [untranslated] left a prose value in English: CAUGHT
+      -> [untranslated] tui.import.empty_header: target is byte-identical to EN prose — 'No sessions to import'
+  negative control [row] restored the round-1 'space seleccionar' (an 80-cell sessions row): CAUGHT
+      -> [row] sessions: assembled row is 80 cells, over the documented 76-cell row at 80x24: '↑↓ mover · space seleccionar · a todas/ninguna · enter vista previa · esc volver'
+  negative control [row] grew a SIBLING term in the same row past the 76-cell budget: CAUGHT
+      -> [row] sessions: assembled row is 91 cells, over the documented 76-cell row at 80x24: '↑↓ mover · space elegir · a todas/ninguna de las sesiones · enter vista previa · esc volver'
+  negative control [register] restored the round-1 noun 'lista' in an infinitive hint family: CAUGHT
+      -> [register] tui.import.hint_list: 'lista' is not an infinitive action label (es guide: action labels are infinitives; en is an imperative verb)
+
+== result ==
+  PASS — all checks clean, every negative control tripped
+[exit 0]
+
+### RIG: the real HarnessImportView, mounted headless with the two stylesheet paddings applied, painting its own sessions-state hint row (EN control: the assembler in checks.py must reproduce this row byte-for-byte)
+$ env PYTHONPATH=/Users/damian/lo-i18n-es /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/3add261f67ba/scratchpad/probe_import_hints.py
+package : /Users/damian/lo-i18n-es/local_operator/__init__.py
+locale  : LOP_LANG=es active=en
+80x24: state=sessions view_outer=76 view_content=76 hints_box=76 narrow=True row=62 slack=+14
+    row  : '↑↓ move · space select · a all/none · enter preview · esc back'
+    parts: '↑↓ move'=7 | ' · space select'=15 | ' · a all/none'=13 | ' · enter preview'=16 | ' · esc back'=11
+79x24: state=sessions view_outer=75 view_content=75 hints_box=75 narrow=True row=62 slack=+13
+    row  : '↑↓ move · space select · a all/none · enter preview · esc back'
+    parts: '↑↓ move'=7 | ' · space select'=15 | ' · a all/none'=13 | ' · enter preview'=16 | ' · esc back'=11
+78x24: state=sessions view_outer=74 view_content=74 hints_box=74 narrow=True row=62 slack=+12
+    row  : '↑↓ move · space select · a all/none · enter preview · esc back'
+    parts: '↑↓ move'=7 | ' · space select'=15 | ' · a all/none'=13 | ' · enter preview'=16 | ' · esc back'=11
+77x24: state=sessions view_outer=73 view_content=73 hints_box=73 narrow=True row=52 slack=+21
+    row  : 'space select · a all/none · enter preview · esc back'
+    parts: 'space select'=12 | ' · a all/none'=13 | ' · enter preview'=16 | ' · esc back'=11
+76x24: state=sessions view_outer=72 view_content=72 hints_box=72 narrow=True row=52 slack=+20
+    row  : 'space select · a all/none · enter preview · esc back'
+    parts: 'space select'=12 | ' · a all/none'=13 | ' · enter preview'=16 | ' · esc back'=11
+75x24: state=sessions view_outer=71 view_content=71 hints_box=71 narrow=True row=52 slack=+19
+    row  : 'space select · a all/none · enter preview · esc back'
+    parts: 'space select'=12 | ' · a all/none'=13 | ' · enter preview'=16 | ' · esc back'=11
+74x24: state=sessions view_outer=70 view_content=70 hints_box=70 narrow=True row=52 slack=+18
+    row  : 'space select · a all/none · enter preview · esc back'
+    parts: 'space select'=12 | ' · a all/none'=13 | ' · enter preview'=16 | ' · esc back'=11
+60x20: state=sessions view_outer=56 view_content=56 hints_box=56 narrow=True row=52 slack=+4
+    row  : 'space select · a all/none · enter preview · esc back'
+    parts: 'space select'=12 | ' · a all/none'=13 | ' · enter preview'=16 | ' · esc back'=11
+[exit 0]
+
+### RIG: the es error_select value injected into the real empty-state body at 80x24 (does the longer message wrap, or is it truncated?)
+$ env PYTHONPATH=/Users/damian/lo-i18n-es /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/3add261f67ba/scratchpad/probe_error_select_wrap.py
+error_select (75 cells): 'Selecciona al menos una sesión con la tecla espacio antes de previsualizar.'
+body_scroller_width=76 body_text_height=4
+body_text_plain_contains_full_message=True
+body_text_plain='Selecciona una sesión\n\nSelecciona al menos una sesión con la tecla espacio antes de previsualizar.\n'
+[exit 0]
+
+### the exact check scripts that produced the blocks above
+$ shasum -a 256 i18n/audits/evidence/es/tui.analytics/w6a2/checks.py i18n/audits/evidence/es/tui.import/w6a2/checks.py
+5e0247c9b628daae3c0519556e97a689e2dbc2a7c93516c905a8a88830957b06  i18n/audits/evidence/es/tui.analytics/w6a2/checks.py
+813c89aebf3aab4da43ec4ca584a1e47d7c0720ed31edeeea10aa7f0dafa5fe2  i18n/audits/evidence/es/tui.import/w6a2/checks.py
+[exit 0]
+
+
+### rig sources (provenance note, not an execution log entry)
+The rig commands above were run from this session's scratch path. Their exact
+sources are preserved beside this log as `probe_import_hints.py.txt` and
+`probe_error_select_wrap.py.txt` (text, not a second executable tree; copy to
+`.py` to re-run).

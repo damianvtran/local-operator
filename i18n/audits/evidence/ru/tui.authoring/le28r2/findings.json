@@ -1,0 +1,31 @@
+{
+  "locale": "ru",
+  "namespace": "tui.authoring",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 1,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "id": "T1",
+      "key": "tui.authoring.promote_usage",
+      "severity": "minor",
+      "category": "context/literal grammar",
+      "en": "Use {command} <name> [replace] [yes] [as <new name>].",
+      "current": "Используйте {command} <имя> [replace] [yes] [as <новое имя>].",
+      "problem": "The English context explicitly requires the bracketed grammar, including as <new name>, to remain literal. This locale translates the angle-bracket metavariables, unlike usage_edit/footer. Actual yes/replace/as command tokens are preserved, so this is non-gating context consistency, not a broken command.",
+      "proposed": "Используйте {command} <name> [replace] [yes] [as <new name>].",
+      "source": "Sonnet comparison; GPT final context adjudication"
+    }
+  ],
+  "adjudication": [],
+  "linguistic_gate_status": "passed",
+  "publication_hold_reasons": [
+    "en context sidecar not routable"
+  ]
+}

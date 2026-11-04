@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2",
+  "locale": "fr",
+  "namespace": "tui.transcript",
+  "routed_reads": [
+    {
+      "path": "local_operator/i18n/catalogues/en/tui.transcript.json",
+      "session": "050d26076010",
+      "session_name": "i18n-route-transcript",
+      "ts": "2026-10-28T23:46:51Z",
+      "tool": "read_public_copy",
+      "policy": "docs/security/redaction-policy.md",
+      "chars": 1180,
+      "reader_body_sha256": "013ace1b0e2657a1e82fea6db81d1d8e54f1c7b15c538c8b3fce2612d7a34218",
+      "recomputed_body_sha256": "013ace1b0e2657a1e82fea6db81d1d8e54f1c7b15c538c8b3fce2612d7a34218",
+      "receipt_copies_in_audit_log": 1,
+      "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl"
+    },
+    {
+      "path": "local_operator/i18n/catalogues/fr/tui.transcript.json",
+      "session": "050d26076010",
+      "session_name": "i18n-route-transcript",
+      "ts": "2026-10-28T23:47:04Z",
+      "tool": "read_public_copy",
+      "policy": "docs/security/redaction-policy.md",
+      "chars": 1386,
+      "reader_body_sha256": "ff49e000451d351c726fa4e60300aade52575667a9abeaf623e5e494fd53cacf",
+      "recomputed_body_sha256": "ff49e000451d351c726fa4e60300aade52575667a9abeaf623e5e494fd53cacf",
+      "receipt_copies_in_audit_log": 1,
+      "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl"
+    }
+  ],
+  "context_sidecar": {
+    "path": "local_operator/i18n/catalogues/en/tui.transcript.context.json",
+    "routed_read_attempted": true,
+    "refused": true,
+    "verbatim_refusal": "refused: catalogue keys and values must be strings",
+    "why": "read_public_copy validates a catalogue as a flat key->string map; the en context sidecar maps keys to role/tone/note objects, so the sanctioned route cannot serve it at this tool version.",
+    "evidence": "child session transcript of the ws_context run (tool result line)",
+    "consequence": "context-sidecar reading remains a direct-git read, not routed; all other inputs for this pair are routed."
+  },
+  "judgement_inputs": "The semantic findings were formed on direct git reads; these receipts were obtained afterwards and independently confirm the same bytes (recomputed digest equality), not the judgements.",
+  "disclosure": "Only en source and locale catalogue reads are sanctioned-reader receipts. Earlier judgements are NOT relabelled as routed."
+}

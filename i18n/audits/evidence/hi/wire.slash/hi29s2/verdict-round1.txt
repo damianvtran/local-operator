@@ -1,0 +1,2 @@
+CHANGES_REQUESTED
+hi wire.slash: 1 MAJOR — accounts/logout use singular क्रेडेंशियल where the hi guide and glossary note 6 fix the plural as क्रेडेंशियल्स; 3 MINOR (agent "किसी का" lost its object, hub "ऑटो-push" mixed-script glue, mcp dropped "किसी एक को"); width is fine — max 51 cells and no value longer than its English (worst is /exit, 12 = 12).

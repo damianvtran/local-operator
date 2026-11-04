@@ -1,0 +1,221 @@
+# w4a2 round-2 audit run — relay.shell
+run_at_utc: 2026-10-29T22:15:32Z
+host: damians-MacBook-Pro / macOS-27.0.1-arm64-arm-64bit-Mach-O
+python: 3.14.7
+repo: /Users/damian/lo-i18n-es   branch: feat/i18n-es-wire-errors
+HEAD: 183f7a0537e4cee42fd82f25a21fe52953a81bdf
+tracked_state (target): ?? local_operator/i18n/catalogues/es/relay.shell.json
+w4a1 log read for the neighbour comparison: audit.log
+
+## input hashes (sha256) of the ROUND-2 bytes
+  en          f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560  local_operator/i18n/catalogues/en/relay.shell.json
+  en.context  16746ecd1537006992935bb2aa88fe39c46700d9e0341e7aacd565e2366349ea  local_operator/i18n/catalogues/en/relay.shell.context.json
+  es          fdc0d458f441d6e2097ff0f69722025c1b6f7294089ad9886827ec0c2fd3fde2  local_operator/i18n/catalogues/es/relay.shell.json
+
+## key parity: en=44 es=44 missing=[] extra=[]
+## delta keys claimed by this round: ['relay.shell.usage.used', 'relay.shell.usage.remaining', 'relay.shell.usage.remaining_unknown_unit', 'relay.shell.usage.used_unknown_unit', 'relay.shell.usage.continue']
+
+## independent CLDR cross-check — Node Intl.PluralRules vs the repo tables
+  node={0: 'other', 1: 'one', 2: 'other', 21: 'other', 1000000: 'many', 1500000: 'other', 2000000: 'many'}
+  repo={0: 'other', 1: 'one', 2: 'other', 21: 'other', 1000000: 'many', 1500000: 'other', 2000000: 'many'}
+  agree=True
+
+## argument names per key (en vs es, recursive through every branch)
+  argument_set_diffs=0
+
+## plural categories used by the target
+  categories_used=['many', 'one', 'other'] selectable=['many', 'one', 'other'] illegal=[]
+
+## DELTA renders — full composition, exactly usage-sheet.tsx's path
+  credits  remaining         0 -> Quedan 0 créditos restantes
+  credits  remaining         1 -> Queda 1 crédito restante
+  credits  remaining         2 -> Quedan 2 créditos restantes
+  credits  remaining        21 -> Quedan 21 créditos restantes
+  credits  remaining   1000000 -> Quedan 1.000.000 de de créditos restantes
+  credits  remaining   1500000 -> Quedan 1.500.000 créditos restantes
+  credits  remaining   2000000 -> Quedan 2.000.000 de de créditos restantes
+  credits  used              0 -> Se usaron 0 créditos
+  credits  used              1 -> Se usó 1 crédito
+  credits  used              2 -> Se usaron 2 créditos
+  credits  used             21 -> Se usaron 21 créditos
+  credits  used        1000000 -> Se usaron 1.000.000 de de créditos
+  credits  used        1500000 -> Se usaron 1.500.000 créditos
+  credits  used        2000000 -> Se usaron 2.000.000 de de créditos
+  tokens   remaining         0 -> Quedan 0 tokens restantes
+  tokens   remaining         1 -> Queda 1 token restante
+  tokens   remaining         2 -> Quedan 2 tokens restantes
+  tokens   remaining        21 -> Quedan 21 tokens restantes
+  tokens   remaining   1000000 -> Quedan 1.000.000 de de tokens restantes
+  tokens   remaining   1500000 -> Quedan 1.500.000 tokens restantes
+  tokens   remaining   2000000 -> Quedan 2.000.000 de de tokens restantes
+  tokens   used              0 -> Se usaron 0 tokens
+  tokens   used              1 -> Se usó 1 token
+  tokens   used              2 -> Se usaron 2 tokens
+  tokens   used             21 -> Se usaron 21 tokens
+  tokens   used        1000000 -> Se usaron 1.000.000 de de tokens
+  tokens   used        1500000 -> Se usaron 1.500.000 tokens
+  tokens   used        2000000 -> Se usaron 2.000.000 de de tokens
+  requests remaining         0 -> Quedan 0 solicitudes restantes
+  requests remaining         1 -> Queda 1 solicitud restante
+  requests remaining         2 -> Quedan 2 solicitudes restantes
+  requests remaining        21 -> Quedan 21 solicitudes restantes
+  requests remaining   1000000 -> Quedan 1.000.000 de de solicitudes restantes
+  requests remaining   1500000 -> Quedan 1.500.000 solicitudes restantes
+  requests remaining   2000000 -> Quedan 2.000.000 de de solicitudes restantes
+  requests used              0 -> Se usaron 0 solicitudes
+  requests used              1 -> Se usó 1 solicitud
+  requests used              2 -> Se usaron 2 solicitudes
+  requests used             21 -> Se usaron 21 solicitudes
+  requests used        1000000 -> Se usaron 1.000.000 de de solicitudes
+  requests used        1500000 -> Se usaron 1.500.000 solicitudes
+  requests used        2000000 -> Se usaron 2.000.000 de de solicitudes
+  usd      remaining         0 -> Quedan 0 USD restantes
+  usd      remaining         1 -> Queda 1 USD restante
+  usd      remaining         2 -> Quedan 2 USD restantes
+  usd      remaining        21 -> Quedan 21 USD restantes
+  usd      remaining   1000000 -> Quedan 1.000.000 de USD restantes
+  usd      remaining   1500000 -> Quedan 1.500.000 USD restantes
+  usd      remaining   2000000 -> Quedan 2.000.000 de USD restantes
+  usd      used              0 -> Se usaron 0 USD
+  usd      used              1 -> Se usó 1 USD
+  usd      used              2 -> Se usaron 2 USD
+  usd      used             21 -> Se usaron 21 USD
+  usd      used        1000000 -> Se usaron 1.000.000 de USD
+  usd      used        1500000 -> Se usaron 1.500.000 USD
+  usd      used        2000000 -> Se usaron 2.000.000 de USD
+  percent  remaining         0 -> 0 % restante
+  percent  remaining         1 -> 1 % restante
+  percent  remaining         2 -> 2 % restante
+  percent  remaining        21 -> 21 % restante
+  percent  remaining   1000000 -> 1.000.000 % restante
+  percent  remaining   1500000 -> 1.500.000 % restante
+  percent  remaining   2000000 -> 2.000.000 % restante
+  percent  used              0 -> 0 % usado
+  percent  used              1 -> 1 % usado
+  percent  used              2 -> 2 % usado
+  percent  used             21 -> 21 % usado
+  percent  used        1000000 -> 1.000.000 % usado
+  percent  used        1500000 -> 1.500.000 % usado
+  percent  used        2000000 -> 2.000.000 % usado
+  unknown  remaining         0 -> Quedan 0 restantes
+  unknown  remaining         1 -> Queda 1 restante
+  unknown  remaining         2 -> Quedan 2 restantes
+  unknown  remaining        21 -> Quedan 21 restantes
+  unknown  remaining   1000000 -> Quedan 1.000.000 de restantes
+  unknown  remaining   1500000 -> Quedan 1.500.000 restantes
+  unknown  remaining   2000000 -> Quedan 2.000.000 de restantes
+  unknown  used              0 -> Se usaron 0
+  unknown  used              1 -> Se usó 1
+  unknown  used              2 -> Se usaron 2
+  unknown  used             21 -> Se usaron 21
+  unknown  used        1000000 -> Se usaron 1.000.000 de usados
+  unknown  used        1500000 -> Se usaron 1.500.000
+  unknown  used        2000000 -> Se usaron 2.000.000 de usados
+
+## CONTROL — the same messages with a NOMINATIVE unit string
+  (what a hand-run that skips unit_credits' own `many` branch measures)
+  relay.shell.usage.used unit='créditos' 1000000 -> Se usaron 1.000.000 de créditos
+  relay.shell.usage.used unit='de créditos' 1000000 -> Se usaron 1.000.000 de de créditos
+  relay.shell.usage.remaining unit='créditos' 1000000 -> Quedan 1.000.000 de créditos restantes
+  relay.shell.usage.remaining unit='de créditos' 1000000 -> Quedan 1.000.000 de de créditos restantes
+
+## CANDIDATE REMEDY (auditor proposal, one/other only; {unit} carries `de`)
+  credits  remaining         0 -> Quedan 0 créditos restantes
+  credits  remaining         1 -> Queda 1 crédito restante
+  credits  remaining        21 -> Quedan 21 créditos restantes
+  credits  remaining   1000000 -> Quedan 1.000.000 de créditos restantes
+  credits  remaining   1500000 -> Quedan 1.500.000 créditos restantes
+  credits  remaining   2000000 -> Quedan 2.000.000 de créditos restantes
+  credits  used              0 -> Se usaron 0 créditos
+  credits  used              1 -> Se usó 1 crédito
+  credits  used             21 -> Se usaron 21 créditos
+  credits  used        1000000 -> Se usaron 1.000.000 de créditos
+  credits  used        1500000 -> Se usaron 1.500.000 créditos
+  credits  used        2000000 -> Se usaron 2.000.000 de créditos
+  requests remaining         0 -> Quedan 0 solicitudes restantes
+  requests remaining         1 -> Queda 1 solicitud restante
+  requests remaining        21 -> Quedan 21 solicitudes restantes
+  requests remaining   1000000 -> Quedan 1.000.000 de solicitudes restantes
+  requests remaining   1500000 -> Quedan 1.500.000 solicitudes restantes
+  requests remaining   2000000 -> Quedan 2.000.000 de solicitudes restantes
+  requests used              0 -> Se usaron 0 solicitudes
+  requests used              1 -> Se usó 1 solicitud
+  requests used             21 -> Se usaron 21 solicitudes
+  requests used        1000000 -> Se usaron 1.000.000 de solicitudes
+  requests used        1500000 -> Se usaron 1.500.000 solicitudes
+  requests used        2000000 -> Se usaron 2.000.000 de solicitudes
+  usd      remaining         0 -> Quedan 0 USD restantes
+  usd      remaining         1 -> Queda 1 USD restante
+  usd      remaining        21 -> Quedan 21 USD restantes
+  usd      remaining   1000000 -> Quedan 1.000.000 USD restantes
+  usd      remaining   1500000 -> Quedan 1.500.000 USD restantes
+  usd      remaining   2000000 -> Quedan 2.000.000 USD restantes
+  usd      used              0 -> Se usaron 0 USD
+  usd      used              1 -> Se usó 1 USD
+  usd      used             21 -> Se usaron 21 USD
+  usd      used        1000000 -> Se usaron 1.000.000 USD
+  usd      used        1500000 -> Se usaron 1.500.000 USD
+  usd      used        2000000 -> Se usaron 2.000.000 USD
+  unknown  remaining         0 -> Quedan 0 restantes
+  unknown  remaining         1 -> Queda 1 restante
+  unknown  remaining        21 -> Quedan 21 restantes
+  unknown  remaining   1000000 -> Quedan 1.000.000 restantes
+  unknown  remaining   1500000 -> Quedan 1.500.000 restantes
+  unknown  remaining   2000000 -> Quedan 2.000.000 restantes
+  unknown  used              0 -> Se usaron 0
+  unknown  used              1 -> Se usó 1
+  unknown  used             21 -> Se usaron 21
+  unknown  used        1000000 -> Se usaron 1.000.000
+  unknown  used        1500000 -> Se usaron 1.500.000
+  unknown  used        2000000 -> Se usaron 2.000.000
+
+## timestamp keys
+  reset = Se restablece el 11 oct 2026 a las 9:00
+  as_of = A fecha de 11 oct 2026, 9:00.
+  fraction = 29 % usado
+  row = L · W: V
+  row_family = L (fam) · W: V
+
+## delta keys, rendered in place
+  relay.shell.usage.used
+    src: '{value, plural, one {Se usó # {unit}} many {Se usaron # de {unit}} other {Se usaron # {unit}}}'
+            0 -> Se usaron 0 X
+            1 -> Se usó 1 X
+            2 -> Se usaron 2 X
+           21 -> Se usaron 21 X
+      1000000 -> Se usaron 1.000.000 de X
+      1500000 -> Se usaron 1.500.000 X
+      2000000 -> Se usaron 2.000.000 de X
+  relay.shell.usage.remaining
+    src: '{value, plural, one {Queda # {unit} restante} many {Quedan # de {unit} restantes} other {Quedan # {unit} restantes}}'
+            0 -> Quedan 0 X restantes
+            1 -> Queda 1 X restante
+            2 -> Quedan 2 X restantes
+           21 -> Quedan 21 X restantes
+      1000000 -> Quedan 1.000.000 de X restantes
+      1500000 -> Quedan 1.500.000 X restantes
+      2000000 -> Quedan 2.000.000 de X restantes
+  relay.shell.usage.remaining_unknown_unit
+    src: '{value, plural, one {Queda # restante} many {Quedan # de restantes} other {Quedan # restantes}}'
+            0 -> Quedan 0 restantes
+            1 -> Queda 1 restante
+            2 -> Quedan 2 restantes
+           21 -> Quedan 21 restantes
+      1000000 -> Quedan 1.000.000 de restantes
+      1500000 -> Quedan 1.500.000 restantes
+      2000000 -> Quedan 2.000.000 de restantes
+  relay.shell.usage.used_unknown_unit
+    src: '{value, plural, one {Se usó #} many {Se usaron # de usados} other {Se usaron #}}'
+            0 -> Se usaron 0
+            1 -> Se usó 1
+            2 -> Se usaron 2
+           21 -> Se usaron 21
+      1000000 -> Se usaron 1.000.000 de usados
+      1500000 -> Se usaron 1.500.000
+      2000000 -> Se usaron 2.000.000 de usados
+  relay.shell.usage.continue
+    src: 'Asignación incluida agotada; continuará con créditos.'
+    -> 'Asignación incluida agotada; continuará con créditos.'
+
+## neighbour check: every non-delta key reproduces w4a1's recorded render
+  reproduced=39 changed=0 unrecorded=0 of 39 non-delta keys

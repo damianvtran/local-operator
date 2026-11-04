@@ -1,0 +1,59 @@
+# audit.log — fr / tui.small / frbk1
+# commands are recorded verbatim; the text under each is the command's real output.
+
+$ git -C /Users/damian/lo-i18n-base status --porcelain | grep 'catalogues/fr/'
+?? local_operator/i18n/catalogues/fr/tui.small.json
+
+$ git -C /Users/damian/lo-i18n-base rev-parse HEAD
+9495f8a6c3bf2b5438ef5c33d7274cf519435dda
+
+$ ls /Users/damian/lo-i18n-base/local_operator/i18n/catalogues/en/tui.small.context.json
+/Users/damian/lo-i18n-base/local_operator/i18n/catalogues/en/tui.small.context.json
+
+$ PYTHONPATH=/Users/damian/lo-i18n-base /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/d5db18882cb9/scratchpad/frbk1_audit_ns.py tui.small
+namespace=tui.small keys_en=137 keys_fr=137 context=present
+sidecar_keys=137 sidecar_missing=[] sidecar_extra=[]
+sha256 en=16d49c4ba2a514bbde7da494443abade26a3b28c0389e6bca124d00aa7d0ed75
+sha256 context=1e3d6785f78126b8389b2acbcc081d5bf782fbaf744114e47611fbff3c45dde1
+sha256 fr=5a1a26ac03a707b7878d4eeb9511d90f398ee48862ed1ff237b5bdb886c6d321
+key_order_matches_en= True
+missing_in_fr= []
+extra_in_fr= []
+argument_tuple_diffs= NONE
+fr_plural_categories= ['many', 'one', 'other']
+plural_selectors_added_vs_en= 11
+  tui.small.draft.attachment_count: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.small.ask_queue.question_waiting: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.small.ask_queue.question_timed_out: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.small.copy_picker.more_lines: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.small.wake_panel.monitors_need_attention: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.small.wake_panel.monitors_armed: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.small.network_panel.member_count: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.small.wake_panel.scheduled_count: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.small.settings_view.hop_count: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.small.command_picker.projects: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+  tui.small.command_picker.entries: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+invalid_fr_selectors= NONE
+typography_strays= NONE
+u202f_total=7 u00a0_total=0
+whitespace_signature_diffs= NONE
+maxCells_rows= [('tui.small.spend.no_charge', 9, 9, 9), ('tui.small.spend.unpriced_failed_wide', 27, 26, 30), ('tui.small.spend.unpriced_failed', 19, 19, 24), ('tui.small.spend.unpriced_failed_short', 10, 11, 24), ('tui.small.spend.unpriced_failed_mixed', 30, 28, 30), ('tui.small.spend.unpriced_failed_mixed_mid', 19, 23, 24), ('tui.small.spend.unpriced_failed_mixed_short', 11, 11, 12), ('tui.small.spend.unpriced_cancelled_wide', 36, 37, 38), ('tui.small.spend.unpriced_cancelled', 29, 29, 30), ('tui.small.spend.unpriced_cancelled_short', 20, 23, 24), ('tui.small.spend.unpriced_cancelled_shortest', 12, 12, 12), ('tui.small.spend.unpriced_ok', 22, 21, 24), ('tui.small.spend.unpriced_ok_short', 15, 10, 15), ('tui.small.spend.unpriced_partial', 22, 22, 24), ('tui.small.spend.unpriced_partial_short', 13, 12, 15), ('tui.small.spend.unpriced_partial_shortest', 12, 9, 12)]
+over_budget= NONE
+largest_fr_minus_en  (plural=ICU template length, not rendered width):
+  + 56  tui.small.wake_panel.monitors_need_attention   en= 99 fr=155 [plural-template]
+  + 50  tui.small.wake_panel.monitors_armed            en= 75 fr=125 [plural-template]
+  + 45  tui.small.ask_queue.question_waiting           en= 81 fr=126 [plural-template]
+  + 43  tui.small.copy_picker.more_lines               en= 71 fr=114 [plural-template]
+  + 41  tui.small.ask_queue.question_timed_out         en= 85 fr=126 [plural-template]
+  + 28  tui.small.settings_view.hop_count              en= 57 fr= 85 [plural-template]
+  + 26  tui.small.network_panel.member_count           en= 61 fr= 87 [plural-template]
+  + 26  tui.small.command_picker.entries               en= 60 fr= 86 [plural-template]
+  + 24  tui.small.draft.attachment_count               en= 64 fr= 88 [plural-template]
+  + 24  tui.small.wake_panel.scheduled_count           en= 60 fr= 84 [plural-template]
+  + 24  tui.small.command_picker.projects              en= 63 fr= 87 [plural-template]
+  + 20  tui.small.tool_card.http_error_page            en= 62 fr= 82
+
+$ PYTHONPATH=/Users/damian/lo-i18n-base /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only; echo "exit=$?"
+check.py: catalogue checks: 0 problem(s)
+exit=0
+

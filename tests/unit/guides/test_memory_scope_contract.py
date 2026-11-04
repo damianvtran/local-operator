@@ -7,6 +7,8 @@ of the Markdown. These are guidance contracts, not proof a model obeys them;
 normal-tool fresh-agent scope-selection pilots remain a separate acceptance gate.
 """
 
+import pytest
+
 
 def _memory_guide() -> str:
     # Resolve on demand just as read(guide://memory) does. Keeping this import
@@ -54,3 +56,92 @@ def test_personal_helper_and_existing_privacy_limits_remain_explicit() -> None:
     assert "Explicit role allowlists are never widened" in body
     assert "secret NAME references only" in body
     assert "an unlabelled secret can still be stored, journaled and synced" in body
+
+
+def test_capture_label_and_tombstone_floor_claims_match_the_code() -> None:
+    """PR #3086 review r2, m2 + n1.
+
+    The label is the fact's STATUS, so a deliberate edit or move still lists as
+    `captured`; the old "(automatic, unreviewed)" gloss contradicted the capture
+    paragraph above it. And the eviction floor counts EVERY tombstone the session
+    holds — forgets and expiries as well as evictions — so the guide must not read as
+    if only evictions are counted.
+    """
+    body = _memory_guide()
+
+    assert "labelled `captured` (status `candidate`" in body
+    assert "(automatic, unreviewed)" not in body
+    assert "once the session holds 2,500 tombstones" in body
+    assert "its forgets and expiries counted with its evictions" in body
+
+
+def test_scope_fit_shapes_and_the_session_todo_remedy_are_documented() -> None:
+    """Review round 1 n-1/n-2 and QA round 1 Q-3/Q-4.
+
+    The shape list must name what the code actually refuses (a line-opening `PR1234`,
+    `session todo`, `task progress`, `next action`), it must not claim the refusal
+    says only "the marker", and the `stated` gloss must not re-create the
+    contradiction the capture paragraph removed.
+    """
+    body = _memory_guide()
+
+    assert "a line OPENING with" in body
+    assert "naming the shape that" in body
+    assert "naming the marker and" not in body
+    assert "A `Session todo:` line is refused:" in body
+    assert "write the reminder itself, without the session framing" in body
+    assert "or `stated` (deliberate)" not in body
+
+
+def test_the_boundaries_round_3_settled_are_documented() -> None:
+    """Review round 2 M-1/m-1/n-2 and QA round 2 QA2-1/QA2-2.
+
+    The guide must not promise a verb as work context (`push`, `squash` are English),
+    must not claim a `ticket` HOLD is refused when only `branch` is, and must state the
+    two bounds a reader would otherwise only find in a PR thread: a line whose FIRST
+    token is a bare personal number, and the `task progress` report shape.
+    """
+    body = _memory_guide()
+
+    assert "a work verb (`rebase`, `squash`, …)" not in body
+    assert "unambiguous work token" in body
+    assert "or ticket with a review state" not in body
+    assert "on a branch with a review state" in body
+    assert "`task progress` on a named workstream" not in body
+    assert "a `task progress` report" in body
+    assert "a line whose FIRST token is a bare" in body
+
+
+def test_the_task_progress_report_shape_is_documented() -> None:
+    """A `task progress` REPORT is work; a preference that lists the phrase is not.
+
+    The operator's own stored boundaries note reads `… not task progress, release
+    status …`, so a bare-phrase rule refused a live durable personal fact. The guide has
+    to say which of the two it refuses, or the next reader will re-widen it.
+    """
+    body = _memory_guide()
+
+    assert "a `task progress` report" in body
+    assert "only a `task progress` REPORT is" in body
+    assert "is not a report and stores" in body
+    assert "the literal phrase `task progress` is refused" not in body
+
+
+def test_the_line_opening_bound_is_stated_as_it_behaves() -> None:
+    """QA round 3, QA3-1: the arm keys on the FIRST token, not on "a line".
+
+    `Flight PR102 Manila to Sydney …` stores because the line opens with a word; only a
+    bare `PR102 Manila …` refuses. The guide said the first form was refused, which is
+    the one direction that would make a writer rephrase a fact that never needed it.
+    """
+    guide = _memory_guide()
+    assert "a line whose FIRST token is a bare" in guide
+    assert "while the same number inside a sentence or behind a leading word" in guide
+
+    from local_operator.memory import MemoryError, scope_fit
+
+    refused = {"title": "x", "body": "PR102 Manila to Sydney departs 22:40", "tags": []}
+    accepted = {"title": "x", "body": "Flight PR102 Manila to Sydney departs 22:40", "tags": []}
+    with pytest.raises(MemoryError):
+        scope_fit("global", dict(refused, aliases=[], subject=""))
+    scope_fit("global", dict(accepted, aliases=[], subject=""))  # must not raise

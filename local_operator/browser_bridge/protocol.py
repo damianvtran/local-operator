@@ -95,7 +95,15 @@ def proto_supported(
 #: 0.1.25 is the first tree whose `element_not_found` carries
 #: `data.candidates` (role/name/locator) on a CSS miss as well as a locator
 #: miss, so the tool can name the closest real elements instead of a bare miss.
-EXPECTED_EXTENSION_VERSION = "0.1.25"
+#: 0.1.26 is the first tree with the pairing TAB (`pair/pair.html`): a normal
+#: extension page that survives focus loss, opened by the `show_pairing` event
+#: `lop browser pair` sends, and on first install.
+EXPECTED_EXTENSION_VERSION = "0.1.26"
+
+#: The first extension version that opens its pairing tab on `show_pairing`.
+#: An older install ignores the event, so `lop browser pair` tells its user to
+#: click the toolbar icon instead of pointing at a tab that never opened.
+SHOW_PAIRING_MIN_EXTENSION_VERSION = "0.1.26"
 
 #: The first extension version that serves each capability-gated method.
 #:
@@ -177,6 +185,13 @@ CAPABILITY_SWITCH_LOCATION = (
 #: peer into a typed, actionable `capability_unsupported` instead.
 CAPABILITY_GATED_METHODS: frozenset[str] = frozenset(
     {
+        # Old desktop hosts have no keyboard handler; refuse before sending
+        # so their missing capability is typed, not a generic bridge failure.
+        "press",
+        # Pointer hover is the same story: an app that predates it has no
+        # handler and would answer a bare `internal`.
+        "hover",
+        "select",
         "download",
         "upload",
         "styles",
@@ -187,8 +202,42 @@ CAPABILITY_GATED_METHODS: frozenset[str] = frozenset(
         "network_stop",
         "network_read",
         "network_clear",
+        # Video recording of the agent's own tab (design D8). Gated like the
+        # network capture: a build that predates the actions would answer a
+        # bare `internal`, which reads as "the bridge broke" instead of "this
+        # app is older than the action".
+        "record_start",
+        "record_stop",
     }
 )
+
+#: The capability token a desktop host advertises when its ``press`` understands
+#: the EXTENDED contract: a modifier chord (``Control+K``), any base key from the
+#: closed table (``Space``, ``F5``, a printable character) and an optional
+#: ``selector`` to focus first.
+#:
+#: It is a capability TOKEN and not a wire method: the wire method stays
+#: ``press`` and the frame shape is a superset of the original (``key`` plus an
+#: optional ``selector``). It exists because "advertises ``press``" is true of
+#: every desktop build since the 8-key allowlist shipped, and such a build would
+#: silently ignore ``selector`` and answer ``unsupported_key`` for the rest. The
+#: harness therefore sends a legacy-shaped press (one of the original eight keys,
+#: no selector) on ``press`` alone and refuses anything wider unless this token
+#: is also advertised. Not in ``CAPABILITY_GATED_METHODS`` (that set is keyed by
+#: request method); the tool checks it in ``_press_chord_problem``.
+PRESS_CHORD_CAPABILITY = "press_chord"
+
+#: The capability token a desktop host advertises when ``record_start`` accepts
+#: ``quality: "high"`` (H.264 in an MP4, a separate encoder from the default AV1
+#: path). A capability TOKEN and not a wire method, on the same terms as
+#: ``record_size``: the wire method stays ``record_start``, and a build without
+#: this token would IGNORE the field and record the default AV1 clip while
+#: reporting success. The harness therefore refuses ``quality="high"`` on its
+#: absence before any approval or path write, and still checks the echoed codec
+#: afterwards because the discovery record can be one app-swap stale. Not in
+#: ``CAPABILITY_GATED_METHODS`` (keyed by request method); the tool checks it in
+#: ``_browser_record``. No ``PROTO_VERSION`` bump.
+RECORD_QUALITY_CAPABILITY = "record_quality"
 
 #: The first extension TREE that carried the ``owner_*`` ownership lifecycle
 #: (PR #798, ``ee146fb73``), whose manifest reads ``0.1.9`` — verify with
@@ -229,6 +278,51 @@ EXTENSION_UPDATE_NOTE = (
     "Browser extension {have} < {want} — update it in Chrome when a newer version is "
     "offered; nothing is blocked."
 )
+
+
+#: How to update an older extension, in one sentence a person can follow.
+#:
+#: Chrome updates store extensions on its own schedule (hours, sometimes a day),
+#: and the only control it gives a person to force it is the Update button on
+#: chrome://extensions, which appears only with Developer mode on. That path is
+#: the one that works for the store build AND for a locally loaded one, so it is
+#: the one we name. Kept beside EXTENSION_UPDATE_NOTE so the CLI and the agent
+#: guide say the same thing; the CLI's own copy is keyed (cli.browser.*).
+EXTENSION_UPDATE_HOW = (
+    "open chrome://extensions, turn on Developer mode (top right), then click Update"
+)
+
+#: The pairing-result sentences the DAEMON sends to the extension's pairing form.
+#:
+#: Single-sourced here and exported to `protocol.gen.ts`, so the popup, the
+#: pairing tab and the daemon carry ONE spelling each. They are rendered by the
+#: extension, which is English-only today (no `_locales`), so they are wire
+#: constants rather than `cli.browser` keys.
+#:
+#: The register is the operator requirement of 2026-11-02: every sentence says
+#: what to DO next in the words a person would use, and the next step is always
+#: "ask Local Operator", never a command — most people pair from a chat with the
+#: agent, not from a terminal. Each fits two lines in the popup's 300px card:
+#: `#pair-error` reserves two line boxes, and a third line would resize the
+#: popup at the moment of failure (popup.css). Typographic quotes and
+#: apostrophes (design D5), matching how the pages render the ask phrase.
+PAIR_MISMATCH_MESSAGE = "That code didn\u2019t match. Check it and type it again."
+PAIR_EXPIRED_MESSAGE = "That code expired. Ask Local Operator to \u201cpair my browser\u201d again."
+PAIR_LOCKED_MESSAGE = (
+    "Too many wrong tries. Ask Local Operator to \u201cpair my browser\u201d for a new code."
+)
+PAIR_NO_CODE_MESSAGE = (
+    "There\u2019s no code for this browser yet. Ask Local Operator to \u201cpair my browser\u201d."
+)
+
+#: The phrase the extension tells a person to say to the agent, and the agent
+#: guide tells the agent to answer. One spelling, because it is a hand-off
+#: between two surfaces: the pairing form says it, the person repeats it.
+PAIR_ASK_PHRASE = "pair my browser"
+
+#: How long one code stays valid, in minutes, for COPY only. The daemon's
+#: `PAIR_TTL_S` is the authority; `test_pair_cold_state` pins the two together.
+PAIR_TTL_MINUTES = 15
 
 
 def parse_extension_version(value: str) -> tuple[int, ...] | None:
@@ -285,6 +379,12 @@ METHODS = (
     "screenshot",
     "click",
     "type",
+    "press",
+    # Kept beside `press` for readers. The desktop host appends `hover` at the
+    # end of ITS list: METHODS order is vocabulary, not wire, and nothing may
+    # depend on it matching the host's.
+    "hover",
+    "select",
     "close",
     "status",
     # tabs lists every live extension-owned surface. It exists because parallel
@@ -374,23 +474,47 @@ METHODS = (
     "network_stop",
     "network_read",
     "network_clear",
+    # Video recording of the agent's own tab (design D8). The wire carries an
+    # absolute destination the harness chose and approved at start; the host
+    # writes it at stop, so bytes never cross RPC (D3). Listed in the shared
+    # vocabulary even though only the desktop host serves it yet — the per-host
+    # answer is the advertisement, never a fork of this tuple.
+    "record_start",
+    "record_stop",
 )
 
 #: Wire methods only the DESKTOP app's browser host can serve.
 #:
 #: They stay in ``METHODS`` because the wire vocabulary is shared and additive at
-#: protocol 1, but this build must neither serve nor advertise them: the
-#: extension attaches its debugger for the length of one action, so it holds no
-#: standing session a ``Network`` subscription could live on. The advertisement is
-#: already derived from the extension's handler table, so this constant exists for
-#: the one place that would otherwise grow a second hand-kept list — the
-#: extension's "every wire method has a handler" test. Generated into both
+#: protocol 1, but this build must neither serve nor advertise them: network
+#: capture needs a standing channel the extension's worker lifetime does not give
+#: it, and recording needs to write a destination Chrome refuses a tab-scoped
+#: session (D10 keeps that one desktop-only until its probe and consent switch
+#: land). The advertisement is already derived from the extension's handler
+#: table, so this constant exists for the one place that would otherwise grow a
+#: second hand-kept list — the extension's "every wire method has a handler"
+#: test. Generated into both
 #: TypeScript targets so the two sides cannot drift.
 DESKTOP_ONLY_METHODS: tuple[str, ...] = (
+    # Owned-page CDP keyboard input is implemented only by the desktop host.
+    # Other peers neither advertise nor serve it and get capability_unsupported.
+    "press",
+    # Trusted pointer movement needs CDP Input.dispatchMouseEvent, which Chrome
+    # drops on the extension's intentionally-inactive tab (see the constraint
+    # recorded in extension/src/commands/input.ts), and the in-page synthetic
+    # substitute click uses is not a hover: it fires handlers but not CSS :hover
+    # nor a trusted pointer. Desktop only, same reason as `press`.
+    "hover",
     "network_start",
     "network_stop",
     "network_read",
     "network_clear",
+    # Recording is desktop-only until the extension probe and D10's operator
+    # switch land (D8/D10). The extension CAN hold a standing debugger session,
+    # but Chrome refuses it the CDP primitives that choose a destination, so the
+    # wire shape differs there and this vocabulary is the desktop one.
+    "record_start",
+    "record_stop",
 )
 
 
@@ -425,6 +549,11 @@ COMMAND_TIMEOUTS = {
     "goto": 30.0,
     "click": 25.0,
     "type": 25.0,
+    "press": 25.0,
+    # hover scrolls the target into view and moves the pointer once; no settle.
+    "hover": 20.0,
+    # DOM selection + bounded read-back; never waits for an OS popup.
+    "select": 25.0,
     "read": 20.0,
     "snapshot": 20.0,
     "screenshot": 20.0,
@@ -481,6 +610,14 @@ COMMAND_TIMEOUTS = {
     "network_stop": 20.0,
     "network_read": 20.0,
     "network_clear": 20.0,
+    # start attaches the debugger and launches the encoder utility process, but
+    # captures nothing on the wire and returns as soon as the stream handle is
+    # open. stop is the long one: the host's own budget is 45 s (stop the
+    # recorder, page IO.read, publish the file), so 60 s nests above it exactly
+    # as the client chain requires — a client that timed out first would report
+    # an unreachable host while the file was being written.
+    "record_start": 20.0,
+    "record_stop": 60.0,
 }
 
 #: Extra budget granted to a command that is BLOCKED on a human origin
@@ -501,6 +638,9 @@ class ErrorCode(StrEnum):
     NAV_FAILED = "nav_failed"
     NAV_TIMEOUT = "nav_timeout"
     ELEMENT_NOT_FOUND = "element_not_found"
+    # Desktop keyboard allowlist refusal must survive Response decoding as a
+    # typed error, not become an unreadable-response / bridge failure.
+    UNSUPPORTED_KEY = "unsupported_key"
     ORIGIN_DENIED = "origin_denied"
     ORIGIN_PROMPT_PENDING = "origin_prompt_pending"
     # A top-level open/goto to an origin the user has not approved. Raised
@@ -692,6 +832,21 @@ class Role(WireModel):
 
     event: Literal["role"] = "role"
     role: Literal["driver", "standby"] = "driver"
+
+
+class ShowPairing(WireModel):
+    """Daemon -> extension: put the pairing page in front, please.
+
+    Sent by ``lop browser pair`` (``POST /pairing/codes``) to every connected,
+    unpaired install, so the person who reads the code in the chat switches to
+    Chrome and finds the code field already open. It carries NO code — the code
+    travels terminal → person → browser, and putting it on this wire would hand
+    it to whatever holds the socket. A new EVENT like ``Role``, so a build that
+    predates it drops the frame instead of failing (worker.ts dispatches on
+    known event names only).
+    """
+
+    event: Literal["show_pairing"] = "show_pairing"
 
 
 class PairRequest(WireModel):

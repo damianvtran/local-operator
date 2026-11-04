@@ -1,0 +1,135 @@
+{
+  "form_raw_string_cell_widths": {},
+  "settings_nonchoice_labels_over29": [
+    [
+      "agents_auto_update_seeds.label",
+      37
+    ],
+    [
+      "compaction_wire_bytes_budget.label",
+      34
+    ],
+    [
+      "display_reasoning.label",
+      30
+    ],
+    [
+      "librarian_cadence_paused.label",
+      31
+    ],
+    [
+      "monitor_classifymaxchars.label",
+      31
+    ],
+    [
+      "network_audit_max_bytes.label",
+      31
+    ],
+    [
+      "network_credentials_grant_ttl_s.label",
+      30
+    ],
+    [
+      "network_rollout_on_update.label",
+      44
+    ],
+    [
+      "network_sync_tick_s.label",
+      30
+    ],
+    [
+      "providers_anthropic_cache_ttl_1h_min_context_tokens.label",
+      36
+    ],
+    [
+      "retry_pinnedfallback.label",
+      35
+    ],
+    [
+      "retry_usageawareaccountpick.label",
+      33
+    ],
+    [
+      "runtime_keep_alive_seconds.label",
+      37
+    ],
+    [
+      "runtime_unattended_gate_timeout.label",
+      38
+    ],
+    [
+      "send_journal_unconfirmed.label",
+      35
+    ],
+    [
+      "session_cleanup_max_inactive_days.label",
+      32
+    ],
+    [
+      "subagents_model_choice.label",
+      32
+    ],
+    [
+      "subagents_slim_child_knowledge.label",
+      31
+    ],
+    [
+      "tools_defer.label",
+      35
+    ],
+    [
+      "tools_search_interception_rg_excludes.label",
+      31
+    ],
+    [
+      "tui_sidebar_show_subagents.label",
+      32
+    ],
+    [
+      "wakes_triggers_max_per_day.label",
+      40
+    ],
+    [
+      "web_fetch_blocked_retry.label",
+      30
+    ]
+  ],
+  "settings_english_nonchoice_labels_over29": [
+    [
+      "aida_onboarding_nudge_days.label",
+      33
+    ],
+    [
+      "providers_anthropic_cache_ttl_1h_min_context_tokens.label",
+      33
+    ],
+    [
+      "runtime_keep_alive_seconds.label",
+      34
+    ],
+    [
+      "runtime_unattended_gate_timeout.label",
+      31
+    ],
+    [
+      "tools_defer.label",
+      39
+    ],
+    [
+      "tools_search_interception_rg_excludes.label",
+      33
+    ]
+  ],
+  "prior_claims_rederived": {
+    "wire.settings scratchpad cap label cells (lost claim es/fr/ru/vi 28/27/24/26; hi/en 19/27)": {
+      "es": 28,
+      "fr": 27,
+      "ru": 24,
+      "vi": 26,
+      "hi": 19,
+      "en": 27
+    }
+  },
+  "numeric_token_differences": [],
+  "qualification": "Scalar measurements, not rendered layout evidence. Lengths of strings containing placeholders include placeholder spelling, not all runtime value lengths."
+}

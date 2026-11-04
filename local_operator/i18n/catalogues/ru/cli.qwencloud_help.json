@@ -1,0 +1,7 @@
+{
+  "cli.qwencloud_help.qwencloud_ticket": "Сохранить cookie сессии консоли QwenCloud, которую читает /usage",
+  "cli.qwencloud_help.set": "Сохранить cookie; значение читается из STDIN, а не из argv",
+  "cli.qwencloud_help.status": "Сохранён ли cookie и насколько он стар; значение никогда не показывается",
+  "cli.qwencloud_help.rm": "Удалить сохранённый cookie",
+  "cli.qwencloud_help.migrate": "Перенести тикет в открытом виде в зашифрованное хранилище секретов"
+}

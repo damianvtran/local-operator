@@ -1,0 +1,19 @@
+{
+  "wire.exec.approval_advisory": "Avertissement : cette exécution ne peut pas demander d’approbation (aucun terminal attaché), donc tout appel d’outil nécessitant une approbation sera refusé.\n  Remèdes : --control met les cartes en attente pour un superviseur ; --yolo approuve automatiquement chaque niveau ; --tools NAME[,NAME] préapprouve les outils listés et borne la portée de cette exécution à ceux-ci ; tool_approval_mode: auto dans la configuration répond de la même façon à chaque appel, pour chaque exécution.",
+  "wire.exec.clear_goal_needs_start": "--clear-goal ajuste une exécution, il n’en démarre pas. Associez-le à --resume SESSION_ID avec un prompt ou --loop.",
+  "wire.exec.error_line": "Erreur : {error}",
+  "wire.exec.error_preflight": "Erreur : échec de la vérification préalable : {error}",
+  "wire.exec.exec_epilog": "Exemples :\n  lop exec 'Review the change' --team release --background\n  printf 'Inspect this report' | lop exec --profile reviewer\n  lop exec --goal 'Finish the checklist' --loop 3 --name 'Night audit'\n  lop exec --resume SESSION_ID --loop-goal 'Verify every acceptance criterion'\n  lop exec --status JOB_ID\n\nLa reprise restaure d’abord la transcription, l’équipe, le profil, l’objectif et le\nnom ; les options de démarrage explicites écrasent leurs propres emplacements.\nÉquipe et profil peuvent coexister. Une boucle s’exécute après le prompt initial\nfacultatif ; --loop N ne compte que les continuations. La progression de boucle\nenregistrée reste visible à la reprise, mais les itérations ne rejouent jamais\nautomatiquement. Un objectif seul ne lance pas de modèle. Les prompts sont\nlittéraux, pas des commandes slash. --goal ne FAIT QUE définir l’objectif ;\ncontrairement à /goal dans la TUI, il n’envoie pas non plus ce texte comme message,\ncar le prompt est le canal de message d’exec. --agent/--agent-id sélectionnent des\ndonnées d’agent héritées et s’excluent mutuellement. Les approbations par défaut\nhors TTY refusent. --control peut attendre un superviseur ; --yolo est une dérogation\nexplicite, jamais induite par --background ni --team. --tools borne ce que l’exécution\npeut atteindre : les outils exclus sont inaccessibles. Les événements et le texte au\npremier plan passent par stdout ; les reçus passent par stderr. Les exécutions\ndétachées consignent les deux flux et affichent des ID de tâche et de session\ndistincts. Utilisez lop --resume SESSION_ID pour voir une exécution en direct ou\nreprendre une exécution terminée ; exec refuse un propriétaire en direct.",
+  "wire.exec.exec_help": "Exécuter une tâche ou une boucle d’objectif dans une session persistée, sans démarrer la TUI",
+  "wire.exec.goal_only_sets_objective": "--goal définit l’objectif mais ne démarre aucun travail (contrairement à /goal dans la TUI). Ajoutez un prompt, transmettez-en un sur stdin (ou '-'), ou lancez une boucle avec --loop N.",
+  "wire.exec.log_pointer": "Log : {log_path}",
+  "wire.exec.no_exec_job": "Aucune tâche exec {job_id} ; les ID de tâche sont affichés par --background et consignés dans {jobs_path}",
+  "wire.exec.no_prompt": "aucun prompt. Passez-le en argument, transmettez-le sur stdin (ou '-'), ou lancez une boucle avec --loop/--loop-goal",
+  "wire.exec.receipt_failure_suffix": " (reçu d’exécution) — {failure}",
+  "wire.exec.receipt_suffix": " (reçu d’exécution)",
+  "wire.exec.session_pointer": "Session : {session_id} (la conversation) — rattacher ou reprendre : lop --resume {session_id}",
+  "wire.exec.status_pointer": "État : lop exec --status {job_id}",
+  "wire.exec.tools_unreachable": "Avertissement : --tools ne nomme aucun outil que cette exécution pourrait atteindre : {names}. La session a atteint {count} outil(s).",
+  "wire.exec.turn_did_not_complete": "le tour ne s’est pas terminé",
+  "wire.exec.waiting_on_you": "Une exécution vous attend ? lop sessions montre ce qu’il lui faut"
+}

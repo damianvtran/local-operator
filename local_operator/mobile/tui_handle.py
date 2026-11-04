@@ -251,6 +251,22 @@ class TuiSessionHandle(SessionHandle):
             raise RuntimeError("session is still starting")
         return session
 
+    async def call_on_session(self, fn: Callable[[Any], Any]) -> Any:
+        """Run ``fn(session)`` on the APP's loop and await its result.
+
+        For a runtime-side caller that has to touch the session itself rather
+        than one of this handle's verbs — today the cwd-move hold and expiry
+        announcements (``RuntimeServer._announce_cwd_move``). This handle
+        publishes no ``session_loop``, so the runtime's generic hop runs such a
+        call INLINE on the registrant's thread, and ``journal_incident`` there
+        took the transcript's app-loop lock from a foreign loop: the session's
+        own turn then failed to persist ("bound to a different event loop", QA
+        round 3, Q5). Going through :meth:`_on_app` keeps the one hop this
+        class already owns, bounded the same way, with an awaitable result
+        awaited on the app loop.
+        """
+        return await self._on_app(lambda: fn(self._session()))
+
     def subagent_counts(self) -> tuple[int | None, int | None]:
         """``(running, queued)`` subagent trajectories for the record.
 

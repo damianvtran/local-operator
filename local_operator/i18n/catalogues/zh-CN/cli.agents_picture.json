@@ -1,0 +1,13 @@
+{
+  "cli.agents_picture.error.no_agent": "没有名称或 ID 为 {agent} 的智能体。",
+  "cli.agents_picture.error.read_file": "无法读取 {path}：{error}",
+  "cli.agents_picture.help.agent": "智能体的名称或 ID",
+  "cli.agents_picture.help.file": "PNG、JPEG、WebP、GIF 或 HEIC 图片的路径",
+  "cli.agents_picture.help.group": "设置、移除或查看智能体的头像",
+  "cli.agents_picture.help.remove": "移除智能体的头像",
+  "cli.agents_picture.help.set": "用图片文件设置智能体的头像",
+  "cli.agents_picture.help.show": "以 JSON 输出智能体头像的元数据",
+  "cli.agents_picture.remove.done": "已移除 {agent} 的头像。",
+  "cli.agents_picture.remove.none": "{agent} 没有可移除的头像。",
+  "cli.agents_picture.set.done": "已为 {agent} 设置头像（{mime}，{bytes} 字节）。"
+}

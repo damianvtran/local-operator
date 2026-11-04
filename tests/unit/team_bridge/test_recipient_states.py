@@ -23,9 +23,12 @@ notify or endpoint-disabled decision — ``connector/conversation.py`` starts fr
 "one ``message_available`` feed row per active agent member whose endpoint
 consent allows it", i.e. the row is already the server's verdict. So:
 
-* state 1 (mentioned) is proven end to end: row → card → wake → turn;
+* state 1 (mentioned) proves row → durable human-visible mention card → wake
+  → turn with a neutral model placeholder. This Session fixture has no bridge
+  runtime, so native body hydration/source presentation is NOT claimed here;
 * state 2 (unmentioned) is proven in both LOCAL arms — a notify=all row wakes
-  with ``mention: no``, and a mention-only member's silence produces no work —
+  with a durable ``mention: no`` card and neutral model placeholder, and a
+  mention-only member's silence produces no work —
   while the rule that turns the setting into a row is modelled from §10.1 and
   named as the server's, not asserted as local behaviour;
 * states 3 (muted) and 4 (endpoint disabled) are proven in the only shape the
@@ -64,6 +67,7 @@ from local_operator.harness.types import (
 )
 from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
+from local_operator.team_bridge import card_projection
 from local_operator.team_bridge import pull as pull_mod
 from local_operator.team_bridge.client import BridgeRefusal
 from local_operator.team_bridge.connector import conversation as conversation_mod
@@ -617,7 +621,27 @@ async def test_mentioned_member_is_woken_with_a_card_that_says_mentioned(
     assert len(router.calls) == 1
     call = router.calls[0]
     assert call.session_id == "sess_a"
-    assert call.sender_display == {"sender_name": "Ada"}
+    # The legacy name still travels, but the typed display carriage is now
+    # additive. Keep an exact assertion so body/admission fields cannot silently
+    # leak into this metadata-only handoff; the model/context checks below must
+    # still prove the original card semantics rather than borrowing this object.
+    assert call.sender_display == {
+        "sender_name": "Ada",
+        "bridge_receipt": {
+            "v": 1,
+            "sender": {"name": "Ada", "kind": "human"},
+            "conversation": {"label": "#qa-coordination"},
+            "attachment_count": 0,
+        },
+        "bridge_receipt_source": {
+            "account_id": recipient.owner.account_id,
+            "tenant_id": recipient.owner.tenant_id,
+            "endpoint_id": recipient.owner.endpoint_id,
+            "conversation_id": CONVERSATION_ID,
+            "message_ids": [MESSAGE_ID],
+            "conversation_seq": 1,
+        },
+    }
     card = call.payload
     assert "Channel message · #qa-coordination · from Ada (human, same tenant)" in card
     assert BRIDGE_UNTRUSTED_CLAUSE in card
@@ -627,13 +651,18 @@ async def test_mentioned_member_is_woken_with_a_card_that_says_mentioned(
     assert "guidance: bridge-guidance-v2" in card
     assert BODY not in card  # metadata only; the body is read separately
 
-    # A REAL TURN started from the wake, and the model request carries the card
-    # inside the bridge envelope — not as the owner's own words.
+    # A REAL TURN starts from the wake, but this fixture binds no bridge
+    # runtime to Session, so it cannot hydrate the reserved body. Conversation
+    # envelopes never gain model authority from wake delivery alone: only the
+    # native admitted frame may carry screened source metadata + body together.
+    # Raw mention metadata remains visible in the human journal below; the
+    # model receives the same fixed placeholder as every unhydrated card.
     requests = _card_requests(recipient)
     assert len(requests) == 1, "the wake must start exactly one turn"
-    assert "mention: yes" in requests[0]
-    assert "from Ada (human, same tenant)" in requests[0]
-    assert "<team-bridge-message" in requests[0]
+    assert card_projection.PENDING_CARD in requests[0]
+    assert "mention:" not in requests[0]
+    assert "from Ada" not in requests[0]
+    assert "<team-bridge-message" not in requests[0]
     assert BODY not in requests[0]
 
     # The row is durable in the recipient's own transcript.
@@ -708,19 +737,32 @@ async def test_unmentioned_member_is_woken_exactly_when_the_setting_emits_a_row(
     card = router.calls[0].payload
     assert "mention: no" in card
     assert "mention: yes" not in card
-    # No reply obligation rides the card; reply-vs-quiet is the served
-    # guidance's call, not this delivery's. The one reply mention allowed is
-    # the conditional ROUTE line (where an answer goes if one is sent), so
-    # an answer stays in the conversation instead of the legacy pair inbox.
+    # WAKE CONTRACT (2026-10-30): an unmentioned card now carries the
+    # per-wake expectation — weigh relevance, end with no_reply if nothing is
+    # needed — and never an obligation to answer. The ROUTE line stays the
+    # conditional one, so an answer lands in the conversation, not the legacy
+    # pair inbox.
     reply_lines = [line for line in card.splitlines() if "reply" in line.lower()]
-    assert "no_reply" not in card
+    # No `directed:` line for an ambient card: `mention: no` already says it
+    # (review round 1, m4 — the word is only emitted for `thread`).
+    assert "directed:" not in card
+    assert "expect: reply" not in card
     assert reply_lines == [
+        "expect: weigh relevance; no_reply if nothing is needed",
         "if you reply: bridge channel_post with channel_id = this conversation_id; "
-        "legacy send/reply never appears in a conversation"
+        "legacy send/reply never appears in a conversation",
     ]
     assert "guidance: bridge-guidance-v2" in card
     requests = _card_requests(all_member)
-    assert len(requests) == 1 and "mention: no" in requests[0]
+    assert len(requests) == 1
+    # As in the mentioned fixture, no Session bridge runtime hydrates the
+    # conversation reservation here. Wake/routing is proven, not body delivery:
+    # no raw conversation envelope is model-visible without its admitted frame.
+    assert card_projection.PENDING_CARD in requests[0]
+    assert "mention:" not in requests[0]
+    assert "from Ada" not in requests[0]
+    assert "<team-bridge-message" not in requests[0]
+    assert BODY not in requests[0]
 
     # notify=mention, unmentioned: the hub's silence produces NO local work.
     assert silent_outcome["handled"] == []

@@ -1,0 +1,13 @@
+{
+  "wire.errors.files.audio_type": "Tệp không thuộc loại âm thanh được phép: {mime_type}",
+  "wire.errors.files.heic_conversion": "Không chuyển đổi được tệp HEIC/HEIF: {error}",
+  "wire.errors.files.html_type": "Tệp không thuộc loại HTML được phép: {mime_type}",
+  "wire.errors.files.html_utf8": "Tệp HTML không phải văn bản UTF-8 hợp lệ.",
+  "wire.errors.files.image_type": "Tệp không thuộc loại hình ảnh được phép: {mime_type}",
+  "wire.errors.files.internal_error": "Lỗi máy chủ nội bộ: {error}",
+  "wire.errors.files.sign_auth": "Cần có token truy cập cục bộ hoặc bearer của desktop.",
+  "wire.errors.files.sign_path": "path không được để trống.",
+  "wire.errors.files.sign_route": "route phải là một trong: {routes}",
+  "wire.errors.files.sign_ttl": "ttl_s phải nằm trong khoảng 1 đến {maximum}.",
+  "wire.errors.files.video_type": "Tệp không thuộc loại video được phép: {mime_type}"
+}

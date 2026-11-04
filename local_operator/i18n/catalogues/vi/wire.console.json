@@ -1,0 +1,10 @@
+{
+  "wire.console.title": "Dung lượng console",
+  "wire.console.description": "Chấp nhận terminal trực tiếp. Lịch sử đã hoàn tất không chiếm chỗ tiến trình. Thay đổi chỉ ảnh hưởng các lần khởi động sau, không bao giờ chấm dứt công việc đang chạy.",
+  "wire.console.max_live.label": "Trần terminal trực tiếp",
+  "wire.console.max_live.help": "32–256; mặc định 128. Bộ nhớ được quản lý, ô terminal và tài nguyên gốc khả dụng có thể cho phép ít terminal hơn. Giá trị này không giới hạn bộ nhớ của tiến trình con.",
+  "wire.console.max_owner.label": "Terminal của tác nhân mỗi cuộc trò chuyện",
+  "wire.console.max_owner.help": "1–32; mặc định 8. Mỗi cuộc trò chuyện dùng chung hạn mức trực tiếp toàn cục; terminal đã hoàn tất không được tính.",
+  "wire.console.user_reserved.label": "Chỗ dành riêng cho terminal của người dùng",
+  "wire.console.user_reserved.help": "4–32; mặc định 16, giới hạn ở một phần tư trần trực tiếp. Tác nhân khởi động không thể dùng các chỗ này. Công việc hiện có không bao giờ bị dừng."
+}

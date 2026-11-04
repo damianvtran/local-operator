@@ -1,0 +1,199 @@
+audit.log — tui.import (es) — audit id w6a1 — 2026-10-30
+This file is the EXECUTION log: each block is a command and its real output.
+The judgements are in report.md and record.json; those are notes, not evidence.
+Run everything below from the repository root.
+
+### 0. environment
+$ /Users/damian/local-operator/.venv/bin/python --version
+Python 3.12.13
+[exit 0]
+
+$ /Users/damian/local-operator/.venv/bin/python -c from importlib.metadata import version; print("rich", version("rich"))
+rich 15.0.0
+[exit 0]
+
+
+### 1. audited revision and the on-disk target (untracked) binding
+$ git rev-parse HEAD
+b925c2e11be36653dfe88ac78f627bc2531427df
+[exit 0]
+
+$ git status --porcelain -- local_operator/i18n/catalogues/es/tui.import.json
+?? local_operator/i18n/catalogues/es/tui.import.json
+[exit 0]
+
+$ shasum -a 256 local_operator/i18n/catalogues/en/tui.import.json local_operator/i18n/catalogues/es/tui.import.json
+932e0f87210ff80950346c684afb000907610c9ff35388125977182120b136c2  local_operator/i18n/catalogues/en/tui.import.json
+ffb39975f8a17571c316e9a2f2c2ff7657011732769136ee3e4d537cc400a422  local_operator/i18n/catalogues/es/tui.import.json
+[exit 0]
+
+$ [ -f local_operator/i18n/catalogues/en/tui.import.context.json ]
+absent — this namespace has NO English context sidecar, so there are no per-key maxCells budgets to assert.
+
+### 2. the repository's own catalogue validator (read-only)
+$ python3 scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+[exit 0]
+
+### 3. this bundle's checks (mechanical + semantic + negative controls)
+$ env PYTHONPATH=/Users/damian/lo-i18n-es /Users/damian/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.import/w6a1/checks.py
+namespace : tui.import
+locale    : es
+repo root : /Users/damian/lo-i18n-es
+en        : tui.import.json exists=True
+target    : es/tui.import.json exists=True
+context   : tui.import.context.json exists=False
+cell_len  : rich.cells.cell_len (the function the TUI measures with)
+
+key counts: en=87 target=87 context=0
+
+== blocking checks ==
+  0 failure(s) so far
+
+== measurements ==
+  plural messages checked: 15
+  render tui.import.pending_count: 1->1 sesión pendiente | 0->0 sesiones pendientes | 2->2 sesiones pendientes | 1000000->1.000.000 de sesiones pendientes | 2000000->2.000.000 de sesiones pendientes | 1500000->1.500.000 sesiones pendientes
+  render tui.import.preview_memory: 1->1 registro de memoria · ~1 tokens · 1 tokens globales | 0->0 registros de memoria · ~0 tokens · 0 tokens globales | 2->2 registros de memoria · ~2 tokens · 2 tokens globales | 1000000->1.000.000 de registros de memoria · ~1.000.000 tokens · 1.000.000 tokens globales | 2000000->2.000.000 de registros de memoria · ~2.000.000 tokens · 2.000.000 tokens globales | 1500000->1.500.000 registros de memoria · ~1.500.000 tokens · 1.500.000 tokens globales
+  render tui.import.preview_narrow: 1->1 seleccionada · Aún no se ha importado nada; enter importa. | 0->0 seleccionadas · Aún no se ha importado nada; enter importa. | 2->2 seleccionadas · Aún no se ha importado nada; enter importa. | 1000000->1.000.000 de seleccionadas · Aún no se ha importado nada; enter importa. | 2000000->2.000.000 de seleccionadas · Aún no se ha importado nada; enter importa. | 1500000->1.500.000 seleccionadas · Aún no se ha importado nada; enter importa.
+  render tui.import.preview_narrow_metadata: 1->1 seleccionada · No se importará nada. | 0->0 seleccionadas · No se importará nada. | 2->2 seleccionadas · No se importará nada. | 1000000->1.000.000 de seleccionadas · No se importará nada. | 2000000->2.000.000 de seleccionadas · No se importará nada. | 1500000->1.500.000 seleccionadas · No se importará nada.
+  render tui.import.preview_summary: 1->1 sesión · 1 mensaje (estimado) · 1 compactación | 0->0 sesiones · 0 mensajes (estimado) · 0 compactaciones | 2->2 sesiones · 2 mensajes (estimado) · 2 compactaciones | 1000000->1.000.000 de sesiones · 1.000.000 de mensajes (estimado) · 1.000.000 de compactaciones | 2000000->2.000.000 de sesiones · 2.000.000 de mensajes (estimado) · 2.000.000 de compactaciones | 1500000->1.500.000 sesiones · 1.500.000 mensajes (estimado) · 1.500.000 compactaciones
+  render tui.import.preview_warnings: 1->1 aviso | 0->0 avisos | 2->2 avisos | 1000000->1.000.000 de avisos | 2000000->2.000.000 de avisos | 1500000->1.500.000 avisos
+  render tui.import.result_detail: 1->1 · 1 mensaje | 0->0 · 0 mensajes | 2->2 · 2 mensajes | 1000000->1.000.000 · 1.000.000 de mensajes | 2000000->2.000.000 · 2.000.000 de mensajes | 1500000->1.500.000 · 1.500.000 mensajes
+  render tui.import.result_summary: 1->1 · 1 sesión · 1 mensaje | 0->0 · 0 sesiones · 0 mensajes | 2->2 · 2 sesiones · 2 mensajes | 1000000->1.000.000 · 1.000.000 de sesiones · 1.000.000 de mensajes | 2000000->2.000.000 · 2.000.000 de sesiones · 2.000.000 de mensajes | 1500000->1.500.000 · 1.500.000 sesiones · 1.500.000 mensajes
+  render tui.import.result_warnings: 1->1 aviso | 0->0 avisos | 2->2 avisos | 1000000->1.000.000 de avisos | 2000000->2.000.000 de avisos | 1500000->1.500.000 avisos
+  render tui.import.session_meta: 1->1 mensaje · 1 compactación · 1 | 0->0 mensajes · 0 compactaciones · 0 | 2->2 mensajes · 2 compactaciones · 2 | 1000000->1.000.000 de mensajes · 1.000.000 de compactaciones · 1.000.000 | 2000000->2.000.000 de mensajes · 2.000.000 de compactaciones · 2.000.000 | 1500000->1.500.000 mensajes · 1.500.000 compactaciones · 1.500.000
+  render tui.import.source_row: 1->1  1 sesión  1 | 0->0  0 sesiones  0 | 2->2  2 sesiones  2 | 1000000->1.000.000  1.000.000 de sesiones  1.000.000 | 2000000->2.000.000  2.000.000 de sesiones  2.000.000 | 1500000->1.500.000  1.500.000 sesiones  1.500.000
+  protected-token comparison on 87 shared keys
+  no maxCells declared in this sidecar — widths are advisory only
+  polarity: 0 lost negation(s); 2 key(s) where es adds a negative marker (reviewed by hand, not auto-failed): ['tui.import.rerun_hint', 'tui.import.review_memory']
+  byte-identical prose values: 0
+  semantic assertions evaluated: 33
+
+== negative controls (each MUST trip its check) ==
+  negative control [keys] dropped one key: CAUGHT
+      -> [keys] 1 key(s) missing from target: ['tui.import.all_none']
+  negative control [icu] renamed a placeholder argument: CAUGHT
+      -> [icu] tui.import.empty_sessions: argument tuple differs — en=(('source', 'simple'),) target=(('renombrado', 'simple'),)
+  negative control [plural] deleted a 'many' branch: CAUGHT
+      -> [plural] tui.import.pending_count: argument count has ['one', 'other']; es requires at least ['many', 'one', 'other']
+  negative control [plural] emptied a branch: CAUGHT
+      -> [plural] tui.import.pending_count: empty branch/branches ['other']
+  negative control [plural] added a 'few' category: CAUGHT
+      -> [plural] tui.import.pending_count: ['few'] is not a Spanish CLDR category (argument count)
+  negative control [tokens] translated the <source> machine token: CAUGHT
+      -> [tokens] tui.import.error_source_required: protected tokens differ — en=['/command:/import', '<angle-token>:<source>', '[bracket-token]:[id]'] target=['/command:/import', '<angle-token>:<origen>', '[bracket-token]:[id]']
+  negative control [budget] injected maxCells=8 on tui.import.all_none (en fits, es does not): CAUGHT
+      -> [budget] tui.import.all_none: 13 cells exceeds maxCells 8 (en 8 fits)
+  negative control [polarity] dropped 'nothing has been imported': CAUGHT
+      -> [polarity] tui.import.preview_confirm: EN negates, target carries no negative marker
+  negative control [semantics] dropped the rewritten-source behaviour: CAUGHT
+      -> [semantics] tui.import.rerun_hint: expected 'copia nueva|nueva copia' (rerun: rewritten sources get a NEW COPY); got 'Repetir es seguro: las fuentes sin cambios se omiten y las que han crecido se reanudan.'
+  negative control [terms] used 'demonio' for daemon: CAUGHT
+      -> [terms] tui.import.all_none: 'demonio' — daemon stays English (§2 amendment)
+  negative control [untranslated] left a prose value in English: CAUGHT
+      -> [untranslated] tui.import.empty_header: target is byte-identical to EN prose — 'No sessions to import'
+
+== result ==
+  PASS — all checks clean, every negative control tripped
+[exit 0]
+
+### 4. width measurements used in report.md
+$ rich.cells.cell_len over the exact strings (the function _row_overhead measures with)
+ 28  tui.analytics.hint.expand.compact (es)               ↑↓ · enter expandir · e todo
+ 30  tui.analytics.hint.expand.compact (fix: fila+abrir)  ↑↓ fila · enter abrir · e todo
+ 24  tui.analytics.hint.expand.keys (es)                  ↑↓ fila · enter · e todo
+ 39  tui.analytics.hint.expand.full (es)                  esc · ↑↓ fila · enter expandir · e todo
+ 56  tui.analytics.hint.expand.full_metric (es)           esc · t coste/tokens · ↑↓ fila · enter expandir · e todo
+ 14  tui.analytics.hint.expand.keys_bare (es)             enter · e todo
+ 13  tui.analytics.hint.expand.keys_bare (en)             enter · e all
+ 62  import hint row (en)                                 ↑↓ move · space select · a all/none · enter preview · esc back
+ 80  import hint row (es)                                 ↑↓ mover · space seleccionar · a todas/ninguna · enter vista previa · esc volver
+ 75  import hint row (fix: elegir)                        ↑↓ mover · space elegir · a todas/ninguna · enter vista previa · esc volver
+ 76  import hint row (fix: todo/nada)                     ↑↓ mover · space seleccionar · a todo/nada · enter vista previa · esc volver
+  8  tui.import.all_none (en)                             all/none
+ 13  tui.import.all_none (es)                             todas/ninguna
+[exit 0]
+
+### 5. the code that consumes these keys (for the register and width findings)
+$ grep -n 'show_move\|_narrow =' local_operator/tui/widgets/harness_import_view.py
+139:        self._narrow = False
+171:        self._narrow = self.size.width < 90
+508:        # The hint row still fits at 80x24 (76 cells); only the 60x20 row needs
+510:        show_move = state in ("sources", "sessions") and (not self._narrow or self.size.width >= 74)
+511:        if show_move:
+[exit 0]
+
+$ sed -n '506,530p' local_operator/tui/widgets/harness_import_view.py
+        state = self._state
+        labels: dict[HintButton, str] = {}
+        # The hint row still fits at 80x24 (76 cells); only the 60x20 row needs
+        # to shed it. Gate on the measured page width, not the pane breakpoint.
+        show_move = state in ("sources", "sessions") and (not self._narrow or self.size.width >= 74)
+        if show_move:
+            labels[self._hint_move] = _t(_kt.hint_move())
+        if state == "sources":
+            labels[self._hint_enter] = _t(_kt.hint_open())
+            labels[self._hint_reload] = _t(_kt.hint_reload())
+        elif state == "sessions":
+            labels[self._hint_space] = _t(_kt.hint_select())
+            labels[self._hint_all] = _t(_kt.all_none())
+            labels[self._hint_enter] = _t(_kt.hint_preview())
+        elif state == "preview":
+            labels[self._hint_enter] = (
+                _t(_kt.hint_confirm()) if self._only_metadata_only() else _t(_kt.hint_import())
+            )
+        elif state == "progress":
+            labels[self._hint_cancel] = _t(_kt.hint_cancel())
+        elif state == "result":
+            labels[self._hint_enter] = _t(_kt.hint_list())
+        labels[self._hint_esc] = _t(_kt.hint_back())
+        return labels
+
+
+$ grep -n 'def truncate_cells' -A12 local_operator/tui/widgets/tool_card.py
+728:def truncate_cells(text: str, width: int, ellipsis: str = "…") -> str:
+729-    """Truncate ``text`` to at most ``width`` cells (one width model).
+730-
+731-    Measurement and slicing both go through ``rich.cells.cell_len``; mixing
+732-    ``len()`` with cell width is a crash class the history documents.
+733-    """
+734-    if width <= 0:
+735-        return ""
+736-    if cell_len(text) <= width:
+737-        return text
+738-    if width <= cell_len(ellipsis):
+739-        return ellipsis[:width]
+740-    out: list[str] = []
+
+$ grep -n 'def _build' -A16 local_operator/tui/widgets/subagent_view.py | sed -n '18,40p'  (hint key+label join)
+    def _build(self, label: str, *, lead: bool, hovered: bool) -> Text:
+        key_token, label_token = self._ink
+        # Hover lifts each tone one step, so the whole hint answers the pointer
+        # rather than only its key — a half-lit hint reads as a rendering
+        # glitch. The lifted pair is the SAME two tokens one rung brighter, so
+        # no colour is introduced and the accent is not spent.
+        if hovered and self._actionable:
+            key_token, label_token = self._lifted_ink
+        dim = Style(color=theme_mod.semantic_color(key_token))
+        faint = Style(color=theme_mod.semantic_color(label_token))
+        row = Text(no_wrap=True, overflow="ellipsis")
+        if lead:
+            # The seam belongs to the ROW, not to the hint that follows it, so
+            # it keeps its resting tone even while that hint is hovered — a
+            # punctuation mark must not read as part of a control.
+            row.append(" · ", style=Style(color=theme_mod.semantic_color("faint")))
+        if self._key:
+            row.append(self._key, style=dim)
+        if label:
+            row.append(f" {label}" if self._key else label, style=faint)
+        return row
+
+
+### 6. what the negative controls caught
+$ grep -A2 'negative control' the checks output above
+Every control printed CAUGHT with the failing check line, e.g.:
+  [plural] tui.analytics.search.counted_read: argument count has ['one','other']; es requires at least ['many','one','other']
+  [icu]    ...: argument tuple differs — en=... target=...
+  [tokens] ...: protected tokens differ — en=['$— money mark:$—'] target=[]
+  [budget] ...: N cells exceeds maxCells M
+  [control] would appear here if any control had NOT tripped; none did.

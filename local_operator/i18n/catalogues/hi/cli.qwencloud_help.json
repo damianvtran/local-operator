@@ -1,0 +1,7 @@
+{
+  "cli.qwencloud_help.qwencloud_ticket": "QwenCloud कंसोल सत्र कुकी सहेजें जिसे /usage पढ़ता है",
+  "cli.qwencloud_help.set": "कुकी सहेजें; मान STDIN से पढ़ा जाता है, argv से कभी नहीं",
+  "cli.qwencloud_help.status": "कुकी सहेजी है या नहीं और कितनी पुरानी है; मान कभी नहीं",
+  "cli.qwencloud_help.rm": "सहेजी गई कुकी हटाएँ",
+  "cli.qwencloud_help.migrate": "सादे टेक्स्ट टिकट को एन्क्रिप्टेड सीक्रेट स्टोर में ले जाएँ"
+}

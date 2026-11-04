@@ -2820,6 +2820,128 @@ def test_the_open_frame_compat_matrix_across_builds(peer_pair: Devices, monkeypa
         link.close("test")
 
 
+def test_owner_projection_matches_resident_frame_without_full_hydration(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bounded facts replace allocation, not any frame/run/opener semantics."""
+    _server_a, server_b, _h, _p = peer_pair
+    from local_operator.session import transcript_index as ti
+
+    _write_frame_journal(server_b.root, SESSION, _preindex_tail_conversation())
+    _warm_frame_index(server_b.root, SESSION)
+    control = _owner_frame(server_b)
+    assert control["runs_state"] == "ready"
+    ti._reset_for_tests()
+    reads = []
+    original = ti._read_raw
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        reads.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ti, "_read_raw", forbidden)
+    monkeypatch.setattr(
+        server_b, "_stored_frame_index", lambda sid: pytest.fail("hydrating fallback")
+    )
+    frame = _owner_frame(server_b)
+    assert frame == control
+    assert reads == []
+
+
+def test_projection_selection_failure_retains_original_fallback(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A valid tail summary is not proof of a complete selected frame."""
+    _server_a, server_b, _h, _p = peer_pair
+    from local_operator.session import index_read_model as rm
+    from local_operator.session import transcript_index as ti
+
+    _write_frame_journal(server_b.root, SESSION, _preindex_tail_conversation())
+    _warm_frame_index(server_b.root, SESSION)
+    control = _owner_frame(server_b)
+    ti._reset_for_tests()
+    calls = []
+    admissions: list[tuple[tuple[str, str], asyncio.Task[Any], bool, bool]] = []
+    server_b._frame_memo.clear()
+    original = server_b._stored_frame_index
+    original_start = ti.start_refresh
+
+    def capture_start(root: str | Path, session_id: str) -> tuple[asyncio.Task[Any], bool]:
+        key = ti._key(root, session_id)
+        previous = ti._IN_FLIGHT.get(key)
+        joining = (
+            previous is not None
+            and previous[0] is asyncio.get_running_loop()
+            and not previous[1].done()
+        )
+        task, started = original_start(root, session_id)
+        entry = ti._IN_FLIGHT.get(key)
+        # Capture admission on the owning loop before it yields. A completed
+        # refresh legitimately removes this transient entry before the reader
+        # can assert on it; absence later is not evidence of suppressed work.
+        joined_correctly = (
+            previous is not None and task is previous[1] and not started if joining else started
+        )
+        admissions.append((key, task, entry is not None and entry[1] is task, joined_correctly))
+        return task, started
+
+    monkeypatch.setattr(ti, "start_refresh", capture_start)
+
+    def fallback(session_id: str) -> Any:
+        calls.append(session_id)
+        return original(session_id)
+
+    monkeypatch.setattr(server_b, "_stored_frame_index", fallback)
+    # BOTH projection entry points, because a read model may answer either one:
+    # the frame first asks for a summary and only a failed summary or projection
+    # needs the full index. Patching one left the other serving facts, which is a
+    # ready frame measured by a cell whose subject is the COLD admission.
+    monkeypatch.setattr(rm, "frame_facts", lambda *args, **kwargs: rm.Result("corrupt"))
+    monkeypatch.setattr(rm, "summary", lambda *args, **kwargs: rm.Result("corrupt"))
+    frame = _owner_frame(server_b)
+    # TWO reads are legitimate here and were one before the summary path existed:
+    # the first answers a FrameSummary, and only a failed projection needs the
+    # full index. What this cell pins is that the fallback is entered for THIS
+    # session and that its answer is the original cold one, not the count.
+    assert set(calls) == {SESSION}, calls
+    # The original cold/no-wait contract remains honest building AND schedules
+    # the single-flight; a failed projection cannot suppress eventual recovery.
+    # EITHER original admission is honest here, and which one is not this cell's
+    # subject: a cold fallback answers `building` and schedules the single-flight,
+    # while a fallback that still finds a usable index answers `ready` with the
+    # control's own facts. What must hold either way is that a failed projection
+    # neither invents facts nor suppresses recovery.
+    if frame["runs_state"] == "ready":
+        assert _canonical_frame_digest(frame) == _canonical_frame_digest(
+            control
+        ), "a failed projection produced a ready frame that is not the control's"
+    else:
+        assert frame["runs"] == [], "a building frame carried facts"
+        assert admissions, "a failed projection suppressed the single-flight"
+    if admissions:
+        expected_key = ti._key(server_b.root, SESSION)
+        assert all(
+            key == expected_key and registered and joined_correctly
+            for key, _task, registered, joined_correctly in admissions
+        )
+
+        async def settle_refresh(task: asyncio.Task[Any]) -> Any:
+            return await asyncio.shield(task)
+
+        # A completed flight can be replaced after a caller's cold cache check
+        # but before its schedule runs. Only overlapping admissions must join;
+        # settle EVERY distinct admitted task, not an invented global flight.
+        for task in dict.fromkeys(task for _key, task, _registered, _joined in admissions):
+            refreshed = asyncio.run_coroutine_threadsafe(
+                settle_refresh(task), task.get_loop()
+            ).result(timeout=5)
+            assert refreshed is not None
+    server_b._frame_memo.clear()
+    monkeypatch.undo()
+    settled = _owner_frame(server_b)
+    assert _canonical_frame_digest(settled) == _canonical_frame_digest(control)
+
+
 def test_the_open_frame_reply_fields_pass_through_the_whole_read_unchanged(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5285,6 +5407,14 @@ def test_the_owner_open_frame_before_the_index_lands_is_the_frame_after_it(
     _warm_frame_index(server_b.root, SESSION)
     asyncio.run(_append_preindex_case(server_b.root / "sessions" / SESSION, case))
     _warm_frame_index(server_b.root, SESSION)
+    # This compatibility cell is about the old late-index seam, not the new
+    # exact-current summary path.
+    original = server_b._stored_frame_source
+
+    def no_projection(session_id: str, source: Any) -> Any:
+        return server_b._stored_frame_index(session_id)
+
+    monkeypatch.setattr(server_b, "_stored_frame_source", no_projection)
 
     original = server_b._stored_frame_index  # noqa: SLF001 — the seam under test
     calls: list[int] = []
@@ -5297,6 +5427,7 @@ def test_the_owner_open_frame_before_the_index_lands_is_the_frame_after_it(
     first = _owner_frame(server_b, limit=limit)
     assert len(calls) >= 2, "the read never re-asked for the index"
     monkeypatch.setattr(server_b, "_stored_frame_index", original)
+    monkeypatch.setattr(server_b, "_stored_frame_source", lambda sid, source: original(sid))
     server_b._frame_memo.clear()  # noqa: SLF001 — the steady read must BUILD, not replay
     steady = _owner_frame(server_b, limit=limit)
 
@@ -5323,3 +5454,60 @@ def test_the_owner_open_frame_whose_index_never_lands_says_building(
     monkeypatch.setattr(server_b, "_stored_frame_index", lambda session_id: None)
     frame = _owner_frame(server_b, limit=20)
     assert frame["runs_state"] == "building" and frame["runs"] == [], frame
+
+
+def test_the_read_model_wait_cannot_park_a_link_thread(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """m3: an optimization must not spend the page read's 60 s bound."""
+    import time as _time
+
+    from local_operator.session import index_read_model as rm
+
+    _server_a, server_b, _h, _p = peer_pair
+    assert rm.READ_MODEL_WAIT_S < relay.SESSION_HISTORY_PAGE_READ_BOUND_S
+    monkeypatch.setattr(rm, "READ_MODEL_WAIT_S", 0.05)
+
+    def hangs(*args: Any, **kwargs: Any) -> Any:
+        _time.sleep(1.0)
+        return rm.Result("ready", "late")
+
+    started = _time.monotonic()
+    result = server_b._stored_projection(hangs)
+    elapsed = _time.monotonic() - started
+    assert result.state == "stale" and elapsed < 0.9, (result, elapsed)
+
+
+def test_listing_rows_carry_the_bound_agents_picture_identity(root: Path) -> None:
+    """Outbound peer rows add ``agent_id``/``avatar_sha256`` (additive, both keys).
+
+    Same resolver as the local listing (``agent_avatar.session_row_fields``): the
+    binding is an agent NAME, resolved to this device's registry id.
+    """
+    import io
+
+    from PIL import Image
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.resume import write_session_attachment
+    from tests.unit.test_agent_avatar import _edit_fields
+
+    registry = AgentRegistry(config_dir=root, refresh_interval=0.0)
+    agent = registry.create_agent(_edit_fields(name="coder"))
+    image = io.BytesIO()
+    Image.new("RGB", (32, 32), (9, 9, 9)).save(image, "PNG")
+    meta = registry.set_agent_avatar(agent.id, image.getvalue())
+    bound, bare = "b0b0b0b0b0b0", "ba5eba5eba5e"
+    for session_id in (bound, bare):
+        (root / "sessions" / session_id).mkdir(parents=True)
+        (root / "sessions" / session_id / "transcript.jsonl").write_text("", encoding="utf-8")
+    write_session_attachment(root / "sessions" / bound, team="", agent="coder", goal="")
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    rows = {item["session_id"]: item for item in server.local_session_rows()}
+    if bound in rows:
+        assert rows[bound]["agent_id"] == agent.id
+        assert rows[bound]["avatar_sha256"] == meta.sha256
+    assert server._row_avatar(bound) == {"agent_id": agent.id, "avatar_sha256": meta.sha256}
+    assert server._row_avatar(bare) == {"agent_id": None, "avatar_sha256": None}

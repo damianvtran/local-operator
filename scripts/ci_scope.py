@@ -156,6 +156,9 @@ WINDOWS_TEST_PATHS = frozenset(
         "tests/unit/test_agent_import_boundary.py",
         "tests/unit/server/test_edit_workspace_boundary.py",
         "tests/unit/network/test_credentials_private_paths.py",
+        # The receiver's native Windows step (`Verify the Team Bridge receiver's
+        # Windows arm`): a test-only change to it must still reach Windows.
+        "tests/unit/team_bridge/test_connector_platforms.py",
     }
 )
 
@@ -191,6 +194,7 @@ WINDOWS_LOADED_PATHS = frozenset(
         "tests/__init__.py",
         "tests/unit/__init__.py",
         "tests/unit/server/__init__.py",
+        "tests/unit/team_bridge/__init__.py",
         "tests/unit/network/test_credential_inherit.py",
         "tests/unit/network/test_credentials_consent.py",
         "tests/unit/network/test_approvals_store.py",
@@ -479,7 +483,10 @@ JOB_COMMANDS: dict[str, tuple[str, ...]] = {
         # leader that exits while a descendant lives on, which the wrapper sweeps.
         # The bound is `BOUNDED_GATE_TIMEOUT`, above: generous on purpose, because
         # timing out a legitimately slow gate is worse than waiting for it.
-        f".venv/bin/python scripts/{BOUNDED_WRAPPER_NAME} --timeout {BOUNDED_GATE_TIMEOUT} -- "
+        # command-status: this gate consumes pyright's status, not a cleanup
+        # certificate, and the default contract refuses on Darwin before spawn.
+        f".venv/bin/python scripts/{BOUNDED_WRAPPER_NAME} --contract=command-status "
+        f"--timeout {BOUNDED_GATE_TIMEOUT} -- "
         ".venv/bin/python -m pyright --pythonpath .venv/bin/python .",
         # The protocol-sync check is a *step of this job* in ci.yml, not a job
         # of its own: a Python-only protocol edit must fail even when the

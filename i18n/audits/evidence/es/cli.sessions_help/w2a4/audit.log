@@ -1,0 +1,58 @@
+Spanish W2 round-2 delta audit — w2a4
+Date: 2026-10-29
+Worktree: /Users/damian/lo-i18n-es
+HEAD: 088699bfea0fc33d6b2f0748037dd7e89d85627d; branch feat/i18n-es-wire-runtime
+Model: kimi/k3.1-pro (self-reported from the current session model-switch notice)
+Fallback: The session opened on anthropic/claude-sonnet-5-5; provider-failure quota notices switched through openai/gpt-6-astra to current kimi/k3.1-pro. This round-2 audit was performed under the disclosed fallback; no primary-model completion is claimed.
+
+Final check command (run from the worktree with isolated HOME/config and inherited CMUX_*/LOP_* stripped by env -i):
+env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" PATH="$PATH" TERM=xterm-256color PYTHONPATH="$PWD" python3 "$LOCAL_OPERATOR_SCRATCHPAD/es_w2a4_checks.py"
+Final exit code: 0
+Changed namespaces: 11; final keys mechanically checked: 235
+Delta semantic scope: 29 key references carrying the 16 round-1 findings; every finding closed by current text and/or measured parser/column output.
+cli.sessions_help.resume_description is recorded as a cross-namespace closure in global_help and bound in the final sessions_help check output.
+Unchanged namespaces: 21/21 target SHA-256 values match their round-1 input_hashes.target.sha256.
+
+Per-namespace final hashes and verdicts:
+cli.agents_help: PASS; keys=21; target_sha256=449a16f0337c6de0b2f394c54cff7183f06236d5f972fcded053c2e49cad6529; findings_closed=es-w2-A01
+cli.browser: PASS; keys=64; target_sha256=dc8198f1ff050541dfdcc75b06a6a3d39183040c859f911febb872245f6d5a76; findings_closed=es-w2-B01,es-w2-B02
+cli.global_help: PASS; keys=17; target_sha256=62c0da2c8cb267d2177d20936661388f507f50fd4f4688adae90a6b8c9eee0cd; findings_closed=es-w2-A06
+cli.hub_help: PASS; keys=12; target_sha256=4a5db59d15212c15165a3bc8e05ea17efe860131a94747b67f7b57622d607802; findings_closed=es-w2-C01
+cli.install_help: PASS; keys=5; target_sha256=02182f7c802873810cd3f3c48673783f53d00705dc279bdd0b23f7c830ea71d2; findings_closed=es-w2-C02
+cli.mobile_help: PASS; keys=15; target_sha256=4613e77bb8a603e582d017869b94fb7f79fd85b21688dc6934ea8f33270350d1; findings_closed=es-w2-C03
+cli.serve_help: PASS; keys=5; target_sha256=eb2006e610f131f78101d1a8a7ccebbd7543bd536012cc9acc900d3002bb0e75; findings_closed=es-w2-C04
+cli.services_help: PASS; keys=9; target_sha256=244cfa578f571bd6e5ac5de66a04ecafd32f2f0597fe1d2eb07468940d735f4c; findings_closed=es-w2-C05
+cli.sessions_help: PASS; keys=47; target_sha256=c094a192c18519cdfed43e70ddbe2dade8b2d20f6dfabaacdf7665d2c0153bef; findings_closed=es-w2-A03,es-w2-A04,es-w2-A05
+cli.teams_help: PASS; keys=34; target_sha256=3c591ba9e5c8e364ecf511ff84b36019e4cedba8750e421fc5fe6178cf907c7c; findings_closed=es-w2-A02
+cli.update_help: PASS; keys=6; target_sha256=6cfd182880c92fb3be703b3ad22139078e5fe857f09de7398358e14260d084d2; findings_closed=es-w2-C06,es-w2-C07
+
+Unchanged target SHA-256 checks:
+cli.aida_help: MATCH 01485a1a9a0ab61af257e2e499af73e812810bb6c127d2e98b190d51a83e658f (w2a3)
+cli.browser_help: MATCH 23b8945bc337c04d4a2f698c014ce53ef53f730484093c39cf0dc8914a6b557b (w2a2)
+cli.config_help: MATCH 9fea13bbe605b62a0cb0e7c400a1ef0f3e4a891dc2f8f931b140a61181f0f5ed (w2a3)
+cli.credential_help: MATCH e447a882aadb47b43e9e32acb81e4fdda4c967c061da3b2c4b88baceacf4036f (w2a3)
+cli.exec_help: MATCH 870c96f52bab91cbf5be083ed3e8bdc5b28d285febea4ffb3fcd060913b8b987 (w2a2)
+cli.exec_runtime: MATCH d9fecc90be9764a8b608162d0e1c42bd1096b6bfbd8f26deb711a7c9f310f35a (w2a2)
+cli.exec_worker_help: MATCH 80d1760634b765a160d5e9f12978866cb575ed300f39aefbb17d19d9a5f366ec (w2a2)
+cli.hub_shared_help: MATCH 3c58b69e84425b2fcc95bcf141d9008a5d5a94a6bd0a4b8e1f15557b643750a9 (w2a3)
+cli.login_help: MATCH c1b6b301968272653d7789d05d47332e05d3783ab0211ac8555b7b332d00cd57 (w2a3)
+cli.login_status_help: MATCH 3fdb5fa84b7c2bb6672c7a5c185e41563d21e055bce2a40f097afde481f6724d (w2a3)
+cli.logout_help: MATCH 33a0695662fc5bb1a0d3e836d2fd002da77c23a591f9c84c1a08ddf77aba23a9 (w2a3)
+cli.mcp_help: MATCH df7cc79adcf68a2e6f02154680b8cfeacf6ff767166fda73d71cacc7a0f93396 (w2a1)
+cli.memory_help: MATCH 960c7b4d0bcf09293a67ecefda892bde07ea4659c513ea28eed95251fc536cf7 (w2a3)
+cli.model_help: MATCH 3a8b4d9959cb5bd45aa2587c53cb6d15f6a04c17d3ba66ccd0135419a94be440 (w2a3)
+cli.monitor_help: MATCH 9f525f7997e1ebc0bc13dc860ab51f386f52f7a4d11666536136be5efb89dcc5 (w2a3)
+cli.qwencloud_help: MATCH 04b18b24bcb7b77e66a15e5ba5ac76caceb2b702e858f9ecedfcd70853d2c984 (w2a3)
+cli.refresh_help: MATCH a2f33655e34395ebb3327989fb51f3c9689d9969e0ce7d06068a2d9a4d996e1e (w2a3)
+cli.resume_click_help: MATCH fb99c08e2c9de25b3dd3a647050c64356b3db48247b3cd08f714a22d7f267ce3 (w2a3)
+cli.send_help: MATCH f1278f1a52c76ab0614b91f703d4e7c617b2a594b3b322f834b610bf0cdaabee (w2a3)
+cli.stop_help: MATCH 5007e8644710979b686f02e3ef1dddb03766c2aab7c5a78b66be88e34e3ab3b2 (w2a3)
+cli.wake_help: MATCH 63ab3617615587d40be899aa854ff812958b2f9e5c0546cdf36c80ec04e0813c (w2a1)
+
+ICU select renders: start => Iniciar el daemon; stop => Detener el daemon; restart => Reiniciar el daemon; pause => pause el daemon.
+Synthetic translated-label negative control: start => start el daemon (falls through to other), proving labels must remain machine tokens.
+Browser runtime value columns: installed_line=21; daemon_healthy=21 (zero-based); no clipping.
+No demonio/demonios/sin interfaz/perfiles iniciales matches in W2 es cli catalogues.
+cli.exec_remote_help excluded: not part of W2.
+
+No repo-wide tests. No catalogue/ledger/allowance/generated edits. No git writes. No PR posts.

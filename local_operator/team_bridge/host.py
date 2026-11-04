@@ -1,12 +1,11 @@
-"""H5 host seam: attach the bridge runtime to the account-bound designated session.
+"""H5 host seam: attach an owner-bound bridge runtime to writer sessions.
 
-WHY THIS MODULE EXISTS. The bridge tool must exist in exactly ONE session per
-machine — the persisted, account-bound CoS session the wake path already names
-(the native enrollment record, ``store.designated_session_for``) — and nowhere
-else. That is a HOST decision, taken where every writer session is built
-(``session_factory._prepare``): a session is handed the runtime at
-construction or never, and the tool's ``createIf`` reports absence for every
-other session without any per-surface choice.
+WHY THIS MODULE EXISTS. Every connected writer session may use outbound bridge
+operations under the same persisted enrollment. The designated CoS remains the
+ONLY inbound recipient: having a runtime or passing admission does not grant
+inbound, ask, or body-consumption authority. Those paths keep the strict
+``owner_fence_refusal`` / ``authority_fence`` designation check. Construction
+belongs at ``session_factory._prepare``; subagent inheritance stays absent.
 
 CONSTRUCTION IS NETWORK-FREE AND GATED ON PERSISTED FACTS ONLY (any miss =>
 ``None`` => no tool):
@@ -15,7 +14,7 @@ CONSTRUCTION IS NETWORK-FREE AND GATED ON PERSISTED FACTS ONLY (any miss =>
 - a committed owner exists (``store.active_owner``: zero OR ambiguous rows
   read ``None`` — never a guess);
 - the owner's enrollment generation is still live (``current_generation_is_live``);
-- the NATIVE designation equals THIS session id (``designated_session_for``);
+- THIS session id is non-empty (designation is an inbound-only constraint);
 - a consent receipt exists (``owner_consent_receipt``).
 The availability/UI record is deliberately NOT a gate: it is per-process UI
 state written only when a UI boundary read ran here, so gating on it made a
@@ -37,8 +36,8 @@ promoted from a cache. Zero traffic exists while the feature is off or native
 authority is missing (no runtime is built then).
 
 EVERY OP, STILL FRESH. Admission proves WHO could act; each operation still
-re-checks the live authority: a cheap LOCAL fence (``owner_fence_refusal``)
-refuses ``owner_changed`` when the committed owner/generation/designation
+re-checks the live authority: a cheap LOCAL fence (``outbound_tool_fence``)
+refuses ``owner_changed`` when the committed owner/generation/binding
 changed under a running session (no silent rebind — re-admission requires a
 new construction), and the client runs the fresh server auth/kill verdict on
 every call. A server ``bridge_disabled``/kill observed at a STATUS boundary
@@ -84,6 +83,7 @@ __all__ = [
     "admit_soon",
     "bridge_runtime_for_session",
     "owner_fence_refusal",
+    "outbound_tool_fence",
 ]
 
 
@@ -111,7 +111,7 @@ def bridge_runtime_for_session(*, config_manager: Any, session_id: str) -> Bridg
             return None
         if not store.current_generation_is_live(owner):
             return None
-        if store.designated_session_for(owner) != session_id:
+        if not session_id:
             return None
         if store.owner_consent_receipt(owner) is None:
             return None
@@ -190,9 +190,9 @@ async def admit_bridge_runtime(runtime: BridgeRuntime) -> str:
     never a silent rebind. No timer, no backoff, no poll.
     """
 
-    from .authority import authority_fence
+    from .authority import outbound_authority_fence
 
-    if authority_fence(runtime) is not None:
+    if outbound_authority_fence(runtime) is not None:
         _cancel_inflight_admission(runtime)  # revoked: invalidate queued work
         return runtime.admission
     task = _ensure_admission_task(runtime)
@@ -212,10 +212,10 @@ async def admit_bridge_runtime(runtime: BridgeRuntime) -> str:
 async def _admission_fetch(runtime: BridgeRuntime) -> None:
     """The ONE in-flight fetch: fence → GET → fence → settle."""
 
-    from .authority import authority_fence
+    from .authority import outbound_authority_fence
     from .client import BridgeRefusal, BridgeSignInRequired, BridgeUnreachable
 
-    if authority_fence(runtime) is not None:
+    if outbound_authority_fence(runtime) is not None:
         return  # revoked between scheduling and the GET: zero traffic
     try:
         payload = await runtime.client.status()
@@ -233,7 +233,7 @@ async def _admission_fetch(runtime: BridgeRuntime) -> None:
         runtime.admission = "disabled"
         runtime.admission_note = str(getattr(refusal, "code", "refused"))
         return
-    if authority_fence(runtime) is not None:
+    if outbound_authority_fence(runtime) is not None:
         # The answer describes an epoch that is no longer bound: DISCARD it —
         # a stale result must never re-admit or rebind.
         return
@@ -275,9 +275,9 @@ def admit_soon(runtime: BridgeRuntime) -> None:
     the next boundary or an explicit trusted human action.
     """
 
-    from .authority import authority_fence
+    from .authority import outbound_authority_fence
 
-    if authority_fence(runtime) is not None:
+    if outbound_authority_fence(runtime) is not None:
         _cancel_inflight_admission(runtime)  # off/drifted: zero traffic
         return
     _ensure_admission_task(runtime)
@@ -342,17 +342,27 @@ def admission_refusal(runtime: BridgeRuntime, *, is_read: bool = False) -> dict[
 
 
 def owner_fence_refusal(runtime: BridgeRuntime) -> dict[str, str] | None:
-    """The LOCAL per-op fence — now the FULL shared one (``authority.py``).
+    """Strict LOCAL fence for inbound, asks, and body-consumption callers.
 
-    Kept name for existing callers (tool.py): the implementation moved so the
-    decide/retry/recovery doors check the SAME facts (enabled, unique owner,
-    live non-empty generation, consent, base/account/tenant/endpoint/credential
-    row, tenant consistency, designation) as construction and admission.
+    Kept strict so existing recovery/consumption doors cannot accidentally
+    acquire outbound-only privileges when a writer session gains a runtime.
     """
 
     from .authority import authority_fence
 
     return authority_fence(runtime)
+
+
+def outbound_tool_fence(runtime: BridgeRuntime) -> dict[str, str] | None:
+    """Fence outbound tool operations without widening inbound authority.
+
+    Tool dispatch must choose this only for outbound/directory operations;
+    shared history and inbound body/ask paths still require the strict fence.
+    """
+
+    from .authority import outbound_authority_fence
+
+    return outbound_authority_fence(runtime)
 
 
 def _owner_changed() -> dict[str, str]:

@@ -260,6 +260,19 @@ async def runtime_rig(tmp_path, monkeypatch, *, sender_kind="human", verdict="de
                 await writer.wait_closed()
 
 
+@pytest.fixture(autouse=True)
+def _no_coalescing_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests drive successive DMs on ONE conversation, iteration by
+    iteration, on the real clock, and assert each lands in its own pass. The
+    wake coalescer's rate window (one wake per conversation per 3 s) would
+    hold the second one back by design; it has its own tests
+    (test_wake_every_message.py), so here the window is zero."""
+
+    from local_operator.team_bridge.connector import coalesce
+
+    monkeypatch.setattr(coalesce, "CONNECTOR_COALESCER", coalesce.WakeCoalescer(window_s=0.0))
+
+
 async def deliver(rig):
     return await loop.run_iteration(
         rig.owner,
@@ -1151,7 +1164,15 @@ async def test_busy_dm_pickup_preserves_running_tool(tmp_path, monkeypatch, case
                     )
                     row = rig.store.body_reservation(rig.owner, CONVERSATION_ID, message_id)
                     assert row["state"] == "completed"
-                assert len(bridge_frames(rig.root)) == len(rig.messages)
+                # ONE wake card per batch (wake contract coalescing): two DMs
+                # admitted in the same connector pass share one card naming
+                # both ids, while each body is still hydrated in its own turn
+                # (the per-message assertions above).
+                cards = bridge_frames(rig.root)
+                assert len(cards) == 1
+                if len(rig.messages) > 1:
+                    text = cards[0]["payload"]["details"]["text"]
+                    assert f"message_ids: {','.join(rig.messages)}" in text
             elif case == "first_unavailable":
                 assert len(rig.stream.requests) == 4
                 assert "SECOND-ADMITTED-BODY-4418" in "\n".join(rig.stream.texts(3))

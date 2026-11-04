@@ -1,0 +1,386 @@
+{
+  "audit_log": "/Users/damian/.local-operator/audit/public-copy-reads.jsonl",
+  "sessions": {
+    "3e7920a93342": "i18n-route-ws_vi",
+    "2b803bbbbf74": "i18n-route-ws_ru",
+    "8e3f2dbf7c26": "i18n-route-authoring",
+    "5752789fe437": "i18n-route-ws_context",
+    "f3b2ff8fdc0d": "i18n-route-ws_en",
+    "94af03aedbd0": "i18n-route-ws_es",
+    "f84a1e51e6a0": "i18n-route-palette",
+    "60a1513c4603": "i18n-route-ws_fr",
+    "35db1f630ed0": "routed-read-probe",
+    "3ac46147b332": "i18n-route-ws_hi",
+    "3bd250c4986d": "i18n-route-team_authoring",
+    "050d26076010": "i18n-route-transcript"
+  },
+  "runs": [
+    {
+      "label": "transcript",
+      "exit": 0,
+      "expected_paths": 7,
+      "my_receipts": [
+        {
+          "chars": 1180,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/en/tui.transcript.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "050d26076010",
+          "sha256": "013ace1b0e2657a1e82fea6db81d1d8e54f1c7b15c538c8b3fce2612d7a34218",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:46:51Z"
+        },
+        {
+          "chars": 1413,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/es/tui.transcript.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "050d26076010",
+          "sha256": "f5a11036bbac2a1bf2195443d219eddda2bdf60c575af020fcef3e23a5eebc14",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:46:59Z"
+        },
+        {
+          "chars": 1386,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/fr/tui.transcript.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "050d26076010",
+          "sha256": "ff49e000451d351c726fa4e60300aade52575667a9abeaf623e5e494fd53cacf",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:47:04Z"
+        },
+        {
+          "chars": 1551,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/ru/tui.transcript.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "050d26076010",
+          "sha256": "af3c0474396589641437f5962715253bfbf3d577858c636d600a0799a6c0e723",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:47:09Z"
+        },
+        {
+          "chars": 1105,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/vi/tui.transcript.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "050d26076010",
+          "sha256": "400346476e24894c0ad494c867561266017877d37dbdb259a4418f78176fa8e5",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:47:14Z"
+        }
+      ],
+      "foreign_lines_in_window": 0
+    },
+    {
+      "label": "authoring",
+      "exit": 0,
+      "expected_paths": 7,
+      "my_receipts": [
+        {
+          "chars": 3317,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/en/tui.authoring.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "8e3f2dbf7c26",
+          "sha256": "2fb30e00dee231832aceb911e1785f979246f238c8374795ff8c20acc191f3cf",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:49:30Z"
+        },
+        {
+          "chars": 3562,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/es/tui.authoring.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "8e3f2dbf7c26",
+          "sha256": "a8cef54acee14c2235338d151fa715bc14e23e6bd0bc01b95df377e6399bc5f1",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:50:04Z"
+        },
+        {
+          "chars": 3604,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/fr/tui.authoring.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "8e3f2dbf7c26",
+          "sha256": "25709050393e5dc9f4439d52770ee833724237a27663c4dd647fa643cb3b5ff8",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:50:13Z"
+        },
+        {
+          "chars": 3490,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/ru/tui.authoring.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "8e3f2dbf7c26",
+          "sha256": "78a4cb25c35b26606d34b2ec1cdde1673f50394effd086eb03e19a5e0d51816e",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:50:20Z"
+        },
+        {
+          "chars": 3378,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/vi/tui.authoring.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "8e3f2dbf7c26",
+          "sha256": "b259353bd79d40f8a202754dd3cdf9674fe346f6e41eff9cf3df7856b26cd6fe",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:50:30Z"
+        },
+        {
+          "chars": 3384,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/hi/tui.authoring.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "8e3f2dbf7c26",
+          "sha256": "724dc11d7cbf8429e5de367d1ea4c469d56ea43b2625ab1934baef3425076ca1",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:50:39Z"
+        }
+      ],
+      "foreign_lines_in_window": 20
+    },
+    {
+      "label": "team_authoring",
+      "exit": 0,
+      "expected_paths": 7,
+      "my_receipts": [
+        {
+          "chars": 2757,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/fr/tui.team_authoring.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "3bd250c4986d",
+          "sha256": "9e477c53af9d49c13fec78051e5b053bc9a095aa1beca5a52f2fe4ca67670a46",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:54:13Z"
+        },
+        {
+          "chars": 2660,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/es/tui.team_authoring.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "3bd250c4986d",
+          "sha256": "85a09f56b962b87555a59c021df44cd3ebe6aaae35d4e3f1a4cc46ef19cdd244",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:54:13Z"
+        },
+        {
+          "chars": 2510,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/vi/tui.team_authoring.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "3bd250c4986d",
+          "sha256": "dbcfb5d9aefc094213da9c8afdb9eda0f3bcd6aadd64c164803933e068631e70",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:54:13Z"
+        },
+        {
+          "chars": 2601,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/ru/tui.team_authoring.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "3bd250c4986d",
+          "sha256": "599ba1d07d48e51522b7b442dc386b0a2367b28a772d89e1874e1d5b0cd990d0",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:54:14Z"
+        },
+        {
+          "chars": 2519,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/hi/tui.team_authoring.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "3bd250c4986d",
+          "sha256": "d180e300271fb71c1d13bfea4c99b262ec9ea93324b263bf3e711f083af7bde1",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:54:14Z"
+        },
+        {
+          "chars": 2488,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/en/tui.team_authoring.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "3bd250c4986d",
+          "sha256": "e0c61074fb8c143a170c92edc5b1d956520199ea6dae49061fac8628e677ed8f",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:54:14Z"
+        }
+      ],
+      "foreign_lines_in_window": 20
+    },
+    {
+      "label": "palette",
+      "exit": 0,
+      "expected_paths": 6,
+      "my_receipts": [
+        {
+          "chars": 322,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/fr/tui.palette.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "f84a1e51e6a0",
+          "sha256": "bfc41c93c7667c999a50ba1e4a3e9704913002d9ad46b82960bf7e77d97608ad",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:56:03Z"
+        },
+        {
+          "chars": 300,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/hi/tui.palette.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "f84a1e51e6a0",
+          "sha256": "382bbf4157d77c337adf4f561c10506c85b87a9cf2937f3c057b080ae84a2d21",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:56:03Z"
+        },
+        {
+          "chars": 315,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/vi/tui.palette.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "f84a1e51e6a0",
+          "sha256": "7977154de57cafbded8b799bf6906973a4fae1d01a1226fd98e82fe2e6e3e32a",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:56:03Z"
+        },
+        {
+          "chars": 314,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/es/tui.palette.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "f84a1e51e6a0",
+          "sha256": "549768b5a8c47223f634112037d56383d27210a189156907e95af83e2c4105d1",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:56:03Z"
+        },
+        {
+          "chars": 319,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/ru/tui.palette.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "f84a1e51e6a0",
+          "sha256": "e5c7ca0d3594e0f16e9d229c5bdb6cdd56163407cf4d71765f2ab77056fec0e6",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:56:03Z"
+        }
+      ],
+      "foreign_lines_in_window": 49
+    },
+    {
+      "label": "ws_en",
+      "exit": 0,
+      "expected_paths": 1,
+      "my_receipts": [
+        {
+          "chars": 82040,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/en/wire.settings.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "f3b2ff8fdc0d",
+          "sha256": "d95e770435086991f45cfa00d6038127c1c053dfd1fb04189c360b4644f50214",
+          "tool": "read_public_copy",
+          "ts": "2026-10-28T23:57:33Z"
+        }
+      ],
+      "foreign_lines_in_window": 13
+    },
+    {
+      "label": "ws_context",
+      "exit": 0,
+      "expected_paths": 1,
+      "my_receipts": [],
+      "foreign_lines_in_window": 42
+    },
+    {
+      "label": "ws_es",
+      "exit": 0,
+      "expected_paths": 1,
+      "my_receipts": [
+        {
+          "chars": 91070,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/es/wire.settings.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "94af03aedbd0",
+          "sha256": "522e28228bfea6b7d03b798d364ef10dd76abda59da9d2e3045a89e301759d4a",
+          "tool": "read_public_copy",
+          "ts": "2026-10-29T00:00:27Z"
+        }
+      ],
+      "foreign_lines_in_window": 117
+    },
+    {
+      "label": "ws_fr",
+      "exit": 0,
+      "expected_paths": 1,
+      "my_receipts": [
+        {
+          "chars": 91725,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/fr/wire.settings.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "60a1513c4603",
+          "sha256": "f90d4ad39e7ea5111f4f8709f6e5d32fbb4f8fe83a13ddd67b21967ece6d7e0e",
+          "tool": "read_public_copy",
+          "ts": "2026-10-29T00:02:06Z"
+        }
+      ],
+      "foreign_lines_in_window": 65
+    },
+    {
+      "label": "ws_ru",
+      "exit": 0,
+      "expected_paths": 1,
+      "my_receipts": [
+        {
+          "chars": 88379,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/ru/wire.settings.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "2b803bbbbf74",
+          "sha256": "3190276bbaab7e4516c7afd828336de66f2fc3a4325e73f4e7e7a29350e9d91d",
+          "tool": "read_public_copy",
+          "ts": "2026-10-29T00:03:13Z"
+        }
+      ],
+      "foreign_lines_in_window": 0
+    },
+    {
+      "label": "ws_vi",
+      "exit": 0,
+      "expected_paths": 1,
+      "my_receipts": [
+        {
+          "chars": 85009,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "3e7920a93342",
+          "sha256": "259a1a0c00e6d759bb852c7280cdfeda4327ae2ccf3da87944e2b3b5107fd4b3",
+          "tool": "read_public_copy",
+          "ts": "2026-10-29T00:04:11Z"
+        }
+      ],
+      "foreign_lines_in_window": 0
+    },
+    {
+      "label": "ws_hi",
+      "exit": 0,
+      "expected_paths": 1,
+      "my_receipts": [
+        {
+          "chars": 83438,
+          "key": null,
+          "path": "local_operator/i18n/catalogues/hi/wire.settings.json",
+          "policy": "docs/security/redaction-policy.md",
+          "session": "3ac46147b332",
+          "sha256": "baaee3cd702b609ac8059702a4bc5643af7d7e04848f70cdd69a02af338ab611",
+          "tool": "read_public_copy",
+          "ts": "2026-10-29T00:05:19Z"
+        }
+      ],
+      "foreign_lines_in_window": 8
+    }
+  ]
+}

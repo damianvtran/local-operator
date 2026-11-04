@@ -1,0 +1,6 @@
+{
+  "cli.failures.error_line": "{prog}: lỗi: {message}",
+  "cli.failures.required": "thiếu đối số bắt buộc: {names}",
+  "cli.failures.invalid_choice": "đối số {argument}: lựa chọn không hợp lệ: {value} (chọn trong {choices})",
+  "cli.failures.invalid_command": "Lệnh {group} không hợp lệ: {command}"
+}

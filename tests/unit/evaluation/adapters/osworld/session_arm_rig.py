@@ -623,6 +623,12 @@ def main(argv: list[str] | None = None) -> int:
         # frontend and would launch a real owner instead of running here.
         "--in-process-host",
     ]
+    if args.ending == "budget-failed-finish":
+        # That scenario is a step-0 ``failed`` finish measuring the budget stop
+        # on an ACCEPTED terminal at epoch N with no challenge in between. The
+        # premature-terminal gate would challenge exactly that finish, so the
+        # scenario runs that gate's control arm; the gate has its own tests.
+        cli.append("--no-premature-terminal-gate")
     # INTERNAL TEST SUPPORT (R3-S2): the rig reaches the unmanaged composition
     # through the injected kwarg -- the standalone script accepts no such flag
     # at all now, and the owner relaunch it performs still goes through the

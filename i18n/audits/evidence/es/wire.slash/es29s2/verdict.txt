@@ -1,0 +1,2 @@
+PASS
+0 BLOCKER / 0 MAJOR: round-1 MAJOR (/team) fixed on the bytes, 8 of 11 findings closed; 2 follow-up MINORs remain (/effort lost shift+tab at 42 of 51 cells, /agent lost 'as one').

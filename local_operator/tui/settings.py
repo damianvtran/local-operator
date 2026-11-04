@@ -247,6 +247,12 @@ _DEFAULT_NOTES: dict[str, Any] = {
     "display.composer.rate": True,
     "display.composer.cost": True,
     "display.composer.duration": True,
+    # The operator's status command (``tui/status_command.py``). Empty means no
+    # segment and nothing runs; the interval is seconds between runs, clamped by
+    # ``status_command.clamp_interval``. Both LIVE through the same
+    # ``_apply_composer_settings`` path as the flags above.
+    "display.composer.command": "",
+    "display.composer.command_interval": 30,
     "display.time_format": "12h",
 }
 

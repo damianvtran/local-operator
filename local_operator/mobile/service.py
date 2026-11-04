@@ -102,6 +102,17 @@ async def amain(port: int = DEFAULT_PORT) -> int:
     server = uvicorn.Server(config)
 
     scanner = asyncio.ensure_future(daemon.scan_loop())
+    # THE TEAM BRIDGE RECEIVER CATCH-UP, the mobile daemon's share of "every
+    # surface": this daemon is its own process (it never boots `lop serve`'s
+    # lifespan), and a machine driven only from the phone must still place the
+    # receiver. The shared helper — same guards, same lock — scheduled, so the
+    # supervisor calls never delay the bind.
+    from local_operator.paths import config_dir as _config_dir
+    from local_operator.team_bridge.connector.install import catch_up_at_surface_start
+
+    bridge_catch_up = asyncio.ensure_future(
+        catch_up_at_surface_start(_config_dir(), surface="mobile")
+    )
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -122,6 +133,9 @@ async def amain(port: int = DEFAULT_PORT) -> int:
         server.should_exit = True
         await serve_task
     scanner.cancel()
+    # Never awaited past shutdown: a sync still in its thread finishes on its
+    # own (it is idempotent and lock-guarded); the task is only released.
+    bridge_catch_up.cancel()
     return 0
 
 

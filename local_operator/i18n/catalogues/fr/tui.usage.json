@@ -1,0 +1,23 @@
+{
+  "tui.usage.paid.continue": "quota inclus épuisé ; les crédits prennent le relais",
+  "tui.usage.paid.family_caps": "les plafonds par famille de modèles s’appliquent toujours",
+  "tui.usage.paid.blocked": "Dépense indisponible",
+  "tui.usage.paid.eligibility_unknown": "Éligibilité à la dépense inconnue",
+  "tui.usage.paid.unlimited": "Allocation payante illimitée",
+  "tui.usage.windows_count": "{count, plural, one {{shown} fenêtre} many {{shown} de fenêtres} other {{shown} fenêtres}}",
+  "tui.usage.exhausted": "{value} épuisée(s)",
+  "tui.usage.near_limit": "{value} près de la limite",
+  "tui.usage.reported_balance": "{count, plural, one {{shown} solde signalé} many {{shown} de soldes signalés} other {{shown} soldes signalés}}",
+  "tui.usage.not_reported": "{value} non signalée(s)",
+  "tui.usage.unavailable": "  ·  utilisation indisponible",
+  "tui.usage.resets_in": ", réinitialisation dans {value}",
+  "tui.usage.no_windows": "  aucune fenêtre signalée",
+  "tui.usage.fetching": "récupération…",
+  "tui.usage.title": "Utilisation",
+  "tui.usage.sign_in_expired": "{value} à reconnecter",
+  "tui.usage.stale": "{value} périmée(s)",
+  "tui.usage.refreshing": "actualisation…",
+  "tui.usage.refresh_failed": "échec de l’actualisation — affichage des derniers chiffres connus",
+  "tui.usage.showing_prefix": "affichage ",
+  "tui.usage.of_separator": " sur "
+}

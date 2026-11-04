@@ -987,6 +987,14 @@ DEFAULT_CONFIG = Config(
                 "inherit": [],
                 "exclude": [],
             },
+            # Radient Saver's ``radient.saver.mode`` deliberately has NO entry
+            # here (agent review R-6): ``ConfigManager`` writes missing top-level
+            # defaults to disk on any unrelated settings save, which would store
+            # an explicit ``off`` no one chose and make the contract's later
+            # flip to ``auto`` (§9, "explicit settings are untouched") unable to
+            # tell a real opt-out from the shipped default. The resolver
+            # (``saver.gate.configured_mode``) supplies ``DEFAULT_MODE`` when
+            # the key is absent.
         },
     }
 )

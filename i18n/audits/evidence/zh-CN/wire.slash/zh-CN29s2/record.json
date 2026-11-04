@@ -1,0 +1,82 @@
+{
+  "schema": 1,
+  "audit_id": "zh-CN29s2",
+  "audit_kind": "independent_full_namespace_audit_of_rewritten_slash_descriptions",
+  "locale": "zh-CN",
+  "namespace": "wire.slash",
+  "round": 2,
+  "audit_date": "2026-10-29",
+  "key_count": 52,
+  "keys_read": 52,
+  "keys_changed_in_this_commit": 5,
+  "changed_keys": [
+    "wire.slash.agent",
+    "wire.slash.context",
+    "wire.slash.credential",
+    "wire.slash.highlights",
+    "wire.slash.hub"
+  ],
+  "changed_keys_method": "git show HEAD:<catalogue> compared key-by-key with the working tree at record time",
+  "tree_head_above_the_rewrite": "7159e2a30927831f5dfb88f84c588eac07770e5d",
+  "current_byte_round_for_ledger": true,
+  "sha256": {
+    "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+    "context": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215",
+    "target": "ebc0ae0101022d4ff31ca7e54f0e0d34d000c7e3b46e62b54ac3ed132a88cd55"
+  },
+  "translator": {
+    "agent": "i18n-translator (session 1fe5533c9a8f)",
+    "session": "1fe5533c9a8f",
+    "model": "radient/auto",
+    "date": "2026-10-29",
+    "model_note": "provider-quota fallback chain anthropic/claude-sonnet-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto; recorded as served, per the translator's own note"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "7b1ecf2ef33b",
+    "instance": "7b1ecf2ef33b-slash-zh-cn",
+    "model": "radient/auto",
+    "date": "2026-10-29",
+    "result": "passed",
+    "findings": 0,
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 1
+    },
+    "independence": "distinct session and instance from the translator and from the round-1 auditor; the receipt states this in its own independence block"
+  },
+  "prior_rounds": [
+    {
+      "round": 1,
+      "instance": "a303f65af544-slash-zh-CN",
+      "verdict": "changes_requested",
+      "counts": {
+        "BLOCKER": 0,
+        "MAJOR": 1,
+        "MINOR": 3,
+        "NIT": 2
+      },
+      "subject": "the shortened bytes introduced by head commit 7159e2a309",
+      "evidence": "session scratch slash-audit/zh-CN/receipt.json (not copied; verdict + counts preserved here and in verdict-round1.txt)"
+    }
+  ],
+  "evidence": {
+    "receipt": "receipt.json",
+    "verdict": "verdict.txt",
+    "scope": "scope.json",
+    "report": "report.md",
+    "manifest": "evidence-manifest.json",
+    "round_1_verdict": "verdict-round1.txt"
+  },
+  "findings_summary": [
+    {
+      "id": "zhCN2-wire-slash-01",
+      "severity": "NIT",
+      "key": "wire.slash.stop"
+    }
+  ],
+  "verdict": "passed"
+}

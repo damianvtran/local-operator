@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "record_kind": "portable_evidence_manifest",
+  "audit_id": "vi1r",
+  "receipt": "receipt.json",
+  "report": "report.md",
+  "file_count": 4,
+  "files": [
+    {
+      "path": "audit.log",
+      "bytes": 2629,
+      "sha256": "01bed843325db395e0f3c1da54fda11f88de8e3f98b75390e979dae6ccd94487",
+      "origin": "/Users/damian/.local-operator/sessions/ebf74725105d/scratchpad/vi-audit/wire.errors.sdk_startup/vi1r/audit.log"
+    },
+    {
+      "path": "receipt.json",
+      "bytes": 582,
+      "sha256": "2a038e1de43524ed89fa284af57a6648e2fa10908fc9573fd04420044a047607",
+      "origin": "/Users/damian/.local-operator/sessions/ebf74725105d/scratchpad/vi-audit/wire.errors.sdk_startup/vi1r/receipt.json"
+    },
+    {
+      "path": "record.json",
+      "bytes": 3795,
+      "sha256": "67eff6ae7979ac8fbd5982bed25e2b7ddc0ae17cd52b7b91ec67c02ca50e0c69",
+      "origin": "/Users/damian/.local-operator/sessions/ebf74725105d/scratchpad/vi-audit/wire.errors.sdk_startup/vi1r/record.json"
+    },
+    {
+      "path": "report.md",
+      "bytes": 6373,
+      "sha256": "d68202b9f64cfe53f25b77ab085750b91565225d5d2c0bbf89b48fe5e56e38a8",
+      "origin": "/Users/damian/.local-operator/sessions/ebf74725105d/scratchpad/vi-audit/wire.errors.sdk_startup/vi1r/report.md"
+    }
+  ]
+}

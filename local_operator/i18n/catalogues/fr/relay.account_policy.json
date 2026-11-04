@@ -1,0 +1,15 @@
+{
+  "relay.account_policy.title": "Paramètres de l’ordinateur",
+  "relay.account_policy.back": "Retour",
+  "relay.account_policy.loading": "Chargement du routage des comptes…",
+  "relay.account_policy.save": "Enregistrer",
+  "relay.account_policy.saving": "Enregistrement…",
+  "relay.account_policy.saved": "Enregistré sur cet ordinateur.",
+  "relay.account_policy.retry": "Réessayer",
+  "relay.account_policy.unavailable": "Les paramètres de routage des comptes ne sont pas disponibles sur ce relais. Mettez à jour Local Operator sur cet ordinateur.",
+  "relay.account_policy.error": "La modification n’a pas pu être confirmée. Vérifiez la connexion et rechargez pour lire la politique actuelle.",
+  "relay.account_policy.scope": "Les modifications ne s’appliquent qu’à cet ordinateur.",
+  "relay.account_policy.entry": "paramètres",
+  "relay.account_policy.rejected": "La modification n’a pas été enregistrée. Vérifiez la valeur ou les paramètres de cet ordinateur, puis réessayez.",
+  "relay.account_policy.load_error": "Impossible de charger le routage des comptes. Vérifiez la connexion et réessayez."
+}

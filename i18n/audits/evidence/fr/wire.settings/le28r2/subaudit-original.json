@@ -1,0 +1,135 @@
+{
+ "locale": "fr",
+ "namespace": "wire.settings",
+ "keys_total": 820,
+ "keys_read": 820,
+ "coverage_statement": "All 820 keys read side by side (en vs fr) in 18 sequential chunks of ~45-50 keys (indices 0-819), plus scripted checks over all 820: key parity, placeholders, backtick spans, numbers/units, ASCII-vs-U+202F spacing before : ; ! ?, straight apostrophes, double spaces, maxCells (8 sidecar keys, all within cap), identical-to-en list. Cross-checked es/ru/vi/zh-CN siblings for kept-English enum labels (identical across locales, not reported). No plural/select messages in this namespace.",
+ "auditor_model": "anthropic/claude-sonnet-5-5 (fallback; job began on deepseek/deepseek-flash, session notice records the quota switch)",
+ "findings": [
+  {
+   "id": "F1",
+   "key": "wire.settings.local_providers.base_url.label",
+   "severity": "major",
+   "category": "grammar (elision with dynamic name)",
+   "en": "{name} endpoint",
+   "current": "endpoint de {name}",
+   "problem": "{name} is a LOCAL_PRESETS display name: 'LM Studio','Ollama','vLLM','llama.cpp','OpenAI-compatible' (providers/local.py:16-26; consumed at settings_io.py:4701). 'endpoint de {name}' renders 'endpoint de Ollama' and 'endpoint de OpenAI-compatible' — in French 'de' must elide before a vowel (d’Ollama, d’OpenAI-compatible) and ICU cannot elide, so the phrasing must avoid 'de {name}'.",
+   "proposed": "endpoint {name}"
+  },
+  {
+   "id": "F2",
+   "key": "wire.settings.local_providers.models.label",
+   "severity": "major",
+   "category": "grammar (elision with dynamic name)",
+   "en": "{name} model overrides",
+   "current": "surcharges de modèle de {name}",
+   "problem": "'surcharges de modèle de {name}' renders 'de Ollama' / 'de OpenAI-compatible' (same elision defect as F1; settings_io.py:4711).",
+   "proposed": "surcharges de modèle pour {name}"
+  },
+  {
+   "id": "F3",
+   "key": "wire.settings.librarian.description",
+   "severity": "minor",
+   "category": "typography",
+   "en": "The Librarian keeps the global Library organised: her display name, the daily pass, and the pause switch. The Library is long-term and shared by every conversation.",
+   "current": "Le Bibliothécaire garde la Bibliothèque globale organisée : son nom affiché, la passe quotidienne et la pause. La Bibliothèque est durable et partagée par toutes les conversations.",
+   "problem": "U+0020 (ASCII space) before ':' — the style guide requires U+202F before : ; ! ? in prose; every other key in the namespace uses U+202F (177 occurrences). Same defect in librarian_cadence_min_gap_minutes.help (before ';'), librarian_cadence_paused.help (before ';'), librarian_enabled.help (before ';'): replace the U+0020 with U+202F in each.",
+   "proposed": "Le Bibliothécaire garde la Bibliothèque globale organisée : son nom affiché, la passe quotidienne et la pause. La Bibliothèque est durable et partagée par toutes les conversations.",
+   "also_keys": [
+    "wire.settings.librarian_cadence_min_gap_minutes.help",
+    "wire.settings.librarian_cadence_paused.help",
+    "wire.settings.librarian_enabled.help"
+   ]
+  },
+  {
+   "id": "F4",
+   "key": "wire.settings.remote_compute.description",
+   "severity": "minor",
+   "category": "typography",
+   "en": "Preview: run agent work on Radient-hosted compute, bound to one of your mesh networks.",
+   "current": "Aperçu  : exécuter le travail de l’agent sur le calcul hébergé par Radient, rattaché à l’un de vos maillages.",
+   "problem": "Contains U+0020 followed by U+202F before ':' ('Aperçu' + ' ' + U+202F + ':'), i.e. a visible double space. Sibling remote_compute_enabled.help is correct.",
+   "proposed": "Aperçu : exécuter le travail de l’agent sur le calcul hébergé par Radient, rattaché à l’un de vos maillages."
+  },
+  {
+   "id": "F5",
+   "key": "wire.settings.session_compression_enabled.help",
+   "severity": "minor",
+   "category": "idiom / width",
+   "en": "Off: transcripts stay plain; compressed sessions stay readable. On: old transcripts compress at launch.",
+   "current": "Désactivé : rien de neuf n’est compressé ; les sessions déjà compressées restent lisibles. Activé : les anciennes transcriptions se compressent au lancement.",
+   "problem": "'rien de neuf n’est compressé' is a stilted calque. Also the sidecar note says this line must fit the page’s ~100-cell help budget: en is 103 chars, fr is 157 (no hard maxCells here, so a width risk, not a measured breach).",
+   "proposed": "Désactivé : aucune nouvelle compression ; sessions compressées lisibles. Activé : compression au lancement."
+  },
+  {
+   "id": "F6",
+   "key": "wire.settings.librarian_cadence_max_extra_per_day.help",
+   "severity": "minor",
+   "category": "consistency (grammatical gender)",
+   "en": "How many extra passes she may request per day. 0 disables extra passes.",
+   "current": "Combien de passes supplémentaires elle peut demander par jour. 0 les désactive.",
+   "problem": "The Librarian is masculine in this section ('Le Bibliothécaire', 'Bibliothécaire activé', 'désactivé/activé' choices) but this help says 'elle peut demander' (en: 'she'). Aida is consistently feminine (Cheffe de cabinet activée). Choose one gender for the Librarian and keep it throughout the section.",
+   "proposed": "Combien de passes supplémentaires il peut demander par jour. 0 les désactive. (or feminise the section: La Bibliothécaire, Bibliothécaire activée, activée/désactivée)"
+  },
+  {
+   "id": "F7",
+   "key": "wire.settings.session_scratchpad.description",
+   "severity": "minor",
+   "category": "terminology consistency",
+   "en": "What one session's own scratch area may hold. The cap is checked on every write and applies immediately.",
+   "current": "Ce que peut contenir la zone de brouillon propre à une session. Le plafond est vérifié à chaque écriture et s’applique immédiatement.",
+   "problem": "The rest of the section keeps 'scratchpad' (title, max_bytes label/help) but this description says 'zone de brouillon': two names for one thing.",
+   "proposed": "Ce que peut contenir le scratchpad propre à une session. Le plafond est vérifié à chaque écriture et s’applique immédiatement."
+  },
+  {
+   "id": "F8",
+   "key": "wire.settings.compaction_auto_continue.help",
+   "severity": "nit",
+   "category": "terminology (glossary lead)",
+   "en": "Schedule a continuation prompt after a successful post-turn pass.",
+   "current": "Programme un prompt de continuation après un passage réussi en fin de tour.",
+   "problem": "'Programme' for 'Schedule' — glossary maps schedule to planification and a scheduled item to 'prompt planifié'.",
+   "proposed": "Planifie un prompt de continuation après un passage réussi en fin de tour."
+  },
+  {
+   "id": "F9",
+   "key": "wire.settings.speech.title",
+   "severity": "nit",
+   "category": "meaning fidelity",
+   "en": "Speech voicing",
+   "current": "Voix",
+   "problem": "en 'Speech voicing' (voice characteristics of the assistant's spoken output); 'Voix' drops 'speech'. Acceptable as a terse title, flagged only as low-confidence.",
+   "proposed": "Voix de synthèse"
+  },
+  {
+   "id": "F10",
+   "key": "wire.settings.static_roots.help",
+   "severity": "nit",
+   "category": "idiom",
+   "en": "Empty = only the built-in roots. Consulted only by the fallback posture (a connection that is not loopback): normal loopback previews can serve any readable file. Comma-separated absolute directories; dot-directories below a root are never served.",
+   "current": "Vide = uniquement les racines intégrées. Pris en compte uniquement par la posture de repli (une connexion qui n’est pas loopback) : les aperçus loopback normaux peuvent servir n’importe quel fichier lisible. Répertoires absolus séparés par des virgules ; les répertoires en point sous une racine ne sont jamais servis.",
+   "problem": "'répertoires en point' is not French usage for dot-directories.",
+   "proposed": "Vide = uniquement les racines intégrées. Pris en compte uniquement par la posture de repli (une connexion qui n’est pas loopback) : les aperçus loopback normaux peuvent servir n’importe quel fichier lisible. Répertoires absolus séparés par des virgules ; les répertoires dont le nom commence par un point sous une racine ne sont jamais servis."
+  },
+  {
+   "id": "F11",
+   "key": "wire.settings.speech_voice_expressiveness.choice.medium.description",
+   "severity": "nit",
+   "category": "idiom",
+   "en": "Today's constant.",
+   "current": "La constante actuelle.",
+   "problem": "'La constante actuelle' is a literal calque of 'Today's constant' (the current fixed level); unclear in French.",
+   "proposed": "Le niveau actuel, constant."
+  },
+  {
+   "id": "F12",
+   "key": "wire.settings.session_compression_enabled.label",
+   "severity": "nit",
+   "category": "meaning fidelity",
+   "en": "Compress old transcripts",
+   "current": "Compresser les transcriptions",
+   "problem": "Drops 'old' (en 'Compress old transcripts'); the label sits at the 29-cell cap (29/29) so only a shorter form fits, and the age row below carries the threshold — low impact.",
+   "proposed": "Compresser les anciennes"
+  }
+ ]
+}

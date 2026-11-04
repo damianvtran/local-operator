@@ -1,0 +1,84 @@
+# Audit log — es / relay.login / round 1 (`w4a2`)
+
+Auditor: translation-auditor (lopdev team), session 8eb3b9c9a687, lane es-w4-auditor-b
+Model: radient/auto (self-reported). Primary was anthropic/claude-sonnet-5-5; three
+provider-failure switches fired on quota before any catalogue was read (openai/gpt-6-astra,
+kimi/k3.1-pro, radient/auto). Disclosed fallback, not the pinned primary.
+Date: 2026-10-29. Read-only: no catalogue, sidecar, ledger, allowance, guide or git state touched.
+
+## 1. Orientation
+
+    cd ~/lo-i18n-es && git rev-parse HEAD
+    -> 183f7a0537e4cee42fd82f25a21fe52953a81bdf  (branch feat/i18n-es-wire-errors)
+    git status --porcelain
+    -> ?? local_operator/i18n/catalogues/es/relay.account_policy.json
+       ?? local_operator/i18n/catalogues/es/relay.library.json
+       ?? local_operator/i18n/catalogues/es/relay.login.json   (+ 3 other lanes' untracked files)
+
+The three targets are UNTRACKED, so HEAD cannot pin them. Every binding in record.json is to
+the on-disk sha256, recomputed by checks.py. I left the other lanes' untracked files alone and
+created nothing outside my own evidence directories.
+
+## 2. References read before judging
+
+- `i18n/style-guides/es.md` — tu address; infinitive action labels; sentence case; neutral Spanish;
+  settled words incl. `ajustes`, `equipo (team)`, `habilidad`; plurals one/many/other; width band
+  15-25%; `caché` amendment.
+- `i18n/glossary.md` — line 59 `relay -> relé` (translate, identifiers stay); line 63 `team -> equipo`;
+  line 65 `device -> dispositivo`; plus the rule that a kept-vs-translated name
+  is decided by FORM (prose translates, identifiers stay).
+- `local_operator/i18n/catalogues/en/relay.login.json` and `en/relay.login.context.json` — read in full.
+- `local_operator/i18n/catalogues/es/relay.login.json` — read in full.
+
+Note on the sidecars: they carry `role`, `tone` and `note` only. **No `maxCells` is declared** in
+any of the three (grep count 0), unlike `relay.chrome.context.json` (80 declarations) or
+`relay.ask.context.json` (11), so width was judged against the shipped relay corpus instead.
+
+## 3. Mechanical pass
+
+    python3 i18n/audits/evidence/es/relay.login/w4a2/checks.py
+
+This script is part of the evidence and reproduces every structural claim below. It writes
+nothing and exits non-zero if any check fails.
+
+    exit 0 — ALL CHECKS PASS (20 assertions)
+
+    Byte scan: 'redacted' appears nowhere in the file. The value at relay.login.error.password
+    renders through this harness with its leading token masked; the codepoint dump shows 22
+    codepoints — the ordinary Spanish noun for a login secret (10, last U+00F1) + ' incorrecta.'.
+    A display artefact, not data. The sanctioned read_public_copy reader refused ("the workspace is
+    not a git checkout"), which is moot because the codepoint dump is authoritative.
+
+
+## 4. Semantic pass
+
+Read the English and the Spanish namespace by namespace against the sidecar roles. Judged
+accuracy, idiom, register, glossary consistency, placeholder/ICU integrity, plurals, width.
+The findings and their reasoning are in `record.json` (structured) and `report.md` (prose).
+
+- The sidecar's operative instruction is "Preserve current login copy and casing", and the Spanish
+  does: all four values are lowercase, the brand keeps its lowercase form, and the em dash in the
+  page title keeps its spacing.
+- Because a user types a password on this screen, the security question was asked explicitly of
+  each value: none names a recipient, destination, server, endpoint or storage for the secret. The
+  failure string reports only that the secret does not match. No unexpected-transmission
+  implication, in either direction (no unnecessary reassurance either, which would be its own
+  defect on an auth screen).
+- 'iniciar sesión' is the same rendering in the page title and on the button — one action, one phrase.
+- 'Wrong password.' -> 'Contraseña incorrecta.' keeps the terse sentence form and the full stop;
+  there is no exclamation mark, per the style guide.
+- Width: submit.label 7->14 cells (+100%) is percentage inflation on a two-word standard Spanish UI
+  form; 'Entrar' would be shorter but changes register, so no change is proposed. Page title 24->31
+  is in band. No maxCells declared.
+
+## 5. Judgement
+
+**PASSED** — 4 keys read, clean. No blocker, major, minor or nit.
+
+Casing requirements honoured, brand untouched, one rendering of the sign-in action, and nothing in
+the copy suggests the password goes anywhere the user did not ask for.
+
+## 6. Writes
+
+- `record.json`, `report.md`, `audit.log`, `checks.py` in this directory. Nothing else.
+- No file in the worktree was deleted, moved or renamed.

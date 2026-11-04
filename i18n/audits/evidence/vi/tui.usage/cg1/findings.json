@@ -1,0 +1,27 @@
+{
+  "locale": "vi",
+  "namespace": "tui.usage",
+  "result": "FINDINGS",
+  "gate_status": "passed",
+  "counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1
+  },
+  "unresolved_blocker_major": 0,
+  "findings": [
+    {
+      "round": 1,
+      "id": "VI-011",
+      "severity": "NIT",
+      "namespace": "tui.usage",
+      "key": "tui.usage.paid.continue",
+      "english": "included quota used; credits will continue",
+      "current": "đã dùng hết hạn mức đi kèm; tín dụng sẽ tiếp tục",
+      "problem": "'tín dụng sẽ tiếp tục' (credits will continue) is ambiguous; the meaning is that usage continues on credits.",
+      "suggested": "đã dùng hết hạn mức đi kèm; sẽ tiếp tục trừ vào tín dụng",
+      "disposition": "fixed (remediation core-fix, session 5e0b68c135be)"
+    }
+  ]
+}

@@ -1,0 +1,91 @@
+AUDIT LOG — es / tui.usage / w6a3 (ROUND 3, narrow convergence)
+date:         2026-10-30T17:15:12Z
+auditor:      independent translation auditor (lopdev team), i18n-auditor role; session c0b953a7c12a
+model:        radient/auto — the model ACTUALLY running this audit. The header named anthropic/claude-sonnet-5-5;
+              quota fallbacks took the session through openai/gpt-6-astra and kimi/k3.1-pro to radient/auto
+              (active_model_route records in this run's transcript), before any audit work. No claim is made
+              for the primary model.
+independence: authored none of this copy and repaired none of it; wrote no catalogue, sidecar, ledger,
+              allowance, style guide or generated file. This round forbade git writes.
+
+Worktree: /Users/damian/lo-i18n-es
+Branch:   feat/i18n-es-tui
+Probe interpreter: /Users/damian/local-operator/.venv/bin/python (supplies rich.cells.cell_len)
+
+THIS IS AN EXECUTION LOG, NOT NOTES. Every block below is captured output of the command above it.
+
+=== 1. revision and identity of the exact inputs =================================
+$ git rev-parse HEAD
+b925c2e11be36653dfe88ac78f627bc2531427df
+$ git rev-parse --abbrev-ref HEAD
+feat/i18n-es-tui
+$ git status --porcelain -- local_operator/i18n/catalogues/es/tui.usage.json
+?? local_operator/i18n/catalogues/es/tui.usage.json
+$ sha256 (en / context / es) for this namespace
+5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b  local_operator/i18n/catalogues/en/tui.usage.json
+bf599f5f161087b890e1e24434a03209fee286b865173af6b578da3133b6ef19  local_operator/i18n/catalogues/en/tui.usage.context.json
+52166a416bf6d49ab61138e7bd285fe5099710008127d3761a6e2fc298ac6776  local_operator/i18n/catalogues/es/tui.usage.json
+
+NOTE: the es target is UNTRACKED at this revision, so HEAD does not bind its bytes; the
+sha256 above is the binding identity, and the probe re-reads the same three files and prints
+their digests at the top of section 3 from independent code.
+
+=== 2. the repository's own validator ===========================================
+$ python3 scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+exit 0
+$ python3 scripts/i18n/check.py
+advisory: local_operator/update.py: 57 literal(s) against a ceiling of 53
+advisory: local_operator/web_fetch/tool.py: 1 literal(s) — not in baseline.json; a file with no recorded ceiling starts at 0
+check.py: ok — 191 file(s) scanned, 2348 literal(s) at or below the baseline, catalogues consistent; 51 advisory finding(s) (report-only until activated)
+exit 0
+
+=== 3. the probe — this namespace ==============================================
+$ ~/local-operator/.venv/bin/python i18n/audits/evidence/es/tui.usage/w6a3/checks.py --namespace tui.usage
+
+== ROUND 3 DELTA AUDIT — es / tui.usage / w6a3 ==
+repo=/Users/damian/lo-i18n-es
+branch=feat/i18n-es-tui
+head=b925c2e11be36653dfe88ac78f627bc2531427df
+cell_ruler=rich.cells.cell_len
+sha256 en: 5aeaec254352896101bf2825ac03d06f74c95e3598cda23536c5fe28507a2f8b  local_operator/i18n/catalogues/en/tui.usage.json
+sha256 context: bf599f5f161087b890e1e24434a03209fee286b865173af6b578da3133b6ef19  local_operator/i18n/catalogues/en/tui.usage.context.json
+sha256 target: 52166a416bf6d49ab61138e7bd285fe5099710008127d3761a6e2fc298ac6776  local_operator/i18n/catalogues/es/tui.usage.json
+
+A1 PASS — key parity: en 21 / es 21; missing=[] extra=[]
+A2 PASS — context 21 keys, missing [] (context is optional, pre-existing; round 2 recorded the same count)
+A3 PASS — every value parses in the shipped ICU subset; errors=[]
+A4 PASS — placeholder tuples identical on all 21 keys; mismatches=[]
+A5 PASS — tui.usage.windows_count: es[selectors=['many', 'one', 'other'] expected=['many', 'one', 'other'] empty=[]] en[selectors=['one', 'other'] expected=['one', 'other'] empty=[]]; tui.usage.reported_balance: es[selectors=['many', 'one', 'other'] expected=['many', 'one', 'other'] empty=[]] en[selectors=['one', 'other'] expected=['one', 'other'] empty=[]]
+A6 PASS — tui.usage.sign_in_expired: braces=['{value}']; exactly one {value}
+A7 PASS — label + colon + space + {value}; no space before the colon
+
+C1 PASS — tui.usage.sign_in_expired = 'caducadas: {value}'; count-neutral label-first value
+C2 PASS — all three counters label-first: exhausted='agotadas: {value}', stale='obsoletas: {value}', sign_in_expired='caducadas: {value}'
+C3 PASS — renders: {'1': 'caducadas: 1', '2': 'caducadas: 2', '12': 'caducadas: 12', '100': 'caducadas: 100', '1000': 'caducadas: 1000', '1000000': 'caducadas: 1000000'}
+C4 PASS — counters segment at 1/2/12/100/1000/1e6 = 28/28/29/30/31/34 vs 31-cell floor body; 1e6 is 34 in both es and en. full row es/en: 43/45 (1), 44/46 (12), 45/47 (100)
+C5 PASS — full row (43) fits the 52-cell content at 60 columns; at 40 the 32-cell chrome truncates es to 'Uso  2m ago  · caducadas: 2  · …' and en to 'Usage  2m ago  · 2 sign-in expi…'
+C6 PASS — round-2 `{value} caducadas` no longer appears anywhere in the file
+C7 PASS — untouched plural keys still render: {'1': '1 ventana', '2': '2 ventanas', '1000000': '1000000 de ventanas', 'balance_1': '1 saldo informado', 'balance_2': '2 saldos informados'}
+
+D1 PASS — paid annotations raw/composed: family_caps 53/55 vs en 29/31; eligibility 35/37 vs en 25/27; paid.continue 52/54 vs en 42/44; thresholds family_caps=64, eligibility=46, continue=63
+SG-1 FAIL — style-guide paid exception says 'at 60+ columns all three fit'; measured at 60 columns (body 51): {'family_caps': False, 'eligibility_unknown': True, 'paid.continue': False}; the paragraph itself says paid.continue needs 63, and its own family_caps (55 composed) needs 64. Decision (keep relay wording) stands; only the threshold sentence is wrong.
+SG-2 WARN — style-guide eligibility comparator: guide says 23, measured en=25 (len=25); es=35 is correct, so the exception still stands but one number is wrong
+SG-3 WARN — style-guide says both paid strings are byte-identical to relay.shell.usage: eligibility=True, family_caps=False; relay family_caps='Siguen aplicándose los límites por familia de modelos.' vs tui='siguen aplicándose los límites por familia de modelos' (case + final period only)
+D2 PASS — tui.analytics.hint.expand.keys_bare: es 14 / en 13 / maxCells 12; guide states 14/13/12; footer crop present=True
+D3 PASS — both exceptions are present in i18n/style-guides/es.md under the recorded-width-exception headings
+
+[E] NEGATIVE CONTROLS
+E1 PASS — negative control `{value} agotadas`: restoring the count-first shape in `exhausted` is rejected by C2 — caught
+E2 PASS — negative control `{value} caducadas`: restoring the round-2 value is rejected by C1/C2 — caught
+E3 PASS — negative control `{count}`: wrong placeholder name differs from the en signature — caught
+
+[F] DELTA PROOF
+F1 PASS — restoring the round-2 value in tui.usage.json reproduces the round-2 file sha256 e2ab2abd3d581eb5…; actual e2ab2abd3d581eb5… — no other value changed
+F2 PASS — current es file sha256 52166a416bf6d49ab61138e7bd285fe5099710008127d3761a6e2fc298ac6776
+
+RESULT: 1 FAIL(s) — SG-1
+exit 1
+
+=== 4. final target sha256 =====================================================
+52166a416bf6d49ab61138e7bd285fe5099710008127d3761a6e2fc298ac6776  local_operator/i18n/catalogues/es/tui.usage.json

@@ -1484,3 +1484,62 @@ class TestInvocationInsideACommandArgument:
             notices = _notice_texts(app)
         assert session.prompts == ["$stub do the thing"], session.prompts
         assert any("empty body" in n for n in notices), notices
+
+
+@pytest.mark.asyncio
+async def test_the_terminal_and_the_relay_expand_a_message_to_the_same_bytes(
+    skill_root,
+) -> None:
+    """One rule, two surfaces: the phone's payload is the TUI's payload.
+
+    The relay does not reuse :meth:`OperatorApp._expand_invocation` — that
+    method reads THIS process's cwd and its own notices, neither of which a
+    relay serving several checkouts has. What the two must share is the
+    ANSWER: the trigger, the body read, the skip rule and the block bytes. So
+    the comparison is on the payload the model would receive, which is the only
+    thing the phone and the terminal can disagree about in a user-visible way.
+    """
+    from local_operator.skills.invoke import expand_invocation
+    from local_operator.skills.protocol import resolve_skill_url
+
+    session = FakeSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        # Populate before the hollow skill below is written, then let discovery
+        # rescan on the scan that sees it (the rescan is the behaviour the
+        # sibling test pins, so this comparison runs against a live vocabulary).
+        await await_session_boot(app)
+        await pilot.pause()
+        skills = app._discovered_skills()
+        assert {"research", "code-review"} <= set(skills)
+
+        def read(name: str) -> str | None:
+            return resolve_skill_url(f"skill://{name}", skills)
+
+        cases = [
+            "$research fix the login bug",
+            "please $research this and $code-review the diff",
+            "nothing to see here",
+            "$PATH is set, costs$5 and $nope is not a skill",
+            "$secret-audit check the repo",
+        ]
+        for text in cases:
+            tui = app._expand_invocation(text)
+            relay = expand_invocation(text, skills, read)
+            assert relay.text == (tui.payload if tui is not None else text), text
+            assert relay.attached == (tui.skills if tui is not None else ()), text
+
+        # The skip rule is part of the contract, not just the happy path: a
+        # skill whose frontmatter is the whole file fires on neither surface
+        # and costs neither the message.
+        hollow = skill_root / "hollow"
+        hollow.mkdir(parents=True)
+        (hollow / "SKILL.md").write_text("---\nname: hollow\ndescription: Nothing yet.\n---\n")
+        skills = app._discovered_skills()
+        assert "hollow" in skills
+        tui = app._expand_invocation("$hollow do the thing")
+        relay = expand_invocation("$hollow do the thing", skills, read)
+        assert tui is None
+        assert relay.text == "$hollow do the thing"
+        assert relay.attached == ()
+        assert [skip.reason for skip in relay.skipped] == ["empty"]

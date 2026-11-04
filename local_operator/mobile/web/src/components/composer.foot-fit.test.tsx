@@ -21,6 +21,7 @@ import type { SessionProjection } from "../types";
 vi.mock("../router", () => ({ navigate: vi.fn() }));
 vi.mock("../api", () => ({
 	sendCommand: vi.fn(), transcribeAudio: vi.fn(), getCommands: vi.fn(async () => ({ commands: [] })),
+	getSkills: vi.fn(async () => ({ skills: [] })),
 	getDirectories: vi.fn(async () => ({ home: "/", recent: [], tmp: "" })),
 }));
 let capabilities: { stt: { available: boolean; path: string | null } | false } = { stt: false };

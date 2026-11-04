@@ -71,6 +71,12 @@ if TYPE_CHECKING:  # import cycle: both modules import this one at runtime
     from local_operator.providers.auth_store import OAuthAccess, StoredCredential
     from local_operator.providers.clients import WireClient
 
+    # Keep the optional hook contract readable without concatenated forward
+    # references: Pyright rejects those as cast types even though Python joins them.
+    _CodexTurnStateScope = Callable[
+        [ChatRequest, str | None, OAuthAccess | None], tuple[str, str] | None
+    ]
+
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
@@ -3196,8 +3202,8 @@ class FailoverRouteState:
     #: every message boundary regardless of ``primary_retry_at_ms`` — a
     #: cooldown sized to a 24h advertised reset would otherwise glue the
     #: session to a fallback for a day after the primary's 5-hour window
-    #: reopened. Transport pins keep the cooldown: their recovery is not
-    #: cheaply observable.
+    #: (where the account reports one) reopened. Transport pins keep the
+    #: cooldown: their recovery is not cheaply observable.
     quota_pinned: bool = False
     #: The selector a CHILD was launched on when the launch resolved an
     #: explicit model (a role tier, or a resumed child's recorded tier) —
@@ -4752,6 +4758,16 @@ async def _stream_with_failover_events(
             successful_terminal = False
             failed_terminal = False
             try:
+                turn_state = current_request._codex_turn_state
+                if turn_state is not None:
+                    # After actual credential selection, before every adapter.
+                    # None MUST clear: A→gateway→A cannot resurrect A's token.
+                    scope_for = cast(
+                        "_CodexTurnStateScope | None",
+                        getattr(client, "codex_turn_state_scope", None),
+                    )
+                    scope = scope_for(current_request, key, access) if callable(scope_for) else None
+                    turn_state.observe_attempt(*(scope or ("", "")))
                 async for event in capture_wire_stream(
                     client.stream(current_request, key, oauth_access=access), attempt_hint
                 ):
@@ -5912,6 +5928,38 @@ def _request_has_rotated(state: AuthRetryKeyState) -> bool:
     return len(state.attempted_keys) > 1
 
 
+#: Typed provenance on a route refusal made BEFORE any request byte existed for
+#: the hop. Set only by :func:`_mark_prewire_refusal`, whose every caller is a
+#: credential-cascade answer — the reader is the screening chain walk
+#: (``team_bridge/model_boundary.py``), which may try the next configured hop
+#: when the refusal proves nothing was dispatched. Spelled once here because
+#: the emitter owns the fact; a downstream layer must not guess it from ``kind``
+#: (two shapes are ``unknown``) or from ``request_sent`` (a spend claim).
+PREWIRE_REFUSAL_ATTR = "tb_screen_prewire"
+
+
+def _mark_prewire_refusal(error: ProviderError) -> ProviderError:
+    """Stamp a pre-dispatch route refusal with the fact the emitter knows.
+
+    WHY AN ATTRIBUTE (B1/M1, PR #3212): the screening chain walk may fall over
+    to another hop only when nothing left the wire, and these refusals are made
+    one layer ABOVE the wire guard, so the guard's physical-send count cannot
+    see them. Neither field can stand in for it: two of the three shapes below
+    classify as ``kind="unknown"`` (a provider with no credential at all, a
+    borrowed credential whose owner device is offline), and ``request_sent``
+    is a spend claim read elsewhere (``supplements/generator.py`` accounting),
+    so it is left as it was rather than repurposed as a routing signal.
+
+    All three emissions are facts about the ROUTE, taken before any request
+    byte existed for this hop (no bearer resolved, a blocked pool, a missing
+    configuration, an offline owner) — none of them can be produced by the
+    content a sender submitted, which is what makes advancing safe.
+    """
+
+    setattr(error, PREWIRE_REFUSAL_ATTR, True)
+    return error
+
+
 def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderError:
     """Say WHY no bearer could be resolved, distinguishing two opposite causes.
 
@@ -5945,7 +5993,9 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
             # "rate limit or quota exceeded:" label in front would be the lie this
             # branch exists to remove. Retryable, like a block: the owner coming
             # back is exactly the kind of change the loop-back sweep can find.
-            return ProviderError(None, reason, retryable=True, kind="unknown")
+            return _mark_prewire_refusal(
+                ProviderError(None, reason, retryable=True, kind="unknown")
+            )
     rows: list["StoredCredential"] = []
     if isinstance(auth, CredentialLister):
         try:
@@ -5953,8 +6003,8 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
         except Exception:  # noqa: BLE001 - diagnosis must never mask the real failure
             rows = []
     if not rows:
-        return ProviderError(
-            None, f"No API key configured for provider '{provider}'", retryable=False
+        return _mark_prewire_refusal(
+            ProviderError(None, f"No API key configured for provider '{provider}'", retryable=False)
         )
     kinds = {row.credential_type for row in rows}
     what = "OAuth sign-in" if "oauth" in kinds else "API key"
@@ -5974,17 +6024,19 @@ def _no_credential_error(auth: FailoverAuthStore, provider: str) -> ProviderErro
     # true, and it hides the real fix (sign in again). Naming the third cause
     # costs a clause and stops the message actively misdirecting; the rate-limit
     # case, which is the common one, still reads first.
-    return ProviderError(
-        None,
-        (
-            f"{subject} not usable right now (rate limited, a token refresh "
-            "failed, or the stored credential could not be read). The "
-            "credentials are still configured; retry once the limit resets, or "
-            "sign in again to replace them."
-        ),
-        retryable=True,
-        kind="quota",
-        request_sent=False,
+    return _mark_prewire_refusal(
+        ProviderError(
+            None,
+            (
+                f"{subject} not usable right now (rate limited, a token refresh "
+                "failed, or the stored credential could not be read). The "
+                "credentials are still configured; retry once the limit resets, or "
+                "sign in again to replace them."
+            ),
+            retryable=True,
+            kind="quota",
+            request_sent=False,
+        )
     )
 
 

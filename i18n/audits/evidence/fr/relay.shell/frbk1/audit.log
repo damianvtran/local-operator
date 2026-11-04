@@ -1,0 +1,72 @@
+$ cd /Users/damian/lo-i18n-base
+## branch
+feat/i18n-core-fr-backfill
+
+## key parity + ICU integrity + fr plural rendering
+$ /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/ab2610514b4d/scratchpad/fr_parity_one.py relay.shell
+namespace=relay.shell en_keys=44 fr_keys=44
+key_order_equal=True
+extra_in_fr=[]
+missing_in_fr=[]
+PLURAL_SELECTORS_DIFFER relay.shell.usage.unit_credits: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+PLURAL_SELECTORS_DIFFER relay.shell.usage.unit_tokens: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+PLURAL_SELECTORS_DIFFER relay.shell.usage.unit_requests: en=(('one', 'other'),) fr=(('one', 'many', 'other'),)
+argument_mismatches=0
+fr_cldr_categories=('many', 'one', 'other')
+plural_keys=3
+  key=relay.shell.usage.unit_credits
+    en = '{count, plural, one {credit} other {credits}}'
+    fr = '{count, plural, one {cr\xe9dit} many {cr\xe9dits} other {cr\xe9dits}}'
+    fr count=       0 category=one    rendered='cr\xe9dit'
+    fr count=       1 category=one    rendered='cr\xe9dit'
+    fr count=       2 category=other  rendered='cr\xe9dits'
+    fr count= 1500000 category=other  rendered='cr\xe9dits'
+    fr count= 1000000 category=many   rendered='cr\xe9dits'
+    fr count= 2000000 category=many   rendered='cr\xe9dits'
+    composed via relay.shell.usage.remaining: 'restant\u202f: 1\u202f000\u202f000 cr\xe9dits'
+    composed via relay.shell.usage.used: 'utilis\xe9\u202f: 1\u202f000\u202f000 cr\xe9dits'
+  key=relay.shell.usage.unit_tokens
+    en = '{count, plural, one {token} other {tokens}}'
+    fr = '{count, plural, one {token} many {tokens} other {tokens}}'
+    fr count=       0 category=one    rendered='token'
+    fr count=       1 category=one    rendered='token'
+    fr count=       2 category=other  rendered='tokens'
+    fr count= 1500000 category=other  rendered='tokens'
+    fr count= 1000000 category=many   rendered='tokens'
+    fr count= 2000000 category=many   rendered='tokens'
+    composed via relay.shell.usage.remaining: 'restant\u202f: 1\u202f000\u202f000 tokens'
+    composed via relay.shell.usage.used: 'utilis\xe9\u202f: 1\u202f000\u202f000 tokens'
+  key=relay.shell.usage.unit_requests
+    en = '{count, plural, one {request} other {requests}}'
+    fr = '{count, plural, one {requ\xeate} many {requ\xeates} other {requ\xeates}}'
+    fr count=       0 category=one    rendered='requ\xeate'
+    fr count=       1 category=one    rendered='requ\xeate'
+    fr count=       2 category=other  rendered='requ\xeates'
+    fr count= 1500000 category=other  rendered='requ\xeates'
+    fr count= 1000000 category=many   rendered='requ\xeates'
+    fr count= 2000000 category=many   rendered='requ\xeates'
+    composed via relay.shell.usage.remaining: 'restant\u202f: 1\u202f000\u202f000 requ\xeates'
+    composed via relay.shell.usage.used: 'utilis\xe9\u202f: 1\u202f000\u202f000 requ\xeates'
+
+## typography + codepoint inventory (masking attestation)
+$ /Users/damian/local-operator/.venv/bin/python /Users/damian/.local-operator/sessions/ab2610514b4d/scratchpad/fr_typo_one.py relay.shell
+namespace=relay.shell values=44
+typography_issues=0
+non_ascii_inventory=U+00B7(MIDDLE DOT)x2, U+00C0(LATIN CAPITAL LETTER A WITH GRAVE)x1, U+00C9(LATIN CAPITAL LETTER E WITH ACUTE)x1, U+00E0(LATIN SMALL LETTER A WITH GRAVE)x4, U+00E8(LATIN SMALL LETTER E WITH GRAVE)x5, U+00E9(LATIN SMALL LETTER E WITH ACUTE)x21, U+00EA(LATIN SMALL LETTER E WITH CIRCUMFLEX)x5, U+2014(EM DASH)x2, U+2019(RIGHT SINGLE QUOTATION MARK)x5, U+2026(HORIZONTAL ELLIPSIS)x4, U+202F(NARROW NO-BREAK SPACE)x9
+equals_sign_in_any_value=False
+U+FFFD_in_any_value=False
+U+202F_total=9
+U+2019_total=5
+
+## repository gate, read-only
+$ /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+check.py: catalogue checks: 0 problem(s)
+
+## input hashes
+en      f53b23560b88b531ef8fc3274bc396676f26e755ad4ff9ad87ce368cebdee560
+context 16746ecd1537006992935bb2aa88fe39c46700d9e0341e7aacd565e2366349ea
+fr      d6aa26b8e8dc15fb27feed031a5595470aeda0f15374ec665312b0bfbfe4c496
+
+## disclosure - one transient negative control
+While testing whether the repo gate rejects a plural category outside fr's [many, one, other], fr/relay.library.json was temporarily rewritten with an illegal `few` arm and then restored with `cp` from a copy taken before the write. The restored file is byte-identical to the copy (sha256 ab64d2fb171c78e79ac689d49da261474e4eaf687cbfbf113d28345234302ea2, the same hash this audit records as its target input). The gate run above ran after restoration. Disclosed because the audit brief forbids modifying catalogues; there is no net change. The negative control itself was never completed - that invocation used a mis-typed interpreter path and exited 127 - so it is reported as attempted and abandoned, not as evidence.
+

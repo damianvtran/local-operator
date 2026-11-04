@@ -1,0 +1,11 @@
+{
+  "cli.config_help.config": "Gestionar los ajustes de configuración",
+  "cli.config_help.open": "Abrir el archivo de configuración en el editor predeterminado",
+  "cli.config_help.edit": "Editar un valor concreto en el archivo de configuración",
+  "cli.config_help.edit_key": "Clave de configuración que actualizar (p. ej., hosting, model_name, conversation_length, detail_length, max_learnings_history, auto_save_conversation)",
+  "cli.config_help.edit_value": "Nuevo valor de la clave de configuración (el tipo se convierte automáticamente según la clave)",
+  "cli.config_help.list": "Listar las opciones de configuración disponibles y sus descripciones",
+  "cli.config_help.create": "Crear un archivo de configuración nuevo",
+  "cli.config_help.instructions": "Mostrar qué archivos de instrucciones personalizadas reúne una sesión y en qué orden (solo rutas y tamaños, nunca su contenido)",
+  "cli.config_help.instructions_description": "Mostrar qué archivos de instrucciones personalizadas reúne una sesión y en qué orden, con el tamaño que aporta cada uno y si se descartó por duplicado, se truncó o se solapa con una fuente anterior. Solo rutas y tamaños, nunca el contenido."
+}

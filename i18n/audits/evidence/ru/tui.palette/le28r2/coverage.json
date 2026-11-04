@@ -1,0 +1,15 @@
+{
+  "keys_read": 7,
+  "keys": [
+    "tui.palette.kind_agent",
+    "tui.palette.kind_command",
+    "tui.palette.kind_session",
+    "tui.palette.kind_setting",
+    "tui.palette.kind_team",
+    "tui.palette.no_matches",
+    "tui.palette.placeholder"
+  ],
+  "method": "Every key read side-by-side in the parent transcript against English, target, English context, glossary and locale guide; elided stretches reprinted. Final context deduplication read during GPT packaging.",
+  "origin": "parent session bc5209588225",
+  "qualification": "This is an audit coverage declaration, not a generated per-key semantic test."
+}

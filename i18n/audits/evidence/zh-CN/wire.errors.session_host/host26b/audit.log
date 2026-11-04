@@ -1,0 +1,17 @@
+Executed at 2026-10-31T18:10:29.264315+00:00
+Source revision: 9c979a03d551020ce6ff1b16c8066aa69ce7bb2a
+Scope: isolated committed validator/runtime; only en + zh-CN wire.errors.session_host; no installation, no shared tree or ledger writes.
+SHA256 local_operator/i18n/catalogues/en/wire.errors.session_host.json: b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0 PASS
+SHA256 local_operator/i18n/catalogues/en/wire.errors.session_host.context.json: d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724 PASS
+SHA256 local_operator/i18n/catalogues/zh-CN/wire.errors.session_host.json: 4205cc6feda10279c524d78ff95c450bbc50981a48d13e37f82849d1705860d4 PASS
+Command: /Users/damian/local-operator/.venv/bin/python scripts/i18n/check.py --catalogues-only
+stdout:
+check.py: catalogue checks: 0 problem(s)
+
+stderr:
+
+Exit code: 0
+Independent checks: valid JSON; exact source/target/context key parity: 3/3 PASS
+wire.errors.session_host.unsupported: placeholder names/types () == (); no ICU/plural/select/markup/backtick spans; literal parity PASS; chars=44, static East-Asian-width cells=88; no maxCells/maxChars specified; NOT rendered-fit evidence
+wire.errors.session_host.unavailable: placeholder names/types () == (); no ICU/plural/select/markup/backtick spans; literal parity PASS; chars=25, static East-Asian-width cells=50; no maxCells/maxChars specified; NOT rendered-fit evidence
+wire.errors.session_host.refused: placeholder names/types () == (); no ICU/plural/select/markup/backtick spans; literal parity PASS; chars=71, static East-Asian-width cells=107; no maxCells/maxChars specified; NOT rendered-fit evidence

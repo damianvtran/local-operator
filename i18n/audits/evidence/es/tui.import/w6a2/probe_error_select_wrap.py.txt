@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Does the longer `error_select` fit the empty-state body, or is it truncated?
+
+Read-only rig: mounts the production HarnessImportView headless with the two
+stylesheet paddings, injects the ACTUAL es catalogue value for
+``tui.import.error_select`` into the empty-state body, and measures whether the
+body grows to a second line (wrap) or keeps one line with the text cut (crop).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+from rich.cells import cell_len
+from textual.app import App, ComposeResult
+
+from local_operator.tui.widgets.harness_import_view import HarnessImportView
+
+CAT = "/Users/damian/lo-i18n-es/local_operator/i18n/catalogues"
+
+
+class Probe(HarnessImportView):
+    def _begin(self) -> None:  # noqa: D401 - rig no-op
+        return
+
+
+class Harness(App):
+    def compose(self) -> ComposeResult:
+        yield Probe()
+
+
+async def main() -> int:
+    es = json.load(open(f"{CAT}/es/tui.import.json", encoding="utf-8"))
+    message = es["tui.import.error_select"]
+    print(f"error_select ({cell_len(message)} cells): {message!r}")
+    app = Harness()
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        view = app.query_one(Probe)
+        app.screen.styles.padding = 1
+        view.styles.padding = 1
+        view._state = "empty"
+        view._empty_header = es["tui.import.select_header"]
+        view._empty = message
+        view._apply_layout()
+        view._paint()
+        await pilot.pause()
+        await pilot.pause()
+        body = view._body
+        text = view._body_text
+        rendered = text.render()
+        plain = rendered.plain if hasattr(rendered, "plain") else str(rendered)
+        print(f"body_scroller_width={body.size.width} body_text_height={text.size.height}")
+        print(f"body_text_plain_contains_full_message={message in plain}")
+        print(f"body_text_plain={plain!r}")
+    return 0
+
+
+raise SystemExit(asyncio.run(main()))

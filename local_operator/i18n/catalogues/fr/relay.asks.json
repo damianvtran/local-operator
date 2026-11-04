@@ -15,6 +15,7 @@
   "relay.asks.card.secret_notice_persisted": "secret — envoyé directement, non affiché dans la transcription, et enregistré dans votre coffre d’identifiants",
   "relay.asks.card.placeholder_secret": "coller le secret",
   "relay.asks.card.placeholder_answer": "votre réponse",
+  "relay.asks.card.other": "Autre",
   "relay.asks.card.recommended": "· recommandé",
   "relay.asks.card.choose_any": "choisissez tout ce qui s’applique",
   "relay.asks.card.urgent": "· urgent",

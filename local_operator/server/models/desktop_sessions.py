@@ -236,6 +236,22 @@ class SessionRow(BaseModel):
     #: hidden.
     opened_by: OpenedBy | None = None
 
+    #: The bound agent's registry id and its profile picture's sha256, so a
+    #: renderer draws ``/v1/agents/{agent_id}/avatar?v=<avatar_sha256>`` without
+    #: a per-row fetch (contract: ``local_operator.agent_avatar``). Resolved from
+    #: the session's ``attachment.json`` agent NAME through a memoised
+    #: name -> id index (``agent_avatar.session_row_fields``); Aida's session
+    #: resolves through her own attachment, or ``aida.state`` when it is absent.
+    #:
+    #: BOTH ALWAYS PRESENT on a local row, ``null`` when unbound or pictureless:
+    #: the renderer's merge is "an absent key is not a claim", so a removal must
+    #: be stated or the old picture stays painted. A remote row carries the
+    #: peer's claim (its ``agent_id`` is THAT device's id; the picture bytes are
+    #: not reachable from here, so a client draws the glyph unless the row is
+    #: local). Defaulted rather than required: additive to older peers.
+    agent_id: str | None = None
+    avatar_sha256: str | None = None
+
 
 class ScopedAsk(BaseModel):
     """The scope a page was ASKED for, echoed back on the answer.

@@ -93,6 +93,63 @@ projects come from the session's project links at read time.
 only). `approval_tier="read"` (the operator's own inbox, the `no_reply`
 reasoning), shared concurrency.
 
+**Title quality — the contract.** The list shows the title ALONE, so a title
+that identifies no event is a row the operator must read and dismiss to learn
+nothing. `NotifyParams` therefore refuses a degenerate title as
+`invalid arguments` (`local_operator/notifications/title_quality.py`):
+
+- **Normalisation** — NFKC, then casefold, then alphanumerics only. A
+compatibility form is the same word to the reader, so `ＮＯＯＰ` is judged as
+`noop` and `Ｎ／Ａ` as `na`. Neither `casefold` nor `isalnum` folds the
+full-width block, so without the NFKC step the guard is one keystroke — an IME
+left in full-width mode — from bypassed, and the junk row it exists to prevent
+is written under a spelling no vocabulary entry matches.
+- **Placeholder vocabulary** — the WHOLE title, normalised as above, against a
+fixed set (`x`/`y`/`z`, `noop`/`no-op`, `n/a`, `none`, `null`, `test`, `todo`,
+`tbd`, `update`, `unused`, `placeholder`, `wip`, `done`, `ok`/`okay`, `note`,
+`misc`). Checked BEFORE the information floor, because a whole-title match is
+the precise diagnosis: `x` is refused as the placeholder word it is, not as a
+miscount of letters — and the five entries that are also shorter than the floor
+(`x`, `y`, `z`, `ok`, `n/a`) stay reachable instead of becoming dead vocabulary
+that reappears if the floor ever moves. Whole-equality only: `Update: 3 PRs
+merged` and `Tests failing on shard 3` pass, because they are statements that
+happen to open with a placeholder word. The set is English by design — it
+encodes the reported population and the vocabulary the model is told to avoid —
+so a two-character equivalent in another script (`完了`, `완료`, `تم`) is
+judged by the information floor alone, which cannot tell a two-character word
+from a two-character non-word; that is an accepted residual, not coverage.
+- **Information floor** — measured in information, not characters: fewer than
+three alphanumerics for a title of Latin letters and digits, fewer than two
+when its letters are non-ASCII (CJK ideographs, kana, Hangul, Arabic, Cyrillic).
+In those scripts a character is already a word or a bound morpheme — `部署`
+("deploy"), `完了` ("done"), `완료` ("complete") — so one character of theirs
+says more than one Latin letter, and holding them to three refused exactly the
+short-but-real titles this section says never to judge. A floor that only
+counts characters is not script-independent; this one is stated in the unit
+that actually matters. Three still admits what people really write (`PR #7`,
+`CI green`) and refuses Latin noise (`ab`); `ok` never reaches this floor —
+the vocabulary above refuses it as a placeholder word, which is the precise
+diagnosis. One character of any script is refused, because a word names
+something but a title has to say what happened; `修复完成` counts four, `🚀`
+counts zero.
+- **Nothing at all** — a whitespace/punctuation-only title is refused HERE. It
+used to reach the store, whose bare `ValueError` surfaced as "the inbox could
+not be written": a dead end naming neither the cause nor a way out.
+
+The boundary is deliberately one-sided: **refuse provably content-free titles,
+never judge a short-but-real one.** Over-refusing a legitimate notification is
+the worse failure, because the model's cheapest way to obey a guard is to post
+nothing. The body is never consulted — it is not on the list row, so a
+substantial body behind `x` still renders as an opaque row.
+
+The refusal names the silent alternative in its own words: a turn that produced
+nothing the operator needs ends with `no_reply` and posts no notification.
+`no_reply` itself is untouched, so a quiet turn stays zero-friction. The guard
+lives on the tool params, NOT in `NotificationStore.notify`: server-side writers
+(an approval gate titled with the tool name, tests) use short titles on purpose
+and must keep working. The rows written before this guard were dismissed from
+the list and remain in the store's history; the guard is what stops new ones.
+
 ### 3.2 Who gets it (createIf rung 3)
 
 Only a top-level conversation the operator's own listings show. The session

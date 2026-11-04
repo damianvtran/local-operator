@@ -1,0 +1,71 @@
+# audit.log — es/tui.small round 4 (w6a4). Real captured output; session 65ddc2e6e89d, 2026-10-30.
+$ git rev-parse HEAD
+215c87822c7c3d2b3e52a9acde39b41a570851d9
+$ shasum -a 256 local_operator/i18n/catalogues/es/tui.small.json
+e374959d70bb379a37e3f02e8c69edeea168b7edbd11107e4131f41fe116b9af  local_operator/i18n/catalogues/es/tui.small.json
+$ git show 4912975a4b5:local_operator/tui/widgets/goal_panel.py > <scratch>/goal_panel_prefix.py   # control copy, scratch only
+$ for f in es/tui.small.json es/tui.analytics.json goal_panel.py test_goal_panel.py es.md: blob(3209592c2b1) vs blob(215c87822c7)
+SAME local_operator/i18n/catalogues/es/tui.small.json cb094e1eeceb3883022b1ad03b231378e6fd1b0f
+SAME local_operator/i18n/catalogues/es/tui.analytics.json 750b6ae2a5959c40e6d24a86f3cfb33a2440613e
+SAME local_operator/tui/widgets/goal_panel.py 7816c565f2ce82e0c26f9fdd475e2581be78f191
+SAME tests/unit/tui/test_goal_panel.py ae03a5c44552561c172ba2252a488d1d99f6af98
+SAME i18n/style-guides/es.md 7d634dce0b216674fcd38037d078e0d0ea30a77d
+$ git diff --stat 3209592c2b1 215c87822c7 -- i18n/ledger/es.json   (only +20 lines: one cli.team_bridge row appended)
+ 1 file changed, 20 insertions(+)
+$ git diff 4912975a4b5 3209592c2b1 -- local_operator/tui/widgets/goal_panel.py | grep "^[-+]" (code lines)
+-        text = truncate_cells(
+-            " ".join(goal.split()), max(10, inner - 2 - (_GOAL_TAG_CELLS if done else 0))
+-        )
++        done_suffix = _t(_x.goal_panel_done_suffix()) if done else ""
++        tag_cells = max(_GOAL_TAG_CELLS, cell_len(done_suffix)) if done else 0
++        text = truncate_cells(" ".join(goal.split()), max(10, inner - 2 - tag_cells))
+-            out.append(_t(_x.goal_panel_done_suffix()), style="dim")
++            out.append(done_suffix, style="dim")
+$ env -i HOME=<scratch>/home LOCAL_OPERATOR_CONFIG_DIR=<scratch>/home/cfg PATH=/usr/bin:/bin .venv/bin/python i18n/audits/evidence/es/tui.small/w6a4/checks.py <scratch>
+PASS  target sha256  e374959d70bb379a37e3f02e8c69edeea168b7edbd11107e4131f41fe116b9af
+PASS  137 keys, same key set  
+PASS  value is exactly '  — hecho'  '  — hecho'
+PASS  two leading spaces + U+2014  
+INFO  cells en=8 es=9  _GOAL_TAG_CELLS=8
+PASS  control module really is pre-fix  
+INFO  [fixed] cols=60 content=56
+      |▌ Migrar el servicio de pagos al nuevo proveed…  — hecho
+PASS  fixed 60: goal row is exactly one painted line  lines=1
+PASS  fixed 60: tag stays on goal row  
+PASS  fixed 60: no line is just 'hecho'  
+PASS  fixed 60: every painted line <= content width  max=56/56
+PASS  fixed 60: hint row still present  
+INFO  [fixed] cols=80 content=76
+      |▌ Migrar el servicio de pagos al nuevo proveedor y verificar cada…  — hecho
+PASS  fixed 80: goal row is exactly one painted line  lines=1
+PASS  fixed 80: tag stays on goal row  
+PASS  fixed 80: no line is just 'hecho'  
+PASS  fixed 80: every painted line <= content width  max=76/76
+PASS  fixed 80: hint row still present  
+INFO  [fixed] cols=100 content=96
+      |▌ Migrar el servicio de pagos al nuevo proveedor y verificar cada cobro con el equipo…  — hecho
+PASS  fixed 100: goal row is exactly one painted line  lines=1
+PASS  fixed 100: tag stays on goal row  
+PASS  fixed 100: no line is just 'hecho'  
+PASS  fixed 100: every painted line <= content width  max=96/96
+PASS  fixed 100: hint row still present  
+INFO  [pre-fix] cols=60 content=56
+      |▌ Migrar el servicio de pagos al nuevo proveedo…  — 
+      |hecho
+PASS  CONTROL pre-fix 60: reproduces the orphan (expected: wraps)  lines=2 orphan=True
+INFO  [pre-fix] cols=80 content=76
+      |▌ Migrar el servicio de pagos al nuevo proveedor y verificar cada c…  — 
+      |hecho
+PASS  CONTROL pre-fix 80: reproduces the orphan (expected: wraps)  lines=2 orphan=True
+INFO  [pre-fix] cols=100 content=96
+      |▌ Migrar el servicio de pagos al nuevo proveedor y verificar cada cobro con el equipo d…  — 
+      |hecho
+PASS  CONTROL pre-fix 100: reproduces the orphan (expected: wraps)  lines=2 orphan=True
+PASS  sweep (3 widths x 150 goal lengths): fixed code never orphans/overflows  []
+PASS  sweep: pre-fix code orphans for at least one goal length  n=282 e.g. [(60, 46), (60, 46), (60, 48), (60, 48)]
+PASS  English rendering identical pre vs fixed (floor keeps 8)  
+
+RESULT ALL CHECKS PASS
+exit=0
+$ env -i ... .venv/bin/python -m pytest tests/unit/tui/test_goal_panel.py -q -p no:cacheprovider -k localised_done_tag
+1 passed, 2 warnings in 24.32s

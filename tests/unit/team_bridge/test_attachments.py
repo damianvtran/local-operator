@@ -794,7 +794,9 @@ def _tool_runtime(hub: Hub) -> BridgeRuntime:
 
 
 async def _history(hub: Hub, monkeypatch, *, vision: bool = True):
-    monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
+    # channel_history/channel_thread are outbound operations: exercise their
+    # real dispatch through the fence those operations actually call.
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda runtime: None)
     monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
     monkeypatch.setattr(conversation_mod, "_screener_sees_images", lambda _d: vision)
     tool = build_bridge_tool(ToolContext(bridge_runtime=_tool_runtime(hub)))
@@ -1014,7 +1016,9 @@ class ThreadWire(ToolWire):
 
 
 async def _thread(hub: Hub, monkeypatch):
-    monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
+    # channel_history/channel_thread are outbound operations: exercise their
+    # real dispatch through the fence those operations actually call.
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda runtime: None)
     monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
     monkeypatch.setattr(conversation_mod, "_screener_sees_images", lambda _d: True)
     runtime = _tool_runtime(hub)
@@ -1050,7 +1054,9 @@ async def test_thread_reply_withheld_marker_after_text_only_admit(monkeypatch, t
     owner, ref, _s, _c = _connector_rig(monkeypatch, tmp_path, hub, verdict="deliver", vision=False)
     await _deliver(owner, ref, tmp_path, hub)
     monkeypatch.setattr(conversation_mod, "_screener_sees_images", lambda _d: False)
-    monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
+    # channel_history/channel_thread are outbound operations: exercise their
+    # real dispatch through the fence those operations actually call.
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda runtime: None)
     monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
     runtime = _tool_runtime(hub)
     runtime.client = cast(TeamBridgeClient, ThreadWire(hub))
@@ -1175,7 +1181,9 @@ async def test_text_only_session_model_strips_announces_and_marks_bridge_images(
     hub = Hub([_png()])
     owner, ref, _s, _c = _connector_rig(monkeypatch, tmp_path, hub, verdict="deliver")
     await _deliver(owner, ref, tmp_path, hub)
-    monkeypatch.setattr(host_mod, "owner_fence_refusal", lambda runtime: None)
+    # channel_history/channel_thread are outbound operations: exercise their
+    # real dispatch through the fence those operations actually call.
+    monkeypatch.setattr(host_mod, "outbound_tool_fence", lambda runtime: None)
     monkeypatch.setattr(host_mod, "admission_refusal", lambda runtime, *, is_read=False: None)
     tool = build_bridge_tool(ToolContext(bridge_runtime=_tool_runtime(hub)))
     assert tool is not None

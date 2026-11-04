@@ -1,0 +1,7 @@
+{
+  "wire.tunnel_setup.in_progress": "La configuration de l’accès téléphone est déjà en cours. Vérifiez son état avant de réessayer.",
+  "wire.tunnel_setup.deadline": "Le délai de réponse de la configuration a expiré une fois le travail dont elle avait la charge terminé. Vérifiez l’état et les étapes accomplies avant de réessayer.",
+  "wire.tunnel_setup.unavailable": "La configuration de l’accès téléphone n’a pas pu terminer cette réponse. Vérifiez l’état actuel avant de réessayer ; ne partez pas du principe qu’un retour arrière a eu lieu.",
+  "wire.tunnel_setup.checking": "Vérification du compte sélectionné et de la préparation requise avant toute modification.",
+  "wire.tunnel_setup.corrupt_intent": "La demande de configuration enregistrée pour l’accès téléphone n’est pas valide. Laissez create.json inchangé et demandez à votre agent de récupérer la demande d’origine avant de réessayer. Aucune modification de configuration n’a été apportée."
+}

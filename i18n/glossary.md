@@ -65,6 +65,10 @@ descriptions, prompt markers — never translates at all (RFC §2.7).
 | device | translate | appareil · dispositivo · 设备 · устройство · thiết bị · ڈیوائس · डिवाइस |
 | credentials | translate | identifiants · credenciales · —⁶ · учётные данные · thông tin xác thực · —⁶ · क्रेडेंशियल |
 | job | translate | tâche · trabajo · —⁶ · задание · tác vụ · —⁶ · जॉब |
+| unit (systemd) | translate — `systemd`/`loginctl` and unit names stay Latin | unité · unidad · 单元 · юнит · unit · یونٹ · यूनिट |
+| service | translate — `lop serve` and `--install-service` stay Latin | service · servicio · 服务 · служба · dịch vụ · سروس · सेवा |
+| supervised | translate | supervisé · supervisado · 受监督 · под управлением · được giám sát · زیرِ نگرانی · निगरानी में |
+| linger | keep English — it is `loginctl`'s own setting name, and the remedy beside it is the literal command | linger (all seven) |
 
 1. `wake` in `ur`/`hi`: verb forms read best inside a sentence ("10 بجے
    جاگے گا", "10 बजे जागेगा"); for the noun label use the table's form. The
@@ -85,9 +89,17 @@ descriptions, prompt markers — never translates at all (RFC §2.7).
    their waves record endorsed renderings; do not invent them here. Hindi uses
    क्रेडेंशियल्स for the plural of क्रेडेंशियल.
 7. Hindi distinguishes watching/monitoring (निगरानी) from a stored monitor
-   object (मॉनिटर), not from the Latin tool name `monitor`. Child agents and
-   subagents consistently use उप-एजेंट; the abandoned child-only spelling is
-   not an exception. Other endorsed Hindi wave-3 calls live in the hi guide.
+   object (मॉनिटर), not from the Latin tool name `monitor`. Related: `ur`,
+  `hi` and `vi` render *supervised* with their existing monitor word
+  (`نگرانی`, `निगरानी`, `giám sát`) — recorded deliberately, because none of
+  the three has a settled word for a supervisor *unit*, and inventing one
+  would give the same concept two names in the same CLI. The extension stays
+  safe only while every string around it names the `unit` or the `{scope}`,
+  which the `cli.services_status` copy does; a future surface that says
+  "monitored" about something that is not a supervised process must pick a
+  distinct rendering and record it here. Child agents and
+  subagents consistently use उप-एजेंट; the abandoned child-only spelling is
+  not an exception. Other endorsed Hindi wave-3 calls live in the hi guide.
 
 ### Wave-2 kept-English set (all locales)
 

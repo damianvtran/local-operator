@@ -30,17 +30,20 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
+from local_operator.i18n.cli_help import help_text
+from local_operator.i18n.keys import cli_group_help as _gg
+
 #: The backends ``--backend`` accepts. ``auto`` is the presence ladder; the rest
 #: are explicit so an operator who wants the file fallback (a CI box, a
 #: container) can say so and be told what it costs.
 BACKEND_CHOICES = ("auto", "secure-enclave", "cng-presence", "file-only")
 
 
-def add_parser(subparsers: Any) -> None:
+def add_parser(subparsers: Any, *, help_locale: str | None = None) -> None:
     """Register ``lop operator`` and its verbs. Stdlib-only."""
     parser = subparsers.add_parser(
         "operator",
-        help="Operator authority: the key that may loosen a running approval gate",
+        help=help_text(_gg.operator(), help_locale),
     )
     actions = parser.add_subparsers(dest="operator_command")
 
@@ -115,15 +118,18 @@ def add_parser(subparsers: Any) -> None:
 
     devices_parser = actions.add_parser(
         "devices",
-        help="List paired phones, pending pairing requests, and revoke/authorise a device",
+        help=(
+            "List paired phones and pending pairing requests; confirm one, confirm "
+            "the phones paired before this version, remove or bring back a device"
+        ),
     )
     devices_parser.add_argument(
         "--revoke",
         default="",
         metavar="DEVICE_ID",
         help=(
-            "Add this device to the anchor's revocation list (needs the same ONE "
-            "privileged step as installing the anchor)"
+            "Remove this device on this computer: adds it to the anchor's "
+            "revocation list (this asks for your approval)"
         ),
     )
     devices_parser.add_argument(
@@ -131,17 +137,43 @@ def add_parser(subparsers: Any) -> None:
         default="",
         metavar="DEVICE_ID",
         help=(
-            "Lift a revocation for this device on this machine: clears the local "
-            "record and the anchor's entry (needs the same ONE privileged step as "
-            "--revoke). Host-side only — a phone cannot un-revoke itself"
+            "Bring back a phone you removed on this computer: clears the local record "
+            "and this computer's entry (this asks for your approval). Host-side only "
+            "— a phone cannot bring itself back"
         ),
+    )
+    devices_parser.add_argument(
+        "--approve",
+        default="",
+        metavar="DEVICE_ID",
+        help=(
+            "Confirm a paired phone, or with --code approve a filed pairing request id "
+            "by typing the phone's six digits (this asks for your approval)"
+        ),
+    )
+    devices_parser.add_argument(
+        "--code",
+        default="",
+        metavar="SIX_DIGITS",
+        help="With --approve APPROVAL_ID, the six digits shown on the phone",
+    )
+    devices_parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help=(
+            "Confirm the phones paired before this version, so this computer starts "
+            "requiring confirmation (this asks for your approval)"
+        ),
+    )
+    devices_parser.add_argument(
+        "--sudo-secret",
+        default="",
+        help="Name of a stored admin password; confirming a phone refuses it",
     )
     devices_parser.add_argument(
         "--print-only",
         action="store_true",
-        help=(
-            "With --revoke or --authorise, print the privileged command instead of " "running it"
-        ),
+        help=("With a device write, print the privileged command instead of running it"),
     )
 
     sign_parser = actions.add_parser(

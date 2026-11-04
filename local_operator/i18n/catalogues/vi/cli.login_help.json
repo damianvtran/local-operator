@@ -1,0 +1,4 @@
+{
+  "cli.login_help.login": "Đăng nhập vào một nhà cung cấp (OAuth hoặc khóa API)",
+  "cli.login_help.provider": "Nhà cung cấp cần đăng nhập (ví dụ: openai, anthropic, kimi, xai). Bỏ qua để liệt kê các nhà cung cấp hỗ trợ đăng nhập."
+}

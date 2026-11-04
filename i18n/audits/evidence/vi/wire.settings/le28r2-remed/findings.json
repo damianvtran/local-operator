@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "audit_id": "le28r2-remed",
+  "locale": "vi",
+  "namespace": "wire.settings",
+  "audit_date": "2026-10-28",
+  "scope": "delta: the corrected keys only, plus their direct sentence",
+  "remediation_commit": "4d38a1d4b8e9a36fa0a38f4833ecf86263da45db",
+  "parent_revision": "9495f8a6c3bf2b5438ef5c33d7274cf519435dda",
+  "previous_target_sha256": "617766d8803624c00ef2fce75722d096d7c2ca3929b28618e18ada27fdbbb6c7",
+  "target_sha256": "3d20e38f5af04ee8040c680cbf4b6697822ff5f4872454495f51c615955e4b14",
+  "en_sha256": "a31ff23241581dddb24f3cd2b93444a408734bbcb0957b0068a97806bf7c36d3",
+  "key_count_in_namespace": 820,
+  "keys_reaudited": 3,
+  "routed_receipt": {
+    "path": "local_operator/i18n/catalogues/vi/wire.settings.json",
+    "session": "c754bf63ab2a",
+    "ts": "2026-10-29T00:24:38Z",
+    "tool": "read_public_copy",
+    "policy": "docs/security/redaction-policy.md",
+    "chars": 85016,
+    "sha256": "27b32b1a3ea1ff0df7f7a484d5759092ce54527264cfe2c862240916ef5906e5"
+  },
+  "routed_receipt_digest_recomputed": "27b32b1a3ea1ff0df7f7a484d5759092ce54527264cfe2c862240916ef5906e5",
+  "findings": [
+    {
+      "key": "wire.settings.web_fetch_render_backend.help",
+      "severity_raised": "major",
+      "disposition": "fixed",
+      "resolved": true,
+      "new_value": "auto dùng markdownify khi extra [fetch] được cài.",
+      "en": "Auto uses markdownify when the [fetch] extra is installed.",
+      "note": "pip extra stays the literal `extra`, as the glossary requires for all locales."
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.help",
+      "severity_raised": "major",
+      "disposition": "fixed",
+      "resolved": true,
+      "new_value": "Cách nhập bằng giọng nói loại bỏ từ đệm và âm thanh phi ngôn ngữ. auto dùng tính năng làm sạch tích hợp sẵn của nhà cung cấp khi có và quy tắc thận trọng phía máy khách trong các trường hợp còn lại; provider và client mỗi bên chỉ dùng một trong hai cơ chế; off giữ nguyên bản ghi. Trường `cleanup` trong từng yêu cầu vẫn được ưu tiên.",
+      "en": "How dictation strips filler words and non-speech cues. auto uses the provider's native cleanup where available and the conservative client rules elsewhere; provider and client each use only one of the two mechanisms; off keeps the verbatim transcript. A per-request `cleanup` field still wins.",
+      "note": "filler words → «từ đệm» (not the medial-glide term «âm đệm»); rest of the sentence unchanged."
+    },
+    {
+      "key": "wire.settings.speech_transcription_cleanup.choice.off.description",
+      "severity_raised": "major",
+      "disposition": "fixed",
+      "resolved": true,
+      "new_value": "Giữ nguyên; không bỏ từ đệm hay âm thanh phi ngôn ngữ.",
+      "en": "Verbatim; no filler or cue removal.",
+      "note": "Same term fix; now also says non-speech sounds rather than the vague «tín hiệu»."
+    }
+  ],
+  "verdict": "PASS",
+  "auditor": {
+    "agent": "translation-reviewer (independent; did not translate)",
+    "session": "bc5209588225",
+    "models": "anthropic/claude-sonnet-5-5 for the original wire.settings audits; openai/gpt-6-astra for reconciliation and packaging; provider fallbacks disclosed in the pair record",
+    "independence": "The remediation was authored in a separate translator session (c57356a6dc11 lane); this audit only judged the resulting bytes."
+  },
+  "limitations": [
+    "Delta scope only: the 809 unchanged keys keep their le28r2 judgement.",
+    "No native-speaker certification; Hindi idiom would need one.",
+    "Scalar text/ICU checks, not a rendered frame."
+  ]
+}

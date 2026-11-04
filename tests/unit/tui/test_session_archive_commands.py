@@ -449,13 +449,29 @@ async def test_delete_works_on_a_stopped_owner_that_still_advertises_the_slash(
         app._stopped_session_id = SESSION
         app._run_slash_command("/delete yes")
         # The receipt is published ACROSS the transition to the fresh
-        # conversation, so the screen is mid-rebuild for a tick: wait for the
-        # directory to be gone AND the transcript to be back before reading it.
-        for _ in range(60):
-            await pilot.pause()
-            if not (root / "sessions" / SESSION).exists() and app.query(TranscriptView):
+        # conversation: the outgoing transcript is replaced wholesale, so the
+        # sentence is deferred and re-emitted once the new one mounts.
+        #
+        # WAIT FOR THE ASSERTED TEXT, NOT FOR A PROXY. Waiting for the directory
+        # to go AND *a* TranscriptView to exist is true in the instant BEFORE the
+        # deferred notice lands, so a loaded shard sampled a screen mid-transition
+        # and the assertion below saw the neighbouring narration
+        # ("· starting a new session…") instead of the receipt. That is the
+        # whole flake, and it is why the failing cell rotated between attempts:
+        # whichever cell in the shard has the tightest fixed wait loses first.
+        #
+        # This is a CONDITION wait, not a loosened bound: if the receipt never
+        # arrives the loop expires and the assertion still fails, with the
+        # captured transcript naming what did arrive.
+        deadline = time.monotonic() + 30.0
+        receipt = ""
+        while time.monotonic() < deadline:
+            await pilot.pause(0.05)
+            if (root / "sessions" / SESSION).exists() or not app.query(TranscriptView):
+                continue
+            receipt = _unwrapped(_transcript_text(app))
+            if "deleted" in receipt:
                 break
-        receipt = _unwrapped(_transcript_text(app))
 
     assert session.routed == [], "the command must be answered by this frontend"
     assert not (root / "sessions" / SESSION).exists()

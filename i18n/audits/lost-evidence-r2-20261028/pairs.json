@@ -1,0 +1,338 @@
+[
+  {
+    "locale": "es",
+    "namespace": "tui.transcript",
+    "semantic_verdict": "PASS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/es/tui.transcript/le28r2/record.json"
+  },
+  {
+    "locale": "fr",
+    "namespace": "tui.transcript",
+    "semantic_verdict": "PASS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/fr/tui.transcript/le28r2/record.json"
+  },
+  {
+    "locale": "ru",
+    "namespace": "tui.transcript",
+    "semantic_verdict": "PASS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/ru/tui.transcript/le28r2/record.json"
+  },
+  {
+    "locale": "vi",
+    "namespace": "tui.transcript",
+    "semantic_verdict": "PASS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/vi/tui.transcript/le28r2/record.json"
+  },
+  {
+    "locale": "es",
+    "namespace": "tui.authoring",
+    "semantic_verdict": "FINDINGS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/es/tui.authoring/le28r2/record.json"
+  },
+  {
+    "locale": "fr",
+    "namespace": "tui.authoring",
+    "semantic_verdict": "FINDINGS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/fr/tui.authoring/le28r2/record.json"
+  },
+  {
+    "locale": "ru",
+    "namespace": "tui.authoring",
+    "semantic_verdict": "FINDINGS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/ru/tui.authoring/le28r2/record.json"
+  },
+  {
+    "locale": "vi",
+    "namespace": "tui.authoring",
+    "semantic_verdict": "FINDINGS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/vi/tui.authoring/le28r2/record.json"
+  },
+  {
+    "locale": "hi",
+    "namespace": "tui.authoring",
+    "semantic_verdict": "FINDINGS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 2,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/hi/tui.authoring/le28r2/record.json"
+  },
+  {
+    "locale": "es",
+    "namespace": "tui.team_authoring",
+    "semantic_verdict": "PASS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/es/tui.team_authoring/le28r2/record.json"
+  },
+  {
+    "locale": "fr",
+    "namespace": "tui.team_authoring",
+    "semantic_verdict": "PASS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/fr/tui.team_authoring/le28r2/record.json"
+  },
+  {
+    "locale": "ru",
+    "namespace": "tui.team_authoring",
+    "semantic_verdict": "PASS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/ru/tui.team_authoring/le28r2/record.json"
+  },
+  {
+    "locale": "vi",
+    "namespace": "tui.team_authoring",
+    "semantic_verdict": "FINDINGS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 1,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/vi/tui.team_authoring/le28r2/record.json"
+  },
+  {
+    "locale": "hi",
+    "namespace": "tui.team_authoring",
+    "semantic_verdict": "PASS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/hi/tui.team_authoring/le28r2/record.json"
+  },
+  {
+    "locale": "es",
+    "namespace": "tui.palette",
+    "semantic_verdict": "PASS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/es/tui.palette/le28r2/record.json"
+  },
+  {
+    "locale": "fr",
+    "namespace": "tui.palette",
+    "semantic_verdict": "PASS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/fr/tui.palette/le28r2/record.json"
+  },
+  {
+    "locale": "ru",
+    "namespace": "tui.palette",
+    "semantic_verdict": "PASS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/ru/tui.palette/le28r2/record.json"
+  },
+  {
+    "locale": "vi",
+    "namespace": "tui.palette",
+    "semantic_verdict": "PASS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/vi/tui.palette/le28r2/record.json"
+  },
+  {
+    "locale": "hi",
+    "namespace": "tui.palette",
+    "semantic_verdict": "PASS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 0,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/hi/tui.palette/le28r2/record.json"
+  },
+  {
+    "locale": "es",
+    "namespace": "wire.settings",
+    "semantic_verdict": "FINDINGS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 5,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/es/wire.settings/le28r2/record.json"
+  },
+  {
+    "locale": "fr",
+    "namespace": "wire.settings",
+    "semantic_verdict": "FINDINGS",
+    "ledger_status": "passed",
+    "unresolved_blocker_major": 0,
+    "counts": {
+      "blocker": 0,
+      "major": 0,
+      "minor": 5,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/fr/wire.settings/le28r2/record.json"
+  },
+  {
+    "locale": "ru",
+    "namespace": "wire.settings",
+    "semantic_verdict": "FINDINGS",
+    "ledger_status": "blocked",
+    "unresolved_blocker_major": 4,
+    "counts": {
+      "blocker": 0,
+      "major": 4,
+      "minor": 3,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/ru/wire.settings/le28r2/record.json"
+  },
+  {
+    "locale": "vi",
+    "namespace": "wire.settings",
+    "semantic_verdict": "FINDINGS",
+    "ledger_status": "blocked",
+    "unresolved_blocker_major": 3,
+    "counts": {
+      "blocker": 0,
+      "major": 3,
+      "minor": 3,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/vi/wire.settings/le28r2/record.json"
+  },
+  {
+    "locale": "hi",
+    "namespace": "wire.settings",
+    "semantic_verdict": "FINDINGS",
+    "ledger_status": "blocked",
+    "unresolved_blocker_major": 1,
+    "counts": {
+      "blocker": 0,
+      "major": 1,
+      "minor": 3,
+      "nit": 0
+    },
+    "record": "i18n/audits/evidence/hi/wire.settings/le28r2/record.json"
+  }
+]

@@ -292,6 +292,20 @@ EVENT_KINDS: frozenset[str] = frozenset(
         # able to tell it apart from a deny (the operator said no) and from an
         # expiry (the window lapsed on its own).
         "onboard_withdrawn",
+        # THE PHONE PAIRING APPROVAL (S4a-pair-op, ``operator/pair_op.py``). One row per
+        # semantic step of ONE ``operator_device_pair`` record, and the reason the family
+        # exists at all: a pairing is the one approval that issues a STANDING signer, so an
+        # incident review asks of it in particular "which phone, under which key, and was a
+        # PERSON proven". `desktop_signed` names the assurance (``presence`` -- an OS prompt
+        # per signature -- or ``file_only``, a 0600 file signed with no person proven), which
+        # is the disclosure the operator accepted (a-2a8b); `desktop_ack` names the typed code
+        # check and how many strikes it has taken (a wrong code costs one, and the third
+        # closes the card as a deny); `desktop_applied` is the certificate landing in the
+        # device store, and `desktop_apply_refused` is why it did not.
+        "device_pair.desktop_ack",
+        "device_pair.desktop_signed",
+        "device_pair.desktop_applied",
+        "device_pair.desktop_apply_refused",
         # MESH ROLLING UPDATES, member side (mesh-update-propagation.md §6). One
         # row per semantic change of one update request: the request was admitted
         # by the authoriser, a rule refused it, or the install began/ended. A
@@ -498,6 +512,13 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
             "scope",
             "refreshed",
             "latency_ms",
+            # Which OWNER row was lent (an int id, never an email), whether the
+            # borrower's affinity anchor chose it, and the selection policy the
+            # lend ran under: the per-turn record that remote load-balancing
+            # matches a local session's (first pick, stickiness, failover).
+            "credential_id",
+            "anchored",
+            "policy",
         }
     ),
     "credential.finite_requested": frozenset(
@@ -587,6 +608,18 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # withdrew (the store only ever accepts the filer), so the row is
     # self-explaining without reading the record.
     "onboard_withdrawn": frozenset({"kind", "surface", "session_id"}),
+    # The phone pairing approval (``operator/pair_op.py``). `device_id` is DERIVED from the
+    # phone's public key (public data, the same string the certificate and the revocation
+    # list carry). `strikes`/`ok` are the typed-code check's own outcome, `assurance` the
+    # level the signature actually reached, `operation` the record's ``what`` key, and
+    # `code` a refusal token -- never a sentence, never key material, and never the six
+    # digits themselves (they are compared in constant time and are never stored).
+    "device_pair.desktop_ack": frozenset({"surface", "ok", "strikes", "device_id"}),
+    "device_pair.desktop_signed": frozenset(
+        {"surface", "operation", "device_id", "key_id", "assurance"}
+    ),
+    "device_pair.desktop_applied": frozenset({"surface", "device_id", "run_id", "lifetime_days"}),
+    "device_pair.desktop_apply_refused": frozenset({"surface", "device_id", "code"}),
     # Mesh rolling updates, member side. `rollout` is the origin's record id when
     # one exists (empty for the single-peer verb — S1 carries it through so the
     # S3 driver's rows need no schema change). `target` is the VERSION asked for,
@@ -598,7 +631,25 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "update_requested": frozenset({"rollout", "target", "capability"}),
     "update_refused": frozenset({"rollout", "target", "code"}),
     "update_started": frozenset({"rollout", "target", "method"}),
-    "update_completed": frozenset({"rollout", "target", "method", "from", "version"}),
+    # ``serve``/``serve_stale``/``serve_remedy`` (2026-10-28): whether this
+    # device's `lop serve` came along with the install — the state token, the
+    # still-stale daemons as short ``pid@version`` strings, the alive-but-not-
+    # serving ones as ``pid@verdict`` (#3093 QA Q1), and the command that moves
+    # them. Flat, because this log's values are bounded scalars and lists
+    # (``_clean_value`` stringifies a dict). Built by ``meshupdate.serve_audit``.
+    "update_completed": frozenset(
+        {
+            "rollout",
+            "target",
+            "method",
+            "from",
+            "version",
+            "serve",
+            "serve_stale",
+            "serve_stuck",
+            "serve_remedy",
+        }
+    ),
     "update_failed": frozenset({"rollout", "target", "method"}),
     # The origin's side (S3a): the opening row carries WHO decided (a closed
     # token, never a sentence), under which policy and front end; the member
@@ -614,7 +665,19 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     # the names it carries can be lost. A list of short ids, bounded by count at
     # the emitter (``rollouts.LEFT_BUSY_CAP``) and here by ``_clean_value``.
     "update_member_state": frozenset(
-        {"rollout", "state", "code", "reason", "method", "version", "left_busy"}
+        {
+            "rollout",
+            "state",
+            "code",
+            "reason",
+            "method",
+            "version",
+            "left_busy",
+            "serve",
+            "serve_stale",
+            "serve_stuck",
+            "serve_remedy",
+        }
     ),
     "update_rollout_done": frozenset({"rollout", "counts"}),
     # The suppression row (S3b): which front end moved (``via``), what the key

@@ -1,0 +1,200 @@
+{
+ "locale": "ru",
+ "namespace": "wire.settings",
+ "keys_total": 820,
+ "keys_read": 820,
+ "coverage_statement": "Printed en/ru side by side and read keys 0-819 in order (chunks 0-119,120-241,242-380,380-500,500-630,630-760,760-819); display-truncated stretches (e.g. 25-87,145-148,318-360,401-426,470-474,529-537,577-603,594-602,629-651,702-735,727-735,760-787) were re-printed and read. Plus mechanical checks over all 820: placeholder/ICU/backtick parity (no diffs, no plural branches in ru), maxCells for the 8 sidecar keys with maxCells (all within), no 'Вы', no '!', straight-quote parity vs en. Auditor is not claiming native fluency beyond a careful reader's judgement.",
+ "auditor_model": "anthropic/claude-sonnet-5-5 (fallback; session started on deepseek/deepseek-flash, which only read the glossary/style guide before provider quota failure)",
+ "findings": [
+  {
+   "id": "F1",
+   "key": "wire.settings.subagents_max_running.label",
+   "severity": "major",
+   "category": "glossary",
+   "en": "Max background jobs",
+   "current": "Макс. фоновых задач",
+   "problem": "Style guide (wave-2 recorded call) fixes job → «задание» (background job → «фоновое задание»), and explicitly says this very copy «Max background jobs» is the alignment anchor; «задача» is reserved for todos.",
+   "proposed": "Макс. фоновых заданий"
+  },
+  {
+   "id": "F2",
+   "key": "wire.settings.supplements_maxcostusd.help",
+   "severity": "major",
+   "category": "glossary",
+   "en": "Needs graphics on. Soft cap on one job's spend.",
+   "current": "Требует включённых графиков. Мягкий потолок расходов на одну задачу.",
+   "problem": "en 'job' = a generation job; glossary/style guide: job → «задание», not «задача».",
+   "proposed": "Требует включённых графиков. Мягкий потолок расходов на одно задание."
+  },
+  {
+   "id": "F3",
+   "key": "wire.settings.supplements_timeouts.help",
+   "severity": "major",
+   "category": "glossary",
+   "en": "Needs Highlights on. Give up on a whole job after this long.",
+   "current": "Требует включённых дополнений. Отказаться от всей задачи по истечении этого срока.",
+   "problem": "en 'job' → glossary «задание»; «задача» is reserved for todos.",
+   "proposed": "Требует включённых дополнений. Отказаться от всего задания по истечении этого срока."
+  },
+  {
+   "id": "F4",
+   "key": "wire.settings.librarian_enabled.help",
+   "severity": "major",
+   "category": "glossary",
+   "en": "Read at boot and by /v1/desktop/librarian; a disabled install never creates her session.",
+   "current": "Читается при запуске и в /v1/desktop/librarian; выключенная установка никогда не создаёт его сеанс.",
+   "problem": "«сеанс» violates glossary session → «сессия» (used everywhere else in the namespace); «выключенная установка… его сеанс» is also a clumsy calque of 'a disabled install never creates her session' and inconsistent with aida_enabled.help.",
+   "proposed": "Считывается при запуске и в /v1/desktop/librarian; если отключено, его сессия не создаётся."
+  },
+  {
+   "id": "F5",
+   "key": "wire.settings.librarian.description",
+   "severity": "minor",
+   "category": "terminology",
+   "en": "The Librarian keeps the global Library organised: her display name, the daily pass, and the pause switch. The Library is long-term and shared by every conversation.",
+   "current": "Библиотекарь поддерживает порядок в глобальной Библиотеке: отображаемое имя, ежедневный проход и переключатель паузы. Библиотека долговременная и общая для всех разговоров.",
+   "problem": "'conversation' is «беседа» throughout the namespace; «разговор» here (and in librarian_name.help) is inconsistent.",
+   "proposed": "Библиотекарь поддерживает порядок в глобальной Библиотеке: отображаемое имя, ежедневный проход и переключатель паузы. Библиотека долговременная и общая для всех бесед."
+  },
+  {
+   "id": "F6",
+   "key": "wire.settings.librarian_name.help",
+   "severity": "minor",
+   "category": "terminology",
+   "en": "The name her pinned conversation and every receipt use.",
+   "current": "Имя, которое используют его закреплённый разговор и все квитанции.",
+   "problem": "«разговор» vs «беседа» elsewhere; «квитанции» for 'receipt' is inconsistent with display_images (receipts → «отметки») and unnatural for UI.",
+   "proposed": "Имя, которое используют его закреплённая беседа и все отметки о результатах.  [low confidence on 'receipt' wording; at least change «разговор» → «беседа»]"
+  },
+  {
+   "id": "F7",
+   "key": "wire.settings.librarian_cadence_at.help",
+   "severity": "minor",
+   "category": "accuracy",
+   "en": "Local wall-clock HH:MM. An invalid value falls back to 03:30 at the next arm.",
+   "current": "Местное время ЧЧ:ММ. Неверное значение вернётся к 03:30 при следующей установке.",
+   "problem": "'arm' here means schedule the next pass (aida_cadence_at.help correctly says «планировании»); «при следующей установке» reads as software installation. «Неверное значение вернётся» is also stilted.",
+   "proposed": "Местное время в формате ЧЧ:ММ. Некорректное значение при следующем планировании заменяется на 03:30."
+  },
+  {
+   "id": "F8",
+   "key": "wire.settings.remote_compute.description",
+   "severity": "minor",
+   "category": "idiom",
+   "en": "Preview: run agent work on Radient-hosted compute, bound to one of your mesh networks.",
+   "current": "Предпросмотр: работа агента выполняется на вычислительных ресурсах Radient и привязана к одной из ваших меш-сетей.",
+   "problem": "'Preview' (pre-release feature) rendered «Предпросмотр» (= viewing a preview of a file/page, the sense used in static.title / tui.viewer). Standard ru for a pre-release feature is «Предварительная версия». Same in remote_compute_enabled.help.",
+   "proposed": "Предварительная версия: работа агента выполняется на вычислительных ресурсах Radient и привязана к одной из ваших меш-сетей."
+  },
+  {
+   "id": "F9",
+   "key": "wire.settings.retired.title",
+   "severity": "minor",
+   "category": "idiom",
+   "en": "Retired",
+   "current": "Выведенные",
+   "problem": "«Выведенные» alone is ambiguous (reads as 'displayed/derived'); the section is retired/obsolete keys.",
+   "proposed": "Устаревшие"
+  },
+  {
+   "id": "F10",
+   "key": "wire.settings.static_roots.help",
+   "severity": "minor",
+   "category": "accuracy",
+   "en": "Empty = only the built-in roots. Consulted only by the fallback posture (a connection that is not loopback): normal loopback previews can serve any readable file. Comma-separated absolute directories; dot-directories below a root are never served.",
+   "current": "Пусто = только встроенные корни. Учитывается только резервным режимом (соединение не по loopback): обычные предпросмотры через loopback могут отдать любой читаемый файл. Абсолютные каталоги через запятую; каталоги с точкой внутри корня никогда не отдаются.",
+   "problem": "«каталоги с точкой внутри корня» is ambiguous (reads as directories containing a dot); en 'dot-directories' = hidden directories whose names start with a dot.",
+   "proposed": "Пусто = только встроенные корни. Учитывается только резервным режимом (соединение не по loopback): обычные предпросмотры через loopback могут отдать любой читаемый файл. Абсолютные каталоги через запятую; скрытые каталоги (с именем на точку) внутри корня никогда не отдаются."
+  },
+  {
+   "id": "F11",
+   "key": "wire.settings.wakes_triggers_project_staleness_enabled.help",
+   "severity": "minor",
+   "category": "accuracy",
+   "en": "Wake to check in on projects whose progress went stale. Settled (done/paused/archived) projects are never watched.",
+   "current": "Пробуждаться, чтобы проверить проекты с устаревшим прогрессом. Завершённые (done/paused/archived) проекты никогда не отслеживаются.",
+   "problem": "en 'Settled (done/paused/archived)' — «Завершённые» is wrong for paused/archived projects.",
+   "proposed": "Пробуждаться, чтобы проверить проекты с устаревшим прогрессом. Проекты в статусах done/paused/archived никогда не отслеживаются."
+  },
+  {
+   "id": "F12",
+   "key": "wire.settings.session_cleanup_max_total_bytes.label",
+   "severity": "minor",
+   "category": "consistency",
+   "en": "↳ max total bytes",
+   "current": "↳ макс. суммарный объём",
+   "problem": "Unit dropped: en says 'bytes' and the help is in bytes; «суммарный объём» has no unit.",
+   "proposed": "↳ макс. объём (байты)"
+  },
+  {
+   "id": "F13",
+   "key": "wire.settings.display_hide_cross_session.choice.false.description",
+   "severity": "minor",
+   "category": "grammar",
+   "en": "show new; reopen to re-read",
+   "current": "показывать новые; переоткрыть, чтобы перечитать",
+   "problem": "Bare infinitive «переоткрыть, чтобы перечитать» has no agent and reads as a fragment (same in .true.description).",
+   "proposed": "показывать новые; переоткройте, чтобы перечитать  (true: скрывать новые; переоткройте, чтобы перечитать)"
+  },
+  {
+   "id": "F14",
+   "key": "wire.settings.model.description",
+   "severity": "minor",
+   "category": "idiom",
+   "en": "Provider, model and reasoning effort for new conversations. Existing sessions keep their model; /model saved adopts the default here.",
+   "current": "Провайдер, модель и усилие рассуждений для новых бесед. Существующие сессии сохраняют свою модель; /model saved подхватывает его здесь как значение по умолчанию.",
+   "problem": "«подхватывает его здесь как значение по умолчанию» — «его» has no clear antecedent (en: 'adopts the default here').",
+   "proposed": "Провайдер, модель и усилие рассуждений для новых бесед. Существующие сессии сохраняют свою модель; /model saved подхватывает значение по умолчанию здесь."
+  },
+  {
+   "id": "F15",
+   "key": "wire.settings.network_audit_max_bytes.help",
+   "severity": "nit",
+   "category": "consistency",
+   "en": "Bytes per generation, after rotation. 8 MiB of gzipped JSONL is roughly 55k records; the five-generation ceiling is therefore ~40 MiB.",
+   "current": "Байт на поколение после ротации. 8 МиБ сжатого JSONL — это примерно 55 тыс. записей; потолок в пять поколений — ~40 МиБ.",
+   "problem": "Unit spelled «МиБ» here but Latin «MiB/GiB» in session_scratchpad_max_bytes.help (en and sidecar use MiB/GiB). Pick one in ru (sidecar says binary prefixes MiB/GiB).",
+   "proposed": "Байт на поколение после ротации. 8 MiB сжатого JSONL — это примерно 55 тыс. записей; потолок в пять поколений — ~40 MiB."
+  },
+  {
+   "id": "F16",
+   "key": "wire.settings.tool_approval_mode.choice.ask.label",
+   "severity": "nit",
+   "category": "consistency",
+   "en": "ask",
+   "current": "спрашивать",
+   "problem": "Sibling value `auto` is kept Latin while `ask` is translated; help text and /approvals use the Latin tokens. (low confidence — depends on whether labels are shown as config values.)",
+   "proposed": "ask"
+  },
+  {
+   "id": "F17",
+   "key": "wire.settings.team_bridge_session.label",
+   "severity": "nit",
+   "category": "consistency",
+   "en": "CoS session",
+   "current": "Сессия CoS",
+   "problem": "'CoS' is an unexplained acronym for ru users, while the namespace renders chief of staff as «глава аппарата».",
+   "proposed": "Сессия главы аппарата  [if width allows; else keep]"
+  },
+  {
+   "id": "F18",
+   "key": "wire.settings.supplements_denyprefixes.label",
+   "severity": "nit",
+   "category": "idiom",
+   "en": "↳ never list under",
+   "current": "↳ никогда не перечислять под",
+   "problem": "«под» suggests 'beneath' in a spatial sense; 'never list under (folder)' reads better with «из/в».",
+   "proposed": "↳ не перечислять из каталогов"
+  },
+  {
+   "id": "F19",
+   "key": "wire.settings.web_fetch_max_bytes.help",
+   "severity": "nit",
+   "category": "idiom",
+   "en": "Enforced during streaming, so a huge page is cut off rather than buffered.",
+   "current": "Ограничение действует во время потока, поэтому огромная страница обрезается, а не буферизуется.",
+   "problem": "«во время потока» is a clumsy rendering of 'during streaming'.",
+   "proposed": "Ограничение действует во время потоковой загрузки, поэтому огромная страница обрезается, а не буферизуется."
+  }
+ ]
+}

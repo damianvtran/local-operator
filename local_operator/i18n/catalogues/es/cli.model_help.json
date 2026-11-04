@@ -1,0 +1,7 @@
+{
+  "cli.model_help.model": "Cambiar el modelo de otra sesión activa de lop (como /model en ella)",
+  "cli.model_help.target": "nombre de conversación / ID de sesión / subcadena de cwd (sin distinguir mayúsculas ni minúsculas). Omitir al seleccionar con --pid/--session.",
+  "cli.model_help.selector": "modelo al que cambiar, p. ej. deepseek/deepseek-flash",
+  "cli.model_help.pid": "seleccionar por pid exacto",
+  "cli.model_help.session": "seleccionar por ID de sesión exacto"
+}

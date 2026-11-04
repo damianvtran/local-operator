@@ -1,0 +1,16 @@
+{
+  "cli.services_status.install_service": "使用`{command}`安装它",
+  "cli.services_status.install_service_help": "仅限Linux：安装并启用serve的systemd用户单元",
+  "cli.services_status.restart_supervision_limit": "`lop services restart`可以重新加载它，但不能让它受监督",
+  "cli.services_status.serve_install_isolated_home": "单元文件已写入，但此HOME不是该用户systemd管理器的主目录；未启用任何内容",
+  "cli.services_status.serve_install_linux_only": "安装serve服务需要在Linux上使用systemd --user；macOS上的serve保持不变",
+  "cli.services_status.serve_install_not_serving": "serve单元已启用，但未服务于其自身进程：{error}",
+  "cli.services_status.serve_install_wrong_cgroup": "serve单元已响应，但其PID的cgroup未确认local-operator-serve.service",
+  "cli.services_status.serve_linger_required": "linger已关闭：运行`loginctl enable-linger`可让此单元在注销后保留",
+  "cli.services_status.serve_unit_enabled": "已启用systemd用户服务：{unit}",
+  "cli.services_status.serve_unit_written": "已写入单元文件：{unit}",
+  "cli.services_status.supervised_by": "受监督于：{unit}",
+  "cli.services_status.supervision_unknown": "监督状态未知：未能找到systemd单元",
+  "cli.services_status.unsupervised_scope": "未受监督：{scope}；systemd无法重新启动它",
+  "cli.services_status.unsupervised_unknown": "未受监督：未能找到systemd单元；systemd无法重新启动它"
+}

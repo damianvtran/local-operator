@@ -36,3 +36,21 @@ def test_observed_authority_change_and_signout_purge_only_scope():
     cache.admit(("root", "upstream"), None)
     assert cache.get(key("a", "login-a-again")) is None
     assert cache.get(other) == entity
+
+
+def test_retention_expiry_is_monotonic_and_sweeps_on_put():
+    now = [1000.0]
+    cache = AvatarCache(max_entries=8, max_bytes=6, ttl_s=60, clock=lambda: now[0])
+    entity = Entity(b"abc", "image/png", '"one"')
+    cache.put(key("a"), entity)
+    now[0] += 59.9
+    assert cache.get(key("a")) == entity
+    now[0] += 0.1
+    assert cache.get(key("a")) is None
+    assert cache._bytes == 0
+    cache.put(key("b"), entity)
+    now[0] += 61
+    # An expired entry never holds byte-cap room against a live one.
+    cache.put(key("c"), Entity(b"xyzuvw", "image/png", '"two"'))
+    assert cache.get(key("c")) is not None
+    assert cache._bytes == 6

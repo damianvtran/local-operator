@@ -53,7 +53,8 @@ def legacy_store(root):
         conn.execute("UPDATE sync SET feed_seq=17, pending_resync=1, inbox_checkpoint='checkpoint'")
         conn.execute("INSERT INTO feed_refs VALUES (?,?,?)", (key, LEGACY, 11))
         conn.execute(
-            "INSERT INTO screening_holds VALUES (?,?,?,?,?)",
+            "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
+            "retry_at, created_at) VALUES (?,?,?,?,?)",
             (key, LEGACY, "provider_error", 900, 12),
         )
         conn.execute(
@@ -94,7 +95,8 @@ def test_legacy_keys_migrate_atomically_without_touching_owner_cursor_or_claim(t
     for table in ("enrollments", "sync", "claims"):
         assert after[table] == before[table]
     assert after["feed_refs"][0][1:] == (alias(LEGACY), 11)
-    assert after["screening_holds"][0][1:] == (alias(LEGACY), "provider_error", 900, 12)
+    # Trailing None: the additive, nullable ``failure_class`` column (no stamp move).
+    assert after["screening_holds"][0][1:] == (alias(LEGACY), "provider_error", 900, 12, None)
     assert "PRIVATE-" not in repr(after)
     # Restart is a no-op; no subsequent call recreates the old spelling.
     assert Store(tmp_path).active_owner() == owner
@@ -112,15 +114,17 @@ def test_every_alias_preserves_its_own_pending_state(tmp_path, other_key, differ
     with sqlite3.connect(state_db_path(tmp_path)) as conn:
         conn.execute("INSERT INTO feed_refs VALUES (?,?,?)", (key, other_key, seq))
         conn.execute(
-            "INSERT INTO screening_holds VALUES (?,?,?,?,?)", (key, other_key, code, retry, created)
+            "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
+            "retry_at, created_at) VALUES (?,?,?,?,?)",
+            (key, other_key, code, retry, created),
         )
     assert Store(tmp_path).active_owner() == owner
     after = snapshot(tmp_path)
     other_target = CANONICAL if other_key == CANONICAL else alias(other_key)
     assert set(after["feed_refs"]) == {(key, alias(LEGACY), 11), (key, other_target, seq)}
     assert set(after["screening_holds"]) == {
-        (key, alias(LEGACY), "provider_error", 900, 12),
-        (key, other_target, code, retry, created),
+        (key, alias(LEGACY), "provider_error", 900, 12, None),
+        (key, other_target, code, retry, created, None),
     }
     assert "PRIVATE-" not in repr(after) and "OTHER-SENDER" not in repr(after)
 
@@ -133,7 +137,8 @@ def test_true_alias_target_collision_rolls_back_even_when_state_matches(tmp_path
             conn.execute("INSERT INTO feed_refs VALUES (?,?,?)", (key, alias(LEGACY), 11))
         else:
             conn.execute(
-                "INSERT INTO screening_holds VALUES (?,?,?,?,?)",
+                "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
+                "retry_at, created_at) VALUES (?,?,?,?,?)",
                 (key, alias(LEGACY), "provider_error", 900, 12),
             )
     before = snapshot(tmp_path)
@@ -223,7 +228,8 @@ def test_inflight_old_key_consumption_leaves_canonical_and_other_alias_untouched
         for raw in (CANONICAL, sibling):
             conn.execute("INSERT INTO feed_refs VALUES (?,?,?)", (key, raw, 11))
             conn.execute(
-                "INSERT INTO screening_holds VALUES (?,?,?,?,?)",
+                "INSERT INTO screening_holds (owner_key, message_id, hold_code, "
+                "retry_at, created_at) VALUES (?,?,?,?,?)",
                 (key, raw, "open_chief_of_staff", None, 25),
             )
     migrate(tmp_path)

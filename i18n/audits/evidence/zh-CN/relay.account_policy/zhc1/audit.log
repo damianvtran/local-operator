@@ -1,0 +1,101 @@
+job 899b78131e20 (zh-wave1-audit) [completed] model=radient/auto
+Audit complete. No files edited — worktree still shows the four files untracked and nothing else changed.
+
+---
+
+# Translation audit — zh-CN backfill (round 1)
+
+**Worktree** `/Users/damian/lo-i18n-zh` @ `feat/i18n-core-zh-backfill`; four target files `??` uncommitted, unmodified by me. Compared against `local_operator/i18n/catalogues/en/<ns>.json` + `.context.json`, `i18n/style-guides/zh-CN.md`, `i18n/glossary.md`, and the six named baseline catalogues.
+
+## Verdicts
+
+| Namespace | Keys | Verdict |
+|---|---|---|
+| `relay.account_policy` | 13 | **clean** |
+| `wire.errors.sdk_startup` | 4 | **findings** — 1 major, 1 minor, 1 nit |
+| `wire.errors.sdk_spec` | 21 | **findings** — 1 major, 2 minor, 1 nit |
+| `wire.settings.account_policy` | 14 | **findings** — 1 minor |
+
+**Overall: NOT clean.** Two majors share one root cause (profile → 角色). No blockers: placeholder/ICU/escape integrity and the redaction trap are both cleared (evidence below).
+
+## Adjudication requested: 角色 vs 配置档 for SDK *profile*
+
+**配置档 is correct; 角色 is drift.** The translator's choice is rejected on three grounds:
+
+- `角色` is this locale's settled rendering of **role**, and it is used *as role* in the same catalogue — `tui.authoring.role` (`'role'` → `角色`), `cli.teams_help.create_manager` (`'Role or specialist…'` → `角色或专家`), `tui.authoring.missing`, and `wire.settings` `内置角色` for "built-in roles". So `角色` does not name the profile object; it names a different product concept (team roles, agent roles).
+- Every catalogue that names the **profile object** uses `配置档`: `tui.authoring.notice_read_only` / `revision_changed` (`profile changes`/`this profile` → `配置档`), `wire.errors.desktop` (`packaged profile` → `内置配置档`, `profile registry` → `配置档注册表`, `Requested session, profile, team…` → `配置档`), `wire.exec.exec_epilog` (`team, profile, goal` → `团队、配置档、目标`), `wire.settings.subagents_model_choice.help` (`in its profile` → `其配置档`). 9 occurrences; the only outlier is `cli.agents_help.sync_name` → `已安装配置`, pre-existing and outside this change.
+- The collision is concrete, not theoretical: `attach_fields_unsupported` lists *"teams, profiles, tools, names, goals or approval policies"*, so `团队、角色、…` reads as *team role*, the exact thing the message is not about. I found nothing in the sidecars making `profile` a keep-English token (the only token to preserve there is `{profile}` and `spec.resume`), so translation is required — with `配置档`.
+
+## `wire.errors.sdk_startup` — findings
+
+**ZH-SDKSTART-R1-001 · blocker-class: major** — `wire.errors.sdk_startup.profile_attach_failed`
+- Current: `无法附加角色{profile}`
+- Proposed: `无法附加配置档{profile}`
+- Reason: per the adjudication above, `角色` names *role*; the object being attached is a named profile (sidecar: "profile is an already repr-quoted name"), which this catalogue renders `配置档` everywhere else.
+
+**ZH-SDKSTART-R1-002 · minor** — `wire.errors.sdk_startup.attach_hosting_unconfigured`
+- Current: `没有存活的运行时正在服务{resume}，此root也无法启动一个运行时：{error}为此root配置hosting（即其config.yml），再用spawn_session()/deliver()接管该ID，运行时出现后再附加。`
+- Proposed: `没有存活的运行时正在服务{resume}，此配置根也无法启动一个运行时：{error}；为此配置根配置hosting（即其config.yml），再用spawn_session()/deliver()接管该ID，运行时出现后再附加。`
+- Reason: the settled term for the config root is `配置根(目录)` (`cli.sessions_help` "existing config root" → `现有配置根目录`, `cli.aida_help` → `从配置根目录解析`), and this sidecar's preserve-list names only `config.yml` and `spawn_session()/deliver()`, so bare `root` is prose, not a token.
+
+**ZH-SDKSTART-R1-003 · nit** — same key
+- Current: `{error}为此root配置hosting`
+- Proposed: `{error}；为此root配置hosting` (waivable)
+- Reason: `{error}` is opaque producer text, so with no terminal separator the remedy sentence fuses into the exception payload; EN has a space at that boundary.
+
+## `wire.errors.sdk_spec` — findings
+
+**ZH-SDKSPEC-R1-001 · major** — `wire.errors.sdk_spec.attach_fields_unsupported`
+- Current: `mode=''attach''会为spec.resume打开查看器；它不附加团队、角色、工具、名称、目标或审批策略——那属于所有者一侧。此spec只应设置resume（或改用mode=''own''）。有问题的字段：{fields}。`
+- Proposed: `…它不附加团队、配置档、工具、名称、目标或审批策略——…` (rest unchanged)
+- Reason: same `profile`→`角色` drift, and here it is worse because `团队` precedes it in the list, so `角色` reads as team role.
+
+**ZH-SDKSPEC-R1-002 · minor** — `wire.errors.sdk_spec.spawn_model_pair_required`
+- Current: `spawn_session()把hosting/model作为一个全新的运行时初始采样路由过去；…`
+- Proposed: `spawn_session()把hosting/model作为一次初始采样路由到新的运行时；…`
+- Reason: the stacked modifier `一个全新的运行时初始采样` makes `全新的` look like it qualifies the *sample* rather than the runtime, and the clause reads translated.
+
+**ZH-SDKSPEC-R1-003 · minor** — same key
+- Current: `（子级随后从root的config解析自己的模型）`
+- Proposed: `（子进程随后从配置根的配置解析其模型）`
+- Reason: two problems in one clause — the sibling key in this same file calls the identical referent `运行时子进程` (while `子级` elsewhere means tree children, `wire.settings.subagents_max_team_depth`), and `root`/`config` left as prose nouns read translated where the locale has `配置根`/`配置`.
+
+**ZH-SDKSPEC-R1-004 · nit** — `wire.errors.sdk_spec.spawn_birth_effort_pair_required`
+- Current: `必须同时给出hosting/model对`
+- Proposed: `必须同时给出hosting/model这一对`
+- Reason: bare `对` as a noun is terse and parses like a classifier; `这一对` is unambiguous.
+
+## `wire.settings.account_policy` — findings
+
+**ZH-SETAP-R1-001 · minor** — `wire.settings.account_policy.reset_soonest.description`
+- Current: `优先选择最近的内含额度重置；对并列项和未知的上报做确定性分散。新配置的默认值。`
+- Proposed: `优先选择最近的内含额度重置；对并列项和上报未知的账户做确定性分散。新配置的默认值。`
+- Reason: `未知的上报` as a noun reads as "unknown submissions" and drops the accounts being spread; EN "unknown reports" means accounts whose quota report is unknown.
+
+## `relay.account_policy` — clean
+
+All 13 keys read. Notably correct where it would be easy to go wrong: `error` (`The change could not be confirmed`) keeps `无法确认` and never asserts the write failed, while `rejected` correctly asserts `更改未保存` — the sidecar's known-saved vs unknown-status distinction is honoured. `retry`→`重试`, `save`→`保存策略`, `saving`→`正在保存……` match the `relay.shell`/`mobile.setup` progressive register.
+
+## Verified clean (execution, not assertion)
+
+- **Placeholder integrity**: 0 mismatches across all 52 keys — `{resume}`, `{error}`, `{fields}`, `{profile}`, `{mode}`, `{formats}`, `{approval_mode}`, `{spec_tools}`, `{policy_tools}` all present with identical counts; no ICU plural/select/number/date skeleton exists in either side, so nothing to preserve or extend.
+- **Redaction trap cleared by ordinals, not by display**: both sides of `yolo_approval_unreachable` begin with codepoints `[121,111,108,111,61,84,114,117,101]` = the `yolo=True` token, then U+4F7F `使` in zh. Raw-byte scan of all four zh files for the ASCII sequence `[redacted]` = **0 occurrences**; no marker shipped. (The same masking also hid a *baseline* value, `wire.errors.settings.inline_credentials` — verified clean at the byte level, i.e. pre-existing and not a defect.)
+- **Escaped apostrophes**: every ASCII `'` in the files is part of a doubled pair (sdk_spec 32/16 pairs, sdk_startup 4/2 pairs). `mode=''own''`, `mode=''attach''`, `''callback''`, `''declared''` byte-identical to source; the three EN pairs with no zh counterpart are possessives (`owner''s`, `root''s`, `run''s`), which Chinese does not mark — correctly not preserved as tokens.
+- **Literal tokens**: zero count drift for `spawn_session()`, `open_session`, `deliver()`, `ApprovalPolicy.*`, `spec.tools`, `spec.resume`, `config.yml`, `world_root`, `birth_effort`, `hosting/model`, `"@latest"`, `None`, `true`/`false`.
+- **Width**: the 5 keys carrying a `maxCells: 29` budget all pass with margin — zh 8–16 cells vs EN 11–24. No overflow anywhere; help text (unbudgeted) is where the only length growth lives.
+- **Typography**: zero ASCII punctuation adjacent to CJK; `……` (two marks) used for all prose ellipsis, matching 77/77 corpus cases; `“ ”` for the quoted Chinese row label `“账户选择策略”` (which matches the actual `label` value — good practice); the lone ASCII `"@latest"` follows the existing corpus convention of ASCII-quoting machine tokens (5 prior keys); zero stray ASCII apostrophes.
+- **Register**: no value addresses the user with `你` or `您`, so no T/V risk in this set; no `请` without an English "please" (the `请` hits are inside `请求`); no `啦/哦/呀/！`; `。` kept on short full-sentence errors exactly as `wire.errors.settings` does (`该设置未注册。`).
+- **Terminology spot-checks (consistent)**: `提供商` (61 corpus uses, no `服务提供方`), `凭据`, `内含额度` (matches the `relay.shell` usage screen), `强度` for effort (matches `推理强度`), `强制要求` for enforcement (matches `cli.exec_help.output_format`), `查看器` for viewer, `附加` for attach, `接管` for engage, `运行时`, `所有者`, `会话ID`. The `true`/`false` branches of `legacy.help` quote the labels verbatim (`余量最多`, `公平分散`, `最早重置`, `账户策略`), which is exactly right.
+
+## Two notes for the coordinator (not copy findings)
+
+1. **Sidecar policy text**: all 21 `sdk_spec` and all 4 `sdk_startup` notes read *"English source only … Keep the existing exception string unchanged; translation requires caller-contract migration."* No other locale has translated either namespace (zh-CN is first), and searching `i18n/allowlist.toml` and the loader finds no namespace-level gate. I did not treat this as a translation defect — the wave was tasked to translate them — but if the ledger expects a caller-contract migration before these are *consumable*, that belongs to whoever owns the ledger, not to a copy round.
+2. **Ledger-ready provenance** (`sha256` of the EN file bytes, matching the existing `ur` `relay.account_policy` row's `0019b081…` exactly):
+   - `relay.account_policy` `0019b08106e6f7762194b164b9b9b37054a8cfade759aa2f6490787a73dea890`
+   - `wire.errors.sdk_spec` `a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855`
+   - `wire.errors.sdk_startup` `5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd`
+   - `wire.settings.account_policy` `1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25`
+
+**Keys read: 52 of 52** (13 + 21 + 4 + 14), each compared value-by-key against its EN source and its sidecar entry in full; baseline register from `wire.settings` (820 keys, term-scanned), `wire.errors.settings` (12, read in full), `wire.settings.hub_defaults`, `relay.shell` (44, read in full), `relay.library` (1), `mobile.setup` (partially read, register only). Corpus-wide consistency sweeps ran over all 94 zh-CN catalogues (3,227 values). Suggested next step: **one consolidated remediation commit** for the 8 findings, then a round-2 review scoped to the remediation diff only.
+
+**Auditor identity**: session `e139d7f8f30c`. Primary model `anthropic/claude-sonnet-5-5`; provider quota failures forced fallback to `openai/gpt-6-astra`, then `kimi/k3.1-pro`, then **`radient/auto`, which is the model that produced this audit** — the first few listing/dump calls ran on the primary before the switches; every finding above was derived after them, by me, from the bytes. No files edited, nothing committed.

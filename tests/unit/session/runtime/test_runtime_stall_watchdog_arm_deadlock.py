@@ -46,6 +46,8 @@ from __future__ import annotations
 
 import ast
 import faulthandler
+import hashlib
+import json
 import os
 import signal
 import socket
@@ -356,6 +358,9 @@ def test_no_native_timer_call_survives_in_the_modules_executable_code() -> None:
 #: removes the storm.
 _ARM_PATH_CHILD = """
 import faulthandler
+import hashlib
+import json
+import os
 import pathlib
 import socket
 import sys
@@ -363,6 +368,16 @@ import threading
 import time
 
 from local_operator.session.runtime import stall_watchdog
+
+# Source/executable receipt BEFORE the timer or deep threads exist: hashing or
+# printing in the in-flight window would change the race this cell observes.
+source = pathlib.Path(stall_watchdog.__file__).resolve()
+print("STARTUP-IDENTITY " + json.dumps({
+    "path": str(source), "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    "executable": str(pathlib.Path(sys.executable).resolve()),
+    "fatal_enabled": faulthandler.is_enabled(), "python": sys.version,
+    "pid": os.getpid(), "pgid": os.getpgrp(),
+}), flush=True)
 
 sink = socket.socket(fileno=int(sys.argv[1]))
 mode = sys.argv[2]
@@ -616,6 +631,9 @@ class _ArmPathChild:
             self.process.kill()
         self.process.wait(timeout=10.0)
         self.read_end.close()
+        # Postmortem evidence is read only after the pipe reader has consumed EOF.
+        self.reader.join(timeout=2.0)
+        assert not self.reader.is_alive(), "the reaped child's output reader did not settle"
 
 
 #: How many attempts ONE leg may spend. A child that dies by SIGNAL before its
@@ -684,6 +702,7 @@ class _LegAttempt:
         "returncode",
         "death_report",
         "pid",
+        "postmortem",
     )
 
     def __init__(
@@ -704,6 +723,7 @@ class _LegAttempt:
         self.returncode = returncode
         self.death_report = death_report
         self.pid = pid
+        self.postmortem = ""
 
 
 def _fatal_report_excerpt(output: str, limit: int = 4) -> str:
@@ -720,6 +740,69 @@ def _fatal_report_excerpt(output: str, limit: int = 4) -> str:
         if _FATAL_MARKER in line:
             return "\n".join(lines[index : index + limit])
     return ""
+
+
+def _sanitized_fault_context(data: bytes) -> list[str]:
+    """Only fatal markers and frame metadata; never echo arbitrary dump contents.
+
+    Capture around the fatal/current-thread header, not merely the tail (the
+    faulting frame can precede a long thread listing). The caller caps bytes read;
+    this parser caps output and excludes source text, arguments and locals.
+    """
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    keep: list[str] = []
+    for index, line in enumerate(lines):
+        if "Fatal Python error" not in line and not line.startswith("Current thread"):
+            continue
+        for nearby in lines[max(0, index - 1) : index + 9]:
+            text = nearby.strip()
+            if text.startswith(("Fatal Python error", "Current thread", "Thread ", 'File "')):
+                # Bound paths/frame strings too; do not include arbitrary payload.
+                keep.append(text[:240])
+                if len(keep) == 12:
+                    return keep
+    return keep
+
+
+def _postmortem_receipt(child: Any) -> str:
+    """Read only AFTER close() reaped the real child; fake drivers have no files.
+
+    File existence alone says nothing about a fatal frame. Read at most 64 KiB
+    from the front plus 4 KiB from the tail, recording full size separately. No
+    added syscall occurs between GO and the arm-path sentinels.
+    """
+    if not isinstance(child, _ArmPathChild):
+        return ""
+    source = Path(stall_watchdog.__file__).resolve()
+    startup = next((line for line in child.lines if line.startswith("STARTUP-IDENTITY ")), "")
+    identity = json.loads(startup.removeprefix("STARTUP-IDENTITY ")) if startup else {}
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
+    dump = stall_watchdog.dump_path(child.pid, child.dump_dir)
+    receipt: dict[str, Any] = {
+        "pid": child.pid,
+        "returncode": child.process.returncode,
+        "signal": -child.process.returncode if child.process.returncode < 0 else None,
+        "reaped": child.process.returncode is not None,
+        "output_reader_joined": not child.reader.is_alive(),
+        "startup": identity,
+        "parent_path": str(source),
+        "parent_sha256": expected,
+        "source_matches": (
+            identity.get("sha256") == expected and identity.get("path") == str(source)
+        ),
+        "executable_matches": identity.get("executable") == str(Path(sys.executable).resolve()),
+    }
+    try:
+        with dump.open("rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            data = handle.read(65536)
+            if size > 65536:
+                handle.seek(max(65536, size - 4096))
+                data += b"\n" + handle.read(4096)
+        receipt.update(file_bytes=size, fault_context=_sanitized_fault_context(data))
+    except OSError as exc:
+        receipt["dump_read_error"] = type(exc).__name__
+    return json.dumps(receipt, sort_keys=True)
 
 
 def _retry_warning(label: str, deaths: "list[_LegAttempt]") -> str:
@@ -741,6 +824,8 @@ def _retry_warning(label: str, deaths: "list[_LegAttempt]") -> str:
             f"  attempt {index} (pid {attempt.pid}): {attempt.death_report}; output tail "
             f"{attempt.output.splitlines()[-3:]!r}"
         )
+        if attempt.postmortem:
+            lines.append(f"  postmortem: {attempt.postmortem}")
         fatal = _fatal_report_excerpt(attempt.output)
         if fatal:
             lines.append(f"  attempt {index} wrote its own fatal report, beginning:\n{fatal}")
@@ -768,7 +853,7 @@ def _leg_failure(label: str, note: str, history: "list[_LegAttempt]", *, all_die
         )
     bodies = [
         f"[attempt {index} pid {attempt.pid} fired={attempt.fired}] {attempt.death_report}; "
-        f"output tail {attempt.output.splitlines()[-4:]!r}"
+        f"output tail {attempt.output.splitlines()[-4:]!r}; postmortem={attempt.postmortem}"
         for index, attempt in enumerate(history, start=1)
     ]
     return f"{head}. {note}\n" + "\n".join(bodies)
@@ -816,6 +901,7 @@ def _run_leg(
     note: str,
     spawn: Any = _ArmPathChild,
     attempts: int = LEG_ATTEMPTS,
+    record_property: Any = None,
 ) -> str:
     """Run ONE leg, retrying a child that died by signal before its sentinels appeared.
 
@@ -835,7 +921,10 @@ def _run_leg(
             evidence = _measure_leg(child, sentinels=sentinels)
         finally:
             child.close()
+        evidence.postmortem = _postmortem_receipt(child)
         history.append(evidence)
+        if record_property is not None:
+            record_property(f"arm_{label}_attempt_{attempt}", evidence.postmortem)
         if evidence.sentinels_present:
             if len(history) > 1:
                 warnings.warn(_retry_warning(label, history[:-1]), stacklevel=2)
@@ -861,7 +950,9 @@ _RIG_NOTE = (
 )
 
 
-def test_the_arm_path_returns_while_a_dump_is_in_flight(tmp_path: Path) -> None:
+def test_the_arm_path_returns_while_a_dump_is_in_flight(
+    tmp_path: Path, record_property: Any
+) -> None:
     """P2: with a dump that cannot finish, the arm path must still return.
 
     THIS IS THE FAILING-FIRST CELL for the whole change, and it is the one the field
@@ -919,6 +1010,7 @@ def test_the_arm_path_returns_while_a_dump_is_in_flight(tmp_path: Path) -> None:
         keep_draining=True,
         sentinels=("LOOP-SURVIVED",),
         note=_CONTROL_NOTE,
+        record_property=record_property,
     )
     assert "LOOP-SURVIVED" in control_output, (
         "the CONTROL run did not survive with its dump channel drained, so the channel "
@@ -932,6 +1024,7 @@ def test_the_arm_path_returns_while_a_dump_is_in_flight(tmp_path: Path) -> None:
         keep_draining=False,
         sentinels=("ARM-PATH-RETURNED", "LOOP-SURVIVED"),
         note=_RIG_NOTE,
+        record_property=record_property,
     )
     assert "ARM-PATH-RETURNED" in output, (
         "the arm path never returned while a dump was in flight. The child stopped "
@@ -1032,6 +1125,23 @@ def _scripted_spawn(
 _RIG_SENTINELS: tuple[str, ...] = ("ARM-PATH-RETURNED", "LOOP-SURVIVED")
 _DEAD_OUTPUT = "TICK 1\nTIMER-ARMED control\nGO"
 _GREEN_OUTPUT = "TICK 1\nTIMER-ARMED control\nGO\nARM-PATH-RETURNED\nLOOP-SURVIVED"
+
+
+def test_the_postmortem_context_keeps_the_fatal_frame_not_arbitrary_payload() -> None:
+    """Pure parser control: a long tail must not obscure a preceding fatal frame."""
+    data = (
+        b"private payload must not be copied\nFatal Python error: Segmentation fault\n"
+        b"Current thread 0x123 (most recent call first):\n"
+        b'  File "synthetic.py", line 8 in probe\n' + b"irrelevant tail\n" * 1000
+    )
+    context = _sanitized_fault_context(data)
+    assert any("synthetic.py" in line for line in context)
+    assert not any("private payload" in line for line in context)
+    assert len(context) <= 12
+
+
+def test_the_postmortem_context_does_not_invent_a_missing_fatal_frame() -> None:
+    assert _sanitized_fault_context(b"ordinary header\nno fatal frame\n") == []
 
 
 def test_the_leg_artifacts_are_attempt_scoped(tmp_path: Path) -> None:

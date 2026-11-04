@@ -1,0 +1,14 @@
+{
+  "wire.errors.auth.account_not_found": "Không tìm thấy tài khoản nhà cung cấp",
+  "wire.errors.auth.auth_refusal": "{error}",
+  "wire.errors.auth.credentials_missing": "Không tìm thấy thông tin xác thực đã lưu cho nhà cung cấp này.",
+  "wire.errors.auth.input_invalid": "Hãy nhập giá trị không rỗng, tối đa 32768 ký tự.",
+  "wire.errors.auth.key_not_accepted": "Nhà cung cấp này không chấp nhận khóa API.",
+  "wire.errors.auth.key_rejected": "Nhà cung cấp đã từ chối khóa API này.",
+  "wire.errors.auth.local_server_only": "Chỉ có thể kiểm tra máy chủ của nhà cung cấp cục bộ.",
+  "wire.errors.auth.provider_refusal": "{error}",
+  "wire.errors.auth.server_address_missing": "Nhà cung cấp này không có địa chỉ máy chủ để kiểm tra.",
+  "wire.errors.auth.sign_in_missing": "Phiên đăng nhập này không còn nữa. Hãy bắt đầu lại.",
+  "wire.errors.auth.sign_in_not_waiting": "Phiên đăng nhập này không đang chờ dữ liệu nhập.",
+  "wire.errors.auth.store_unreadable": "Không đọc được kho thông tin xác thực — bước thống kê nhà cung cấp cần nó."
+}

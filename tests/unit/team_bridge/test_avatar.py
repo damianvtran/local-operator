@@ -209,7 +209,9 @@ async def test_encoded_body_refused_before_read(tmp_path):
 
 @pytest.mark.parametrize("mime", ["image/png", "image/jpeg"])
 async def test_exact_limit_and_large_thumbnail(tmp_path, mime):
-    body = b"x" * (1024 * 1024)
+    # Exactly 1 MiB, starting with the declared type's magic (S-1 sniffs it).
+    magic = b"\x89PNG\r\n\x1a\n" if mime == "image/png" else b"\xff\xd8\xff"
+    body = magic + b"x" * (1024 * 1024 - len(magic))
 
     def upstream(request):
         assert request.url.params["size"] == "256"
@@ -273,3 +275,36 @@ async def test_transport_failure_evicts_without_stale_fallback(tmp_path):
         await client.fetch_avatar("acc_2", **args)
     await client.fetch_avatar("acc_2", **args)
     assert conditionals == [None, '"valid"', None]
+
+
+@pytest.mark.parametrize(
+    "declared,body",
+    [
+        ("image/png", b"<svg xmlns='http://www.w3.org/2000/svg'><script/></svg>"),
+        ("image/png", b"<!doctype html><html><script>alert(1)</script></html>"),
+        ("image/jpeg", b"\x89PNG\r\n\x1a\nreally a png"),
+        ("image/png", b"\xff\xd8\xffreally a jpeg"),
+    ],
+)
+async def test_declared_type_must_match_the_bytes(tmp_path, declared, body):
+    """Security review round 1, S-1: a hub label is not trusted on its own.
+    Bytes whose magic contradicts the declared type are refused (502) on BOTH
+    image routes, since they share ``_avatar_read``."""
+
+    from local_operator.team_bridge.client import BridgeRefusal
+
+    def upstream(request):
+        return httpx.Response(200, content=body, headers={"content-type": declared})
+
+    client = TeamBridgeClient(
+        tmp_path, store=AvatarStore(), transport=httpx.MockTransport(upstream)
+    )
+    with pytest.raises(BridgeRefusal) as account:
+        await client.fetch_avatar(
+            "acc_2", v="0123456789abcdef", size=64, expected_account_id="acc_1"
+        )
+    with pytest.raises(BridgeRefusal) as endpoint:
+        await client.fetch_endpoint_avatar(
+            "bep_1", v="0123456789abcdef", size=64, expected_account_id="acc_1"
+        )
+    assert account.value.http_status == endpoint.value.http_status == 502

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "audit_id": "cg1",
+  "locale": "vi",
+  "namespace": "cli.install_help",
+  "source_sha256": "f242bfdbf8e80bd7f956ae361985180d7eb797dd4223da8423dc678b6fec61e7",
+  "target_sha256": "98e866fc17c94169ef0b5fc36ca518d80d7f82d0da8d9efc59aaaac66d848aa0",
+  "hashes": {
+    "audit.log": "b4182b75fa505728fddee0c199ee25fb14fb9999c2954963683c5e6591069886",
+    "findings.json": "21552a07d46ad9a14e636ca78c9b24d8ae99817092b2eed3e081be4eb1ea04ac",
+    "record.json": "18acc848d98b12401921446095ddd09813fa310c37495a1590bf964c52a207ad",
+    "report.md": "2899b08f8b18e2ebe1a846bfdb28125b203e5e8fbe84788eb2bad1e7cc3ebf05"
+  }
+}

@@ -1,0 +1,335 @@
+{
+  "instance": "1ad20cd0410c-slash2-ru",
+  "locale": "ru",
+  "namespace": "wire.slash",
+  "round": "fresh independent re-audit (round 2) of the uncommitted revision",
+  "scope": "local_operator/i18n/catalogues/ru/wire.slash.json as it stands in the uncommitted scratch worktree /Users/damian/lo-core-fix on top of 7159e2a30927831f5dfb88f84c588eac07770e5d, judged against the unchanged en source local_operator/i18n/catalogues/en/wire.slash.json. All 52 keys audited; the 13 values the uncommitted edit rewrites (git diff: 13 insertions / 13 deletions) are the ones under verification, and the rest were re-read for new defects.",
+  "checkout": "/Users/damian/lo-core-fix",
+  "tree_head": "7159e2a30927831f5dfb88f84c588eac07770e5d",
+  "tree_state": "dirty: local_operator/i18n/catalogues/{es,fr,hi,ru,ur,vi,zh-CN}/wire.slash.json modified, uncommitted",
+  "audit_date": "2026-10-29",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "1ad20cd0410c",
+    "model": "radient/auto",
+    "actual_model_source": "provider-fallback chain this run: anthropic/claude-sonnet-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro -> radient/auto (each hop after a provider quota failure); the audit was reasoned under radient/auto",
+    "independent_from_translator_session": true,
+    "independence_basis": "never authored these values; did not audit the previous revision (that was session 2c04d4b44ec7 in /Users/damian/lo-core-3088); first read of these bytes"
+  },
+  "input_sha256": {
+    "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+    "target": "09b51528fb14e80fd3db33367624762ef33c47a4668a1a99e6946f451bd5761f",
+    "context": "32b3475a5808048a6eeaae462fee0feb55405fca77026e41b9609a516d74a215"
+  },
+  "previous_round": {
+    "receipt": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/slash-audit/ru/receipt.json",
+    "instance": "2c04d4b44ec7-slash-ru",
+    "verdict": "changes_requested",
+    "target_sha256_then": "8b706dfc70803df70c1c502b14f35efbc4c3195e190af70353dccabfb3e17988",
+    "target_sha256_now": "09b51528fb14e80fd3db33367624762ef33c47a4668a1a99e6946f451bd5761f",
+    "bytes_differ": true,
+    "used_as": "claim list only; every claim re-checked on the current bytes"
+  },
+  "counts": {
+    "BLOCKER": 0,
+    "MAJOR": 0,
+    "MINOR": 6,
+    "NIT": 5
+  },
+  "verdict": "pass",
+  "verdict_reason": "All three previous MAJORs are fixed on the bytes (/fork <message> restored, /hub per-link + Latin auto-push, /approvals mode restored) and the argument tokens and flags are byte-identical. What remains is MINOR/NIT: one previous MINOR still open (m3 /sidebar), an ellipsis the /model fix introduced, one lost addressee (/agent), and 6 values over the 51-cell picker column that the picker ellipsises (en itself carries 16).",
+  "width": {
+    "budget_cells": 51,
+    "budget_source": "commit 7159e2a309 body: 'the picker's description column holds 51 cells in the offer view at 80 columns (design review round 1, D2)'. Not re-derived by me: in command_picker.py the description budget is width - 3 gutter - name column (12..32, fit to content) - 2 gap - 2 edge margin, so 51 is that design-round figure at the offer view, not a constant.",
+    "measured_with": "rich.cells.cell_len (the project's cell model) and local_operator.tui.widgets.tool_card.truncate_cells for the picker cut",
+    "truncation": "command_picker._command_row truncates, never wraps: over-budget text is painted as 50 cells + '…'",
+    "ru_over_budget": [
+      {
+        "key": "wire.slash.fork",
+        "ru": 67,
+        "en": 74,
+        "picker_at_51": "Ответвить чат; <message> — старт; --switch здесь,…"
+      },
+      {
+        "key": "wire.slash.stop",
+        "ru": 55,
+        "en": 66,
+        "picker_at_51": "Завершить эту, другую (имя/pid) или все; /resume в…"
+      },
+      {
+        "key": "wire.slash.approvals",
+        "ru": 52,
+        "en": 47,
+        "picker_at_51": "Режим одобрения инструментов сессии: показать/зада…"
+      },
+      {
+        "key": "wire.slash.effort",
+        "ru": 52,
+        "en": 47,
+        "picker_at_51": "Показать/задать усилие рассуждений; shift+tab — ци…"
+      },
+      {
+        "key": "wire.slash.hub",
+        "ru": 52,
+        "en": 56,
+        "picker_at_51": "Открыть связи с хабом: подписка и auto-push у кажд…"
+      },
+      {
+        "key": "wire.slash.mcp",
+        "ru": 52,
+        "en": 58,
+        "picker_at_51": "Серверы MCP: add/remove или управлять доступом OAu…"
+      }
+    ],
+    "ru_max_cells": 67,
+    "en_over_budget_count": 16,
+    "en_max_cells": 74,
+    "note": "The round-1 revision held every ru value at or under 51 (its receipt: ru_max_cells 51, ru_over_budget []). This revision trades that for restored tokens: 6 values are now over, two materially (/fork 67, /stop 55). I judged each against the commit's own accepted class (a tail that is fixed tokens rather than prose) and report them as MINOR, since the strings themselves are complete and /help shows them whole."
+  },
+  "mechanical": {
+    "json_valid": true,
+    "key_sets_identical": true,
+    "keys": 52,
+    "icu_arguments": "none in either file; no braces, no %s",
+    "argument_tokens": "en <goal>, <n>, <message>; ru keeps all three byte-identical",
+    "flags_and_commands": "--switch, --window, --clear, --stop, --refresh, --copy, /goal, /loop, /model, /title, /resume all present and byte-identical; Latin kept: auto, focus, auto-push, OAuth, MCP, PyPI, Radient, pid, add/remove, status/enable/stop/billing, subverb list of /project",
+    "identical_to_english": "none",
+    "repo_validator": "scripts/i18n/check.py check_catalogues() -> 0 errors over the whole catalogue tree (parity, key sets, argument tuples, plural categories)"
+  },
+  "namespaces": {
+    "wire.slash": {
+      "status": "passed",
+      "keys_audited": 52,
+      "keys_changed_by_this_revision": 13,
+      "sha256": {
+        "en": "b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202",
+        "target": "09b51528fb14e80fd3db33367624762ef33c47a4668a1a99e6946f451bd5761f"
+      },
+      "findings": [
+        {
+          "id": "r2m1",
+          "severity": "MINOR",
+          "key": "wire.slash.sidebar",
+          "en": "Show or hide conversations; 'focus' keys the list",
+          "current": "Показать/скрыть беседы; «focus» — клавиши к списку",
+          "cells": 50,
+          "problem": "Previous finding m3, still open: the round-1 suggestion was applied verbatim and «клавиши к списку» is still not Russian — keys do not go «к списку». The calque of “keys the list” survives, so the row reads as a caption (“keys to the list”) instead of an action (“focus puts the keyboard on the list”). The quote half is fixed (ёлочки), the idiom half is not.",
+          "suggestion": "Показать/скрыть беседы; «focus» — фокус на списке",
+          "suggestion_cells": 49
+        },
+        {
+          "id": "r2m2",
+          "severity": "MINOR",
+          "key": "wire.slash.agent",
+          "en": "List agents, switch an agent's class, or speak to this session as one",
+          "current": "Показать агентов, сменить класс, написать как агент",
+          "cells": 51,
+          "problem": "The third clause lost its addressee. “speak to this session as one” became «написать как агент» = “write as an agent” with no object, so a reader cannot tell who is addressed; «как агент» alone also leans to the sender side (“in the capacity of an agent”) rather than “address this session in agent form”. The row is exactly at 51 cells, so the addressee has to be paid for elsewhere — the noun frame buys it.",
+          "suggestion": "Агенты: сменить класс, написать сессии как агент",
+          "suggestion_cells": 48
+        },
+        {
+          "id": "r2m3",
+          "severity": "MINOR",
+          "key": "wire.slash.model",
+          "en": "Switch model; /model default saves it for new sessions",
+          "current": "Сменить модель; /model default сохранит для новых",
+          "cells": 49,
+          "problem": "A defect the round-1 fix introduced: the verb is back but its object's noun is gone. «для новых» has no antecedent anywhere in the string — the row never says «сессии» — so a ru reader stops at “saves for new …”. «Запомнит» plus the full «для новых сессий» fits once «Сменить» is spent on the noun frame.",
+          "suggestion": "Модель; /model default запомнит для новых сессий",
+          "suggestion_cells": 48
+        },
+        {
+          "id": "r2m4",
+          "severity": "MINOR",
+          "key": "wire.slash.fork",
+          "en": "Branch this chat; --switch here, --window elsewhere; <message> starts work",
+          "current": "Ответвить чат; <message> — старт; --switch здесь, --window отдельно",
+          "cells": 67,
+          "problem": "M1 is fixed on the bytes: <message> is back, both flags are kept, and the order now leads with the message. The committed value was 48 cells («Ответвить чат; --switch здесь, --window отдельно»); this value is 67, against the 51-cell column, so the picker paints «Ответвить чат; <message> — старт; --switch здесь,…» and `--window` plus its «отдельно» gloss never reach that surface (the /help line still shows the whole string). That is the commit's own accepted over-budget class — the tail is branching flags, as fr/vi /fork 81 and en 74 — and I could not build a form keeping both flags, both glosses and <message> under 51 (best tried: 64). Honest options: record the exception, or mirror en's order so the cut costs the message hint rather than a flag name.",
+          "suggestion": "Record the exception (as fr/vi) OR reorder to «Ответвить чат; --switch здесь, --window отдельно; <message> — старт» (same 67 cells) so the picker cut costs the message hint, not a flag name.",
+          "suggestion_cells": 67
+        },
+        {
+          "id": "r2m5",
+          "severity": "MINOR",
+          "key": "wire.slash.stop",
+          "en": "End this session, another by name/pid, or all — /resume reopens it",
+          "current": "Завершить эту, другую (имя/pid) или все; /resume вернёт",
+          "cells": 55,
+          "problem": "m5's addressing fix is in («эту», «(имя/pid)»), but two things came with it: «вернёт» was stripped of its object («её») and the line is still 4 cells over, so at 51 the picker paints «…; /resume в…» — a mid-word cut that hides the reopen hint entirely. The cells saved by dropping «её» bought no compliance.",
+          "suggestion": "Завершить эту/другую (имя/pid)/все; /resume вернёт (uses the catalogue's own slash-list convention; keeps all three cases, «имя/pid» and the full hint) — or keep the comma form «Завершить эту, другую (имя/pid), все; /resume вернёт» (52) and record a 1-cell exception.",
+          "suggestion_cells": 50
+        },
+        {
+          "id": "r2m6",
+          "severity": "MINOR",
+          "keys": [
+            "wire.slash.approvals",
+            "wire.slash.effort",
+            "wire.slash.hub",
+            "wire.slash.mcp"
+          ],
+          "key": "wire.slash.approvals / effort / hub / mcp",
+          "en": "Show or set tool approval mode for this session · Show or set reasoning effort (shift+tab cycles) · Open Hub links — per-link subscribe and auto-push policy · List MCP servers; add/remove one, or manage an OAuth grant",
+          "current": "Режим одобрения инструментов сессии: показать/задать (52) · Показать/задать усилие рассуждений; shift+tab — цикл (52) · Открыть связи с хабом: подписка и auto-push у каждой (52) · Серверы MCP: add/remove или управлять доступом OAuth (52)",
+          "cells": 52,
+          "problem": "Four values sit one cell over the column, so at 51 the picker paints 50 cells plus «…» and cuts the last word mid-way rather than dropping a clause: «…показать/зада…», «…shift+tab — ци…», «…auto-push у кажд…», «…управлять доступом OAu…». All four are content-complete; the overrun is one cell each and two have a clean one-cell shave.",
+          "suggestion": "hub → «Открыть связи с хабом: подписка, auto-push у каждой» (51, «и»→comma); mcp → «Серверы MCP: add/remove или управлять OAuth» (43); approvals and effort need a word dropped (approvals: drop «сессии» → 45; effort: «Показать/задать»→«Задать» → 43) or a one-cell exception recorded.",
+          "suggestion_cells": 51
+        },
+        {
+          "id": "r2n1",
+          "severity": "NIT",
+          "key": "wire.slash.notifications",
+          "en": "Unread completions; read marks them read",
+          "current": "Непрочитанные завершённые сессии; read помечает",
+          "cells": 47,
+          "problem": "Previous finding n5, only half fixed: the verb is back, its complement is not — «read помечает» marks … what? The result state (“as read”) is the thing the row exists to state. Full form is 60 cells; the complete predicate fits only if the noun goes: «Непрочитанные; read помечает прочитанными» (41).",
+          "suggestion": "Непрочитанные; read помечает прочитанными",
+          "suggestion_cells": 41
+        },
+        {
+          "id": "r2n2",
+          "severity": "NIT",
+          "key": "wire.slash.highlights",
+          "en": "Cancel, retry or steer the highlights under an answer",
+          "current": "Отменить, повторить или скорректировать дополнения",
+          "cells": 50,
+          "problem": "“under an answer” — the location that identifies which block this acts on — is dropped; «дополнения» is also the word the settings page uses for supplements, so without the location the row leans on that collision. The verb triad is accurate.",
+          "suggestion": "Отменить, повторить или скорректировать дополнения под ответом",
+          "suggestion_cells": 62,
+          "suggestion_note": "62 cells — does not fit 51; recorded as a known tradeoff, not as an acceptance that fits."
+        },
+        {
+          "id": "r2n3",
+          "severity": "NIT",
+          "key": "wire.slash.project",
+          "en": "Track workstreams: list, show, new, delete, link, unlink",
+          "current": "Вести потоки: list, show, new, delete, link, unlink",
+          "cells": 51,
+          "problem": "«потоки» bare drops the qualified term the catalogue already established («рабочие потоки», wire.settings.session_cleanup). «Рабочие потоки: …» is 53 (over); the fitting 51-cell form, «Потоки работ: …», is a third variant of the same term.",
+          "suggestion": "Потоки работ: list, show, new, delete, link, unlink",
+          "suggestion_cells": 51
+        },
+        {
+          "id": "r2n4",
+          "severity": "NIT",
+          "key": "wire.slash.loop",
+          "en": "Loop toward a goal: /loop <goal>, <n>; --stop cancels",
+          "current": "Цикл к цели: /loop <goal>, <n>; --stop отменяет",
+          "cells": 47,
+          "problem": "«Цикл к цели» is a calque; Russian pairs the noun with «до», not «к», for this sense. One preposition fixes it inside budget.",
+          "suggestion": "Цикл до цели: /loop <goal>, <n>; --stop отменяет",
+          "suggestion_cells": 48
+        },
+        {
+          "id": "r2n5",
+          "severity": "NIT",
+          "key": "wire.slash.search",
+          "en": "Configure web search providers and load balancing",
+          "current": "Провайдеры веб-поиска и балансировка нагрузки",
+          "cells": 45,
+          "problem": "Previous n4 is fixed («нагрузки» restored), but the noun frame drops “Configure”, so the row reads like a read-only status view of a command that edits settings. The verb form is 56 cells; the frames used elsewhere (/context, /mcp, /network) make this consistent, which is why it is a NIT and not a defect.",
+          "suggestion": "Настроить провайдеров веб-поиска и балансировку нагрузки",
+          "suggestion_cells": 56,
+          "suggestion_note": "56 cells — over budget; recorded as the tradeoff behind the noun frame."
+        }
+      ]
+    }
+  },
+  "previous_findings": [
+    {
+      "id": "M1",
+      "key": "wire.slash.fork",
+      "state": "fixed",
+      "evidence": "<message> is back and byte-identical: «Ответвить чат; <message> — старт; --switch здесь, --window отдельно»; both flags kept. New defect: width, see r2m4."
+    },
+    {
+      "id": "M2",
+      "key": "wire.slash.hub",
+      "state": "fixed",
+      "evidence": "auto-push is Latin (glossary wave-2 kept-English push), per-link is «у каждой», and the авто- hyphen glue is gone: «Открыть связи с хабом: подписка и auto-push у каждой». Residual: 52 cells, see r2m6."
+    },
+    {
+      "id": "M3",
+      "key": "wire.slash.approvals",
+      "state": "fixed",
+      "evidence": "«Режим» restored: «Режим одобрения инструментов сессии: показать/задать». Residual: 52 cells (r2m6) and the genitive «инструментов сессии» reads as “session tools” rather than “for this session” (NIT-level, folded into r2m6)."
+    },
+    {
+      "id": "m1",
+      "key": "wire.slash.session",
+      "state": "fixed",
+      "evidence": "«диагностика» restored: «Использование, стоимость, диагностика; --copy — ID». «сессии» is gone from the tag, but the row is /session and the flag sits on it; the full form is 57 cells, so the bare «ID» is the fitting compromise (noted, not flagged)."
+    },
+    {
+      "id": "m2",
+      "key": "wire.slash.effort",
+      "state": "fixed",
+      "evidence": "«shift+tab — цикл» now states the effect. «цикл» is a noun where a verb reads better (NIT-level), and the row is 52 cells (r2m6)."
+    },
+    {
+      "id": "m3",
+      "key": "wire.slash.sidebar",
+      "state": "not fixed",
+      "evidence": "Quote half fixed, idiom half not: «клавиши к списку» is still the calque. See r2m1."
+    },
+    {
+      "id": "m4",
+      "key": "wire.slash.mcp",
+      "state": "fixed",
+      "evidence": "Verb restored and the OAuth object is back: «Серверы MCP: add/remove или управлять доступом OAuth». Residual: 52 cells (r2m6)."
+    },
+    {
+      "id": "m5",
+      "key": "wire.slash.stop",
+      "state": "fixed",
+      "evidence": "«эту» and «(имя/pid)» are both in. New defects came with the fix: «вернёт» lost «её», and the line is 55 cells so the picker cuts it mid-word — see r2m5."
+    },
+    {
+      "id": "n1",
+      "key": "wire.slash.failovers",
+      "state": "fixed",
+      "evidence": "«какая обслуживает» — agreement with «модель» restored."
+    },
+    {
+      "id": "n2",
+      "key": "wire.slash.model",
+      "state": "not fixed",
+      "evidence": "The verb is back but the noun is gone: «сохранит для новых» has no antecedent. The fix introduced the defect — see r2m3."
+    },
+    {
+      "id": "n3",
+      "key": "wire.slash.goal",
+      "state": "fixed",
+      "evidence": "«/goal --clear снимает» — object recoverable from «цель» in the same line."
+    },
+    {
+      "id": "n4",
+      "key": "wire.slash.search",
+      "state": "fixed",
+      "evidence": "«балансировка нагрузки» restored. Residual: “Configure” dropped from the noun frame — see r2n5."
+    },
+    {
+      "id": "n5",
+      "key": "wire.slash.notifications",
+      "state": "not fixed",
+      "evidence": "Verb restored, complement still missing: «read помечает» never says what it marks. See r2n1."
+    }
+  ],
+  "previous_findings_open": [
+    "m3",
+    "n2",
+    "n5"
+  ],
+  "method": "Read the previous receipt as a claim list, then re-derived every claim on the current bytes: cell widths from rich.cells.cell_len and the project's truncate_cells, token parity by regex over flags/angle arguments/slash commands, term consistency by grepping the ru catalogues (хаб, меш-сеть, рабочие потоки, усилие рассуждений, учётные данные), and the repo's catalogue validator. Judged meaning against en key by key; nothing in the tree was edited.",
+  "artifacts": {
+    "receipt": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/slash-audit2/ru/receipt.json",
+    "verdict": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/slash-audit2/ru/verdict.txt",
+    "width_script": "/Users/damian/.local-operator/sessions/1ad20cd0410c/scratchpad/measure_ru_slash.py",
+    "tracked_evidence": "none: this audit was read-only by instruction (tree untouched), so no i18n/audits/evidence bundle was written; the implementer's step owns it"
+  },
+  "generated_at": "2026-10-29",
+  "ledger": "not written: this audit is read-only by instruction (the tree must not be edited), and the ledger row is the i18n ledger owner's write. Proposed row: locale ru, namespace wire.slash, status passed, keys 52, source sha256 en b20f4be0dae6446424862ba227313b6c3384bd115a033edc57c0a289bfe74202, target 09b51528fb14e80fd3db33367624762ef33c47a4668a1a99e6946f451bd5761f, findings 0B/0M/6m/5n, note -> this receipt path."
+}

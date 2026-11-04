@@ -7,10 +7,12 @@
 // parent — same name, same age — exactly the twin-row confusion the TUI's
 // /resume picker had just stopped showing. The fix has to reach BOTH sides, so
 // this renders the real screen rather than asserting on the payload.
-import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PastSessionsScreen } from "./screens/past-sessions";
+
+afterEach(cleanup);
 
 const NOW = Date.now() / 1000;
 
@@ -56,4 +58,25 @@ describe("the phone's history list", () => {
 		// One tag for two rows: the parent is not a fork and must not be tagged.
 		expect(screen.getAllByText("[fork]").length).toBe(1);
 	});
+});
+
+// A generated Latin marker must not select the Urdu name's clipping end.
+it.each([
+ ["API منصوبے کی پیش رفت اور اگلے مرحلے کی تفصیلی گفتگو", "rtl"],
+ ["Pure Latin identifying beginning and a long conversation title", "ltr"],
+ ["تحقیقاتی منصوبے کی پیش رفت اور اگلے مرحلے کی تفصیلی گفتگو", "rtl"],
+ ["2026-11-03 12345678901234567890", null],
+])("isolates the fork name %s from its generated marker", async (name, direction) => {
+ const original = rows[0].name;
+ rows[0].name = name;
+ try {
+  render(<div dir="rtl"><PastSessionsScreen /></div>);
+  const title = await screen.findByText(name);
+  const mark = screen.getByText("[fork]");
+  expect(title.getAttribute("dir")).toBe(direction);
+  expect(title.className).toContain("truncate");
+  expect(mark.parentElement).toBe(title.parentElement);
+  expect(mark.hasAttribute("dir")).toBe(false);
+  expect(title.parentElement?.hasAttribute("dir")).toBe(false);
+ } finally { rows[0].name = original; }
 });

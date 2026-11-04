@@ -1,0 +1,140 @@
+{
+ "locale": "vi",
+ "namespace": "wire.settings",
+ "keys_total": 820,
+ "keys_read": 820,
+ "coverage_statement": "Printed en+vi side by side for indices 0-819 in chunks 0-55,55-115,115-175,175-240,240-305,305-370,370-435,435-495,495-545,545-610,609-670,670-725,725-775,775-820; tool output elisions in the middle of 8 chunks (326-345, 391-418, 462-469, 514-519, 566-592, 639-647, 693-699) were re-dumped and read. Plus scripted checks: numbers parity, ICU/placeholder parity (mech file), NFC, orthography of oa/uy words, maxCells for 8 sidecar keys with width (all within budget), identical-to-en list (all placeholders/config literals).",
+ "auditor_model": "anthropic/claude-sonnet-5-5 (session fell back from deepseek/deepseek-flash on a 402 quota error before any catalogue key was read; style guide/glossary were read under deepseek-flash)",
+ "findings": [
+  {
+   "id": "F1",
+   "key": "wire.settings.web_fetch_render_backend.help",
+   "severity": "major",
+   "category": "glossary",
+   "en": "Auto uses markdownify when the [fetch] extra is installed.",
+   "current": "auto dùng markdownify khi gói phụ trợ [fetch] được cài.",
+   "problem": "Glossary §2 wave-2 kept-English set fixes 'extra' (pip extras) as English, undeclined; es/fr/ru all keep 'extra'. 'gói phụ trợ' translates the term and obscures the pip-extra name.",
+   "proposed": "auto dùng markdownify khi extra [fetch] được cài."
+  },
+  {
+   "id": "F2",
+   "key": "wire.settings.speech_transcription_cleanup.help",
+   "severity": "major",
+   "category": "terminology",
+   "en": "How dictation strips filler words and non-speech cues. ...",
+   "current": "Cách nhập bằng giọng nói loại bỏ âm đệm và âm thanh phi ngôn ngữ. ...",
+   "problem": "'âm đệm' is the phonology term for the medial glide (the /w/ in 'hoa'), not filler words (um/uh). Filler words are 'từ đệm' / 'từ thừa'. Same wrong term in ...choice.off.description. LOW-MEDIUM confidence (I am not a native speaker) but the phonological sense is standard.",
+   "proposed": "Cách nhập bằng giọng nói loại bỏ từ đệm và âm thanh phi ngôn ngữ. ... (rest unchanged)"
+  },
+  {
+   "id": "F2b",
+   "key": "wire.settings.speech_transcription_cleanup.choice.off.description",
+   "severity": "major",
+   "category": "terminology",
+   "en": "Verbatim; no filler or cue removal.",
+   "current": "Giữ nguyên; không bỏ âm đệm hay tín hiệu.",
+   "problem": "Same 'âm đệm' mis-term as F2; 'tín hiệu' for 'cue' is also vaguer than the help's 'âm thanh phi ngôn ngữ'.",
+   "proposed": "Giữ nguyên; không loại bỏ từ đệm hay dấu hiệu phi ngôn ngữ."
+  },
+  {
+   "id": "F3",
+   "key": "wire.settings.web_search_timeout_seconds.help",
+   "severity": "minor",
+   "category": "terminology/consistency",
+   "en": "Per-provider request timeout. Clamped to 1-120 when read.",
+   "current": "Hết giờ cho mỗi yêu cầu nhà cung cấp. Được kẹp trong khoảng 1-120 khi đọc.",
+   "problem": "'kẹp' is a calque of 'clamp'; the same catalogue renders 'Clamped 60 s..24 h' as 'Được giới hạn trong khoảng' (proactive_patience_default_ms.help). Same calque in speech_voice_pace.help ('tự kẹp về giới hạn của nó').",
+   "proposed": "Hết giờ cho mỗi yêu cầu nhà cung cấp. Được giới hạn trong khoảng 1-120 khi đọc.  /  speech_voice_pace.help: '... Nhà cung cấp có dải hẹp hơn sẽ tự giới hạn theo dải của nó.'"
+  },
+  {
+   "id": "F4",
+   "key": "wire.settings.hooks_native.label",
+   "severity": "minor",
+   "category": "terminology/consistency",
+   "en": "Native hooks",
+   "current": "Hook bản địa",
+   "problem": "'bản địa' reads as 'locally adapted/indigenous'; the same catalogue renders 'native' as 'tích hợp sẵn' (speech cleanup) and built-in elsewhere. Also hooks.description and hooks_native.help area ('PostToolUse bản địa'). Low confidence.",
+   "proposed": "Hook gốc  (and hooks.description: '... các hook PostToolUse gốc và chuyển tiếp ...')"
+  },
+  {
+   "id": "F5",
+   "key": "wire.settings.librarian_cadence_max_extra_per_day.help",
+   "severity": "minor",
+   "category": "consistency",
+   "en": "How many extra passes she may request per day. 0 disables extra passes.",
+   "current": "Số lượt chạy thêm nó có thể yêu cầu mỗi ngày. 0 sẽ tắt lượt chạy thêm.",
+   "problem": "The en text refers to the Librarian as 'she/her' and aida.* in this catalogue uses 'cô ấy'; here (and librarian_enabled.help 'phiên của nó') the pronoun is 'nó', which is impolite for a persona and inconsistent.",
+   "proposed": "Số lượt chạy thêm cô ấy được phép yêu cầu mỗi ngày. 0 sẽ tắt lượt chạy thêm.  /  librarian_enabled.help: '... sẽ không bao giờ tạo phiên của cô ấy.'"
+  },
+  {
+   "id": "F6",
+   "key": "wire.settings.providers_openrouter_sort.choice.unset.description",
+   "severity": "minor",
+   "category": "idiom",
+   "en": "no preference — sticky routing stays on (warmest cache)",
+   "current": "không tùy chọn — định tuyến cố định được giữ (cache ấm nhất)",
+   "problem": "'không tùy chọn' reads as 'no options', not 'no preference set'. Same in providers_openrouter_allow_fallbacks.choice.unset.description and providers_openrouter_require_parameters.choice.unset.description.",
+   "proposed": "không đặt tùy chọn — định tuyến cố định được giữ (cache ấm nhất)"
+  },
+  {
+   "id": "F7",
+   "key": "wire.settings.speech_transcription_cleanup.choice.auto.description",
+   "severity": "minor",
+   "category": "clarity",
+   "en": "Native, else client rules.",
+   "current": "Tích hợp sẵn; nếu không, máy khách.",
+   "problem": "Elliptical: drops 'rules' and reads as 'built-in; otherwise, the client' (the 'client' choice description says 'Quy tắc phía máy khách').",
+   "proposed": "Bản của nhà cung cấp; nếu không, quy tắc phía máy khách."
+  },
+  {
+   "id": "N1",
+   "key": "wire.settings.runtime_keep_alive_seconds.label",
+   "severity": "nit",
+   "category": "word order",
+   "en": "Keep closed conversations warm (s)",
+   "current": "Giữ cuộc trò chuyện đã đóng ấm (giây)",
+   "problem": "Adjective after long object is awkward.",
+   "proposed": "Giữ ấm cuộc trò chuyện đã đóng (giây)"
+  },
+  {
+   "id": "N2",
+   "key": "wire.settings.librarian_cadence_paused.help",
+   "severity": "nit",
+   "category": "clarity",
+   "en": "The desktop and /librarian write the same key.",
+   "current": "Ứng dụng và /librarian ghi cùng một khóa.",
+   "problem": "'Ứng dụng' alone is ambiguous; elsewhere 'ứng dụng desktop'.",
+   "proposed": "Ứng dụng desktop và /librarian ghi cùng một khóa."
+  },
+  {
+   "id": "N3",
+   "key": "wire.settings.providers_openai_api.help",
+   "severity": "nit",
+   "category": "idiom",
+   "en": "Direct OpenAI GPT-5 calls use the Responses API unless opted out.",
+   "current": "... trừ khi chọn từ bỏ.",
+   "problem": "'từ bỏ' = give up; opt-out is 'chọn không dùng'.",
+   "proposed": "Các lệnh gọi GPT-5 trực tiếp của OpenAI dùng Responses API trừ khi chọn không dùng."
+  },
+  {
+   "id": "N4",
+   "key": "wire.settings.tui_sidebar_visible.choice.false.description",
+   "severity": "nit",
+   "category": "consistency",
+   "en": "keep the full conversation width",
+   "current": "giữ nguyên chiều rộng hội thoại",
+   "problem": "'hội thoại' vs 'cuộc trò chuyện' used everywhere else (also providers_openrouter_sort.help 'hội thoại dài').",
+   "proposed": "giữ nguyên chiều rộng cuộc trò chuyện"
+  },
+  {
+   "id": "N5",
+   "key": "wire.settings.providers_openrouter_provider_affinity.label",
+   "severity": "nit",
+   "category": "terminology",
+   "en": "cache affinity",
+   "current": "ái lực cache",
+   "problem": "'ái lực' is a chemistry/physics term; unusual in dev register. Low confidence.",
+   "proposed": "gắn host cho cache"
+  }
+ ]
+}

@@ -1,0 +1,9 @@
+{
+  "wire.errors.agent_avatar.empty_body": "No se envió ninguna imagen. Envía los bytes de la imagen en el cuerpo de la solicitud.",
+  "wire.errors.agent_avatar.imaging_unavailable": "Las imágenes requieren compatibilidad con imágenes, que no está instalada. Reinstala Local Operator con el extra images.",
+  "wire.errors.agent_avatar.not_found": "Este agente no tiene imagen.",
+  "wire.errors.agent_avatar.too_large": "Esta imagen es demasiado grande. Elige una imagen de menos de {limit_mib} MB.",
+  "wire.errors.agent_avatar.too_many_pixels": "Esta imagen tiene demasiados píxeles. Elige una imagen de menos de {limit_mp} megapíxeles.",
+  "wire.errors.agent_avatar.undecodable": "No se pudo leer esta imagen. Puede que el archivo esté dañado.",
+  "wire.errors.agent_avatar.unsupported_type": "No se puede usar esta imagen. Elige una imagen PNG, JPEG, WebP, GIF o HEIC."
+}

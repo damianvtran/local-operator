@@ -1,0 +1,140 @@
+{
+  "schema": 1,
+  "audit_id": "w2a2",
+  "audit_round": 1,
+  "audit_kind": "independent_spanish_cli_help_and_runtime_copy_audit",
+  "locale": "es",
+  "namespace": "cli.browser_help",
+  "audit_date": "2026-10-29",
+  "audited_revision": "088699bfea0fc33d6b2f0748037dd7e89d85627d",
+  "audited_revision_note": "Worktree /Users/damian/lo-i18n-es branch feat/i18n-es-wire-runtime at 088699bfea0fc33d6b2f0748037dd7e89d85627d. The target local_operator/i18n/catalogues/es/cli.browser_help.json is UNTRACKED ('??' in git status), so the verdict binds its exact on-disk sha256 23b8945bc337c04d4a2f698c014ce53ef53f730484093c39cf0dc8914a6b557b, not a committed target blob. English source and context are tracked at the audited revision.",
+  "key_count": {
+    "en": 20,
+    "target": 20,
+    "context": 20
+  },
+  "verdict": "passed",
+  "result": "clean",
+  "verdict_reason": "All 20 English, Spanish, and context entries were read side by side. Semantic accuracy, idiom, neutral tú/infinitive register, glossary/product names, behavioural promises, machine syntax, plurals, literal tokens, authored line breaks, and declared width constraints were checked. No blocker, major, or minor finding.",
+  "finding_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "unresolved_blocker_major": 0,
+  "auditor": {
+    "agent": "translation-auditor (lopdev team delegation es-w2-auditor-b)",
+    "session_or_instance": "session da5e9c85b719",
+    "model": "kimi/k3.1-pro at the latest session model-switch notice; primary anthropic/claude-sonnet-5-5",
+    "model_note": "SELF-REPORTED from this session's model header and switch notices, not independently observable. The session opened on anthropic/claude-sonnet-5-5; quota HTTP 429 provider-failure notices switched to openai/gpt-6-astra and then kimi/k3.1-pro. No concrete model is claimed beyond those notices.",
+    "fallback_notice": "Temporary provider fallbacks disclosed: anthropic/claude-sonnet-5-5 -> openai/gpt-6-astra -> kimi/k3.1-pro; reason quota HTTP 429. No role, default, or tools change.",
+    "date": "2026-10-29",
+    "independence": "Independent of the translator: I authored none of this copy, repaired none of it, and made no catalogue, sidecar, ledger, allowance, generated-file, or git writes. Only these audit evidence directories were written."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.browser_help.json",
+      "revision": "088699bfea0fc33d6b2f0748037dd7e89d85627d",
+      "sha256": "7fd47199bb8d443a0fbf7469d635453cd6f57bb7c14efec91862c6b5b0c1b1e6"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/es/cli.browser_help.json",
+      "sha256": "23b8945bc337c04d4a2f698c014ce53ef53f730484093c39cf0dc8914a6b557b"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.browser_help.context.json",
+      "sha256": "05160cd292e9c18125f62b7112e06cbb474556847b449ad63d3fcbac5d8c0908"
+    }
+  },
+  "findings": [],
+  "source_and_method_notes": [
+    "No maxCells is declared on any key in the five context sidecars; no hard clipping budget was invented. Browser aligned rows were measured against their common zero-based value column 21.",
+    "No English or Spanish key in these five namespaces contains argparse %(default)s/%(prog)s/%% syntax, contrary to the delegation expectation. The actual JSON Schema quoted-brace example was rendered through the real parser instead.",
+    "No value displayed as a redaction marker, so no sanctioned-reader re-read was needed. read_public_copy cannot read untracked working-tree targets or context sidecars; that limitation is recorded rather than worked around.",
+    "No plural arguments occur in this namespace. Spanish CLDR one/many/other rules were checked against the style guide; no unsupported few/zero/two category occurs."
+  ],
+  "check_output": {
+    "all_five_namespace_mechanical_summary": {
+      "cli.browser": {
+        "keys": 64,
+        "key_context_parity": true,
+        "icu_parse_and_parity": true,
+        "authored_newline_mismatches": [],
+        "select_renders": [],
+        "maxCells_keys": [],
+        "argparse_printf_token_keys": []
+      },
+      "cli.browser_help": {
+        "keys": 20,
+        "key_context_parity": true,
+        "icu_parse_and_parity": true,
+        "authored_newline_mismatches": [],
+        "select_renders": [
+          "Iniciar el daemon",
+          "Detener el daemon",
+          "Reiniciar el daemon",
+          "unknown el daemon"
+        ],
+        "maxCells_keys": [],
+        "argparse_printf_token_keys": []
+      },
+      "cli.exec_help": {
+        "keys": 20,
+        "key_context_parity": true,
+        "icu_parse_and_parity": true,
+        "authored_newline_mismatches": [],
+        "select_renders": [],
+        "maxCells_keys": [],
+        "argparse_printf_token_keys": []
+      },
+      "cli.exec_worker_help": {
+        "keys": 11,
+        "key_context_parity": true,
+        "icu_parse_and_parity": true,
+        "authored_newline_mismatches": [],
+        "select_renders": [],
+        "maxCells_keys": [],
+        "argparse_printf_token_keys": []
+      },
+      "cli.exec_runtime": {
+        "keys": 11,
+        "key_context_parity": true,
+        "icu_parse_and_parity": true,
+        "authored_newline_mismatches": [],
+        "select_renders": [],
+        "maxCells_keys": [],
+        "argparse_printf_token_keys": []
+      }
+    },
+    "parser": "local_operator.i18n.runtime loaded from /Users/damian/lo-i18n-es/local_operator/i18n/runtime.py; parse_message, message_arguments, plural_selectors, and AST _Arg.parts label comparison used for every key.",
+    "negative_control": "Translated start label detected; start falls through to other -> start el daemon",
+    "real_argparse_probe": {
+      "command": "/Users/damian/local-operator/.venv/bin/python -c \nimport argparse\nfrom local_operator.cli import build_cli_parser\np = build_cli_parser()\nsubs = next(a for a in p._actions if isinstance(a, argparse._SubParsersAction))\nbrowser = subs.choices['browser']\nbsubs = next(a for a in browser._actions if isinstance(a, argparse._SubParsersAction))\nfor action in ('start', 'stop', 'restart'):\n    row = next(row for row in bsubs._choices_actions if row.dest == action)\n    print(action + ': ' + row.help)\nexec_parser = subs.choices['exec']\nfor dest in ('command', 'output_schema', 'output_retries'):\n    action = next(a for a in exec_parser._actions if a.dest == dest)\n    print(dest + ': ' + action.help)\nprint('exec-worker hidden from top-level choices:', 'exec-worker' not in subs.choices)\n",
+      "exit_code": 0,
+      "stdout": "start: Iniciar el daemon\nstop: Detener el daemon\nrestart: Reiniciar el daemon\ncommand: Prompt literal; '-' u omitirlo con stdin por tubería lee stdin; opcional para un bucle\noutput_schema: Archivo JSON Schema que debe cumplir el payload JSON/YAML/TOML decodificado. Para --output-format markdown: un objeto JSON {'required_sections': [...]}. Requiere --output-format.\noutput_retries: Máximo de reintentos tras una respuesta final fallida (0-5; predeterminado: 2). Requiere --output-format.\nexec-worker hidden from top-level choices: True\n",
+      "stderr": ""
+    },
+    "checks": [
+      "exact key/context parity",
+      "ICU parse success and argument parity",
+      "plural selector parity",
+      "ICU select label-set parity via parser AST",
+      "argparse printf token parity",
+      "flag/backtick/ANSI/Rich-tag token parity",
+      "authored newline-count parity",
+      "maxCells census",
+      "semantic/register/glossary/behaviour review of every key"
+    ]
+  },
+  "limitations": [
+    "LLM semantic judgement, not native-speaker attestation.",
+    "Static copy audit plus direct ICU and real build_cli_parser rendering; no browser UI, service, full test suite, eligibility, or release claim.",
+    "All five Spanish targets are untracked; exact on-disk sha256 values are the binding evidence.",
+    "Evidence files are written but not committed because this role is forbidden all git writes."
+  ],
+  "artifacts": [
+    "report.md",
+    "audit.log"
+  ]
+}

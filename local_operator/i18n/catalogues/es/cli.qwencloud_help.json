@@ -1,0 +1,7 @@
+{
+  "cli.qwencloud_help.qwencloud_ticket": "Guardar la cookie de sesión de la consola de QwenCloud que lee /usage",
+  "cli.qwencloud_help.set": "Guardar la cookie; el valor se lee de STDIN, nunca de argv",
+  "cli.qwencloud_help.status": "Si hay una cookie guardada y su antigüedad; nunca el valor",
+  "cli.qwencloud_help.rm": "Eliminar la cookie guardada",
+  "cli.qwencloud_help.migrate": "Mover un ticket en texto plano al almacén cifrado de secretos"
+}

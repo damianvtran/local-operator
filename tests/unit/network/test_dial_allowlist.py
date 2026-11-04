@@ -415,3 +415,78 @@ def test_an_excuse_never_shadows_a_forwarded_field() -> None:
 def test_the_excuses_carry_their_reason(name: str) -> None:
     reason = _NOT_FORWARDED[name]
     assert len(reason) > 80, f"the excuse for {name} does not say why it is safe to drop"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("declared", [False, True])
+async def test_a_relayed_viewers_cwd_adoption_survives_the_hop(
+    declared: bool, tmp_path: Path
+) -> None:
+    """``cwd_adoption`` crosses the real dial, not only the allowlist above (QA round 3, Q4b).
+
+    WHY A WIRE CELL: the owner retires toward a new directory only while some
+    attached client has declared it adopts one. A relay that dropped the
+    declaration would leave a relayed viewer reading as "cannot follow", and the
+    queued move would hold until it expired for a reason nobody on that viewer
+    could see. So the frame is captured from the PRODUCTION handshake
+    (``AttachClient``) and replayed through the real ``dial_owner``, and the frame
+    the owner receives is what is asserted. The undeclared half is the negative
+    control: forwarding must not turn the capability into an unconditional claim.
+    """
+    import asyncio
+    import json
+
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.network.dial import dial_owner
+    from local_operator.session.runtime.types import SessionRecord
+
+    frames: list[dict[str, object]] = []
+    finished = asyncio.Event()
+    session_id = "synthetic-cwd-adoption-dial"
+
+    async def owner(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            frames.append(json.loads(await reader.readline()))
+            welcome = {"op": "welcome", "data": {"session_id": session_id, "pid": 0}}
+            writer.write(json.dumps(welcome).encode() + b"\n")
+            await writer.drain()
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            finished.set()
+
+    server = await asyncio.start_server(owner, "127.0.0.1", 0)
+    record = SessionRecord(
+        pid=1,
+        kind="tui",
+        session_id=session_id,
+        conversation_name="",
+        cwd=str(tmp_path),
+        model_label="",
+        control_port=server.sockets[0].getsockname()[1],
+        control_key="synthetic-record-key",
+        protocol=4,
+    )
+    client = AttachClient(lambda projection: None, lambda reason: None, cwd_adoption=declared)
+    try:
+        await client.connect(record, session_id)
+        assert frames[0].get("cwd_adoption") is (True if declared else None)
+        client.close()
+        await asyncio.wait_for(finished.wait(), timeout=2)
+        finished.clear()
+        dial, _ = await asyncio.to_thread(
+            dial_owner, tmp_path, session_id, auth=dict(frames[0]), _record=record
+        )
+        try:
+            assert frames[1].get("cwd_adoption") is (True if declared else None)
+            # The dialer's own facts still win over anything the viewer sent.
+            assert frames[1]["key"] == record.control_key
+            assert frames[1]["locality"] == "remote"
+        finally:
+            dial.close()
+        await asyncio.wait_for(finished.wait(), timeout=2)
+    finally:
+        client.close()
+        server.close()
+        await server.wait_closed()

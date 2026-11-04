@@ -42,6 +42,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+import httpx
+
 from local_operator.hub_sync.budget import OperationBudget, OperationDeadlineExceeded
 from local_operator.hub_sync.identity import Kind, LinkError
 from local_operator.hub_sync.merge import MergeOptions
@@ -123,6 +125,19 @@ class PushTransport(Protocol):
 #: ``PUT /{family}/{hub_id}/publish`` and its ``/preview`` twin. First
 #: publication is a deliberate manual action on the client, not this path.
 _FAMILY_ROUTES = {"agent": "agents", "team": "teams", "skill": "skills"}
+
+
+#: Transport errors that prove a COMMIT request never reached the Hub (see the
+#: classification in ``HttpPushTransport._send``). Everything else httpx raises
+#: while a request is in flight is an UNCERTAIN commit outcome.
+_PROVABLY_UNSENT: tuple[type[httpx.RequestError], ...] = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.ProxyError,
+    httpx.UnsupportedProtocol,
+    httpx.LocalProtocolError,
+)
 
 
 class HttpPushTransport:
@@ -241,6 +256,49 @@ class HttpPushTransport:
             )
         except OperationDeadlineExceeded:
             raise
+        except httpx.RequestError as exc:
+            # CLASSIFY BY ONE QUESTION: may the request have been fully sent and
+            # processed? Production saw a commit APPLIED while the client gave up
+            # mid-moderation; settling that ``failed``/``hub-error`` erased the
+            # intent and invited a blind re-publish. Only a COMMIT can be in that
+            # state -- a preview writes nothing, so every preview-stage error stays
+            # a retryable outage.
+            #
+            # On the commit stage the request is PROVABLY UNSENT only for the errors
+            # below: a connection that never opened (``ConnectError``/
+            # ``ConnectTimeout``, which also covers DNS and TLS-handshake failure),
+            # no pooled connection to use (``PoolTimeout``), a proxy tunnel that was
+            # not established (``ProxyError``), a URL the transport refuses to dial
+            # (``UnsupportedProtocol``), and a request the HTTP encoder refused to
+            # serialize locally (``LocalProtocolError``). Those are a plain outage.
+            #
+            # EVERYTHING ELSE is uncertain, deliberately by exclusion so a future
+            # httpx error class defaults to the safe side (preserved intent, read
+            # before any replay) instead of the unsafe one:
+            # * ``ReadTimeout``/``ReadError``/``RemoteProtocolError``: the request
+            #   went out and the answer never (fully) came -- the Hub applying the
+            #   write and then dropping the connection without a response (e.g. a
+            #   proxy idle cutoff during ~19s moderation, now MORE likely because
+            #   the commit read limit was widened to the budget) is exactly this.
+            # * ``WriteTimeout``/``WriteError``: the body may have been fully
+            #   delivered before the failure surfaced; the server cannot be assumed
+            #   to have discarded it.
+            # * ``CloseError``: the failure surfaced while the exchange was
+            #   finishing, i.e. after the request was sent.
+            # * ``DecodingError``: a response ARRIVED (so the server processed the
+            #   request) but could not be read; its status is unknown.
+            # Uncertain is cheap and safe: pending-reconciliation keeps the verbatim
+            # intent, the next attempt reads the Hub first, and any resend is still
+            # conditional on the stored ``If-Match`` (a stale replay is a 412).
+            if envelope or isinstance(exc, _PROVABLY_UNSENT):
+                raise PushRefused(
+                    "hub-error",
+                    f"the hub request failed ({type(exc).__name__})",
+                    outage=True,
+                ) from exc
+            raise OperationDeadlineExceeded(
+                f"commit outcome unknown: {type(exc).__name__} before the hub answered"
+            ) from exc
         except Exception as exc:  # noqa: BLE001 - any transport failure is a named refusal
             raise PushRefused(
                 "hub-error", f"the hub request failed ({type(exc).__name__})", outage=True
@@ -320,6 +378,13 @@ def _refusal_of(exc: BaseException) -> str:
     return "publish-document-invalid"
 
 
+def org_skill_operation_id(operation_id: str) -> str:
+    """Keep new org intents out of paths older runtimes can rewrite."""
+    # Every legacy push id starts with `push-`; a prefix outside that grammar
+    # cannot collide even when a skill's own valid ID contains `org-v2`.
+    return f"org-v2--{operation_id}"
+
+
 async def push_item(
     *,
     kind: Kind,
@@ -337,6 +402,89 @@ async def push_item(
     document_builder: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
     bundle_attested: bool = False,
     bundle_upload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    org_skill: bool = False,
+) -> PushOutcome:
+    """Serialize an org skill's dispatch so a pending intent has one live owner."""
+    kwargs: dict[str, Any] = dict(
+        kind=kind,
+        local_id=local_id,
+        captured_local=captured_local,
+        accepted=accepted,
+        current_local=current_local,
+        remote_latest=remote_latest,
+        expected_revision=expected_revision,
+        transport=transport,
+        outbox=outbox,
+        operation_id=operation_id,
+        budget=budget,
+        opts=opts,
+        document_builder=document_builder,
+        bundle_attested=bundle_attested,
+        bundle_upload=bundle_upload,
+        org_skill=org_skill,
+    )
+    if kind != "skill":
+        return await _push_item_inner(**kwargs)
+    if not org_skill:
+        # A changed or unverified scope must not bypass an unresolved org intent
+        # by starting a fresh publication in the legacy namespace.
+        prior = outbox.read(org_skill_operation_id(operation_id))
+        if prior is not None and prior.state in ("pending", "pending-reconciliation"):
+            return PushOutcome(
+                "skipped", operation_id=operation_id, reason="org-reconciliation-required"
+            )
+        return await _push_item_inner(**kwargs)
+    # Old workers do not honor the new operation lock and may rewrite the old
+    # outbox path. A separate namespace makes the durable intent inaccessible to
+    # them; CAS still arbitrates any competing writes to the remote row.
+    scoped_id = org_skill_operation_id(operation_id)
+    with outbox.org_skill_operation(scoped_id) as acquired:
+        if not acquired:
+            return PushOutcome("skipped", operation_id=scoped_id, reason="operation-in-progress")
+        # Earlier unreleased candidates used a suffix in the legacy namespace.
+        # Do not strand an intent from that candidate, nor confuse another
+        # skill whose legitimate ID happens to end in the same suffix.
+        prior_candidate = outbox.read(f"{operation_id}-org-v2")
+        if (
+            prior_candidate is not None
+            and prior_candidate.local_id == local_id
+            and prior_candidate.state in ("pending", "pending-reconciliation")
+        ):
+            return PushOutcome(
+                "skipped",
+                operation_id=operation_id,
+                reason="prior-version-reconciliation-required",
+            )
+        legacy = outbox.read(operation_id)
+        if legacy is not None and legacy.state in ("pending", "pending-reconciliation"):
+            # Even a stale revision cannot prove an old request left paid
+            # moderation. Until an authoritative drain exists, never race it or
+            # alter the legacy row; operators need the retained evidence.
+            return PushOutcome(
+                "skipped", operation_id=operation_id, reason="legacy-reconciliation-required"
+            )
+        kwargs["operation_id"] = scoped_id
+        return await _push_item_inner(**kwargs)
+
+
+async def _push_item_inner(
+    *,
+    kind: Kind,
+    local_id: str,
+    captured_local: Mapping[str, Any] | None,
+    accepted: Mapping[str, Any] | None,
+    current_local: Mapping[str, Any],
+    remote_latest: Mapping[str, Any],
+    expected_revision: str | None,
+    transport: PushTransport,
+    outbox: Outbox,
+    operation_id: str,
+    budget: OperationBudget,
+    opts: MergeOptions = MergeOptions(),
+    document_builder: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    bundle_attested: bool = False,
+    bundle_upload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    org_skill: bool = False,
 ) -> PushOutcome:
     """Project and conditionally publish one authored item; settle the outbox.
 
@@ -359,7 +507,11 @@ async def push_item(
         kind, captured_local, accepted, current_local, remote_latest, expected_revision
     )
     attempt: Attempt | None = outbox.begin_attempt(
-        operation_id, kind=kind, local_id=local_id, input_fp=input_fp
+        operation_id,
+        kind=kind,
+        local_id=local_id,
+        input_fp=input_fp,
+        recover_org_skill_intent=kind == "skill" and org_skill,
     )
     if attempt is None:
         # Dead-lettered (over the attempt cap), inside its backoff window, or an
@@ -378,6 +530,11 @@ async def push_item(
             generation=generation,
             intent=attempt.replay,
             budget=budget,
+            kind=kind,
+            org_skill=org_skill,
+            current_local=current_local,
+            remote_latest=remote_latest,
+            remote_revision=str(expected_revision or "").strip() or None,
         )
 
     try:
@@ -442,6 +599,7 @@ async def push_item(
             outbox, operation_id, generation, "bundle-unsupported-server", state="needs-review"
         )
 
+    unpinned_org_skill = False
     if is_bundle:
         preview_document: Mapping[str, Any] | None = document
         token = ""
@@ -486,7 +644,23 @@ async def push_item(
         preview_document = preview.get("document")
         pin = preview.get("pin")
         token = str(pin.get("token") or "") if isinstance(pin, Mapping) else ""
-        if not isinstance(preview_document, Mapping) or not token:
+        # Org skill documents deliberately have no generalization pin on the hub.
+        # Only a verified org-scope caller may accept that contract; the preview
+        # must also prove it returned our exact untransformed document. CAS still
+        # binds both preview and commit to the same remote revision above.
+        transform = preview.get("transform")
+        unpinned_org_skill = (
+            kind == "skill"
+            and org_skill
+            and not token
+            and status == "unchanged"
+            and not unresolved
+            and preview.get("changes") == []
+            and isinstance(transform, Mapping)
+            and transform.get("model") == "not_applied"
+            and preview_document == document
+        )
+        if not isinstance(preview_document, Mapping) or (not token and not unpinned_org_skill):
             return _settle_deterministic(
                 outbox, operation_id, generation, "unsupported-precondition"
             )
@@ -527,6 +701,9 @@ async def push_item(
         # A bundle commit carries NO pin, so replay must not demand one; the flag
         # is what distinguishes "no token needed" from "lost the token".
         "bundle": is_bundle,
+        # Only a successfully validated org preview may authorize a tokenless
+        # document replay; the retry also rechecks the current linked scope.
+        "unpinned_org_skill": unpinned_org_skill,
     }
     if not outbox.store_intent(operation_id, generation, intent):
         # Persisting the intent must succeed BEFORE a mutating dispatch: without
@@ -566,6 +743,47 @@ async def push_item(
     )
 
 
+def _already_landed(
+    kind: Kind,
+    *,
+    intent_document: Mapping[str, Any],
+    intent_expected: str,
+    current_local: Mapping[str, Any],
+    remote_latest: Mapping[str, Any],
+    remote_revision: str | None,
+) -> bool:
+    """True only when an uncertain commit PROVABLY landed.
+
+    Three facts must all hold, each one blocking a different false "landed":
+
+    * the hub's revision MOVED past the one the stored commit was conditioned on
+      (an unmoved revision means the write cannot have applied);
+    * the hub now serves exactly the stored commit's content (a later edit by
+      someone else is not our commit);
+    * today's local skill equals that content as well, because the receipt the
+      caller advances records the local bytes as "sent" -- advancing it over a newer
+      unsent local edit would hide that edit. In that case the verbatim replay is
+      left to refuse with ``remote-revision-changed`` (CAS keeps it harmless) and
+      the person pulls.
+
+    Anything unprovable (a non-mapping, an unfingerprintable side) is False, so
+    the existing replay path decides.
+    """
+
+    if kind != "skill" or not remote_revision or remote_revision == intent_expected:
+        return False
+    # The ONE skill-content comparator the manual-confirm reconciliation already
+    # uses (its docstring says what it tolerates and why that is safe here: it
+    # normalizes the spelling the server canonicalizes away); a second, stricter
+    # comparator here would call a clean landing "different".
+    # Imported lazily: service imports this module at load time.
+    from local_operator.hub_sync.service import _same_content
+
+    return _same_content(intent_document, remote_latest) and _same_content(
+        current_local, remote_latest
+    )
+
+
 async def _replay_verbatim(
     *,
     transport: PushTransport,
@@ -574,6 +792,11 @@ async def _replay_verbatim(
     generation: int,
     intent: Mapping[str, Any],
     budget: OperationBudget,
+    kind: Kind,
+    org_skill: bool,
+    current_local: Mapping[str, Any],
+    remote_latest: Mapping[str, Any],
+    remote_revision: str | None,
 ) -> PushOutcome:
     """Resend one UNCERTAIN commit with exactly the stored bytes.
 
@@ -596,9 +819,49 @@ async def _replay_verbatim(
     accepts = list(intent.get("accept_unresolved") or [])
     expected = str(intent.get("expected_revision") or "")
     is_bundle = bool(intent.get("bundle"))
-    if not isinstance(document, Mapping) or not expected or (not token and not is_bundle):
+    unpinned_org_skill = (
+        intent.get("unpinned_org_skill") is True and kind == "skill" and org_skill and not accepts
+    )
+    if (
+        not isinstance(document, Mapping)
+        or not expected
+        or (not token and not is_bundle and not unpinned_org_skill)
+    ):
         return PushOutcome(
             "skipped", operation_id=operation_id, reason="reconciliation-intent-invalid"
+        )
+    if _already_landed(
+        kind,
+        intent_document=document,
+        intent_expected=expected,
+        current_local=current_local,
+        remote_latest=remote_latest,
+        remote_revision=remote_revision,
+    ):
+        # READ-THEN-COMPARE: the caller just read the hub. If it already serves the
+        # stored commit's content at a NEWER revision, the uncertain commit landed;
+        # resending would only 412. Settle it as accepted instead of leaving a
+        # phantom conflict, and let the caller advance the outbound receipt.
+        #
+        # The settle result is IGNORED on purpose, and that is harmless: ``settle``
+        # returns False when a newer generation superseded this attempt (or the
+        # outbox lock is busy). The "landed" verdict is a fact about the HUB that
+        # was just read, not about this record, so it stays true; the superseding
+        # attempt owns the record and re-reads the Hub itself, and a still-
+        # ``pending-reconciliation`` record just re-derives the same verdict (and
+        # settles) on its next tick. Nothing is sent here, so there is no double
+        # publish to fence; overwriting the newer record is exactly what the fence
+        # prevents, and it did.
+        outbox.settle(
+            operation_id,
+            generation=generation,
+            result={"revision": remote_revision, "reconciled": True},
+        )
+        return PushOutcome(
+            "pushed",
+            operation_id=operation_id,
+            accepted={"accepted_document": dict(remote_latest), "operation_id": operation_id},
+            revision=remote_revision,
         )
     try:
         result = await transport.commit(

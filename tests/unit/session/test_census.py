@@ -153,6 +153,65 @@ def test_a_recorded_removal_produces_no_unaccounted_row(tmp_path: Path) -> None:
     assert len(recorded) == 1 and recorded[0]["session"] == "recorded"
 
 
+def test_a_removal_completed_during_the_walk_is_never_reported_unaccounted(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Review round 1, M-1: the walk->stat window must not swallow a receipt.
+
+    THE MEASURED DEFECT. ``run_store_census`` walked the store and only THEN
+    sampled the log size it records as the next pass's start offset. A removal
+    that landed inside the walk was appended BELOW that recorded offset while its
+    session was still inside the recorded map, so the next pass could not see the
+    receipt and reported an audited removal as ``unaccounted-removal``. On the
+    reference store the walk measures ~122 s over ~3,450 directories and 488 of
+    492 live unaccounted rows named a session that HAD a valid receipt — the audit
+    channel's verdict was wrong almost every time it fired.
+
+    The race is reproduced at its exact seam: the pass takes its snapshot, a
+    REMOVAL (a real one, through the audited remover, so the receipt is real) lands
+    after the snapshot and before the offset is sampled. The session is therefore
+    absent on the next pass with its receipt sitting below the recorded offset,
+    which is precisely the false report this pins.
+    """
+    _session(tmp_path, "kept")
+    target = _session(tmp_path, "racy", pad=32)
+    mark_store(tmp_path / "sessions")
+    assert census.run_store_census(tmp_path)["count"] == 2
+
+    real_walk = census._walk_store
+
+    def walk_then_remove(config_root: Path, directory: Path, *, should_stop: Any) -> Any:
+        snapshot = real_walk(config_root, directory, should_stop=should_stop)
+        # AFTER the snapshot (so this pass neither reports it nor drops it from the
+        # map) and BEFORE this pass samples its log offset.
+        assert remove_session_dir(
+            target,
+            config_dir=tmp_path,
+            policy="delegated_max_age",
+            reason="idle over 48h",
+            actor="test",
+        )
+        return snapshot
+
+    monkeypatch.setattr(census, "_walk_store", walk_then_remove)
+    try:
+        census.run_store_census(tmp_path)
+    finally:
+        monkeypatch.setattr(census, "_walk_store", real_walk)
+
+    # The recorded offset is the PRE-walk size: the receipt below belongs to the
+    # next pass's range, which is the whole fix.
+    payload = json.loads((tmp_path / "sessions" / census.CENSUS_NAME).read_text())
+    assert payload["log_bytes"] == 0, "the offset must be sampled BEFORE the walk"
+
+    census.run_store_census(tmp_path)
+
+    assert _unaccounted(tmp_path, census.UNACCOUNTED_REMOVAL_POLICY) == [], (
+        "a removal recorded during the walk was reported as unaccounted: the "
+        "receipt exists and names the session"
+    )
+
+
 def test_a_live_sessions_pad_change_is_not_reported(tmp_path: Path, monkeypatch: Any) -> None:
     target = _session(tmp_path, "busy", pad=2 * 1024 * 1024)
     census.run_store_census(tmp_path)

@@ -1,0 +1,118 @@
+{
+  "locale": "ru",
+  "namespace": "wire.errors.session_host",
+  "audit_date": "2026-10-31",
+  "record_created_at": "2026-10-31T18:09:41.902075+00:00",
+  "key_count": 3,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "af28bb46bcc2",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "bd43602aa8db",
+    "actual_model_source": "Runtime notices: primary anthropic/claude-sonnet-5-5 -> anthropic/claude-opus-5-5 -> openai/gpt-6.1-sol after provider quota failures. All substantive audit review/validation under openai/gpt-6.1-sol.",
+    "fallback": true
+  },
+  "source_audit_revision": "9c979a03d551020ce6ff1b16c8066aa69ce7bb2a",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.json",
+      "sha256": "b7d6561be15577c118ec333586f7c809e65471c5dfd0dd839abee700b2ed1ba0"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.errors.session_host.context.json",
+      "sha256": "d26acd5a6357a0c54bbd5ed409b4ad2c060ee52b9bd76670679397c4b464f724"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/ru/wire.errors.session_host.json",
+      "sha256": "232cdecfca4bd8018b47046cfc9ca0060980d476fb8fa01759ddb6b6d9192983"
+    }
+  },
+  "candidate_actual_path": "/Users/damian/.local-operator/sessions/bd43602aa8db/scratchpad/host-copy-ru/wire.errors.session_host.json",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/report.md",
+      "sha256": "6ab4216cbed68f2715e16c92f76f90b34e125db0c58fff537dee9562d676e2c4"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/audit.log",
+      "sha256": "4cca59496c64150a31f9682f2a36448787fd78dffca4de056fc413fbb43e5319"
+    },
+    {
+      "path": "i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/ledger-proposal.json",
+      "sha256": "8b6816a0311215628dd7e6eaf2675a096ac568a0d1aaf7d3715ade8426ab32da"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "per_key": [
+    {
+      "key": "wire.errors.session_host.unsupported",
+      "current_text": "На этом компьютере нельзя запустить фоновую службу сессий, поэтому сессия не запущена. Используйте компьютер с поддерживаемым диспетчером фоновых служб.",
+      "status": "passed",
+      "finding_ids": [],
+      "reason": "Cannot start on this computer is terminal; explicitly says the session was not started. Supported background service manager is preserved, without suggesting reconnecting.",
+      "suggested_wording": null
+    },
+    {
+      "key": "wire.errors.session_host.unavailable",
+      "current_text": "Фоновая служба сессий не ответила, поэтому сессия не запущена. Подождите немного и попробуйте снова.",
+      "status": "passed",
+      "finding_ids": [],
+      "reason": "Host did not answer; explicitly no session started. Wait then manually retry preserves temporary unavailability; no automatic retry or reconnect.",
+      "suggested_wording": null
+    },
+    {
+      "key": "wire.errors.session_host.refused",
+      "current_text": "Фоновая служба сессий отклонила запрос на запуск этой сессии. Сессия не запущена. Прежде чем повторить попытку, проверьте logs/session-host.log в папке настроек Local Operator.",
+      "status": "passed",
+      "finding_ids": [],
+      "reason": "Host declined the startup request; explicit non-start. Log inspection precedes retry. logs/session-host.log and Local Operator remain exact literals.",
+      "suggested_wording": null
+    }
+  ],
+  "findings": [],
+  "fit_measurements": [
+    {
+      "key": "wire.errors.session_host.unsupported",
+      "en_cells": 145,
+      "ru_cells": 152,
+      "maxCells": null,
+      "maxChars": null
+    },
+    {
+      "key": "wire.errors.session_host.unavailable",
+      "en_cells": 110,
+      "ru_cells": 100,
+      "maxCells": null,
+      "maxChars": null
+    },
+    {
+      "key": "wire.errors.session_host.refused",
+      "en_cells": 174,
+      "ru_cells": 176,
+      "maxCells": null,
+      "maxChars": null
+    }
+  ],
+  "report_kind": "audit_notes_not_execution_log",
+  "execution_log": "i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/audit.log",
+  "canonical_future_record_path": "i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/record.json",
+  "retention_status": "scratch_only_pending_manager_tracked_commit; no shared worktree writes authorized",
+  "high_visibility_pass": 1,
+  "second_independent_pass_required": true,
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "integration": {
+    "integrated_from_session": "af28bb46bcc2",
+    "original_record_sha256": "873decd5a5053891c42b5c2c87e0f0d4df5d9eb88348cc5e2b0684e97114aa79",
+    "original_receipt_sha256": "742e5febe21a76249a83ecdd6bf1299f9e692b862dcd9dbde5e1d6f46e6f65ec",
+    "canonical_record": "i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/record.json",
+    "canonical_translator_provenance": "i18n/audits/evidence/ru/wire.errors.session_host/host-ru-a1/translator/provenance.json",
+    "retention": "Retained in this PR; not claimed merged or on main. Historical commands/cwd/scratch input paths are preserved as executed, not claimed tracked.",
+    "integration_judgment": "No new audit; semantic pass/finding facts copied from independent original records."
+  }
+}

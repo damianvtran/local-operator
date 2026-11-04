@@ -1,0 +1,4 @@
+{
+  "cli.login_status_help.login_status": "Listar las credenciales de proveedores guardadas y su estado",
+  "cli.login_status_help.status_alias": "Alias de login-status: listar las credenciales de proveedores guardadas"
+}

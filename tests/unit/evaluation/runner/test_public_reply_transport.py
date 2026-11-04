@@ -106,11 +106,19 @@ async def test_loopback_sse_factory_public_memory_and_secret_retention(
                 }
                 for chunk in chunks
             ]
+            # The synthetic model has no registry price. Supply an explicit,
+            # deterministic provider receipt so the capped episode can exercise
+            # all 13 decisions without weakening the unknown-cost guard.
             events.append(
                 {
                     "id": f"fixture-{len(requests)}",
                     "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15,
+                        "cost": 0.000001,
+                    },
                 }
             )
             body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)

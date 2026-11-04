@@ -1,0 +1,259 @@
+"""es W4 / w4a3 round-3 audit run — composed-path verification of the four keys.
+
+Each rendered row is compared against a grammar oracle written from Spanish
+agreement + CLDR grouping, NOT from the catalogue's own unit_* messages, so a
+wrong unit message cannot mask a wrong row (and vice versa).
+
+Usage: python3 w4a3_run.py <w4a1 audit.log> <w4a2 record.json>
+Read-only on the repository.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import platform
+import re
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+REPO = Path("/Users/damian/lo-i18n-es")
+sys.path.insert(0, str(REPO))
+from local_operator.i18n import format as fmt  # noqa: E402
+from local_operator.i18n import runtime as rt  # noqa: E402
+
+CAT = REPO / "local_operator/i18n/catalogues"
+NS = "relay.shell"
+COUNTS = [0, 1, 2, 21, 1_000_000, 1_500_000, 2_000_000]
+DELTA = ["relay.shell.usage.used", "relay.shell.usage.remaining",
+         "relay.shell.usage.remaining_unknown_unit", "relay.shell.usage.used_unknown_unit"]
+KINDS = ["credits", "tokens", "requests", "usd", "unknown"]
+UNITS = {  # grammar oracle, written by hand from Spanish, not from unit_*.json
+    "credits": ("crédito", "créditos", "de créditos"),
+    "tokens": ("token", "tokens", "de tokens"),
+    "requests": ("solicitud", "solicitudes", "de solicitudes"),
+    "usd": ("USD", "USD", "USD"),  # a currency code takes no "de"
+}
+
+
+def sh(*args: str) -> str:
+    return subprocess.run(args, cwd=REPO, capture_output=True, text=True).stdout.strip()
+
+
+def sha(p: Path) -> str:
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def render(src: str, params: dict) -> str:
+    return rt.render_message(src, params, "es")
+
+
+def unit_label(kind: str, n: int) -> str | None:
+    if kind == "unknown":
+        return None
+    singular, plural, millions = UNITS[kind]
+    if n == 1:
+        return singular
+    if n != 0 and n % 1_000_000 == 0:
+        return millions
+    return plural
+
+
+def expected(kind: str, remaining: bool, n: int) -> str:
+    num = fmt.format_number(n, "es")
+    unit = unit_label(kind, n)
+    tail = "" if unit is None else f" {unit}"
+    if remaining:
+        return f"Queda {num}{tail} restante" if n == 1 else f"Quedan {num}{tail} restantes"
+    return f"Se usó {num}{tail}" if n == 1 else f"Se usaron {num}{tail}"
+
+
+def compose(es: dict[str, str], kind: str, remaining: bool, n: int) -> str:
+    if kind == "percent":
+        key = "relay.shell.usage.remaining_percent" if remaining else "relay.shell.usage.used_percent"
+        return render(es[key], {"value": n / 100})
+    if kind == "unknown":
+        key = "relay.shell.usage.remaining_unknown_unit" if remaining else "relay.shell.usage.used_unknown_unit"
+        return render(es[key], {"value": n})
+    unit = render(es["relay.shell.usage.unit_usd"], {}) if kind == "usd" else \
+        render(es[f"relay.shell.usage.unit_{kind}"], {"count": n})
+    key = "relay.shell.usage.remaining" if remaining else "relay.shell.usage.used"
+    return render(es[key], {"value": n, "unit": unit})
+
+
+def branches(src: str) -> list[tuple[str, str]]:
+    """Top-level plural branch sources, in declaration order."""
+    body = src[src.index("plural,") + len("plural,"):]
+    out: list[tuple[str, str]] = []
+    depth = 0
+    buf = ""
+    selbuf = ""
+    pending: str | None = None
+    for ch in body:
+        if depth == 0:
+            if ch == "{":
+                pending = selbuf.strip()
+                selbuf, buf, depth = "", "", 1
+            elif ch == "}":
+                break  # closes the plural argument itself
+            else:
+                selbuf += ch
+        else:
+            if ch == "{":
+                depth += 1
+                buf += ch
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    out.append((pending or "", buf))
+                    pending, buf = None, ""
+                else:
+                    buf += ch
+            else:
+                buf += ch
+    return out
+
+
+def parse_specials(log: Path) -> dict[str, str]:
+    out = {}
+    for line in log.read_text().splitlines():
+        m = re.match(r"^  (reset|as_of|fraction|row|row_family) = (.*)$", line)
+        if m:
+            out[m.group(1)] = m.group(2)
+    return out
+
+
+def parse_plain(log: Path) -> dict[str, str]:
+    out = {}
+    for line in log.read_text().splitlines():
+        m = re.match(r"^  (relay\.[\w.]+) = (.*)$", line)
+        if m:
+            try:
+                out[m.group(1)] = eval(m.group(2), {"__builtins__": {}}, {})  # noqa: S307 - own log
+            except Exception:  # noqa: BLE001 - a non-literal line is simply not a reference
+                pass
+    return out
+
+
+def main() -> None:
+    w4a1_log, w4a2_record = Path(sys.argv[1]), Path(sys.argv[2])
+    en = json.loads((CAT / "en" / f"{NS}.json").read_text())
+    es = json.loads((CAT / "es" / f"{NS}.json").read_text())
+
+    print(f"# w4a3 round-3 audit run — {NS}")
+    print(f"run_at_utc: {__import__('datetime').datetime.now(__import__('datetime').timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}")
+    print(f"host: {platform.node()} / {platform.platform()}")
+    print(f"python: {sys.version.split()[0]}")
+    print(f"repo: {REPO}   branch: {sh('git','rev-parse','--abbrev-ref','HEAD')}")
+    print(f"HEAD: {sh('git','rev-parse','HEAD')}")
+    print("tracked_state (target): "
+          + (sh("git", "status", "--porcelain", "--", f"local_operator/i18n/catalogues/es/{NS}.json") or "clean"))
+    print(f"references: {w4a1_log} , {w4a2_record}")
+
+    print("\n## input hashes (sha256) of the ROUND-3 bytes")
+    for label, p in (("en", CAT / "en" / f"{NS}.json"),
+                     ("en.context", CAT / "en" / f"{NS}.context.json"),
+                     ("es", CAT / "es" / f"{NS}.json"),
+                     ("session es (untouched this round)", CAT / "es" / "relay.session.json")):
+        print(f"  {label:34} {sha(p)}  {p.relative_to(REPO)}")
+    print(f"\n## key parity: en={len(en)} es={len(es)} "
+          f"missing={sorted(set(en)-set(es))} extra={sorted(set(es)-set(en))}")
+
+    print("\n## branch inventory of the four delta keys")
+    for key in DELTA:
+        br = branches(es[key])
+        print(f"  {key}")
+        for sel, body_src in br:
+            print(f"    {sel:6} -> {body_src.strip()!r}")
+        selectors = [s for s, _ in br]
+        print(f"    selectors={selectors} es_categories={list(fmt.plural_categories('es'))} "
+              f"missing={sorted(set(fmt.plural_categories('es')) - set(selectors))} "
+              f"illegal={sorted(set(selectors) - set(fmt.plural_categories('es')))}")
+        d = dict(br)
+        if "many" in d and "other" in d:
+            print(f"    many_is_alias_of_other={d['many'].strip() == d['other'].strip()}")
+        print(f"    every_branch_renders_the_number="
+              f"{all('#' in body for _, body in br)}")
+
+    print("\n## composed-path matrix vs grammar oracle (PASS/FAIL per row)")
+    fails = []
+    total = 0
+    for kind in KINDS:
+        for remaining in (True, False):
+            for n in COUNTS:
+                total += 1
+                got = compose(es, kind, remaining, n)
+                want = expected(kind, remaining, n)
+                ok = got == want
+                if not ok:
+                    fails.append((kind, remaining, n, want, got))
+                print(f"  [{'PASS' if ok else 'FAIL'}] {kind:9} {'remaining' if remaining else 'used':9} "
+                      f"{n:>9}  got={got!r}" + ("" if ok else f"  want={want!r}"))
+    for remaining in (True, False):
+        for n in COUNTS:
+            total += 1
+            got = compose(es, "percent", remaining, n)
+            want = f"{fmt.format_percent(n / 100, 'es')} " + ("restante" if remaining else "usado")
+            ok = got == want
+            if not ok:
+                fails.append(("percent", remaining, n, want, got))
+            print(f"  [{'PASS' if ok else 'FAIL'}] {'percent':9} {'remaining' if remaining else 'used':9} "
+                  f"{n:>9}  got={got!r}" + ("" if ok else f"  want={want!r}"))
+    print(f"  matrix: {total - len(fails)} PASS / {len(fails)} FAIL of {total}")
+
+    print("\n## regression substrings (must be absent everywhere)")
+    all_rows = [compose(es, k, r, n) for k in KINDS + ["percent"] for r in (True, False) for n in COUNTS]
+    for bad in ("de de", "de restantes", "de usados", "de USD"):
+        hits = [row for row in all_rows if bad in row]
+        print(f"  {bad!r}: {'ABSENT' if not hits else 'FOUND in ' + repr(hits)}")
+
+    print("\n## neighbour check")
+    old_plain = parse_plain(w4a1_log)
+    w4a2 = json.loads(w4a2_record.read_text())
+    cont = next(f for f in w4a2["findings"] if f["id"] == "F4")["current"]
+    ok = miss = 0
+    problems = []
+    for key, value in en.items():
+        if key in DELTA:
+            continue
+        if "{" not in value:
+            now = render(es[key], {})
+            if key in old_plain and now == old_plain[key]:
+                ok += 1
+            elif key == "relay.shell.usage.continue" and now == cont:
+                ok += 1
+            else:
+                problems.append((key, old_plain.get(key), now))
+        else:
+            miss += 1
+    print(f"  plain keys reproducing w4a1 (or w4a2 for usage.continue) recorded text: {ok}, "
+          f"differing: {len(problems)}, parameterised (covered by the matrix): {miss}")
+    for p in problems:
+        print(f"  !! {p[0]}\n     reference: {p[1]}\n     now      : {p[2]}")
+
+    print("\n## row / timestamp re-renders vs w4a1 (non-delta templates)")
+    sp = parse_specials(w4a1_log)
+    when = datetime(2026, 10, 11, 9, 0)
+    rows = {
+        "row": render(es["relay.shell.usage.row"], {"label": "L", "window": "W", "value": "V"}),
+        "row_family": render(es["relay.shell.usage.row_family"],
+                             {"label": "L", "family": "fam", "window": "W", "value": "V"}),
+        "reset": render(es["relay.shell.usage.reset"], {"value": when}),
+        "as_of": render(es["relay.shell.usage.as_of"], {"value": when}),
+        "fraction": render(es["relay.shell.usage.fraction"], {"value": 0.29}),
+    }
+    for name, got in rows.items():
+        ref = sp.get(name)
+        print(f"  [{'PASS' if got == ref else 'FAIL'}] {name:10} got={got!r}"
+              + ("" if got == ref else f"  reference={ref!r}"))
+
+    print("\n## verdict inputs")
+    print(f"  delta_keys_checked={DELTA}")
+    print(f"  composed_failures={len(fails)}")
+    for f in fails:
+        print(f"  FAIL {f}")
+
+
+if __name__ == "__main__":
+    main()

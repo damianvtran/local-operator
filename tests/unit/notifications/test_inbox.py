@@ -84,6 +84,38 @@ def test_an_update_makes_a_read_item_unread_again(tmp_path: Path) -> None:
     assert store.counts()[0] == 1
 
 
+def test_get_by_key_reads_one_session_key_and_never_creates_the_store(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    assert store.get_by_key(SID, "k") is None
+    assert not store.path.exists()  # a read never creates the store
+
+    item = store.notify(SID, title="A", body_md="1", key="k", priority="high")
+    store.notify("sess_other", title="B", body_md="2", key="k")
+
+    found = store.get_by_key(SID, "k")
+    assert found is not None and found["id"] == item.item_id and found["priority"] == "high"
+    assert store.get_by_key(SID, "other-key") is None
+    assert store.get_by_key("sess_none", "k") is None
+    assert store.get_by_key(SID, "") is None  # an unkeyed row has no collapse identity
+
+
+def test_find_by_key_reads_every_session_and_never_creates_the_store(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    assert store.find_by_key("k") == []
+    assert not store.path.exists()  # a read never creates the store
+
+    store.notify(SID, title="A", body_md="1", key="k", priority="high")
+    store.notify("sess_other", title="B", body_md="2", key="k")
+    store.notify(SID, title="C", body_md="3", key="unrelated")
+
+    found = store.find_by_key("k")
+    assert sorted(row["session_id"] for row in found) == sorted([SID, "sess_other"])
+    assert {row["key"] for row in found} == {"k"}
+    assert next(row for row in found if row["session_id"] == SID)["priority"] == "high"
+    assert store.find_by_key("absent") == []
+    assert store.find_by_key("") == []  # an unkeyed row has no collapse identity
+
+
 def test_a_dismissed_key_absorbs_silently_and_an_escalation_revives_it(tmp_path: Path) -> None:
     """The dismissed row is what keeps a 5-minute wake from flooding the reel."""
     store = _store(tmp_path)
@@ -366,7 +398,7 @@ def test_a_non_http_link_is_refused_as_invalid_arguments() -> None:
     result = _run_awaitable(
         tool.execute(
             "c",
-            {"title": "t", "links": [{"label": "x", "url": "file:///etc"}]},
+            {"title": "Storage export", "links": [{"label": "x", "url": "file:///etc"}]},
             None,
             None,
             context,
@@ -381,7 +413,9 @@ def test_the_cap_refusal_reaches_the_model_as_a_sentence() -> None:
 
     context = _context(door)
     tool = create_tools(context, enabled=["notify"])[0]
-    result = _run_awaitable(tool.execute("c", {"title": "t"}, None, None, context))
+    # A REAL title: the cap has to be what this test exercises, and the title guard
+    # (``NotifyParams``) would otherwise refuse the call before the door is reached.
+    result = _run_awaitable(tool.execute("c", {"title": "Storage export"}, None, None, context))
     assert isinstance(result.content[0], TextContent)
     assert result.is_error and "key" in result.content[0].text
 

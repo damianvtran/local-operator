@@ -1,0 +1,22 @@
+{
+  "wire.errors.media.media_refusal": "{error}",
+  "wire.errors.media.provider_model_pair": "provider et model doivent être fournis ensemble, ou aucun des deux.",
+  "wire.errors.media.radient_key_missing": "La clé API Radient n’est pas configurée sur le serveur.",
+  "wire.errors.media.save_audio_failed": "Échec de l’enregistrement du fichier audio téléversé : {error}",
+  "wire.errors.media.speech_generate_failed": "Échec de la génération de la parole : {error}",
+  "wire.errors.media.speech_no_credential": "Connectez-vous à Radient dans les paramètres pour activer la lecture à voix haute.",
+  "wire.errors.media.speech_radient_credit_low": "Votre solde de crédits Radient est trop faible pour la parole. Ajoutez des crédits dans Radient Console pour continuer.",
+  "wire.errors.media.speech_radient_sign_in_failed": "Votre connexion à Radient ne fonctionne plus. Reconnectez-vous dans les paramètres.",
+  "wire.errors.media.speech_temporarily_unavailable": "La parole est temporairement indisponible. Réessayez dans un instant.",
+  "wire.errors.media.speech_unavailable": "La parole est indisponible pour le moment. Réessayez dans un instant.",
+  "wire.errors.media.speech_unknown_agent": "L’agent de cette conversation n’est plus disponible.",
+  "wire.errors.media.speech_upstream_no_response": "La génération de parole a échoué en amont : aucune réponse du service amont : {error}",
+  "wire.errors.media.speech_upstream_reported_error": "La génération de parole a échoué en amont : Radient a signalé une erreur (HTTP {status}) : {error}",
+  "wire.errors.media.speech_upstream_responded": "La génération de parole a échoué en amont : l’amont a répondu {status} : {error}",
+  "wire.errors.media.speech_vendor_credit_low": "Votre solde de crédits {vendor} est trop faible pour la parole. Ajoutez des crédits auprès de {vendor} pour continuer.",
+  "wire.errors.media.speech_vendor_key_refused": "{vendor} a refusé votre clé API. Remplacez-la.",
+  "wire.errors.media.temp_audio_missing": "Fichier audio temporaire introuvable après l’enregistrement.",
+  "wire.errors.media.transcription_unexpected": "Une erreur inattendue s’est produite pendant la transcription : {error}",
+  "wire.errors.media.unknown_model": "Modèle {provider}/{model} inconnu : {error}",
+  "wire.errors.media.unknown_provider": "Fournisseur {provider} inconnu."
+}

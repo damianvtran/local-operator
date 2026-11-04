@@ -1,0 +1,11 @@
+{
+  "cli.services_help.services": "Đưa các dịch vụ không phải runtime của máy này (các daemon serve và daemon được giám sát) lên bản dựng hiện tại, mà không dừng cuộc trò chuyện nào đang chạy",
+  "cli.services_help.services_description": "Mọi thứ local_operator chạy cho máy này mà không phải một cuộc trò chuyện. Một 'dịch vụ' là một daemon `lop serve` hoặc một LaunchAgent được giám sát — relay di động, cầu nối trình duyệt, tunnel và tác nhân wake. Runtime — các tiến trình giữ cuộc trò chuyện của bạn — không bao giờ bị dừng: 'restart' nạp lại một daemon serve tại chỗ, giữ nguyên pid và socket của nó.",
+  "cli.services_help.status": "Báo cáo từng dịch vụ không phải runtime, bản dựng nó đang phục vụ và bản dựng mà bản cài đặt đang dùng",
+  "cli.services_help.status_description": "Chỉ đọc. Nêu bản dựng mà bản cài đặt đang dùng và, với mỗi daemon `lop serve`, bản dựng nó đang PHỤC VỤ — cả hai vế của mọi phép so sánh, vì độ lệch thường gặp trên máy này là bản dựng lại cùng phiên bản, khi chỉ riêng phiên bản không cho thấy daemon đang tụt lại.",
+  "cli.services_help.restart": "Đưa mọi dịch vụ lên bản dựng hiện tại (không bao giờ dừng runtime)",
+  "cli.services_help.wait": "Thời gian chờ một daemon được yêu cầu quay lại trên bản dựng mới (mặc định: {wait_seconds}s; phải là số dương). Daemon nào không kịp sẽ được báo cáo, vẫn phục vụ bản dựng đã nạp, và được thử lại ở lần `lop services restart` kế tiếp.",
+  "cli.services_help.reclaim": "Kết thúc một daemon `lop serve` đã được ghi nhận nhưng không phục vụ địa chỉ của nó (không bao giờ đụng daemon đang phục vụ)",
+  "cli.services_help.reclaim_description": "Yêu cầu MỘT daemon serve, gọi theo pid, thoát đi, leo thang từ SIGTERM lên SIGKILL ở một giới hạn, sau khi chứng minh tiến trình đó là daemon serve của sản phẩm này và nó không phải daemon đang phục vụ địa chỉ mà bản ghi của nó nêu. `lop services status` liệt kê các daemon dành cho việc này. Việc này không bao giờ tự động: daemon có thể đang giám sát các runtime phiên, và không bên đọc bản ghi nào chứng minh được rằng một bản kế nhiệm đã sẵn sàng thay thế.",
+  "cli.services_help.pid": "pid của daemon, đúng như `lop services status` in ra"
+}

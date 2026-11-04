@@ -67,6 +67,15 @@ class ResetCandidate:
     state: Literal["healthy", "reserve", "depleted", "unknown"] = "unknown"
     weekly_ms: int | None = None
     five_hour_ms: int | None = None
+    #: When a ``depleted`` verdict stops holding, epoch ms — set ONLY when a FRESH
+    #: report proves it: the LATEST reset among the windows that are themselves
+    #: depleted (every one of them must reopen, so the earliest would be a guess
+    #: an account can still refuse). ``None`` for every other state, for a stale
+    #: report (usage may have grown since, so its resets are a lower bound) and
+    #: for a depleted window with no stated reset. Read by the mesh broker's
+    #: ``quota_blocked`` remainder (``AuthStore.quota_eligibility``); never by
+    #: ranking, which keeps ordering on the two reset fields above.
+    reopens_at_ms: int | None = None
 
 
 def _finite_number(value: object) -> TypeGuard[int | float]:
@@ -137,15 +146,7 @@ def reset_candidate(
         deadline = limit.resets_at_ms
         if not _finite_number(deadline) or deadline <= now_ms:
             continue
-        # These are normalized parser window identifiers, never localized UI
-        # labels. Unsupported periods remain unknown rather than being guessed
-        # from primary/secondary position or a translated allowance title.
-        window = limit.window.strip().lower()
-        period = (
-            _WEEK_MS
-            if window in ("7 day", "7 days", "7d", "weekly")
-            else _FIVE_HOUR_MS if window in ("5 hour", "5 hours", "5h") else None
-        )
+        period = _window_period_ms(limit)
         if period is None or deadline - now_ms > period + RESET_TOLERANCE_MS:
             continue
         (weekly if period == _WEEK_MS else short).append(int(deadline))
@@ -154,7 +155,64 @@ def reset_candidate(
         health.state,
         min(weekly) if weekly else None,
         min(short) if short else None,
+        (
+            _proven_reopening(safe_report, current, model_id, reserve_percent, now_ms)
+            if health.state == "depleted"
+            else None
+        ),
     )
+
+
+def _proven_reopening(
+    report: UsageReport,
+    current: Sequence[Any],
+    model_id: str,
+    reserve_percent: float,
+    now_ms: int,
+) -> int | None:
+    """The latest reset among the individually depleted windows, or ``None``.
+
+    Each window is judged by the SAME reduction the verdict used
+    (:func:`usage_health` over that one window), so this adds no second idea of
+    "spent". A depleted window with no finite future reset makes the reopening
+    unknowable, and so does a verdict no single window explains: both answer
+    ``None`` rather than a time nobody stated.
+    """
+    from local_operator.providers.usage import usage_health
+
+    deadlines: list[int] = []
+    for limit in current:
+        alone = replace(report, limits=[limit])
+        if usage_health(alone, model_id, reserve_percent=reserve_percent, now_ms=now_ms).state != (
+            "depleted"
+        ):
+            continue
+        deadline = limit.resets_at_ms
+        if not _finite_number(deadline) or deadline <= now_ms:
+            return None
+        # THE RANKING PATH'S SANITY WINDOW, applied here too (#3108 review m2): a
+        # reset further away than its own window's period (plus the tolerance) is
+        # garbled evidence, and it must not become the owner's retry figure. An
+        # unrecognised window has no period to judge by, so it proves nothing.
+        period = _window_period_ms(limit)
+        if period is None or deadline - now_ms > period + RESET_TOLERANCE_MS:
+            return None
+        deadlines.append(int(deadline))
+    return max(deadlines) if deadlines else None
+
+
+def _window_period_ms(limit: Any) -> int | None:
+    """The period a normalized window id names, or ``None`` for an unsupported one.
+
+    These are parser window identifiers, never localized UI labels; anything else
+    stays unknown rather than being guessed from position or a translated title.
+    """
+    window = str(getattr(limit, "window", "") or "").strip().lower()
+    if window in ("7 day", "7 days", "7d", "weekly"):
+        return _WEEK_MS
+    if window in ("5 hour", "5 hours", "5h"):
+        return _FIVE_HOUR_MS
+    return None
 
 
 def _spread(

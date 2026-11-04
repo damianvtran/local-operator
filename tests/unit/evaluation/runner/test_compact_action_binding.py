@@ -86,7 +86,8 @@ def test_compact_schema_and_prompt_omit_repeated_action_ids() -> None:
     # no work behind it -- the repair the note-only and empty-object refusals
     # kept paying a round trip for. This movement was verified as a prompt diff
     # against the base (exactly that one sentence), not re-pinning whatever a
-    # run printed.
+    # run printed. Held modifiers are opt-in: the default prompt keeps the
+    # pre-modifier bytes, while negotiated surfaces offer the field and bullet.
     assert hashlib.sha256(build_system_prompt().encode()).hexdigest() == (
         "068de08db33e14fc84ab62f6aabd126ddf3686306b2a1baf58caab54dc16d648"
     )

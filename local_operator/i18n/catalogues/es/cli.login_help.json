@@ -1,0 +1,4 @@
+{
+  "cli.login_help.login": "Iniciar sesión con un proveedor (OAuth o clave de API)",
+  "cli.login_help.provider": "Proveedor con el que iniciar sesión (p. ej., openai, anthropic, kimi, xai). Omitir para listar los proveedores compatibles."
+}

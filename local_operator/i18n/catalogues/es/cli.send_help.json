@@ -1,0 +1,9 @@
+{
+  "cli.send_help.send": "Enviar un mensaje a otra sesión local de lop (sin cmux)",
+  "cli.send_help.target": "nombre de conversación / ID de sesión / subcadena de cwd (sin distinguir mayúsculas ni minúsculas). Omitir al usar --pid/--session; no se permite pasar ambos.",
+  "cli.send_help.message": "texto del mensaje; omitir para leer el cuerpo de stdin. Con --pid/--session, un solo posicional ES el mensaje; no se permite escribirlo y canalizar un cuerpo a la vez.",
+  "cli.send_help.pid": "seleccionar por pid exacto",
+  "cli.send_help.session": "seleccionar por ID de sesión exacto",
+  "cli.send_help.steer": "inyectar durante el turno (steer) en lugar del buzón predeterminado",
+  "cli.send_help.wake": "si el destino está inactivo, iniciar un turno ahora (solo en modo buzón)"
+}
