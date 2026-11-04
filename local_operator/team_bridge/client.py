@@ -5030,6 +5030,44 @@ def selected_tenant_id(payload: Any) -> str | None:
     return tenant_id if isinstance(tenant_id, str) and tenant_id else None
 
 
+def trial_ended_tenant(payload: Any) -> dict[str, str] | None:
+    """The organization whose no-card Team trial ENDED, when nothing is eligible.
+
+    Why this exists (teams-trial QA round 1, Q5): after a trial ends the hub
+    answers the org's row with ``eligible:false`` and, for an owner or a member
+    the end disabled, no endpoint — so :func:`select_tenant` selects nothing,
+    the surface reads A with ``tenant_id: null``, and the renderer could not
+    reach its paused band (it fell through to the trial on-ramp instead). The
+    hub now marks such a row POSITIVELY with ``trial_ended_at`` (agent-server
+    #296), which is exactly the positive evidence R9 asked for before any
+    surface may speak of an ended plan; ``eligible:false`` alone still proves
+    nothing and still reads nothing here.
+
+    Constraints: this NEVER changes the §3.2 selection or the A–G letter (those
+    stay the backend-policy reading every consumer shares); it is a separate,
+    additive marker. It answers only when no row is eligible — an eligible
+    organization is this machine's subject and an older ended trial elsewhere
+    is not news. The selected (retained-endpoint) row wins when it carries the
+    marker, so the marker and ``tenant_id`` describe the same organization;
+    otherwise the first marked row in the server's own order. An older hub
+    without the field yields ``None`` and the surface keeps today's reading.
+    """
+
+    if not isinstance(payload, Mapping):
+        return None
+    tenants = [t for t in (payload.get("tenants") or []) if isinstance(t, Mapping)]
+    if any(bool(t.get("eligible")) for t in tenants):
+        return None
+    selected = select_tenant(payload)
+    ordered = ([selected] if selected is not None else []) + tenants
+    for tenant in ordered:
+        tenant_id = tenant.get("tenant_id")
+        ended_at = tenant.get("trial_ended_at")
+        if isinstance(tenant_id, str) and tenant_id and isinstance(ended_at, str) and ended_at:
+            return {"tenant_id": tenant_id, "trial_ended_at": ended_at}
+    return None
+
+
 def _surface_state(check: StatusCheck) -> str | None:
     if check.state == STATE_READY:
         selected = select_tenant(check.payload)
