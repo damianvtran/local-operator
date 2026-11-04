@@ -124,11 +124,14 @@ import contextvars
 import json
 import logging
 import os
+import re
 import threading
 import time
+import zlib
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from contextlib import contextmanager
+from copy import copy as _shallow_copy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterator
@@ -905,23 +908,49 @@ def _read_raw(config_dir: str | Path, session_id: str) -> dict[str, Any] | None:
 
     Deliberately version-agnostic: parts of it (``naming``) survive a version
     mismatch, so the reader cannot be the thing that discards it.
+
+    TWO LAYOUTS ARE READ HERE, and both return the same whole document. A file
+    without ``store`` is the classic single document. A file WITH ``store`` is a
+    small HEAD naming an immutable snapshot plus a committed prefix of an
+    append-only delta log (see "Incremental publication" above
+    :func:`write_index`); the document is the snapshot with every committed delta
+    applied and the head's own fields on top. ``_publication_identity`` is the
+    HEAD's identity in both layouts, because the head is what every publication
+    atomically replaces — the receipt semantics callers rely on are unchanged.
     """
     path = index_path(config_dir, session_id)
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            stamp = os.fstat(handle.fileno())
-            raw = handle.read()
-    except OSError:
-        return None
-    try:
-        loaded = json.loads(raw)
-    except ValueError:
-        return None
-    if not isinstance(loaded, dict):
-        return None
-    # Private read receipt, deliberately ignored by write_index's explicit payload.
-    loaded["_publication_identity"] = (stamp.st_ino, stamp.st_size, stamp.st_mtime_ns)
-    return loaded
+    # A compaction can retire the snapshot named by a head this reader already
+    # holds; the retry re-reads the (newer) head instead of failing the read.
+    for _attempt in range(3):
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                stamp = os.fstat(handle.fileno())
+                raw = handle.read()
+        except OSError:
+            return None
+        try:
+            loaded = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(loaded, dict):
+            return None
+        if "store" in loaded:
+            try:
+                loaded = _assemble(path.parent, session_id, loaded)
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError, KeyError, TypeError, IndexError):
+                # A delta that fails its frame inside the COMMITTED range is not a
+                # torn write (those lie past the committed length and are never
+                # read); it is damage. The cache is derived: answering "unusable"
+                # sends the caller to the rescan that rebuilds it from the journal.
+                return None
+            if loaded is None:
+                return None
+        # Private read receipt, deliberately ignored by write_index's explicit payload.
+        loaded["_publication_identity"] = (stamp.st_ino, stamp.st_size, stamp.st_mtime_ns)
+        return loaded
+    return None
 
 
 def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
@@ -1012,7 +1041,517 @@ def _index_from_raw(raw: dict[str, Any] | None) -> TranscriptIndex | None:
 
 def read_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | None:
     """The cached index as a typed view (no freshness check), else ``None``."""
-    return _index_from_raw(_read_raw(config_dir, session_id))
+    return _read_indexed(config_dir, session_id)[1]
+
+
+# ---------------------------------------------------------------------------
+# Incremental publication: immutable snapshot + append-only delta + small head
+# ---------------------------------------------------------------------------
+#
+# WHY THIS EXISTS. The canonical document holds the whole transcript's derived
+# facts — every message doc, checkpoint, run, journal row/range and source
+# fact. A one-row append re-derives only the resume window's suffix, yet base
+# serialised and fsynced the WHOLE document on every refresh, and the live
+# trigger (``serving.py``'s journal-order correction calls ``start_refresh`` on
+# every durable commit) made that a per-row cost. Measured on a real 470 MB
+# journal (2026-11-03, 62.9 MB index): every one-row append refresh took
+# 1.3-1.55 s of CPU and rewrote 62.9 MB; the operator's session republished it
+# 9x in 60 s (~570 MB/min of writes for ~100 KB of new facts).
+#
+# THE LAYOUT. ``<sid>.json`` stays the commit point and keeps base's resume head
+# (``version, sig, scan, journal_generation`` first, in order — the paint hold's
+# ``_read_resume_head`` and the read model's ``header()`` parse only that), but
+# it becomes a HEAD of a few KB that also carries ``coverage``, ``naming`` and a
+# ``store`` pointer:
+#
+#   ``<sid>.snap.<id>.json``  an IMMUTABLE whole document (base's format), written
+#                             once per compaction, never modified afterwards.
+#   ``<sid>.delta.<id>.log``  append-only frames, each one the re-derived suffix
+#                             of one publication, bound to that snapshot.
+#   head ``store``            ``{"snapshot", "delta", "frames", "length"}`` — the
+#                             COMMITTED prefix of the delta.
+#
+# A publication appends ONE frame (the suffix past the previous publication's
+# kept prefix), fsyncs it, then atomically replaces the head with the new
+# committed length. The cost is the suffix plus the head, not the history.
+#
+# CRASH SAFETY. A reader trusts only ``[0, length)`` of the delta, the head's
+# number, and the head is replaced atomically (temp + fsync + ``os.replace``)
+# AFTER the frame is durable. So:
+#   * a crash mid-frame leaves bytes past ``length`` that no head names; the next
+#     writer truncates them before appending (a torn tail is ignored, never read);
+#   * a crash between frame and head leaves the old head: the old publication is
+#     served, intact, and the next refresh re-derives the same suffix;
+#   * every frame is ``<len> <crc32>\n<json>\n``; a frame inside the committed
+#     range that fails its check is damage, and ``_read_raw`` answers ``None`` so
+#     the caller rescans the journal — the cache is derived, never authority.
+# Snapshots are never modified in place (a compaction writes a NEW id), so a
+# reader that resolved a head always finds consistent files or a missing one
+# (retired by a later compaction), and retries on the newer head.
+#
+# MIGRATION. A classic document (no ``store`` key) reads exactly as before. The
+# first incremental publication over one HARD-LINKS the existing file as the
+# snapshot (no copy, no re-serialisation), so no session pays a forced rebuild;
+# where links are unsupported it falls back to one ordinary whole write.
+#
+# COMPACTION. When the committed delta exceeds ``_DELTA_COMPACT_FRACTION`` of the
+# snapshot (or ``_DELTA_COMPACT_FRAMES`` frames), the next publication writes a
+# whole new snapshot and an empty delta. Amortised, the bytes written per
+# publication stay proportional to the new content.
+
+#: Compact once the delta is this fraction of its snapshot's size. A quarter
+#: keeps read amplification (snapshot + delta parsed per cold read) at <=1.25x
+#: while amortising one whole write over many appends.
+_DELTA_COMPACT_FRACTION = 0.25
+#: ... or once it holds this many frames, so a session of tiny appends against a
+#: tiny snapshot does not grow an unbounded chain of frames to replay.
+_DELTA_COMPACT_FRAMES = 512
+#: Below this snapshot size the whole document IS the cheap write: a small
+#: session keeps base's single-file layout and pays nothing for the store.
+_STORE_MIN_BYTES = 1 << 20
+
+#: The list sections a frame carries a suffix of. Each is ordered by ``seq``
+#: (``first_seq`` for runs) and an incremental refresh keeps a PREFIX of each and
+#: re-derives the rest — exactly the shape a ``(keep, tail)`` frame encodes.
+_LIST_SECTIONS = ("checkpoints", "messages", "runs", "source_projection_facts")
+
+#: Store file ids are writer-minted uuid hex; anything else in a head is refused
+#: rather than joined into a path.
+_STORE_ID = re.compile(r"[0-9a-f]{32}\Z")
+#: The two store file shapes, and nothing else, are what ``_retire`` and
+#: ``_sweep_missing`` may reclaim; group 1 is the owning session id.
+_STORE_FILE = re.compile(
+    r"([A-Za-z0-9_-]{1,128})\.(?:snap\.[0-9a-f]{32}\.json|delta\.[0-9a-f]{32}\.log)\Z"
+)
+
+#: Parse memo: head path -> (head identity, typed index, store, small raw fields).
+#: Bounded like the resident set. Worker threads read and write it (refreshes run
+#: under ``asyncio.to_thread``), hence the lock around every compound access.
+_ParseMemo = tuple[tuple[int, int, int], Any, "dict[str, Any] | None", dict[str, Any]]
+_PARSED: "OrderedDict[str, _ParseMemo]" = OrderedDict()
+_PARSED_SESSIONS = 4
+_PARSED_LOCK = threading.Lock()
+
+
+def _frame(payload: dict[str, Any]) -> bytes:
+    """One delta record: ``<len> <crc32>\\n<body>\\n`` (body is compact JSON)."""
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return b"%d %08x\n" % (len(body), zlib.crc32(body)) + body + b"\n"
+
+
+def _frames(data: bytes, count: int) -> list[dict[str, Any]]:
+    """Decode exactly ``count`` committed frames from ``data``; raise on damage.
+
+    ``data`` is already cut to the head's committed length, so anything this
+    rejects is inside the committed range: corruption, not a torn append.
+    """
+    out: list[dict[str, Any]] = []
+    position = 0
+    for _ in range(count):
+        newline = data.index(b"\n", position)
+        size_text, crc_text = data[position:newline].split(b" ")
+        size = int(size_text)
+        body = data[newline + 1 : newline + 1 + size]
+        if len(body) != size or zlib.crc32(body) != int(crc_text, 16):
+            raise ValueError("delta frame failed its check")
+        if data[newline + 1 + size : newline + 2 + size] != b"\n":
+            raise ValueError("delta frame is not terminated")
+        loaded = json.loads(body)
+        if not isinstance(loaded, dict):
+            raise ValueError("delta frame is not an object")
+        out.append(loaded)
+        position = newline + 2 + size
+    if position != len(data):
+        raise ValueError("committed delta length does not end on a frame")
+    return out
+
+
+def _store_paths(directory: Path, session_id: str, store: dict[str, Any]) -> tuple[Path, Path]:
+    snapshot, delta = store["snapshot"], store["delta"]
+    if not (_STORE_ID.fullmatch(str(snapshot)) and _STORE_ID.fullmatch(str(delta))):
+        raise ValueError("unsafe store identity")
+    return (
+        directory / f"{session_id}.snap.{snapshot}.json",
+        directory / f"{session_id}.delta.{delta}.log",
+    )
+
+
+def _apply_frame(document: dict[str, Any], frame: dict[str, Any]) -> None:
+    """Fold one frame into a whole document (in place)."""
+    keep = frame["keep"]
+    rows_keep = int(keep["rows"])
+    rows, ranges = document["journal_rows"], document["journal_ranges"]
+    # The ids at or past the cut are exactly the ids of the facts past the cut:
+    # the facts table has one entry per ordinal and ``journal_rows`` names each
+    # id's LAST ordinal (``valid_source_projection_facts`` pins ``last == rows``).
+    # Walking that suffix keeps a cold read O(frames x suffix), not O(frames x
+    # history) — 512 frames over 97k rows would otherwise be ~50M dict probes.
+    facts = document["source_projection_facts"]
+    if not 0 <= rows_keep <= len(facts):
+        raise ValueError("frame keeps more rows than its base holds")
+    for fact in facts[rows_keep:]:
+        id_ = fact.get("id")
+        if id_ and rows.get(id_, -1) >= rows_keep:
+            del rows[id_]
+            ranges.pop(id_, None)
+    for section in _LIST_SECTIONS:
+        current = document[section]
+        cut = int(keep[section])
+        if not 0 <= cut <= len(current):
+            raise ValueError("frame keeps more than its base holds")
+        del current[cut:]
+        current.extend(frame["tail"][section])
+    rows.update(frame["tail"]["journal_rows"])
+    ranges.update(frame["tail"]["journal_ranges"])
+
+
+def _assemble(directory: Path, session_id: str, head: dict[str, Any]) -> dict[str, Any] | None:
+    """Snapshot + committed delta prefix + head fields -> the whole document."""
+    store = head["store"]
+    snapshot_path, delta_path = _store_paths(directory, session_id, store)
+    with snapshot_path.open("r", encoding="utf-8", errors="replace") as handle:
+        document = json.loads(handle.read())
+    # No version gate here: ``_read_raw`` is version-agnostic by contract (naming
+    # survives a bump), and the head's fields — version included — overwrite the
+    # snapshot's below, so ``_index_from_raw`` judges the HEAD's version.
+    if not isinstance(document, dict):
+        return None
+    frames, length = int(store["frames"]), int(store["length"])
+    if frames:
+        with delta_path.open("rb") as handle:
+            data = handle.read(length)
+        if len(data) != length:
+            raise ValueError("delta is shorter than its committed length")
+        for frame in _frames(data, frames):
+            _apply_frame(document, frame)
+    # The head's own fields are the publication's truth; the snapshot's copies
+    # describe the compaction it was cut at.
+    for key, value in head.items():
+        if key != "store":
+            document[key] = value
+    document["store"] = store
+    return document
+
+
+def _head(index: "TranscriptIndex", store: dict[str, Any]) -> dict[str, Any]:
+    """The small commit-point document: base's resume head, THEN ``store``.
+
+    ``store`` sits immediately after the four resume-head keys so the bounded
+    head reader can price a refresh's hydration (snapshot + committed delta) from
+    the same 4 KiB it already reads, with no extra ``stat`` on the event loop.
+    """
+    return {
+        "version": TRANSCRIPT_INDEX_VERSION,
+        "sig": index.sig,
+        "scan": index.scan.to_payload(),
+        "journal_generation": index.journal_generation,
+        "store": store,
+        "coverage": index.coverage,
+        "naming": index.naming,
+    }
+
+
+def _common_prefix(old: list[Any], new: list[Any]) -> int:
+    """How many leading entries ``new`` shares with ``old``.
+
+    Identity first: an incremental refresh carries the kept prefix as the SAME
+    objects, so the comparison is a pointer check for all of it; equality is the
+    fallback that keeps a re-parsed base (fresh objects) honest.
+    """
+    limit = min(len(old), len(new))
+    position = 0
+    while position < limit and (old[position] is new[position] or old[position] == new[position]):
+        position += 1
+    return position
+
+
+def _encode(section: str, items: list[Any]) -> list[Any]:
+    if section == "source_projection_facts":
+        return items
+    return [item.to_payload() for item in items]
+
+
+def _delta_frame(base: "TranscriptIndex", index: "TranscriptIndex") -> dict[str, Any]:
+    """The suffix ``index`` adds over ``base``, as one frame."""
+    keep: dict[str, int] = {}
+    tail: dict[str, Any] = {}
+    for section in _LIST_SECTIONS:
+        old, new = getattr(base, section), getattr(index, section)
+        cut = _common_prefix(old, new)
+        keep[section] = cut
+        tail[section] = _encode(section, new[cut:])
+    # Rows: every kept id keeps its ordinal (append preserves the prefix), so the
+    # frame's cut is the first ordinal the two disagree on, found from the facts
+    # table that carries one entry per ordinal.
+    rows_keep = keep["source_projection_facts"]
+    keep["rows"] = rows_keep
+    tail["journal_rows"] = {i: s for i, s in index.journal_rows.items() if s >= rows_keep}
+    tail["journal_ranges"] = {i: index.journal_ranges[i] for i in tail["journal_rows"]}
+    return {"keep": keep, "tail": tail}
+
+
+def _frame_is_exact(
+    base: "TranscriptIndex", index: "TranscriptIndex", frame: dict[str, Any]
+) -> bool:
+    """Would applying ``frame`` to ``base`` reproduce ``index``'s row maps?
+
+    The list sections are exact by construction (prefix + tail). The two id maps
+    are reconstructed by ordinal, which is only right when every id ``base`` kept
+    below the cut has the same ordinal and span in ``index`` — true for every
+    append, and checked rather than assumed so a refresh shape this module does
+    not produce today falls back to a whole write instead of a wrong map.
+    """
+    rows_keep = frame["keep"]["rows"]
+    kept = 0
+    for id_, seq in base.journal_rows.items():
+        if seq < rows_keep:
+            if index.journal_rows.get(id_) != seq:
+                return False
+            if tuple(index.journal_ranges.get(id_, ())) != tuple(base.journal_ranges[id_]):
+                return False
+            kept += 1
+    return kept + len(frame["tail"]["journal_rows"]) == len(index.journal_rows)
+
+
+def _write_durable(path: Path, data: bytes) -> None:
+    """Whole-file write through the descriptor that wrote it (base's fsync rule)."""
+    with path.open("wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _retire(directory: Path, session_id: str, keep: dict[str, Any] | None) -> None:
+    """Drop this session's store files the live head no longer names.
+
+    Only files of the fixed ``<sid>.snap.<hex>.json`` / ``<sid>.delta.<hex>.log``
+    shape are considered, so nothing else in the cache directory is touched; a
+    reader that already opened a retired file holds its descriptor and keeps
+    reading, and one that resolved a head and finds its file gone retries.
+    """
+    names = set()
+    if keep is not None:
+        snapshot_path, delta_path = _store_paths(directory, session_id, keep)
+        names = {snapshot_path.name, delta_path.name}
+    try:
+        entries = list(directory.glob(f"{session_id}.*"))
+    except OSError:
+        return
+    for entry in entries:
+        match = _STORE_FILE.fullmatch(entry.name)
+        if match is None or match.group(1) != session_id or entry.name in names:
+            continue
+        try:
+            entry.unlink()
+        except OSError:
+            continue
+
+
+def _publish_store(
+    directory: Path, session_id: str, path: Path, index: "TranscriptIndex"
+) -> tuple[dict[str, Any], dict[str, Any] | None, bool]:
+    """Stage ``index`` (CALLER HOLDS THE PUBLISH LOCK): ``(head, store, moved)``.
+
+    Writes whatever the commit needs BESIDE the head — a delta frame, a hard link
+    or a new snapshot — durably, and returns the document the caller then
+    publishes with the head replace (the one commit point). ``moved`` says the
+    store changed identity, so superseded files are reclaimable after the commit.
+
+    The delta path runs when the disk publication is the one this process last
+    parsed or wrote (memo identity) and ``index`` extends it. Anything else is
+    one whole write: a classic document for a small index (base's layout), the
+    hard-linked migration of a classic document that IS the base, or a fresh
+    snapshot (a rebuild, a cold process, or a compaction).
+    """
+    store, base = _store_state(path)
+    frame: dict[str, Any] | None = None
+    if base is not None and base.journal_generation == index.journal_generation:
+        candidate = _delta_frame(base, index)
+        if _frame_is_exact(base, index, candidate):
+            frame = candidate
+    if frame is not None and store is not None:
+        snapshot_bytes = int(store.get("snapshot_bytes") or 0)
+        length, frames = int(store["length"]), int(store["frames"])
+        if _frame_is_empty(base, frame):
+            # Nothing past the base changed (a naming patch, a re-publication):
+            # the head alone carries naming/coverage, so no frame is appended.
+            return _head(index, store), store, False
+        if (
+            snapshot_bytes
+            and length <= snapshot_bytes * _DELTA_COMPACT_FRACTION
+            and frames < _DELTA_COMPACT_FRAMES
+        ):
+            _snapshot_path, delta_path = _store_paths(directory, session_id, store)
+            record = _frame(frame)
+            # Truncate to the COMMITTED length first: bytes past it are a torn
+            # append from a writer that died before its head landed. No head
+            # names them, and they must not end up between two committed frames.
+            with delta_path.open("r+b" if delta_path.exists() else "wb") as handle:
+                handle.truncate(length)
+                handle.seek(length)
+                handle.write(record)
+                handle.flush()
+                os.fsync(handle.fileno())
+            new_store = dict(store, frames=frames + 1, length=length + len(record))
+            return _head(index, new_store), new_store, False
+    if frame is not None and store is None:
+        # MIGRATION: the classic document on disk is exactly ``base`` (memo
+        # identity, checked under this lock). Link it as the snapshot instead of
+        # re-serialising it, and publish the suffix as the first frame — an
+        # existing v8 cache moves to the store without any whole rewrite.
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        if size >= _STORE_MIN_BYTES:
+            new_store = _new_store(size)
+            snapshot_path, delta_path = _store_paths(directory, session_id, new_store)
+            try:
+                os.link(path, snapshot_path)
+            except OSError:
+                pass  # no hard links here: fall through to one whole write
+            else:
+                record = _frame(frame)
+                _write_durable(delta_path, record)
+                new_store.update(frames=1, length=len(record))
+                return _head(index, new_store), new_store, True
+    document = _document(index)
+    body = json.dumps(document, separators=(",", ":")).encode("utf-8")
+    if len(body) < _STORE_MIN_BYTES:
+        return document, None, store is not None
+    new_store = _new_store(len(body))
+    snapshot_path, _delta_path = _store_paths(directory, session_id, new_store)
+    staged = snapshot_path.with_name(f"{snapshot_path.name}.{os.getpid()}.tmp")
+    try:
+        _write_durable(staged, body)
+        staged.replace(snapshot_path)
+    finally:
+        staged.unlink(missing_ok=True)
+    return _head(index, new_store), new_store, True
+
+
+def _new_store(snapshot_bytes: int) -> dict[str, Any]:
+    """A fresh store pointer; ``snapshot_bytes`` prices hydration from the head."""
+    return {
+        "snapshot": uuid4().hex,
+        "delta": uuid4().hex,
+        "snapshot_bytes": snapshot_bytes,
+        "frames": 0,
+        "length": 0,
+    }
+
+
+def _frame_is_empty(base: "TranscriptIndex", frame: dict[str, Any]) -> bool:
+    """True when the frame neither cuts nor adds anything over ``base``."""
+    keep, tail = frame["keep"], frame["tail"]
+    return all(keep[s] == len(getattr(base, s)) for s in _LIST_SECTIONS) and not any(
+        tail[key] for key in (*_LIST_SECTIONS, "journal_rows", "journal_ranges")
+    )
+
+
+def _store_state(path: Path) -> tuple[dict[str, Any] | None, "TranscriptIndex | None"]:
+    """``(store, base)`` of the publication on disk now, from the parse memo.
+
+    ``base`` is ``None`` unless the head's current identity is the one this
+    process last parsed or wrote; that identity check, under the publish lock,
+    is what lets a frame be computed against ``base`` without decoding the
+    document — and it is the whole-file receipt the memo shares with
+    ``_previous_if_current``/``expected_publication``.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None, None
+    with _PARSED_LOCK:
+        memo = _PARSED.get(str(path))
+    if memo is None or memo[0] != (st.st_ino, st.st_size, st.st_mtime_ns):
+        return None, None
+    return memo[2], memo[1]
+
+
+def _hydration_bytes(head_bytes: int, store: Any) -> int:
+    """What a cold read of this publication decodes: head + snapshot + delta."""
+    if not isinstance(store, dict):
+        return head_bytes
+    try:
+        return head_bytes + int(store.get("snapshot_bytes") or 0) + int(store.get("length") or 0)
+    except (TypeError, ValueError):
+        return head_bytes
+
+
+def _read_indexed(
+    config_dir: str | Path, session_id: str
+) -> tuple[dict[str, Any] | None, "TranscriptIndex | None"]:
+    """``(raw, index)`` for the publication on disk, reusing this process's parse.
+
+    THE PARSE MEMO. ``refresh_index``, ``probe_index`` and ``read_index`` each
+    decoded the whole document, three times per append refresh (0.22 s each on
+    the 62.9 MB index, plus 0.32 s of typing). The memo keys the typed view by
+    the head's ``(ino, size, mtime_ns)``: every publication replaces the head,
+    so a hit means exactly "the bytes this process last parsed or wrote".
+
+    ``raw`` on a hit carries only the SMALL fields (resume head, coverage,
+    naming, store) plus the receipt. Every caller of this pairing reads exactly
+    those from it (``preserved_naming``, ``patch_naming``'s receipt); a consumer
+    that needs the bulk sections calls ``_read_raw`` itself.
+    """
+    path = index_path(config_dir, session_id)
+    try:
+        st = path.stat()
+    except OSError:
+        return None, None
+    identity = (st.st_ino, st.st_size, st.st_mtime_ns)
+    with _PARSED_LOCK:
+        memo = _PARSED.get(str(path))
+        if memo is not None and memo[0] == identity:
+            _PARSED.move_to_end(str(path))
+    if memo is not None and memo[0] == identity:
+        raw = {**memo[3], "_publication_identity": identity}
+        # The same version gate ``_index_from_raw`` applies: a memo made under
+        # another build's constant is that build's document, naming and all.
+        if raw.get("version") != TRANSCRIPT_INDEX_VERSION:
+            return raw, None
+        return raw, _detached(memo[1], identity)
+    raw = _read_raw(config_dir, session_id)
+    index = _index_from_raw(raw)
+    if raw is not None and index is not None:
+        receipt = raw.get("_publication_identity")
+        if isinstance(receipt, tuple) and len(receipt) == 3:
+            _remember_parse(path, receipt, index, raw)
+    return raw, index
+
+
+def _detached(
+    index: "TranscriptIndex", identity: tuple[int, int, int] | None = None
+) -> "TranscriptIndex":
+    """A copy whose fields a caller may REBIND without touching the memo's view.
+
+    Shallow by design — copying the sections would cost what the memo saves.
+    Callers rebind (``index.naming = ...``) and never mutate the sections in
+    place; the derivation builds new lists for every refresh.
+    """
+    out = _shallow_copy(index)
+    out.naming = dict(index.naming) if isinstance(index.naming, dict) else {}
+    if identity is not None:
+        # The receipt names the head THIS view was served from, as a fresh parse
+        # would; a memo entry made at write time carries the caller's old one.
+        out.publication_identity = identity
+    return out
+
+
+def _remember_parse(
+    path: Path, identity: tuple[int, int, int], index: "TranscriptIndex", raw: dict[str, Any]
+) -> None:
+    """Memoise a parsed or just-written publication under its head identity."""
+    small = {key: raw[key] for key in (*_HEAD_KEYS, "coverage", "naming") if key in raw}
+    store = raw.get("store") if isinstance(raw.get("store"), dict) else None
+    if store is not None:
+        small["store"] = store
+    with _PARSED_LOCK:
+        _PARSED[str(path)] = (identity, _detached(index, identity), store, small)
+        _PARSED.move_to_end(str(path))
+        while len(_PARSED) > _PARSED_SESSIONS:
+            _PARSED.popitem(last=False)
 
 
 @contextmanager
@@ -1105,6 +1644,8 @@ def write_index(
 
     path = index_path(config_dir, session_id)
     payload_ok = False
+    moved = False
+    store: dict[str, Any] | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(f".{os.getpid()}.{uuid4().hex}.tmp")
@@ -1131,7 +1672,7 @@ def write_index(
                         latest = (
                             {"naming": sidecar}
                             if sidecar is not None
-                            else _read_raw(config_dir, session_id)
+                            else _read_indexed(config_dir, session_id)[0]
                         )
                     if latest is not None:
                         merged = preserved_naming(latest, {c.id for c in index.checkpoints})
@@ -1148,7 +1689,6 @@ def write_index(
                         ):
                             items.update({k: v for k, v in own.items() if k in live})
                         index.naming = {"prompt_version": NAMING_PROMPT_VERSION, "items": items}
-                document = _document(index)
                 # The sidecar is keyed by the DERIVED token, so it is correct even
                 # if the companion lands later; it costs a few KB, not the body.
                 try:
@@ -1157,8 +1697,12 @@ def write_index(
                     )
                 except (OSError, ValueError):
                     logger.debug("read-model naming unavailable for %s", session_id)
+                # Everything BESIDE the head (a delta frame, a migration link or
+                # a new snapshot) is made durable first; the head replace below
+                # is the one commit point, exactly as base's whole document was.
+                head, store, moved = _publish_store(path.parent, session_id, path, index)
                 with tmp.open("w", encoding="utf-8") as handle:
-                    handle.write(json.dumps(document, separators=(",", ":")))
+                    handle.write(json.dumps(head, separators=(",", ":")))
                     handle.flush()
                     # fsync the descriptor that WROTE these bytes. A read-only
                     # handle cannot be synced on Windows, and that is exactly the
@@ -1166,6 +1710,11 @@ def write_index(
                     os.fsync(handle.fileno())
                 tmp.replace(path)
                 payload_ok = True
+                try:
+                    st = path.stat()
+                    _remember_parse(path, (st.st_ino, st.st_size, st.st_mtime_ns), index, head)
+                except OSError:
+                    pass
         finally:
             tmp.unlink(missing_ok=True)
     except OSError:
@@ -1178,6 +1727,10 @@ def write_index(
             )
         return
     # Reclaim outside the lock: unlink cost must not sit in the critical section.
+    # A store file is only reclaimable once no head names it; a reader still
+    # holding an older head re-reads on the missing file (see ``_read_raw``).
+    if moved:
+        _retire(path.parent, session_id, store)
     try:
         index_read_model.collect(config_dir, session_id, index_read_model.token_for(index))
     except OSError:
@@ -1291,6 +1844,14 @@ def _read_resume_head(
             if text[position : position + 1] != ",":
                 return None
             position += 1
+        # A store head names its snapshot and committed delta right after the
+        # resume head; a cold refresh decodes all three, so that is the
+        # hydration figure (not the few-KB head's own size).
+        if text.startswith('"store"', position):
+            key, position = decoder.raw_decode(text, position)
+            if text[position : position + 1] == ":":
+                store, position = decoder.raw_decode(text, position + 1)
+                size = _hydration_bytes(size, store)
     except ValueError:
         return None
     sig = values["sig"]
@@ -1368,10 +1929,18 @@ def _sweep_missing(config_dir: str | Path) -> None:
         return
     sessions = Path(config_dir) / "sessions"
     for entry in entries:
-        if entry.suffix != ".json":
+        # A store file is named ``<sid>.snap.<id>.json`` / ``<sid>.delta.<id>.log``:
+        # its owner is the leading id, never the stem (which would read every live
+        # snapshot as an orphan and delete it).
+        store = _STORE_FILE.fullmatch(entry.name)
+        if store is not None:
+            owner = store.group(1)
+        elif entry.suffix == ".json" and "." not in entry.stem:
+            owner = entry.stem
+        else:
             continue
         try:
-            if not (sessions / entry.stem).is_dir():
+            if not (sessions / owner).is_dir():
                 entry.unlink()
         except OSError:
             continue
@@ -1394,8 +1963,7 @@ def patch_naming(config_dir: str | Path, session_id: str, items: dict[str, Any])
     lock and unions it with this write winning. An earlier version of this
     docstring claimed the whole function was under that lock; it never was.
     """
-    raw = _read_raw(config_dir, session_id)
-    index = _index_from_raw(raw)
+    raw, index = _read_indexed(config_dir, session_id)
     if index is not None and raw is not None:
         naming = raw.get("naming")
         merged = dict(naming) if isinstance(naming, dict) else {}
@@ -2954,8 +3522,7 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
             st = path.stat()
         except OSError:
             return None
-        raw = _read_raw(config_dir, session_id)
-        previous = _index_from_raw(raw)
+        raw, previous = _read_indexed(config_dir, session_id)
         if previous is not None and previous.journal_generation and _sig_matches(previous.sig, st):
             from local_operator.session import index_read_model
 
@@ -3012,7 +3579,11 @@ def refresh_index(config_dir: str | Path, session_id: str) -> TranscriptIndex | 
         # merged with the disk winning per turn key.
         sidecar = _read_model().naming_for_root(config_dir, session_id)
         fresh_section = preserved_naming(
-            {"naming": sidecar} if sidecar is not None else _read_raw(config_dir, session_id),
+            (
+                {"naming": sidecar}
+                if sidecar is not None
+                else _read_indexed(config_dir, session_id)[0]
+            ),
             {c.id for c in index.checkpoints if c.kind == KIND_USER},
         )
         if fresh_section["items"]:
@@ -3050,8 +3621,7 @@ def probe_index(config_dir: str | Path, session_id: str) -> IndexProbe:
         st = path.stat()
     except OSError:
         return IndexProbe(state="missing", index=None, built_at=None)
-    raw = _read_raw(config_dir, session_id)
-    index = _index_from_raw(raw)
+    _raw, index = _read_indexed(config_dir, session_id)
     cache_path = index_path(config_dir, session_id)
     try:
         built_at = cache_path.stat().st_mtime
@@ -4022,6 +4592,8 @@ def _reset_for_tests() -> None:
     _IN_FLIGHT.clear()
     _RESIDENT.clear()
     _RESIDENT_STAMP.clear()
+    with _PARSED_LOCK:
+        _PARSED.clear()
     _FAILURES.clear()
     _PAINT_HOLDS.clear()
     _PAINT_HOLD_SINCE.clear()
