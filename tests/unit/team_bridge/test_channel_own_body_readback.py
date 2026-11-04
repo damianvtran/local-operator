@@ -158,7 +158,7 @@ async def test_another_members_unadmitted_row_stays_null_and_is_never_fetched() 
     )
 
     by_id = {r["id"]: r["body"] for r in rows}
-    # The withheld row reads as the marker, never as an empty body (#3386).
+    # The withheld row reads as the marker, never as an empty body (#3400).
     assert by_id == {theirs: tool_mod._UNSCREENED_BODY, mine: "my reply"}
     assert hub.body_calls == [mine]  # screening is not bypassed for anyone else
 

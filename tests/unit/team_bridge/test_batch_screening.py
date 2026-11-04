@@ -1,6 +1,6 @@
 """Batch screening: one model call per wake batch, one verdict per message.
 
-What these pin (PR #3386, 2026-11-03):
+What these pin (PR #3400, 2026-11-03):
 
 * one call covers several messages and returns a verdict PER message, mapped
   back by id, so one message can never admit or reject another;

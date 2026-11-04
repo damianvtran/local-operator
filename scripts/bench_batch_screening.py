@@ -1,4 +1,4 @@
-"""Before/after screening spend for a busy Team Bridge group (PR #3386).
+"""Before/after screening spend for a busy Team Bridge group (PR #3400).
 
 WHY THIS EXISTS. Agent replies are no longer capped by the hub (agent-server
 #294), so the recipient's screening budget is what bounds its spend. This

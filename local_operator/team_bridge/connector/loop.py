@@ -385,7 +385,7 @@ async def retry_due_holds(
     store = Store(config_dir)
     _release_engaged_holds(store, owner, config_dir, now=_time.time())
     due = store.due_screening_holds(owner, now=_time.time(), limit=limit)
-    # HELD MESSAGES ARE RE-SCREENED IN BATCHES TOO (PR #3386). A budget refill
+    # HELD MESSAGES ARE RE-SCREENED IN BATCHES TOO (PR #3400). A budget refill
     # makes a whole backlog due at once; re-driving it one model call per
     # message would spend one refilled unit per message and the backlog would
     # never drain. The due conversation rows (oldest first, bounded by
