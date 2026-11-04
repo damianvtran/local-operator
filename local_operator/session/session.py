@@ -254,11 +254,13 @@ from local_operator.projects import (
 )
 from local_operator.prompts_api import (
     ADVISORY_TAIL_SECTIONS,
+    LIVE_TAIL_SECTIONS,
     STATE_SECTION_HEADINGS,
     TOOL_INVENTORY_HEADING,
     assemble_system_block_sections,
     render_tool_inventory_block,
     split_system_block_sections,
+    with_live_tail_sections,
 )
 from local_operator.redaction_shapes import ShapeReport
 from local_operator.references import expand_references
@@ -6738,7 +6740,7 @@ class Session:
             await self._transcript.append_custom("system_prefix", {"blocks": desired})
             self._frozen_system_blocks = list(desired)
         if not commit_state:
-            return list(self._frozen_system_blocks)
+            return self._outbound_system_blocks(desired)
         changes, compaction_id = self._system_state_delta(desired)
         if changes:
             message = self._system_state_message(changes)
@@ -6751,7 +6753,21 @@ class Session:
         # this runtime rendered, so a later message re-anchors the reminder
         # normally (see the open-asks replay rule in ``_system_state_delta``).
         self._state_baseline_from_replay = False
-        return list(self._frozen_system_blocks)
+        return self._outbound_system_blocks(desired)
+
+    def _outbound_system_blocks(self, desired: list[str]) -> list[str]:
+        """The blocks a request sends: live sections reconciled onto the frozen tail.
+
+        A LIVE section (:data:`prompts_api.LIVE_TAIL_SECTIONS`) is a standing
+        instruction, so it must be readable as system text on every call. The
+        frozen prefix cannot carry the current value -- it is written once per
+        epoch and an edit must not reprice it -- so the desired text is spliced
+        into a COPY of the tail per request. The frozen copy itself stays
+        byte-identical, which is what resume, fork and the provider cache read.
+        Nothing is journaled: the delta path skips live sections for the same
+        reason (see ``_system_state_delta``).
+        """
+        return with_live_tail_sections(self._frozen_system_blocks or [], desired)
 
     def _system_state_delta(
         self, desired: list[str]
@@ -6817,6 +6833,15 @@ class Session:
         # Sections this host cannot answer for. Their ABSENCE from ``desired`` is
         # not a removal — see ``_open_asks_unknown`` and QA round 1, Q2.
         unknown = frozenset({"open_asks"}) if self._open_asks_unknown() else frozenset()
+        # LIVE sections (``LIVE_TAIL_SECTIONS``) ship in the outbound system
+        # blocks instead (``_outbound_system_blocks``), so a change to one is
+        # never a state delta — in EITHER direction. A record would say the same
+        # thing twice on the turn it changes and then disagree with the system
+        # prompt forever after; a removal record would tell the model a rule was
+        # gone while the frozen prefix still carried it. This covers the
+        # ``lost_state`` re-anchor too: it is the same walk, and a live section
+        # missing from what the model can see is repaired by the splice, not by
+        # a record.
         for index, block in enumerate(desired):
             if index == 0:
                 continue
@@ -6825,7 +6850,9 @@ class Session:
                 split_system_block_sections(index, previous[index]) if index < len(previous) else {}
             )
             section_changes = {
-                name: text for name, text in sections.items() if prior.get(name) != text
+                name: text
+                for name, text in sections.items()
+                if prior.get(name) != text and name not in LIVE_TAIL_SECTIONS
             }
             if any(
                 name in ADVISORY_TAIL_SECTIONS and text for name, text in section_changes.items()
@@ -6860,7 +6887,10 @@ class Session:
                 {
                     name: ""
                     for name, text in prior.items()
-                    if name not in sections and text and name not in unknown
+                    if name not in sections
+                    and text
+                    and name not in unknown
+                    and name not in LIVE_TAIL_SECTIONS
                 }
             )
             if section_changes:
@@ -6987,6 +7017,9 @@ class Session:
             # Helpers do not journal, but they must obey a new standing rule
             # immediately too. The real turn commits this epoch independently.
             blocks = list(desired)
+        # A helper is a real request beside the turn, so it carries the same
+        # LIVE sections; the delta below skips them on both paths.
+        blocks = with_live_tail_sections(blocks, desired)
         changes, _ = self._system_state_delta(desired)
         if changes:
             history.append(self._system_state_message(changes))

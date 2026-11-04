@@ -18,8 +18,9 @@ destroyed by the next writer that did not know about it.
 The POC is behind ``LOP_SESSION_RULES=1`` (:func:`rules_enabled`). With the flag
 off the session never reads or writes this file. The operator edits rules with
 the dev CLI at the bottom of this module; the running session re-reads the file
-on each provider step, so an edit needs no session API and reaches the model as
-an ordinary ``[session-state]`` delta.
+on each provider step, so an edit needs no session API. The rendered section is
+LIVE (``prompts_api.LIVE_TAIL_SECTIONS``): it rides the outbound system blocks
+on every call and is never reduced to a ``[session-state]`` delta.
 
 Module scope imports only the standard library and the deliberately light
 ``resume`` module, so the CLI starts without loading the engine.

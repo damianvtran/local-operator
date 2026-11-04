@@ -1192,8 +1192,9 @@ def build_system_blocks(
         )
     if session_rules:
         # Directly after the goal: both are standing state the operator set on
-        # this session, and the tail (not block 0) is where a mid-session edit
-        # ships as a [session-state] delta without repricing the cached head.
+        # this session. The tail (not block 0) is where an edit rides without
+        # repricing the cached head; the section is LIVE, so the outbound blocks
+        # carry the current text on every call (``LIVE_TAIL_SECTIONS``).
         tail = f"{tail}\n\n{session_rules}"
     if team_brief.strip():
         # A /team launch stamps the group's collaboration and project briefs
@@ -1383,6 +1384,29 @@ _TAIL_SECTION_MARKERS: tuple[tuple[str, str], ...] = (
 #: because the intervening record may have said something else.
 ADVISORY_TAIL_SECTIONS: frozenset[str] = frozenset({"memory_suggestions", "memory_hint"})
 
+#: Sections that must be in the system blocks the model is sent, on EVERY call.
+#: A standing instruction is only worth what it is read as: put in a
+#: ``[session-state]`` record it is one more note in the history, beside an
+#: older copy the model already read. Two consequences, and the second follows
+#: from the first:
+#:
+#: (1) the outbound blocks are the FROZEN prefix with each live section taken
+#:     from the desired render (:func:`with_live_tail_sections`), so a rule
+#:     added after the prefix froze is in block 3 on the very next call without
+#:     an epoch and without rewriting a byte of the frozen copy; and
+#: (2) a live section is never reduced to a ``[session-state]`` delta -- a
+#:     delta leaves the system prompt without the current text, which is the
+#:     exact failure this set exists to prevent (measured: rules delivered only
+#:     as deltas did not beat custom instructions).
+#:
+#: Live is nearly free on the wire: providers mark only the leading
+#: ``len(blocks) - 2`` blocks for the cache, so the tail block is re-sent on
+#: every request anyway (``providers/clients.py::_system_messages``). The
+#: exception is a session with an output-contract block appended after the
+#: tail: the tail is then inside the marked prefix, so an edit reprices from
+#: it. Correctness is the same; the cache is not.
+LIVE_TAIL_SECTIONS: frozenset[str] = frozenset({"rules"})
+
 #: The order a block's sections are APPENDED in — the order ``assemble``
 #: restores and the order a delta lists changed sections in.
 _BLOCK_SECTION_ORDER: dict[int, tuple[str, ...]] = {
@@ -1562,3 +1586,43 @@ def assemble_system_block_sections(index: int, sections: Mapping[str, str]) -> s
     ordered = [name for name in order if sections.get(name)]
     extra = [name for name in sections if name not in order and sections.get(name)]
     return _join_sections([str(sections[name]) for name in (*ordered, *extra)])
+
+
+def with_live_tail_sections(frozen: Sequence[str], desired: Sequence[str]) -> list[str]:
+    """The blocks to send: ``frozen`` with its LIVE sections taken from ``desired``.
+
+    The frozen prefix is cache-stable and is never rewritten, so a section that
+    must ride every call (:data:`LIVE_TAIL_SECTIONS`) cannot live only in it:
+    whatever text was present when the prefix froze would be the text forever.
+    This returns a per-request copy whose tail has each live section replaced in
+    place, appended when ``desired`` gained it, dropped when ``desired`` lost
+    it -- every other section stays exactly as frozen and the caller's list is
+    not touched. With no live section on either side the bytes are unchanged,
+    which is the flag-off case.
+
+    The sections come from :func:`split_system_block_sections` and are rejoined
+    with :func:`assemble_system_block_sections`, the one protocol the delta and
+    the resume fold also use -- never a marker walk here.
+    """
+    blocks = list(frozen)
+    if len(blocks) < 4 or len(desired) < 4:
+        return blocks
+    sections = split_system_block_sections(3, blocks[3])
+    rendered = split_system_block_sections(3, desired[3])
+    names = [
+        name
+        for name, _ in _TAIL_SECTION_MARKERS
+        if name in LIVE_TAIL_SECTIONS and (name in sections or name in rendered)
+    ]
+    if not names:
+        return blocks
+    for name in names:
+        text = rendered.get(name, "")
+        if sections.get(name, "") == text:
+            continue
+        if text:
+            sections[name] = text
+        else:
+            sections.pop(name, None)
+    blocks[3] = assemble_system_block_sections(3, sections)
+    return blocks
