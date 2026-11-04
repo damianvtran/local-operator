@@ -247,13 +247,24 @@ def doctor_command() -> int:
         )
         _say(f"  when banners are on: {_describe(plan)}")
         return 0
+    env = os.environ
+    if terminals.is_ssh(env) and plan.kind == "file":
+        # The same rule as `tui/notify._sound_plan` (review round 2, R2-M1): the
+        # player would sound on the REMOTE machine, so lop stays out of it
+        # entirely and the terminal-side behaviour is exactly as before.
+        _say(
+            "lop: over SSH: lop plays no sound of its own; your local terminal's "
+            "notification sound applies"
+        )
+        _say(f"  on this machine directly it would play {plan.sound_id}")
+        _say("double sound: none expected (only your local terminal signals)")
+        return 0
     _say(f"lop: {_describe(plan)}")
     if plan.kind == "file":
         _say(f"  file: {plan.path}")
         _say(f"  gain: {plan.gain:.2f}   at most one sound every {sound.THROTTLE_S:g}s")
     for problem in _problems(sound.configured(values), plan):
         _say(f"  note: {problem}")
-    env = os.environ
     protocol = notify.detect_protocol(env)
     # The SAME condition `Notifier.send` uses to drop the BEL: a file plan that
     # clears the rig guard. Under a redirected HOME lop plays nothing, and the
@@ -288,6 +299,14 @@ def doctor_command() -> int:
                 )
         elif lop_plays and not in_mux:
             _say("banner leg: none in the terminal; lop's sound replaces the terminal bell")
+            if terminals.term_program(env) == terminals.TERM_PROGRAM_APPLE:
+                # Review round 2, R2-m1: on Terminal.app the BEL is also the
+                # unfocused window's only visual cue (Dock bounce and badge).
+                _say(
+                    "  Terminal.app: without the bell there is no Dock bounce or badge; "
+                    "choose `system` to keep them (lop then plays nothing): "
+                    "lop config edit notifications.sound.id system"
+                )
         else:
             _say("banner leg: terminal bell")
         if protocol == "bell" and sys.platform.startswith("linux"):

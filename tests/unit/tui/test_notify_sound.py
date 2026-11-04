@@ -37,6 +37,10 @@ class Sink:
 def played(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
     calls: list[tuple[str, str]] = []
     monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
+    # The detached path reads the PROCESS environment for its SSH rule, so a
+    # suite run over ssh must not silence every case here.
+    monkeypatch.delenv("SSH_CONNECTION", raising=False)
+    monkeypatch.delenv("SSH_TTY", raising=False)
     monkeypatch.setattr(notify, "desktop_belongs_to_this_process", lambda: True)
     monkeypatch.setattr(notify, "_play_sound", lambda plan, leg: calls.append((plan.kind, leg)))
     return calls
@@ -44,7 +48,7 @@ def played(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
 
 def _use(monkeypatch: pytest.MonkeyPatch, **values: Any) -> None:
     plan = sound.resolve({"notifications": {"sound": values}}, env={})
-    monkeypatch.setattr(notify, "_sound_plan", lambda: plan)
+    monkeypatch.setattr(notify, "_sound_plan", lambda *_a: plan)
 
 
 def test_osc99_silent_rides_the_first_chunk_only() -> None:
@@ -218,3 +222,87 @@ def test_the_pane_flag_bel_is_kept_under_a_multiplexer(
     )
     assert sink.writes == ["\a"]
     assert played == [("file", "osc")]
+
+
+# -- R2-M1 (review round 2): over SSH lop plays nothing and changes nothing --
+
+SSH = {"SSH_CONNECTION": "10.0.0.2 50000 10.0.0.1 22", "SSH_TTY": "/dev/pts/3"}
+
+
+def _real_plan_lookup(monkeypatch: pytest.MonkeyPatch, **values: Any) -> None:
+    """Keep notify's own `_sound_plan` (it holds the SSH rule) but feed it config."""
+    monkeypatch.setattr(
+        # `env={}`: the suite arms LOCAL_OPERATOR_NO_SOUND globally, which would
+        # make every plan silent and the SSH cases pass vacuously (the control
+        # below caught exactly that).
+        sound,
+        "resolve",
+        lambda *_a, **_k: _resolve({"notifications": {"sound": values}}, env={}),
+    )
+
+
+_resolve = sound.resolve
+
+
+def test_over_ssh_a_bell_terminal_keeps_its_bel_and_lop_plays_nothing(
+    played: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _real_plan_lookup(monkeypatch)
+    sink = Sink()
+    env = {**SSH, "TERM": "xterm-256color"}
+    assert Notifier(sink, env=env, platform="linux").notify_turn_complete(running_children=0)
+    assert sink.writes == ["\a"]
+    assert played == []
+
+
+def test_over_ssh_kitty_gets_no_silent_key(
+    played: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _real_plan_lookup(monkeypatch)
+    sink = Sink()
+    Notifier(sink, env={**SSH, **KITTY_ENV}, platform="linux").notify_turn_complete(
+        running_children=0
+    )
+    wire = "".join(sink.writes)
+    assert wire.startswith("\x1b]99;") and "s=" not in wire
+    assert played == []
+
+
+def test_over_ssh_notify_send_keeps_its_own_sound(
+    played: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _real_plan_lookup(monkeypatch)
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(notify, "_spawn_detached", spawned.append)
+    monkeypatch.setattr(notify.shutil, "which", lambda name: f"/usr/bin/{name}")
+    env = {**SSH, "TERM": "xterm-256color", "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/bus"}
+    Notifier(Sink(), env=env, platform="linux").notify_turn_complete(running_children=0)
+    assert spawned and SUPPRESS_SOUND_HINT not in spawned[0]
+    assert played == []
+
+
+def test_over_ssh_the_detached_banner_plays_nothing(
+    played: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _real_plan_lookup(monkeypatch)
+    for name, value in SSH.items():
+        monkeypatch.setenv(name, value)
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(notify.sys, "platform", "linux")
+    monkeypatch.setattr(notify.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(notify, "_spawn_detached_ok", lambda argv: spawned.append(argv) or True)
+    assert notify.detached_notify("T", "B") is True
+    assert SUPPRESS_SOUND_HINT not in spawned[0]
+    assert played == []
+
+
+def test_without_ssh_the_same_lookup_plays(
+    played: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Negative control for the SSH cases: the patched lookup does play."""
+    _real_plan_lookup(monkeypatch)
+    sink = Sink()
+    Notifier(sink, env={"TERM": "xterm-256color"}, platform="darwin").notify_turn_complete(
+        running_children=0
+    )
+    assert sink.writes == [] and played == [("file", "osc")]

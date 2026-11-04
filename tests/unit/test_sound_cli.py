@@ -31,6 +31,8 @@ _TERMINAL_MARKERS = (
     "CMUX_WORKSPACE_ID",
     "LOCAL_OPERATOR_NO_SOUND",
     "LOCAL_OPERATOR_NO_NOTIFICATIONS",
+    "SSH_CONNECTION",
+    "SSH_TTY",
 )
 
 
@@ -166,3 +168,24 @@ def test_doctor_under_a_redirected_home_does_not_claim_to_replace_the_bell(
     out = _doctor(capsys)
     assert "lop plays no notification sound here" in out
     assert "replaces the terminal bell" not in out
+
+
+def test_doctor_over_ssh_says_lop_plays_nothing(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SSH_CONNECTION", "10.0.0.2 50000 10.0.0.1 22")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    out = _doctor(capsys)
+    assert out.splitlines()[0] == (
+        "lop: over SSH: lop plays no sound of its own; your local terminal's "
+        "notification sound applies"
+    )
+    assert "replaces the terminal bell" not in out
+
+
+def test_doctor_on_terminal_app_names_the_lost_dock_cue(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TERM_PROGRAM", "Apple_Terminal")
+    out = _doctor(capsys)
+    assert "no Dock bounce or badge; choose `system` to keep them" in out

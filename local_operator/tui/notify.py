@@ -1244,12 +1244,23 @@ def detached_notify(
     return raised
 
 
-def _sound_plan() -> "SoundPlan | None":
-    """The configured notification sound, or ``None`` if it cannot be read.
+def _sound_plan(env: EnvMap | None = None) -> "SoundPlan | None":
+    """The configured notification sound, or ``None`` when lop plays none here.
 
-    Never raises: a banner path asked for a banner, and a broken sound install
-    must not take that away.
+    ``None`` means "behave exactly as before notification sounds existed": no
+    kitty ``s=silent``, no notify-send suppress hint, the BEL kept and nothing
+    played. Two cases return it.
+
+    - **Over SSH** (review round 2, R2-M1; manager decision): the player would
+      run on the REMOTE host, sounding on that machine's speakers (or nowhere,
+      if it is headless), while the BEL or OSC travels back to the user's local
+      terminal, which is their real signal. So lop plays nothing of its own on
+      any protocol, and the local terminal's notification sound applies.
+    - The plan cannot be read. Never raises: a banner path asked for a banner,
+      and a broken sound install must not take that away.
     """
+    if terminals.is_ssh(env):
+        return None
     try:
         from local_operator.notifications.sound import resolve
 
@@ -1881,7 +1892,7 @@ class Notifier:
 
         # Resolved once per send, read fresh from config (LIVE scope): the OSC
         # 99 / notify-send hints and the sound itself must agree.
-        plan = _sound_plan()
+        plan = _sound_plan(self._env)
         mute_host = plan is not None and plan.mutes_host_sound
         # Whether lop's OWN sound will play for this banner: a file plan that
         # clears the same rig guard `_sound` applies. Only then may the bare BEL
