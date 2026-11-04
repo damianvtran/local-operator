@@ -850,7 +850,9 @@ async def proxy(guard: BudgetGuard, request: Request) -> Response:
         status = resp.status_code
 
         def write_row(
-            usage: WireObject, extra: dict[str, object] | None = None, unpriced: frozenset = frozenset()
+            usage: WireObject,
+            extra: dict[str, object] | None = None,
+            unpriced: frozenset = frozenset(),
         ) -> None:
             # OpenRouter returns the billed amount in usage.cost: it feeds the
             # hard budget stop and is reported beside our list-price computation.

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "derivation": "Static scan of solution/ in the 13 subset tasks (container-s4/package-egress-hosts.json, 2026-11-04): agent-phase mechanisms apt (11), pip (3), uv (1) and solution-literal download hosts. Verifier-phase hosts (astral.sh) and build-time hosts (github.com) are deliberately absent: the verifier keeps Harbor's own uplink. To be confirmed by a logged oracle sweep through the proxy before any paid run.",
+  "allow": [
+    "archive.ubuntu.com",
+    "security.ubuntu.com",
+    "deb.debian.org",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "download.pytorch.org",
+    "benryves.com",
+    "www.povray.org",
+    "19100.neocities.org"
+  ],
+  "rationale": {
+    "archive.ubuntu.com": "apt mirror of ubuntu:24.04 amd64 images (7 tasks)",
+    "security.ubuntu.com": "apt security pocket of ubuntu:24.04 images",
+    "deb.debian.org": "apt mirror (incl. debian-security) of debian:13.0-slim and python:3.13-slim-bookworm images (6 tasks)",
+    "pypi.org": "pip/uv index (kv-store-grpc, largest-eigenval, pytorch-model-cli, financial-document-processor)",
+    "files.pythonhosted.org": "pip/uv wheel downloads",
+    "download.pytorch.org": "literal in pytorch-model-cli solve.sh (CPU wheel index)",
+    "benryves.com": "literal in make-doom-for-mips solve.sh",
+    "www.povray.org": "literal in build-pov-ray solve.sh",
+    "19100.neocities.org": "literal in build-pov-ray solve.sh"
+  }
+}

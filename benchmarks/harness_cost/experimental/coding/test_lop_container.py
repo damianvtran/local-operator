@@ -165,7 +165,8 @@ class EgressTests(unittest.TestCase):
     IMAGE = "alexgshaw/git-leak-recovery@sha256:" + "a" * 64
 
     def override(self, ports=(8787, 8789, 41000)):
-        return egress.compose_override("run1", list(ports), self.IMAGE, Path("/s"), Path("/t"))
+        return egress.compose_override("run1", list(ports), self.IMAGE, Path("/s"), Path("/t"),
+                                       Path("/l"))
 
     def test_main_only_on_internal_network_and_never_pulls(self):
         o = self.override()
@@ -178,21 +179,23 @@ class EgressTests(unittest.TestCase):
         self.assertEqual(main["pull_policy"], "never")
         self.assertEqual(gate["pull_policy"], "never")
         self.assertEqual(gate["image"], self.IMAGE)
-        self.assertEqual(gate["entrypoint"][2:], ["8787=8787", "8789=8789", "41000=41000"])
-        self.assertTrue(all(v["read_only"] for v in gate["volumes"]))
+        self.assertEqual(gate["entrypoint"][8:], ["8787=8787", "8789=8789", "41000=41000"])
+        # Read-only except the package-egress log (test_package_egress).
+        self.assertEqual([v["target"] for v in gate["volumes"] if not v["read_only"]],
+                         [egress.EGRESS_LOG])
         self.assertEqual(gate["cap_drop"], ["ALL"])
         # R6 F16: main resolves the host gateway NAME (an /etc/hosts line, no
         # route) so the egress canary tests routing, not DNS.
         self.assertEqual(main["extra_hosts"], ["host.docker.internal:host-gateway"])
 
     def test_override_refusals(self):
-        for bad in ([], [0], [70000], [8787, 8787], [True]):
+        for bad in ([], [0], [70000], [8787, 8787], [True], [egress.PACKAGE_PROXY_PORT]):
             with self.subTest(bad), self.assertRaises(ValueError):
                 self.override(bad)
         with self.assertRaises(ValueError):
-            egress.compose_override("run1", [1], "repo:tag", Path("/s"), Path("/t"))
+            egress.compose_override("run1", [1], "repo:tag", Path("/s"), Path("/t"), Path("/l"))
         with self.assertRaises(ValueError):
-            egress.compose_override("../x", [1], self.IMAGE, Path("/s"), Path("/t"))
+            egress.compose_override("../x", [1], self.IMAGE, Path("/s"), Path("/t"), Path("/l"))
 
     def test_no_implicit_pull_guard(self):
         ok = ["docker", "run", "--pull", "never", "--rm", "--platform", "linux/amd64", "img"]
@@ -545,7 +548,9 @@ class DriverContainerTests(unittest.TestCase):
             driver.container_plan("r", "omp", "i", meter_port=1, bridge_port=2,
                                   edge={"port": 3, "env": {}, "ca_file": Path("/edge-ca.pem")})
         plan = driver.container_plan("r", "omp", "i", meter_port=8787, bridge_port=8789)
-        self.assertEqual(plan["env"], {})
+        # Only the package-proxy route (test_package_egress); no edge env.
+        self.assertEqual(sorted(plan["env"]), ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+                                               "http_proxy", "https_proxy", "no_proxy"])
         self.assertEqual(plan["ports"], [8787])
 
     def test_edge_mount_is_the_ca_file(self):

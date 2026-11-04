@@ -293,6 +293,87 @@ class EdgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(query.status_code, 403)
         self.assertEqual(self.decision_calls, [])
 
+    async def _package_edge(self):
+        """This edge with a package policy whose upstream is a loopback fixture."""
+        package = load("package_egress")
+        received: list[bytes] = []
+
+        async def registry(reader, writer):
+            received.append(await reader.read(65536))
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            await writer.drain()
+            writer.close()
+
+        fixture = await asyncio.start_server(registry, "127.0.0.1", 0)
+        self.addAsyncCleanup(self._close_server, fixture)
+        port = fixture.sockets[0].getsockname()[1]
+        opened: list[tuple[str, int]] = []
+
+        async def opener(host, p):
+            opened.append((host, p))
+            return await asyncio.open_connection("127.0.0.1", port)
+
+        # api.anthropic.com is listed ON PURPOSE: the policy must still refuse it.
+        self.edge._packages = package.PackageProxy(
+            package.Policy(["deb.debian.org", "api.anthropic.com"]),
+            package.ConnectionLog(self.edge.package_log_path, via="edge"), opener=opener)
+        return received, opened
+
+    @staticmethod
+    async def _close_server(server):
+        server.close()
+        await server.wait_closed()
+
+    def package_rows(self):
+        path = self.edge.package_log_path
+        return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+
+    async def test_package_policy_tunnels_registry_traffic_without_metering(self):
+        received, opened = await self._package_edge()
+        # Plain HTTP (apt's default transport) through the edge with LoP's env.
+        response = await self.client().get("http://deb.debian.org/debian/dists/x/InRelease")
+        self.assertEqual((response.status_code, response.text), (200, "ok"))
+        self.assertEqual(opened, [("deb.debian.org", 80)])
+        self.assertTrue(received[0].startswith(b"GET /debian/dists/x/InRelease HTTP/1.1"))
+        self.assertNotIn(b"proxy-authorization", received[0].lower())
+        self.assertNotIn(self.edge.nonce.encode(), received[0])
+        for _ in range(250):  # the row lands after the client saw the response
+            if self.package_rows():
+                break
+            await asyncio.sleep(0.02)
+        [row] = self.package_rows()
+        self.assertEqual((row["via"], row["host"], row["port"], row["allowed"]),
+                         ("edge", "deb.debian.org", 80, True))
+        self.assertEqual(self.rows(), [])  # not a metered route
+        self.assertFalse(Path(os.environ["BENCH_SPEND_FILE"]).exists())
+
+    async def test_package_policy_never_captures_the_model_route(self):
+        _, opened = await self._package_edge()
+        body = {"model": "claude-sonnet-5-5", "max_tokens": 128000,
+                "messages": [{"role": "user", "content": "hi"}]}
+        response = await self.client().post(MESSAGES, json=body)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.model_calls), 1)  # metered through the meter
+        self.assertEqual(opened, [])
+        self.assertEqual(self.package_rows(), [])
+        self.assertEqual(self.rows()[-1]["route"], "model")
+
+    async def test_package_policy_denials_are_logged_and_keep_edge_rules(self):
+        _, opened = await self._package_edge()
+        response = await self.client().get("https://example.invalid/metadata")
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(opened, [])
+        row = self.package_rows()[-1]
+        self.assertEqual((row["host"], row["allowed"], row["reason"]),
+                         ("example.invalid", False, "not-allowlisted"))
+        self.assertTrue(self.rows()[-1]["denied"])
+
+    def test_entrypoint_loads_the_package_allowlist(self):
+        src = (ROOT / "lop_edge.py").read_text()
+        self.assertIn('package_egress.Policy.load(config["package_allowlist"])', src)
+        # Desktop lane (runner_v2) copies a fixed file set: no eager import.
+        self.assertNotIn("\nimport package_egress\n", src)
+
     async def test_unlisted_get_is_denied_without_latching(self):
         response = await self.client().get("https://example.invalid/metadata")
         self.assertEqual(response.status_code, 403)

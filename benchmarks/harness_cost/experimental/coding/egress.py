@@ -31,6 +31,11 @@ CONSTRAINTS:
   validated run id and never from task input.
 * Every host port is a positive int; the gate listens on the SAME numbers so a
   container URL ``http://bench-gate:<port>`` names exactly one host service.
+* Agent-phase package egress (``../package_egress.py``): the gate also serves
+  an exact-host forward proxy on ``PACKAGE_PROXY_PORT`` (never in the relayed
+  port map), allowlist frozen in ``package-egress-allowlist.json``, model hosts
+  always denied, one row per connection into the run-owned ``log_dir`` -- the
+  gate's ONLY writable mount, never mounted into ``main``.
 """
 
 from __future__ import annotations
@@ -49,6 +54,11 @@ GATE_PYTHON = "/opt/bench/python/cpython-3.14-linux-x86_64-gnu/bin/python3.14"
 SUPPORT = "/opt/bench-support"
 # Each container role gets these and nothing else from the host.
 CA_TARGET = "/run/bench-ca/edge-ca.pem"
+# The package proxy's listen port inside the gate. Not a host port: the gate
+# itself dials allowlisted registries through its uplink.
+PACKAGE_PROXY_PORT = 3128
+PACKAGE_ALLOWLIST = "package-egress-allowlist.json"
+EGRESS_LOG = "/var/log/bench-egress"
 _RUN = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 
 
@@ -64,7 +74,8 @@ def gate_url(port: int, path: str = "") -> str:
 
 
 def compose_override(
-    run_id: str, ports: list[int], image: str, support_dir: Path, toolchain: Path
+    run_id: str, ports: list[int], image: str, support_dir: Path, toolchain: Path,
+    log_dir: Path,
 ) -> dict[str, object]:
     """Harbor ``--extra-docker-compose`` body for one paid trial.
 
@@ -78,7 +89,14 @@ def compose_override(
         raise ValueError("gate needs unique ports")
     if "@sha256:" not in image:
         raise ValueError("gate image must be the digest-pinned task image")
-    relay_args = [f"{p}={p}" for p in ports]
+    if PACKAGE_PROXY_PORT in ports:
+        raise ValueError("a host port collides with the package proxy port")
+    relay_args = [
+        "--package-proxy", str(PACKAGE_PROXY_PORT),
+        "--allowlist", f"{SUPPORT}/{PACKAGE_ALLOWLIST}",
+        "--log", f"{EGRESS_LOG}/connections.jsonl",
+        *(f"{p}={p}" for p in ports),
+    ]
     return {
         "services": {
             "main": {
@@ -121,6 +139,13 @@ def compose_override(
                         "source": str(Path(support_dir).resolve()),
                         "target": SUPPORT,
                         "read_only": True,
+                    },
+                    {
+                        # Per-connection package log: the trial record's source.
+                        "type": "bind",
+                        "source": str(Path(log_dir).resolve()),
+                        "target": EGRESS_LOG,
+                        "read_only": False,
                     },
                 ],
                 "healthcheck": {
@@ -260,4 +285,6 @@ def run_docker(argv: list[str], *, explicit_pull: bool = False, **kwargs):
 
 
 # Support files the gate and the trial need, copied into one per-run directory.
-SUPPORT_FILES = ("gate_relay.py", "gold_probe.py", "lop_launch.py")
+# Paths are relative to coding/; each is copied flat (by basename).
+SUPPORT_FILES = ("gate_relay.py", "gold_probe.py", "lop_launch.py", "../package_egress.py",
+                 PACKAGE_ALLOWLIST)

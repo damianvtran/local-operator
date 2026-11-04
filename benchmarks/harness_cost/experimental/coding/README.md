@@ -118,7 +118,8 @@ hard hold; boolean assertions and arbitrary hashed text are insufficient:
   `frozen: true`; exact `billing_tier`, `model`, ordered `harnesses` and `tasks`
   lists, `rep`, `total_budget_usd`, `trial_budget_usd`, `input_usd_per_m`,
   `output_usd_per_m`, `runtime_sha256`, `toolwire_sha256`, `oracle_sha256`, `subset_sha256`,
-  `catalog_sha256`; `source_sha256` maps every local `*.py` basename to its
+  `catalog_sha256`, `package_egress_sha256` (`{policy, allowlist}` hashes of the
+  agent-phase package proxy, `driver.package_egress_hashes()`); `source_sha256` maps every local `*.py` basename to its
   SHA-256. `task_files` maps each selected task name to its **complete** recursive
   mapping of external payload-relative filenames to SHA-256. Escaping symlinks
   and payload changes fail. Freeze these only after independent review.
@@ -139,6 +140,19 @@ free. Disk space is checked before pulls: >=21 GiB free and estimated >=17 GiB
 remaining (compressed bytes ×3 +512 MiB). Active trials stop below 17 GiB,
 protecting the **15 GiB hard floor**. Shared writers mean this is a guard, not a
 filesystem quota. Only the current exact task image is removed; never global prune.
+
+## Agent-phase package egress
+
+Paid trials have one package route in the agent phase, identical for all seven
+harnesses: an exact-host forward proxy (`../package_egress.py`) served by the
+bench gate on `bench-gate:3128` and, for Local Operator, by its metering edge
+under the same policy (LoP's proxy variables must name the edge). Allowlist:
+`package-egress-allowlist.json` (exact hosts, ports 80/443); model/LLM hosts are
+always denied, even if listed. TLS is tunnelled, not intercepted, so package
+bytes are unmetered; each connection is logged and reported per trial
+(`runs.jsonl` → `package_egress`). Changing the allowlist or policy changes the
+container closure and the preregistration input, voiding earlier records. The
+verifier phase keeps Harbor's own uplink and does not use this proxy.
 
 ## Oracle continuation (not run for this port)
 

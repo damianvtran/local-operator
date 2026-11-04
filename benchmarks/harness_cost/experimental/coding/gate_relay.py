@@ -16,6 +16,11 @@ CONSTRAINTS:
   through unchanged, so metering stays entirely on the host.
 * Prints one ``ready`` line after every listener is bound (the gate's
   healthcheck reads /tmp/gate.ready).
+* ``--package-proxy <port> --allowlist <json> --log <jsonl>`` (required) also
+  serves the agent-phase package proxy (``package_egress.py``, copied beside
+  this file): exact allowlisted hosts on 80/443, model hosts always denied,
+  one log row per connection. It is the ONLY non-fixed destination the gate
+  reaches, and it is deliberately not in the relayed port map.
 """
 
 from __future__ import annotations
@@ -41,6 +46,32 @@ def parse_ports(args: list[str]) -> dict[int, int]:
     if not ports:
         raise ValueError("at least one port mapping is required")
     return ports
+
+
+_OPTIONS = ("--package-proxy", "--allowlist", "--log")
+
+
+def parse_args(args: list[str]) -> tuple[dict[str, object], dict[int, int]]:
+    """``(options, port map)``; the package-proxy options are all required.
+
+    Required rather than optional so a gate can never come up without the
+    package route for one harness and with it for another (equal treatment).
+    """
+    opts: dict[str, object] = {}
+    rest = list(args)
+    while rest and rest[0].startswith("--"):
+        name = rest.pop(0)
+        if name not in _OPTIONS or name.lstrip("-").replace("-", "_") in opts or not rest:
+            raise ValueError(f"unknown, repeated or valueless option: {name}")
+        opts[name.lstrip("-").replace("-", "_")] = rest.pop(0)
+    if set(opts) != {"package_proxy", "allowlist", "log"}:
+        raise ValueError("--package-proxy, --allowlist and --log are required")
+    ports = parse_ports(rest)
+    proxy = str(opts["package_proxy"])
+    if not proxy.isdigit() or not 0 < int(proxy) < 65536 or int(proxy) in ports:
+        raise ValueError("package proxy port must be a free integer in 1..65535")
+    opts["package_proxy"] = int(proxy)
+    return opts, ports
 
 
 async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -73,12 +104,22 @@ def _handler(host_port: int):
 
 
 async def main(argv: list[str]) -> None:
-    ports = parse_ports(argv)
+    opts, ports = parse_args(argv)
+    # Imported here: package_egress.py sits beside this file in the gate's
+    # support mount; the port-map tests import this module without it.
+    import package_egress
+
+    proxy = package_egress.PackageProxy(
+        package_egress.Policy.load(str(opts["allowlist"])),
+        package_egress.ConnectionLog(str(opts["log"]), via="gate"),
+    )
     servers = [
         await asyncio.start_server(_handler(hp), "0.0.0.0", lp) for lp, hp in ports.items()
     ]
+    servers.append(await asyncio.start_server(proxy.handle, "0.0.0.0", opts["package_proxy"]))
     READY.write_text("ready\n")
-    print("ready " + " ".join(f"{lp}->{hp}" for lp, hp in ports.items()), flush=True)
+    print("ready " + " ".join(f"{lp}->{hp}" for lp, hp in ports.items())
+          + f" package-proxy:{opts['package_proxy']}", flush=True)
     await asyncio.gather(*(s.serve_forever() for s in servers))
 
 

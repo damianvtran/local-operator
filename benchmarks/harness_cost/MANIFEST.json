@@ -49,8 +49,8 @@
     },
     {
       "path": "experimental/EXPERIMENTAL-MANIFEST.json",
-      "bytes": 9921,
-      "sha256": "e8bdec07ef9c37790ad99f6eb45487a62f58222b09ce46ea5839ccfd470a8ec1"
+      "bytes": 10368,
+      "sha256": "ad049af62f374bdc919382ca553ff4fcca0ba1227e03d5e46b4cd73bf2b72f28"
     },
     {
       "path": "experimental/LOP-EDGE-VERIFICATION.md",
@@ -144,8 +144,8 @@
     },
     {
       "path": "experimental/coding/README.md",
-      "bytes": 10429,
-      "sha256": "5ea00c9d191ebf6b0ade91ffff567b2f4e3d0faf2f39a76c33746bae820cb53a"
+      "bytes": 11356,
+      "sha256": "baca2c145152cc80e47f099a4afabd1c8c7f28c57c08d073d3350ad543c4ffde"
     },
     {
       "path": "experimental/coding/SOURCE_MAP.md",
@@ -154,8 +154,8 @@
     },
     {
       "path": "experimental/coding/STATUS.md",
-      "bytes": 5748,
-      "sha256": "43b181d2b7f3babbeb73d35abc42a1eb8589b03b952eeaff6e27d265c70fe646"
+      "bytes": 7409,
+      "sha256": "5edb5921bd4851546221bd116e80f6536d2751aaeb48c333db00c334a2f3ea47"
     },
     {
       "path": "experimental/coding/THIRD_PARTY_NOTICES.md",
@@ -184,18 +184,18 @@
     },
     {
       "path": "experimental/coding/driver.py",
-      "bytes": 35604,
-      "sha256": "e9913b910df1e898fdbc1a4da0eddc11410f9b70dd571b9e36b7973d20e526ac"
+      "bytes": 38397,
+      "sha256": "20f8556ac3c4769f006571a92288e3a06f98f1c3112dcc59cd8c81ab9e26a241"
     },
     {
       "path": "experimental/coding/egress.py",
-      "bytes": 12267,
-      "sha256": "f0b6a5f79d64c0a8f3bcb2f4edb97f8d49b2b0a607e37225416802f8280ef69a"
+      "bytes": 13650,
+      "sha256": "3838fb850f7dd45541eb687deb5801816a157b857431ace7efb331dea0062921"
     },
     {
       "path": "experimental/coding/gate_relay.py",
-      "bytes": 3305,
-      "sha256": "7dfd8a2df96264fc835fe0e76abeda4ae965353ff39a51793345060d5f288837"
+      "bytes": 5342,
+      "sha256": "318ccf6c9618eff6f69914f6572b026a30856311b8aeb3d82022af3149288262"
     },
     {
       "path": "experimental/coding/gold_probe.py",
@@ -211,6 +211,11 @@
       "path": "experimental/coding/oracle_sweep.py",
       "bytes": 10828,
       "sha256": "38d43c41d75d3111572fd3995dd3bad5ee6118a1323d692eae419558a46bae9f"
+    },
+    {
+      "path": "experimental/coding/package-egress-allowlist.json",
+      "bytes": 1416,
+      "sha256": "34a2088db869a2b0ad91e8a9ebad2226138653f35659a59f7942e1b57ab180b0"
     },
     {
       "path": "experimental/coding/subset.json",
@@ -234,8 +239,13 @@
     },
     {
       "path": "experimental/coding/test_lop_container.py",
-      "bytes": 39457,
-      "sha256": "4f42e75a12a20c33520cf067191f2e5498739b1bb0e32058b4c950967814a3e4"
+      "bytes": 39907,
+      "sha256": "1976ada0ac4e92b49e4eb7e24e911c80d3efa82c3f7a4fb838a29b2f818715c0"
+    },
+    {
+      "path": "experimental/coding/test_package_egress.py",
+      "bytes": 15527,
+      "sha256": "31a771ff54855151edaa28be1d1da6d799a3e4bc41c023b4493ccb2667ad7b81"
     },
     {
       "path": "experimental/evaluate.py",
@@ -279,8 +289,8 @@
     },
     {
       "path": "experimental/lop_edge.py",
-      "bytes": 32400,
-      "sha256": "f7bc56f458eb95c363fff74886d054aee3f3bc7d5891335b49f39fbd68a368e3"
+      "bytes": 35259,
+      "sha256": "ed28e05f4b10854c38222a15c9021f8ea6e2a7df4db1a22264c4f1b20d8fbd42"
     },
     {
       "path": "experimental/lop_launch.py",
@@ -289,8 +299,13 @@
     },
     {
       "path": "experimental/meter_proxy.py",
-      "bytes": 41300,
-      "sha256": "1901cb2dc5d3fa671f48542a1451a697969bcba3d61dc2ba93545fd50fed1c18"
+      "bytes": 44366,
+      "sha256": "b91f7716622fda9fd433a52e95345b730453c94b42f5ccd6af49aadf48116bd1"
+    },
+    {
+      "path": "experimental/package_egress.py",
+      "bytes": 11842,
+      "sha256": "9218cbab5fdd0048e7830db0c5ee6e8f32303e0a9f9c846a3f4aba6729d37d0d"
     },
     {
       "path": "experimental/radient_meter/classifier.py",
@@ -324,8 +339,8 @@
     },
     {
       "path": "experimental/test_adapters.py",
-      "bytes": 38879,
-      "sha256": "8425ba3bc729c8251c2c910b3f26af6eb9bf5ec2bda20aee42fa229ef5459b43"
+      "bytes": 43885,
+      "sha256": "ae282d84ef9da6305979d00f0bc8a588ad3eb3c95d065135fddee219b2cfe39b"
     },
     {
       "path": "experimental/test_bridge_sse.py",
@@ -354,8 +369,8 @@
     },
     {
       "path": "experimental/test_lop_edge.py",
-      "bytes": 32167,
-      "sha256": "ae867a1a5f8ee0776332727bcf0ba9b4c1c6a818ea48b81a9ddb1cf304332e84"
+      "bytes": 36191,
+      "sha256": "89a83c26b6dd34c9847bbbf1017f864ee9b4efa2b248742f20f29f28851a96d5"
     },
     {
       "path": "experimental/test_runner_v2.py",

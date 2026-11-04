@@ -87,6 +87,7 @@ CONTAINER_CLOSURE = (
     "../radient_meter/json_types.py",
     "../radient_meter/model.py",
     "../radient_meter/sse_stream.py",
+    "../package_egress.py",
     "adapters.py",
     "bench_verifier.py",
     "driver.py",
@@ -94,11 +95,43 @@ CONTAINER_CLOSURE = (
     "gate_relay.py",
     "gold_probe.py",
     "lop_launch.py",
+    "package-egress-allowlist.json",
 )
+# Agent-phase package egress (egress.py, ../package_egress.py): the policy code
+# and its frozen exact-host allowlist. Both are closure members AND a named
+# preregistration input, so widening the allowlist voids the container S4
+# record and any frozen preregistration.
+PACKAGE_ALLOWLIST = HERE / "package-egress-allowlist.json"
 
 
 def container_closure_hashes():
     return {name: digest(HERE / name) for name in CONTAINER_CLOSURE}
+
+
+def package_egress_hashes():
+    return {"policy": digest(HERE.parent / "package_egress.py"),
+            "allowlist": digest(PACKAGE_ALLOWLIST)}
+
+
+def package_egress_summary(logs):
+    """Every package-egress connection of one trial, for its runs.jsonl record.
+
+    ``logs`` are the gate's and (LoP) the edge's JSON-lines logs; a missing
+    file means that side saw no connection. Disclosed, never priced: the bytes
+    are registry traffic, not model traffic.
+    """
+    rows = []
+    for log in logs:
+        if Path(log).is_file():
+            rows += [json.loads(line) for line in Path(log).read_text().splitlines() if line]
+    return {
+        "policy": package_egress_hashes(),
+        "allowed": sum(1 for r in rows if r.get("allowed") is True),
+        "denied": sum(1 for r in rows if r.get("allowed") is False),
+        "bytes_up": sum(int(r.get("bytes_up", 0)) for r in rows),
+        "bytes_down": sum(int(r.get("bytes_down", 0)) for r in rows),
+        "connections": rows,
+    }
 
 
 def container_evidence(args):
@@ -257,6 +290,17 @@ def container_plan(run_id, harness, image, *, meter_port, bridge_port, edge=None
     if codex:
         urls["codex"] = egress.gate_url(bridge_port, "/v1")
     env = {}
+    if harness != "local-operator":
+        # Package route for tool children (apt reads http(s)_proxy from env;
+        # pip, uv, curl and git honour the same). NO_PROXY exempts the gate
+        # host: every model URL above is http://bench-gate:<port>, so model
+        # traffic goes straight to the meter/bridge, never into the proxy
+        # (which would deny it anyway). Both spellings, identical values.
+        proxy = f"http://{egress.GATE_SERVICE}:{egress.PACKAGE_PROXY_PORT}"
+        no_proxy = f"{egress.GATE_SERVICE},127.0.0.1,localhost,::1"
+        for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+            env[key] = proxy
+        env.update(NO_PROXY=no_proxy, no_proxy=no_proxy)
     if harness == "local-operator":
         if not edge:
             raise ValueError("LoP runs only behind its host edge")
@@ -337,6 +381,7 @@ def preflight(args):
         "oracle_sha256": args.oracle_sha256,
         "source_sha256": {p.name: digest(p) for p in sorted(HERE.glob("*.py"))},
         "catalog_sha256": digest(HERE / "codex-model-catalog.json"),
+        "package_egress_sha256": package_egress_hashes(),
     }
     if any(prereg.get(k) != v for k, v in expected.items()):
         raise ValueError("requested run differs from frozen preregistration")
@@ -607,7 +652,11 @@ def start_edge(args, run_id):
         cwd=HERE.parent, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL, text=True, start_new_session=True,
     )
-    config = {"run_id": run_id, "run_dir": str(run_dir), "meter_base": args.meter_url.rstrip("/")}
+    # The edge serves LoP's package route itself (lop_edge docstring): LoP's
+    # proxy variables must keep naming the edge, so its tool children reach
+    # registries through it under the same policy as the gate's proxy.
+    config = {"run_id": run_id, "run_dir": str(run_dir), "meter_base": args.meter_url.rstrip("/"),
+              "package_allowlist": str(PACKAGE_ALLOWLIST)}
     if os.environ.get("BENCH_DECISIONS_URL"):  # zero-paid rig fixture only
         config["decisions_url"] = os.environ["BENCH_DECISIONS_URL"]
     proc.stdin.write(json.dumps({**config, "radient_token": token}) + "\n")
@@ -640,10 +689,13 @@ def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge,
     support = args.output / "support" / run_id
     support.mkdir(parents=True)
     for name in egress.SUPPORT_FILES:
-        shutil.copy(HERE / name, support / name)
+        shutil.copy(HERE / name, support / Path(name).name)
+    egress_log = args.output / "egress" / run_id
+    egress_log.mkdir(parents=True)
     override = egress.write_override(
         args.output / "support" / (run_id + ".compose.json"),
-        egress.compose_override(run_id, plan["ports"], plan["image"], support, args.toolchain),
+        egress.compose_override(run_id, plan["ports"], plan["image"], support, args.toolchain,
+                                egress_log),
     )
     url = plan["urls"]["anthropic"]
     mounts = [
@@ -776,6 +828,10 @@ def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge,
         "cost_usd": sum(float(r["usage"]["cost"]) for r in rows),
         "requests": len(rows),
         "verified": bool(rows) and reward is not None and not disk_stop and code == 0,
+        "package_egress": package_egress_summary(
+            [egress_log / "connections.jsonl"]
+            + ([args.output / "edge" / run_id / "package-egress.jsonl"] if edge else [])
+        ),
     }
     with (args.output / "runs.jsonl").open("a") as stream:
         stream.write(json.dumps(record) + "\n")

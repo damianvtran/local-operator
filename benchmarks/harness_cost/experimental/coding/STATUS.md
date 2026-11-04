@@ -1,4 +1,4 @@
-# Coding lane status — 2026-11-03
+# Coding lane status — 2026-11-04
 
 ## Container metering path (implemented; container S4 pending)
 
@@ -31,6 +31,28 @@
   partial-content matches (archives, concatenations) are out of scope.
 * **Budget:** the external meter is the single budget authority for both lanes
   (R6 F19); the lane-local reservation guard was removed.
+* **Agent-phase package egress (S8, 2026-11-04):** the paid fence left no
+  package route in the agent phase, so `apt-get`/`pip` in the oracle's own
+  `solve.sh` failed (nginx-request-logging, kv-store-grpc: 0). The gate now
+  also runs `../package_egress.py`, an HTTP CONNECT + plain-HTTP forward proxy
+  on `bench-gate:3128`: exact hosts from `package-egress-allowlist.json` (apt
+  mirrors, PyPI, four solve.sh download hosts), ports 80/443, no IP literals,
+  upstream addresses must be public. Model/LLM hosts and their subdomains
+  (anthropic, openai, openrouter, radienthq, deepseek, Gemini/Vertex, Bedrock,
+  Azure OpenAI, Mistral, xAI, Groq, ...) are denied even if listed. TLS is
+  tunnelled, not intercepted: package bytes are unmetered and disclosed. Every
+  connection (host, port, bytes, allowed/denied + reason) is logged and copied
+  into the trial's `runs.jsonl` row as `package_egress`. Same route for all 7:
+  the six non-LoP harnesses get `HTTP(S)_PROXY=http://bench-gate:3128` with
+  `NO_PROXY=bench-gate,...` (their model URLs all name `bench-gate`, so model
+  traffic never enters the proxy); LoP keeps `HTTPS_PROXY` = its edge (the
+  launcher refuses anything else), and the edge applies the SAME policy to
+  tool-child requests, tunnelling allowlisted hosts and logging them in the
+  same row shape, while model routes stay MITM-metered. Policy and allowlist
+  are `CONTAINER_CLOSURE` members and the prereg `package_egress_sha256` input.
+  Limits: static-scan derivation (redirect/CDN hosts unconfirmed until a logged
+  oracle sweep through the proxy); a tool that ignores proxy env still has no
+  route; the canary denial is unchanged.
 * **REQUIRED before any pilot:** re-qualify the oracle for the subset under
   `BenchVerifier` (Docker; not run). The earlier oracle acceptance used Harbor's
   stock verifier and does not carry over to this grading path.

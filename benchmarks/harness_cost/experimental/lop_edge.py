@@ -39,6 +39,14 @@ CONSTRAINTS:
 * Rows record method/host/path/status/body hash and billing facts — never
   headers, bodies or credential values (Radient usage ids are stored hashed).
 * HTTP/1.1 only: nothing in ``local_operator/`` enables HTTP/2 at 500883ef.
+* Package egress (container lane only, ``package_policy``): LoP's tool
+  children inherit ``HTTPS_PROXY`` naming THIS edge, and the launcher refuses
+  any other proxy, so the agent-phase package route the other six harnesses
+  get at the bench gate is served here under the SAME ``package_egress``
+  policy and log shape: a CONNECT or plain-HTTP request whose host the policy
+  allows is tunnelled unmodified (no MITM, unmetered, logged per connection).
+  Model hosts are always denied by that policy, so they keep falling through
+  to the metered routes below; with no policy (desktop lane) nothing changes.
 """
 
 from __future__ import annotations
@@ -61,6 +69,7 @@ from collections.abc import Iterable, Mapping
 from decimal import Decimal
 from http import HTTPStatus
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import httpx
 from cryptography import x509
@@ -76,6 +85,12 @@ from radient_meter.classifier import (
     validate_classifier_request,
 )
 from radient_meter.json_types import parse_json
+
+if TYPE_CHECKING:
+    # Imported lazily below: only the container lane (driver.start_edge) runs
+    # the edge with a package policy, so the desktop lane (runner_v2, which
+    # copies a fixed file set) never depends on package_egress.py.
+    import package_egress
 
 DECISIONS_URL = "https://api.radienthq.com/v1/decisions"
 # ``/v1/messages/count_tokens`` is deliberately absent: LoP 500883ef never calls
@@ -305,6 +320,7 @@ class EdgeServer:
         meter_client: httpx.AsyncClient | None = None,
         decisions_client: httpx.AsyncClient | None = None,
         decisions_url: str = DECISIONS_URL,
+        package_policy: package_egress.Policy | None = None,
     ) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", run_id):
             raise ValueError("invalid run identifier")
@@ -324,6 +340,14 @@ class EdgeServer:
             timeout=httpx.Timeout(120, connect=30), trust_env=False, follow_redirects=False
         )
         self._decisions_url = decisions_url
+        self.package_log_path = self.run_dir / "package-egress.jsonl"
+        self._packages: package_egress.PackageProxy | None = None
+        if package_policy is not None:
+            import package_egress
+
+            self._packages = package_egress.PackageProxy(
+                package_policy, package_egress.ConnectionLog(self.package_log_path, via="edge")
+            )
         self.ca = RunCA()
         self.ca_path = self.run_dir / "edge-ca.pem"
         self.log_path = self.run_dir / "edge-requests.jsonl"
@@ -432,6 +456,9 @@ class EdgeServer:
                     close=True,
                 )
                 return
+            if self._packages is not None and await self._package(reader, writer, method,
+                                                                  target, headers):
+                return
             if method != "CONNECT":
                 # Plain-HTTP proxying would carry a request the edge cannot
                 # route by TLS host; refuse it like any unlisted route.
@@ -467,6 +494,33 @@ class EdgeServer:
             self._writers.discard(writer)
             with contextlib.suppress(Exception):
                 writer.close()
+
+    async def _package(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        method: str,
+        target: str,
+        headers: dict[str, str],
+    ) -> bool:
+        """Serve an allowlisted package request; ``False`` hands it to the metered path.
+
+        A non-model destination the policy denies is logged here as well (the
+        trial's package record must show every attempt), then still takes the
+        edge's normal deny path, so its latch rules are unchanged.
+        """
+        assert self._packages is not None
+        parsed = self._packages.target(method, target)
+        if parsed is None:
+            return False
+        reason = self._packages.policy.decide(parsed[0], parsed[1])
+        if reason is None:
+            await self._packages.dispatch(reader, writer, method, target, headers)
+            return True
+        if reason != "model-host":
+            self._packages.log.write(method=method, host=parsed[0].lower(), port=parsed[1],
+                                     allowed=False, reason=reason, bytes_up=0, bytes_down=0)
+        return False
 
     async def _tunnel(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str
@@ -728,12 +782,18 @@ async def _serve_from_stdin() -> None:
     upstream at a loopback fixture; a paid run uses the default.
     """
     config = json.loads(sys.stdin.readline())
+    policy = None
+    if config.get("package_allowlist"):
+        import package_egress
+
+        policy = package_egress.Policy.load(config["package_allowlist"])
     server = EdgeServer(
         run_id=config["run_id"],
         run_dir=Path(config["run_dir"]),
         radient_token=config["radient_token"],
         meter_base=config["meter_base"],
         decisions_url=config.get("decisions_url", DECISIONS_URL),
+        package_policy=policy,
     )
     await server.start()
     sys.stdout.write(json.dumps({"port": server.port, "env": server.child_env()}) + "\n")
