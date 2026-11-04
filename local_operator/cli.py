@@ -13460,24 +13460,23 @@ def _resolve_org_client(base_dir: Path) -> "RadientClient | None":
     because its fix is a different one from a missing login's (review round 1,
     R1-2/S-1).
     """
-    from pydantic import SecretStr  # lazy: pydantic stays off the startup path
-
-    from local_operator.clients.radient import RadientClient  # lazy: HTTP stack
     from local_operator.env import (
         DEFAULT_RADIENT_API_BASE_URL,  # quoted, never spelled (see below)
     )
+    from local_operator.hub_org.client import build_org_client
     from local_operator.providers.radient_credentials import (  # lazy: auth stack
         ORG_LOGIN_REMEDY,
         org_destination_refused_sentence,
-        org_oauth_destination_allowed,
-        resolve_radient_oauth_access_sync,
     )
 
     config_manager = ConfigManager(base_dir)
-    base_url = _radient_hub_base_url(config_manager)
-    access = resolve_radient_oauth_access_sync(config_manager.config_dir, base_url)
-    if access is None:
-        if not org_oauth_destination_allowed(base_url):
+    # The decision lives in ``hub_org.client`` (shared with the agent tool and
+    # the background auto-enrol, which cannot print); this function only
+    # renders the reason it answers.
+    built = build_org_client(config_manager)
+    base_url = built.base_url
+    if built.client is None:
+        if built.reason == "destination-refused":
             # The sentence comes from the ONE definition the CLI and the local
             # server share, and the canonical host in it is quoted at runtime
             # from env.py's constant: cli.py must stay free of URL-shaped

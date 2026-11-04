@@ -3668,6 +3668,60 @@ def install_skill(
                 "origin-conflict", "managed alias belongs to another local skill origin"
             )
         destination = storage.path(alias)
+        # BUNDLE ADOPTION (take-hub only). A bundle has no per-file merge engine
+        # -- its content is a hash-bound archive, so a merged tree could never
+        # match the published tree hash -- which is why bundles used to stop at
+        # the storage's hard ``alias-occupied`` refusal with no way forward. The
+        # org bulk pull (``hub_org.pull``) needs one, and hub-wins-with-backup
+        # is the only honest adoption for an archive. The occupying folder is
+        # snapshotted to ``hub/backups/skill-adopt-<alias>-<uuid>`` with the
+        # SAME ``durable_snapshot`` the document adoption uses (so one restore
+        # procedure covers both), then moved aside and replaced by the hub's
+        # archive in the ordinary install transaction. Only a folder no hub
+        # origin owns qualifies (``owner is None``); an owned alias is a
+        # reinstall/resume and keeps its own path.
+        bundle_adoption: dict[str, Any] | None = None
+        if bundle is not None and owner is None and destination.exists():
+            if dry_run:
+                return {
+                    "reports": [
+                        {
+                            "kind": "skill",
+                            "local_id": local_id,
+                            "name": alias,
+                            "hub_id": hub_id,
+                            "outcome": "needs-review",
+                            "applied": False,
+                        }
+                    ],
+                    "bundle": _bundle_summary(bundle),
+                    "publisher": _bundle_publisher(resolved.document),
+                    "bundle_adoption": {"strategies": ["take-hub"]},
+                    "confirmation_required": True,
+                    "form": "bundle",
+                    "link": None,
+                    "links": links_snapshot(ctx),
+                    "dry_run": True,
+                }
+            if adoption_strategy != "take-hub" or not confirm:
+                raise LinkError(
+                    "alias-occupied",
+                    f"a skill named {alias!r} already exists on this machine outside the hub; "
+                    "a bundle skill can only be adopted hub-wins (take-hub, with confirmation), "
+                    "which backs your copy up first",
+                )
+            from local_operator.hub_sync.skill_adoption import (
+                AdoptionError,
+                durable_snapshot,
+                read_tree,
+            )
+
+            try:
+                occupying = Path(ctx.config_dir).resolve() / "skills" / alias
+                snapshot = durable_snapshot(ctx.config_dir, alias, read_tree(occupying))
+            except AdoptionError as error:
+                raise LinkError(error.code, str(error)) from None
+            bundle_adoption = {"snapshot": snapshot, "occupying": occupying}
         if bundle is None and destination.exists():
             from local_operator.hub_sync.skill_adoption_service import adopt_skill
 
@@ -4003,6 +4057,16 @@ def install_skill(
                     bundle,
                     bearer=resolved.identity.visibility == "org",
                 )
+                # Bundle adoption: the snapshot above is the durable backup;
+                # the live folder is moved to a dot-prefixed sibling (skill
+                # discovery skips dot entries) so the install sees a free alias,
+                # and moved BACK if the transaction refuses -- a failed adopt
+                # must leave the operator's folder exactly where it was.
+                aside: Path | None = None
+                if bundle_adoption is not None:
+                    occupying = bundle_adoption["occupying"]
+                    aside = occupying.with_name(f".adopt-{alias}-{secrets.token_hex(6)}")
+                    os.replace(occupying, aside)
                 try:
                     transaction = ManagedBundleStorage(ctx.config_dir).apply(
                         identity,
@@ -4015,8 +4079,17 @@ def install_skill(
                         automatic=False,
                         basis="reinstall" if reinstall else "initial-install",
                     )
+                except BaseException:
+                    if aside is not None and not bundle_adoption["occupying"].exists():
+                        os.replace(aside, bundle_adoption["occupying"])
+                        aside = None
+                    raise
                 finally:
                     _discard_bundle_download(archive)
+                if aside is not None:
+                    # The backup lives in hub/backups; the moved-aside live
+                    # copy is redundant once the hub's tree is committed.
+                    shutil.rmtree(aside, ignore_errors=True)
             else:
                 assert local_write is not None
                 transaction = storage.apply(
@@ -4099,7 +4172,11 @@ def install_skill(
         if bundle is not None:
             payload["bundle"] = _bundle_summary(bundle)["bundle"]
             payload["publisher"] = publisher
-        return {"reports": [payload], "link": row, "links": snapshot}
+        response: dict[str, Any] = {"reports": [payload], "link": row, "links": snapshot}
+        if bundle_adoption is not None:
+            # The restore point, named in the answer like a document adoption's.
+            response["snapshot"] = bundle_adoption["snapshot"]
+        return response
 
 
 def subscribe_skill(
