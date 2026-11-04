@@ -32,6 +32,9 @@ from local_operator.mobile.push_payload import (
     IDEMPOTENCY_HEADER,
     PAYLOAD_VERSION,
     PUSH_KINDS,
+    SOUND_DEFAULT,
+    SOUND_FIELD,
+    SOUND_NONE,
     TYPE_ATTENTION,
     TYPE_COMPLETION,
     TYPE_DIGEST,
@@ -44,7 +47,9 @@ from local_operator.mobile.push_payload import (
     digest_emit_key,
     digest_payload,
     emit_body,
+    push_sound,
 )
+from local_operator.notifications.sound import DEFAULT_SOUND_ID, sound_ids
 from local_operator.tui.notify import APP_NAME, BODIES, BODY_COMPLETE, digest_subtitle
 
 #: ``tests/unit/mobile/<this file>`` -> the repo root, where the shared
@@ -190,6 +195,7 @@ COMPLETION_INPUT: dict[str, Any] = {
     "kind": "complete",
     "emit_id": "6b1e2d3c4a5f60718293a4b5c6d7e8f9",
     "count": 2,
+    "sound": "soft-pulse",
 }
 
 #: The attention emit's input: one field fewer (no ``conversation``, no
@@ -213,6 +219,7 @@ DIGEST_INPUT: dict[str, Any] = {
     "count": 4,
     "emit_id": "5c7e9a1b3d5f708192a3b4c5d6e7f809",
     "kinds": ["complete", "complete", "complete", "complete"],
+    "sound": "soft-pulse",
 }
 
 
@@ -302,11 +309,12 @@ def test_the_attention_payload_equals_the_filed_literals_with_and_without_exclud
     # The attention form is the SILENT one, so it carries no alert at all — and
     # the absence is declared (absent_fields) rather than left to the equality
     # above, so a later edit that "tidy-ups" an alert onto it fails here.
-    assert fixture["absent_fields"] == [ALERT_FIELD]
+    assert fixture["absent_fields"] == [ALERT_FIELD, SOUND_FIELD]
     for key in ("payload", "exclude_absent_payload", "body"):
-        assert ALERT_FIELD not in fixture[key], f"the attention form must not carry {key}.alert"
-    assert ALERT_FIELD not in with_exclude
-    assert ALERT_FIELD not in without
+        for absent in fixture["absent_fields"]:
+            assert absent not in fixture[key], f"the attention form must not carry {key}.{absent}"
+            assert absent not in with_exclude
+            assert absent not in without
 
     body = emit_body(with_exclude, DEVICE_ROWS)
     _check_block(body["devices"], fixture, where="emit-attention.body.devices")
@@ -573,6 +581,7 @@ def test_the_three_payloads_carry_nothing_the_cloud_must_not_hold() -> None:
         kind="complete",
         emit_id="aa11bb22cc33dd44ee55ff6677889900",
         count=1,
+        sound="soft-pulse",
     )
     bodies = [
         emit_body(completion, DEVICE_ROWS),
@@ -591,6 +600,7 @@ def test_the_three_payloads_carry_nothing_the_cloud_must_not_hold() -> None:
                 count=3,
                 emit_id="00112233445566778899aabbccddeeff",
                 kinds=["complete", "complete", "complete"],
+                sound="soft-pulse",
                 exclude=["d" * 32],
             ),
             DEVICE_ROWS,
@@ -641,6 +651,7 @@ def test_the_kind_vocabulary_is_the_stores_and_refuses_the_composers_gaps() -> N
         "completion_token": "t",
         "emit_id": "e",
         "count": 1,
+        "sound": "soft-pulse",
     }
     for kind in PUSH_KINDS:
         assert completion_payload(kind=kind, **kwargs)["kind"] == kind
@@ -755,3 +766,69 @@ def test_a_heal_mints_a_new_key_and_the_attention_sequence_never_collides() -> N
     assert [v["key"] for v in fixture["attention_vectors"]] == [
         attention_emit_key(v["sequence"]) for v in fixture["attention_vectors"]
     ]
+
+
+# --- data.sound (notification-sounds design §3.6, PR C3) -----------------------
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        # No file, no section, an empty section: every default, so Soft pulse.
+        (None, "soft-pulse"),
+        ({}, "soft-pulse"),
+        ({"notifications": {"sound": {}}}, "soft-pulse"),
+        ({"notifications": {"sound": {"id": "felt-marimba"}}}, "felt-marimba"),
+        ({"notifications": {"sound": {"enabled": True, "id": "tape-warble"}}}, "tape-warble"),
+        # ``system`` is "the platform's own sound", which on the phone is its default.
+        ({"notifications": {"sound": {"id": "system"}}}, SOUND_DEFAULT),
+        # Off wins over any id, ``system`` included.
+        ({"notifications": {"sound": {"enabled": False, "id": "felt-marimba"}}}, SOUND_NONE),
+        ({"notifications": {"sound": {"enabled": False, "id": "system"}}}, SOUND_NONE),
+        # A custom sound (C2) is not on the phone in v1, nor is a typo'd id.
+        ({"notifications": {"sound": {"id": "custom-3f9a2c"}}}, "soft-pulse"),
+        ({"notifications": {"sound": {"id": "soft-puls"}}}, "soft-pulse"),
+        # A hand-written off reads as off, exactly as the settings page paints
+        # it (``strict_bool`` via ``sound.configured``); garbage keeps the default.
+        ({"notifications": {"sound": {"enabled": "off", "id": "hum-swell"}}}, SOUND_NONE),
+        ({"notifications": {"sound": {"enabled": "maybe", "id": "hum-swell"}}}, "hum-swell"),
+        # The computer's volume does not travel: 0 mutes local speakers only.
+        ({"notifications": {"sound": {"id": "hum-swell", "volume": 0}}}, "hum-swell"),
+        # A malformed section is the defaults, never an exception in the worker.
+        ({"notifications": "loud"}, "soft-pulse"),
+        ({"notifications": {"sound": ["soft-pulse"]}}, "soft-pulse"),
+    ],
+)
+def test_push_sound_maps_the_computers_setting_to_what_the_phone_can_play(
+    values: dict[str, Any] | None, expected: str
+) -> None:
+    assert push_sound(values) == expected
+
+
+def test_every_built_in_sound_travels_by_its_own_id_and_the_fixture_lists_them() -> None:
+    """Each shipped sound reaches the phone unchanged, and the filed value list is
+    the catalog's: a sound added to core without a phone file and channel would
+    be a push the app cannot play (mobile M1 bundles exactly this list)."""
+    built_ins = [sound_id for sound_id in sound_ids() if sound_id != "system"]
+    assert len(built_ins) == 10
+    assert DEFAULT_SOUND_ID == "soft-pulse"
+    for sound_id in built_ins:
+        assert push_sound({"notifications": {"sound": {"id": sound_id}}}) == sound_id
+    for name in ("emit-completion.json", "emit-digest.json"):
+        fixture = _fixture(name)
+        assert fixture["sound_values"]["builtin"] == built_ins, name
+        assert fixture["payload_required"][SOUND_FIELD] == "str", name
+        assert {fixture["payload"][SOUND_FIELD], fixture["body"][SOUND_FIELD]} == {"soft-pulse"}
+
+
+def test_both_visible_builders_carry_the_sound_and_refuse_one_the_phone_lacks() -> None:
+    for sound in ("soft-pulse", "bubble-pulse", SOUND_DEFAULT, SOUND_NONE):
+        assert completion_payload(**{**COMPLETION_INPUT, "sound": sound})[SOUND_FIELD] == sound
+        assert digest_payload(**{**DIGEST_INPUT, "sound": sound})[SOUND_FIELD] == sound
+    # The builders validate rather than map: a custom id that reached them
+    # bypassed :func:`push_sound`, and the cloud has no file or channel for it.
+    for bad in ("custom-3f9a2c", "system", "", "Soft-Pulse"):
+        with pytest.raises(ValueError, match="unknown push sound"):
+            completion_payload(**{**COMPLETION_INPUT, "sound": bad})
+        with pytest.raises(ValueError, match="unknown push sound"):
+            digest_payload(**{**DIGEST_INPUT, "sound": bad})
