@@ -11,6 +11,7 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import Any, Iterator
 
 import pytest
 
@@ -20,15 +21,22 @@ BASE = "https://hub.example.test/v1"
 
 
 @pytest.fixture(autouse=True)
-def _isolated(monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolated(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     el.reset_memo()
     monkeypatch.setattr(el, "_configured_base_url", lambda _cfg: BASE)
     yield
     el.reset_memo()
 
 
-def _membership(status: str = "active", plan: str | None = "active", role: str = "member"):
-    entry = {"tenant_id": "t-1", "tenant_name": "Acme", "role": role, "status": status}
+def _membership(
+    status: str = "active", plan: str | None = "active", role: str = "member"
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "tenant_id": "t-1",
+        "tenant_name": "Acme",
+        "role": role,
+        "status": status,
+    }
     if plan is not None:
         entry["plan"] = {"status": plan, "seats": 5}
     return entry
@@ -156,7 +164,7 @@ def test_transient_failure_keeps_orgs_and_backs_off(tmp_path: Path, monkeypatch)
 
     monkeypatch.setattr(el, "_fetch_memberships", boom)
     assert el.refresh(tmp_path, boundary="timer") == [el.OrgRef("t-1", "Acme", "admin")]
-    assert isinstance(el.read_record(tmp_path)["last_error_at"], float)
+    assert isinstance(_record(tmp_path)["last_error_at"], float)
     el.refresh(tmp_path, boundary="timer")
     assert calls == [1]  # inside the 30 min backoff
 
@@ -183,7 +191,7 @@ def test_account_switch_resets_enrol_bookkeeping(tmp_path: Path, monkeypatch) ->
     _seed(tmp_path, seen={"t-1": {"agent": ["x"]}}, next_catalogue_at={"t-1": 1.0})
     monkeypatch.setattr(el, "_fetch_memberships", lambda *_: ("b", [_membership()]))
     el.refresh(tmp_path, boundary="sign-in", force=True)
-    record = el.read_record(tmp_path)
+    record = _record(tmp_path)
     assert record["seen"] == {} and record["next_catalogue_at"] == {}
 
 
@@ -191,7 +199,7 @@ def test_same_account_keeps_enrol_bookkeeping(tmp_path: Path, monkeypatch) -> No
     _seed(tmp_path, seen={"t-1": {"agent": ["x"]}})
     monkeypatch.setattr(el, "_fetch_memberships", lambda *_: ("a", [_membership()]))
     el.refresh(tmp_path, boundary="sign-in", force=True)
-    assert el.read_record(tmp_path)["seen"] == {"t-1": {"agent": ["x"]}}
+    assert _record(tmp_path)["seen"] == {"t-1": {"agent": ["x"]}}
 
 
 def test_lock_loser_skips_refresh(tmp_path: Path, monkeypatch) -> None:
@@ -218,4 +226,11 @@ def test_record_never_holds_a_token(tmp_path: Path, monkeypatch) -> None:
         "seen",
         "next_catalogue_at",
         "last_error_at",
+        "last_enrol",
     }
+
+
+def _record(config_dir: Path) -> dict[str, Any]:
+    record = el.read_record(config_dir)
+    assert record is not None
+    return record

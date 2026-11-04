@@ -27,6 +27,19 @@
         "settings_io.py": 6
       }
     },
+    "wire.settings.hub_org": {
+      "reason": "org Agent Hub settings section rendered in-process by settings_io._t as plain strings",
+      "render_points": [
+        {
+          "path": "local_operator/settings_io.py",
+          "symbol": "settings_io._t",
+          "note": "org hub section title/description and the auto-enrol row merged into the settings registry as plain label/help strings"
+        }
+      ],
+      "references": {
+        "settings_io.py": 8
+      }
+    },
     "wire.console": {
       "reason": "console section title/description and row labels rendered by settings_io._t",
       "render_points": [

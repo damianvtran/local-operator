@@ -9,7 +9,7 @@ installs without copying files into each user's configuration directory.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from local_operator.skills.discovery import Skill, parse_frontmatter
@@ -17,7 +17,52 @@ from local_operator.skills.protocol import resolve_resource_url
 
 
 class Guide(Skill):
-    """One immutable harness guide routed through the shared semantic index."""
+    """One immutable harness guide routed through the shared semantic index.
+
+    ``requires`` names an availability predicate from the ``requires``
+    frontmatter key (see :data:`GUIDE_PREDICATES`). Discovery itself stays
+    static and network-free; the SESSION drops a guide whose predicate fails
+    before it builds the router, the classification roster and the
+    ``guide://`` resolver (:func:`guides_available`), so an ineligible session
+    can neither see, recommend nor read it.
+    """
+
+    requires: str | None = None
+
+
+def _radient_team(config_dir: Path | None) -> bool:
+    # The org Agent Hub is a Radient Team feature and must not be advertised to
+    # anyone signed out or outside a team-plan org (operator constraint). The
+    # gate is the cached record: zero network, fail closed.
+    if config_dir is None:
+        return False
+    from local_operator.hub_org.eligibility import is_eligible  # lazy: hub stack
+
+    return is_eligible(config_dir)
+
+
+#: ``requires:`` value -> predicate over the session's config root. An UNKNOWN
+#: value fails closed: a typo must hide a gated guide, never publish it.
+GUIDE_PREDICATES: dict[str, Callable[[Path | None], bool]] = {
+    "radient-team": _radient_team,
+}
+
+
+def guides_available(guides: list[Guide], config_dir: Path | None) -> list[Guide]:
+    """The guides whose ``requires`` predicate holds for ``config_dir``. Never raises."""
+
+    kept: list[Guide] = []
+    for guide in guides:
+        if guide.requires is None:
+            kept.append(guide)
+            continue
+        predicate = GUIDE_PREDICATES.get(guide.requires)
+        try:
+            if predicate is not None and predicate(config_dir):
+                kept.append(guide)
+        except Exception:  # noqa: BLE001 - a failing predicate hides its guide
+            continue
+    return kept
 
 
 def discover_guides() -> list[Guide]:
@@ -51,6 +96,11 @@ def discover_guides() -> list[Guide]:
             name = child.name
         if not isinstance(description, str) or not description.strip():
             continue
+        requires = metadata.get("requires")
+        if requires is not None and (not isinstance(requires, str) or not requires.strip()):
+            # Present but unusable reads as an unknown predicate (hidden), not
+            # as "no requirement" (published).
+            requires = "invalid"
         guides.append(
             Guide(
                 name=name.strip(),
@@ -59,6 +109,7 @@ def discover_guides() -> list[Guide]:
                 base_dir=child,
                 source=str(root),
                 resource_type="guide",
+                requires=requires.strip() if isinstance(requires, str) else None,
             )
         )
     return guides
