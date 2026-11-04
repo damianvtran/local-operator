@@ -283,7 +283,13 @@ def test_a_signal_to_the_wrapper_reaches_the_group(reap_markers, forwarded):
 
     assert returncode == 128 + forwarded, f"rc={returncode}, stderr={stderr!r}"
     assert f"signal {forwarded}" in stderr
-    assert _wait_until_gone(token) == [], "a signalled wrapper left its group running"
+    # STDERR IN THE MESSAGE: CI keeps only the assertion, and #3368 CI job
+    # 126130789160 failed here with rc 143 and no visible cause -- the wrapper's
+    # own `... refused: <reason>` line is what separates a churn refusal from a
+    # deadline one, and without it the failure could only be argued about.
+    assert (
+        _wait_until_gone(token) == []
+    ), f"a signalled wrapper left its group running; stderr={stderr!r}"
 
 
 def test_a_child_killed_by_someone_else_reports_128_plus_the_signal(reap_markers):

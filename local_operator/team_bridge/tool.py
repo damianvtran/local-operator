@@ -136,6 +136,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import re
 import time
 import unicodedata
@@ -181,6 +182,8 @@ from .types import (
     validate_recipient_shape,
     validate_send_recipient,
 )
+
+logger = logging.getLogger(__name__)
 
 #: Ops the tool accepts. ``decide`` is deliberately absent (see the module
 #: docstring); the executor still names it in its refusal so a model that
@@ -1453,7 +1456,17 @@ def _agent_run_advice(
       tell the model a delivered message failed — inviting a second copy;
     * a guard already found BUSY in this call is not asked again (code n-A):
       each attempt waits out the 5 s busy timeout, and advice is not worth a
-      second wait.
+      second wait. The cost (round 5, n-B): a successful send with NO notice
+      in that same call cannot reset the remembered level to 0, because the
+      reset is that skipped lookup. The next send on a free guard resets it,
+      so lock contention delays or loses at most one threshold warning —
+      never a post, and never a warning that should not have fired.
+
+    A swallowed fault leaves one DEBUG line naming the exception CLASS only
+    (security round 5, n-3): a persistent bookkeeping fault (a schema skew
+    from an older build, say) would otherwise disable the warning with
+    nothing to diagnose. Never the message: an exception's text can carry
+    hub-supplied values, and bridge logs never carry content.
     """
 
     if guard_busy:
@@ -1465,7 +1478,8 @@ def _agent_run_advice(
             conversation_id=conversation_id,
             notice=_agent_wake_notice(result),
         )
-    except Exception:  # noqa: BLE001 — advice after delivery must never fail the post
+    except Exception as exc:  # noqa: BLE001 — advice after delivery must never fail the post
+        logger.debug("bridge: agent-run advice dropped code=%s", type(exc).__name__)
         return None
 
 

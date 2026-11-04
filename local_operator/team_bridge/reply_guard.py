@@ -90,9 +90,11 @@ even read the retry guidance. So :func:`reserve_post` still raises
 ``ReplyGuardUnavailable`` (classified ``transient`` for BUSY/LOCKED, otherwise
 broken), and the tool POSTS ANYWAY with :func:`unavailable_warning` in the
 result: "reply guard busy; posted without duplicate/run tracking", or "reply
-guard state is broken (<reason>); posted without duplicate/run tracking — tell
-the operator". That post has no duplicate skip and no run count; the cost is
-that accidental double sends are not caught while the state is unusable
+guard state is broken (<reason>); posted without duplicate/run tracking — do
+not resend or retry; report this to the operator" (a permanent fault: stop and
+report, never a retry loop — review round 2, S-6). That post has no duplicate
+skip and no run count; the cost is that accidental double sends are not caught
+while the state is unusable
 (review round 4, security n-1). The trigger side fails open too
 (``record_trigger`` never raises); if a trigger is lost under a lock, an
 identical short answer to that unrecorded question within 10 s can be skipped
@@ -141,6 +143,15 @@ AGENT_RUN_COUNT_MAX = 10**6
 #: Classification of a post for an OLDER build sharing this file (it reads the
 #: ``agent_to_agent`` and ``human_prompted`` columns); this build decides
 #: nothing from them. An agent trigger older than this no longer explains a post.
+#:
+#: NOT A RETRY CLOCK (review round 2, S-7). The hourly ceiling whose
+#: ``retry_after_s`` could outlast this TTL — so a retry was admitted earlier
+#: than the stated time — is gone, and nothing in this module states a retry
+#: time any more: a skip names how long ago the twin went out, never when to
+#: try again, and no result carries ``retry_after_s``
+#: (``test_no_guard_result_states_a_retry_time``). A future delay derived from
+#: guard state must be capped at the trigger's remaining TTL, or it is not the
+#: earliest admit time it claims to be.
 TRIGGER_TTL_S = 1800.0
 HUMAN_TRIGGER_TTL_S = 600.0
 
@@ -376,9 +387,14 @@ def unavailable_warning(failure: ReplyGuardUnavailable) -> str:
 
     if failure.transient:
         return "reply guard busy; posted without duplicate/run tracking"
+    # PERMANENT (review round 2, S-6): a damaged key or an unreadable file never
+    # recovers on its own, so the line says the post LANDED (a resend would be a
+    # second copy) and that the fix is the operator's, not a retry's. It never
+    # asks the agent to wait and try again: round 2's "resumes in 5s" invited
+    # up to 720 wakes an hour on a guard that would never come back.
     return (
         f"reply guard state is broken ({failure.reason}); posted without "
-        "duplicate/run tracking — tell the operator"
+        "duplicate/run tracking — do not resend or retry; report this to the operator"
     )
 
 
@@ -552,7 +568,14 @@ def reserve_post(
         kind = str(trigger[1]) if trigger is not None else ""
         age = now - inbound_at if inbound_at is not None else None
         human_prompted = age is not None and kind == "human" and age <= HUMAN_TRIGGER_TTL_S
-        agent_to_agent = age is not None and kind == "agent" and age <= TRIGGER_TTL_S
+        # ``unknown`` counts as an agent (review round 2, S-5): a hub from
+        # before ``sender_kind`` (agent-server ``4131fd3b``) records every
+        # sender as unknown, and reading that as "not an agent" exempted an
+        # agent loop on such a hub from the agent-to-agent classification. The
+        # safe direction is the one that classifies more posts as agent chatter:
+        # only a positively HUMAN trigger is exempt. Classification only — this
+        # build refuses nothing from it.
+        agent_to_agent = age is not None and kind != "human" and age <= TRIGGER_TTL_S
 
         if digest is not None:
             previous = conn.execute(
@@ -710,12 +733,12 @@ __all__ = [
     "ReplyGuardUnavailable",
     "Reservation",
     "Skipped",
+    "agent_run_warning",
     "body_hash",
     "guard_path",
     "key_path",
-    "agent_run_warning",
-    "unavailable_warning",
     "record_trigger",
     "release",
     "reserve_post",
+    "unavailable_warning",
 ]

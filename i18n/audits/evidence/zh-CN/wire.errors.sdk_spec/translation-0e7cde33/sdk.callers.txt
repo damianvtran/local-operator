@@ -1,0 +1,120 @@
+Pinned commit: 0e7cde33ca8008d561e74f4aed774aa5f76ff7d5
+Source SHA256: 2f3ef2d9e33da374b116cd215c6641d99c9bc41f9a30343b23970ec96fdf78ca
+local_operator/sdk.py:915: 
+local_operator/sdk.py:916:     Exit ``dispose()``s the session. For an owner that ends the turn loop and
+local_operator/sdk.py:917:     releases the claim (as closing exec does); for a viewer it drops the
+local_operator/sdk.py:918:     viewer's side without touching the owner.
+local_operator/sdk.py:919:     """
+local_operator/sdk.py:920:     if mode not in ("own", "attach"):
+local_operator/sdk.py:921:         from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/sdk.py:922: 
+local_operator/sdk.py:923:         raise SessionSpecError(
+local_operator/sdk.py:924:             wire_errors_sdk_spec.mode_invalid(mode=repr(mode)).envelope(locale="en")["text"]
+local_operator/sdk.py:925:         )
+local_operator/sdk.py:926:     if mode == "attach":
+local_operator/sdk.py:927:         if spec.resume is None:
+local_operator/sdk.py:928:             from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/sdk.py:929: 
+local_operator/sdk.py:930:             raise SessionSpecError(
+local_operator/sdk.py:931:                 wire_errors_sdk_spec.attach_resume_required().envelope(locale="en")["text"]
+local_operator/sdk.py:932:             )
+local_operator/sdk.py:933:         _refuse_attach_extras(spec)
+local_operator/sdk.py:934:     else:
+local_operator/sdk.py:935:         _guard_agent_shell()
+local_operator/sdk.py:936: 
+local_operator/sdk.py:937:     roots.assert_durable()
+local_operator/sdk.py:938:     # Preflight the world boundary BEFORE the live-root/scoped-env scopes and
+local_operator/sdk.py:990:             ("output_retries", spec.output_retries),
+local_operator/sdk.py:991:         )
+local_operator/sdk.py:992:         if value is not None
+local_operator/sdk.py:993:     ]
+local_operator/sdk.py:994:     if occupancy:
+local_operator/sdk.py:995:         # Enforced by the OWNER runtime, never the viewer: an attach spec that
+local_operator/sdk.py:996:         # carried enforcement would be inert by construction (the viewer
+local_operator/sdk.py:997:         # cannot install it), and an inert setting a caller believes in is the
+local_operator/sdk.py:998:         # failure shape this surface refuses to have.
+local_operator/sdk.py:999:         from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/sdk.py:1000: 
+local_operator/sdk.py:1001:         raise SessionSpecError(
+local_operator/sdk.py:1002:             wire_errors_sdk_spec.attach_output_unsupported().envelope(locale="en")["text"]
+local_operator/sdk.py:1003:         )
+local_operator/sdk.py:1004:     # Value equality, deliberately: ``refuse()`` is the default, so a caller
+local_operator/sdk.py:1005:     # who spells it out is indistinguishable from one who does not — and every
+local_operator/sdk.py:1006:     # other preset (auto/declared/callback) is refused, each enum value covered
+local_operator/sdk.py:1007:     # by the parametrized attach test.
+local_operator/sdk.py:1008:     if spec.approvals != ApprovalPolicy.refuse():
+local_operator/sdk.py:1009:         set_fields.append("approvals")
+local_operator/sdk.py:1010:     if spec.yolo or spec.train or spec.workstream or set_fields:
+local_operator/sdk.py:1011:         from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/sdk.py:1012: 
+local_operator/sdk.py:1013:         raise SessionSpecError(
+local_operator/sdk.py:1014:             wire_errors_sdk_spec.attach_fields_unsupported(
+local_operator/sdk.py:1015:                 fields=", ".join(set_fields) if set_fields else "yolo/train/workstream"
+local_operator/sdk.py:1016:             ).envelope(locale="en")["text"]
+local_operator/sdk.py:1017:         )
+local_operator/sdk.py:1018: 
+local_operator/sdk.py:1019: 
+local_operator/sdk.py:1020: def _refuse_spawn_extras(spec: SessionSpec) -> None:
+local_operator/sdk.py:1021:     """Refuse spec fields the spawn contract cannot deliver, loudly.
+local_operator/sdk.py:1058:         # A spawned runtime child is composed from its environment plus the
+local_operator/sdk.py:1059:         # sidecars its session directory already carries; the contract is
+local_operator/sdk.py:1060:         # post-open session state and has no sanctioned channel to a NEW child
+local_operator/sdk.py:1061:         # (same rule as team/profile/tools/goal). The composition that works
+local_operator/sdk.py:1062:         # is named in the remedy below and in the module docstring.
+local_operator/sdk.py:1063:         from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/sdk.py:1064: 
+local_operator/sdk.py:1065:         raise SessionSpecError(
+local_operator/sdk.py:1066:             wire_errors_sdk_spec.spawn_output_unsupported(fields=", ".join(output_fields)).envelope(
+local_operator/sdk.py:1067:                 locale="en"
+local_operator/sdk.py:1068:             )["text"]
+local_operator/sdk.py:1069:         )
+local_operator/sdk.py:1070:     if spec.yolo:
+local_operator/sdk.py:1071:         blockers.append("yolo")
+local_operator/sdk.py:1072:     if (
+local_operator/sdk.py:1073:         spec.approvals.mode != "refuse"
+local_operator/sdk.py:1074:         or spec.approvals.tools
+local_operator/sdk.py:1075:         or spec.approvals.handler is not None
+local_operator/sdk.py:1076:     ):
+local_operator/sdk.py:1077:         blockers.append("approvals")
+local_operator/sdk.py:1078:     if blockers:
+local_operator/sdk.py:1079:         from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/sdk.py:1080: 
+local_operator/sdk.py:1081:         raise SessionSpecError(
+local_operator/sdk.py:1082:             wire_errors_sdk_spec.spawn_fields_unsupported(fields=", ".join(blockers)).envelope(
+local_operator/sdk.py:1083:                 locale="en"
+local_operator/sdk.py:1084:             )["text"]
+local_operator/sdk.py:1085:         )
+local_operator/sdk.py:1086: 
+local_operator/sdk.py:1087: 
+local_operator/sdk.py:1088: def _model_sample(spec: SessionSpec) -> Any:
+local_operator/sdk.py:1089:     """The birth sample an engage carries, or ``None`` when the spec says nothing.
+local_operator/sdk.py:1090: 
+local_operator/sdk.py:1150: 
+local_operator/sdk.py:1151:         if spec.resume is None:
+local_operator/sdk.py:1152:             # A HALF model pair is not routable to a new child: the birth
+local_operator/sdk.py:1153:             # sample must carry provider and model together (see
+local_operator/sdk.py:1154:             # ``_model_sample``), and dropping either silently would leave the
+local_operator/sdk.py:1155:             # caller believing the child was born on their selection. Refused
+local_operator/sdk.py:1156:             # with the remedies named.
+local_operator/sdk.py:1157:             if (spec.hosting is None) != (spec.model is None):
+local_operator/sdk.py:1158:                 from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/sdk.py:1159: 
+local_operator/sdk.py:1160:                 raise SessionSpecError(
+local_operator/sdk.py:1161:                     wire_errors_sdk_spec.spawn_model_pair_required().envelope(locale="en")["text"]
+local_operator/sdk.py:1162:                 )
+local_operator/sdk.py:1163:             if spec.birth_effort and not (spec.hosting and spec.model):
+local_operator/sdk.py:1164:                 from local_operator.i18n.keys import wire_errors_sdk_spec
+local_operator/sdk.py:1165: 
+local_operator/sdk.py:1166:                 raise SessionSpecError(
+local_operator/sdk.py:1167:                     wire_errors_sdk_spec.spawn_birth_effort_pair_required().envelope(locale="en")[
+local_operator/sdk.py:1168:                         "text"
+local_operator/sdk.py:1169:                     ]
+local_operator/sdk.py:1170:                 )
+local_operator/sdk.py:1171:             session_id = uuid.uuid4().hex[:12]
+local_operator/sdk.py:1172:         else:
+local_operator/sdk.py:1173:             # '@latest' resolves here, against THIS root, so the id the child
+local_operator/sdk.py:1174:             # adopts is a concrete directory name — never a sentinel.
+local_operator/sdk.py:1175:             session_id = resolve_resume_id(roots.config_path, spec.resume)
+local_operator/sdk.py:1176: 
+local_operator/sdk.py:1177:         kwargs: dict[str, Any] = {"config_dir": roots.config_path}
+local_operator/sdk.py:1178:         if deadline_s is not None:
