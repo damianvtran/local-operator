@@ -4785,7 +4785,7 @@ def _resume_consumed_ids(directory: Path) -> set[str]:
     return {item for item in consumed if isinstance(item, str) and item}
 
 
-async def _drain_inbox_into(handle: object) -> int:
+async def _drain_inbox_into(handle: object, *, live: bool = False) -> int:
     from local_operator.session.runtime.inbox import (
         claim_read_batch_or_defer,
         settle_read_batch,
@@ -4804,14 +4804,14 @@ async def _drain_inbox_into(handle: object) -> int:
     delivered = 0
     try:
         if await claim_read_batch_or_defer(batch):
-            delivered = await _drain_inbox_into_claimed(handle, batch)
+            delivered = await _drain_inbox_into_claimed(handle, batch, live=live)
     except BaseException as exc:
         error = exc
     await settle_read_batch(batch, error, cwd=str(getattr(handle, "_desktop_cwd", "") or ""))
     return delivered
 
 
-async def _drain_inbox_into_claimed(handle: object, batch) -> int:
+async def _drain_inbox_into_claimed(handle: object, batch, *, live: bool = False) -> int:
     """Deliver every message spooled while this session was cold. Count sent.
 
     Also the handover path: the same file is where a DRAINING runtime spools what
@@ -4950,7 +4950,9 @@ async def _drain_inbox_into_claimed(handle: object, batch) -> int:
         try:
             if owner_row:
                 await admit_batch_row(
-                    batch, ordinals[id(line)], _run_owner_prompt(handle, line, seen=seen_owner_ids)
+                    batch,
+                    ordinals[id(line)],
+                    _run_owner_prompt(handle, line, seen=seen_owner_ids, live=live),
                 )
             elif callable(probed):
                 fields: dict[str, Any] = {
@@ -5046,7 +5048,9 @@ async def _drain_inbox_into_claimed(handle: object, batch) -> int:
     return delivered
 
 
-async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> None:
+async def _run_owner_prompt(
+    handle: object, line: Any, *, seen: set[str], live: bool = False
+) -> None:
     """Run one spooled OWNER prompt on this runtime, at most once.
 
     The continuation of the drain's own promise: a runtime that latched a
@@ -5109,10 +5113,26 @@ async def _run_owner_prompt(handle: object, line: Any, *, seen: set[str]) -> Non
     parameters = inspect.signature(run).parameters
     fields: dict[str, Any] = {}
     if "wait_for_turn" in parameters:
-        fields["wait_for_turn"] = False
+        # The BOOT drain must not wait (the socket is not listening yet; see
+        # ``ServingSessionHandle.prompt``). The LIVE drain
+        # (``_watch_live_inbox``) runs on its own task beside a listening
+        # socket, so a queued PROMPT waits its turn exactly as the socket op
+        # would have, instead of being folded into the turn in flight as a steer
+        # the user did not ask for.
+        fields["wait_for_turn"] = live
     if "harness_injected" in parameters:
         fields["harness_injected"] = bool(getattr(line, "harness_injected", False))
     try:
+        if live and getattr(line, "mode", "") == "steer":
+            # A LIVE-QUEUED STEER: the user's mid-turn message that the busy
+            # owner could not acknowledge in time. It joins the turn in flight
+            # exactly as the socket op would have -- raised into the steer arm
+            # below, which dedupes by ``command_id`` through the same
+            # reservation map, so a socket copy the owner DID take answers
+            # "already admitted" rather than steering twice.
+            from local_operator.session.errors import TurnInFlight
+
+            raise TurnInFlight()
         if command_id:
             await run(line.text, command_id=command_id, **fields)
             # RECORDED AFTER THE DELIVERY, not before it: the batch's own repeat
@@ -5279,6 +5299,83 @@ STALL_BEAT_RESTARTS = 3
 #: window shorter than one heartbeat would make the budget unreachable, because
 #: attempts cannot be closer together than the tick's own leading sleep.
 STALL_BEAT_WINDOW_S = 300.0
+
+
+#: How often a LIVE runtime looks at its own ``inbox.jsonl`` for rows a sender
+#: queued because this runtime did not answer in time. See :func:`_watch_live_inbox`.
+LIVE_INBOX_POLL_S = 1.0
+
+
+async def _watch_live_inbox(handle: object, stop: asyncio.Event) -> None:
+    """Deliver rows queued to THIS runtime's inbox while it is running.
+
+    WHY IT EXISTS (the 2026-11-04 Aida incident). The spool used to be read at
+    boot (:func:`_drain_inbox_into`, before the socket listens) and once at the
+    first turn (``Session._drain_spooled_peer_inbox``), so it could only carry a
+    message to a runtime that did not exist yet. A message to a runtime that
+    DID exist but was too busy to acknowledge inside the desktop envelope
+    (``DESKTOP_CONTROL_ATTACH_S``) or the peer dial's budget was therefore
+    REFUSED — the desktop answered ``runtime_busy`` 503 and the operator's two
+    messages never reached the transcript; ``send`` refused a ``wedged`` peer
+    outright. With this watcher a sender may instead append the message to
+    the inbox and answer "queued": this loop picks it up the next time the
+    runtime's own loop runs, which is exactly when the runtime could have
+    answered the socket anyway.
+
+    AT-MOST-ONCE, against the socket copy. A sender that times out may have
+    had its socket write taken by the owner as well, so the same message can
+    arrive twice. Delivery reuses the boot drain's own per-row paths, and both
+    are idempotent by the sender's identity: an owner row by ``command_id``
+    (:func:`_run_owner_prompt` consults the in-memory reservation through
+    ``prompt`` and the durable transcript index ``has_admitted_command``), a
+    peer row by ``message_id`` (``Session.receive_peer_message`` answers a
+    known id as a duplicate).
+
+    A STAT, NOT A READ, ON THE STEADY-STATE TICK: the file is empty or absent
+    on a healthy session, so the loop costs one ``stat`` per
+    :data:`LIVE_INBOX_POLL_S` and claims a batch only when bytes are present.
+    The claim itself is the shared one (``try_enter_read_batch`` /
+    ``claim_read_batch_or_defer``), so it cannot race the first-turn drain or a
+    successor's boot drain into delivering a row twice.
+
+    WHY POLLING RATHER THAN AN ERRAND OVER THE SOCKET: the whole point is the
+    case where the socket did not answer. Anything that needs this runtime's
+    loop to run in order to be told about the row has the same problem as the
+    message itself; a file the loop looks at whenever it next runs does not.
+
+    NEVER RAISES OUT: a failed pass is logged and the next tick tries again. A
+    runtime that is updating or retiring is left alone — its successor's boot
+    drain owns the spool then (``serving._spool_for_successor``).
+    """
+    session = getattr(handle, "_session", None)
+    directory = getattr(getattr(session, "transcript", None), "directory", None)
+    if directory is None:
+        return
+    from local_operator.session.runtime.inbox import inbox_path
+
+    path = inbox_path(Path(directory))
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=LIVE_INBOX_POLL_S)
+            return
+        except TimeoutError:
+            pass
+        if getattr(handle, "_updating", "") or getattr(handle, "_retiring_cause", ""):
+            continue
+        try:
+            if path.stat().st_size == 0:
+                continue
+        except OSError:
+            continue
+        try:
+            delivered = await _drain_inbox_into(handle, live=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — the next tick retries; a pass never ends the runtime
+            logger.warning("live inbox pass failed; retrying next tick", exc_info=True)
+            continue
+        if delivered:
+            logger.info("delivered %d queued message(s) to the live runtime", delivered)
 
 
 async def _beat_stall_watchdog(stop: asyncio.Event) -> None:
@@ -5776,6 +5873,15 @@ async def amain(operator_cap: bytes | None = None) -> int:
         except Exception:  # noqa: BLE001 — an unarmable scheduler is not a dead runtime
             logger.warning("wake scheduler did not arm at boot", exc_info=True)
 
+    # SET BEFORE THE SERVER EXISTS: ``RuntimeServer`` builds the record's
+    # capability list from the handle, and ``live-inbox-v1`` promises senders
+    # that :func:`_watch_live_inbox` (started below, beside the reaper) reads
+    # this runtime's spool while it runs. Only this entry point starts that
+    # watcher, so only it may set the flag.
+    try:
+        setattr(handle, "live_inbox_drain", True)
+    except Exception:  # noqa: BLE001 — a handle that refuses it simply does not advertise
+        logger.debug("handle does not accept the live-inbox flag", exc_info=True)
     runtime = RuntimeServer(handle, kind=RUNTIME_RECORD_KIND, operator_cap=operator_cap)
     # THE RUN KEY AT ITS OTHER END, announced the moment the run has an identity
     # and before the serving plane can make this process addressable. Removed only
@@ -6106,6 +6212,10 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # armed for an in-process host that never went through this module's entry
     # point, where ``beat`` is a no-op.
     stall_beats = asyncio.ensure_future(_watch_stall_beats(stop))
+    # The live inbox drain, same lifetime as the two above. See
+    # :func:`_watch_live_inbox`; its capability string was advertised on the
+    # record from the flag set before ``RuntimeServer`` was constructed.
+    live_inbox = asyncio.ensure_future(_watch_live_inbox(handle, stop))
     reaper_ran_clean_exit = False
     await stop.wait()
     if routing.draining is not None and not routing.draining.done():
@@ -6115,6 +6225,8 @@ async def amain(operator_cap: bytes | None = None) -> int:
         # which has now happened, so it is cancelled rather than left to wake
         # against a session that is already disposing.
         routing.draining.cancel()
+    if not live_inbox.done():
+        live_inbox.cancel()
     if not stall_beats.done():
         # The SUPERVISOR, so this reaches the live tick through its await rather
         # than skipping a dead one: a tick that died and was re-created is not

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import json
 import logging
 import pathlib
@@ -2017,6 +2018,109 @@ def _runtime_busy_refusal() -> "HTTPException":
         | {"retryable": True, "retry_after_ms": RUNTIME_BUSY_RETRY_AFTER_MS},
         headers={"Retry-After": str(max(1, RUNTIME_BUSY_RETRY_AFTER_MS // 1000))},
     )
+
+
+def _owner_busy(error: BaseException) -> bool:
+    """Is ``error`` one of the two "alive but did not answer in time" facts?
+
+    The same predicate :func:`errors` uses to choose :func:`_runtime_busy_refusal`
+    (a sync expiry, or an ack timeout carrying ``owner_alive``), read here so the
+    message route can QUEUE instead of refusing. Kept beside the refusal so the
+    two cannot drift on what "busy" means.
+    """
+    return isinstance(error, RuntimeUnresponsiveError) or bool(getattr(error, "owner_alive", False))
+
+
+async def _queue_or_refuse(
+    request: Request, session_id: str, body: "Prompt", error: BaseException
+) -> dict[str, Any]:
+    """Queue ONE message for a live-but-busy owner, or re-raise its busy refusal.
+
+    THE REQUIREMENT: a message typed to a busy session is queued or steered,
+    never rejected. The owner's own spool (``inbox.jsonl``) is the queue: a row
+    written here is read by the owner's live drain (``process._watch_live_inbox``)
+    the next time its loop runs, and run through the same admission the socket
+    frame would have had -- a ``prompt`` waits its turn, a ``steer`` joins the
+    turn in flight.
+
+    AT-MOST-ONCE, and this is the property that makes queueing safe after an ack
+    timeout. The owner may already have taken the socket write that timed out,
+    so the message can now exist twice: once in the owner's admission queue and
+    once in the spool. Both carry the client's ``request_id`` as their
+    ``command_id``, and the owner's delivery of the spooled row is answered as a
+    duplicate by the same identity (``process._run_owner_prompt``: the
+    in-memory reservation through ``prompt``/``steer``, then the durable
+    transcript index). The receipt journal (``receipts().run``) records the
+    queued outcome under the same key, so a client retry REPLAYS it instead of
+    spooling a second row.
+
+    WHEN QUEUEING IS NOT HONEST, the original busy refusal is re-raised and the
+    renderer's existing resend applies:
+
+    * the owner does not drain live (``inbox.live_inbox_owner`` is ``None``): an
+      older build, a TUI-hosted owner, a dead pid, or a conversation a mesh peer
+      owns -- a row would sit until some later boot, and "queued" would promise a
+      delivery nothing is going to make;
+    * the message carries attachments: an inbox row is text
+      (``inbox.InboxLine``), and dropping the pictures or files to queue the
+      words would answer a question the user did not ask.
+    """
+    if body.images or body.files or body.audio:
+        raise error
+    from local_operator.session.runtime.inbox import (
+        SOURCE_USER,
+        SPOOL_RECEIPT_LIVE,
+        InboxLine,
+        append_for_successor,
+        live_inbox_owner,
+    )
+    from local_operator.wakes.spooled import await_spool_write
+
+    root = store_root(request)
+    owner = await asyncio.to_thread(live_inbox_owner, root, session_id)
+    if owner is None:
+        raise error
+    line = InboxLine(
+        text=body.text,
+        sender={},
+        mode="steer" if body.mode == "steer" else "mailbox",
+        written_at=time.time(),
+        # ``wake`` + ``SOURCE_USER`` is what makes ``append_for_successor``
+        # record the turn as OWED, so if the owner dies before its live drain
+        # runs, the wake supervisor raises a successor whose boot drain runs it
+        # (``local_operator.wakes.spooled``). The live drain settles it.
+        wake=True,
+        source=SOURCE_USER,
+        command_id=body.request_id,
+    )
+    try:
+        written = await await_spool_write(
+            append_for_successor,
+            root,
+            root / "sessions" / session_id,
+            line,
+            # The owner is alive and will read the row itself; raising the
+            # supervisor (a ``launchctl`` hop) is only for the owner-died case,
+            # which the obligation record already covers on its next pass.
+            raise_reader=False,
+        )
+    except Exception:  # noqa: BLE001 — an unwritable spool is the busy refusal, not a crash
+        logger.warning("could not queue a message for busy session %s", session_id, exc_info=True)
+        written = False
+    if not written:
+        raise error
+    logger.info(
+        "desktop message %s queued for busy session %s (owner pid %s)",
+        body.request_id,
+        session_id,
+        getattr(owner, "pid", "?"),
+    )
+    return {
+        "status": "queued",
+        "command_id": body.request_id,
+        "duplicate": False,
+        "detail": SPOOL_RECEIPT_LIVE,
+    }
 
 
 @asynccontextmanager
@@ -4250,67 +4354,90 @@ async def prompt(session_id: str, body: Prompt, request: Request):
         #: acknowledgement resolves through the turn's own frames instead.
         admitted = False
         try:
-            async with host(request).session(session_id) as bridge:
+            try:
+                async with host(request).session(session_id) as bridge:
 
-                async def admit():
-                    nonlocal admitted
-                    assert bridge.remote is not None
-                    # A PEER'S CONVERSATION KEEPS ITS PICTURES VISIBLE HERE: the
-                    # owner externalises the payload into ITS store, so the row
-                    # carries a digest this device could not resolve (§§2.2).
-                    # ``prepare_peer_images`` bounds each image exactly as the
-                    # owner will, stages THOSE bytes, and returns the list to
-                    # admit — the owner journals what it receives, so sending
-                    # anything else is the defect. Local sessions are untouched.
-                    images = await bridge.prepare_peer_images(
-                        [image.model_dump() for image in body.images]
-                    )
-                    detail, duplicate = await bridge.remote.admit_prompt(
-                        body.text,
-                        command_id=body.request_id,
-                        images=images,
-                        # Documents ride as REFERENCES and are resolved by the
-                        # OWNER (its store holds them for a local session).
-                        # A peer owner is refused on this side before the frame
-                        # is sent — ``admit_prompt`` raises
-                        # ``RemoteDocumentUnsupported`` (contract amendment 2).
-                        files=[reference.model_dump() for reference in body.files],
-                        # Recordings travel UNSTAGED, deliberately: the peer
-                        # image stage exists so the SENDER's viewer can resolve
-                        # the digest the owner journals, and v1 has no audio
-                        # rendering surface on either side of a peer send —
-                        # `prepare_peer_audio` would stage bytes nothing reads.
-                        # The owner's own ingest sniffs and externalises them
-                        # exactly as it does for a local send.
-                        audio=[block.model_dump() for block in body.audio],
-                        steer=body.mode == "steer",
-                        # Silent input metadata, omitted from the attach frame
-                        # when absent (``admit_prompt`` drops the None keys), so
-                        # a legacy-sender frame stays byte-identical and an
-                        # owner from before the carriage never sees the keys.
-                        input_mode=body.input_mode,
-                        input_path=body.input_path,
-                    )
-                    admitted = True
-                    # Admission can bind a cold viewer while an event
-                    # subscription is already open. Apply only its still-live
-                    # lease, never resurrect one.
-                    await bridge.refresh_watch()
-                    return {
-                        "status": "admitted",
-                        "command_id": body.request_id,
-                        "duplicate": duplicate,
-                        "detail": detail,
-                    }
+                    async def admit():
+                        nonlocal admitted
+                        assert bridge.remote is not None
+                        # A PEER'S CONVERSATION KEEPS ITS PICTURES VISIBLE HERE: the
+                        # owner externalises the payload into ITS store, so the row
+                        # carries a digest this device could not resolve (§§2.2).
+                        # ``prepare_peer_images`` bounds each image exactly as the
+                        # owner will, stages THOSE bytes, and returns the list to
+                        # admit — the owner journals what it receives, so sending
+                        # anything else is the defect. Local sessions are untouched.
+                        images = await bridge.prepare_peer_images(
+                            [image.model_dump() for image in body.images]
+                        )
+                        detail, duplicate = await bridge.remote.admit_prompt(
+                            body.text,
+                            command_id=body.request_id,
+                            images=images,
+                            # Documents ride as REFERENCES and are resolved by the
+                            # OWNER (its store holds them for a local session).
+                            # A peer owner is refused on this side before the frame
+                            # is sent — ``admit_prompt`` raises
+                            # ``RemoteDocumentUnsupported`` (contract amendment 2).
+                            files=[reference.model_dump() for reference in body.files],
+                            # Recordings travel UNSTAGED, deliberately: the peer
+                            # image stage exists so the SENDER's viewer can resolve
+                            # the digest the owner journals, and v1 has no audio
+                            # rendering surface on either side of a peer send —
+                            # `prepare_peer_audio` would stage bytes nothing reads.
+                            # The owner's own ingest sniffs and externalises them
+                            # exactly as it does for a local send.
+                            audio=[block.model_dump() for block in body.audio],
+                            steer=body.mode == "steer",
+                            # Silent input metadata, omitted from the attach frame
+                            # when absent (``admit_prompt`` drops the None keys), so
+                            # a legacy-sender frame stays byte-identical and an
+                            # owner from before the carriage never sees the keys.
+                            input_mode=body.input_mode,
+                            input_path=body.input_path,
+                        )
+                        admitted = True
+                        # Admission can bind a cold viewer while an event
+                        # subscription is already open. Apply only its still-live
+                        # lease, never resurrect one.
+                        await bridge.refresh_watch()
+                        return {
+                            "status": "admitted",
+                            "command_id": body.request_id,
+                            "duplicate": duplicate,
+                            "detail": detail,
+                        }
 
-                return reply(
-                    await receipts(request).run(
-                        session_id + ":" + body.request_id,
-                        body.model_dump(),
-                        admit,
-                        retry_safe=True,
+                    return reply(
+                        await receipts(request).run(
+                            session_id + ":" + body.request_id,
+                            body.model_dump(),
+                            admit,
+                            retry_safe=True,
+                        )
                     )
+            except ConnectionError as error:
+                # THE OWNER IS ALIVE AND DID NOT ACKNOWLEDGE IN TIME: QUEUE, NEVER
+                # REFUSE. Both busy arms land here -- ``RuntimeUnresponsiveError``
+                # from the control attach and an ``OwnerAckTimeout`` from the
+                # admission frame -- and before this the operator's message was
+                # answered ``runtime_busy`` and, once the renderer's resends were
+                # spent, dropped (2026-11-04: two messages to a busy Aida never
+                # reached the transcript). See :func:`_queue_for_busy_owner` for
+                # when queueing is honest and why it is at-most-once.
+                if not _owner_busy(error):
+                    raise
+                queued = await receipts(request).run(
+                    session_id + ":" + body.request_id,
+                    body.model_dump(),
+                    functools.partial(_queue_or_refuse, request, session_id, body, error),
+                    retry_safe=True,
                 )
+                # A queued message is the owner's from here, exactly like an
+                # admitted one: publishing ``admission.failed`` would tell every
+                # viewer the text was dropped while it is in the owner's inbox.
+                admitted = True
+                return reply(queued)
         except BaseException as error:
             # ``announced`` rather than an unconditional publish: a request this
             # host never acknowledged (no resident viewer, a latched daemon, an
