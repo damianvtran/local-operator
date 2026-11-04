@@ -251,6 +251,15 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.health.reconnecting_detail": "Ce t\u00e9l\u00e9phone a perdu la connexion avec votre ordinateur et continue d\u2019essayer de se reconnecter. La session s\u2019y ex\u00e9cute peut-\u00eatre encore\u202f; un envoi peut \u00e9chouer tant que la connexion n\u2019est pas r\u00e9tablie.",
     },
   },
+  "relay.highlights": {
+    "fr": {
+      "relay.highlights.withheld.line": "{count, plural, one {# fichier non affich\u00e9} many {# de fichiers non affich\u00e9s} other {# fichiers non affich\u00e9s}}\u202f: {reasons}",
+      "relay.highlights.withheld.reason.missing": "le fichier n\u2019existe plus",
+      "relay.highlights.withheld.reason.outside": "hors des emplacements autoris\u00e9s",
+      "relay.highlights.withheld.reason.sensitive": "fichier sensible",
+      "relay.highlights.withheld.reason.too_large": "trop volumineux pour un aper\u00e7u",
+    },
+  },
   "relay.library": {
     "fr": {
       "relay.library.count": "{count, plural, one {# \u00e9l\u00e9ment} many {# d\u2019\u00e9l\u00e9ments} other {# \u00e9l\u00e9ments}}",

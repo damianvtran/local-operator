@@ -5818,6 +5818,11 @@ _SUPPLEMENT_FILE_TYPES: dict[str, str] = {
     ".heic": "image/heic",
     ".heif": "image/heif",
     ".avif": "image/avif",
+    # Video for the written-video preview tile. Inert media types (the player decodes;
+    # nothing executes), still under the 10 MB cap and ``nosniff`` like every entry.
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
 }
 
 #: The read family's response policy (file-serving RFC D5; memo §2.7): the pair rides
@@ -8026,13 +8031,29 @@ def build_app(daemon: MobileDaemon):
                     return "no-cwd"
                 expanded = os.path.join(cwd, expanded)
             resolved_path = Path(os.path.realpath(expanded))
-            allowed_roots = [Path(os.path.realpath(root)) for root in (cwd, home) if root]
+            # The row's own session scratchpad is a root beside cwd/home (a relocated config
+            # dir may sit outside ``~``), mirroring the prefilter that admitted the path.
+            from local_operator.scratchpad import scratchpad_root
+
+            own_pad = scratchpad_root(directory)
+            allowed_roots = [
+                Path(os.path.realpath(root))
+                for root in (cwd, home, str(own_pad) if own_pad is not None else "")
+                if root
+            ]
             if not any(
                 resolved_path == root or resolved_path.is_relative_to(root)
                 for root in allowed_roots
             ):
                 return "missing"
-            if denylist.is_sensitive(str(resolved_path), cwd=cwd or home):
+            # The row's own session scratchpad is servable (the prefilter admitted it under
+            # the same carve-out); every credential rule and every OTHER session's store
+            # stay refused. Derived from the requested session's directory, never the env.
+            if denylist.is_sensitive_for_supplements(
+                str(resolved_path),
+                cwd=cwd or home,
+                session_scratchpad=str(own_pad) if own_pad is not None else None,
+            ):
                 logger.info("supplement file refused by the denylist for %s", session_id)
                 return "missing"
             try:

@@ -2774,6 +2774,46 @@
       },
       "status": "passed",
       "note": "Independent round-2 re-audit (7 keys). 0 unresolved blocker/major. Target SHA-256 5804d76d69b59ab3913dba9b179f26a2b3df40134bddc127eda79a5ea181d96c. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.highlights",
+      "source_sha256": "8d1002cbbc015243fdf7709ec51b7179d40a508a042e38f7085e7bdaad5cf131",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (relay.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the zh-CN style guide. FINDING fixed in these bytes: ZH-H1 MINOR reason.too_large '文件过大，无法预览' carried a full-width comma inside a fragment that is itself joined into a reason list, so two joined reasons read as three -> '文件过大无法预览'. Arm other only, '# 个文件未显示' with full-width '：'. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.highlights",
+      "source_sha256": "cc19a5f6e319d21b5be6230957644e6182c5e760dbda1df88e2f79fe620c36af",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the zh-CN style guide. FINDING fixed in these bytes: ZH-H1 MINOR reason.too_large '文件过大，无法预览' carried a full-width comma inside a fragment that is itself joined into a reason list, so two joined reasons read as three -> '文件过大无法预览'. Arm other only, '# 个文件未显示' with full-width '：'. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
     }
   ]
 }
