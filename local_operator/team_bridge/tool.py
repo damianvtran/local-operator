@@ -1072,6 +1072,7 @@ async def _direct_message(
     # addressees: the DM's conversation id already names its recipient.
     slot: reply_guard.Reservation | reply_guard.Skipped | None = None
     guard_warning: str | None = None
+    guard_busy = False
     try:
         slot = reply_guard.reserve_post(
             runtime.config_dir,
@@ -1082,6 +1083,7 @@ async def _direct_message(
         )
     except reply_guard.ReplyGuardUnavailable as failure:
         guard_warning = reply_guard.unavailable_warning(failure)
+        guard_busy = failure.transient
     if isinstance(slot, reply_guard.Skipped):
         return slot.as_result(conversation_id)
     try:
@@ -1135,12 +1137,7 @@ async def _direct_message(
         receipt,
         guard_warning,
         slot.warning if slot is not None else None,
-        reply_guard.agent_run_warning(
-            runtime.config_dir,
-            endpoint_id=endpoint_id,
-            conversation_id=conversation_id,
-            notice=_agent_wake_notice(result),
-        ),
+        _agent_run_advice(runtime, endpoint_id, conversation_id, result, guard_busy=guard_busy),
     )
 
 
@@ -1371,6 +1368,42 @@ def _agent_wake_notice(result: Any) -> Any:
     nested = result.get("message")
     view: dict[str, Any] = nested if isinstance(nested, dict) else result
     return view.get("agent_wake")
+
+
+def _agent_run_advice(
+    runtime: "BridgeRuntime",
+    endpoint_id: str,
+    conversation_id: str,
+    result: Any,
+    *,
+    guard_busy: bool,
+) -> str | None:
+    """#294's ``agent_wake`` advice for a post the hub ALREADY ACCEPTED, never fatal.
+
+    Called only after a successful send, so a missing notice is a real
+    "below the threshold" reading and resets the remembered level
+    (:func:`reply_guard.agent_run_warning`, QA Q-2). Two rules, both from
+    review round 4:
+
+    * any exception is swallowed and the warning dropped (security S-11): the
+      post has landed, and an advisory fault reported as a tool error would
+      tell the model a delivered message failed — inviting a second copy;
+    * a guard already found BUSY in this call is not asked again (code n-A):
+      each attempt waits out the 5 s busy timeout, and advice is not worth a
+      second wait.
+    """
+
+    if guard_busy:
+        return None
+    try:
+        return reply_guard.agent_run_warning(
+            runtime.config_dir,
+            endpoint_id=endpoint_id,
+            conversation_id=conversation_id,
+            notice=_agent_wake_notice(result),
+        )
+    except Exception:  # noqa: BLE001 — advice after delivery must never fail the post
+        return None
 
 
 def _model_notes(outcome: dict[str, Any]) -> str:
@@ -1949,6 +1982,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         # thread and the addressees are part of the duplicate key (M-1).
         slot: reply_guard.Reservation | None = None
         guard_warning: str | None = None
+        guard_busy = False
         guarded = False
         addressees = [
             f"{m.get('kind', '')}:{m.get('account_id', '')}:{m.get('endpoint_id', '')}"
@@ -1960,7 +1994,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                 self.result = result
 
         def pre_http_guard() -> None:
-            nonlocal slot, guard_warning, guarded
+            nonlocal slot, guard_warning, guard_busy, guarded
             fence = outbound_tool_fence(runtime)
             refusal = (
                 _error(fence["error"], code=fence["code"])
@@ -1985,6 +2019,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                     )
                 except reply_guard.ReplyGuardUnavailable as failure:
                     guard_warning = reply_guard.unavailable_warning(failure)
+                    guard_busy = failure.transient
                     return
                 if isinstance(reserved, reply_guard.Skipped):
                     # Not a failure: the identical message is already posted.
@@ -2036,12 +2071,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
             receipt,
             guard_warning,
             slot.warning if slot is not None else None,
-            reply_guard.agent_run_warning(
-                runtime.config_dir,
-                endpoint_id=endpoint_id,
-                conversation_id=channel_id,
-                notice=_agent_wake_notice(result),
-            ),
+            _agent_run_advice(runtime, endpoint_id, channel_id, result, guard_busy=guard_busy),
         )
 
     if params.op == "react":

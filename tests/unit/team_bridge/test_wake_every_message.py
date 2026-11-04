@@ -1348,6 +1348,163 @@ def test_the_server_agent_run_notice_reaches_the_model_once_per_threshold(
     )
 
 
+class _Hub294Client(ToolClient):
+    """agent-server #294's send answer, faithfully: ``agent_wake`` is OMITTED
+    while the conversation's agent run is below 8 (an alternating pair never
+    reaches the 3-in-a-row streak), and present from 8 on (QA round 4, Q-2)."""
+
+    run = 0
+
+    async def conversation_send(self, conversation_id: str, *, text: str, **kwargs: Any):
+        answer = await super().conversation_send(conversation_id, text=text, **kwargs)
+        if self.run >= 8:
+            answer["agent_wake"] = {
+                "unanswered_messages": 1,
+                "consecutive_agent_messages": self.run,
+            }
+        return answer
+
+
+@pytest.mark.parametrize("first_run_ends", [9, 25])
+def test_a_second_agent_run_re_arms_through_an_omitted_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_run_ends: int
+) -> None:
+    """QA round 4, Q-2 / code m-B, QA's reproduction. Run 1 → a gap in which the
+    server sends NO notice (a person spoke, the run restarted below 8) → run 2.
+    Run 2 must warn at every threshold again, including the one run 1 stopped
+    at (on 54f74c5 the 8 or the 20 was lost)."""
+
+    clock = Clock()
+    monkeypatch.setattr(time, "time", clock)
+    a = _owner("a", 1)
+    hub = Hub(members=("bep_a",))
+    _rig(monkeypatch, hub, {})
+    runtime = _runtime(hub, a, tmp_path)
+    client = _Hub294Client(hub, a.endpoint_id)
+    runtime.client = cast(TeamBridgeClient, client)
+
+    def turn(run: int) -> str | None:
+        clock.now += 30
+        client.run = run
+        _trigger(tmp_path, "agent", clock.now)  # alternating: a new inbound each turn
+        result = _post(runtime, body=f"turn {clock.now}")
+        assert result["ok"] is True
+        return result.get("warning")
+
+    first = [run for run in range(8, first_run_ends + 1) if turn(run)]
+    assert first == [r for r in (8, 10, 20) if r <= first_run_ends]
+    gap = [turn(run) for run in range(1, 8)]  # run 1..7 of the next exchange: field absent
+    assert gap == [None] * 7
+    second = [run for run in range(8, 21) if turn(run)]
+    assert second == [8, 10, 20], second
+
+
+def test_a_person_speaking_clears_the_notice_level(tmp_path: Path) -> None:
+    """The server resets the run on any human post; so does the client (Q-2)."""
+
+    def notice(count: int) -> str | None:
+        return reply_guard.agent_run_warning(
+            tmp_path,
+            endpoint_id="bep_a",
+            conversation_id=CONV,
+            notice={"unanswered_messages": 1, "consecutive_agent_messages": count},
+        )
+
+    assert notice(8) is not None and notice(9) is None
+    _trigger(tmp_path, "human", 5.0)  # ambient, not addressed: still a reset
+    assert notice(8) is not None, "a new run after a person spoke warns at 8 again"
+
+
+@pytest.mark.parametrize("count", [10**30, 2**63, -1, 10**6 + 1])
+def test_an_out_of_range_run_count_never_fails_a_delivered_post(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, count: int
+) -> None:
+    """Security round 4, S-11: 10**30 raised OverflowError AFTER the post had
+    landed, and the harness told the model it failed. Bounded now: posted,
+    ok, no warning, nothing raised."""
+
+    from local_operator.harness.types import ToolContext
+    from local_operator.team_bridge.tool import build_bridge_tool
+
+    a = _owner("a", 1)
+    hub = Hub(members=("bep_a",))
+    _rig(monkeypatch, hub, {})
+    runtime = _runtime(hub, a, tmp_path)
+    client = _NoticeClient(hub, a.endpoint_id)
+    client.run = count
+    runtime.client = cast(TeamBridgeClient, client)
+    tool = build_bridge_tool(ToolContext(bridge_runtime=runtime))
+    assert tool is not None
+    args = {"op": "channel_post", "channel_id": CONV, "body": "the approval"}
+
+    async def run() -> Any:
+        return await tool.execute("call_o", args, None, None, ToolContext())
+
+    result = asyncio.run(run())
+    assert not result.is_error and result.details["ok"] is True
+    assert "warning" not in result.details
+    assert len(hub.agent_posts()) == 1
+
+
+@pytest.mark.parametrize("op", ["channel_post", "dm"])
+def test_an_advisory_fault_after_delivery_is_never_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, op: str
+) -> None:
+    """S-11, structural: whatever the notice bookkeeping raises after the hub
+    accepted the post, the post is reported as posted (both call sites)."""
+
+    from local_operator.team_bridge import tool as tool_mod
+
+    def explode(*args: Any, **kwargs: Any) -> Any:
+        raise OverflowError("bookkeeping fault")
+
+    monkeypatch.setattr(tool_mod.reply_guard, "agent_run_warning", explode)
+    a = _owner("a", 1)
+    hub = Hub(members=("bep_a",))
+    _rig(monkeypatch, hub, {})
+    runtime = _runtime(hub, a, tmp_path)
+    advice = tool_mod._agent_run_advice(runtime, "bep_a", CONV, {"id": "bcmsg_x"}, guard_busy=False)
+    assert advice is None
+    if op == "channel_post":
+        result = _post(runtime, body="landed")
+        assert result["ok"] is True and len(hub.agent_posts()) == 1
+
+
+def test_a_busy_guard_is_not_asked_again_for_the_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Code round 4, n-A: one busy timeout per call, not two."""
+
+    import sqlite3
+
+    from local_operator.team_bridge import tool as tool_mod
+
+    calls: list[Any] = []
+    real = tool_mod.reply_guard.agent_run_warning
+    monkeypatch.setattr(
+        tool_mod.reply_guard,
+        "agent_run_warning",
+        lambda *a, **k: calls.append(k) or real(*a, **k),
+    )
+    monkeypatch.setattr(reply_guard, "_BUSY_TIMEOUT_S", 0.05)
+    a = _owner("a", 1)
+    hub = Hub(members=("bep_a",))
+    _rig(monkeypatch, hub, {})
+    runtime = _runtime(hub, a, tmp_path)
+    _reserve(tmp_path, 1.0, body="seed")
+    holder = sqlite3.connect(reply_guard.guard_path(tmp_path), isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        busy = _post(runtime, body="while busy")
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert busy["ok"] is True and "reply guard busy" in busy["warning"]
+    assert calls == [], "the notice lookup was skipped after a busy reservation"
+    assert _post(runtime, body="after")["ok"] is True
+    assert len(calls) == 1, "and runs normally once the guard is free"
+
+
 def test_channel_post_skips_an_exact_double_send(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

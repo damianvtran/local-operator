@@ -91,8 +91,9 @@ even read the retry guidance. So :func:`reserve_post` still raises
 broken), and the tool POSTS ANYWAY with :func:`unavailable_warning` in the
 result: "reply guard busy; posted without duplicate/run tracking", or "reply
 guard state is broken (<reason>); posted without duplicate/run tracking — tell
-the operator". That post has no duplicate skip and no run count; the cost is at
-most one accidental double send. The trigger side fails open too
+the operator". That post has no duplicate skip and no run count; the cost is
+that accidental double sends are not caught while the state is unusable
+(review round 4, security n-1). The trigger side fails open too
 (``record_trigger`` never raises); if a trigger is lost under a lock, an
 identical short answer to that unrecorded question within 10 s can be skipped
 (review round 3, S-10 — a narrow, pre-existing asymmetry, deferred).
@@ -133,6 +134,9 @@ DUPLICATE_WINDOW_S = 10.0
 #: (8, 10, 12 … or 9, 11, 13 …), so an equality test would miss half of them.
 AGENT_RUN_WARN_FIRST = 8
 AGENT_RUN_WARN_EVERY = 10
+#: The largest ``consecutive_agent_messages`` read as a real run (S-11): far
+#: past any conversation, and well inside SQLite's 64-bit INTEGER.
+AGENT_RUN_COUNT_MAX = 10**6
 
 #: Classification of a post for an OLDER build sharing this file (it reads the
 #: ``agent_to_agent`` and ``human_prompted`` columns); this build decides
@@ -439,8 +443,8 @@ def record_trigger(
     as a diagnostic column and to clear an older build's cool-down (below).
     ``directed=None`` falls back to ``mention`` for a caller that predates the
     bit. Never raises: a trigger that cannot be recorded leaves the previous
-    one (at worst a run warning comes early), and the post side still fails
-    closed on its own.
+    one (at worst a run warning comes early), and the post side fails open too
+    (module docstring, FAIL OPEN; review round 4, security n-2).
     """
 
     now = time.time() if now is None else now
@@ -463,6 +467,15 @@ def record_trigger(
                     1 if addressed else 0,
                 ),
             )
+            if kind == "human":
+                # A person spoke: the server resets the conversation's agent
+                # run to 0 on ANY human post, so the remembered notice level
+                # goes too, or the next run's first threshold would compare
+                # equal to the old one and be lost (review round 4, QA Q-2).
+                conn.execute(
+                    "DELETE FROM agent_run_notices WHERE endpoint_id = ? AND conversation_id = ?",
+                    (endpoint_id, conversation_id),
+                )
             if kind == "human" and addressed:
                 # This build never reads ``runs``. The write stays so an OLDER
                 # build sharing this file mid-upgrade still sees a directed
@@ -611,19 +624,36 @@ def agent_run_warning(
     send answer once that run reaches 8 (or the sender has posted 3 in a row).
     This turns it into the operator's "warning instead of an error" for the
     back-and-forth case, once per threshold crossing (8, 10, 20, …), never on
-    every post. The level reached is remembered per endpoint and conversation,
-    and it resets when the server reports a run below 8 (a person spoke, or ten
-    idle minutes). ADDITIVE: an older server sends no ``agent_wake``, ``notice``
-    is then None and nothing changes. Best effort: unusable guard state returns
-    None rather than a second warning about bookkeeping.
+    every post. The level reached is remembered per endpoint and conversation.
+
+    RE-ARMING (review round 4, QA Q-2 / code m-B). #294 OMITS ``agent_wake``
+    below its threshold (run < 8 and streak < 3), so in an alternating
+    exchange a count below 8 is never seen: a reset that waited for one never
+    happened, and a second run's warning at the old level was lost. So the
+    caller passes ``notice=None`` for a SUCCESSFUL send whose answer carried no
+    notice, and that is read as "below the threshold": the level resets to 0.
+    A human trigger clears it too (:func:`record_trigger`), the server's own
+    reset rule. On an older server that never sends the field the level is
+    always 0, so the reset changes nothing — the feature stays ADDITIVE.
+
+    BOUNDED (review round 4, security S-11). Only the hub controls the count;
+    one outside 0..``AGENT_RUN_COUNT_MAX`` is not a run this client can name,
+    so it yields no warning and is not stored (an int past SQLite's 64-bit
+    range raised ``OverflowError`` after the post had landed). Best effort:
+    unusable guard state returns None rather than a second warning about
+    bookkeeping; the tool also treats any failure here as non-fatal.
     """
 
-    if not isinstance(notice, dict):
+    count: Any = None
+    if isinstance(notice, dict):
+        count = notice.get("consecutive_agent_messages")
+        if not isinstance(count, int) or isinstance(count, bool):
+            return None
+        if not 0 <= count <= AGENT_RUN_COUNT_MAX:
+            return None
+    elif notice is not None:
         return None
-    count = notice.get("consecutive_agent_messages")
-    if not isinstance(count, int) or isinstance(count, bool):
-        return None
-    level = _agent_run_level(count)
+    level = _agent_run_level(count) if count is not None else 0
     try:
         with _connect(config_dir) as conn:
             row = conn.execute(
@@ -668,6 +698,7 @@ def release(
 
 
 __all__ = [
+    "AGENT_RUN_COUNT_MAX",
     "AGENT_RUN_WARN_EVERY",
     "AGENT_RUN_WARN_FIRST",
     "DUPLICATE_WINDOW_S",
