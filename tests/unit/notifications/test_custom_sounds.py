@@ -415,3 +415,63 @@ def test_removing_the_selected_sound_logs_no_stray_warning(store: Path, caplog) 
     caplog.set_level("WARNING")
     assert custom_sounds.remove(row.id).selection_reset
     assert not [r for r in caplog.records if "does not carry" in r.getMessage()]
+
+
+# -- QA round 2: the CLI's view of a custom selection, and its locale -----------
+
+
+@pytest.mark.parametrize("verb", ["list", "doctor"])
+def test_a_selected_custom_sound_is_not_reported_as_unknown(
+    store: Path, capsys, monkeypatch, verb: str
+) -> None:
+    """Q5: `_problems` used `builtin()`, so every custom selection read as a typo."""
+    from local_operator import sound_cli
+
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_SOUND", raising=False)
+    # `doctor` returns early with banners off or over SSH, before the notes it
+    # is meant to print; both are armed by the suite or may leak from a shell.
+    # Only the env checks are lifted: no banner is raised by either verb.
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
+    for name in ("SSH_CONNECTION", "SSH_TTY"):
+        monkeypatch.delenv(name, raising=False)
+    row = custom_sounds.add(tone(0.3), source_name="mine.wav")
+    settings_io.write_setting(
+        ConfigManager(store), settings_io.BY_KEY["notifications.sound.id"], row.id
+    )
+    capsys.readouterr()
+    assert (sound_cli.list_command() if verb == "list" else sound_cli.doctor_command()) == 0
+    out = capsys.readouterr().out
+    assert f"plays {row.id}" in out
+    assert "is not a known sound" not in out
+
+
+def test_an_unknown_custom_id_is_still_reported(store: Path, capsys, monkeypatch) -> None:
+    """Control for Q5: a hand-edited id naming no stored sound still gets the note."""
+    from local_operator import sound_cli
+    from local_operator.notifications import sound as _sound
+
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_SOUND", raising=False)
+    stored = _sound.configured({"notifications": {"sound": {"id": "custom-gone-000000"}}})
+    plan = _sound.resolve({"notifications": {"sound": {"id": "custom-gone-000000"}}}, env={})
+    assert any("is not a known sound" in p for p in sound_cli._problems(stored, plan))
+
+
+def test_cli_refusals_render_in_the_active_locale(store: Path, capsys) -> None:
+    """Q6: `Msg.envelope()` renders en by default; the CLI must pass the locale."""
+    from local_operator import sound_cli
+    from local_operator.i18n import text
+
+    previous = text.active_locale()
+    text.set_active_locale("fr")
+    try:
+        assert sound_cli.add_command("f" * 32, name=None, select=False, keep_loudness=False) == 1
+        err = capsys.readouterr().err
+        with pytest.raises(SoundRejected) as caught:
+            custom_sounds.remove("soft-pulse")
+        refusal = caught.value.text
+    finally:
+        text.set_active_locale(previous)
+    assert "Aucune pièce jointe" in err, err
+    assert "son intégré" in refusal, refusal
+    # The route envelope stays en (the desktop keys on `code`).
+    assert "built-in sound" in caught.value.envelope()["text"]

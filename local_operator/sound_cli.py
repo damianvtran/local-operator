@@ -53,8 +53,15 @@ def _t(key: Any, locale: str | None) -> str:
 
 
 def render(message: Any) -> str:
-    """A keyed message's text in the active locale (the CLI's refusal lines)."""
-    return str(message.envelope()["text"])
+    """A keyed message's text in the active locale (the CLI's refusal lines).
+
+    ``Msg.envelope`` renders ``en`` unless given a locale, so the active one is
+    passed explicitly (QA round 2, Q6), the ``render(..., locale=active_locale())``
+    idiom ``slash_commands`` uses.
+    """
+    from local_operator.i18n.text import active_locale
+
+    return str(message.envelope(locale=active_locale())["text"])
 
 
 def add_parser(
@@ -299,7 +306,10 @@ def _problems(stored: Any, plan: Any) -> list[str]:
     if (
         stored.enabled
         and stored.sound_id != sound.SYSTEM_SOUND_ID
-        and sound.builtin(stored.sound_id) is None
+        # `playable`, not `builtin`: a selected CUSTOM sound is known too (QA
+        # round 2, Q5), and `playable` is the same lookup `resolve` plays from,
+        # so this note fires exactly when resolve falls back to the default.
+        and sound.playable(stored.sound_id) is None
     ):
         problems.append(
             f"notifications.sound.id {stored.sound_id!r} is not a known sound; "

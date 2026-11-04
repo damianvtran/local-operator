@@ -159,7 +159,15 @@ class SoundRejected(Exception):
 
     @property
     def text(self) -> str:
-        return str(self.envelope()["text"])
+        """The refusal in the process's ACTIVE locale (what the CLI prints).
+
+        ``envelope()`` stays en-by-default like every route envelope (the
+        desktop keys on ``code``); a terminal line has no client to localize
+        it, so it renders here (QA round 2, Q6).
+        """
+        from local_operator.i18n.text import active_locale
+
+        return str(self.message.envelope(locale=active_locale())["text"])
 
 
 @dataclasses.dataclass(frozen=True)
@@ -780,7 +788,10 @@ class Removal:
         return _keys().removed_selection_reset(default=default)
 
     def reset_text(self) -> str:
-        return str(self.reset_message().envelope()["text"])
+        """The "selected again" line in the active locale (CLI output)."""
+        from local_operator.i18n.text import active_locale
+
+        return str(self.reset_message().envelope(locale=active_locale())["text"])
 
 
 class _ResetAuditFilter(logging.Filter):
