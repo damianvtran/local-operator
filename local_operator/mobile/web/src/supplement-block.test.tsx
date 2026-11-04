@@ -597,6 +597,8 @@ describe("deliverables written to disk (highlights contract)", () => {
 		expect(line).toContain("outside allowed locations");
 		expect(line).toContain("file no longer exists");
 		expect(line.match(/outside allowed locations/g)).toHaveLength(1);
+		/* A comma list (QA round 1, Q3): `narrow` rendered the reasons space-joined. */
+		expect(line).toContain("outside allowed locations, file no longer exists");
 	});
 
 	it("plays a FILE-origin sound through the same sound grid as a generated one", () => {

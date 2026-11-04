@@ -127,6 +127,10 @@ class Decision:
     graphics_p: float = 0.0
     #: The answering vendor, :data:`HEURISTIC_VENDOR`, or ``"none"`` (nothing was asked).
     vendor: str = "none"
+    #: Qualifying files counted but not listed: unnamed sweep hits past the sweep's file
+    #: bound (``Prefilter.sweep_more``). Added to the row's ``files_more`` so the cut is
+    #: disclosed, never silent.
+    more_unlisted: int = 0
 
     @property
     def empty(self) -> bool:
@@ -516,7 +520,13 @@ def heuristic_files(candidates: Sequence[Candidate]) -> list[Candidate]:
     the cost is bounded by ``max_featured`` and by the pre-filter's own exclusions. Tier 3
     (merely NAMED in the answer) and source-code kinds stay out: no write evidence.
     """
-    chosen = [c for c in candidates if c.tier <= 2 and c.deliverable]
+    # Unnamed SWEPT audio is left to a vendor: with no one to judge it, staged clips
+    # (TTS chunks, stems) would otherwise become players nobody asked for (review R1-1).
+    chosen = [
+        c
+        for c in candidates
+        if c.tier <= 2 and c.deliverable and not (c.swept and c.kind == "audio")
+    ]
     chosen.sort(key=lambda c: (c.tier, -c.order, c.path))
     return chosen
 

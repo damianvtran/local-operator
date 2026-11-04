@@ -36,7 +36,7 @@ from rich.text import Text
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.i18n.keys import tui_highlights
-from local_operator.i18n.text import tr
+from local_operator.i18n.text import active_locale, tr
 from local_operator.tui import imagegen as imagegen_mod
 
 __all__ = [
@@ -231,6 +231,17 @@ _WITHHELD_REASON_KEYS: Final = {
 }
 
 
+#: The reasons list separator per locale -- the relay's ``Intl.ListFormat(unit, short)``
+#: answer, written out because Python has no CLDR list formatter in the dependency set.
+#: zh-CN joins with the ideographic comma and ur with the Arabic comma (i18n audit note);
+#: every other shipped locale uses ", ".
+_LIST_SEPARATORS: Final = {"zh-CN": "、", "ur": "، "}
+
+
+def _list_separator(locale: str) -> str:
+    return _LIST_SEPARATORS.get(locale, ", ")
+
+
 def withheld_line(withheld: object, more: object = 0) -> str:
     """``2 files not shown: outside allowed locations, sensitive file`` or ``""``.
 
@@ -253,7 +264,9 @@ def withheld_line(withheld: object, more: object = 0) -> str:
         return ""
     _t = tr("tui.highlights")
     reasons = list(dict.fromkeys(str(item["reason"]) for item in entries))
-    joined = ", ".join(_t(_WITHHELD_REASON_KEYS[reason]()) for reason in reasons)
+    joined = _list_separator(active_locale()).join(
+        _t(_WITHHELD_REASON_KEYS[reason]()) for reason in reasons
+    )
     return display_text(_t(tui_highlights.withheld_line(count=count, reasons=joined)))
 
 

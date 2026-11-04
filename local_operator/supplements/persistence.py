@@ -133,9 +133,10 @@ def build_details(
         ]
         if len(withheld) > WITHHELD_MAX:
             details["withheld_more"] = len(withheld) - WITHHELD_MAX
-    if decision.more:
-        details["files_more"] = len(decision.more)
-        details["more"] = [c.path for c in decision.more[:MORE_MAX]]
+    if decision.more or decision.more_unlisted:
+        details["files_more"] = len(decision.more) + decision.more_unlisted
+        if decision.more:
+            details["more"] = [c.path for c in decision.more[:MORE_MAX]]
     if error:
         details["error"] = error[:_ERROR_MAX_CHARS]
     return details  # type: ignore[return-value]

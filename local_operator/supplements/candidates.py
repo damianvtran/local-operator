@@ -195,6 +195,10 @@ class Candidate:
     linked_in_answer: bool = False
     #: Named in a ``deliver`` pin (``TIER_PIN``); journaled as ``pinned: true``.
     pinned: bool = False
+    #: Found ONLY by a directory sweep: nothing in the turn named it. Such a file is offered
+    #: to the decision like any candidate but is never auto-promoted (review R1-1): written
+    #: audio becomes a player only when named or featured, never because it was nearby.
+    swept: bool = False
 
     @property
     def deliverable(self) -> bool:
@@ -235,6 +239,9 @@ class Prefilter:
     #: a command found and the gates refused are NOT listed -- only what the agent or the
     #: answer told the operator to expect, so the notice never becomes noise.
     withheld: tuple[tuple[str, str], ...] = ()
+    #: Unnamed sweep hits held back by :data:`SWEEP_MAX_FILES` (QA round 1, Q1). Counted
+    #: into the row's ``files_more`` so the cut is disclosed, never silent.
+    sweep_more: int = 0
 
 
 def kind_of(name: str) -> str:
@@ -965,6 +972,8 @@ class Mention:
     tool: str
     intent: str
     order: int
+    #: Found by a directory sweep, not named by any command, write or answer.
+    swept: bool = False
 
 
 def _harvest(
@@ -1034,7 +1043,7 @@ SWEEP_MAX_FILES: Final = 8
 SWEEP_SLACK_S: Final = 2.0
 
 
-def _sweep(directory: str, since: float) -> list[str]:
+def _sweep(directory: str, since: float, floor: float = 0.0) -> list[str]:
     """Regular, visible files of a deliverable kind in ``directory`` modified since ``since``.
 
     Non-recursive and bounded (:data:`SWEEP_MAX_ENTRIES` entries read). Dotfiles are skipped
@@ -1053,12 +1062,14 @@ def _sweep(directory: str, since: float) -> list[str]:
                     modified = entry.stat(follow_symlinks=False).st_mtime
                 except OSError:
                     continue
-                if modified >= since - SWEEP_SLACK_S:
+                if modified >= max(since - SWEEP_SLACK_S, floor):
                     found.append((modified, entry.name))
     except (OSError, ValueError):
         return []
     found.sort(reverse=True)
-    return [name for _modified, name in found[:SWEEP_MAX_FILES]]
+    # UNCAPPED here (entries are bounded above): the caller caps only the hits nothing
+    # named, so an answer-named file is never cut by the file bound (QA round 1, Q1).
+    return [name for _modified, name in found]
 
 
 #: Bounds of the session-scratchpad sweep (contract "Written-file diff"): the scratchpad is
@@ -1069,10 +1080,11 @@ SCRATCH_SWEEP_MAX_DEPTH: Final = 3
 SCRATCH_SWEEP_MAX_ENTRIES: Final = 500
 
 
-def _sweep_tree(root: str, since: float) -> list[str]:
+def _sweep_tree(root: str, since: float, floor: float = 0.0) -> list[str]:
     """Deliverable files under ``root`` (depth <= 3, <= 500 entries) modified since ``since``.
 
-    Absolute paths, newest first, at most :data:`SWEEP_MAX_FILES`. Dot entries and the
+    Absolute paths, newest first, every hit within the entry/depth bounds (the caller caps
+    the unnamed ones at :data:`SWEEP_MAX_FILES`). Dot entries and the
     generated trees (``node_modules``, ``.venv``...) are never descended: they are the
     scratchpad's bulk and never a deliverable.
     """
@@ -1101,12 +1113,12 @@ def _sweep_tree(root: str, since: float) -> list[str]:
                         modified = entry.stat(follow_symlinks=False).st_mtime
                     except OSError:
                         continue
-                    if modified >= since - SWEEP_SLACK_S:
+                    if modified >= max(since - SWEEP_SLACK_S, floor):
                         found.append((modified, entry.path))
         except (OSError, ValueError):
             continue
     found.sort(reverse=True)
-    return [path for _modified, path in found[:SWEEP_MAX_FILES]]
+    return [path for _modified, path in found]
 
 
 #: The write tool's (and an agent's prose) spelling of the session scratchpad.
@@ -1274,6 +1286,7 @@ def prefilter(
     want_files: bool = True,
     want_graphics: bool = True,
     since: float = 0.0,
+    sweep_floor: float = 0.0,
     session_since: float = 0.0,
     scratchpad: str = "",
 ) -> Prefilter:
@@ -1294,6 +1307,12 @@ def prefilter(
     (:func:`~local_operator.supplements.denylist.is_sensitive_for_supplements`), the value of
     ``$LOCAL_OPERATOR_SCRATCHPAD`` in a command, the target of ``scratchpad://`` and, with
     ``since``, a bounded recursive sweep root (:func:`_sweep_tree`).
+
+    ``sweep_floor`` is when the PREVIOUS turn was known finished (``0`` = unknown); the
+    caller keeps it ``<= since``. The sweep's 2 s slack exists for coarse mtimes, but with
+    turns under 2 s apart it re-listed the previous turn's files (QA round 1, Q2); a file
+    last modified before the previous turn finished is that turn's, so the bound is
+    ``max(since - slack, sweep_floor)``.
 
     ``session_since`` is the SESSION's start (``created_at``). A path the answer names --
     in a code span, a link or bare prose -- is admitted as touched (tier 2) when it exists and
@@ -1355,6 +1374,7 @@ def prefilter(
                     if call.prepared_html and call.name == "write" and len(prepared_content) < 3:
                         prepared_content[identity] = (absolute, call.prepared_html)
     prepared: list[tuple[Candidate, str]] = []
+    sweep_more = 0
     if want_files or prepared_content:
         env = {"LOCAL_OPERATOR_SCRATCHPAD": scratchpad} if scratchpad else None
         mentions, sweep_dirs = _harvest(items, env=env)
@@ -1374,6 +1394,14 @@ def prefilter(
                 )
                 if parent not in landed:
                     landed.append(parent)
+        # What the answer names, by base name: a sweep hit the answer names is a deliverable
+        # the operator was told about, so it bypasses the unnamed-hit cap below and its
+        # directory becomes a place a bare name in the answer resolves.
+        visible = _answer_spans(answer_text)
+        named_bases = {os.path.basename(span) for span in visible} | {
+            os.path.basename(match.group("path")) for match in _PROSE_PATH.finditer(answer_text)
+        }
+        swept_hits: list[Mention] = []
         if since > 0:
             seen_dirs: set[str] = set()
             for directory, intent, order in sweep_dirs:
@@ -1387,17 +1415,35 @@ def prefilter(
                     continue
                 if base not in landed:
                     landed.append(base)
-                mentions.extend(
-                    Mention(os.path.join(base, name), TIER_COMMAND, "bash", intent, order)
-                    for name in _sweep(base, since)
+                swept_hits.extend(
+                    Mention(os.path.join(base, name), TIER_COMMAND, "bash", intent, order, True)
+                    for name in _sweep(base, since, sweep_floor)
                 )
             if scratchpad:
                 # Order 0 ranks a sweep hit BELOW every named output (a later order wins a
                 # tie), so it never displaces the path and intent a command spelled out.
-                mentions.extend(
-                    Mention(path, TIER_COMMAND, "sweep", "", 0)
-                    for path in _sweep_tree(scratchpad, since)
+                swept_hits.extend(
+                    Mention(path, TIER_COMMAND, "sweep", "", 0, True)
+                    for path in _sweep_tree(scratchpad, since, sweep_floor)
                 )
+        unnamed_kept = 0
+        seen_hits: set[str] = set()
+        for hit in swept_hits:
+            if hit.raw in seen_hits:
+                continue
+            seen_hits.add(hit.raw)
+            parent = os.path.dirname(hit.raw)
+            if os.path.basename(hit.raw) in named_bases:
+                # Named by the answer: never capped, NOT "swept" (the answer named it), and
+                # its directory resolves the answer's other bare names.
+                if parent not in landed:
+                    landed.append(parent)
+                mentions.append(replace(hit, swept=False))
+            elif unnamed_kept < SWEEP_MAX_FILES:
+                unnamed_kept += 1
+                mentions.append(hit)
+            else:
+                sweep_more += 1
         if scratchpad:
             landed.append(scratchpad)
         # Links participate in admission too; a tier-3 mention of a file the answer already
@@ -1422,7 +1468,6 @@ def prefilter(
                     )
                 )
                 mentions.append(Mention(raw, TIER_PROSE, "answer", "", 10_000))
-        visible = _answer_spans(answer_text)
         for span in sorted(visible):
             if span.startswith(_SCRATCH_SCHEME) and kind_of(span) in _DELIVERABLE_KINDS:
                 mentions.append(Mention(span, TIER_PROSE, "answer", "", 10_000))
@@ -1519,14 +1564,18 @@ def prefilter(
                 # Dedup stays for what the turn only MENTIONED (tier 3) and for non-deliverable
                 # kinds (a linked script). A tier 1/2 deliverable is kept, flagged below.
                 if held is not None and held.tier <= TIER_COMMAND:
-                    candidates[absolute] = replace(held, linked_in_answer=True)
+                    # The answer links it, so it is named whatever door found it first.
+                    candidates[absolute] = replace(held, linked_in_answer=True, swept=False)
                     continue
                 if tier == TIER_PROSE or kind not in _DELIVERABLE_KINDS:
                     reject("already-visible")
                     continue
             if held is not None and (held.tier, -held.order) <= (tier, -order):
                 if linked_name and not held.linked_in_answer:
-                    candidates[absolute] = replace(held, linked_in_answer=True)
+                    held = candidates[absolute] = replace(held, linked_in_answer=True)
+                if held.swept and not mention.swept:
+                    # A sweep found it first, but the turn also NAMED it: it is named.
+                    candidates[absolute] = replace(held, swept=False)
                 continue
             candidates[absolute] = Candidate(
                 path=display,
@@ -1541,6 +1590,7 @@ def prefilter(
                 intent=intent,
                 linked_in_answer=linked_name or (held is not None and held.linked_in_answer),
                 pinned=pinned or (held is not None and held.pinned),
+                swept=mention.swept and (held is None or held.swept),
             )
             # An earlier refusal under the same name (a pin spelled wrong, then the answer's
             # right path) is not a withheld file: the operator sees it.
@@ -1565,4 +1615,5 @@ def prefilter(
         rejected=rejected,
         prepared=tuple(prepared),
         withheld=tuple(withheld.items()) if want_files else (),
+        sweep_more=sweep_more if want_files else 0,
     )

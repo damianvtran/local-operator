@@ -35,8 +35,32 @@ _NAMES_SHOWN: Final = 3
 DELIVER_DESCRIPTION: Final = "Files to show under your answer."
 
 
+def _deny_prefixes() -> tuple[str, ...]:
+    """The operator's ``supplements.denyPrefixes``, read the way the runner reads them.
+
+    Without them the call-time verdict could say nothing while the turn-end row withholds
+    the same pin (review R1-2): ONE verdict means the same inputs. Read per pinned call --
+    pins are rare and the read is a small config load; a failure is "no prefixes", never a
+    failed tool call.
+    """
+    try:
+        from local_operator.config import ConfigManager
+        from local_operator.paths import config_dir
+        from local_operator.supplements.policy import SupplementSettings
+
+        values = getattr(ConfigManager(config_dir()).get_config(), "values", None)
+        return tuple(SupplementSettings.from_values(values).deny_prefixes)
+    except Exception:  # noqa: BLE001 -- see docstring
+        return ()
+
+
 def refusal_line(
-    paths: Sequence[str], *, cwd: str, scratchpad: str | None, tool: str = "bash"
+    paths: Sequence[str],
+    *,
+    cwd: str,
+    scratchpad: str | None,
+    tool: str = "bash",
+    deny_prefixes: Sequence[str] | None = None,
 ) -> str:
     """``""`` when every pin is accepted, else the one-line notice. Never raises."""
     pins = [p for p in paths if isinstance(p, str) and p.strip()]
@@ -51,7 +75,14 @@ def refusal_line(
             role="assistant",
             tool_calls=(ToolCallItem(id="deliver-check", name=tool, args={}, deliver=tuple(pins)),),
         )
-        result = prefilter([item], "", cwd=cwd, want_graphics=False, scratchpad=scratchpad or "")
+        result = prefilter(
+            [item],
+            "",
+            cwd=cwd,
+            want_graphics=False,
+            scratchpad=scratchpad or "",
+            deny_prefixes=_deny_prefixes() if deny_prefixes is None else deny_prefixes,
+        )
     except Exception:  # noqa: BLE001 -- a notice must never fail the call it rides on
         return ""
     if not result.withheld:

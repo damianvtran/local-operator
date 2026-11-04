@@ -266,6 +266,9 @@ class SupplementRunner:
         #: it like the job task.
         self._sweep_task: asyncio.Task[None] | None = None
         self._open_row: Mapping[str, Any] | None = None
+        #: Wall time the previous job began -- after that turn settled (``_job`` waits for
+        #: it), so a file older than this belongs to an earlier turn. The sweep floor.
+        self._previous_job_at = 0.0
         #: Jobs this runtime is running right now: the runtime's half of the reader rule
         #: (``contract.reader_disposition(job_live=...)``).
         self._live_jobs: set[str] = set()
@@ -570,6 +573,11 @@ class SupplementRunner:
         want_graphics = settings.graphics and GENERATOR_AVAILABLE
         started = time.perf_counter()
         scratchpad, session_since = await asyncio.to_thread(self._scratch_facts)
+        turn_start = float(getattr(provenance, "started_at", 0.0) or 0.0)
+        # Never above this turn's start: a delayed previous job must not hide this turn's
+        # own early writes.
+        sweep_floor = min(self._previous_job_at, turn_start)
+        self._previous_job_at = time.time()
         pre = await asyncio.to_thread(
             prefilter,
             provenance.items,
@@ -578,17 +586,28 @@ class SupplementRunner:
             deny_prefixes=settings.deny_prefixes,
             want_files=want_files,
             want_graphics=want_graphics,
-            since=float(getattr(provenance, "started_at", 0.0) or 0.0),
+            since=turn_start,
+            sweep_floor=sweep_floor,
             session_since=session_since,
             scratchpad=scratchpad,
         )
         withheld = pre.withheld
-        # Written audio leaves the file pool BEFORE the decision: like generated audio it is
-        # shown as a player in ``sounds[]`` (every surface already has one), never offered to
-        # the classifier as a file and never duplicated in ``files[]``.
-        remaining, written_audio = await asyncio.to_thread(self._file_sounds, pre.candidates)
+        # NAMED written audio (pinned, a recognised write/cp/redirect, or named by the
+        # answer) leaves the file pool BEFORE the decision: like generated audio it is a
+        # player in ``sounds[]``, never offered to the classifier, never duplicated in
+        # ``files[]``. Audio a sweep merely FOUND stays in the pool: the decision weighs it
+        # like any file, and only what it features becomes a player (review R1-1 -- twelve
+        # staged ``chunk_NN.wav`` must not become twelve players nobody asked for).
+        remaining, written_audio = await asyncio.to_thread(
+            self._file_sounds, [c for c in pre.candidates if not c.swept]
+        )
         if written_audio:
-            pre = replace(pre, candidates=remaining)
+            moved = {c.absolute for c in pre.candidates if not c.swept} - {
+                c.absolute for c in remaining
+            }
+            pre = replace(
+                pre, candidates=tuple(c for c in pre.candidates if c.absolute not in moved)
+            )
             sounds = [*sounds, *written_audio]
         logger.debug(
             "supplements: prefilter candidates=%d structured=%s skipped=%s rejected=%s "
@@ -625,6 +644,18 @@ class SupplementRunner:
             want_graphics=want_graphics,
             max_featured=settings.max_featured,
         )
+        if pre.sweep_more:
+            decision = replace(decision, more_unlisted=pre.sweep_more)
+        # Swept audio the decision FEATURED is now a deliverable: give it the player.
+        featured_swept = [c for c in decision.featured if c.swept and c.kind == "audio"]
+        if featured_swept:
+            kept_featured, promoted = await asyncio.to_thread(self._file_sounds, featured_swept)
+            if promoted:
+                gone = {c.absolute for c in featured_swept} - {c.absolute for c in kept_featured}
+                decision = replace(
+                    decision, featured=tuple(c for c in decision.featured if c.absolute not in gone)
+                )
+                sounds = [*sounds, *promoted]
         logger.debug(
             "supplements: decision vendor=%s featured=%d more=%d graphics=%s total_ms=%.1f",
             decision.vendor,
@@ -1148,11 +1179,13 @@ class SupplementRunner:
     ) -> tuple[tuple[Candidate, ...], list[SupplementSound]]:
         """Split written audio out of ``candidates`` into stored ``sounds[]`` entries.
 
-        Only audio with WRITE evidence (a pin, a write, a command's output, a sweep hit, or
-        an answer-named file made this session -- tier <= ``TIER_COMMAND``); a file merely
-        named in prose stays a callout. Each is copied into the content-addressed
-        AttachmentStore exactly as a generated sound is, so the row carries a digest and
-        every player (desktop, relay, mobile) plays it unchanged. A file over
+        Only audio with WRITE evidence (a pin, a write, a command's output, or an
+        answer-named file made this session -- tier <= ``TIER_COMMAND``); a file merely
+        named in prose stays a callout. The caller passes only NAMED candidates, plus the
+        swept ones the decision featured -- never an unnamed sweep hit directly. Each is
+        copied into the content-addressed AttachmentStore exactly as a generated sound
+        is, so the row carries a digest and every player (desktop, relay, mobile) plays
+        it unchanged. A file over
         :data:`FILE_SOUND_MAX_BYTES`, an unreadable one, or one past
         :data:`FILE_SOUNDS_MAX` stays a plain file callout: never dropped.
         """
@@ -1281,6 +1314,14 @@ class SupplementRunner:
                 # until a cold open read the journal.
                 sounds_more=(
                     int(details.get("sounds_more") or 0) if state in ("decided", "done") else 0
+                ),
+                withheld=(
+                    [dict(item) for item in (details.get("withheld") or [])]
+                    if state in ("decided", "done")
+                    else []
+                ),
+                withheld_more=(
+                    int(details.get("withheld_more") or 0) if state in ("decided", "done") else 0
                 ),
                 model=str(details.get("model", "") or ""),
                 model_source=str(details.get("model_source", "") or ""),

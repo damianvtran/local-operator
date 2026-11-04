@@ -3512,6 +3512,11 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
     #: Zero means "nothing held back" and is OMITTED on the wire like the fields
     #: above, so a beat from a turn inside the bound stays byte-identical.
     sounds_more: int = 0
+    #: The row's withheld notice (``SupplementWithheld`` dicts) and its cut, on the
+    #: same beats as ``files``: without them a live done beat restated "nothing
+    #: withheld" over the durable row and the notice vanished until a reload.
+    withheld: list[dict[str, Any]] = Field(default_factory=list)
+    withheld_more: int = 0
     model: str = ""
     model_source: str = ""
     attempts: list[str] = Field(default_factory=list)
@@ -3525,7 +3530,16 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
     ) -> dict[str, Any]:
         """Old event fixtures remain byte-identical when no new facts were observed."""
         value = handler(self)
-        for key in ("model", "model_source", "attempts", "detail", "sounds", "sounds_more"):
+        for key in (
+            "model",
+            "model_source",
+            "attempts",
+            "detail",
+            "sounds",
+            "sounds_more",
+            "withheld",
+            "withheld_more",
+        ):
             if not value.get(key):
                 value.pop(key, None)
         return value

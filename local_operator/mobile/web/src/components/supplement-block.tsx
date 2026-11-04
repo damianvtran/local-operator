@@ -101,7 +101,8 @@ function withheldReasonText(reason: SupplementWithheld["reason"]): string {
  * `2 files not shown: outside allowed locations, sensitive file` — the ONE quiet
  * line that keeps a refused pin or answer-named file from vanishing silently.
  * Distinct reasons only, in first-seen order, joined with the locale's own list
- * format; `count` includes the row's `withheld_more` cut. `""` when nothing was
+ * format (`unit`/`short`: a comma list, never "and"; `narrow` drops the commas
+ * in English, QA round 1 Q3); `count` includes the row's `withheld_more` cut. `""` when nothing was
  * withheld.
  */
 export function withheldLine(
@@ -114,7 +115,7 @@ export function withheldLine(
 	const reasons = [...new Set(withheld.map((item) => item.reason))].map(withheldReasonText);
 	let joined = reasons.join(", ");
 	try {
-		joined = new Intl.ListFormat(locale, { type: "unit", style: "narrow" }).format(reasons);
+		joined = new Intl.ListFormat(locale, { type: "unit", style: "short" }).format(reasons);
 	} catch {
 		/* An engine without ListFormat (or a malformed tag) keeps the comma join. */
 	}
