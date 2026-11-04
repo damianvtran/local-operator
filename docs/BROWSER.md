@@ -273,9 +273,15 @@ complete file. Capture size is the caller's: omit `width`/`height` and the clip 
 visible, larger tab can come out smaller, e.g. 1144x720), or give both (even,
 240-3840, area at most 3840x2160) and
 the host resizes the tab's viewport to exactly that before it starts.
-`fps` (10) and audio (off) stay fixed. The clip is an MP4 with an AV1 track,
-which decoded in AVFoundation in the desktop PR's real-path run and is expected
-not to play in Chrome's `<video>` or H.264-only players (not tested in Chrome).
+`fps` (10) and audio (off) stay fixed. The default clip is an MP4 with an AV1
+track, which decoded in AVFoundation in the desktop PR's real-path run and is
+expected not to play in Chrome's `<video>` or H.264-only players (not tested in
+Chrome). `quality: "high"` (capability `record_quality`) records the same tab
+through a separate encoder into an H.264 MP4 that plays in Chrome and most
+players, at a higher CPU cost; software encoding is limited to 1920x1080, a host
+without a usable encoder refuses (`record_quality_unavailable`) rather than
+falling back, and the harness refuses it on a host without the capability,
+before approval, and fails a start that does not echo `codec: "h264"`.
 Limits: `timeout_s` is the length (default 120 s, max 600 s; the host auto-stops
 and saves at it), 64 MiB per clip (32 MiB under a scratchpad, where a larger
 clip is discarded rather than truncated), one recording per session per tab and

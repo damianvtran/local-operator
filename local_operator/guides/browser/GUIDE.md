@@ -470,7 +470,7 @@ Same `browser` tool. Actions:
 - `network_start` / `network_stop` / `network_read` / `network_clear` (record
   and inspect the tab's own requests — desktop app host only; see below)
 - `record_start` / `record_stop` (record the tab's video to an `.mp4`, at an
-  optional `width`/`height` — desktop app host only; see below)
+  optional `width`/`height` and `quality: "high"` — desktop app host only; see below)
 - `close` (drop the surface and its tab)
 
 ### Network capture: what the tab actually sent and received
@@ -584,11 +584,51 @@ does not have to be the visible one: recording reads the same pixels
   **75 s** inside a scratchpad,
   against roughly 16 minutes at 720p — set `timeout_s` accordingly whenever you
   ask for 4K.
-- **Container and playback.** 10 fps, no audio, MP4 with an AV1 track. It plays
-  in QuickTime/AVFoundation (decoded there in the desktop PR's real-path run).
-  Chrome's `<video>` and H.264-only players are expected not to play AV1-in-MP4;
-  that has not been tested in Chrome here, so check before promising playback
-  to someone.
+- **Container and playback (default clip).** 10 fps, no audio, MP4 with an AV1
+  track. It plays in QuickTime/AVFoundation (decoded there in the desktop PR's
+  real-path run). Chrome's `<video>` and H.264-only players are expected not to
+  play AV1-in-MP4; that has not been tested in Chrome here, so check before
+  promising playback to someone. For a clip people will watch in a browser, or
+  one with readable text, use `quality: "high"` below.
+- **`quality: "high"` — a sharper clip, opt in per recording.** Default is
+  unchanged: omit `quality` (or give `"standard"`) and you get the AV1 clip above.
+  `"high"` records the same tab with a different encoder and writes an H.264
+  MP4 (still 10 fps at most, no audio) that plays in Chrome's `<video>` and most
+  players (checked in Chromium and AVFoundation on macOS at 1080p and 4K, no
+  dropped frames). Use it when the clip will be READ or SHOWN: text-heavy pages
+  (docs, tables, dashboards, code), scrolling, demos, bug reports. The default
+  AV1 encoder smears text on scroll and has no quality setting; the gain is
+  largest at 1920x1080 and below and on scrolling or other motion, and small on
+  a page that does not change. Skip it for a quick check nobody will watch.
+  - Cost: more CPU than it sounds. Hardware H.264 is preferred (the start result
+    says `encoder: hardware|software`); software encoding is allowed only at
+    1920x1080 or smaller. A 4K request with no hardware encoder is refused as
+    `record_quality_unavailable` (`why: software_over_1080p`) instead of
+    running slowly; ask for 1920x1080 or drop `quality`. Hardware H.264 at 4K
+    was measured on macOS only; Windows and Linux have not been measured, so
+    expect a refusal there rather than assume it works.
+  - The app NEVER falls back to the default clip by itself: a refused `high`
+    start (`record_quality_unavailable`, `why` = `no_h264_encoder`,
+    `software_over_1080p`, `size_unsupported`, `encoder_start`) starts nothing
+    and writes nothing. Retry smaller, or call `record_start` again WITHOUT
+    `quality` knowingly accepting the lower-quality clip.
+  - An app build without it advertises no `record_quality` capability and is
+    refused before the approval prompt; the copy says to update the app or drop
+    `quality`. A start whose result does not say `codec: "h264"` (a stale app
+    that ignored the field) is reported as a FAILED start, like a wrong size:
+    the AV1 clip IS recording at the approved path, so `record_stop` saves it.
+  - Anything but `standard` or `high` is refused as `record_quality`
+    (`why: value`) before the prompt. `width`/`height` work with it unchanged.
+  - The start result adds `encoder`, `bitrate_bps` (the target) and the real
+    `width`/`height` (even for an unsized clip). The stop result adds `frames`,
+    `measured_fps`, `avg_bitrate_kbps` and `stop_reason` (`stop`, `max_duration`
+    or `max_bytes`). The clip is variable frame rate: a still page costs almost
+    nothing and the last frame is held, so `measured_fps` under 10 is normal.
+  - Reaching the byte cap ends a `high` clip EARLY but keeps it: the file is
+    complete up to that point (`stop_reason: max_bytes`), unlike the default
+    clip, which is discarded. Nothing reaches disk before the stop either way.
+  - Other limits are the same as the default clip (one per session per tab,
+    two app-wide counting both kinds, one above 1920x1080 at a time).
 - The desktop app echoes `width`/`height` in the start result; a clip that
   comes back at another size is reported as a failed sized start (the clip is
   still recording, so `record_stop` can save it — stop it and retry once the

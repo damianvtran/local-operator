@@ -402,10 +402,7 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             ToolDocOp(op="network_clear", blurb="Drop the buffer."),
             ToolDocOp(
                 op="record_start",
-                blurb=(
-                    "Record THIS tab's video to an .mp4, optionally at width=/height= "
-                    "(see notes)."
-                ),
+                blurb="Record THIS tab's video to an .mp4 (see notes).",
             ),
             ToolDocOp(
                 op="record_stop",
@@ -436,12 +433,11 @@ TOOL_NOTES: dict[str, ToolDocNotes] = {
             "'network_start' then read with 'network_read'. Bodies are opt-in "
             "per exact origin+path and land in a private session file, never in "
             "this transcript.\n"
-            "- 'record_start'/'record_stop' make an MP4 of this tab (AV1: plays "
-            "in QuickTime; not expected in Chrome's <video>); path= is approved before "
-            "capture and never overwritten, timeout_s= caps the length, width=/height= "
-            "size the viewport (both or neither, even, 240-3840, area at most "
-            "3840x2160). A clip over 64 MiB is discarded (32 MiB in a scratchpad): "
-            "at 4K about 150 s worst case, 75 s there, so size timeout_s to suit. "
+            "- 'record_start'/'record_stop' make an MP4 of this tab (default AV1: "
+            "QuickTime, not Chrome; quality='high' is H.264, plays in Chrome, costs "
+            "more CPU); path= is approved first, never overwritten. width=/height= go "
+            "together, area at most 3840x2160. A default clip over 64 MiB (32 in a "
+            "scratchpad) is discarded: at 4K about 150 s worst case, 75 s there. "
             "Desktop host only.\n"
             "- Hosts, setup, approvals, error meanings: ``guide://browser``."
         ),

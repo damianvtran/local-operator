@@ -1490,3 +1490,516 @@ def test_the_hosts_own_size_refusal_ends_nothing_was_started() -> None:
     assert sentence.endswith("Nothing was started.")
     message = format_error(error, action="record_start", host=HOST_UI)
     assert "Nothing was started." in message
+
+
+# ---------------------------------------------------------------------------
+# Opt-in high-quality recording: quality="high" (H.264)
+# ---------------------------------------------------------------------------
+
+
+class _QualityHost(_AdvertisedHost):
+    """The same desktop host, advertising `record_quality` as well."""
+
+    def capabilities(self) -> HostCapabilities:
+        return HostCapabilities(
+            methods=(*RECORD_ACTIONS, "record_size", "record_quality"),
+            version="0.99.0",
+            capabilities_known=True,
+        )
+
+
+#: A high-quality start result as the desktop host shapes it (`recording.ts`).
+HIGH_START = {
+    "recording": True,
+    "path": "",
+    "quality": "high",
+    "codec": "h264",
+    "fps": 10,
+    "encoder": "hardware",
+    "bitrate_bps": 8_000_000,
+    "width": 1920,
+    "height": 1080,
+}
+
+
+def test_a_default_start_never_mentions_quality(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Backward compatibility: no `quality` ⇒ the wire and the copy are as before."""
+    result, seen = _call("record_start", tmp_path, monkeypatch, client=_QualityHost())
+    assert not result.is_error
+    assert "quality" not in seen[0][1]
+    assert "AV1" in result.text
+    assert "H.264" not in result.text
+    assert "quality" not in (result.details or {})
+
+
+def test_standard_is_the_same_request_as_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`standard` is not sent and needs no capability: it is the default clip."""
+    result, seen = _call("record_start", tmp_path, monkeypatch, quality="standard")
+    assert not result.is_error
+    assert "quality" not in seen[0][1]
+    assert "AV1" in result.text
+
+
+def test_quality_is_folded_and_an_empty_string_means_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _params("record_start", quality="").quality is None
+    assert _params("record_start", quality="  High ").quality == "high"
+    result, seen = _call("record_start", tmp_path, monkeypatch, quality="")
+    assert not result.is_error
+    assert "quality" not in seen[0][1]
+
+
+def test_a_high_start_sends_quality_and_reports_the_h264_clip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, seen = _call(
+        "record_start",
+        tmp_path,
+        monkeypatch,
+        client=_QualityHost(),
+        quality="high",
+        reply=dict(HIGH_START),
+    )
+    assert not result.is_error
+    assert seen[0][1]["quality"] == "high"
+    details = result.details or {}
+    assert details["quality"] == "high"
+    assert details["codec"] == "h264"
+    assert details["encoder"] == "hardware"
+    assert (details["width"], details["height"]) == (1920, 1080)
+    assert details["bitrate_bps"] == 8_000_000
+    assert "H.264" in result.text
+    assert "Chrome" in result.text
+    # The AV1 sentence would be false for this clip.
+    assert "AV1" not in result.text
+    assert "hardware encoder" in result.text
+    assert "1920x1080" in result.text
+    assert builtin._APPROVED_RECORDINGS["ui:7:nonce"] == details["target"]
+
+
+def test_a_sized_high_start_sends_both(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    result, seen = _call(
+        "record_start",
+        tmp_path,
+        monkeypatch,
+        client=_QualityHost(),
+        quality="high",
+        width=1920,
+        height=1080,
+        reply=dict(HIGH_START),
+    )
+    assert not result.is_error
+    assert (seen[0][1]["width"], seen[0][1]["height"], seen[0][1]["quality"]) == (
+        1920,
+        1080,
+        "high",
+    )
+
+
+def test_a_host_without_record_quality_refuses_before_any_path_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An old app would ignore the field and record AV1 while reporting success."""
+    result, seen = _call("record_start", tmp_path, monkeypatch, quality="high")
+    assert result.is_error
+    assert seen == []
+    assert (result.details or {})["error_code"] == "capability_unsupported"
+    assert "cannot record in high quality" in result.text
+    assert "without quality" in result.text
+    assert "built before this action existed" not in result.text
+    # No destination was composed, so nothing can be approved or stopped later.
+    assert builtin._APPROVED_RECORDINGS == {}
+    assert not (tmp_path / "cfg" / "browser" / "recordings").exists()
+
+
+def test_the_extension_host_says_high_quality_is_desktop_only() -> None:
+    error = capability_refusal(
+        "record_quality", host=HOST_EXTENSION, capabilities=HostCapabilities()
+    )
+    message = format_error(error, action="record_quality", host=HOST_EXTENSION)
+    assert "desktop app" in message
+    assert "backend='ui'" in message
+
+
+def test_a_stale_host_that_recorded_av1_is_a_failed_start_that_keeps_the_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record said `record_quality`, the host ignored it: the echo catches it."""
+    result, _ = _call(
+        "record_start",
+        tmp_path,
+        monkeypatch,
+        client=_QualityHost(),
+        quality="high",
+        reply={"recording": True, "path": "", "codec": "av1", "fps": 10},
+    )
+    assert result.is_error
+    assert "NOT high quality" in result.text
+    assert "av1" in result.text
+    details = result.details or {}
+    assert details["reason"] == "record_quality_mismatch"
+    assert details["why"] == "not_applied"
+    # A clip IS recording: the reason must not read as proof that nothing runs,
+    # or the stop that would save it is refused.
+    assert "record_quality_mismatch" not in builtin._RECORD_ABSENT_REASONS
+    assert builtin._APPROVED_RECORDINGS["ui:7:nonce"] == details["target"]
+
+
+def test_a_high_start_with_no_codec_echo_is_the_same_failed_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _ = _call("record_start", tmp_path, monkeypatch, client=_QualityHost(), quality="high")
+    assert result.is_error
+    assert "unreported" in result.text
+    assert (result.details or {})["reason"] == "record_quality_mismatch"
+
+
+def test_the_clip_a_mismatched_start_left_running_can_still_be_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start, _ = _call(
+        "record_start",
+        tmp_path,
+        monkeypatch,
+        client=_QualityHost(),
+        quality="high",
+        reply={"recording": True, "path": "", "codec": "av1"},
+    )
+    target = Path((start.details or {})["target"])
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(MP4_HEAD)
+    stop, seen = _call(
+        "record_stop",
+        tmp_path,
+        monkeypatch,
+        client=_QualityHost(),
+        reply={"path": str(target), "bytes": len(MP4_HEAD), "duration_ms": 10, "codec": "av1"},
+    )
+    assert not stop.is_error
+    assert seen[0][0] == "record_stop"
+    assert "AV1" in stop.text
+
+
+@pytest.mark.parametrize("value", ["ultra", "HIGHEST", "h264", "1", "low"])
+def test_an_unknown_quality_is_refused_before_dispatch(value: str) -> None:
+    refusal = builtin._browser_args_problem(
+        "call", "record_start", _params("record_start", quality=value)
+    )
+    assert refusal is not None
+    details = refusal.details or {}
+    assert (details["reason"], details["param"], details["why"]) == (
+        "record_quality",
+        "quality",
+        "value",
+    )
+    assert "'standard' or 'high'" in refusal.text
+    assert refusal.text.endswith("Nothing was started.")
+
+
+@pytest.mark.parametrize("value", ["high", "standard", None])
+def test_a_known_quality_passes_the_argument_check(value: str | None) -> None:
+    assert (
+        builtin._browser_args_problem(
+            "call", "record_start", _params("record_start", quality=value)
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("action", ["record_stop", "screenshot", "snapshot"])
+def test_quality_on_any_other_action_is_refused(action: str) -> None:
+    problem = builtin._validate_browser_args(action, _params(action, quality="high"))
+    assert "only valid for 'record_start'" in problem
+
+
+@pytest.mark.parametrize("value", [True, 3, ["high"]])
+def test_a_non_text_quality_is_typed_through_the_real_entry(
+    value: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    tool = builtin.build_browser_tool(_ctx(tmp_path))
+    assert tool is not None
+
+    async def _run() -> Any:
+        return await tool.execute(
+            "call", {"action": "record_start", "quality": value}, None, None, _ctx(tmp_path)
+        )
+
+    result = asyncio.run(_run())
+    assert result.is_error
+    details = result.details or {}
+    assert (details["reason"], details["why"]) == ("record_quality", "value")
+    assert result.text.endswith("Nothing was started.")
+    # Plan time answers the same fault without asking for approval.
+    assert tool.refuse_args is not None
+    hint = tool.refuse_args({"action": "record_start", "quality": value}, frozenset())
+    assert hint is not None and hint.endswith("Nothing was started.")
+
+
+def test_an_unknown_quality_is_refused_at_plan_time_and_for_the_real_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    tool = builtin.build_browser_tool(_ctx(tmp_path))
+    assert tool is not None and tool.refuse_args is not None
+    args = {"action": "record_start", "quality": "ultra"}
+    assert "'standard' or 'high'" in (tool.refuse_args(args, frozenset()) or "")
+    # `high` and a size error: the size sentence wins, the order is stable.
+    assert "even" in (
+        tool.refuse_args(
+            {"action": "record_start", "quality": "high", "width": 1921, "height": 1080},
+            frozenset(),
+        )
+        or ""
+    )
+    assert tool.refuse_args({"action": "record_start", "quality": "high"}, frozenset()) is None
+
+    async def _run() -> Any:
+        return await tool.execute("call", args, None, None, _ctx(tmp_path))
+
+    result = asyncio.run(_run())
+    assert (result.details or {})["reason"] == "record_quality"
+
+
+def test_the_approval_row_names_high_quality(tmp_path: Path) -> None:
+    row = builtin._describe_browser_approval(
+        {
+            "action": "record_start",
+            "path": str(tmp_path / "clip.mp4"),
+            "quality": "high",
+            "width": 1920,
+            "height": 1080,
+        },
+        str(tmp_path),
+    )
+    assert row.endswith(" at 1920x1080 (high quality)")
+    plain = builtin._describe_browser_approval(
+        {"action": "record_start", "path": str(tmp_path / "clip.mp4")}, str(tmp_path)
+    )
+    assert "high quality" not in plain
+    assert "high quality" not in builtin._describe_browser_approval(
+        {"action": "record_start", "quality": {"bad": 1}}, str(tmp_path)
+    )
+
+
+def test_the_two_new_host_refusals_prove_no_recording_is_running() -> None:
+    assert "record_quality" in builtin._RECORD_ABSENT_REASONS
+    assert "record_quality_unavailable" in builtin._RECORD_ABSENT_REASONS
+
+
+def test_a_host_value_refusal_renders_the_harness_copy() -> None:
+    error = _wire_error(ErrorCode.INTERNAL, "record_quality", param="quality", why="value")
+    message = format_error(error, action="record_start", host=HOST_UI)
+    assert "'standard' or 'high'" in message
+    assert message.endswith("Nothing was started.")
+
+
+@pytest.mark.parametrize(
+    "why, needle, offers_smaller",
+    [
+        ("no_h264_encoder", "no H.264 encoder", False),
+        ("software_over_1080p", "limited to 1920x1080", True),
+        ("size_unsupported", "does not support that clip size", True),
+        ("encoder_start", "failed to start", False),
+    ],
+)
+def test_every_unavailable_reason_renders_a_way_forward(
+    why: str, needle: str, offers_smaller: bool
+) -> None:
+    error = _wire_error(ErrorCode.INTERNAL, "record_quality_unavailable", why=why)
+    message = format_error(error, action="record_start", host=HOST_UI)
+    assert needle in message
+    # The app never falls back by itself, so the copy must say how to proceed.
+    assert "without quality" in message
+    assert message.endswith("Nothing was started.")
+    assert ("smaller" in message or "1920x1080 or smaller" in message) is offers_smaller
+
+
+def test_an_unknown_unavailable_why_falls_back_to_the_host_words() -> None:
+    error = BridgeError(
+        ErrorCode.INTERNAL,
+        "the GPU is on fire",
+        {"reason": "record_quality_unavailable", "why": "from_the_future"},
+    )
+    message = format_error(error, action="record_start", host=HOST_UI)
+    assert "the GPU is on fire" in message
+    assert "without quality" in message
+
+
+def test_a_refused_high_start_forgets_the_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`record_quality_unavailable` from the host: nothing runs, nothing is kept."""
+    seen: list[str] = []
+
+    async def refusing(tool_call_id, action_name, wire, *, surface="", client=None):
+        seen.append(action_name)
+        error = _wire_error(
+            ErrorCode.INTERNAL, "record_quality_unavailable", why="software_over_1080p"
+        )
+        problem = builtin._error(
+            tool_call_id, "browser", format_error(error, action=action_name, host=HOST_UI)
+        )
+        problem.details = {"reason": "record_quality_unavailable", "error_code": "internal"}
+        return None, problem
+
+    monkeypatch.setattr(builtin, "_bridge_call", refusing)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "cfg"))
+    builtin._APPROVED_RECORDINGS["ui:7:nonce"] = "stale"
+    result = asyncio.run(
+        builtin._browser_record(
+            "call",
+            _surface(),
+            "record_start",
+            _params("record_start", quality="high", width=3840, height=2160),
+            _ctx(tmp_path),
+            client=_QualityHost(),
+        )
+    )
+    assert result.is_error
+    assert seen == ["record_start"]
+    assert "ui:7:nonce" not in builtin._APPROVED_RECORDINGS
+
+
+def test_a_high_stop_passes_the_new_fields_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(MP4_HEAD)
+    result, _ = _call(
+        "record_stop",
+        tmp_path,
+        monkeypatch,
+        client=_QualityHost(),
+        reply={
+            "path": str(target),
+            "bytes": len(MP4_HEAD),
+            "duration_ms": 11_000,
+            "auto_stopped": False,
+            "codec": "h264",
+            "quality": "high",
+            "encoder": "software",
+            "frames": 32,
+            "measured_fps": 2.9,
+            "avg_bitrate_kbps": 1234.4,
+            "stop_reason": "stop",
+        },
+    )
+    assert not result.is_error
+    assert result.details == {
+        "path": str(target),
+        "bytes": len(MP4_HEAD),
+        "quality": "high",
+        "encoder": "software",
+        "frames": 32,
+        "measured_fps": 2.9,
+        "avg_bitrate_kbps": 1234.4,
+        "stop_reason": "stop",
+    }
+    assert "H.264" in result.text
+    assert "32 frames" in result.text
+    assert "2.9 fps measured" in result.text
+    assert "1234 kbps" in result.text
+    assert "AV1" not in result.text
+
+
+def test_a_clip_that_hit_the_byte_cap_is_kept_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(MP4_HEAD)
+    result, _ = _call(
+        "record_stop",
+        tmp_path,
+        monkeypatch,
+        reply={
+            "path": str(target),
+            "bytes": len(MP4_HEAD),
+            "duration_ms": 40_000,
+            "auto_stopped": False,
+            "codec": "h264",
+            "quality": "high",
+            "stop_reason": "max_bytes",
+        },
+    )
+    assert not result.is_error
+    assert (result.details or {})["stop_reason"] == "max_bytes"
+    assert "size limit" in result.text
+    assert "complete" in result.text
+    assert "time limit" not in result.text
+
+
+def test_a_max_duration_stop_still_says_the_time_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(MP4_HEAD)
+    result, _ = _call(
+        "record_stop",
+        tmp_path,
+        monkeypatch,
+        reply={
+            "path": str(target),
+            "bytes": len(MP4_HEAD),
+            "duration_ms": 120_000,
+            "auto_stopped": True,
+            "codec": "h264",
+            "quality": "high",
+            "stop_reason": "max_duration",
+        },
+    )
+    assert "time limit" in result.text
+
+
+def test_malformed_stop_fields_are_dropped_not_trusted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(MP4_HEAD)
+    result, _ = _call(
+        "record_stop",
+        tmp_path,
+        monkeypatch,
+        reply={
+            "path": str(target),
+            "bytes": len(MP4_HEAD),
+            "duration_ms": 1,
+            "quality": "high",
+            "encoder": "quantum",
+            "frames": True,
+            "measured_fps": float("nan"),
+            "avg_bitrate_kbps": "lots",
+            "stop_reason": "exploded",
+        },
+    )
+    assert not result.is_error
+    assert result.details == {"path": str(target), "bytes": len(MP4_HEAD), "quality": "high"}
+
+
+def test_a_default_stop_is_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The AV1 receipt keeps its sentence and its details, even from a newer host."""
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(MP4_HEAD)
+    result, _ = _call(
+        "record_stop",
+        tmp_path,
+        monkeypatch,
+        reply={
+            "path": str(target),
+            "bytes": len(MP4_HEAD),
+            "duration_ms": 1000,
+            "codec": "av1",
+            "fps": 10,
+            "container": "mp4",
+        },
+    )
+    assert result.details == {"path": str(target), "bytes": len(MP4_HEAD)}
+    assert "AV1" in result.text
+    assert "QuickTime" in result.text

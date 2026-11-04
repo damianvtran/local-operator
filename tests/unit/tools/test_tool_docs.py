@@ -409,8 +409,16 @@ MEASURED_TOKENS: dict[str, int] = {
     # note drop the host-only clause they each duplicated from the other
     # (-5 tokens against the branch's own +131); the number below is measured
     # on the rebased tree by this test's own print, not a sum of branch deltas.
+    # 2097 -> 2104 (+7, opt-in high-quality recording): `quality='high'` (H.264,
+    # plays in Chrome, costs more CPU) is the one fact a model must meet at the
+    # op, since the default AV1 clip is the lower-quality choice. To stay under the
+    # 8192-char soft cap (8188 chars before this change) the note drops the
+    # width/height bounds the param descriptions and the validator's refusal already
+    # carry, and the op row drops its width/height clause. The when-to-use guidance
+    # and the measured costs live in `guide://browser`. Measured by this test's
+    # own print.
     # No other tool's entry moved.
-    "browser": 2097,
+    "browser": 2104,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the
