@@ -417,8 +417,13 @@ MEASURED_TOKENS: dict[str, int] = {
     # carry, and the op row drops its width/height clause. The when-to-use guidance
     # and the measured costs live in `guide://browser`. Measured by this test's
     # own print.
+    # 2104 -> 2108 (+4, review M1 on the high-quality PR): the earlier "costs more
+    # CPU" was wrong against the measurements (whole-app CPU is LOWER for `high`
+    # on macOS arm64; what rises is main-process CPU and about 0.8 GB of RAM), so
+    # the note states the RAM cost and the tested playback instead. Measured by
+    # this test's own print; the doc is 8181 chars against the 8192 cap.
     # No other tool's entry moved.
-    "browser": 2104,
+    "browser": 2108,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the

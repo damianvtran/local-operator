@@ -21810,7 +21810,7 @@ class BrowserParams(BaseModel):
     )
     quality: str | None = Field(
         default=None,
-        description="'record_start': 'standard' (default) or 'high' (sharper H.264; more CPU).",
+        description="'record_start': 'standard' (default) or 'high' (sharper H.264, +0.8GB RAM)",
     )
 
     @field_validator("x", "y", mode="before")
@@ -26552,21 +26552,35 @@ def _recording_landed(
 #: cannot back. The default clip is AV1 and the QuickTime claim is the one
 #: decoded in the desktop PR's real-path run; the H.264 claim is the Chromium
 #: `<video>` decode and seek check the desktop PR ran on its high-quality clips
-#: (1080p and 4K played, 0 dropped frames), which is why it can say Chrome where
-#: the AV1 sentence cannot.
+#: (1080p and 4K played, 0 dropped frames) and the same run's AV1 clips, which
+#: Chromium refused (DEMUXER_ERROR_NO_SUPPORTED_STREAMS). Both were macOS arm64
+#: only, so neither sentence claims another player or platform.
 _AV1_CLIP_NOTE = (
-    "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; it is not "
-    "expected to play in Chrome's <video> (not tested)."
+    "MP4 with an AV1 track: it plays in QuickTime/AVFoundation; Chromium's <video> "
+    "could not play it in testing."
 )
-_H264_CLIP_NOTE = "H.264 MP4: it plays in Chrome's <video> and most players."
+_H264_CLIP_NOTE = (
+    "H.264 MP4: it played in Chromium's <video> and macOS AVFoundation in testing "
+    "(other players not tested)."
+)
 
 
 def _whole(result: dict[str, Any], key: str) -> int | None:
-    """A non-negative whole number from a host result, or ``None`` (bool is not one)."""
+    """A non-negative whole number from a host result, or ``None`` (bool is not one).
+
+    Total on purpose: this runs after the clip is on disk, so an exception here
+    would lose the receipt of a saved file. ``float(huge_int)`` raises
+    ``OverflowError`` and ``int(nan)`` raises ``ValueError``, so non-finite and
+    out-of-range values are dropped before either conversion.
+    """
     value = result.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if value < 0 or float(value) != int(value):
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(number) or number < 0 or number != int(number):
         return None
     return int(value)
 
@@ -26576,9 +26590,13 @@ def _number(result: dict[str, Any], key: str) -> float | None:
     value = result.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if not math.isfinite(value) or value < 0:
+    try:
+        number = float(value)
+    except OverflowError:
         return None
-    return float(value)
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
 
 
 def _high_start_facts(result: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -26689,7 +26707,9 @@ async def _browser_record(
         # `record_quality` is a CAPABILITY, not a wire method, for the reason
         # `record_size` is: a host that lacks it ignores the field and records the
         # default AV1 clip while reporting success. Checked before the approval
-        # path is resolved or written, so an old app refuses without a prompt.
+        # path is resolved or remembered and before any wire call, so an old app
+        # starts nothing. NOT before the prompt: the host client this needs does
+        # not exist at plan time, so the user has already approved the row.
         problem = _capability_problem(
             tool_call_id, RECORD_QUALITY_CAPABILITY, client, surface=state.surface_id
         )

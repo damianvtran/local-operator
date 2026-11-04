@@ -877,9 +877,9 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
         if host == HOST_UI:
             return (
                 "this build of the Local Operator desktop app cannot record in high "
-                "quality: it records only the default clip. Update Local Operator "
-                f"({remedy}) and retry with quality='high', or call 'record_start' "
-                "without quality for the default clip — that works now. Nothing was started."
+                "quality: it records only the default clip. To use quality='high', "
+                f"{remedy}; or call 'record_start' without quality for the default "
+                "clip — that works now. Nothing was started."
             )
         return (
             "high-quality recording is served only by the Local Operator desktop app's "

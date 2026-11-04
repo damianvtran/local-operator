@@ -636,7 +636,7 @@ def test_stop_reports_what_landed_and_the_av1_caveat(
     assert set(seen[0][1]) == {"tab", "requester", "session_label"}
     assert result.details == {"path": str(target), "bytes": len(MP4_HEAD)}
     assert "AV1" in result.text
-    assert "will not play" not in result.text  # not tested in Chrome: no hard claim
+    assert "will not play" not in result.text  # one browser, one platform: no hard claim
     assert "QuickTime" in result.text
 
 
@@ -1574,7 +1574,8 @@ def test_a_high_start_sends_quality_and_reports_the_h264_clip(
     assert (details["width"], details["height"]) == (1920, 1080)
     assert details["bitrate_bps"] == 8_000_000
     assert "H.264" in result.text
-    assert "Chrome" in result.text
+    assert "Chromium" in result.text
+    assert "most players" not in result.text  # only Chromium and AVFoundation were tested
     # The AV1 sentence would be false for this clip.
     assert "AV1" not in result.text
     assert "hardware encoder" in result.text
@@ -1615,6 +1616,8 @@ def test_a_host_without_record_quality_refuses_before_any_path_is_written(
     # No destination was composed, so nothing can be approved or stopped later.
     assert builtin._APPROVED_RECORDINGS == {}
     assert not (tmp_path / "cfg" / "browser" / "recordings").exists()
+    # QA Q2: the remedy already says "then retry"; the sentence must not say it twice.
+    assert result.text.lower().count("retry") == 1
 
 
 def test_the_extension_host_says_high_quality_is_desktop_only() -> None:
@@ -1981,6 +1984,90 @@ def test_malformed_stop_fields_are_dropped_not_trusted(
     )
     assert not result.is_error
     assert result.details == {"path": str(target), "bytes": len(MP4_HEAD), "quality": "high"}
+
+
+_HOSTILE_NUMBERS = [
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+    1e999,
+    10**400,
+    -(10**400),
+    -1,
+    1.5,
+    True,
+    False,
+    "7",
+    None,
+]
+
+
+@pytest.mark.parametrize("field", ["frames"])
+@pytest.mark.parametrize("bad", _HOSTILE_NUMBERS, ids=repr)
+def test_a_hostile_stop_count_never_escapes_after_the_file_is_written(
+    field: str, bad: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file is on disk and the approval popped by now: nothing here may raise."""
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(MP4_HEAD)
+    result, _ = _call(
+        "record_stop",
+        tmp_path,
+        monkeypatch,
+        reply={
+            "path": str(target),
+            "bytes": len(MP4_HEAD),
+            "duration_ms": 1,
+            "quality": "high",
+            field: bad,
+        },
+    )
+    assert not result.is_error
+    assert field not in (result.details or {})
+    assert result.details["path"] == str(target)  # type: ignore[index]
+
+
+@pytest.mark.parametrize("field", ["measured_fps", "avg_bitrate_kbps"])
+@pytest.mark.parametrize("bad", _HOSTILE_NUMBERS, ids=repr)
+def test_a_hostile_stop_rate_never_escapes_after_the_file_is_written(
+    field: str, bad: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Includes bool: `True` must not render as "1.0 fps measured"."""
+    target = tmp_path / "clip.mp4"
+    target.write_bytes(MP4_HEAD)
+    result, _ = _call(
+        "record_stop",
+        tmp_path,
+        monkeypatch,
+        reply={
+            "path": str(target),
+            "bytes": len(MP4_HEAD),
+            "duration_ms": 1,
+            "quality": "high",
+            field: bad,
+        },
+    )
+    assert not result.is_error
+    expected_kept = isinstance(bad, (int, float)) and not isinstance(bad, bool)
+    kept = field in (result.details or {})
+    # Only a finite, non-negative number may be kept (1.5 is a fine rate).
+    assert kept == (expected_kept and bad in (1.5,))
+
+
+@pytest.mark.parametrize("field", ["width", "height", "fps", "bitrate_bps"])
+@pytest.mark.parametrize("bad", _HOSTILE_NUMBERS, ids=repr)
+def test_a_hostile_start_field_never_escapes_and_is_dropped(
+    field: str, bad: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reply = {**HIGH_START, field: bad}
+    result, _ = _call(
+        "record_start", tmp_path, monkeypatch, client=_QualityHost(), quality="high", reply=reply
+    )
+    # A hostile width/height only drops the NUMBERS; the codec echo is what
+    # decides success, and it is intact.
+    assert not result.is_error
+    assert field not in (result.details or {})
+    assert "H.264" in result.text
 
 
 def test_a_default_stop_is_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -275,13 +275,16 @@ visible, larger tab can come out smaller, e.g. 1144x720), or give both (even,
 the host resizes the tab's viewport to exactly that before it starts.
 `fps` (10) and audio (off) stay fixed. The default clip is an MP4 with an AV1
 track, which decoded in AVFoundation in the desktop PR's real-path run and is
-expected not to play in Chrome's `<video>` or H.264-only players (not tested in
-Chrome). `quality: "high"` (capability `record_quality`) records the same tab
-through a separate encoder into an H.264 MP4 that plays in Chrome and most
-players, at a higher CPU cost; software encoding is limited to 1920x1080, a host
-without a usable encoder refuses (`record_quality_unavailable`) rather than
-falling back, and the harness refuses it on a host without the capability,
-before approval, and fails a start that does not echo `codec: "h264"`.
+refused by Chromium's `<video>` in testing (macOS arm64); H.264-only players
+are expected not to play it (untested). `quality: "high"` (capability `record_quality`) records the
+same tab through a separate encoder into an H.264 MP4 that played in Chromium's
+`<video>` and macOS AVFoundation (other players and platforms untested). On
+macOS arm64 with the hardware encoder it used less whole-app CPU than the default
+clip, but more main-process CPU and about 0.8 GB more RAM. Software encoding is
+limited to 1920x1080, and a host without a usable encoder refuses
+(`record_quality_unavailable`) rather than falling back. A host without the
+capability is refused after the approval prompt but before anything starts or is
+sent to the app, and a start that does not echo `codec: "h264"` is a failed start.
 Limits: `timeout_s` is the length (default 120 s, max 600 s; the host auto-stops
 and saves at it), 64 MiB per clip (32 MiB under a scratchpad, where a larger
 clip is discarded rather than truncated), one recording per session per tab and
