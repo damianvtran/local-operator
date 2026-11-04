@@ -1020,10 +1020,27 @@ def _in_place_edit(name: str, args: list[Expanded]) -> bool:
         if t.startswith("--in-place"):
             return True
         if t.startswith("-") and not t.startswith("--"):
-            # R3-3: ``i`` anywhere in a short cluster (``-Ei``, ``-ni``, ``-pi``).
-            if "i" in t[1:]:
+            # R3-3: ``i`` anywhere in a short cluster (``-Ei``, ``-ni``, ``-pi``)
+            # — but only BEFORE the first script letter (R4-2): in
+            # ``-e's/in/out/'`` everything after ``e`` is the script text.
+            flags, _script = _split_cluster(name, t[1:])
+            if "i" in flags:
                 return True
     return False
+
+
+def _split_cluster(name: str, cluster: str) -> tuple[str, str | None]:
+    """A short-option cluster's flag letters, and its attached script if any.
+
+    sed's script letters are ``e``/``f``; perl's are ``e``/``E``. The first one
+    ends the flags: the rest of the word, if any, is its value (``-es/x/y/``).
+    ``None`` means no script letter; ``""`` means the value is the NEXT word.
+    """
+    letters = ("e", "E") if name == "perl" else ("e", "f")
+    for k, ch in enumerate(cluster):
+        if ch in letters:
+            return cluster[:k], cluster[k + 1 :]
+    return cluster, None
 
 
 @dataclass
@@ -1125,7 +1142,16 @@ class _Walker:
         # (``cat <<EOF | bash``) is therefore the script a pipe-fed shell runs.
         upstream_bodies: list[str] = []
         groups: list[_Snapshot] = []
-        for index, (text, piped, op) in enumerate(pieces):
+        # R4-1: whether a stage reads the previous one's stdout comes from the
+        # PREVIOUS piece's operator. ``_split`` reports ``|&`` as a ``|`` run
+        # followed by an ``&`` that clears its own ``piped`` flag, so the flag
+        # cannot be trusted for ``|&``; the operator can.
+        piped_in = [i > 0 and pieces[i - 1][2] == "|" for i in range(len(pieces))]
+        # R4-1: bodies produced inside a ``{ …; }``/``( … )`` group are the
+        # group's output, which a ``} |``/``) |`` closer pipes onward.
+        group_bodies: list[list[str]] = []
+        for index, (text, _flag, op) in enumerate(pieces):
+            piped = piped_in[index]
             # R4: a subshell ``( … )``, any pipeline stage and a ``&`` job run in
             # a child process, so their cd/assignments do not reach later
             # segments. A subshell spans several pieces (``( cd x && rm y )``),
@@ -1140,17 +1166,24 @@ class _Walker:
             while tail.endswith(")") and tail.count(")") > tail.count("("):
                 closes += 1
                 tail = tail[:-1].rstrip()
-            nxt_piped = index + 1 < len(pieces) and pieces[index + 1][1]
+            brace_opens = 0
+            head = text.strip()
+            while head.startswith(("{ ", "{\n", "{\t", "(")) and not head.startswith("(("):
+                brace_opens += 1
+                head = head[1:].lstrip()
+            for _ in range(brace_opens):
+                group_bodies.append([])
+            nxt_piped = index + 1 < len(pieces) and piped_in[index + 1]
             isolated = piped or nxt_piped or op == "&"
             openers = len(_HEREDOC_OPEN_RE.findall(text))
             heredocs, pending_bodies = pending_bodies[:openers], pending_bodies[openers:]
             # The whole pipeline's text, so a pipe-fed shell can ask whether
             # anything upstream names a delete (S2-2).
             start = index
-            while start > 0 and pieces[start][1]:
+            while start > 0 and piped_in[start]:
                 start -= 1
             end = index
-            while end + 1 < len(pieces) and pieces[end + 1][1]:
+            while end + 1 < len(pieces) and piped_in[end + 1]:
                 end += 1
             pipeline = " | ".join(p[0] for p in pieces[start : end + 1])
             if not piped:
@@ -1169,7 +1202,17 @@ class _Walker:
                 self._segment(
                     text, depth, heredocs, stdin_piped=piped, pipeline=pipeline, feed=feed
                 )
-            upstream_bodies = upstream_bodies + heredocs + _herestring_texts(text)
+            produced = heredocs + _herestring_texts(text)
+            upstream_bodies = upstream_bodies + produced
+            for bodies in group_bodies:
+                bodies.extend(produced)
+            tail_text = text.strip()
+            group_closes = closes + (
+                1 if tail_text == "}" or tail_text.endswith((" }", ";}")) else 0
+            )
+            for _ in range(min(group_closes, len(group_bodies))):
+                # The closer's stage pipes the WHOLE group's output onward.
+                upstream_bodies = upstream_bodies + group_bodies.pop()
             for _ in range(closes):
                 if groups:
                     self._restore(groups.pop())
@@ -1364,19 +1407,23 @@ class _Walker:
                 script_by_flag = True
                 k += 1
                 continue
-            if t.startswith("-") and len(t) > 1:
-                cluster = t.lstrip("-")
-                # A short cluster ending in a script-taking letter consumes the
-                # next word: sed ``e``/``f``; perl ``e``/``E`` (``-E`` is
-                # sed's extended-regex flag, not a script).
-                script_letters = ("e", "E") if name == "perl" else ("e", "f")
-                takes_script = t in ("-e", "-f", "--expression", "--file") or (
-                    not t.startswith("--") and cluster[-1:] in script_letters
-                )
-                if takes_script:
+            if t in ("--expression", "--file"):
+                script_by_flag = True
+                k += 2
+                continue
+            if t.startswith("-") and not t.startswith("--") and len(t) > 1:
+                # R4-2/R4-3: scan the cluster letter by letter. The first script
+                # letter (sed ``e``/``f``, perl ``e``/``E``; sed's ``-E`` is
+                # extended regex) takes the rest of the word as its script, or
+                # the next word when nothing follows it.
+                _flags, attached = _split_cluster(name, t[1:])
+                if attached is not None:
                     script_by_flag = True
-                    k += 2
+                    k += 1 if attached else 2
                     continue
+                k += 1
+                continue
+            if t.startswith("--"):
                 k += 1
                 continue
             files.append(args[k])
