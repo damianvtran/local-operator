@@ -2814,9 +2814,12 @@ SETTINGS: tuple[Setting, ...] = (
             _t(_ns.enabled_choice_true_description()),
             _t(_ns.enabled_choice_false_description()),
         ),
-        # A sound rides a banner, so with banners off there is nothing for it
-        # to accompany; the row says so instead of reading "on".
-        gated_by="display.notifications",
+        # NOT `gated_by="display.notifications"`, though a sound only rides a
+        # banner: `gated_by` is a same-section relation (the page dims a row
+        # whose master sits beside it, and test_every_gated_setting_names_a_bool_master
+        # pins that), and the banner switch lives in `appearance`. The runtime
+        # needs no gate here (no banner, no sound), and `lop sound doctor` leads
+        # with "banners are off" when they are.
         synonyms=("chime", "audio", "mute"),
     ),
     Setting(

@@ -1,0 +1,36 @@
+{
+  "scope": "21-key zh-CN catalogue completion only; legacy SDK producers stay English, no UI presentation path/fit claim",
+  "source_sha256": "a92bc479321cd0ee938d338cff05c1fced88590df3d43ec39d14f4d7b3cf5855",
+  "context_sha256": "8735964058f901e1d97527801eb88f5a36585f0d7713c1e21f7f98ebaa55418e",
+  "target_sha256": "0ff78d9cecbb7c024a284abc694f1a3d9e21bc283c464cba5ae42b2a227c76ad",
+  "translator": {
+    "session": "7fce46e29bee",
+    "actual_model": "openai/gpt-6.1-sol",
+    "source": "translator-record.json completed usage"
+  },
+  "independent_readers": [
+    {
+      "session": "e55f54b6a26e",
+      "model": "openai/gpt-6.1-sol",
+      "record": "i18n/audits/evidence/zh-CN/wire.errors.sdk_spec/e55f54-r1/record.json",
+      "record_sha256": "0a0c7753245980ed680ad5ef134ca1b13017d9711f914d8a7f3875cd77cf559b",
+      "verdict": "passed",
+      "findings": 0
+    },
+    {
+      "session": "6433b7a5b3e9",
+      "model": "openai/gpt-6.1-sol",
+      "record": "i18n/audits/evidence/zh-CN/wire.errors.sdk_spec/second-6433b7a5b3e9/record.json",
+      "record_sha256": "e3c466b4cc9a1b1d0d369899b7192f414daa9e2992d05ae83b3a9283c4e440ab",
+      "verdict": "passed",
+      "findings": 0
+    }
+  ],
+  "retention_note": "All original packet/companion files retained byte-identically except isolated-home ephemeral sandbox is not audit evidence; no files inside it copied",
+  "not_run": [
+    "native fit",
+    "pseudo",
+    "RTL execution",
+    "direct UI presentation"
+  ]
+}

@@ -72,6 +72,11 @@ TUI (`lop --resume <session-id>`), or answer it from the phone. If the user
 wants replies to go out with nobody at the machine, that is their decision
 about their approval mode. Never change it for them.
 
+Agent replies are never capped by count: agents can keep each other updated,
+so keep each message purposeful and do not spam (an exact re-send of the same
+message to the same thread and recipients within 10 s, with nothing new in
+between, is skipped; a long run with no reply returns a one-line warning).
+
 ## Prerequisites and setup without the desktop app
 
 Check these in order. The receiver is not installed until all of them hold.
@@ -172,6 +177,17 @@ local-operator-bridge-connector.service` command to read it.
 "Last inbox check" moves when the receiver merges an inbox page or finishes a
 resync, not on every quiet poll, so an old time on a quiet account is normal.
 `logs` is the better liveness signal.
+
+## Long-held messages
+
+When a message has been held (in screening, or admitted and waiting for
+delivery) for longer than `team_bridge.hold_alert_after_minutes` (default 60,
+`0` turns it off, maximum 10080), the receiver raises one inbox notification in
+the designated session and clears it once nothing is held that long. It has no
+`lop config edit` key: run `lop config open` and add
+`hold_alert_after_minutes: <minutes>` under `values:` > `team_bridge:`. The
+receiver re-reads it without a restart. `lop team-bridge receiver status` shows
+what is held.
 
 ## Linux: lingering
 

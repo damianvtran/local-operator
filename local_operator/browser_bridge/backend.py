@@ -870,6 +870,22 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
             "browser; the Chrome extension records the page at its own size. Open the "
             "page with backend='ui' to record at a chosen size."
         )
+    if method == "record_quality":
+        # Same shape as `record_size` above, and for the same reason: the action
+        # exists on that build (`record_start` works, as the default AV1 clip),
+        # so "built before this action existed" would be false.
+        if host == HOST_UI:
+            return (
+                "this build of the Local Operator desktop app cannot record in high "
+                "quality: it records only the default clip. To use quality='high', "
+                f"{remedy}; or call 'record_start' without quality for the default "
+                "clip — that works now. Nothing was started."
+            )
+        return (
+            "high-quality recording is served only by the Local Operator desktop app's "
+            "browser; the Chrome extension cannot record at all. Open the page with "
+            "backend='ui' to record."
+        )
     if host == HOST_EXTENSION and method in DESKTOP_ONLY_METHODS:
         # A desktop-only method has NO remedy inside the extension: no update,
         # toggle or re-pair makes it servable, and the old copy sent the user to
@@ -1046,6 +1062,36 @@ def _record_reason_message(error: BridgeError, reason: str) -> str:
         remedy = f" {detail}" if detail and why in {"visible", "not_applied"} else ""
         return (
             f"the clip was not started at the size asked for: {cause}.{remedy} Nothing was started."
+        )
+    if reason == "record_quality":
+        return (
+            "quality must be 'standard' or 'high'; omit it for the default clip. "
+            "Nothing was started."
+        )
+    if reason == "record_quality_unavailable":
+        why = str(error.data.get("why") or "")
+        cause = {
+            "no_h264_encoder": "this machine has no H.264 encoder the desktop app can use",
+            "software_over_1080p": (
+                "only a software H.264 encoder is available here, and it is limited to "
+                "1920x1080 or smaller"
+            ),
+            "size_unsupported": "the H.264 encoder here does not support that clip size",
+            "encoder_start": "the H.264 encoder failed to start",
+        }.get(why, detail or "the app has no usable high-quality encoder")
+        # The app never falls back to the default clip by itself (the caller asked
+        # for the sharper one), so the way forward is spelled out per cause: a
+        # smaller size where the size is the problem, a retry where the failure
+        # may be transient, and in every case the default clip, knowingly.
+        retry = {
+            "software_over_1080p": " Retry at 1920x1080 or smaller, or",
+            "size_unsupported": " Retry at a smaller width/height, or",
+            "encoder_start": " Retry, or",
+        }.get(why, " Instead,")
+        return (
+            f"high-quality recording is not available: {cause}.{retry} call 'record_start' "
+            "without quality for the default AV1 clip, which is lower quality. Nothing "
+            "was started."
         )
     if reason == "record_too_large":
         cap = error.data.get("max_bytes")

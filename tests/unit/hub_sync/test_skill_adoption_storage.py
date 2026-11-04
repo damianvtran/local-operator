@@ -159,6 +159,38 @@ def test_full_diffs_and_keep_local_preview_are_truthful(tmp_path):
     assert read_tree(tree.root).tree_hash == tree.tree_hash
 
 
+def test_keep_local_projection_with_sibling_ref_stays_readable(tmp_path):
+    """Storage reads/fingerprints of a keep-local projection never refuse.
+
+    Root requirements.md relocates in the projection while references/local.md
+    names it as a bare sibling that does not resolve locally. Before PR 3390 the
+    projection raised "ambiguous inline filepath" here, so adopt, snapshot and
+    fingerprint of the managed skill all failed; now the text stays verbatim.
+    """
+    identity, document, baseline, storage, tree, snapshot = _setup(tmp_path)
+    (tree.root / "requirements.md").write_text("# Requirements\n")
+    (tree.root / "references").mkdir(exist_ok=True)
+    (tree.root / "references/local.md").write_text("Defined in `requirements.md`.\n")
+    raw = read_tree(tree.root)
+    snapshot = durable_snapshot(storage.config_dir, document.name, raw)
+    transaction = storage.adopt(
+        identity,
+        document.name,
+        None,
+        baseline,
+        expected_tree_hash=raw.tree_hash,
+        snapshot=snapshot,
+        carried_paths=("assets/local.bin",),
+    )
+    assert transaction.phase == "complete"
+    assert read_tree(tree.root).tree_hash == raw.tree_hash
+    projected = storage.snapshot(identity.local_id).document
+    files = {f.path: f.content for f in projected.files}
+    assert files["references/local.md"] == "Defined in `requirements.md`.\n"
+    assert files["references/requirements.md"] == "# Requirements\n"
+    assert storage._fingerprint_path(tree.root, alias=document.name) == projected.fingerprint
+
+
 def test_relocation_collision_never_drops_unique_root_guidance(tmp_path):
     identity, document, baseline, storage, tree, snapshot = _setup(tmp_path)
     (tree.root / "requirements.md").write_text("Unique original root obligation")
@@ -388,7 +420,18 @@ def test_source_relative_relocation_links_and_escape_refusal(tmp_path):
     assert "[root](requirements.md)" in files["references/local.md"]
     assert "[same](./local.md)" in files["references/local.md"]
     assert "[requirements](./requirements.md)" in files["references/rubric.md"]
-    for invalid in ("../../requirements.md", "requirements.md"):
+    # A bare ``requirements.md`` from references/ resolves to the relocation's
+    # own destination, so it is valid once the move lands and is kept verbatim
+    # (the operator's municipal tree). Escapes and other same-basename paths
+    # still fail closed.
+    (tree.root / "references/local.md").write_text("Read requirements.md.\n")
+    kept = build_proposal(document.name, read_tree(tree.root), remote, resolver=None)
+    assert kept.document is not None
+    assert (
+        "Read requirements.md."
+        in {f.path: f.content for f in kept.document.files}["references/local.md"]
+    )
+    for invalid in ("../../requirements.md", "sub/requirements.md"):
         (tree.root / "references/local.md").write_text(f"Read {invalid}.\n")
         with pytest.raises(AdoptionError) as failure:
             build_proposal(document.name, read_tree(tree.root), remote, resolver=None)

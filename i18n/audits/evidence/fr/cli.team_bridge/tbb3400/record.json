@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "audit_id": "tbb3400",
+  "locale": "fr",
+  "namespace": "cli.team_bridge",
+  "audit_date": "2026-11-03",
+  "key_count": 2,
+  "auditor": {
+    "agent": "i18n-auditor (radientdev team; did not translate)",
+    "session": "0ca4d09f6337",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "session header 'Model: anthropic/claude-opus-5-5'; no provider fallback observed",
+    "independent_from_translator_session": true,
+    "independence": "Distinct agent and session from the PR #3400 coder that authored the translations; this auditor's copy edits are listed in report.md."
+  },
+  "translator": {
+    "agent": "coder — PR #3400 implementer",
+    "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred"
+  },
+  "source_audit_revision": "5456b8db1d017c421c7632324ab2065e64e8b85e",
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/cli.team_bridge.json",
+      "sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/cli.team_bridge.context.json",
+      "sha256": "3d013c35bee8f902fdb02e003f2569928b38a8613b94cca5f76d612ee7b4779a"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/fr/cli.team_bridge.json",
+      "sha256": "f2ade7381a742f9a2017b1aa54790c23f1c41236559a6968acb2ed6bec3aa99b",
+      "note": "post-remediation bytes (the shipped bytes)"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "current_bytes_match_audited_hashes": true,
+  "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+  "target_sha256": "f2ade7381a742f9a2017b1aa54790c23f1c41236559a6968acb2ed6bec3aa99b",
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "F1",
+      "F2",
+      "F3"
+    ],
+    "summary": "1 major, 2 minor; all fixed"
+  },
+  "ledger_status": "passed",
+  "unresolved_blocker_major": 0,
+  "audit_notes_not_execution_log": "report.md is reasoning; audit.log is captured command output.",
+  "artifacts": [
+    "audit_checks.py.txt",
+    "audit.log",
+    "receipt.json",
+    "record.json",
+    "report.md"
+  ]
+}

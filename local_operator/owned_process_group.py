@@ -324,6 +324,26 @@ def _pgid_outcome(pid):
         return type(exc).__name__
 
 
+# Closing-delta relists allowed inside ONE strict_linux attempt. The deadline is
+# the real bound; this cap only guarantees termination under an injected or
+# stalled clock. Exhausting it is an incomplete attempt (stricter), never a pass.
+_LINUX_CENSUS_RELISTS = 8
+
+# Full census->census->sample cycles one `refresh` may run before refusing.
+# CI run 41748872018 (job 126359450123) refused a HEALTHY fast-forking command
+# with exit 126 "census member sample unreadable": censuses
+# [[2425,2443,2444,2445,2446],[2425,2444,2445,2446]], and 2444 -- present in
+# BOTH -- died before its sample (ENOENT). That shape cannot be amnestied (a
+# member seen in census 2 could have forked a live child before dying), so the
+# fix re-runs the proof instead of relaxing it. INVARIANT: a verdict rests on
+# exactly one cycle's evidence; earlier cycles only decide whether another
+# starts. The loop never carries evidence across cycles -- censuses, samples,
+# failures and departures are all rebuilt -- and a retry is attempted only when
+# `_rerunnable` holds and another cycle fits the deadline. Three cycles keep
+# the cost bounded; a trigger persisting through all of them still refuses.
+_SAMPLE_CYCLES = 3
+
+
 def strict_linux(
     pgid,
     deadline,
@@ -344,6 +364,50 @@ def strict_linux(
     attempts, attempt_count, remaining_ids = [], 0, 16
     phase = "opening-deadline"
 
+    def classify(entry):
+        """Return the parsed group of /proc/<entry>, or None when ENOENT proves it gone.
+
+        Raises Unknown for every other outcome (EACCES, EIO, a short or
+        unparseable row, a stat row missing beside a live directory). The
+        opening scan and the closing-delta reconciliation share this one
+        proof so an added PID can never be excused by a weaker rule.
+        """
+        nonlocal phase
+        path = f"/proc/{entry}"
+        phase = "row-read"
+        try:
+            raw = read(path + "/stat")
+        except FileNotFoundError:
+            try:
+                stat(path)
+            except FileNotFoundError:
+                return None
+            # The directory exists but the row did not read: retry it once.
+            # A transient miss during churn is not a malformed row, and only a
+            # second miss is genuinely unreadable identity.
+            try:
+                raw = read(path + "/stat")
+            except FileNotFoundError:
+                raise Unknown("stat row missing for existing PID")
+            except (OSError, UnicodeError) as exc:
+                raise Unknown("unreadable /proc row") from exc
+        except (OSError, UnicodeError) as exc:
+            raise Unknown("unreadable /proc row") from exc
+        phase = "row-parse"
+        try:
+            left, tail = (
+                raw[: raw.index("(")].strip(),
+                raw[raw.rindex(")") + 1 :].split(),
+            )
+            if int(left) != int(entry) or len(tail) < 3 or len(tail[0]) != 1:
+                raise ValueError("invalid process stat")
+            parent, group = int(tail[1]), int(tail[2])
+            if parent < 0 or group < 0:
+                raise ValueError("negative process identity")
+        except (ValueError, IndexError) as exc:
+            raise Unknown("malformed /proc row") from exc
+        return group
+
     def scan():
         nonlocal phase, attempt_count
         # Keep the existing six attempts and exact deadline/read cadence. These
@@ -356,59 +420,129 @@ def strict_linux(
             attempt_count = attempt + 1
             first, last = None, None
             result, disappeared, parsed = [], set(), set()
+            relists = 0
+            reconciled = {"different_group": 0, "same_group": 0, "gone": 0, "departed": 0}
+            unclassified, listed, gone_members = None, set(), set()
             phase = "opening-scan"
             try:
                 first = {n for n in listdir("/proc") if n.isdigit()}
+                listed = set(first)
                 phase = "row-scan"
                 for entry in first:
                     if clock() >= deadline:
                         phase = "row-deadline"
                         raise Unknown("strict /proc row deadline")
-                    path = f"/proc/{entry}"
-                    phase = "row-read"
-                    try:
-                        raw = read(path + "/stat")
-                    except FileNotFoundError:
-                        try:
-                            stat(path)
-                        except FileNotFoundError:
-                            disappeared.add(entry)
-                            continue
-                        # The directory exists but the row did not read: retry it once.
-                        # A transient miss during churn is not a malformed row, and only a
-                        # second miss is genuinely unreadable identity.
-                        try:
-                            raw = read(path + "/stat")
-                        except FileNotFoundError:
-                            raise Unknown("stat row missing for existing PID")
-                        except (OSError, UnicodeError) as exc:
-                            raise Unknown("unreadable /proc row") from exc
-                    except (OSError, UnicodeError) as exc:
-                        raise Unknown("unreadable /proc row") from exc
-                    phase = "row-parse"
-                    try:
-                        left, tail = (
-                            raw[: raw.index("(")].strip(),
-                            raw[raw.rindex(")") + 1 :].split(),
-                        )
-                        if int(left) != int(entry) or len(tail) < 3 or len(tail[0]) != 1:
-                            raise ValueError("invalid process stat")
-                        parent, group = int(tail[1]), int(tail[2])
-                        if parent < 0 or group < 0:
-                            raise ValueError("negative process identity")
-                    except (ValueError, IndexError) as exc:
-                        raise Unknown("malformed /proc row") from exc
+                    group = classify(entry)
+                    if group is None:
+                        disappeared.add(entry)
+                        continue
                     parsed.add(entry)
                     if group == pgid:
                         result.append(int(entry))
-                phase = "closing-scan"
-                last = {n for n in listdir("/proc") if n.isdigit()}
-                if first - disappeared == last:
-                    # RAW NAMESPACE, before the group filter, for the same reason as Darwin.
-                    leader_seen = str(pgid) in (first | last)
-                    phase = "complete"
-                    return sorted(result), True, leader_seen
-                phase = "namespace-changed"
+                # RECONCILE THE CLOSING DELTA TO A FIXPOINT (PR3269, CI run
+                # 41657372783 job 125993075099; architect ruling 641ae72fe5d1,
+                # "Unstable /proc census at refresh"). The old completeness test
+                # was a machine-wide zero delta (opening minus proven-gone ==
+                # closing), so ANY unrelated fork or exit on a busy runner
+                # failed all six attempts and refresh() refused with
+                # "unstable /proc census" while our group was perfectly stable.
+                # The promise that test made is "every PID in the final list is
+                # classified", and that is what is kept here, not weakened:
+                # - a REMOVED PID was already read (parsed) or proven gone in
+                #   this attempt, so it is classified; our-group ones stay in
+                #   `result` and refresh() samples them;
+                # - an ADDED PID (including a proven-gone PID listed again, i.e.
+                #   possible PID reuse, because it is not in `parsed`) is read
+                #   with the SAME proof as the opening scan: another pgid or
+                #   ENOENT-gone is harmless, our pgid joins `result`, and every
+                #   other outcome (EACCES, EIO, short/unparseable row) leaves
+                #   the attempt INCOMPLETE -- never a silent omission;
+                # - then /proc is listed again until a listing adds nothing
+                #   unclassified. Relists are capped per attempt and every read
+                #   checks the deadline, so the six attempts and the caller's
+                #   deadline still bound the whole census; an unsettled delta
+                #   is Unknown, never the last partial attempt.
+                #
+                # - an OUR-group PID that a listing no longer contains is NOT
+                #   "already classified" (review round 1, R1): keeping it would
+                #   hand refresh()/_terminal_absence a corpse and refuse exactly
+                #   the post-SIGKILL census this change exists to complete, and
+                #   would defeat #3360's in-census-1-not-in-census-2 rule. It is
+                #   re-read: ENOENT on row AND directory drops it (departed);
+                #   a positive read while absent from the listing is a
+                #   contradiction, and any other outcome is unknown -- both
+                #   leave the attempt incomplete. A departure also forces one
+                #   more listing, so a child it forked before exiting is seen.
+                #   Foreign removals need no re-read: they never enter result.
+                # - PID-reuse blind spot (review round 1, m1): a PID parsed as
+                #   foreign is not re-read if a later listing still shows it, so
+                #   a reuse of that PID by our group between relists is missed.
+                #   The old zero-delta rule had the same blind spot within one
+                #   attempt; relists widen the window by at most
+                #   _LINUX_CENSUS_RELISTS listings inside the same deadline.
+                while True:
+                    phase = "closing-scan"
+                    last = {n for n in listdir("/proc") if n.isdigit()}
+                    listed |= last
+                    departed = sorted({str(pid) for pid in result} - last, key=int)
+                    pending = sorted(last - parsed, key=int)
+                    if not pending and not departed:
+                        # RAW NAMESPACE, before the group filter, for the same reason as Darwin.
+                        leader_seen = str(pgid) in listed
+                        phase = "complete"
+                        return sorted(result), True, leader_seen
+                    if clock() >= deadline:
+                        phase = "row-deadline"
+                        raise Unknown("strict /proc row deadline")
+                    work = [(entry, True) for entry in departed]
+                    work += [(entry, False) for entry in pending]
+                    if relists >= _LINUX_CENSUS_RELISTS:
+                        # unclassified_count: PIDs this attempt still had to
+                        # classify when it stopped (m2: one meaning everywhere).
+                        unclassified = len(work)
+                        phase = "namespace-changed"
+                        break
+                    relists += 1
+                    phase = "reconcile"
+                    for index, (entry, was_ours) in enumerate(work):
+                        if clock() >= deadline:
+                            phase = "row-deadline"
+                            raise Unknown("strict /proc row deadline")
+                        try:
+                            group = classify(entry)
+                        except Unknown:
+                            unclassified = len(work) - index
+                            phase = "reconcile-unclassified"
+                            break
+                        if was_ours:
+                            if group is not None:
+                                # Readable while the listing omits it: the two
+                                # facts contradict, so nothing here is proven.
+                                unclassified = len(work) - index
+                                phase = "reconcile-contradiction"
+                                break
+                            # A filter, not list.remove: the session-deletion
+                            # guard flags every `.remove` call shape. Same
+                            # effect -- result holds each PID once.
+                            result = [pid for pid in result if pid != int(entry)]
+                            parsed.discard(entry)
+                            disappeared.add(entry)
+                            gone_members.add(entry)
+                            reconciled["departed"] += 1
+                            continue
+                        if group is None:
+                            disappeared.add(entry)
+                            reconciled["gone"] += 1
+                            continue
+                        parsed.add(entry)
+                        disappeared.discard(entry)
+                        if group == pgid:
+                            result.append(int(entry))
+                            reconciled["same_group"] += 1
+                        else:
+                            reconciled["different_group"] += 1
+                    if unclassified is not None:
+                        break
             finally:
                 # A diagnostic must not replace any original read/parse/deadline
                 # refusal. Record only facts already obtained in THIS attempt.
@@ -423,15 +557,25 @@ def strict_linux(
                             {
                                 "pid": int(pid),
                                 "relation": (
-                                    "unobserved"
-                                    if pid not in parsed
-                                    else "same-group" if int(pid) in result else "different-group"
+                                    "departed-same-group"
+                                    if pid in gone_members
+                                    else (
+                                        "unobserved"
+                                        if pid not in parsed
+                                        else (
+                                            "same-group"
+                                            if int(pid) in result
+                                            else "different-group"
+                                        )
+                                    )
                                 ),
                             }
                             for pid in selected
                         ]
 
-                    added = closing - opening if last is not None else set()
+                    # m3: arrivals accumulate across every relist of the
+                    # attempt; removals compare the opening and final listings.
+                    added = listed - opening if last is not None else set()
                     removed = opening - closing if last is not None else set()
                     attempts.append(
                         {
@@ -442,6 +586,9 @@ def strict_linux(
                             "added_count": len(added),
                             "removed_count": len(removed),
                             "confirmed_disappeared_count": len(disappeared),
+                            "relist_count": relists,
+                            "reconciled": dict(reconciled),
+                            "unclassified_count": unclassified,
                             "added": entries(added),
                             "removed": entries(removed),
                             "confirmed_disappeared": entries(disappeared),
@@ -1155,7 +1302,13 @@ class OwnedGroup:
         # `proof: []` on every successful run.
         # A new refusal (including irreversible revocation) must not relabel
         # an earlier attempt's sample diagnostics as evidence gathered now.
-        for stale in ("sample_failure", "unresolved", "census_failure", "vanished"):
+        for stale in (
+            "sample_failure",
+            "unresolved",
+            "census_failure",
+            "vanished",
+            "sample_retries",
+        ):
             self.probe.pop(stale, None)
         if self._revoked:
             self.last = Verdict(
@@ -1213,81 +1366,120 @@ class OwnedGroup:
                     # terminal report may rest on the weaker one, and on nothing else.
                     return self._terminal_absence(deadline)
                 raise Unknown("leader witness unreadable")
-            try:
-                first = self._members(deadline)
-                second = self._members(deadline)
-            except Exception:
-                # Re-read the witness exactly once: if it has become a readable
-                # foreign birth in the meantime, the loss still wins over the
-                # unreadable census.
-                late, _ = self._leader_witness(deadline)
-                if late == "reaped":
-                    raise PinLost("reservation lost during a failed census") from None
-                raise
-            members = sorted(set(first) | set(second))
-            self.probe["members"] = list(members)
-            if not members:
-                # EMPTY-COMPLETE, bracketed on both sides: a retained matching
-                # witness before AND after, or no absence may be claimed.
-                if witness is not None and witness.zombie:
-                    after_state, _ = self._leader_witness(deadline)
-                    if after_state == "reaped":
-                        raise PinLost("reservation lost during the empty proof")
-                    if after_state != "held":
-                        raise Unknown("witness unreadable during the empty proof")
-                    self.probe["anchor"] = "leader-reservation"
-                    self.last = Verdict(
-                        "OBSERVED_EMPTY", "retained corpse and complete no-live-member census"
-                    )
-                    self._terminal_result = self.last
-                    return self.last
-                raise Unknown("live leader absent from a complete census: contradictory")
-            samples = self._samples(set(members) | {self.leader}, deadline)
-            # SNAPSHOT NOW (security review C11): `_samples` resets
-            # `_sample_failures` on every call and `_leader_witness` calls it, so
-            # any later witness read would erase this attempt's member evidence
-            # -- or, after a refactor, substitute the leader's.
-            failures = {row["pid"]: row for row in self._sample_failures}
-            self.probe["observed"] = _observed(samples, None)
-            # UNRESOLVED MEMBER SAMPLES ARE REFUSED BEFORE ANY EMPTINESS VERDICT.
-            # A missing map entry cannot prove departure, so certifying "no live
-            # members" while one member is unresolved would be false cleanup through
-            # a second door.
-            absent = [pid for pid in members if pid not in samples]
-            departed, unresolved = self._departed(absent, first, second, failures)
-            if departed and not unresolved:
-                kept = [pid for pid in members if pid not in departed]
-                if not kept:
-                    # Never let a pruned set reach an emptiness verdict: the
-                    # empty-census branch above is bracketed by its own witness
-                    # reads and was not designed for "everything left". The
-                    # refusal keeps the unpruned members as its residuals.
-                    raise Unknown("every census member departed: no member to prove")
-                # Pruned BEFORE `live`, so identities, Verdict members and
-                # residuals all describe the members that remain.
-                members = kept
-                self.probe["vanished"] = [departed[pid] for pid in sorted(departed)]
-                absent = []
-            if absent:
-                self.probe["unresolved"] = absent
-                # These are observations from the existing reads, not a new
-                # authority predicate. ENOENT ALONE is not amnesty for a PID seen
-                # by either complete census -- `/proc` visibility is not the
-                # kernel's process table (hidepid, setuid). The one exception is
-                # `_departed`'s conjunction, and it applies only when EVERY
-                # absent member qualifies; otherwise this refusal is unchanged.
-                self.probe["sample_failure"] = {
-                    "phase": "terminal-member-sample" if terminal else "member-sample",
-                    "witness": state,
-                    "censuses": [first[:16], second[:16]],
-                    "census_counts": [len(first), len(second)],
-                    "unresolved_count": len(absent),
-                    "unresolved": [
-                        failures.get(pid, {"pid": pid, "reason": "unavailable", "errno": None})
-                        for pid in absent[:16]
-                    ],
-                }
-                raise Unknown("census member sample unreadable")
+            # ONE VERDICT, ONE CYCLE'S EVIDENCE (see `_SAMPLE_CYCLES`). Every name
+            # the proof below reads -- the censuses, members, samples, failures and
+            # departures -- is rebuilt inside the cycle that decides; an earlier
+            # cycle only decides whether another one starts.
+            for cycle in range(_SAMPLE_CYCLES):
+                started = self.clock()
+                members = []
+                samples = {}
+                # A cycle that refuses before re-publishing these (its census
+                # raises or is incomplete, its sample overruns) must not show a
+                # DISCARDED cycle's members/observations beside its refusal; the
+                # `sample_retries` rows are the only record of earlier cycles.
+                for stale in ("members", "observed"):
+                    self.probe.pop(stale, None)
+                try:
+                    first = self._members(deadline)
+                    second = self._members(deadline)
+                except Exception:
+                    # Re-read the witness exactly once: if it has become a readable
+                    # foreign birth in the meantime, the loss still wins over the
+                    # unreadable census.
+                    late, _ = self._leader_witness(deadline)
+                    if late == "reaped":
+                        raise PinLost("reservation lost during a failed census") from None
+                    raise
+                members = sorted(set(first) | set(second))
+                self.probe["members"] = list(members)
+                if not members:
+                    # EMPTY-COMPLETE, bracketed on both sides: a retained matching
+                    # witness before AND after, or no absence may be claimed.
+                    if witness is not None and witness.zombie:
+                        after_state, _ = self._leader_witness(deadline)
+                        if after_state == "reaped":
+                            raise PinLost("reservation lost during the empty proof")
+                        if after_state != "held":
+                            raise Unknown("witness unreadable during the empty proof")
+                        self.probe["anchor"] = "leader-reservation"
+                        self.last = Verdict(
+                            "OBSERVED_EMPTY", "retained corpse and complete no-live-member census"
+                        )
+                        self._terminal_result = self.last
+                        return self.last
+                    raise Unknown("live leader absent from a complete census: contradictory")
+                samples = self._samples(set(members) | {self.leader}, deadline)
+                # SNAPSHOT NOW (security review C11): `_samples` resets
+                # `_sample_failures` on every call and `_leader_witness` calls it, so
+                # any later witness read would erase this attempt's member evidence
+                # -- or, after a refactor, substitute the leader's.
+                failures = {row["pid"]: row for row in self._sample_failures}
+                self.probe["observed"] = _observed(samples, None)
+                # UNRESOLVED MEMBER SAMPLES ARE REFUSED BEFORE ANY EMPTINESS VERDICT.
+                # A missing map entry cannot prove departure, so certifying "no live
+                # members" while one member is unresolved would be false cleanup through
+                # a second door.
+                absent = [pid for pid in members if pid not in samples]
+                departed, unresolved = self._departed(absent, first, second, failures)
+                if departed and not unresolved:
+                    kept = [pid for pid in members if pid not in departed]
+                    if not kept:
+                        # Never let a pruned set reach an emptiness verdict: the
+                        # empty-census branch above is bracketed by its own witness
+                        # reads and was not designed for "everything left". The
+                        # refusal keeps the unpruned members as its residuals.
+                        raise Unknown("every census member departed: no member to prove")
+                    # Pruned BEFORE `live`, so identities, Verdict members and
+                    # residuals all describe the members that remain.
+                    members = kept
+                    self.probe["vanished"] = [departed[pid] for pid in sorted(departed)]
+                    absent = []
+                if absent:
+                    # THE RE-RUN DOOR (see `_SAMPLE_CYCLES`). It never removes a
+                    # member: it discards this whole cycle and starts a fresh one,
+                    # and only when one more cycle -- at the pace this one ran --
+                    # still fits inside the deadline with room to spare.
+                    now = self.clock()
+                    if (
+                        cycle < _SAMPLE_CYCLES - 1
+                        and now + 2 * (now - started) < deadline
+                        and self._rerunnable(unresolved, second, failures)
+                    ):
+                        self.probe.setdefault("sample_retries", []).append(
+                            {
+                                "cycle": cycle,
+                                "rerun": unresolved[:16],
+                                "rerun_count": len(unresolved),
+                                "censuses": [first[:16], second[:16]],
+                            }
+                        )
+                        continue
+                    self.probe["unresolved"] = absent
+                    # These are observations from the existing reads, not a new
+                    # authority predicate. ENOENT ALONE is not amnesty for a PID seen
+                    # by either complete census -- `/proc` visibility is not the
+                    # kernel's process table (hidepid, setuid). The one exception is
+                    # `_departed`'s conjunction, and it applies only when EVERY
+                    # absent member qualifies; otherwise this refusal is unchanged.
+                    self.probe["sample_failure"] = {
+                        "phase": "terminal-member-sample" if terminal else "member-sample",
+                        "witness": state,
+                        "censuses": [first[:16], second[:16]],
+                        "census_counts": [len(first), len(second)],
+                        "unresolved_count": len(absent),
+                        "unresolved": [
+                            failures.get(pid, {"pid": pid, "reason": "unavailable", "errno": None})
+                            for pid in absent[:16]
+                        ],
+                        # The cycles already discarded, so CI stderr shows what was tried
+                        # before this refusal (empty when none was eligible).
+                        "sample_retries": list(self.probe.get("sample_retries", [])),
+                    }
+                    raise Unknown("census member sample unreadable")
+                # This cycle produced a complete, resolved sample: it alone is the
+                # evidence the proof below rests on.
+                break
             live = [pid for pid in members if not samples[pid].zombie]
             if not live:
                 # Corpse-only: allowed ONLY under a retained matching witness, and a
@@ -1432,6 +1624,67 @@ class OwnedGroup:
                 pass
             unresolved.append(pid)
         return departed, unresolved
+
+    def _rerunnable(self, unresolved, second, failures):
+        """Whether this cycle's unresolved members justify discarding it and re-running.
+
+        WHY THIS EXISTS BESIDE `_departed`. `_departed` deliberately refuses a
+        member that is in BOTH censuses and then reads ENOENT: dropping it would
+        let a member fork a live child after census 2 and then be amnestied (the
+        late-fork hole). But that is also exactly what a healthy fast-forking
+        command looks like when a child exits between census 2 and its sample
+        (run 41748872018, job 126359450123: censuses
+        ``[[2425,2443,2444,2445,2446],[2425,2444,2445,2446]]``, 2444 ENOENT).
+        Neither amnesty nor refusal is right for that shape; a fresh cycle is,
+        because any child forked before the death is in the next census.
+
+        This predicate ONLY decides whether another full census->census->sample
+        cycle starts. It never removes a member and never feeds evidence into the
+        next cycle, so it may be looser than `_departed` only in admitting the
+        in-both shape; every other conjunct is the same one `_departed` uses.
+        The census-2 and non-empty conjuncts never decide today -- `_departed`
+        runs first and either prunes a census-1-only pid or leaves it unresolved
+        for a reason re-checked here, and `unresolved` is non-empty whenever
+        `absent` is -- so they are a defence-in-depth net for a later reordering,
+        not dead code:
+
+        - ``unresolved`` is non-empty and EVERY pid in it qualifies (one
+          unexplained member is a refusal, not a retry);
+        - the pid is in census 2 (the in-census-1-only shape is `_departed`'s);
+        - it is neither the leader nor the pgid;
+        - this cycle's diagnostic says ``read-error``/ENOENT;
+        - ``getpgid`` raises ProcessLookupError (the kernel agrees it is gone);
+        - `/proc/self` names our pid (C10), and the native sampler is in use
+          (an injected sampler carries no per-PID errno).
+        """
+        if not unresolved or self.samples is not None:
+            return False
+        probe = self._departure or os.getpgid
+        try:
+            own = (self._proc_self or (lambda: os.readlink("/proc/self")))()
+        except Exception:  # noqa: BLE001 - an unreadable namespace grants nothing
+            return False
+        if own != str(os.getpid()):
+            return False
+        seen_second = set(second)
+        for pid in unresolved:
+            row = failures.get(pid)
+            if (
+                pid in (self.leader, self.pgid)
+                or pid not in seen_second
+                or row is None
+                or row.get("reason") != "read-error"
+                or row.get("errno") != errno.ENOENT
+            ):
+                return False
+            try:
+                probe(pid)
+            except ProcessLookupError:
+                continue
+            except Exception:  # noqa: BLE001 - anything but ESRCH is not departure
+                return False
+            return False
+        return True
 
     def signal(self, signum, *, deadline):
         result = self.refresh(deadline=deadline)
