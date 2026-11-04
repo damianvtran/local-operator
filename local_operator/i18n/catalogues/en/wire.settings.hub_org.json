@@ -1,0 +1,8 @@
+{
+  "wire.settings.hub_org.auto_enrol.help": "Pull new org agents, teams and skills and keep them subscribed.",
+  "wire.settings.hub_org.auto_enrol.label": "Add new organization items",
+  "wire.settings.hub_org.auto_enrol.off.description": "only when I run lop hub org pull",
+  "wire.settings.hub_org.auto_enrol.on.description": "add new items automatically",
+  "wire.settings.hub_org.description": "Your organization shares agents, teams and skills through its private Agent Hub. Choose whether new ones are added to this machine automatically.",
+  "wire.settings.hub_org.title": "Organization Agent Hub"
+}

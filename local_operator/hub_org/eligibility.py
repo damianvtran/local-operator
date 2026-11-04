@@ -31,7 +31,7 @@ corrupt one. A wrong absence costs one refresh; a wrong presence is the up-sell
 the constraint forbids and nothing can undo on screen.
 
 The same record also carries the auto-enrol bookkeeping (``seen``,
-``next_catalogue_at``) owned by :mod:`local_operator.hub_org.enrol`; writers go
+``next_catalogue_at``, ``last_enrol``) owned by :mod:`local_operator.hub_org.enrol`; writers go
 through :func:`update_record` under :func:`refresh_lock` so neither side drops
 the other's keys.
 """
@@ -101,12 +101,25 @@ def membership_entitles(membership: Mapping[str, Any]) -> bool:
 
 
 def _configured_base_url(config_dir: Path) -> str:
-    """The Radient base this config root resolves to (the record's binding)."""
+    """The Radient base this config root resolves to (the record's binding).
 
-    from local_operator.config import ConfigManager  # lazy: YAML stack
-    from local_operator.providers.radient_credentials import configured_radient_base_url
+    The same rule as ``configured_radient_base_url`` (configured value, else
+    ``RADIENT_API_BASE_URL``/canonical default), but read through
+    ``read_config_values`` rather than a ``ConfigManager``: this runs from the
+    hub runner's timer and every session build, and constructing a manager
+    over a torn ``config.yml`` moves it aside — a side effect a gate read must
+    never have. An unreadable file raises, which every caller turns into
+    "closed".
+    """
 
-    return configured_radient_base_url(ConfigManager(Path(config_dir)))
+    from local_operator.config import read_config_values  # lazy: YAML stack
+    from local_operator.env import resolve_radient_api_base_url
+
+    values = read_config_values(Path(config_dir))
+    if values is None:
+        raise OSError("config.yml is unreadable right now")
+    configured = values.get("radient_base_url")
+    return resolve_radient_api_base_url(configured if isinstance(configured, str) else None)
 
 
 def _stat_key(path: Path) -> tuple[int, int] | None:
@@ -324,11 +337,15 @@ def _refresh(config_dir: Path, *, boundary: str, force: bool) -> list[OrgRef]:
         return _refresh_locked(config_dir, boundary=boundary)
 
 
-def _fetch_memberships(config_dir: Path, base_url: str) -> tuple[str | None, list[Any]] | None:
-    """``(account_id, memberships)`` for the signed-in person, or ``None`` signed out.
+def person_client(config_dir: Path, base_url: str | None = None) -> tuple[Any, str | None] | None:
+    """``(RadientClient, account_id)`` acting as the signed-in PERSON, or ``None``.
 
-    Runs the async credential resolver on a private loop so this works from a
-    worker thread inside a host whose own loop is running.
+    Org calls authenticate with the stored Radient OAuth access token, never the
+    tenant API key (an API key proves an application tenant, not a person's
+    membership). The resolver also refuses a destination that may not receive
+    the person's bearer, which reads as ``None`` here exactly like a sign-out.
+    Runs the async resolver on a private loop so it works from a worker thread
+    inside a host whose own loop is running; never call it ON a running loop.
     """
 
     import asyncio
@@ -336,13 +353,28 @@ def _fetch_memberships(config_dir: Path, base_url: str) -> tuple[str | None, lis
     from pydantic import SecretStr  # lazy: pydantic stays off the startup path
 
     from local_operator.clients.radient import RadientClient  # lazy: HTTP stack
-    from local_operator.providers.radient_credentials import resolve_radient_oauth_access
+    from local_operator.providers.radient_credentials import (
+        resolve_radient_oauth_access,
+    )
 
+    base_url = base_url or _configured_base_url(config_dir)
     access = asyncio.run(resolve_radient_oauth_access(config_dir, base_url))
     if access is None:
         return None
     client = RadientClient(api_key=SecretStr(access.access_token), base_url=base_url)
-    return access.account_id, client.list_memberships()
+    # The account id lets the record tell an account switch (reset the enrol
+    # bookkeeping) from a re-sign-in of the same account (keep it).
+    return client, access.account_id
+
+
+def _fetch_memberships(config_dir: Path, base_url: str) -> tuple[str | None, list[Any]] | None:
+    """``(account_id, memberships)`` for the signed-in person, or ``None`` signed out."""
+
+    resolved = person_client(config_dir, base_url)
+    if resolved is None:
+        return None
+    client, account_id = resolved
+    return account_id, client.list_memberships()
 
 
 def _refresh_locked(config_dir: Path, *, boundary: str) -> list[OrgRef]:
@@ -392,6 +424,7 @@ def _refresh_locked(config_dir: Path, *, boundary: str) -> list[OrgRef]:
             # account's enrol bookkeeping.
             data["seen"] = {}
             data["next_catalogue_at"] = {}
+            data["last_enrol"] = {}
         data.update(
             account_id=account_id,
             base_url=base_url,

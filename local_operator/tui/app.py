@@ -12736,6 +12736,15 @@ class OperatorApp(App[None]):
         self.run_worker(
             self._bridge_receiver_catch_up(), thread=False, group="bridge-receiver-catch-up"
         )
+        # THE ORG AGENT HUB GATE at TUI start. A terminal-only machine never
+        # reaches the daemon lifespan, so without this its cached Radient Team
+        # eligibility (which decides whether the org-hub guide, hints and
+        # settings exist at all) would only move at sign-in. A refresh only —
+        # no catalogue pull from a TUI; enrolment rides sign-in and the daemon.
+        # A thread worker: the memberships read is blocking network I/O.
+        self.run_worker(
+            self._org_hub_gate_refresh, thread=True, group="org-hub-gate", exit_on_error=False
+        )
         # An empty transcript is the boot layout's whole precondition, and the
         # session starts empty — so the app opens in it. Set here rather than in
         # the stylesheet's base rules because this is state, not style: it is the
@@ -14324,6 +14333,17 @@ class OperatorApp(App[None]):
                 pass  # a failed probe is the old deferred behaviour, not a crash
 
         self.run_worker(_run(), exclusive=False)
+
+    @staticmethod
+    def _org_hub_gate_refresh() -> None:
+        """Refresh the org Agent Hub gate record for this config root (6 h TTL)."""
+        try:
+            from local_operator.hub_org import eligibility
+            from local_operator.paths import config_dir
+
+            eligibility.refresh(config_dir(), boundary="tui-start")
+        except Exception:  # noqa: BLE001 — a surface start never fails for this
+            pass
 
     async def _bridge_receiver_catch_up(self) -> None:
         """Run the shared receiver catch-up for this TUI's config root.
