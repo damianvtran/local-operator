@@ -3405,3 +3405,20 @@ def test_a_parked_pair_row_is_redriven_ahead_of_an_ambient_backlog(tmp_path, mon
     retried = _iterate(owner, tmp_path)
     actions = {o["message_id"]: o["action"] for o in retried["retries"]["outcomes"]}
     assert actions.get("bmsg_1") == "hold", "re-driven in the first pass"
+
+
+def test_a_parked_conversation_ref_takes_no_tier_from_the_park() -> None:
+    """#3420 R2-m2 (b): only a PAIR row is addressed by construction. A
+    conversation ref's tier is the one its handler stamps; the park must not
+    promote an ambient conversation row to ADDRESSED."""
+
+    from local_operator.team_bridge.types import ConversationFeedRef
+
+    ref = ConversationFeedRef(
+        conversation_id="bcv_abcdefgh",
+        message_id="bcmsg_abcdef01",
+        conversation_seq=1,
+        mention=False,
+    ).validated()
+    assert loop_mod._parked_tier(ref.encode()) is None  # noqa: SLF001
+    assert loop_mod._parked_tier("bmsg_1") == store_mod.Store.SCREENING_TIER_ADDRESSED

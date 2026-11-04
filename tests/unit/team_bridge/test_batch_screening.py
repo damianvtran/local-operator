@@ -1112,10 +1112,18 @@ def _outdate_the_first_receipt(store: Store, owner: Any, case: str) -> Any:
         owner = dataclasses.replace(owner, enrollment_generation=2)
         store.commit_enrollment(owner, OwnerReceipt("bridge_consent_v1", "ref-2"))
         return owner
-    fields = dict(version=Policy.screening_version, template_sha256=Policy.template_sha256)
-    store.publish_screening_policy(owner, default_model="qa/other", revision="rev-2", **fields)
+    # Explicit keywords, not ``**fields``: a ``dict[str, str]`` spread types
+    # every keyword parameter as ``str`` and fails pyright (#3420 QA Q-2).
+    version, template = Policy.screening_version, Policy.template_sha256
     store.publish_screening_policy(
-        owner, default_model=Policy.default_model, revision=Policy.admission_revision, **fields
+        owner, version=version, template_sha256=template, default_model="qa/other", revision="rev-2"
+    )
+    store.publish_screening_policy(
+        owner,
+        version=version,
+        template_sha256=template,
+        default_model=Policy.default_model,
+        revision=Policy.admission_revision,
     )
     return owner
 
@@ -1190,3 +1198,55 @@ def test_a_corrupt_cached_receipt_holds_as_damaged_proof(tmp_path: Path) -> None
     assert result.hold_code in screening.HOLD_CODES
     assert store.receipt_for_message(owner, "bmsg_2") is None
     assert len(runner.calls) == 1, "damaged proof is never re-screened behind"
+
+
+def test_a_damaged_twin_behind_a_current_hit_still_holds_as_damaged_proof(
+    tmp_path: Path,
+) -> None:
+    """#3420 R2-m1: damage is caught at ANY position among the candidates. A
+    current ``allow`` comes first in the scan order and a damaged twin after
+    it; stopping at the first current row would serve the hit and never see
+    the damage. Fail-closed: ``proof_corrupt``, no receipt, no re-screen."""
+
+    from local_operator.team_bridge.store import _owner_key
+
+    store, owner = _setup(tmp_path)
+    runner = BatchRunner(lambda p: deliver_everything(p, default_model="")[0])
+    _single(owner, tmp_path, runner, _item(body="ack", message_id="bmsg_1"))
+    with sqlite3.connect(state_db_path(tmp_path)) as conn:
+        # Written LATER than the current row, so it sorts after it.
+        conn.execute(
+            "INSERT INTO screening_receipts SELECT owner_key, 'bmsg_9', body_sha256, "
+            "template_sha256, prompt_version, model, verdict, '[\"spam\"]', envelope_digest, "
+            "admission_revision, policy_epoch, creator_generation, created_at + 1, "
+            "rendered_template_sha256 FROM screening_receipts "
+            "WHERE owner_key = ? AND message_id = 'bmsg_1'",
+            (_owner_key(owner),),
+        )
+    result = _single(owner, tmp_path, runner, _item(body="ack", message_id="bmsg_2"))
+    assert (result.disposition, result.hold_code) == ("hold", "proof_corrupt")
+    assert store.receipt_for_message(owner, "bmsg_2") is None
+    assert len(runner.calls) == 1
+
+
+def test_a_receipt_damaged_between_hit_and_copy_holds_as_damaged_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3420 R2-m2 (a): the ADOPT side of N-1. Damage that appears between the
+    hit and the copy is refused ``proof_corrupt`` by the adoption; that hold
+    must keep its name, not fall back to ``policy_stale``."""
+
+    store, owner = _setup(tmp_path)
+    runner = BatchRunner(lambda p: deliver_everything(p, default_model="")[0])
+    _single(owner, tmp_path, runner, _item(body="ack", message_id="bmsg_1"))
+
+    def damaged(*_args: Any, **_kwargs: Any) -> Any:
+        raise StoreRefused("proof_corrupt", "damaged between the hit and the copy")
+
+    monkeypatch.setattr(Store, "adopt_cached_receipt", damaged)
+    result = _single(owner, tmp_path, runner, _item(body="ack", message_id="bmsg_2"))
+    assert (result.disposition, result.hold_code) == ("hold", "proof_corrupt")
+    hold = store.screening_hold(owner, "bmsg_2")
+    assert hold is not None and hold["hold_code"] == "proof_corrupt"
+    assert store.receipt_for_message(owner, "bmsg_2") is None
+    assert len(runner.calls) == 1
