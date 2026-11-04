@@ -1,0 +1,104 @@
+{
+  "wire.skill_adoption.preview_required": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "Blocking unlinked same-name local folder. Both diffs compare the proposal against local and Hub guidance. Keep the skill ID, scope and options unchanged from preview through confirmation. Commands and flags are literal and untranslated; <receipt> is a CLI metavariable, not an ICU parameter."
+  },
+  "wire.skill_adoption.preview_changed": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "Refuse applying a stale receipt; user must regenerate and review. Does not imply any local mutation occurred."
+  },
+  "wire.skill_adoption.needs_choice": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "Merge failed closed. keep-local preserves local guidance and links; take-hub uses Hub guidance with a recoverable original snapshot. No silent fallback."
+  },
+  "wire.skill_adoption.preview_title": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "Preview heading; linking has not happened."
+  },
+  "wire.skill_adoption.confirm": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "CLI confirmation. Keep literal [y/N] and trailing space: parser accepts y, default is No. Adoption means reviewed consolidation/linking of an existing local skill."
+  },
+  "wire.skill_adoption.cancelled": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "Cancellation guarantees the live local skill was not changed; preview artifacts/snapshot may exist."
+  },
+  "wire.skill_adoption.dry_run_help": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "CLI option --dry-run. Preview may create a snapshot/receipt but does not modify/install/link the live skill."
+  },
+  "wire.skill_adoption.receipt_help": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "CLI option --adopt-receipt; opaque receipt identifies already reviewed input pins, not an authorization bypass."
+  },
+  "wire.skill_adoption.strategy_help": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "CLI option --strategy. Literal choices merge, keep-local, take-hub are machine tokens and MUST NOT be translated."
+  },
+  "wire.skill_adoption.no_llm_help": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "CLI option --no-llm; no skill text is sent to merge model. Do not promise all network traffic stops."
+  },
+  "wire.skill_adoption.backup_label": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "{path} is original-folder snapshot path; {hash} is SHA-256. Preserve both placeholders and technical SHA-256 token. Snapshot is made before model call; live folder is not moved."
+  },
+  "wire.skill_adoption.receipt_label": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "{receipt} is opaque preview ID consumed by --adopt-receipt. Preserve placeholder."
+  },
+  "wire.skill_adoption.no_apply": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "Dry-run completion; preview artifacts may exist but live skill is neither installed nor linked."
+  },
+  "wire.skill_adoption.inherited_assets": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "Non-guidance local assets are preserved without model egress. Do not claim assets are uploaded or discarded."
+  },
+  "wire.skill_adoption.yes_help": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "CLI option --yes. Confirmation applies a reviewed preview; it is not permission to bypass receipt checks."
+  },
+  "wire.skill_adoption.alias_occupied": {
+    "role": "Skill adoption CLI preview, confirmation, or keyed wire remedy",
+    "tone": "plain, calm, explicit about review and data preservation",
+    "width": "terminal prose; wraps without truncating commands or parameters",
+    "note": "Remedy for name collision on Hub pull; --dry-run is literal. Alternate name remains valid for creation/non-Hub paths."
+  },
+  "wire.skill_adoption.projection_unsupported": {
+    "role": "Fail-closed capability refusal before adopting an existing local skill",
+    "tone": "plain, calm, explicit about preserved local state and the supported alternative",
+    "width": "terminal prose; wraps without truncation",
+    "note": "Platform-generic refusal for unsupported secure adoption projection writes. The existing local skill and its link remain unchanged. Ordinary installs means fresh Hub skill installs under valid unoccupied names; not permission to overwrite an existing folder or bypass adoption review. Does not claim native Windows validation or unsupported status for ordinary pull/update/unpull. No placeholders."
+  }
+}

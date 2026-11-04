@@ -1,0 +1,30 @@
+# audit.log — values transcribed from the actual check run (eval tool, session 425221b9b2c6, 2026-11-03)
+# This is NOT a repo-validator log: the source-only exception barred running processes.
+
+HASHES
+  en_scratch: 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63
+  ctx_scratch: ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9
+  es_scratch: 8de6f07aa22bb654bc0e45390bc803ba28f37698e6e08ffe95399d895ff3c5cf
+  en_repo: 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63
+  ctx_repo: ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9
+  match_expected: {'en_scratch': True, 'ctx_scratch': True, 'es_scratch': True}
+  scratch==repo(en,ctx): True True
+
+JSON valid: all | key sets: True | en keys: ['wire.errors.hosting.not_configured']
+target keys: ['wire.errors.hosting.not_configured'] | added: set() | dropped: set()
+context fields: ['note', 'role', 'tone']
+
+EN {"len": 35, "nfc": true, "nonascii": [], "Cf_or_Cc": [], "placeholders": [], "trailing_ws": false, "double_space": false, "ends_period": true, "caps_start": true, "repr": "'Hosting platform is not configured.'"}
+
+ES {"len": 49, "nfc": true, "nonascii": ["á"], "Cf_or_Cc": [], "placeholders": [], "trailing_ws": false, "double_space": false, "ends_period": true, "caps_start": true, "repr": "'La plataforma de alojamiento no est\\xe1 configurada.'"}
+
+EN text: Hosting platform is not configured.
+ES text: La plataforma de alojamiento no está configurada.
+bom: [] | newline_at_eof: []
+
+# Terminology precedent (grep of core worktree es catalogues, hits shown verbatim):
+#   cli.global_help.json:8   "cli.global_help.hosting": "Plataforma de alojamiento que usar (radient, deepseek, openai, …)"
+#   cli.global_help.json:16  "cli.global_help.propagated_hosting": "Plataforma de alojamiento para esta ejecución …"
+#   cli.exec_worker_help.json:5 "cli.exec_worker_help.hosting": "Anulación de la plataforma de alojamiento"
+#   cli.credential_help.json:3  "… distintas plataformas de alojamiento"
+#   no es file uses kept-English "hosting" as a term

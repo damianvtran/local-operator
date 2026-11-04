@@ -1438,6 +1438,25 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "both fixed avatar.png|jpg FILEs in an agent dir, absent is fine; never sessions/",
     ),
+    # The picture's size-variant cache (``.avatar.<sha12>.<size>.<ext>``) lives
+    # beside it in the same agent directory: built from verified original bytes,
+    # swept on set/clear. Names are derived from the sha and a fixed size set.
+    (
+        "local_operator/agent_avatar.py::_sized",
+        "os.replace",
+        "staging temp FILE -> agents/<id>/.avatar.<sha12>.<size>.<ext> variant; never sessions/",
+    ),
+    (
+        "local_operator/agent_avatar.py::_sized",
+        "<path>.unlink",
+        "only the same-directory variant staging temp FILE this write created",
+    ),
+    (
+        "local_operator/agent_avatar.py::remove_derivatives",
+        "<path>.unlink",
+        "cached .avatar.<sha12>.<size>.<ext> variant FILEs (and their staging temps) "
+        "in agents/<id>/, matched by _is_derivative_name; never sessions/",
+    ),
     (
         "local_operator/agent_avatar.py::subscribe._unsubscribe",
         "<path>.remove",
@@ -2343,6 +2362,29 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/transcript_index.py::_sweep_missing",
         "<path>.unlink",
         "a *.json cache FILE whose session directory is gone; suffix-guarded",
+    ),
+    # The incremental store (snapshot + delta beside the head) lives in the same
+    # cache directory. `_publish_store` renames its own staged snapshot temp onto
+    # a `<sid>.snap.<32-hex>.snapshot` FILE and unlinks that temp on failure;
+    # `_retire` unlinks only names matching `_STORE_FILE` (that exact snapshot or
+    # delta FILE shape) for the head it just superseded. None is a directory, and
+    # every path is the cache root + a fixed shape, never a `sessions/` path.
+    (
+        "local_operator/session/transcript_index.py::_publish_store",
+        "<path>.replace",
+        "staged temp FILE -> <sid>.snap.<hex>.snapshot store FILE under the cache root",
+    ),
+    (
+        "local_operator/session/transcript_index.py::_publish_store",
+        "<path>.unlink",
+        "only its own staged snapshot temp FILE when the rename did not land",
+    ),
+    (
+        "local_operator/session/transcript_index.py::_retire",
+        "<path>.unlink",
+        "superseded <sid>.snap/.delta store FILEs (_STORE_FILE) and this session's "
+        "orphaned staged-snapshot temp FILEs (_STAGED_FILE, dead pid or past grace)",
+        2,
     ),
     (
         "local_operator/session/transcript.py::Transcript._write_entries",
@@ -3559,8 +3601,9 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._swap",
         "os.replace",
-        "Old-dir backup, edit restore and staged swap of <config_dir>/skills/<validated alias>",
-        3,
+        "Old-dir backup, edit restore, staged swap and raw_after-CAS backup restore of "
+        "<config_dir>/skills/<validated alias>; every destination comes from _locations()",
+        4,
     ),
     # LOCAL REMOVE. Same path construction as above: the source is
     # ``path(alias)`` (validated alias under <config_dir>/skills, symlinks
@@ -3569,6 +3612,39 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     # is a single same-filesystem rename that KEEPS the bytes -- never an rmtree
     # -- and a linked alias is refused before it is reached. The same three
     # tests above drive ``remove_local`` at sessions/ and show it refused.
+    # Projection operations use a retained no-follow config/hub/projection
+    # directory FD, never a path reopened through a mutable hub ancestor. The
+    # adversarial projection tests replace each ancestor and leaf at check/use
+    # boundaries and assert the sessions-like victim tree stays byte-identical.
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._write_projection",
+        "os.replace",
+        "Own .projection-<uuid>.tmp to validated alias JSON, both relative to one retained FD",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._write_projection",
+        "os.unlink",
+        "Removes only this operation's temporary entry relative to its retained projection FD",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._retire_projection",
+        "os.unlink",
+        "Validated alias JSON entry relative to retained projection FD; "
+        "leaf symlinks never followed",
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.adopt",
+        "os.replace",
+        "Original backup, concurrent-edit restore and staged install "
+        "through validated _locations()",
+        3,
+    ),
+    (
+        "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage._recover_adoption",
+        "os.replace",
+        "Restores raw-hash-matching backup to the validated alias destination "
+        "supplied by _locations()",
+    ),
     (
         "local_operator/hub_sync/skill_storage.py::ManagedSkillStorage.remove_local",
         "os.replace",
@@ -4195,6 +4271,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE
         "local_operator/session/search_index.py::_save",  # tmp -> index FILE
         "local_operator/session/transcript_index.py::write_index",  # tmp -> index FILE
+        "local_operator/session/transcript_index.py::_publish_store",  # tmp -> snapshot FILE
         "local_operator/session/archived.py::_write_archived",  # tmp -> archive index FILE
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
         # tmp -> runtime-stall-<pid>.deadline FILE. Both paths are log_dir() + an int

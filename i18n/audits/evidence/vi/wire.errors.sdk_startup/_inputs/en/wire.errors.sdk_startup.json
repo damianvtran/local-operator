@@ -1,0 +1,6 @@
+{
+  "wire.errors.sdk_startup.attach_hosting_unconfigured": "no live runtime is serving {resume}, and this root cannot start one: {error} Configure hosting for this root (its config.yml), then engage the id with spawn_session()/deliver() and attach once a runtime exists.",
+  "wire.errors.sdk_startup.attach_runtime_missing": "no live runtime is serving {resume}; open it with mode=''own'' to run it in this process, or engage it first with spawn_session()/deliver() and attach once a runtime exists.",
+  "wire.errors.sdk_startup.profile_attach_failed": "Could not attach profile {profile}",
+  "wire.errors.sdk_startup.tool_inventory_mismatch": "spec.tools {spec_tools} and ApprovalPolicy.declared({policy_tools}) name different inventories; state the run''s reach once"
+}
