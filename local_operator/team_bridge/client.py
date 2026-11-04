@@ -5047,9 +5047,12 @@ def trial_ended_tenant(payload: Any) -> dict[str, str] | None:
     stay the backend-policy reading every consumer shares); it is a separate,
     additive marker. It answers only when no row is eligible — an eligible
     organization is this machine's subject and an older ended trial elsewhere
-    is not news. The selected (retained-endpoint) row wins when it carries the
-    marker, so the marker and ``tenant_id`` describe the same organization;
-    otherwise the first marked row in the server's own order. An older hub
+    is not news. When a row IS selected (state F, a retained endpoint) the
+    answer is that row's marker or nothing — never another org's, because
+    ``tenant_id`` already names the selected org and the status contract is
+    shared by consumers that would otherwise read two different organizations
+    off one payload (agent review round 2, R2-1). Only when nothing is selected
+    does it fall through to the first marked row in the server's own order. An older hub
     without the field yields ``None`` and the surface keeps today's reading.
     """
 
@@ -5059,7 +5062,7 @@ def trial_ended_tenant(payload: Any) -> dict[str, str] | None:
     if any(bool(t.get("eligible")) for t in tenants):
         return None
     selected = select_tenant(payload)
-    ordered = ([selected] if selected is not None else []) + tenants
+    ordered = [selected] if selected is not None else tenants
     for tenant in ordered:
         tenant_id = tenant.get("tenant_id")
         ended_at = tenant.get("trial_ended_at")

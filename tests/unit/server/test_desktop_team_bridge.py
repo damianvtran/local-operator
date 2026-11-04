@@ -980,6 +980,21 @@ async def test_status_trial_ended_needs_positive_evidence_and_no_eligible_org(ap
     assert result["surface_state"] == "F"
     assert result["tenant_id"] == "tnt_retained"
     assert result["trial_ended"]["tenant_id"] == "tnt_retained"
+    # R2-1: a selected row WITHOUT the marker answers nothing, never another
+    # org's marker — otherwise ``tenant_id`` and ``trial_ended`` disagree.
+    unmarked = _ended_row("tnt_retained", endpoint={"endpoint_id": "ep_1", "state": "active"})
+    del unmarked["trial_ended_at"]
+    discipline.check_result = _status_check(
+        payload={
+            "api_version": "1",
+            "available": True,
+            "tenants": [_ended_row("tnt_other"), unmarked],
+        }
+    )
+    result = (await client.get("/v1/desktop/team-bridge/status")).json()["result"]
+    assert result["surface_state"] == "F"
+    assert result["tenant_id"] == "tnt_retained"
+    assert result["trial_ended"] is None
 
 
 async def test_status_never_claims_a_receiver_that_is_not_installed(api):
