@@ -740,6 +740,74 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Only the sibling mkstemp temp FILE this call created in <config_dir>; "
         "never a session, transcript or directory",
     ),
+    # The custom notification-sound store (`notifications/custom_sounds.py`,
+    # notification-sounds design §3). Every path it touches is built by
+    # `store_root()` = <config>/sounds/custom or `render_root()` =
+    # <config>/sounds/rendered (both from `config_dir()`, never a session id or
+    # a transcript), joined with a basename that is either a fixed name
+    # (`index.json`), an id that matched `^custom-[a-z0-9-]{1,40}$` and passed
+    # resolved containment (`_contained`), or a `.<name>.<hex>.tmp` this same
+    # call minted. Every replace target and every unlink target is a regular FILE
+    # (or a symlink planted in a sound's slot, unlinked as the link itself); no
+    # call names a directory, and none can resolve under `sessions/`.
+    (
+        "local_operator/notifications/custom_sounds.py::_write_index",
+        "os.replace",
+        "Atomic replace of <config>/sounds/custom/index.json from a sibling tmp FILE; "
+        "never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::_write_index",
+        "<path>.unlink",
+        "Only the sibling .index.json.<hex>.tmp FILE this call created",
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::add",
+        "os.replace",
+        "Atomic replace of <config>/sounds/custom/<custom-id>.wav from a sibling tmp FILE",
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::add",
+        "<path>.unlink",
+        "The sibling tmp FILE this call created, or (index write failed) the <id>.wav "
+        "it just wrote; both under <config>/sounds/custom/",
+        2,
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::remove",
+        "<path>.unlink",
+        "The removed sound's <config>/sounds/custom/<custom-id>.wav FILE, or a symlink "
+        "planted in that slot (the link itself, never its target)",
+        2,
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::_drop_renders",
+        "<path>.unlink",
+        "Rendered-cache FILES <config>/sounds/rendered/<custom-id>-*.wav (symlinks skipped)",
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::_prune_renders",
+        "<path>.unlink",
+        "Oldest rendered-cache FILES under <config>/sounds/rendered/ (symlinks skipped)",
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::render",
+        "os.replace",
+        "Atomic replace of a <config>/sounds/rendered/<id>-<sha8>-<vol>.wav FILE",
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::render",
+        "<path>.unlink",
+        "Only the sibling tmp FILE this call created in <config>/sounds/rendered/",
+    ),
+    # `lop sound remove`: `custom_sounds.remove(...)` is a module function call
+    # whose name happens to be `remove`; it is the store mutation argued above,
+    # not a filesystem call on a path.
+    (
+        "local_operator/sound_cli.py::remove_command",
+        "<path>.remove",
+        "custom_sounds.remove(sound_id): the store API above, not a path removal",
+    ),
     (
         "local_operator/session/session_tags.py::_write",
         "os.replace",
