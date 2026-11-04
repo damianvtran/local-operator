@@ -1237,6 +1237,61 @@ def files_capability(payload: Any) -> dict[str, Any] | None:
     return out
 
 
+#: An EDGE refusal: the request never reached agent-server (2026-11-04). The
+#: AWS WAF in front of ``api.radienthq.com`` (radient-infra
+#: ``pulumi/radient_infra/waf.py``, managed rule ``GenericLFI_Body``) answers a
+#: body that looks like a file-inclusion probe — a ``../`` or ``~/.aws/…`` path —
+#: with a plain ``403`` HTML page, no JSON. That used to decode as the generic
+#: ``bridge_error`` "Radient refused the request (HTTP 403)", so the agent read a
+#: firewall block as the hub's judgement and retried the same body. The hub's
+#: OWN 403s are always a coded JSON object, so a 403 that is not one (or is
+#: served as HTML) is the edge's. Scoped to 403 on purpose: an HTML 502/503 is a
+#: gateway failure, not a block, and an uncoded 404 is the outdated-hub signal
+#: (see ``owned_agent_invitations``) and must stay ``bridge_error``.
+EDGE_BLOCKED_CODE = "edge_blocked"
+EDGE_BLOCKED_SENTENCE = (  # i18n: ignore model-facing refusal sentence, like the §6.5 class
+    "The edge firewall in front of Radient blocked this request before it reached "
+    "Radient, so nothing was posted or changed. Content that looks like an attack "
+    "signature can trigger it — for example file paths such as ../ or ~/.aws/… — so "
+    "rephrase without them and try once more."
+)
+
+#: An edge header value is untrusted text that lands in a log and a tool
+#: result: one bounded token of a conservative alphabet, or nothing.
+_EDGE_HEADER_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ./;=+_-]{0,63}")
+
+
+def _is_html(response: httpx.Response) -> bool:
+    return "text/html" in response.headers.get("content-type", "").lower()
+
+
+def _edge_header(response: httpx.Response, name: str) -> str:
+    value = " ".join(response.headers.get(name, "").split())
+    return value if _EDGE_HEADER_VALUE.fullmatch(value) else ""
+
+
+def _edge_blocked(response: httpx.Response) -> BridgeRefusal:
+    """The refusal for a non-JSON 403: the edge's block, with its evidence.
+
+    ``details`` keeps the response's ``content-type`` and ``server`` header
+    VALUES — which edge answered, and how — so the next report can name the
+    layer without anyone reproducing it. The BODY never travels: it is the
+    edge's page, not an answer, and it may echo the request back.
+    """
+
+    details: dict[str, Any] = {}
+    for header, key in (("content-type", "content_type"), ("server", "server")):
+        value = _edge_header(response, header)
+        if value:
+            details[key] = value
+    return BridgeRefusal(
+        EDGE_BLOCKED_CODE,
+        EDGE_BLOCKED_SENTENCE,
+        http_status=response.status_code,
+        details=details,
+    )
+
+
 def _refusal(response: httpx.Response) -> BridgeRefusal:
     """Map one non-2xx answer onto :class:`BridgeRefusal` (§6.5).
 
@@ -1254,6 +1309,8 @@ def _refusal(response: httpx.Response) -> BridgeRefusal:
             body = parsed
     except (ValueError, UnicodeDecodeError):
         body = None
+    if status == 403 and (body is None or _is_html(response)):
+        return _edge_blocked(response)
     code = body.get("code") if body else None
     message = body.get("error") if body else None
     details = body.get("details") if body else None
