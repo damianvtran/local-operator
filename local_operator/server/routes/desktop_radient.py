@@ -321,6 +321,26 @@ class RadientRequest(Input):
         # key is refused with 401), which is why the quota notice only offers the
         # button to an OAuth-signed-in account (`desktop_quota._resend_available`).
         "signup.resend",
+        # The Team free trial (teams-trial design §3, Lane E): the eligibility
+        # read, the one call that names the home org AND starts the trial, and
+        # the trial-state read the Team Bridge page uses for its paused state.
+        # ADDITIVE like the org ops: an older server refuses the unknown
+        # operation at validation, so a UI newer than its server simply offers
+        # no trial. Shapes (a contract with local-operator-ui `team-trial-api.ts`):
+        #   team_trial.eligibility {}                     -> GET  /team-trial/eligibility
+        #   team_trial.start       {tenant_id, payload}   -> POST /tenants/{id}/team-trial
+        #                          (payload: terms_version, terms_accepted,
+        #                           org_name?; source=lop is pinned server-side)
+        #   team_trial.status      {tenant_id}            -> GET  /tenants/{id}/team-trial
+        # The start is a mutation with legal weight (terms acceptance), so it
+        # takes the mandatory `request_id` and the receipt like every POST: a
+        # lost response must replay the stored answer rather than re-submit.
+        # Auto-enrolment needs no op here: after a start the renderer refetches
+        # `/v1/desktop/team-bridge/status`, whose discipline enrolls an eligible
+        # member with no endpoint (`team_bridge.client`, design §9 Lane E).
+        "team_trial.eligibility",
+        "team_trial.start",
+        "team_trial.status",
     ]
     request_id: RequestID | None = None
     tenant_id: Identifier | None = None
@@ -446,8 +466,15 @@ class RadientRequest(Input):
             allowed = {"text"}
         elif self.operation == "application.create":
             allowed = {"name", "description"}
+        elif self.operation == "team_trial.start":
+            # `source` is deliberately NOT a caller field: this plane is the
+            # desktop app by construction, so `_operation_payload` pins it, the
+            # same way `visibility=org` is pinned for the org list.
+            allowed = {"terms_version", "terms_accepted", "org_name"}
         if self.payload.keys() - allowed:
             raise ValueError("Unsupported payload fields")
+        if self.operation == "team_trial.start":
+            _validate_team_trial_start(self.payload)
         required = (
             {"name", "version"}
             if self.operation == "agents.create"
@@ -467,8 +494,48 @@ class RadientRequest(Input):
         return self
 
 
+#: The hub's org-name bound (design §3: 1-80 characters after trim). Checked
+#: here too so an over-long name is refused before a request with legal weight
+#: is built; the hub stays the authority and re-checks it.
+TEAM_TRIAL_ORG_NAME_MAX = 80
+
+
+def _validate_team_trial_start(payload: dict[str, Any]) -> None:
+    """Refuse a trial start the hub could only refuse, before it is sent.
+
+    Terms acceptance must be an explicit boolean ``true`` and the version a
+    non-empty string: the hub records both as the consent (``terms_required`` /
+    ``terms_outdated``), and a truthy string coerced to ``True`` here would be
+    consent the user never gave. ``org_name`` is optional; when present it is a
+    rename of the home tenant, so a blank or over-long one is refused rather
+    than trimmed into something the user did not type.
+    """
+    if payload.get("terms_accepted") is not True:
+        raise ValueError("Accept the Terms of Service to start the trial")
+    version = payload.get("terms_version")
+    if not isinstance(version, str) or not version.strip() or len(version) > 64:
+        raise ValueError("Required text fields are missing")
+    if "org_name" in payload:
+        name = payload["org_name"]
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or len(name.strip()) > TEAM_TRIAL_ORG_NAME_MAX
+        ):
+            raise ValueError("Choose an organization name of 1 to 80 characters")
+
+
 def endpoint(body: RadientRequest) -> tuple[str, str]:
     op = body.operation
+    if op == "team_trial.eligibility":
+        # The hub resolves the caller's HOME tenant itself, so no id travels.
+        return "GET", "/team-trial/eligibility"
+    if op in {"team_trial.start", "team_trial.status"}:
+        if not body.tenant_id:
+            raise ValueError("Choose an organization")
+        return ("POST" if op == "team_trial.start" else "GET"), (
+            f"/tenants/{body.tenant_id}/team-trial"
+        )
     if op == "agents.statuses":
         # The one operation whose real work is several upstream calls, so this
         # pair is NOMINAL: it exists because `validate_request` asks for the
@@ -584,6 +651,19 @@ def _operation_params(body: RadientRequest) -> dict[str, str | int]:
     return body.query
 
 
+def _operation_payload(body: RadientRequest) -> dict[str, Any]:
+    """The upstream JSON body one operation sends.
+
+    Every operation forwards the validated ``payload`` verbatim except
+    ``team_trial.start``, whose ``source`` (an analytics tag the hub records
+    with the trial, design §2.1) is a fact about THIS plane rather than a
+    caller choice, so it is pinned here and never accepted from the renderer.
+    """
+    if body.operation == "team_trial.start":
+        return {**body.payload, "source": "lop"}
+    return body.payload
+
+
 def base_url() -> str:
     provider = get_provider_definition("radient")
     assert provider is not None and provider.base_url
@@ -678,6 +758,13 @@ ORG_OPERATIONS = frozenset(
         "org_team.get",
         "org_skills.list",
         "org_skill.get",
+        # The Team trial ops (design §3/§9 Lane E): their refusals are the
+        # hub's designed envelope too -- a non-owner or a member of no
+        # organization reads the same membership codes, and the trial's own
+        # codes below are useless to the renderer if folded into "sign in".
+        "team_trial.eligibility",
+        "team_trial.start",
+        "team_trial.status",
     }
 )
 
@@ -688,7 +775,31 @@ ORG_OPERATIONS = frozenset(
 #: them is fixed by signing in again, so folding them into
 #: `radient_credential_refused` would send the user to the wrong remedy
 #: (review round 1, major 2).
-_ORG_REFUSAL_CODES = frozenset({"not_a_member", "insufficient_role", "team_plan_required"})
+#:
+#: The trial adds three (design §3/D9): `trial_not_eligible` (its
+#: `details.reason` says why -- trial_used, not_owner, email_unverified ...),
+#: `terms_outdated` (`details.terms_version` names the current version, so the
+#: renderer re-reads eligibility and asks again), and `team_trial_ended`
+#: (`details.trial_ended_at` / `subscribe_url` drive the paused state).
+_ORG_REFUSAL_CODES = frozenset(
+    {
+        "not_a_member",
+        "insufficient_role",
+        "team_plan_required",
+        "trial_not_eligible",
+        "terms_outdated",
+        "team_trial_ended",
+    }
+)
+
+#: Codes carried ONLY for the trial ops. `rate_limited` (429) in particular
+#: would otherwise read as `radient_credential_refused` -- "sign in again" --
+#: when the credential worked and the remedy is to wait; scoping these to the
+#: trial ops keeps every existing org op's answers byte-identical.
+_TEAM_TRIAL_OPERATIONS = frozenset(
+    {"team_trial.eligibility", "team_trial.start", "team_trial.status"}
+)
+_TEAM_TRIAL_REFUSAL_CODES = frozenset({"terms_required", "rate_limited", "team_trial_unavailable"})
 
 #: The sentence each carried code gets on THIS plane. The codes and their
 #: `details` travel as the hub sent them; only the prose is restated here, in
@@ -697,6 +808,12 @@ _ORG_REFUSAL_MESSAGES = {
     "not_a_member": "You are not a member of this organization",
     "insufficient_role": "Your organization role does not allow this action",
     "team_plan_required": "This organization needs an active team plan",
+    "trial_not_eligible": "This account cannot start a Team trial",
+    "terms_outdated": "The Terms of Service changed; review them and try again",
+    "team_trial_ended": "This organization's Team trial ended; subscribe to continue",
+    "terms_required": "Accept the Terms of Service to start the trial",
+    "rate_limited": "Too many trial requests; try again shortly",
+    "team_trial_unavailable": "The Team trial is not available right now",
 }
 
 
@@ -705,7 +822,13 @@ def _org_refusal_code(operation: str, envelope: Any) -> str | None:
     if operation not in ORG_OPERATIONS or not isinstance(envelope, dict):
         return None
     code = envelope.get("code")
-    return code if isinstance(code, str) and code in _ORG_REFUSAL_CODES else None
+    if not isinstance(code, str):
+        return None
+    if code in _ORG_REFUSAL_CODES:
+        return code
+    if operation in _TEAM_TRIAL_OPERATIONS and code in _TEAM_TRIAL_REFUSAL_CODES:
+        return code
+    return None
 
 
 #: `signup.resend`'s own refusal vocabulary. `_upstream_refusal` would class the
@@ -1327,7 +1450,7 @@ async def radient(
                     method,
                     base_url() + path,
                     params=_operation_params(body),
-                    json=body.payload if method in {"POST", "PATCH"} else None,
+                    json=_operation_payload(body) if method in {"POST", "PATCH"} else None,
                     headers={"Authorization": "Bearer " + token} if token else {},
                 ) as response:
                     if response.is_redirect:
