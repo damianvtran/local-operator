@@ -305,6 +305,12 @@ def test_adopt_link_differing_agent_keeps_local_bytes_and_links_to_the_hub_revis
     assert len(backups) == 1 and report.adopted[0]["backup"]
     checks = svc.check_items(svc.sync_context(rig["manager"]), kinds=("agent",))
     assert [c.classification.state for c in checks if c.classification] == ["local-only"]
+    # Q5: the plain `agents sync --check` line carries that drift, not just --json.
+    from local_operator.hub_sync.report import render_entry
+
+    assert [render_entry(svc.check_report(c)) for c in checks] == [
+        "coder: hub up-to-date (local-only)"
+    ]
 
 
 def test_adopt_link_differing_team_keeps_local_bytes(rig, monkeypatch) -> None:
@@ -334,6 +340,12 @@ def test_adopt_link_differing_team_keeps_local_bytes(rig, monkeypatch) -> None:
     record = prov.read_baseline(rig["root"], "team", local.id)
     assert record is not None and record.hub_id == TEAM_ID
     assert record.fields["instructions"] == "Hub brief." and record.identity is not None
+    from local_operator.hub_sync.report import render_entry
+
+    checks = svc.check_items(svc.sync_context(rig["manager"]), kinds=("team",))
+    assert [render_entry(svc.check_report(c)) for c in checks] == [
+        "lopdev: hub up-to-date (local-only)"
+    ]
 
 
 # -- R1: a same-named local row linked to a DIFFERENT hub item --------------------------
@@ -379,6 +391,35 @@ def test_agent_with_only_a_public_hub_tag_is_linked_elsewhere(rig) -> None:
 
     assert _outcomes(report) == {"agent:coder": "linked-elsewhere"}, report.to_json()
     assert prov.read_baseline(rig["root"], "agent", local.id) is None
+
+
+def test_skill_linked_to_another_hub_item_is_never_retargeted(rig) -> None:
+    """Review round 2 M1: R1's skill arm, keyed by the per-alias baseline.
+
+    A pulled ``acme-style`` follows SKILL_ID; a later org item with the same
+    name but another id must stay ``linked-elsewhere`` under every conflict
+    mode -- no adopt snapshot, no rewritten bytes, the link still on SKILL_ID.
+    """
+    rig["hub"].skills[SKILL_ID] = _skill_doc("acme-style", "First body.\n")
+    assert _outcomes(rig["run"]()) == {"skill:acme-style": "pulled"}
+    other_id = "55555555-5555-4555-8555-555555555555"
+    del rig["hub"].skills[SKILL_ID]
+    rig["hub"].skills[other_id] = _skill_doc("acme-style", "Another org item.\n")
+    folder = rig["root"] / "skills" / "acme-style"
+    before = (folder / "SKILL.md").read_bytes()
+
+    for on_conflict in ("adopt-link", "adopt", "reconcile", "skip"):
+        report = rig["run"](allow_llm=False, on_conflict=on_conflict)
+        assert _outcomes(report) == {"skill:acme-style": "linked-elsewhere"}, report.to_json()
+        assert not report.adopted
+
+    assert (folder / "SKILL.md").read_bytes() == before
+    linked = [r.hub_id for r in prov.iter_baselines(rig["root"]) if r.kind == "skill"]
+    assert linked == [SKILL_ID]
+    assert not list((rig["root"] / "hub" / "backups").glob("skill-adopt-acme-style-*"))
+    assert [p.name for p in (rig["root"] / "skills").iterdir() if not p.name.startswith(".")] == [
+        "acme-style"
+    ]
 
 
 def test_team_linked_to_the_public_hub_is_never_retargeted(rig) -> None:
