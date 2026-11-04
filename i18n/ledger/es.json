@@ -3262,6 +3262,37 @@
       },
       "status": "passed",
       "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. No defects. Filtrado/filtrar and retenidos agree with namespace; tu register, respaldo/default model meaning preserved. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.guardrails",
+      "source_sha256": "2ab2689fe217cdee757173027e0ecb93c3ca75c9a9806047fe6a055b118ed664",
+      "translator": {
+        "agent": "coder (lopdev, PR #3440 implementer)",
+        "session": "a13d3cd32111",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev task subagent i18n-audit)",
+        "session": "03d9d36d99c8",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of the PR #3440 coder draft against en at 2ab2689fe217 (b10c4017bb3; rules_dir.help changed in that commit). Target bytes sha256 5eaf5d4a4a69. 10/10 keys, parity, no ICU arguments, '*.md' and 'dangerous-delete' byte-identical, label maxCells 29 met (rich cell_len), no manual bidi controls. 3 key(s) corrected by the auditor, all resolved in these bytes: critical_override.help: major(glossary): 'este equipo' for computer collides with glossary team=equipo; shipped es uses 'esta máquina'. minor: 'Activado,' → 'Si se activa,'; 'eliminaciones' → 'borrados' to match the label; judge_timeout_s.label: minor: telegraphic 'Límite comprobación' missing 'de'; rules_dir.help: MAJOR(stale): superseded English semantics. second independent audit complete (see second_audit); same model family as translator (claude-opus-5-5) — disclosed. Audit record: PR #3440 thread.",
+      "second_audit": {
+        "status": "passed",
+        "agent": "i18n-auditor (lopdev task subagent, second independent audit)",
+        "session": "c3a461e17031",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "scope": "critical_override.label, critical_override.help, rules_dir.help at en source 2ab2689fe217",
+        "findings": 0,
+        "note": "0 findings; all three keys PASS (esta máquina / carpeta personal match shipped es; 'además de' keeps additive rules_dir semantics). Same model family as translator and first auditor (claude-opus-5-5) — disclosed."
+      }
     }
   ]
 }

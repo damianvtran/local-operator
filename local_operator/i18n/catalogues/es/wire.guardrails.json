@@ -1,0 +1,12 @@
+{
+  "wire.guardrails.critical_override.help": "Desactivado por defecto. Si se activa, los borrados críticos (carpeta de estado, configuración, secretos, carpeta personal) pasan por la comprobación de seguridad en lugar de rechazarse. Solo tiene efecto si se configura desde los ajustes de esta máquina, nunca editando un archivo.",
+  "wire.guardrails.critical_override.label": "Revisar borrados críticos",
+  "wire.guardrails.enabled.help": "Aplica tus archivos de reglas de protección a las llamadas a herramientas antes de que se ejecuten. La comprobación integrada dangerous-delete sigue activa en cualquier caso.",
+  "wire.guardrails.enabled.label": "Reglas de protección",
+  "wire.guardrails.judge_timeout_s.help": "Cuánto puede tardar la comprobación de seguridad antes de bloquear la llamada. Una comprobación que no responde siempre bloquea.",
+  "wire.guardrails.judge_timeout_s.label": "Límite de comprobación (s)",
+  "wire.guardrails.rules_dir.help": "Carpeta adicional de archivos de reglas de protección (*.md), que se carga además de la carpeta rules del directorio de configuración.",
+  "wire.guardrails.rules_dir.label": "Carpeta de reglas",
+  "wire.guardrails.section.description": "Comprobaciones que se ejecutan antes de una llamada a herramienta y pueden rechazar las peligrosas.",
+  "wire.guardrails.section.title": "Protecciones"
+}
