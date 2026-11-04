@@ -27,7 +27,8 @@
     "sound": "str"
   },
   "payload_optional": {
-    "exclude": "list[str]"
+    "exclude": "list[str]",
+    "sound_custom": "str"
   },
   "payload_version": 1,
   "alert_required": {
@@ -53,7 +54,8 @@
     ],
     "default": "the computer's `system` choice: the phone plays its OS default notification sound (iOS aps.sound = \"default\"; Android sound.default)",
     "none": "notifications.sound.enabled is false on the computer: the banner posts silently (iOS omits aps.sound; Android uses the silent sound.none channel)",
-    "fallback": "soft-pulse — any computer selection that is not a built-in (a custom sound, or a hand-edited id that names nothing) sends soft-pulse, because custom sounds are not on the phone in v1"
+    "fallback": "soft-pulse — any computer selection that is not a built-in (a custom sound, or a hand-edited id that names nothing) sends soft-pulse in data.sound, because a phone that does not hold the custom file must still play the default rather than an OS sound; the custom file travels by name in the reserved, optional sound_custom (not sent yet)",
+    "custom": "c_<sha256[:16]> — RESERVED, carried only by the optional sound_custom (not by sound), only when the selection is a custom sound and enabled is true; not sent yet"
   },
   "report_block_required": {
     "device_id": "str",
@@ -61,7 +63,16 @@
   },
   "report_block_optional": {
     "credential_expires_at": "int",
-    "last_authenticated_at": "int"
+    "last_authenticated_at": "int",
+    "sound_custom_ready": "bool"
+  },
+  "reserved_not_sent": {
+    "payload": [
+      "sound_custom"
+    ],
+    "report_block": [
+      "sound_custom_ready"
+    ]
   },
   "payload": {
     "v": 1,
@@ -124,6 +135,7 @@
     "exclude is PERMITTED here with the attention form's meaning and is NEVER REQUIRED (§3.2 at digest_rules_ref): the required case belongs to the attention emit alone, because what makes it required is an ack, and the nudge an ack produces emits the per-conversation attention correction, never a catch-up digest. A digest that happens to follow an ack in time is not the same thing as one triggered by it. Absent means \"exclude nobody\", which is what the tick-detected path sends; exclude_absent_payload is a whole valid payload, not an empty list.",
     "The key is sha256(\"digest\" ‖ emit_id ‖ computer) — see emit-idempotency-keys.json, which carries the worked vector. The emit_id is minted ONCE when the coalescing window closes and is PERSISTED with the positions that window speaks for, so a restart mid-window re-emits the SAME key; re-minting per attempt would give one batch a new identity each time and defeat the cloud's dedupe (review round 1, B1; the persistence rule is digest_rules_ref §3.4).",
     "count is §3.2's count: the machine's unread conversation count at composition time, the one aggregate the design discloses to the cloud on purpose.",
-    "sound is the computer's selected notification sound, MAPPED by the cloud and never composed from (notification-sounds design §3.6, ADR 0006 amendment), per value. iOS: a built-in id → aps.sound = \"<id>.wav\"; \"default\" → aps.sound = \"default\" (the OS default sound); \"none\" → aps.sound OMITTED (an unknown file name would make APNs play the default sound, the opposite of the setting). Android: android.channel_id = \"sound.<id>\" for a built-in, \"sound.default\" for default, and the silent \"sound.none\" channel for none (a channel's sound is fixed at creation). A custom selection, or any id the phone has no file for, sends soft-pulse (custom sounds are not on the phone in v1); notifications.sound.enabled false sends none. The computer's volume does not travel: the phone plays at its own notification volume. sound_values lists every value the field may carry."
+    "sound is the computer's selected notification sound, MAPPED by the cloud and never composed from (notification-sounds design §3.6, ADR 0006 amendment), per value. iOS: a built-in id → aps.sound = \"<id>.wav\"; \"default\" → aps.sound = \"default\" (the OS default sound); \"none\" → aps.sound OMITTED (an unknown file name would make APNs play the default sound, the opposite of the setting). Android: android.channel_id = \"sound.<id>\" for a built-in, \"sound.default\" for default, and the silent \"sound.none\" channel for none (a channel's sound is fixed at creation). A custom selection, or any id the phone has no file for, sends soft-pulse (the phone may not hold the custom file; sound_custom, reserved below, names it for a device that does); notifications.sound.enabled false sends none. The computer's volume does not travel: the phone plays at its own notification volume. sound_values lists every value the field may carry.",
+    "sound_custom and devices[].sound_custom_ready are RESERVED, OPTIONAL and NOT SENT YET (ADR 0006 amendment 2026-11-04; notification-sounds addendum 2 §2.2): the phone will fetch the computer's custom sound through the tunnel and cache it, and the cloud picks PER DEVICE — sound_custom_ready true → iOS aps.sound = \"<sound_custom>.wav\", Android channel_id = \"sound.<sound_custom>\"; otherwise it maps data.sound exactly as above, which stays required and still carries soft-pulse for a custom selection. sound_custom is \"c_<sha256[:16]>\" of the stored WAV, never the user's sound name, so P2 holds; the underscore makes the wire value the phone's file stem (c_<sha16>.wav), so there is no second mapping. They are declared now because the cloud validates with extra=\"forbid\": reserving them before S7 builds avoids a cloud-first deploy when core's notification-sounds C5 starts emitting them. reserved_not_sent lists them, and the suite asserts today's builder output carries neither."
   ]
 }

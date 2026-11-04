@@ -133,9 +133,15 @@ IDEMPOTENCY_HEADER = "Idempotency-Key"
 
 #: The sound the phone plays with a VISIBLE push (notification-sounds design
 #: §3.6, ADR 0006 amendment): a built-in id, :data:`SOUND_DEFAULT` or
-#: :data:`SOUND_NONE`. The cloud MAPS it (``aps.sound = "<id>.wav"``,
+#: :data:`SOUND_NONE`. The cloud MAPS it (iOS ``aps.sound = "<id with - → _>.wav"``,
+#: the bundled file name, since Android ``res/raw`` names allow no hyphen;
 #: ``android.channel_id = "sound.<id>"``) and never composes from it, so P2
-#: holds. It rides completion and digest only: the attention form is a silent
+#: holds. ADR 0006 (amendment 2026-11-04) also RESERVES the optional
+#: ``sound_custom`` (``"c_<sha256[:16]>"``) beside it and a per-device
+#: ``sound_custom_ready`` in the report block; this module emits NEITHER yet
+#: (notification-sounds C5 does), and ``fixtures/push/`` lists them under
+#: ``reserved_not_sent`` so the suite proves today's output carries neither.
+#: It rides completion and digest only: the attention form is a silent
 #: wake, so a sound on it would have nothing to accompany (design §6 C3:
 #: "``sound`` absent on attention, which is silent by definition").
 SOUND_FIELD = "sound"
@@ -277,9 +283,11 @@ def push_sound(values: Mapping[str, Any] | None) -> str:
     notification volume). Only ``enabled: false`` turns the phone silent.
 
     Any id that is not a built-in — a custom sound (C2), or a hand-edited typo —
-    sends :data:`~local_operator.notifications.sound.DEFAULT_SOUND_ID`: custom
-    sounds are not on the phone in v1 (§3.6), and the phone has no file to play
-    for any other name. ``system`` maps to :data:`SOUND_DEFAULT`.
+    sends :data:`~local_operator.notifications.sound.DEFAULT_SOUND_ID`: a phone
+    may not hold a custom file (the reserved ``sound_custom`` names it for a
+    device that does, from C5 on), and it has no file to play for any other
+    name. ``data.sound`` is the value every not-ready device plays.
+    ``system`` maps to :data:`SOUND_DEFAULT`.
     """
     # ``configured`` is the computer's own reader of the three keys (the one
     # ``resolve`` and ``lop sound`` use), so the phone and the computer can never
