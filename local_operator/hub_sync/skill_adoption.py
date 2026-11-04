@@ -536,29 +536,52 @@ def _rewrite_relocated_refs(
     source_path: str = "SKILL.md",
     destination_path: str | None = None,
     known_paths: set[str] | None = None,
+    on_ambiguous: Literal["refuse", "verbatim"] = "refuse",
 ) -> str:
     """Resolve within the captured source tree, then relativize at the destination.
 
     Basename substitution cannot distinguish ../requirements.md from a different
     file beside the source. Unknown/traversing references to moved names refuse
     rather than leave a ready proposal with a silently broken link.
+
+    ONE case is not ambiguous and is accepted verbatim: a file that does not move
+    itself (``source_path == destination_path``) naming a path that resolves to a
+    relocation DESTINATION. The operator's real municipal tree is the witness:
+    ``references/record-contract.md`` says ``rubric.md`` while rubric.md sits at
+    the root. Dangling locally, that sibling name becomes correct the moment
+    relocation lands rubric.md at ``references/rubric.md``, so refusing it was a
+    dead end on exactly the case adoption exists for. Anything else that merely
+    shares a moved basename still refuses under merge.
+
+    ``on_ambiguous="verbatim"`` is for callers whose output never installs a
+    rewritten guess: the take-hub proposal (local text is only shown in the
+    diff) and the keep-local projection (the folder itself is kept byte for
+    byte). Those explicit fallbacks must never dead-end on a rewrite question
+    they do not need answered; the text is left exactly as authored.
     """
     if not moves:
         return text
     destination_path = destination_path or moves.get(source_path, source_path)
     known = known_paths if known_paths is not None else set(moves)
+    stationary = source_path == destination_path
+    destinations = set(moves.values())
+
+    def ambiguous(reason: str) -> None:
+        if on_ambiguous == "refuse":
+            raise AdoptionError("adoption-needs-choice", reason)
     pattern = re.compile(r"(?<![\w/.:~-])(?:[\w.@~+-]+/)*[\w@~+-]+\.[\w.~+-]*[\w~+-]")
 
     def rewrite(match: re.Match[str]) -> str:
         token = match.group()
         resolved = posixpath.normpath(posixpath.join(posixpath.dirname(source_path), token))
         if resolved == ".." or resolved.startswith("../"):
-            raise AdoptionError("adoption-needs-choice", "reference escapes captured skill root")
+            ambiguous("reference escapes captured skill root")
+            return token
         if resolved not in known:
+            if stationary and resolved in destinations:
+                return token  # valid once the relocation lands (see docstring)
             if posixpath.basename(token) in {posixpath.basename(old) for old in moves}:
-                raise AdoptionError(
-                    "adoption-needs-choice", "ambiguous reference to relocated file"
-                )
+                ambiguous("ambiguous reference to relocated file")
             return token
         target = moves.get(resolved, resolved)
         relative = posixpath.relpath(target, posixpath.dirname(destination_path) or ".")
@@ -582,9 +605,11 @@ def _rewrite_relocated_refs(
                 if literal.startswith("./") and not relative.startswith("."):
                     relative = "./" + relative
                 replacements.append((start, end, relative))
+            elif stationary and resolved in destinations and resolved not in known:
+                continue  # valid once the relocation lands (see docstring)
             elif posixpath.basename(literal) in {posixpath.basename(old) for old in moves}:
                 if resolved.startswith("../") or resolved not in known:
-                    raise AdoptionError("adoption-needs-choice", "ambiguous inline filepath")
+                    ambiguous("ambiguous inline filepath")
         for start, end, relative in reversed(replacements):
             text = text[:start] + relative + text[end:]
     masked, payloads = _shield_code(text)
@@ -821,6 +846,8 @@ def build_proposal(
                         source_path=src,
                         destination_path=target,
                         known_paths=set(local_by_path),
+                        # take-hub installs the Hub text; local text is display only.
+                        on_ambiguous="verbatim" if strategy == "take-hub" else "refuse",
                     )
                     if _prose_path(src, local_by_path[src].mode) and _prose_path(target)
                     else text
@@ -1260,6 +1287,8 @@ def local_projection(tree: LocalTree, *, carried_paths: Sequence[str] = ()) -> S
                 source_path=inverse.get(path, path),
                 destination_path=path,
                 known_paths=original,
+                # The projected folder is kept byte for byte; never refuse a read.
+                on_ambiguous="verbatim",
             )
             if (
                 _prose_path(inverse.get(path, path), modes[inverse.get(path, path)])

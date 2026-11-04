@@ -388,7 +388,17 @@ def test_source_relative_relocation_links_and_escape_refusal(tmp_path):
     assert "[root](requirements.md)" in files["references/local.md"]
     assert "[same](./local.md)" in files["references/local.md"]
     assert "[requirements](./requirements.md)" in files["references/rubric.md"]
-    for invalid in ("../../requirements.md", "requirements.md"):
+    # A bare ``requirements.md`` from references/ resolves to the relocation's
+    # own destination, so it is valid once the move lands and is kept verbatim
+    # (the operator's municipal tree). Escapes and other same-basename paths
+    # still fail closed.
+    (tree.root / "references/local.md").write_text("Read requirements.md.\n")
+    kept = build_proposal(document.name, read_tree(tree.root), remote, resolver=None)
+    assert kept.document is not None
+    assert "Read requirements.md." in {f.path: f.content for f in kept.document.files}[
+        "references/local.md"
+    ]
+    for invalid in ("../../requirements.md", "sub/requirements.md"):
         (tree.root / "references/local.md").write_text(f"Read {invalid}.\n")
         with pytest.raises(AdoptionError) as failure:
             build_proposal(document.name, read_tree(tree.root), remote, resolver=None)
