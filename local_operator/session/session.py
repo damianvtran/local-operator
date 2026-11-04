@@ -6023,7 +6023,10 @@ class Session:
         from local_operator.providers.failover import is_request_too_large
 
         if not is_request_too_large(error):
-            return False
+            # Not a byte-size refusal: a TOKEN overflow ("maximum context
+            # length", or this harness's own local refusal, which uses the same
+            # wording) has its own, narrower remedy. See the method.
+            return await self._degrade_largest_document_for_context(error)
 
         budget = self._wire_bytes_budget()
         if budget <= 0:
@@ -6062,6 +6065,132 @@ class Session:
             frames_left,
         )
         await self._emit(_notice(_nt.request_too_large_dropped(), kind="warning"))
+        return True
+
+    async def _degrade_largest_document_for_context(self, error: BaseException | str) -> bool:
+        """Replace the largest attached document with its reference line.
+
+        The last rung for a CONTEXT-LENGTH refusal that compaction cannot
+        answer. Compaction only sheds history; a document in the live tail, or
+        in a user turn (those are preserved verbatim), survives every pass, and
+        the local estimator can under-count dense text (base64, hex, control
+        bytes: ``document_limits.DOCUMENT_CHARS_PER_TOKEN``), so the same
+        oversized request is refused on every later turn. Measured: 25 refusals
+        in a row for a 2 MB UTF-16-as-UTF-8 CSV at 128k beside 30-60k tokens of
+        user-turn history.
+
+        One document per error, largest first: the next refusal takes the next
+        one, so the cost to the user is bounded by what was actually too big.
+        The failing turn is NOT retried (the user resends once), for the reason
+        ``_recover_if_request_too_large`` documents.
+
+        The LIVE context only. The transcript row keeps the document, exactly
+        as frame shedding does: ``/export``, forks and a later session on a
+        larger window still see it. The price is that a resumed session replays
+        the document and can take one more refusal before this fires again.
+        Persisting is safe from the turn-end pass: ``_persist_new_messages``
+        skips a message id the transcript already holds, so the mutated message
+        is never rewritten.
+
+        Documents are touched only when they are a material share of the window
+        (``DOCUMENT_CULPRIT_SHARE`` for one document, or ``DOCUMENT_WINDOW_SHARE``
+        for all of them together; both capped at ``DOCUMENT_CULPRIT_CEILING``).
+        The sum covers a collection whose members are each under the first bar
+        (13 dense files). It has the higher bar on purpose: modest attachments
+        beside a history that is itself the cause are left alone, since
+        stripping them would not cure the overflow and the notice would blame
+        the wrong thing. The error then surfaces exactly as before. A window of
+        0 or unknown makes the thresholds 0, so every document qualifies: the
+        cause-blind behaviour, accepted there because nothing is known to judge
+        by.
+
+        The error filter is the context-length marker list, which is wider than
+        "the prompt is over the window": it also matches an attached-file size
+        cap, a tool-definition cap and an image size cap. An image refusal is
+        left to ``_degrade_if_image_rejected`` while images can still be rejected
+        (it never reaches here); once they all already are, it falls through to
+        the document guard, since an image handler with nothing left to do would
+        otherwise leave a document-driven overflow unanswered. The other two
+        are bounded by the share gate, since neither is cured by a small
+        document and a large one is the thing a size cap names.
+
+        Returns ``False`` when the error is not a context-length refusal or no
+        document is a material share, so the error surfaces exactly as it did
+        before.
+        """
+        from local_operator.compaction.tokens import (
+            _document_token_estimate,
+            invalidate_message_cache,
+        )
+        from local_operator.harness.document_limits import (
+            DOCUMENT_CULPRIT_CEILING,
+            DOCUMENT_CULPRIT_SHARE,
+            DOCUMENT_WINDOW_SHARE,
+        )
+        from local_operator.incidents import CONTEXT_LENGTH_MARKERS
+        from local_operator.providers.documents import _reference_text
+        from local_operator.providers.failover import (
+            _KIND_LABELS,
+            ProviderError,
+            is_image_rejection,
+        )
+
+        if is_image_rejection(error) and not self._images_rejected:
+            # "Image exceeds the maximum size" also matches the context markers;
+            # it is a poisoned-block refusal with its own handler, which the
+            # caller runs when this declines.
+            return False
+        if isinstance(error, ProviderError):
+            if error.kind != "request":
+                return False
+            haystack = error.message.lower()
+        else:
+            haystack = (error if isinstance(error, str) else str(error)).lower()
+            if not haystack.startswith(_KIND_LABELS["request"]):
+                return False
+        if not any(marker in haystack for marker in CONTEXT_LENGTH_MARKERS):
+            return False
+
+        window = int(self.effective_model.context_window)
+        threshold = min(window // DOCUMENT_CULPRIT_SHARE, DOCUMENT_CULPRIT_CEILING)
+        total_threshold = min(window // DOCUMENT_WINDOW_SHARE, DOCUMENT_CULPRIT_CEILING)
+
+        largest: tuple[int, Message, int] | None = None
+        total = 0
+        for message in self._context.messages:
+            if not isinstance(message, Message):
+                continue
+            for index, block in enumerate(message.content):
+                if not isinstance(block, DocumentContent):
+                    continue
+                cost = _document_token_estimate(block)
+                total += cost
+                if largest is None or cost > largest[0]:
+                    largest = (cost, message, index)
+        if largest is None or (largest[0] < threshold and total < total_threshold):
+            return False
+
+        _, message, index = largest
+        block = message.content[index]
+        assert isinstance(block, DocumentContent)
+        message.content[index] = TextContent(
+            text=_reference_text(block, reason="dropped to fit the model's context window")
+        )
+        # The estimate cache is keyed on ``Message.id``: without this the
+        # message keeps its document's charge and the next request is refused
+        # again for content that is no longer there.
+        invalidate_message_cache(message)
+        logger.warning(
+            "provider refused the request as over the context window; replaced %s (%d bytes) "
+            "with its reference line in this session's context",
+            block.filename,
+            block.bytes,
+        )
+        # Reuses the "too large, run /compact" notice: a dedicated, localized
+        # sentence needs the translator + independent auditor per locale (see
+        # docs/I18N.md). It does not name the file; the model does, from the
+        # reference line it now holds, on the next turn.
+        await self._emit(_notice(_nt.too_large_run_compact(), kind="warning"))
         return True
 
     async def _degrade_images_for_size(self, budget: int, frames_left: int) -> bool:
@@ -13466,6 +13595,32 @@ class Session:
         # during the session flips it, and the trigger must see that on the next
         # message rather than on the next session.
         hooks.code_requests_ledger = self._code_requests_ledger_nonempty
+        # Team Bridge recommendation probe: same attach point, same reason
+        # (session-owned state; the answer moves as admission settles).
+        hooks.team_bridge_available = self._team_bridge_available
+
+    def _team_bridge_available(self) -> bool:
+        """Whether this session can message teammates over Team Bridge — no network.
+
+        True only when the session holds BOTH the ``bridge`` tool (createIf on
+        the runtime) and a runtime whose cached admission is ``pending`` or
+        ``admitted``. ``pending`` counts because the runtime itself exists only
+        when persisted, network-free facts hold (enabled, committed Radient
+        owner, live Team-org enrollment, consent) — that IS "signed in and on a
+        team"; only the eligibility re-check is outstanding, and the tool
+        returns a typed refusal if it fails. A KNOWN negative (``signin``,
+        ``disabled`` incl. ``read_only``, ``paused``) means the bridge cannot
+        carry the message, so recommending it would be wrong. Never raises.
+        """
+        try:
+            runtime = getattr(self, "bridge_runtime", None)
+            if runtime is None:
+                return False
+            if not any(getattr(tool, "name", "") == "bridge" for tool in self._tools):
+                return False
+            return str(getattr(runtime, "admission", "") or "") in ("pending", "admitted")
+        except Exception:  # noqa: BLE001 - a probe never breaks a prompt build
+            return False
 
     def _code_requests_ledger_nonempty(self) -> bool:
         """Whether this session's derived code-request index has any rows.

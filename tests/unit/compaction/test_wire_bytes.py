@@ -1102,3 +1102,35 @@ def test_a_non_ascii_tool_name_is_sized_in_bytes() -> None:
     message = Message.assistant("")
     message.tool_calls = [ToolCall(id="1", name="\u6587\u5b57", raw_arguments="{}")]
     assert estimate_wire_bytes([message]) >= len("\u6587\u5b57".encode("utf-8")) + 2
+
+
+def test_a_large_reference_document_does_not_trip_the_byte_trigger() -> None:
+    """A 29.6 MB mp4 renders a ~50-token sentence, so it is not 39 MB of wire.
+
+    It used to measure 39,466,664 bytes against the 16 MB trigger and shed
+    screenshots on every turn for a payload that never left the machine.
+    """
+    import base64
+
+    from local_operator.harness.types import DocumentContent
+
+    block = DocumentContent(
+        data=base64.b64encode(b"\x00" * 29_600_000).decode("ascii"),
+        mime_type="application/octet-stream",
+        filename="demo.mp4",
+        bytes=29_600_000,
+        injection="reference",
+    )
+    wire = estimate_wire_bytes([Message(role="user", content=[block])])
+    assert wire < DEFAULT_WIRE_BYTES_TRIGGER
+    assert wire < 10_000
+
+
+def test_a_pdf_still_counts_its_base64_toward_the_wire() -> None:
+    """Only a PDF can go native, so it keeps the over-estimate the budget wants."""
+    from local_operator.harness.types import DocumentContent
+
+    block = DocumentContent(
+        data="A" * 5_000_000, mime_type="application/pdf", filename="a.pdf", bytes=3_750_000
+    )
+    assert estimate_wire_bytes([Message(role="user", content=[block])]) == 5_000_000

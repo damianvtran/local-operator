@@ -116,6 +116,7 @@ import os
 from pathlib import Path
 
 from local_operator.compaction.marker import COMPACTION_MARKER_TYPE
+from local_operator.harness.derived_ids import HINT_ID_SUFFIX
 from local_operator.harness.types import (
     DocumentContent,
     ImageContent,
@@ -129,7 +130,7 @@ from local_operator.tools.confinement import ToolConfinement
 #: ``~rb``: the token-estimate memo is keyed on ``message.id``, and these
 #: copies carry more content than the originals, so the two must not share an
 #: id. Deterministic, so the hinted view is byte-stable across turns.
-_HINT_ID_SUFFIX = "~ah"
+_HINT_ID_SUFFIX = HINT_ID_SUFFIX
 
 #: The note's opening, one line, singular and plural. A shared constant so the
 #: two arities cannot drift in wording — the sentence is the whole interface

@@ -88,6 +88,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from local_operator.harness.derived_ids import ELIDED_ID_SUFFIX
 from local_operator.harness.types import Content, Message, TextContent
 from local_operator.text_bounds import clip_head_tail
 
@@ -122,7 +123,7 @@ REPLAY_ARGUMENT_MARKER = (
 )
 
 #: Suffix that keeps a bounded copy's token-memo key distinct from the original's.
-_ELIDED_ID_SUFFIX = "~rb"
+_ELIDED_ID_SUFFIX = ELIDED_ID_SUFFIX
 
 
 def bound_replay_payloads(

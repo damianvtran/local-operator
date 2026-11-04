@@ -1,0 +1,144 @@
+{
+  "record_kind": "translation-audit",
+  "audit_kind": "single-key new namespace, source-only, reader 1 of 2",
+  "packet": "hosting-hi-audit-reader1",
+  "audit_id": "20261103-b858f6df",
+  "locale": "hi",
+  "namespace": "wire.errors.hosting",
+  "audit_date": "2026-11-03",
+  "key_count": 1,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "b858f6df97a0",
+    "model_requested": "radient/auto",
+    "model_served": "UNKNOWN",
+    "actual_model_source": "session-state header ('Model: radient/auto'); the route does not expose the served provider model to this session, and none is inferred",
+    "fallback_used": "none disclosed by the route; no fallback claimed",
+    "independent_from_translator_session": true,
+    "translator_session": "b60b4bdc8c47",
+    "independent_from_code_author": true,
+    "code_author": "94dcef624dec",
+    "no_translation_or_mt_service_used": true,
+    "no_self_translation": true,
+    "no_target_ledger_generated_baseline_repo_edits": true,
+    "other_reader_verdict_read_before_verdict": false
+  },
+  "source_state": {
+    "kind": "new English namespace, UNCOMMITTED",
+    "base_commit": "87ca846245b2",
+    "absent_at_base": "per the dispatch binding; NOT re-verified because Git/process execution is out of bounds for this audit",
+    "shipped": false,
+    "activation_or_shipped_claim": "none"
+  },
+  "inputs": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "bytes": 82,
+      "computed_by_me": true,
+      "matches_binding": true,
+      "value": "Hosting platform is not configured."
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9",
+      "bytes": 854,
+      "computed_by_me": true,
+      "matches_binding": true,
+      "read_in_full": true
+    },
+    "target": {
+      "path": "/Users/damian/.local-operator/sessions/b60b4bdc8c47/scratchpad/hosting-hi/target/hi/wire.errors.hosting.json",
+      "sha256": "22989094e5c759832fbd1e22220b68d0b5a7165c9dca9df6690b587d5add8f2e",
+      "bytes": 156,
+      "computed_by_me": true,
+      "matches_binding": true,
+      "value": "होस्टिंग प्लेटफ़ॉर्म कॉन्फ़िगर नहीं है।",
+      "key": "wire.errors.hosting.not_configured"
+    },
+    "reference": [
+      {
+        "path": "/Users/damian/local-operator/i18n/style-guides/hi.md",
+        "sha256": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5",
+        "bytes": 4215,
+        "read": "hi style guide; danda, loan rule, register"
+      },
+      {
+        "path": "/Users/damian/local-operator/i18n/glossary.md",
+        "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+        "bytes": 13399,
+        "read": "glossary has no platform/provider/hosting row; the shipped corpus is the governing terminology source for this key"
+      }
+    ]
+  },
+  "audit_dimensions": {
+    "condition_meaning": "PASS — names the owned preflight condition (hosting platform not configured); not an opaque external error and not a restated exception",
+    "no_added_remedy_or_detail": "PASS — no remedy, path, provider list or cause detail beyond the English; the surrounding refusal frame supplies the remedy",
+    "complete_statement_after_colon": "PASS — reads as one complete sentence spliced after the frame's colon, and the already-shipped frame wire.errors.sdk_startup.attach_hosting_unconfigured continues as a new sentence after it",
+    "punctuation_and_case": "PASS — terminal danda U+0964 (not ASCII period), no case system in Hindi so the English capitalisation requirement is met by starting with the term, four single spaces, no double or edge spaces",
+    "terminology_vs_corpus": "PASS — 'होस्टिंग प्लेटफ़ॉर्म' verified in cli.global_help.hosting, cli.exec_worker_help.hosting and cli.credential_help.credential; 'कॉन्फ़िगर नहीं है' mirrors wire.errors.media.radient_key_missing. wire.settings.hosting.label's 'डिफ़ॉल्ट प्रोवाइडर' names a different thing (the setting field), and the English source says 'platform', so uniform 'provider' wording is correctly not forced",
+    "no_english_fallback": "PASS — zero Latin characters; होस्टिंग / प्लेटफ़ॉर्म / कॉन्फ़िगर are settled Devanagari loans allowed by the hi guide",
+    "native_idiom": "PASS — one plain diagnostic clause, neutral/polite register, no honorifics, no exclamation, no calque word order"
+  },
+  "mechanical": {
+    "key_parity": "1 key in en, context and target; identical key ID; no keys added or dropped",
+    "json_valid": true,
+    "file_shape": "two-space indent, one trailing newline, no BOM",
+    "icu_arguments": "none — zero placeholders",
+    "placeholder_clldr": "N/A with reason: a literal sentence with no arguments, no plural/select structure and no {…} tokens; placeholder identity and CLDR categories do not apply",
+    "markup_code_spans": "none",
+    "terminal_terminator": "danda U+0964",
+    "normalisation": "NFC-stable and NFD-stable",
+    "cf_characters": 0,
+    "manual_bidi_controls": 0,
+    "zwj_zwnj": 0,
+    "latin_characters": 0
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "minor_or_nit_count": 0,
+    "scope_note": "PASS applies to this one keyed sentence at target sha256 22989094…; it is not whole-page clearance, not activation, and not rendered proof"
+  },
+  "separate_holds": {
+    "native_rendered_consumer_proof": "NOT RUN — held for the separate future consumer/renderer proof",
+    "pseudo_localisation": "NOT RUN — no pseudo claim made",
+    "rtl": "N/A — hi is LTR",
+    "formatter_cell_measurement": "not applicable and NOT RUN — the sidecar carries no maxCells; no width claim",
+    "repo_validator_scanner_generation_tests_ci": "NOT RUN — forbidden by the brief"
+  },
+  "advisories": [
+    {
+      "id": "A1",
+      "topic": "consumer wiring, caller-owned",
+      "detail": "The display path must pass this keyed sentence, not str(HostingNotConfiguredError) — the exception message is English by contract (session_factory.py:816, read-only inspection). API/caller changes are outside this audit's permission; no English-free claim is made from the key alone."
+    },
+    {
+      "id": "A2",
+      "topic": "glossary",
+      "detail": "The author proposes hosting platform → होस्टिंग प्लेटफ़ॉर्म as a glossary row; the corpus supports the term, but recording it is a manager/glossary decision, not part of this audit."
+    },
+    {
+      "id": "A3",
+      "topic": "provenance",
+      "detail": "Namespace absence at base and uncommitted status rest on the dispatch binding; this audit executed no Git."
+    }
+  ],
+  "preserved": {
+    "tui_settings_chrome_r1_r2_records": "untouched by this audit",
+    "repo_ledger_generated_baseline": "untouched",
+    "pr_comments_activation_frame_clearance": "none"
+  },
+  "artifacts": {
+    "record": {
+      "path": "/Users/damian/.local-operator/sessions/b858f6df97a0/scratchpad/hosting-hi-audit-reader1/record.json",
+      "role": "this record"
+    },
+    "report": {
+      "path": "/Users/damian/.local-operator/sessions/b858f6df97a0/scratchpad/hosting-hi-audit-reader1/report.md",
+      "sha256": "7366a49b396084ed7fa01f7dea4e1bd000ffbd8f3d02a91afa21cfaa59307a52",
+      "bytes": 6963
+    }
+  }
+}

@@ -2719,6 +2719,200 @@
     },
     {
       "locale": "fr",
+      "namespace": "wire.errors.hosting",
+      "source_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two independent sessions: c44e0f808e48, 35aac0a677bc)",
+        "model": "radient/auto (served model not disclosed by the route)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace wire.errors.hosting (1 key: the owned display cause the startup refusal splices into its {error} slot) authored at base 87ca846245b2 against frozen English sha256 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63. fr 'La plateforme d’hébergement n’est pas configurée.' keeps the typographic apostrophes and the corpus term for hosting platform. Two independent readers, neither the translator nor the code author, both PASSED on these bytes with 0 blocker/major/minor/nit (sessions c44e0f808e48, 35aac0a677bc). Source-only assembly: no rendered, native-speaker, width, RTL or validator proof, and no activation, shipped or release claim. Evidence: i18n/audits/evidence/fr/wire.errors.hosting/ (bundles ['frhost1', 'frhost2'], frozen inputs under _inputs/)."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 774a3a293a6a95ba3576083e27e2b0c7e8406ab02ceb0611f99e83cded6c84fb; context SHA-256 df0189becbf118ae9fa766395b412fe4d32a324cffd7587e87e392c255ed7a94. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "anthropic/claude-opus-5-5 failed quota before translation; all translations authored by openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "First independent audit, completed via full initial audit (104 keys per locale across both namespaces) plus scoped round-2 remediation of SA-I18N-001..006. All findings fixed; terminal clean, 0 unresolved blocker/major. Evidence: i18n/audits/skill-adoption-round2-5ad13f38d6e6.json. Target SHA-256 19458365fcacf645d5e9621f460be5cc35962b98d7b2e6146a5d05fd9d5dc64e; context SHA-256 105c41ad6e03647b789d2f9dba474b2aa84fee4b050bbe11a95e7c2927246036. Initial audit model recorded as openai/gpt-6.1-sol; round-2 runtime-declared model anthropic/claude-opus-5-5. No rendered/native-RTL sign-off; second independent high-visibility audit remains required. Translator attribution from i18n/provenance/skill-adoption.translator.json; current target bytes hashed independently after remediation."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "e809a3221b21b41951ef45200378d59f9a66dcda81c45c4b81119c1cbba360be",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "anthropic/claude-opus-5-5",
+        "fallback": "none reported in this resumed delta",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "D3 independent delta audit: only wire.skill_adoption.preview_required changed; prior full audit retained with exact HEAD hash compatibility. Same ID/scope/options, preview/review/receipt confirmation verified. Target SHA-256 8a70390f121dfb5b578e336ae6f2c093bf941a951b1d58c2e9f048ce33f4831c; context SHA-256 d24fe484fa7ce9758efc7135b95f2c8c0527a90cde9824b0c82f153779dfacef. Evidence: i18n/audits/skill-adoption-d3-5ad13f38d6e6.json. Unchanged translations retain initial openai/gpt-6.1-sol authorship; changed key translator anthropic/claude-opus-5-5. No aggregate generation or rendered/real-path QA claimed."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "e809a3221b21b41951ef45200378d59f9a66dcda81c45c4b81119c1cbba360be",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "Actual served model verified from transcript metadata; historical startup/fallback claims retained in superseded row.",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Metadata-only correction: prior runtime-label error; actual auditor and translator openai/gpt-6.1-sol. Same approved source/target and verdict; no re-audit or new independent round. Target SHA-256 8a70390f121dfb5b578e336ae6f2c093bf941a951b1d58c2e9f048ce33f4831c. Evidence: i18n/audits/skill-adoption-model-correction-5ad13f38d6e6.json. Prior row retains historical labels."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.errors.desktop",
+      "source_sha256": "157da6d752f5b02f6e9f0256893a6516aae681b85d0111c2cc12ea3f478d4bc7",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "fallback": "Actual served model verified from transcript metadata; historical startup/fallback claims retained in superseded row.",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Metadata-only correction: prior runtime-label error; actual auditor and translator openai/gpt-6.1-sol. Same approved source/target and verdict; no re-audit or new independent round. Target SHA-256 19458365fcacf645d5e9621f460be5cc35962b98d7b2e6146a5d05fd9d5dc64e. Evidence: i18n/audits/skill-adoption-model-correction-5ad13f38d6e6.json. Prior row retains historical labels."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.skill_adoption",
+      "source_sha256": "5313b5455bb3b295e3fe78a5ea465a9e9d85c641927562bad93f58e0e5971f7b",
+      "translator": {
+        "agent": "coder / skill-adoption-copy",
+        "session": "5984801ad25d",
+        "model": "openai/gpt-6.1-sol",
+        "identity_evidence": "Parent verified actual serving model; existing model_identity_correction applies",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent translation auditor",
+        "session": "5ad13f38d6e6",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent delta audit: only new wire.skill_adoption.projection_unsupported; prior completed whole-namespace/D3 audits carry with exact previous target hash compatibility. Platform refusal, unchanged local skill/link, supported-platform adoption and ordinary strict-install alternative preserved. Target SHA-256 21c69011c26caa9a4b797b84f39768909a736357d5f2dc04c09163b61e5f8745; context SHA-256 9227b4d2536eeedd7423e09bb9e31309e5b2e06a99a7df86594a256f56d0715c. Evidence: i18n/audits/skill-adoption-projection-delta-5ad13f38d6e6.json. No native Windows, rendered RTL or executable QA claim."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "cb3fcf96f055cafb2b61702cb0888f2b64f8cc6bcc0372a203fd81b12a5e6c6b",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-a, task subagent)",
+        "session": "886288cfe273",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 2
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.team_bridge_alert at source hash cb3fcf96f055: key set and ICU placeholder/plural-structure parity with en, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical, safety meaning (count, held longer than threshold, agent NOT given the messages, no deletion/review claim, cleared text does not claim delivery), 'Agent messages' title and 'held' wording against the locale's cli.team_bridge catalogue and glossary/style guide. 0 blocker / 0 major / 2 minor. Plural one/many/other present and correct (many = 'de messages'/'de minutes'). Minors: (1) both titles use a plain space before ':' where fr.md requires U+202F and cli.team_bridge titles use it; (2) held is 'retenu' here but 'en attente' in cli.team_bridge.status.screening_held (the tui.notices.stopped_session_held key also uses 'retenu'); 'retenu' is the clearer safety wording, so not blocking. Passed with minors outstanding. Single independent audit pass; no cross-model second audit."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (i18n-audit-r2a, task subagent)",
+        "session": "3c5e5fe61f9b",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent re-audit (not the translator; supersedes the row at the old English hash) of cli.team_bridge_alert at source hash f433a71daee9: key set and ICU placeholder/plural-structure parity with en for all 4 keys, required CLDR arms for the locale, `lop team-bridge receiver status` byte-identical in long_hold.body, meaning ('held for more than N minutes and has not reached your agent'; cleared = no message held longer than the threshold; no delivery, deletion or review claim), 'Agent messages' title wording and 'held' term against the locale's cli.team_bridge catalogue, glossary and style guide; every key rendered with the repo formatter. 0 blocker / 0 major / 1 minor. one/many/other present and correct (many = 'de messages'/'de minutes'; 1 000 000 de messages renders correctly); U+202F before ':' present in both titles; verb agreement correct (est retenu / sont retenus). Minor: held is 'retenu' here but 'en attente' in cli.team_bridge.status.screening_held (tui.notices also uses 'retenu'); 'retenu' is the clearer wording for a message that has not reached the agent, so not blocking. Passed with 1 minor outstanding. Single independent audit pass; no cross-model second audit."
+    },
+    {
+      "locale": "fr",
       "namespace": "wire.settings.hub_defaults",
       "source_sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
       "translator": {

@@ -47,7 +47,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Mapping, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, NamedTuple, Optional
 
 # stdlib-only and import-cheap by construction (os/sys/pathlib/logging), so it
 # does not violate this module's no-heavy-module-level-imports rule.
@@ -840,6 +840,8 @@ def build_cli_parser() -> LocalizedArgumentParser:
         help="Print the machine-readable JSON result",
     )
 
+    from local_operator.i18n.keys import wire_skill_adoption as _adoption_copy
+
     skills_pull = skills_subparsers.add_parser(
         # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "pull",
@@ -894,7 +896,7 @@ def build_cli_parser() -> LocalizedArgumentParser:
         # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
         "--yes",
         action="store_true",
-        help="Confirm the bundle publisher and hash shown by this command",
+        help=_adoption_copy.yes_help().envelope(locale=help_locale)["text"],
     )
     skills_pull.add_argument(
         # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
@@ -902,6 +904,27 @@ def build_cli_parser() -> LocalizedArgumentParser:
         action="store_true",
         help="Bundle links only: discard local changes, re-fetch and re-pin the hub's "
         "current archive (accepts a changed publisher after the confirmation)",
+    )
+    skills_pull.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=_adoption_copy.dry_run_help().envelope(locale=help_locale)["text"],
+    )
+    skills_pull.add_argument(
+        "--adopt-receipt",
+        default=None,
+        help=_adoption_copy.receipt_help().envelope(locale=help_locale)["text"],
+    )
+    skills_pull.add_argument(
+        "--strategy",
+        choices=("merge", "keep-local", "take-hub"),
+        default="merge",
+        help=_adoption_copy.strategy_help().envelope(locale=help_locale)["text"],
+    )
+    skills_pull.add_argument(
+        "--no-llm",
+        action="store_true",
+        help=_adoption_copy.no_llm_help().envelope(locale=help_locale)["text"],
     )
     skills_pull.add_argument(
         # i18n: ignore skills CLI copy tranche pending (cli.skills_help extraction)
@@ -12543,7 +12566,7 @@ def _bundle_lines(
     return lines
 
 
-def _skills_scope(args: argparse.Namespace) -> tuple[str, str | None]:
+def _skills_scope(args: argparse.Namespace) -> tuple[Literal["public", "org"], str | None]:
     """``--public`` / ``--org TENANT`` as the paired scope the service requires."""
 
     public = bool(getattr(args, "public", False))
@@ -12659,6 +12682,38 @@ def _skills_publish(args: argparse.Namespace, base_dir: Path) -> int:
     return 0
 
 
+def _print_skill_adoption(preview: dict[str, Any]) -> None:
+    """Render ALL reviewed bytes/diffs; do not truncate a consent boundary.
+
+    Each physical line is sanitized independently: terminal controls in remote
+    content cannot erase the prompt or forge a prior line. JSON clients receive
+    the complete structured proposal instead of this terminal projection.
+    """
+    import json as _json
+
+    from local_operator.i18n.keys import wire_skill_adoption as copy
+
+    print(copy.preview_title().envelope()["text"])
+    snapshot = preview.get("snapshot") or {}
+    print(
+        copy.backup_label(
+            path=str(snapshot.get("path") or ""), hash=str(snapshot.get("tree_hash") or "")
+        ).envelope()["text"]
+    )
+    proposal = preview["adoption"]
+    for row in proposal.get("files", []):
+        # Technical field labels stay machine vocabulary. File content includes
+        # both-sided provenance and full diffs, so the CLI is a review surface,
+        # not a claim that the preview exists elsewhere.
+        rendered = _json.dumps(row, ensure_ascii=False, indent=2)
+        for line in rendered.splitlines():
+            print(_safe(line, limit=len(line) + 1))
+    print(copy.receipt_label(receipt=preview["adoption_receipt"]).envelope()["text"])
+    if proposal.get("state") == "needs-choice":
+        print(copy.needs_choice().envelope()["text"])
+    print(copy.no_apply().envelope()["text"])
+
+
 def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
     import json as _json
 
@@ -12679,6 +12734,35 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
     ctx = svc.sync_context(ConfigManager(base_dir))
     alias = getattr(args, "alias", None)
     hub_source = canonical_hub_source(ctx.config_manager) or ""
+    adoption_receipt = getattr(args, "adopt_receipt", None)
+    if adoption_receipt:
+        from local_operator.i18n.keys import wire_skill_adoption as adoption_copy
+
+        if not getattr(args, "yes", False) or getattr(args, "dry_run", False):
+            return _skills_fail(
+                args,
+                LinkError(
+                    "confirmation-required", adoption_copy.preview_required().envelope()["text"]
+                ),
+            )
+        try:
+            adopted = svc.install_skill(
+                ctx,
+                hub_source=hub_source,
+                hub_id=args.hub_id,
+                visibility=visibility,
+                tenant_id=tenant_id,
+                alias=alias,  # type: ignore[arg-type]
+                subscribe=subscribe,
+                confirm=True,
+                adoption_receipt=adoption_receipt,
+                adoption_strategy=getattr(args, "strategy", "merge"),
+                allow_llm=not getattr(args, "no_llm", False),
+            )
+        except LinkError as error:
+            return _skills_fail(args, error)
+        print(_json.dumps(adopted, indent=2))
+        return 0
     try:
         preview = svc.install_skill(
             ctx,
@@ -12690,11 +12774,25 @@ def _skills_pull(args: argparse.Namespace, base_dir: Path) -> int:
             subscribe=subscribe,
             dry_run=True,
             reinstall=reinstall,
+            adoption_strategy=getattr(args, "strategy", "merge"),
+            allow_llm=not getattr(args, "no_llm", False),
         )
     except LinkError as error:
         return _skills_fail(args, error)
     bundle = preview.get("bundle")
     publisher = preview.get("publisher")
+    if preview.get("adoption"):
+        # An authored collision is reviewed separately from an ordinary new
+        # install. --yes cannot skip that review: a subsequent command must
+        # name the durable receipt bound to these exact proposed bytes.
+        if getattr(args, "json", False):
+            print(_json.dumps(preview, indent=2))
+        else:
+            _print_skill_adoption(preview)
+        return 0
+    if getattr(args, "dry_run", False):
+        print(_json.dumps(preview, indent=2))
+        return 0
     confirm_publisher = getattr(args, "confirm_publisher", None)
     confirm_hash = getattr(args, "confirm_hash", None)
     if not getattr(args, "json", False):

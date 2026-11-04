@@ -1,0 +1,148 @@
+{
+  "schema": 1,
+  "audit_id": "ur-hosting-r2-25304c",
+  "audit_kind": "independent_second_reader_contribution_audit",
+  "locale": "ur",
+  "namespace": "wire.errors.hosting",
+  "audit_date": "2026-11-03",
+  "key_count": 1,
+  "keys": ["wire.errors.hosting.not_configured"],
+  "status": "passed",
+  "reader_role": "second independent reader",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "25304c88781e",
+    "model_requested": "anthropic/claude-sonnet-5-5",
+    "model_requested_source": "host system prompt for this session",
+    "model_served": "UNKNOWN",
+    "actual_model_source": "The served model id is not exposed to this session; an earlier session-state snapshot exposed only the provider route 'radient/auto'. No underlying model is inferred and no provider fallback is claimed.",
+    "independent_from_translator_session": true,
+    "translator_session": "1955dea69023",
+    "independent_from_code_author": true,
+    "code_author": "94dcef624dec",
+    "independence_evidence": "I did not translate the key and did not author the caller; I did not read any other reader's verdict or receipt before this verdict was fixed. Read: the English source, its context sidecar, the Urdu target, the author's record.json, the shipped ur corpus (search) and the caller code region."
+  },
+  "candidate": {
+    "english_uncommitted": true,
+    "absent_from_checked_out_catalogues": {"en": true, "ur": true},
+    "absent_at_base": "87ca846245b2 (manager-declared; not re-derived here - no Git in this run)",
+    "shipped": false,
+    "note": "New namespace candidate. The checked-out catalogue tree has no wire.errors.hosting.json for en or ur; this is a source-side observation, not a Git claim."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "bytes": 82,
+      "computed_here": true
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9",
+      "bytes": 854,
+      "computed_here": true
+    },
+    "ur": {
+      "path": "/Users/damian/.local-operator/sessions/1955dea69023/scratchpad/hosting-ur/targets/ur/wire.errors.hosting.json",
+      "sha256": "8f7977e2ce06a53267f0672f50605e9e5a09b5c52e85b58619acbb90dfbdd732",
+      "bytes": 113,
+      "computed_here": true
+    },
+    "author_record": {
+      "path": "/Users/damian/.local-operator/sessions/1955dea69023/scratchpad/hosting-ur/record.json",
+      "sha256": "ca191e5a491a9f0d8044ca3311f568ccfc07d94ecdb5b6b6dc6ba838779ed7b2",
+      "computed_here": true
+    },
+    "worktree_en_copy": {
+      "path": "/Users/damian/local-operator/.worktrees/startup-owned-copy/local_operator/i18n/catalogues/en/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "bytes": 82,
+      "computed_here": true
+    }
+  },
+  "copy": {
+    "en": "Hosting platform is not configured.",
+    "ur": "ہوسٹنگ پلیٹ فارم ترتیب نہیں دیا گیا۔",
+    "codepoints": 36,
+    "bytes": 113
+  },
+  "mechanical": {
+    "key_parity": {"en": 1, "context": 1, "ur": 1, "identical_keys": true},
+    "icu_arguments": "none in either file (no braces)",
+    "placeholder_checks": "N/A by reason - zero ICU arguments, so no placeholder can differ",
+    "cldr_plural_categories": "N/A by reason - no plural/select in the value",
+    "json_valid": true,
+    "encoding": "UTF-8",
+    "nfc_normalized": true,
+    "nfd_differs": false,
+    "combining_marks": [],
+    "cf_codepoints": [],
+    "ascii_letters": 0,
+    "latin_words": [],
+    "terminal": {"last_codepoint": "U+06D4", "urdu_full_stop": true},
+    "punctuation_in_value": ["۔"],
+    "script_fidelity": "clean Urdu letters (U+06C1/U+0679/U+06AF/U+06CC/U+06BA); no Arabic-variant letters, no tatweel, no Arabic comma"
+  },
+  "native_assessment": {
+    "meaning": "hosting platform is not configured - preserved; no provider named, no remedy, no extra detail",
+    "sentence_shape": "complete impersonal statement; survives the mid-sentence splice after a colon; terminal Urdu full stop kept; Urdu has no case so the English capital is not a content change",
+    "precedent": "shipped ur wire.errors.desktop.aida_no_provider uses the same '… ترتیب نہیں دیا گیا' construction",
+    "terms": {
+      "ہوسٹنگ": "extends the shipped ہوسٹ family (ہوسٹ, ہوسٹ دیا/کیا); settled borrowing",
+      "پلیٹ فارم": "ordinary Urdu word for platform; no corpus entry yet",
+      "پرووائیڈر": "deliberately not used - the sentence names the platform, and the sidecar forbids importing the surrounding frame's wording"
+    },
+    "grammar": "masculine agreement (دیا گیا) correct for پلیٹ فارم as compound head"
+  },
+  "consumer_check": {
+    "display_path": "sdk.py::startup_cause_text renders this code via messages.render(..., locale=startup_refusal_locale()) after exact-type plus English-source equality; the legacy English exception text is not spliced into translated frames",
+    "legacy_contract": "session_factory.HostingNotConfiguredError('Hosting platform is not configured.') at session_factory.py:816 stays English by contract; untouched",
+    "edits_by_auditor": "none"
+  },
+  "findings": [],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "advisories": [
+    {
+      "id": "ADV-1",
+      "severity": "advisory (non-gating)",
+      "topic": "new term ہوسٹنگ پلیٹ فارم has zero corpus precedent (verified by search); ہوسٹ family exists",
+      "action": "the wave owning i18n/style-guides/ur.md may add one glossary line for 'hosting platform' so a later namespace does not coin میزبانی"
+    },
+    {
+      "id": "ADV-2",
+      "severity": "advisory (non-gating)",
+      "topic": "runtime locale eligibility for this surface (shipped/ledger state) is not established by this copy audit",
+      "action": "programme gate, not copy"
+    }
+  ],
+  "native_renderer_holds": {
+    "status": "NOT RUN",
+    "items": [
+      "refusal frame colon splice, terminal width and wrapping",
+      "bidi ordering and glyph shaping in a terminal",
+      "pseudolocale render",
+      "runtime display under the ur locale"
+    ],
+    "note": "The copy carries no Latin island and no mixed-direction punctuation, so it adds no bidi hazard of its own; real rendering remains the consumer/renderer proof, not claimed here."
+  },
+  "artifacts": [
+    {"path": "report.md", "sha256": "6cf70a1db51a3d8b1d45fe488fa9668e5dc14f8024d18d46ec2f2735b26d6c14", "bytes": 7045}
+  ],
+  "artifacts_note": "record.json's own sha256 is in SHA256SUMS; a file cannot carry its own digest.",
+  "ledger_activation_pr": "none - no ledger write, no activation, no PR comment, no frame clearance",
+  "limits": [
+    "Source-only audit: read/grep/glob/write plus stdlib json/hashlib/unicodedata. No process, bash, subprocess, tests, formatter, project imports, native/app run, install, CI or Git.",
+    "English is an uncommitted candidate; absence at base is manager-declared and not re-derived without Git.",
+    "No runtime, renderer or pseudolocale evidence; native holds listed above.",
+    "One key only; this is not a whole-page or whole-locale English-freeness claim."
+  ],
+  "audit_notes_not_execution_log": "This record and report.md are the artifacts. Checks were executed in this session via read/grep/glob and stdlib eval; hashes above are computed values. No shell, test or app execution took place."
+}
