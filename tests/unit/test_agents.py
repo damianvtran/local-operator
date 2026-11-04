@@ -2677,6 +2677,44 @@ def test_unreadable_agent_dir_still_fails_strict_reads(temp_agents_dir: Path):
         os.chmod(locked_dir, 0o755)
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFOs only")
+def test_a_fifo_agent_yml_is_unreadable_not_a_hang(temp_agents_dir: Path):
+    """QA round 2 Q1: a writer-less FIFO at ``agent.yml`` must not block the scan.
+
+    The scan runs on every refresh behind ``get_agent``, i.e. on HTTP request
+    threads; a blocking ``open(2)`` there wedged the whole core, ``/health``
+    included. The FIFO is an unreadable definition (strict bucket), and a
+    symlinked ``agent.yml`` keeps loading as it always did.
+    """
+    import threading
+
+    registry = AgentRegistry(temp_agents_dir)
+    agents_root = temp_agents_dir / "agents"
+    _seed_valid_agent(agents_root)
+
+    linked_dir = agents_root / "linked-agent"
+    linked_dir.mkdir(parents=True, exist_ok=True)
+    real_manifest = temp_agents_dir / "linked-agent.yml"
+    real_manifest.write_text(_valid_agent_yaml("linked-agent", "Linked"))
+    (linked_dir / "agent.yml").symlink_to(real_manifest)
+
+    fifo_dir = agents_root / "fifo-agent"
+    fifo_dir.mkdir(parents=True, exist_ok=True)
+    fifo = fifo_dir / "agent.yml"
+    os.mkfifo(fifo)
+
+    worker = threading.Thread(target=registry._refresh_agents_metadata, daemon=True)
+    worker.start()
+    worker.join(timeout=2.0)
+    if worker.is_alive():
+        # Unblock the stuck open so the daemon thread can exit, then fail.
+        with open(fifo, "wb"):
+            pass
+        pytest.fail("the registry scan blocked on a FIFO agent.yml")
+    assert registry._incomplete_agent_dirs == [fifo_dir]
+    assert "linked-agent" in registry._agents
+
+
 def test_vanished_agents_dir_fails_strict_reads(temp_agents_dir: Path):
     """A registry whose directory disappeared is unreadable, not empty.
 
