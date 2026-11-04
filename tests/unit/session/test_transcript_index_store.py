@@ -155,7 +155,7 @@ def test_a_torn_delta_tail_is_ignored_and_the_next_append_repairs_it(tmp_path):
     delta = ti._store_paths(ti._index_dir(tmp_path), SID, store)[1]
     # A writer died mid-append: bytes past the committed length, never headed.
     with delta.open("ab") as handle:
-        handle.write(b"99999 deadbeef\n{\"keep\":")
+        handle.write(b'99999 deadbeef\n{"keep":')
     before = _cold(tmp_path)
     assert before is not None and before.coverage["last_id"] == "a00020"
     _append(tmp_path, _rows(21, 1))
@@ -260,9 +260,7 @@ def test_a_concurrent_reader_always_sees_one_whole_publication(tmp_path):
     assert seen, "the reader never completed a read"
 
 
-def test_compaction_folds_the_delta_into_a_new_snapshot_and_retires_the_old(
-    tmp_path, monkeypatch
-):
+def test_compaction_folds_the_delta_into_a_new_snapshot_and_retires_the_old(tmp_path, monkeypatch):
     monkeypatch.setattr(ti, "_DELTA_COMPACT_FRAMES", 3)
     _append(tmp_path, _rows(0, 20))
     ti.refresh_index(tmp_path, SID)
