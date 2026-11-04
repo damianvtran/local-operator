@@ -1438,12 +1438,16 @@ async def test_notice_readiness_waits_for_real_layout_not_the_expected_width(mon
 
             # A REAL incorrect layout must remain ready: equality belongs to the
             # oracle, never the wait predicate (otherwise it could hide a defect).
-            published = False
             old_width = blocks[0].styles.width
             try:
                 blocks[0].styles.width = 79
-                assert await _until(pilot, lambda: published and _painted_boxes_ready(blocks))
-                assert blocks[0].size.width == 79
+                # Wait for the test's OWN injected layout, not for "a layout
+                # was published": the boxes are already painted-ready at 80
+                # before the style change, and any unrelated or already-pending
+                # refresh flips ``published``, so that wait could return while
+                # the size was still 80 (hosted CI: ``assert 80 == 79``).
+                assert await _until(pilot, lambda: blocks[0].size.width == 79)
+                assert _painted_boxes_ready(blocks)
                 with pytest.raises(AssertionError, match="layout pinned 79"):
                     _assert_notice_budget(app, blocks, 84, False)
             finally:
