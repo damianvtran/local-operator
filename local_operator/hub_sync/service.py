@@ -4063,10 +4063,11 @@ def install_skill(
                 # and moved BACK if the transaction refuses -- a failed adopt
                 # must leave the operator's folder exactly where it was.
                 aside: Path | None = None
+                occupying_path: Path | None = None
                 if bundle_adoption is not None:
-                    occupying = bundle_adoption["occupying"]
-                    aside = occupying.with_name(f".adopt-{alias}-{secrets.token_hex(6)}")
-                    os.replace(occupying, aside)
+                    occupying_path = Path(bundle_adoption["occupying"])
+                    aside = occupying_path.with_name(f".adopt-{alias}-{secrets.token_hex(6)}")
+                    os.replace(occupying_path, aside)
                 try:
                     transaction = ManagedBundleStorage(ctx.config_dir).apply(
                         identity,
@@ -4080,8 +4081,12 @@ def install_skill(
                         basis="reinstall" if reinstall else "initial-install",
                     )
                 except BaseException:
-                    if aside is not None and not bundle_adoption["occupying"].exists():
-                        os.replace(aside, bundle_adoption["occupying"])
+                    if (
+                        aside is not None
+                        and occupying_path is not None
+                        and not occupying_path.exists()
+                    ):
+                        os.replace(aside, occupying_path)
                         aside = None
                     raise
                 finally:

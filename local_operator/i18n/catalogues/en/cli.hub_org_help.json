@@ -1,0 +1,14 @@
+{
+  "cli.hub_org_help.org": "Your organization's shared agents, teams and skills (Radient Team)",
+  "cli.hub_org_help.list": "List the organization catalogue and how each item sits locally",
+  "cli.hub_org_help.pull": "Pull the organization catalogue and stay subscribed to updates",
+  "cli.hub_org_help.org_flag": "Organization tenant id (defaults to your only eligible organization)",
+  "cli.hub_org_help.kind": "Only this kind (repeatable)",
+  "cli.hub_org_help.name": "Only this item: a hub id, name or unique name prefix (repeatable)",
+  "cli.hub_org_help.json": "Emit machine-readable JSON",
+  "cli.hub_org_help.on_conflict": "For an unlinked local copy with the same name: adopt-link keeps your content and links it, adopt takes the hub copy, reconcile merges, skip leaves it",
+  "cli.hub_org_help.no_subscribe": "Pull without subscribing to updates",
+  "cli.hub_org_help.auto_push": "Also publish your local edits automatically (organization owners and admins only)",
+  "cli.hub_org_help.no_llm": "Never call a model to merge differing copies",
+  "cli.hub_org_help.yes": "Apply the plan instead of only printing it"
+}

@@ -178,7 +178,9 @@ class _LocalIndex:
     names: dict[tuple[str, str], tuple[str, str]]  # (kind, casefold name) -> (name, id)
 
 
-def local_index(config_dir: Path, *, agent_registry: Any = None, team_registry: Any = None) -> _LocalIndex:
+def local_index(
+    config_dir: Path, *, agent_registry: Any = None, team_registry: Any = None
+) -> _LocalIndex:
     """Index existing links (baselines) and local names, with no network.
 
     Exposed for :mod:`hub_org.pull`, which re-reads it per item so a pull earlier
@@ -239,7 +241,9 @@ def local_index(config_dir: Path, *, agent_registry: Any = None, team_registry: 
     return _LocalIndex(linked=linked, linked_ids=linked_ids, names=names)
 
 
-def classify(index: _LocalIndex, kind: Kind, hub_id: str, name: str) -> tuple[LocalState, str | None, str | None]:
+def classify(
+    index: _LocalIndex, kind: Kind, hub_id: str, name: str
+) -> tuple[LocalState, str | None, str | None]:
     """``(local, local_name, local_id)`` for one remote row, against ``index``."""
 
     key = (kind, hub_id)
@@ -319,7 +323,9 @@ def catalogue_result(
         from local_operator.paths import config_dir as _active
 
         config_dir = _active()
-    index = local_index(Path(config_dir), agent_registry=agent_registry, team_registry=team_registry)
+    index = local_index(
+        Path(config_dir), agent_registry=agent_registry, team_registry=team_registry
+    )
     items: list[CatalogueItem] = []
     errors: dict[str, str] = {}
     for kind in KINDS:

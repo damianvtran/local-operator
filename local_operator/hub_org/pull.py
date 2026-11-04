@@ -40,7 +40,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Sequence
 
-from local_operator.hub_org.catalogue import KINDS, CatalogueItem, item_from_row, local_index
+from local_operator.hub_org.catalogue import (
+    KINDS,
+    CatalogueItem,
+    item_from_row,
+    local_index,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +233,9 @@ def _remote_identical(run: _Run, item: CatalogueItem, local: dict[str, Any]) -> 
         from local_operator.agents import _fetch_hub_profile
         from local_operator.hub_sync.segment import norm
 
-        instructions, description = _fetch_hub_profile(run.client, item.hub_id, with_credential=True)
+        instructions, description = _fetch_hub_profile(
+            run.client, item.hub_id, with_credential=True
+        )
         remote = {"instructions": norm(instructions), "description": norm(description)}
         return prov.fingerprint_fields("agent", remote) == prov.fingerprint_fields("agent", local)
     document = _fetch_team(run, item.hub_id)
@@ -302,7 +309,9 @@ def _conflict_row(
         else _local_team_fields(run, local_id)
     )
     if on_conflict == "adopt-link" and _remote_identical(run, item, local):
-        backup = prov.write_backup(run.config_dir, item.kind, local_id, local, "org-adopt-link")  # type: ignore[arg-type]
+        backup = prov.write_backup(
+            run.config_dir, item.kind, local_id, local, "org-adopt-link"  # type: ignore[arg-type]
+        )
         _link_row(run, item, local_id, "adopt")
         return (
             PullOutcome(item.kind, item.hub_id, item.name, "adopt-linked", "identical", backup),
@@ -322,7 +331,9 @@ def _conflict_row(
     # what an unsettled merge means. ``reconcile`` asked for a merge and reports
     # it as needing review. ``adopt-link`` keeps the link so the drift is
     # visible to ``sync --check`` (its whole point).
-    backup = prov.write_backup(run.config_dir, item.kind, local_id, local, "org-adopt-link")  # type: ignore[arg-type]
+    backup = prov.write_backup(
+        run.config_dir, item.kind, local_id, local, "org-adopt-link"  # type: ignore[arg-type]
+    )
     merged = _apply(run, item, local_name, acknowledge_unknown_baseline=True)
     settled = merged is not None and merged.applied
     backup = getattr(merged, "backup", None) or backup
@@ -352,7 +363,9 @@ def _merge_detail(report: Any) -> str:
     return ": ".join(p for p in parts if p)
 
 
-def _adopted(item: CatalogueItem, local_name: str, result: str, backup: str | None) -> dict[str, Any]:
+def _adopted(
+    item: CatalogueItem, local_name: str, result: str, backup: str | None
+) -> dict[str, Any]:
     return {
         "name": local_name,
         "kind": item.kind,
@@ -370,7 +383,9 @@ def _skill_backup(result: dict[str, Any]) -> str | None:
     return str(snapshot.get("path") or "") or None
 
 
-def _adopt_document(run: _Run, item: CatalogueItem, strategy: str, subscribe: bool) -> dict[str, Any]:
+def _adopt_document(
+    run: _Run, item: CatalogueItem, strategy: str, subscribe: bool
+) -> dict[str, Any]:
     """Preview then confirm, in one process: the receipt still binds the snapshot.
 
     The preview is what takes the ``hub/backups/skill-adopt-*`` snapshot and
@@ -452,7 +467,9 @@ def _skill_conflict(
             # Keep-local links WITHOUT touching authored bytes; the baseline is
             # the hub revision, so `skills sync --check` reports the drift.
             kept = _adopt_document(run, item, "keep-local", subscribe)
-            return done("adopt-linked", "kept-local-linked", _skill_backup(kept) or _skill_backup(result))
+            return done(
+                "adopt-linked", "kept-local-linked", _skill_backup(kept) or _skill_backup(result)
+            )
         return done(
             "needs-review",
             None,
@@ -506,7 +523,7 @@ def _apply_policy(
         None,
     )
     revision = ((row or {}).get("policy") or {}).get("revision")
-    current = ((row or {}).get("policy") or {})
+    current = (row or {}).get("policy") or {}
     if not revision:
         return note or "policy revision unavailable; policy left at its default"
     if current.get("subscribe") == subscribe and push is None:
@@ -599,7 +616,12 @@ def pull_all(
             if item is None or not _wanted(item, names):
                 continue
             outcome, adoption = _one(run, item, on_conflict=on_conflict, subscribe=subscribe)
-            if outcome.outcome not in ("already-linked", "conflict-skipped", "failed", "needs-review"):
+            if outcome.outcome not in (
+                "already-linked",
+                "conflict-skipped",
+                "failed",
+                "needs-review",
+            ):
                 try:
                     note = _apply_policy(
                         run, item, subscribe=subscribe, auto_push=auto_push, role=role
@@ -649,6 +671,8 @@ def _one(
         cause = getattr(error, "code", None)
         text = str(error)[:300]
         return (
-            PullOutcome(item.kind, item.hub_id, item.name, "failed", f"{cause}: {text}" if cause else text),
+            PullOutcome(
+                item.kind, item.hub_id, item.name, "failed", f"{cause}: {text}" if cause else text
+            ),
             None,
         )

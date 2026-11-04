@@ -1,0 +1,12 @@
+{
+  "cli.hub_org.ineligible": "Organization catalogues are a Radient Team feature; this account isn’t in a team-plan organization.",
+  "cli.hub_org.choose_org": "You belong to several team-plan organizations; pass --org with one of:",
+  "cli.hub_org.resolved": "resolved “{ref}” → {hub_id}",
+  "cli.hub_org.ambiguous": "“{ref}” matches several items; pass the hub id or a longer name:",
+  "cli.hub_org.not_found": "No item in organization “{org}” matches “{ref}”.",
+  "cli.hub_org.unlinked_copies": "unlinked local copies: {names} — run `lop hub org pull` to adopt",
+  "cli.hub_org.plan": "{count, plural, one {# item} other {# items}} to pull, {conflicts, plural, one {# unlinked local copy} other {# unlinked local copies}}; re-run with --yes to apply.",
+  "cli.hub_org.adopted_heading": "Adopted local copies:",
+  "cli.hub_org.last_enrol": "Last automatic sync: {at}, {pulled, plural, one {# item pulled} other {# items pulled}}",
+  "cli.hub_org.list_failed": "Could not list the organization's {kind} items: {cause}"
+}

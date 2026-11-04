@@ -137,6 +137,8 @@ class AgentParams(BaseModel):
         "sync",
         "delete",
         "promote",
+        "org_list",
+        "org_pull",
     ] = Field(description="The op to run.")
     # The no-spaces guidance is a modularity contract, not registry law: the
     # registry itself accepts any string, but a role/specialist name is also a
@@ -311,6 +313,18 @@ class AgentParams(BaseModel):
         default="",
         description="sync: local|remote picks a side for a hub conflict.",
     )
+    # ORG HUB ops (``org_list``/``org_pull``). These three properties and the
+    # two enum literals exist on the wire ONLY for a Radient Team account:
+    # ``build_agent_tool`` deletes them from the schema when the cached gate is
+    # closed (operator constraint: never advertise the private hub outside
+    # Radient Team), and ``execute_agent`` refuses the ops there anyway. Plain
+    # strings, not Literals/``| None`` (same budget/Gemini reasons as
+    # ``resolve``); values are validated in the executor.
+    org: str = Field(default="", description="org_*: tenant id; omit for your only org.")
+    # Comma-separated, not ``list[str] | None``: the optional list costs an
+    # ``anyOf`` null branch on every eligible session's schema.
+    kinds: str = Field(default="", description="org_*: agent,team,skill subset.")
+    on_conflict: str = Field(default="", description="org_pull: see tool://agent.")
 
 
 #: Cap on one rendered row. Two lines at 80 columns: enough for a role to say
@@ -1856,6 +1870,179 @@ def write_profile(
     return name, kind, action_class
 
 
+#: The org-hub surface on this tool's schema: removed whole when the gate is closed.
+_ORG_OPS = ("org_list", "org_pull")
+_ORG_PROPERTIES = ("org", "kinds", "on_conflict")
+_ORG_ROW_CAP = 40
+
+
+def _org_config_dir(context: ToolContext | None) -> Path | None:
+    # Fail closed on anything that is not a path: registries vary by host (a
+    # conversation-scoped composite, test doubles), and the schema build must
+    # never raise over the org gate.
+    registry = _registry(context)
+    root = getattr(registry, "config_dir", None) if registry is not None else None
+    if root is None:
+        root = getattr(getattr(registry, "global_registry", None), "config_dir", None)
+    return Path(root) if isinstance(root, (str, Path)) else None
+
+
+def _org_eligible(config_dir: Path | None) -> bool:
+    """The cached, network-free Radient Team gate; any failure reads as closed."""
+    if config_dir is None:
+        return False
+    try:
+        from local_operator.hub_org.eligibility import is_eligible
+
+        return is_eligible(config_dir)
+    except Exception:  # noqa: BLE001 - fail closed
+        return False
+
+
+def _org_schema(parameters: dict[str, Any], eligible: bool) -> dict[str, Any]:
+    """Drop the org ops and their three properties from an ineligible schema.
+
+    Zero tokens for everyone outside Radient Team, and nothing on the wire that
+    could advertise the private hub (operator constraint). Mutates and returns.
+    """
+    if eligible:
+        return parameters
+    props = parameters.get("properties") or {}
+    op = props.get("op") or {}
+    if isinstance(op.get("enum"), list):
+        op["enum"] = [value for value in op["enum"] if value not in _ORG_OPS]
+    for name in _ORG_PROPERTIES:
+        props.pop(name, None)
+    return parameters
+
+
+async def _op_org(
+    context: ToolContext | None, tool_call_id: str, params: AgentParams
+) -> ToolResult:
+    """``org_list`` / ``org_pull``: the org catalogue through ``hub_org`` (no second engine).
+
+    ``org_pull`` subscribes every item it links (that is the point: the org's
+    latest, kept current by the existing runner) and never enables auto-push
+    from the model. A conflict defaults to ``adopt-link``: authored content is
+    kept and linked, so drift becomes visible. Hub-wins ``adopt`` and the
+    LLM-spending ``reconcile`` need ``confirm_replace=true``, which is the user's
+    confirmation, exactly like ``promote``. The account write is the same
+    durable-write consent ``sync`` asks for on a conversation-scoped host.
+    """
+
+    config_dir = _org_config_dir(context)
+    if not _org_eligible(config_dir):
+        return _error(
+            tool_call_id,
+            "agent",
+            "Organization catalogues are a Radient Team feature; this account isn't in a "
+            "team-plan organization.",
+        )
+    assert config_dir is not None
+    kinds = tuple(k.strip() for k in (params.kinds or "agent,skill,team").split(",") if k.strip())
+    bad = [k for k in kinds if k not in ("agent", "skill", "team")]
+    if bad:
+        return _error(tool_call_id, "agent", f"kinds must be agent|team|skill (got {bad!r}).")
+    conflict = (params.on_conflict or "adopt-link").strip()
+    if conflict not in ("adopt-link", "skip", "adopt", "reconcile"):
+        return _error(tool_call_id, "agent", "on_conflict must be adopt-link|skip|adopt|reconcile.")
+    if (
+        params.op == "org_pull"
+        and conflict in ("adopt", "reconcile")
+        and not params.confirm_replace
+    ):
+        return _error(
+            tool_call_id,
+            "agent",
+            f"on_conflict={conflict!r} changes the user's local copies; ask them, then "
+            "retry with confirm_replace=true (adopt-link keeps their content).",
+        )
+    from local_operator.hub_org.cli import resolve_tenant
+
+    tenant, orgs = resolve_tenant(config_dir, params.org or None)
+    if tenant is None:
+        listed = ", ".join(f"{o.tenant_id} ({o.tenant_name})" for o in orgs)
+        return _error(tool_call_id, "agent", f"several organizations; pass org= one of: {listed}")
+    registry = _registry(context)
+    if params.op == "org_pull" and getattr(registry, "session_registry", None) is not None:
+        from local_operator.profile_scope import durable_write_decision, durable_write_refusal
+
+        # ``sync``: the closed intent vocabulary's account-update class, which
+        # an org pull is (it writes account rows the runner keeps current).
+        intent = DurableWriteIntent(kind="agent", operation="sync", name=f"org {tenant}")
+        authorized_by, reason = await durable_write_decision(
+            context, intent  # type: ignore[arg-type]
+        )
+        if authorized_by is None:
+            return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
+    names = [params.name] if params.name and params.name.strip() else None
+    query = (params.query or "").strip().casefold()
+
+    def run() -> str:
+        from local_operator.config import ConfigManager
+        from local_operator.hub_org import catalogue as cat
+        from local_operator.hub_org.client import build_org_client
+        from local_operator.hub_org.pull import pull_all
+
+        manager = ConfigManager(config_dir)
+        client = build_org_client(manager).client
+        if client is None:
+            return "error: not signed in to Radient (the user runs `lop login`)."
+        # Org items are ACCOUNT rows (the runner keeps them current for every
+        # conversation), so a conversation-scoped host writes its global arm.
+        account = getattr(registry, "global_registry", None) or registry
+        if params.op == "org_list":
+            result = cat.catalogue_result(
+                client, tenant, kinds, config_dir=config_dir, agent_registry=account
+            )
+            rows = [
+                i
+                for i in result.items
+                if not query or query in f"{i.name} {i.description}".casefold()
+            ]
+            lines = [
+                f"{i.kind} {i.name} [{i.local}{' as ' + i.local_name if i.local_name else ''}]"
+                f" id={i.hub_id}"
+                for i in rows[:_ORG_ROW_CAP]
+            ]
+            # Model-facing tool output (English by design, AGENTS.md i18n).
+            if len(rows) > _ORG_ROW_CAP:
+                lines.append(  # i18n: ignore model-facing tool result
+                    f"... {len(rows) - _ORG_ROW_CAP} more (narrow with query/kinds)"
+                )
+            unlinked = [i.name for i in result.unlinked_local_copies()]
+            if unlinked:
+                lines.append(  # i18n: ignore model-facing tool result
+                    f"unlinked local copies: {', '.join(unlinked)} — op='org_pull' adopts them"
+                )
+            lines += [f"{k} list failed: {c}" for k, c in result.errors.items()]
+            return "\n".join(lines) or "the organization shares nothing of these kinds yet"
+        report = pull_all(
+            manager,
+            tenant,
+            kinds=kinds,
+            names=names,
+            subscribe=True,
+            auto_push=False,
+            on_conflict=conflict,  # type: ignore[arg-type]
+            client=client,
+            agent_registry=account,
+        )
+        lines = [
+            f"{i.kind} {i.name}: {i.outcome}" + (f" ({i.detail})" if i.detail else "")
+            for i in report.items
+        ]
+        lines += [
+            f"adopted {a['kind']} {a['name']}: {a['result']} (backup {a.get('backup')})"
+            for a in report.adopted
+        ]
+        lines += [f"{k} list failed: {c}" for k, c in report.errors.items()]
+        return "\n".join(lines) or "nothing matched"
+
+    text, spill = spill_truncate(await asyncio.to_thread(run), "agent", context)
+    return _text(tool_call_id, "agent", text, details=spill or None)
+
+
 async def _op_write(
     context: ToolContext | None,
     tool_call_id: str,
@@ -2153,6 +2340,8 @@ async def execute_agent(
         return await _op_delete(context, tool_call_id, str(params.name))
     if params.op == "promote":
         return await _op_promote(context, tool_call_id, params)
+    if params.op in _ORG_OPS:
+        return await _op_org(context, tool_call_id, params)
     if params.op == "sync":
         return await _op_sync(
             context, tool_call_id, str(params.name) if params.name else None, params.resolve or None
@@ -2219,6 +2408,9 @@ def build_agent_tool(context: ToolContext) -> AgentTool | None:
         extra=(INHERIT_EFFORT,),
         model_choice=model_choice,
     )
+    # One cached gate read per build (no network). Ineligible: the org ops and
+    # their properties are not on the wire at all.
+    parameters = _org_schema(parameters, _org_eligible(_org_config_dir(context)))
     return AgentTool(
         name="agent",
         label="Agent roles",

@@ -1,0 +1,52 @@
+{
+  "cli.hub_org.ineligible": {
+    "role": "lop CLI output",
+    "tone": "plain, operator-facing",
+    "note": "The ONLY sentence shown to an ineligible account: a direct answer, never an up-sell. `Radient Team` is a plan name; keep it verbatim"
+  },
+  "cli.hub_org.choose_org": {
+    "role": "lop CLI output",
+    "tone": "plain, operator-facing",
+    "note": "followed by a list of organizations; --org is a flag token"
+  },
+  "cli.hub_org.resolved": {
+    "role": "lop CLI output",
+    "tone": "plain, operator-facing",
+    "note": "{ref} is what the user typed, {hub_id} an identifier; the arrow stays"
+  },
+  "cli.hub_org.ambiguous": {
+    "role": "lop CLI output",
+    "tone": "plain, operator-facing",
+    "note": "followed by candidate lines; {ref} is user input"
+  },
+  "cli.hub_org.not_found": {
+    "role": "lop CLI output",
+    "tone": "plain, operator-facing",
+    "note": "{org} is a tenant id, {ref} user input"
+  },
+  "cli.hub_org.unlinked_copies": {
+    "role": "lop CLI output",
+    "tone": "plain, operator-facing",
+    "note": "{names} is a comma-separated list of item names; the backticked command stays verbatim"
+  },
+  "cli.hub_org.plan": {
+    "role": "lop CLI output",
+    "tone": "plain, operator-facing",
+    "note": "dry-run summary; --yes is a flag token"
+  },
+  "cli.hub_org.adopted_heading": {
+    "role": "lop CLI output",
+    "tone": "plain, operator-facing",
+    "note": "heading over lines `kind name: result (backup path)`"
+  },
+  "cli.hub_org.last_enrol": {
+    "role": "lop CLI output",
+    "tone": "plain, operator-facing",
+    "note": "{at} is an ISO timestamp"
+  },
+  "cli.hub_org.list_failed": {
+    "role": "lop CLI output",
+    "tone": "plain, operator-facing",
+    "note": "{kind} is agent/team/skill (identifier), {cause} a server error line"
+  }
+}

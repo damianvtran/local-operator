@@ -175,6 +175,8 @@ def _local_agent(agents: AgentRegistry, name: str, text: str, description: str =
     fields = F(
         name=name,
         description=description,
+        tags=None,
+        categories=None,
         security_prompt=None,
         hosting=None,
         model=None,
@@ -259,9 +261,7 @@ def test_adopt_link_identical_agent_links_in_place_with_a_backup(rig) -> None:
     assert (rig["root"] / report.adopted[0]["backup"]).is_file()
     record = prov.read_baseline(rig["root"], "agent", local.id)
     assert record is not None and record.hub_id == AGENT_ID and record.identity is not None
-    assert len(rig["agents"].list_agents()) == len(
-        {a.id for a in rig["agents"].list_agents()}
-    )
+    assert len(rig["agents"].list_agents()) == len({a.id for a in rig["agents"].list_agents()})
     assert not [a for a in rig["agents"].list_agents() if a.name == "coder-2"]
 
 
@@ -273,9 +273,13 @@ def test_adopt_link_differing_without_a_model_keeps_local_and_links(rig, monkeyp
 
     assert report.adopted and report.adopted[0]["kind"] == "agent"
     assert report.adopted[0]["result"] in {"kept-local-linked", "reconciled"}
-    assert rig["agents"].get_agent_system_prompt(local.id).strip() in {
-        "My own text.",
-    } or report.adopted[0]["result"] == "reconciled"
+    assert (
+        rig["agents"].get_agent_system_prompt(local.id).strip()
+        in {
+            "My own text.",
+        }
+        or report.adopted[0]["result"] == "reconciled"
+    )
     record = prov.read_baseline(rig["root"], "agent", local.id)
     assert record is not None and record.hub_id == AGENT_ID
     backups = list((rig["root"] / "hub" / "backups").glob(f"agent-{local.id}-*.json"))
@@ -309,7 +313,9 @@ def test_adopt_team_hub_wins_and_writes_a_backup(rig) -> None:
     }
     rig["hub"].teams[TEAM_ID] = hub_team
     local = rig["teams"].create_team(
-        TeamEditFields(name="lopdev", description="mine", manager="manager", instructions="My brief.")
+        TeamEditFields(
+            name="lopdev", description="mine", manager="manager", instructions="My brief."
+        )
     )
     del TeamMember
 
