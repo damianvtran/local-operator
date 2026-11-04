@@ -1,0 +1,117 @@
+"""The ``deliver`` pin's call-time notice (bash/eval): one line, only when a pin is refused.
+
+WHY AT CALL TIME. A pin is the agent saying "show this under my answer". The row's
+``withheld`` notice tells the OPERATOR when that failed, but only after the turn; the agent
+would end its answer promising a file that never appears. So the tool result gains ONE
+compact line naming the refused pins, e.g.
+``deliver: 1 not shown (outside allowed locations: x.key)``, while the agent can still move
+the file somewhere allowed. Accepted pins add nothing: the line costs tokens on every call
+that carries it, and silence is the common case.
+
+ONE VERDICT. The check runs the real :func:`~local_operator.supplements.candidates.prefilter`
+over a synthetic one-call turn, so the call-time line and the end-of-turn row can never
+disagree about which pin is refused or why. Model-facing text, so English by design (the
+i18n exception for model-facing prompts); the operator-facing copy is the surfaces' keyed
+withheld line.
+"""
+
+from typing import Any, Final, Mapping, Sequence
+
+#: Reason id -> the phrase the agent reads. Same vocabulary as the row's ``withheld``.
+_REASON_TEXT: Final[Mapping[str, str]] = {
+    "outside": "outside allowed locations",
+    "sensitive": "sensitive file",
+    "missing": "file does not exist",
+    "too-large": "too large to preview",
+}
+#: Names listed per reason before ``+N``; the line must stay one short line.
+_NAMES_SHOWN: Final = 3
+
+#: The ``deliver`` field's schema description, shared by bash and eval so the two tools
+#: advertise one contract. Kept to one line: the schema rides every request.
+#: The schema rides EVERY request of every session (the start-context budget guard), so
+#: this is the shortest wording that still says what a pin does; path forms live in
+#: guide://highlights.
+DELIVER_DESCRIPTION: Final = "Files to show under your answer."
+
+
+def refusal_line(
+    paths: Sequence[str], *, cwd: str, scratchpad: str | None, tool: str = "bash"
+) -> str:
+    """``""`` when every pin is accepted, else the one-line notice. Never raises."""
+    pins = [p for p in paths if isinstance(p, str) and p.strip()]
+    if not pins:
+        return ""
+    try:
+        from local_operator.supplements.candidates import prefilter
+        from local_operator.supplements.trigger import ToolCallItem, TurnItem
+
+        item = TurnItem(
+            id="deliver-check",
+            role="assistant",
+            tool_calls=(ToolCallItem(id="deliver-check", name=tool, args={}, deliver=tuple(pins)),),
+        )
+        result = prefilter([item], "", cwd=cwd, want_graphics=False, scratchpad=scratchpad or "")
+    except Exception:  # noqa: BLE001 -- a notice must never fail the call it rides on
+        return ""
+    if not result.withheld:
+        return ""
+    by_reason: dict[str, list[str]] = {}
+    for name, reason in result.withheld:
+        by_reason.setdefault(reason, []).append(name)
+    parts = []
+    for reason, names in by_reason.items():
+        shown = ", ".join(names[:_NAMES_SHOWN])
+        extra = f" +{len(names) - _NAMES_SHOWN}" if len(names) > _NAMES_SHOWN else ""
+        parts.append(f"{_REASON_TEXT.get(reason, reason)}: {shown}{extra}")
+    return f"deliver: {len(result.withheld)} not shown ({'; '.join(parts)})"
+
+
+def with_deliver_notice(execute: Any, tool: str) -> Any:
+    """Wrap a bash/eval ``execute`` so a refused ``deliver`` pin adds the one-line notice.
+
+    Checked AFTER the call: a pin routinely names the file the same command creates. A
+    background call is skipped -- its files do not exist yet when the job id returns, and a
+    "file does not exist" line there would be wrong; the row's ``withheld`` still discloses a
+    refusal at the end of the turn. A failed call is skipped too: its own error is the news.
+    """
+
+    async def run(
+        tool_call_id: str,
+        args: dict[str, Any],
+        signal: Any = None,
+        on_update: Any = None,
+        context: Any = None,
+    ) -> Any:
+        result = await execute(tool_call_id, args, signal, on_update, context)
+        pins = args.get("deliver") if isinstance(args, Mapping) else None
+        if not isinstance(pins, list) or not pins or args.get("background") is True:
+            return result
+        if getattr(result, "is_error", False):
+            return result
+        import asyncio
+
+        from local_operator.scratchpad import scratchpad_dir_of
+
+        line = await asyncio.to_thread(
+            refusal_line,
+            pins,
+            cwd=str(getattr(context, "cwd", "") or "."),
+            scratchpad=scratchpad_dir_of(context),
+            tool=tool,
+        )
+        return append_notice(result, line)
+
+    return run
+
+
+def append_notice(result: Any, line: str) -> Any:
+    """Append ``line`` as a trailing text block of a ``ToolResult`` (in place), if any."""
+    if not line:
+        return result
+    from local_operator.harness.types import TextContent
+
+    content = getattr(result, "content", None)
+    if isinstance(content, list):
+        content.append(TextContent(text=line))
+    return result

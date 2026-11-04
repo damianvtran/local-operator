@@ -43,6 +43,7 @@ from local_operator.supplements.contract import (
     SOUNDS_MAX,
     SUPERSEDED_ERROR,
     SUPPLEMENT_CUSTOM_TYPE,
+    WITHHELD_MAX,
     SupplementDecision,
     SupplementDetails,
     SupplementFile,
@@ -53,6 +54,8 @@ from local_operator.supplements.decision import Decision
 #: Bounds on strings that originate in the model or the filesystem, so one pathological row
 #: cannot bloat the journal or a viewer's history page.
 _ERROR_MAX_CHARS: Final = 300
+#: A withheld entry's name is a filesystem basename (255 bytes on every mainstream FS).
+_NAME_MAX_CHARS: Final = 255
 
 
 def new_job_id() -> str:
@@ -72,6 +75,8 @@ def file_entry(candidate: Candidate) -> SupplementFile:
     if candidate.linked_in_answer:
         # Omitted when False so a row stays byte-identical to what older builds wrote.
         entry["linked_in_answer"] = True
+    if candidate.pinned:
+        entry["pinned"] = True
     return entry
 
 
@@ -94,6 +99,7 @@ def build_details(
     error: str = "",
     at: float | None = None,
     sounds: Sequence[SupplementSound] = (),
+    withheld: Sequence[tuple[str, str]] = (),
 ) -> SupplementDetails:
     """One row's ``details``: the files half of the decision, ``components`` empty.
 
@@ -119,6 +125,14 @@ def build_details(
         details["sounds"] = [dict(sound) for sound in sounds[:SOUNDS_MAX]]
         if len(sounds) > SOUNDS_MAX:
             details["sounds_more"] = len(sounds) - SOUNDS_MAX
+    if withheld:
+        # Names and reasons only (see ``SupplementWithheld``); the cut is counted, not lost.
+        details["withheld"] = [
+            {"name": str(name)[:_NAME_MAX_CHARS], "reason": reason}
+            for name, reason in withheld[:WITHHELD_MAX]
+        ]
+        if len(withheld) > WITHHELD_MAX:
+            details["withheld_more"] = len(withheld) - WITHHELD_MAX
     if decision.more:
         details["files_more"] = len(decision.more)
         details["more"] = [c.path for c in decision.more[:MORE_MAX]]

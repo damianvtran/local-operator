@@ -76,6 +76,7 @@ from local_operator.scratchpad import (
     scratchpad_dir_of,
     scratchpad_env_injection,
 )
+from local_operator.supplements.pins import DELIVER_DESCRIPTION, with_deliver_notice
 from local_operator.tools import shell_env
 from local_operator.tools.builtin import (
     TOOL_OUTPUT_LIMIT_CHARS,
@@ -170,6 +171,8 @@ class EvalParams(BaseModel):
             "separate, so it neither sees nor changes the session namespace."
         ),
     )
+    # Highlights pin; see ``BashParams.deliver``.
+    deliver: list[str] = Field(default_factory=list, description=DELIVER_DESCRIPTION)
 
 
 class _Kernel:
@@ -1900,5 +1903,5 @@ def build_eval_tool() -> AgentTool:
         # Abort kills the worker mid-run; the next call starts a fresh
         # kernel (state is honestly reported lost — see _lost_state_error).
         interruptible=True,
-        execute=execute_eval,
+        execute=with_deliver_notice(execute_eval, "eval"),
     )

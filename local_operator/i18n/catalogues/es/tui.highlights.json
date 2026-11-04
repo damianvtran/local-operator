@@ -1,0 +1,7 @@
+{
+  "tui.highlights.withheld.line": "{count, plural, one {# archivo no mostrado} many {# de archivos no mostrados} other {# archivos no mostrados}}: {reasons}",
+  "tui.highlights.withheld.reason.outside": "fuera de las ubicaciones permitidas",
+  "tui.highlights.withheld.reason.sensitive": "archivo confidencial",
+  "tui.highlights.withheld.reason.missing": "el archivo ya no existe",
+  "tui.highlights.withheld.reason.too_large": "demasiado grande para la vista previa"
+}

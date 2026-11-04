@@ -1,0 +1,7 @@
+{
+  "tui.highlights.withheld.line": "{count, plural, one {# fichier non affiché} many {# de fichiers non affichés} other {# fichiers non affichés}} : {reasons}",
+  "tui.highlights.withheld.reason.outside": "hors des emplacements autorisés",
+  "tui.highlights.withheld.reason.sensitive": "fichier sensible",
+  "tui.highlights.withheld.reason.missing": "le fichier n'existe plus",
+  "tui.highlights.withheld.reason.too_large": "trop volumineux pour un aperçu"
+}

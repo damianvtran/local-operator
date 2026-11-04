@@ -133,6 +133,8 @@ function beat(over: Partial<SupplementBeat> = {}): SupplementBeat {
 		more: [],
 		components: [],
 		sounds: [],
+		withheld: [],
+		withheldMore: 0,
 		error: "",
 		cause: "",
 		dismissed: false,
@@ -465,6 +467,8 @@ function sound(index: number): SupplementSound {
 		mime: "audio/mpeg",
 		title: `clip ${index + 1}`,
 		durationS: 1.5,
+		origin: "",
+		path: "",
 	};
 }
 
@@ -550,5 +554,88 @@ describe("supplement sounds", () => {
 		await waitFor(() => {
 			expect(container.querySelector('[data-sound-player][data-waveform="peaks"]')).toBeTruthy();
 		});
+	});
+});
+
+describe("deliverables written to disk (highlights contract)", () => {
+	it("paints a WITHHELD-ONLY row as one quiet line, in both folds' block", () => {
+		const { container } = render(
+			<SupplementBlock
+				beat={beat({ withheld: [{ name: "x.key", reason: "sensitive" }] })}
+				sessionId="s1"
+				jobLive={false}
+			/>,
+		);
+		expect(
+			container.querySelector("[data-supplement-block]")?.getAttribute("data-supplement-block"),
+		).toBe("block");
+		expect(container.querySelector("[data-supplement-withheld]")?.textContent).toBe(
+			"1 file not shown: sensitive file",
+		);
+		/* Names only travel on the row; the line never paints them. */
+		expect(screen.queryByText(/x\.key/)).toBeNull();
+	});
+
+	it("counts withheld_more and joins DISTINCT reasons", () => {
+		const { container } = render(
+			<SupplementBlock
+				beat={beat({
+					files: [file()],
+					withheld: [
+						{ name: "a.pdf", reason: "outside" },
+						{ name: "b.pdf", reason: "outside" },
+						{ name: "c.mp3", reason: "missing" },
+					],
+					withheldMore: 2,
+				})}
+				sessionId="s1"
+				jobLive={false}
+			/>,
+		);
+		const line = container.querySelector("[data-supplement-withheld]")?.textContent ?? "";
+		expect(line.startsWith("5 files not shown: ")).toBe(true);
+		expect(line).toContain("outside allowed locations");
+		expect(line).toContain("file no longer exists");
+		expect(line.match(/outside allowed locations/g)).toHaveLength(1);
+	});
+
+	it("plays a FILE-origin sound through the same sound grid as a generated one", () => {
+		stubWaveformFetch(null);
+		const written = { ...sound(1), origin: "file", path: "picks/01-two-note-chime.mp3" };
+		const { container } = render(
+			<SupplementBlock beat={beat({ sounds: [sound(0), written] })} sessionId="s1" jobLive={false} />,
+		);
+		expect(container.querySelectorAll("[data-supplement-sound]")).toHaveLength(2);
+		expect(container.querySelector("[data-supplement-sounds]")?.getAttribute("data-supplement-sounds")).toBe("2");
+	});
+
+	it("renders a written video as a preview tile, fetched by the row's own index", async () => {
+		api.getSupplementFile.mockResolvedValueOnce({
+			blob: new Blob([new Uint8Array([0, 0, 0, 24])], { type: "video/mp4" }),
+			mime: "video/mp4",
+		});
+		/* Spied, never assigned: happy-dom's URL is shared by every test in the file. */
+		const created = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:video");
+		const revoked = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+		/* ONE file: the <= 2-file one-liner must yield for a video, or the tile
+		   would have no row to open it from. */
+		const { container } = render(
+			<SupplementBlock
+				beat={beat({ files: [file({ path: "out/demo.mp4", name: "demo.mp4", kind: "video" })] })}
+				sessionId="s1"
+				jobLive={false}
+			/>,
+		);
+		expect(container.querySelector("[data-supplement-files-summary]")).toBeNull();
+		fireEvent.click(screen.getByText("demo.mp4"));
+		expect(api.getSupplementFile).toHaveBeenCalledWith("s1", JOB, 0);
+		await waitFor(() => {
+			const video = container.querySelector("video[data-supplement-video]");
+			expect(video?.getAttribute("src")).toBe("blob:video");
+			expect(video?.hasAttribute("controls")).toBe(true);
+		});
+		expect(created).toHaveBeenCalledTimes(1);
+		created.mockRestore();
+		revoked.mockRestore();
 	});
 });

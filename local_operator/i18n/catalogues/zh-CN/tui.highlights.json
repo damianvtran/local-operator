@@ -1,0 +1,7 @@
+{
+  "tui.highlights.withheld.line": "{count, plural, other {# 个文件未显示}}：{reasons}",
+  "tui.highlights.withheld.reason.outside": "不在允许的位置",
+  "tui.highlights.withheld.reason.sensitive": "敏感文件",
+  "tui.highlights.withheld.reason.missing": "文件已不存在",
+  "tui.highlights.withheld.reason.too_large": "文件过大，无法预览"
+}

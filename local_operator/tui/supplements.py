@@ -30,10 +30,13 @@ imports this one, and the direction must stay one-way.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import Final
 
 from rich.text import Text
 
 from local_operator.ansi import strip_control_sequences
+from local_operator.i18n.keys import tui_highlights
+from local_operator.i18n.text import tr
 from local_operator.tui import imagegen as imagegen_mod
 
 __all__ = [
@@ -218,6 +221,40 @@ def sound_row_text(sound: Mapping[str, object]) -> str:
 def sound_rows(sounds: Sequence[Mapping[str, object]]) -> list[str]:
     """Every sound's row, in generation order (the row's own order, never re-sorted)."""
     return [sound_row_text(sound) for sound in sounds]
+
+
+_WITHHELD_REASON_KEYS: Final = {
+    "outside": tui_highlights.withheld_reason_outside,
+    "sensitive": tui_highlights.withheld_reason_sensitive,
+    "missing": tui_highlights.withheld_reason_missing,
+    "too-large": tui_highlights.withheld_reason_too_large,
+}
+
+
+def withheld_line(withheld: object, more: object = 0) -> str:
+    """``2 files not shown: outside allowed locations, sensitive file`` or ``""``.
+
+    The row's ``withheld`` notice (``SupplementWithheld``): pinned or answer-named
+    deliverables the server refused. Distinct reasons in first-seen order; malformed
+    entries and unknown reasons are skipped; ``more`` (the row's ``withheld_more``)
+    joins the count. Resolved at render time so a live language change re-paints.
+    """
+    entries = [
+        item
+        for item in (withheld if isinstance(withheld, list) else [])
+        if isinstance(item, Mapping)
+        and isinstance(item.get("name"), str)
+        and item.get("name")
+        and item.get("reason") in _WITHHELD_REASON_KEYS
+    ]
+    extra = more if isinstance(more, int) and not isinstance(more, bool) and more > 0 else 0
+    count = len(entries) + extra
+    if count == 0:
+        return ""
+    _t = tr("tui.highlights")
+    reasons = list(dict.fromkeys(str(item["reason"]) for item in entries))
+    joined = ", ".join(_t(_WITHHELD_REASON_KEYS[reason]()) for reason in reasons)
+    return display_text(_t(tui_highlights.withheld_line(count=count, reasons=joined)))
 
 
 def sounds_more_text(count: int) -> str:

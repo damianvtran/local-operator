@@ -59,6 +59,8 @@ NONE_OPTION: Final = "none"
 #: ``SupplementDecision.vendor`` when no vendor answered the files question and the no-vendor
 #: heuristic chose; ``"none"`` when no question was asked at all.
 HEURISTIC_VENDOR: Final = "heuristic"
+#: ``vendor`` when only ``deliver`` pins were featured and nothing was asked.
+PIN_VENDOR: Final = "pin"
 
 #: A non-top option joins the featured set only above this floor AND above half the top
 #: probability (memo §2.3).
@@ -550,6 +552,11 @@ async def decide(
     "yes" nothing can act on is waste, and C1a ships no generator. The structured-signal
     overrule is applied here, so a model "yes" over no evidence is a "no".
     """
+    # Pins bypass the decision entirely (contract: "always featured"): the agent said
+    # "show this", which no classifier may overrule, and a pinned path is never sent to a
+    # vendor as an option. They take the featured slots first; overflow goes to ``more``.
+    pins = [c for c in candidates if c.pinned] if want_files else []
+    candidates = [c for c in candidates if not c.pinned]
     literals = _egress_literals(candidates)
     options = option_ids(candidates) if want_files else {}
     ask_files = bool(options)
@@ -603,6 +610,12 @@ async def decide(
     else:
         more = ()
 
+    if pins:
+        cap = max(1, max_featured)
+        merged = pins + [c for c in featured if not c.pinned] + list(more)
+        featured, more = merged[:cap], tuple(merged[cap:])
+        if vendor == "none":
+            vendor = PIN_VENDOR
     graphics_p, graphics = apply_graphics(graphics_answer, evidence)
     if graphics_answer is not None and vendor == "none":
         vendor = str(getattr(service, "vendor_name", None) or "unknown")

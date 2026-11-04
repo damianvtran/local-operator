@@ -193,6 +193,7 @@ from local_operator.scratchpad import (
     scratchpad_refusal,
     scratchpad_size_text,
 )
+from local_operator.supplements.pins import DELIVER_DESCRIPTION, with_deliver_notice
 from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
 from local_operator.tools import (
     group_reaper,
@@ -2695,6 +2696,9 @@ class BashParams(BaseModel):
             "bash.memory.enabled=true. Exceeding the limit kills the group."
         ),
     )
+    # Highlights pin (``supplements.pins``): files to show under the final answer. Read by
+    # the supplement prefilter from the call's arguments, never by the command itself.
+    deliver: list[str] = Field(default_factory=list, description=DELIVER_DESCRIPTION)
 
 
 #: What the live card shows while the pipe is holding an unterminated line.
@@ -5647,7 +5651,7 @@ def build_bash_tool(context: ToolContext | None = None) -> AgentTool:
         # #1546). The execute-time check below stays as the backstop for the
         # direct ``execute`` callers no hook reaches.
         refuse_args=_long_foreground_sleep_refusal,
-        execute=execute_bash,
+        execute=with_deliver_notice(execute_bash, "bash"),
     )
 
 

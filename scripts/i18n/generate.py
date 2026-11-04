@@ -245,6 +245,10 @@ OWNED_SPA_NAMESPACES = (
     # text, the header control's label and the "change it on the desktop" hint.
     # Its own namespace for the frozen-bytes reason above.
     "relay.agent_avatar",
+    # The Highlights block's withheld notice ("1 file not shown: outside allowed
+    # locations"). Its own namespace for the frozen-bytes reason above: the
+    # supplement block's other copy is not keyed yet and must not stale a ledger.
+    "relay.highlights",
 )
 
 GENERATED_HEADER = (

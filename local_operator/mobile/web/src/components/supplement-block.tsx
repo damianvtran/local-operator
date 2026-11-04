@@ -53,6 +53,7 @@ import {
 	supplementSteer,
 } from "../api";
 import { refusalText } from "../lib/refusal";
+import { messageRuntime, useLocaleSnapshot } from "../store";
 import { cn } from "../lib/cn";
 import {
 	COPY_ADJUST,
@@ -78,7 +79,47 @@ import {
 	type SupplementComponent,
 	type SupplementFile,
 	type SupplementSound,
+	type SupplementWithheld,
 } from "../lib/supplement";
+
+/** Reason id -> its keyed phrase. One spelling per reason, shared by every row. */
+function withheldReasonText(reason: SupplementWithheld["reason"]): string {
+	const t = messageRuntime.t;
+	switch (reason) {
+		case "outside":
+			return t("relay.highlights.withheld.reason.outside");
+		case "sensitive":
+			return t("relay.highlights.withheld.reason.sensitive");
+		case "missing":
+			return t("relay.highlights.withheld.reason.missing");
+		case "too-large":
+			return t("relay.highlights.withheld.reason.too_large");
+	}
+}
+
+/**
+ * `2 files not shown: outside allowed locations, sensitive file` — the ONE quiet
+ * line that keeps a refused pin or answer-named file from vanishing silently.
+ * Distinct reasons only, in first-seen order, joined with the locale's own list
+ * format; `count` includes the row's `withheld_more` cut. `""` when nothing was
+ * withheld.
+ */
+export function withheldLine(
+	withheld: SupplementWithheld[],
+	more: number,
+	locale: string,
+): string {
+	const count = withheld.length + Math.max(0, more);
+	if (count === 0) return "";
+	const reasons = [...new Set(withheld.map((item) => item.reason))].map(withheldReasonText);
+	let joined = reasons.join(", ");
+	try {
+		joined = new Intl.ListFormat(locale, { type: "unit", style: "narrow" }).format(reasons);
+	} catch {
+		/* An engine without ListFormat (or a malformed tag) keeps the comma join. */
+	}
+	return messageRuntime.t("relay.highlights.withheld.line", { count, reasons: joined });
+}
 
 /**
  * How much of a text preview renders. The route caps a served file at 10 MB,
@@ -149,6 +190,8 @@ export const SupplementBlock = memo(function SupplementBlock({
 	jobLive: boolean;
 }) {
 	const disposition = supplementDisposition(beat, jobLive);
+	/* Subscribes the block to a live language change, and feeds the list format. */
+	const { uiLocale } = useLocaleSnapshot();
 	const [adjusting, setAdjusting] = useState(false);
 	const [draft, setDraft] = useState("");
 	const [busy, setBusy] = useState(false);
@@ -385,7 +428,10 @@ export const SupplementBlock = memo(function SupplementBlock({
 	 */
 	let filesSection: ReactNode = null;
 	if (files.length > 0 || moreCount > 0) {
-		if (totalFiles <= 2 && components.length === 0) {
+		/* A video needs its row (the row IS the preview tile's control), so the
+		   one-liner yields whenever the row carries one. */
+		const hasVideo = files.some((file) => supplementFileClass(file.path) === "video");
+		if (totalFiles <= 2 && components.length === 0 && !hasVideo) {
 			const summary = filesSummaryOf(beat);
 			filesSection =
 				summary === null ? null : (
@@ -505,6 +551,17 @@ export const SupplementBlock = memo(function SupplementBlock({
 			</div>
 		) : null;
 
+	/* The withheld notice: one muted line under the artifacts, never a card or
+	   an icon — it explains an absence, it is not itself a deliverable. Names
+	   are not painted (a tooltip-free surface would truncate them anyway); the
+	   count and the reasons are what the reader acts on. */
+	const withheldText = withheldLine(beat.withheld, beat.withheldMore, uiLocale);
+	const withheldSection = withheldText ? (
+		<p className="text-meta text-ink-dim" data-supplement-withheld="">
+			{withheldText}
+		</p>
+	) : null;
+
 	return (
 		<div
 			className="flex flex-col gap-1.5"
@@ -513,6 +570,7 @@ export const SupplementBlock = memo(function SupplementBlock({
 		>
 			{filesSection}
 			{soundsSection}
+			{withheldSection}
 			{stateLine}
 			{adjustLine}
 			{errorLine}
@@ -529,6 +587,7 @@ type FilePreview =
 	| { kind: "loading" }
 	| { kind: "text"; text: string; truncated: boolean }
 	| { kind: "image"; url: string }
+	| { kind: "video"; url: string }
 	| { kind: "refused"; message: string };
 
 function CalloutRow({
@@ -544,14 +603,14 @@ function CalloutRow({
 }) {
 	const { name, path, size } = fileRowParts(file);
 	const fileClass = supplementFileClass(file.path);
-	const previewable = fileClass === "text" || fileClass === "image";
+	const previewable = fileClass === "text" || fileClass === "image" || fileClass === "video";
 	const [open, setOpen] = useState(false);
 	const [preview, setPreview] = useState<FilePreview | null>(null);
 
 	/* The object URL is this component's to revoke — a second holder would be
 	   a revoke this row cannot see coming. */
 	useEffect(() => {
-		if (preview?.kind !== "image") return;
+		if (preview?.kind !== "image" && preview?.kind !== "video") return;
 		const url = preview.url;
 		return () => URL.revokeObjectURL(url);
 	}, [preview]);
@@ -569,6 +628,8 @@ function CalloutRow({
 			const { blob } = await getSupplementFile(sessionId, job, index);
 			if (fileClass === "image") {
 				setPreview({ kind: "image", url: URL.createObjectURL(blob) });
+			} else if (fileClass === "video") {
+				setPreview({ kind: "video", url: URL.createObjectURL(blob) });
 			} else {
 				const text = await blob.text();
 				setPreview({
@@ -634,6 +695,20 @@ function CalloutRow({
 							src={preview.url}
 							alt={name || displayText(file.path)}
 							className="max-h-64 max-w-full rounded-sm border border-hairline"
+						/>
+					)}
+					{preview.kind === "video" && (
+						/* A preview TILE, not autoplay: `controls` and `preload="metadata"`
+						   so a phone fetches the first frame and the reader chooses to play;
+						   `playsInline` keeps iOS from taking over the screen. */
+						<video
+							src={preview.url}
+							controls
+							playsInline
+							preload="metadata"
+							aria-label={name || displayText(file.path)}
+							className="max-h-64 max-w-full rounded-sm border border-hairline bg-sunken"
+							data-supplement-video=""
 						/>
 					)}
 					{preview.kind === "refused" && (

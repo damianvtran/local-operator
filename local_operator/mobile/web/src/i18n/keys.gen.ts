@@ -221,6 +221,11 @@ export type MessageParams = {
   "relay.health.quiet_detail": undefined;
   "relay.health.reconnecting": undefined;
   "relay.health.reconnecting_detail": undefined;
+  "relay.highlights.withheld.line": { "count": number; "reasons": string };
+  "relay.highlights.withheld.reason.missing": undefined;
+  "relay.highlights.withheld.reason.outside": undefined;
+  "relay.highlights.withheld.reason.sensitive": undefined;
+  "relay.highlights.withheld.reason.too_large": undefined;
   "relay.library.count": { "count": number };
   "relay.login.error.password": undefined;
   "relay.login.page.title": undefined;

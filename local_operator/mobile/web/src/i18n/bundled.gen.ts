@@ -251,6 +251,15 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
       "relay.health.reconnecting_detail": "This phone lost its connection to your computer and keeps trying. The session may still be running there; sending may fail until the connection is back.",
     },
   },
+  "relay.highlights": {
+    "en": {
+      "relay.highlights.withheld.line": "{count, plural, one {# file not shown} other {# files not shown}}: {reasons}",
+      "relay.highlights.withheld.reason.missing": "file no longer exists",
+      "relay.highlights.withheld.reason.outside": "outside allowed locations",
+      "relay.highlights.withheld.reason.sensitive": "sensitive file",
+      "relay.highlights.withheld.reason.too_large": "too large to preview",
+    },
+  },
   "relay.library": {
     "en": {
       "relay.library.count": "{count, plural, one {# asset} other {# assets}}",
@@ -500,11 +509,4 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
  * rather than mixing two languages under one page tag. */
 export const BUNDLED_CHUNKS: Readonly<Record<string, () => Promise<
  { readonly BUNDLED_LOCALE: typeof BUNDLED_OWNED }>>> = {
-  "es": () => import("./bundled.es.gen"),
-  "fr": () => import("./bundled.fr.gen"),
-  "hi": () => import("./bundled.hi.gen"),
-  "ru": () => import("./bundled.ru.gen"),
-  "ur": () => import("./bundled.ur.gen"),
-  "vi": () => import("./bundled.vi.gen"),
-  "zh-CN": () => import("./bundled.zh-CN.gen"),
 };
