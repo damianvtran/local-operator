@@ -184,9 +184,9 @@
       "label": "QA tester",
       "description": "Independent execution proof for a change: preflights the rig, exercises real paths and negative cases, and reports a scoped QA matrix without editing the repository.",
       "when_to_use": "Independently testing whether a pull request, patch or feature actually works end to end; reproducing a bug, validating side effects, or checking remediation regressions.",
-      "version": "1.0.9",
-      "instructions_sha256": "f1c0e510c1c82296639980477832d3da414bcd84c7dceebd17bc1a5f06c4baac",
-      "instructions_chars": 2484,
+      "version": "1.0.10",
+      "instructions_sha256": "d357c16a120e72d514a71c744aab066e5a3bcb93a58bac7c39a25fca07f6c2f1",
+      "instructions_chars": 2546,
       "tools": [
         "read",
         "glob",
