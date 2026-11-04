@@ -255,7 +255,11 @@ async def test_dm_to_endpoint_id_opens_the_same_dm_as_the_top_level_field() -> N
     by_field = DmClient([_member()])
     by_to = DmClient([_member()])
     field_outcome = await execute_bridge(_runtime(by_field), _dm(endpoint_id=PEER_ENDPOINT))
-    to_outcome = await execute_bridge(_runtime(by_to), _dm(to={"endpoint_id": PEER_ENDPOINT}))
+    # A distinct body: both runtimes share one guard file and one DM id, and the
+    # reply guard refuses an identical second post as a duplicate.
+    to_outcome = await execute_bridge(
+        _runtime(by_to), _dm(to={"endpoint_id": PEER_ENDPOINT}, body="ping via to")
+    )
 
     assert field_outcome["ok"] is True, field_outcome
     assert to_outcome["ok"] is True, to_outcome
@@ -283,7 +287,9 @@ async def test_dm_to_account_id_and_a_bare_id_reach_the_account_target(to: Any) 
     by_field = DmClient([_member()])
     by_to = DmClient([_member()])
     field_outcome = await execute_bridge(_runtime(by_field), _dm(account_id=PEER))
-    to_outcome = await execute_bridge(_runtime(by_to), _dm(to=to))
+    # A distinct body: both runtimes share one guard file and one DM id, and the
+    # reply guard refuses an identical second post as a duplicate.
+    to_outcome = await execute_bridge(_runtime(by_to), _dm(to=to, body="ping via to"))
 
     assert field_outcome["ok"] is True, field_outcome
     assert to_outcome["ok"] is True, to_outcome
@@ -631,41 +637,39 @@ async def test_a_sibling_op_surfaces_the_same_detail() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_dm_post_spends_the_reply_guard_budget(
+async def test_a_dm_post_is_covered_by_the_reply_guard(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A DM wakes the other agent like any conversation post, so it is budgeted.
+    """A DM gets the same guard as a channel post: never a count refusal.
 
-    Under the wake contract both agents are `all` members of the DM, so two
-    agents trading `dm` posts is the runaway the guard exists for — and an older
-    hub enforces no cap at all, which leaves the CLIENT as the only bound.
+    Operator, 2026-11-03: agents keep each other updated, so 12 DMs with nothing
+    new to answer all go out; the 5th and 10th carry the one-line warning, and
+    an exact re-send of the last one is skipped, never sent twice.
     """
-
-    from local_operator.team_bridge import reply_guard
 
     client = DmClient([_member()])
     runtime = _runtime(client, config_dir=tmp_path)
 
-    for _ in range(reply_guard.ABSOLUTE_POSTS):
-        assert (await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT)))["ok"] is True
-    refused = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT))
+    warned = []
+    for index in range(1, 13):
+        sent = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, body=f"part {index}"))
+        assert sent["ok"] is True and not sent.get("skipped"), sent
+        if "warning" in sent:
+            warned.append(index)
+    assert warned == [5, 10]
 
-    assert refused["ok"] is False
-    assert refused["code"] == reply_guard.CODE_ABSOLUTE
-    # The structured answer: keep the draft, retry once the window frees.
-    assert "retry after retry_after_s" in refused["next"] and refused["retry_after_s"] > 0
-    # The refused post never reached the hub.
+    again = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, body="part 12"))
+    assert again["ok"] is True and again["skipped"] is True
+    assert again["warning"].count("not posted") == 1
     sends = [call for call in client.calls if call["method"] == "conversation_send"]
-    assert len(sends) == reply_guard.ABSOLUTE_POSTS
+    assert len(sends) == 12
 
 
 @pytest.mark.asyncio
-async def test_a_dm_the_hub_refuses_gives_the_budget_back(
+async def test_a_dm_the_hub_refuses_is_not_recorded(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A refused write returns its slot: only POSTS spend the budget."""
-
-    from local_operator.team_bridge import reply_guard
+    """A refused write returns its slot: its retry is neither a double send nor counted."""
 
     class RefusingSend(DmClient):
         fail_next = False
@@ -678,16 +682,44 @@ async def test_a_dm_the_hub_refuses_gives_the_budget_back(
 
     client = RefusingSend([_member()])
     runtime = _runtime(client, config_dir=tmp_path)
-    for _ in range(reply_guard.ABSOLUTE_POSTS - 1):
-        assert (await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT)))["ok"] is True
+    for index in range(3):
+        sent = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, body=f"part {index}"))
+        assert sent["ok"] is True
 
     client.fail_next = True
-    failed = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT))
+    failed = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, body="last part"))
     assert failed["ok"] is False and refused_code(failed) == "post_failed"
 
-    # One fewer than the cap landed, so the last slot is still free.
-    assert (await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT)))["ok"] is True
-    assert (await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT)))["ok"] is False
+    # The SAME text right away is not a double send (the failed attempt left no
+    # hash), and it is the 4th recorded post, so no warning yet.
+    retried = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, body="last part"))
+    assert retried["ok"] is True and "skipped" not in retried and "warning" not in retried
+    fifth = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, body="extra"))
+    assert fifth["ok"] is True and "warning" in fifth
+
+
+@pytest.mark.asyncio
+async def test_an_advisory_fault_after_a_delivered_dm_is_never_a_failure(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3377 round 5, m-C: the DM call site's own end-to-end twin of the S-11
+    test. A real ``dm`` through ``execute_bridge``; the post-delivery notice
+    bookkeeping raises; the DM still reports ok, went out once, and carries no
+    warning — a delivered message reported as failed would invite a second copy."""
+
+    from local_operator.team_bridge import tool as tool_mod
+
+    def explode(*args: Any, **kwargs: Any) -> Any:
+        raise OverflowError("bookkeeping fault")
+
+    monkeypatch.setattr(tool_mod.reply_guard, "agent_run_warning", explode)
+    client = DmClient([_member()])
+    runtime = _runtime(client, config_dir=tmp_path)
+    sent = await execute_bridge(runtime, _dm(endpoint_id=PEER_ENDPOINT, body="landed"))
+    assert sent["ok"] is True and "warning" not in sent and not sent.get("skipped"), sent
+    assert sent["destination_type"] == "conversation_dm"
+    sends = [call for call in client.calls if call["method"] == "conversation_send"]
+    assert [call["text"] for call in sends] == ["landed"]
 
 
 def refused_code(outcome: dict[str, Any]) -> str:

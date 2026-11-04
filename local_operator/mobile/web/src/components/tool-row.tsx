@@ -191,6 +191,9 @@ const OUTCOME_TONE: Record<NonNullable<BridgeRowFacts["outcome"]>, OutcomeTone> 
 	   keeps the wash, so it stays the loudest of the three. */
 	unconfirmed: "pending",
 	awaiting_acceptance: "pending",
+	/* The reply guard skipped an exact double send: nothing failed, but it was
+	   not posted, so it must not read as a plain landed post (#3377 round 3). */
+	skipped: "pending",
 };
 
 const OUTCOME_MARK: Partial<Record<NonNullable<BridgeRowFacts["outcome"]>, keyof typeof LUCIDE>> = {

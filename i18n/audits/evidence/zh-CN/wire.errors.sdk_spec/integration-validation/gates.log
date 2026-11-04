@@ -1,0 +1,34 @@
+{"gate": "generator", "command": ["/Users/damian/local-operator/.venv/bin/python", "scripts/run_bounded.py", "--contract=command-status", "--memory-mb", "512", "--timeout", "90", "--", "/Users/damian/local-operator/.venv/bin/python", "scripts/i18n/generate.py", "--check"], "outer_pid": 7939, "outer_pgid": 7939, "rc": 0, "group_rows_after_exit": [], "group_rows_after_supervisor": [], "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"}
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+generate.py --check: 123 artifact(s) byte-identical
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=19341f0aadc247f6b5653aa3838858a5 completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/19341f0aadc247f6b5653aa3838858a5.completion.json
+
+{"gate": "catalogues", "command": ["/Users/damian/local-operator/.venv/bin/python", "scripts/run_bounded.py", "--contract=command-status", "--memory-mb", "512", "--timeout", "90", "--", "/Users/damian/local-operator/.venv/bin/python", "scripts/i18n/check.py", "--catalogues-only"], "outer_pid": 8037, "outer_pgid": 8037, "rc": 0, "group_rows_after_exit": [], "group_rows_after_supervisor": [], "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"}
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+check.py: catalogue checks: 0 problem(s)
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=16fbbb6fdff74e43bbf332a20802387e completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/16fbbb6fdff74e43bbf332a20802387e.completion.json
+
+{"gate": "affected-pytest", "command": ["/Users/damian/local-operator/.venv/bin/python", "scripts/run_bounded.py", "--contract=command-status", "--memory-mb", "512", "--timeout", "90", "--", "/Users/damian/local-operator/.venv/bin/python", "-m", "pytest", "tests/unit/i18n/test_language_manifest.py", "tests/unit/i18n/test_ledger_shards.py", "tests/unit/i18n/test_generate.py", "tests/unit/i18n/test_eligibility.py", "tests/unit/i18n/test_sdk_spec_slice.py", "-q", "-n0"], "outer_pid": 8075, "outer_pgid": 8075, "rc": 0, "group_rows_after_exit": [], "group_rows_after_supervisor": [], "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"}
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
+........................................................................ [ 52%]
+.................................................................        [100%]
+137 passed in 22.94s
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=d9ae8df3a61044ff9aaa9d91f14c73a0 completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/d9ae8df3a61044ff9aaa9d91f14c73a0.completion.json
+
+{"gate": "registry-proof", "command": ["/Users/damian/local-operator/.venv/bin/python", "scripts/run_bounded.py", "--contract=command-status", "--memory-mb", "512", "--timeout", "90", "--", "/Users/damian/local-operator/.venv/bin/python", "/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/sdk-spec-production-proof.py"], "outer_pid": 8388, "outer_pgid": 8388, "rc": 0, "group_rows_after_exit": [], "group_rows_after_supervisor": [], "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"}
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+{
+  "source": "/Users/damian/local-operator/.worktrees/zh-cn-sdk-spec/local_operator/__init__.py",
+  "formatter_records": 21,
+  "parameterized_records": 8,
+  "opaque_parameter_bytes": "preserved",
+  "unknown_fallback": "English source",
+  "legacy_exception_controls": 21,
+  "ambient_locale_during_legacy_calls": "zh-CN",
+  "legacy_english_args_str_attrs": "byte-identical to pre-extraction golden",
+  "target_sha256": "0ff78d9cecbb7c024a284abc694f1a3d9e21bc283c464cba5ae42b2a227c76ad",
+  "no_native_or_UI_proof": true
+}
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=fae4a3dad4564960a8865baab0ae568c completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/run-bounded-runs/fae4a3dad4564960a8865baab0ae568c.completion.json
+

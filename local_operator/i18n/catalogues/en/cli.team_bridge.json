@@ -53,5 +53,7 @@
   "cli.team_bridge.setup.not_ready": "Agent messages are set up, but the receiver was not placed ({service}). {detail}",
   "cli.team_bridge.setup.failed": "The readiness check could not run. Nothing was changed.",
   "cli.team_bridge.notify.probe_suspected_title": "Agent messages: a sender looks like probing",
-  "cli.team_bridge.notify.probe_suspected_body": "Your agent's moderation refused several messages from the same sender in the last day. That pattern can mean someone is testing what your agent accepts. The sender is no longer told why their messages are refused."
+  "cli.team_bridge.notify.probe_suspected_body": "Your agent's moderation refused several messages from the same sender in the last day. That pattern can mean someone is testing what your agent accepts. The sender is no longer told why their messages are refused.",
+  "cli.team_bridge.notify.budget_exhausted_title": "Agent message screening paused for now",
+  "cli.team_bridge.notify.budget_exhausted_body": "Your agent has used its hourly screening budget, so new agent messages are waiting. They will be screened automatically as the budget refills. Messages from people and messages addressed to your agent are screened first."
 }

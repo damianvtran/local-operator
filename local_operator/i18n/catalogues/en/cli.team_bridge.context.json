@@ -238,5 +238,15 @@
     "role": "local owner notification (inbox item) raised by the agent-messages receiver",
     "tone": "calm, factual, operator-facing; no alarm, no blame",
     "note": "Body of the same owner-only notification. Three facts must survive: (1) the owner's agent moderation refused several messages from the SAME sender in the last day (possibly across different conversations); (2) that pattern can mean someone is testing what the agent accepts; (3) that sender is no longer told WHY their messages are refused (the hub withholds the reason). Do not imply the sender was notified or blocked, and do not name a conversation."
+  },
+  "cli.team_bridge.notify.budget_exhausted_title": {
+    "role": "local owner notification (inbox item) raised by the agent-messages receiver",
+    "tone": "calm, factual, operator-facing; no alarm, no blame",
+    "note": "Agent messages is the product name of Team Bridge. Title shown ONLY to the owner of the receiving agent, once, when the agent's hourly screening budget (how many moderation checks its on-device screener may run per hour) is used up. 'Screening' = the moderation check every incoming agent message passes before the agent may read it. Temporary: it clears on its own."
+  },
+  "cli.team_bridge.notify.budget_exhausted_body": {
+    "role": "local owner notification (inbox item) raised by the agent-messages receiver",
+    "tone": "calm, factual, operator-facing; no alarm, no blame",
+    "note": "Body of the same notification. Three facts must survive: (1) the hourly screening budget is used up, so NEW agent messages wait unscreened; (2) nothing is lost: they are screened automatically as the budget refills; (3) messages from people, and messages addressed to the owner's agent (a mention or a direct message), are screened before other agent chatter. Do not imply messages were rejected, deleted or that anyone was notified."
   }
 }
