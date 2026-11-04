@@ -401,6 +401,15 @@ async def retry_due_holds(
 
     store = Store(config_dir)
     _release_engaged_holds(store, owner, config_dir, now=_time.time())
+    # The screener's bare ``bcmsg_`` duplicates go BEFORE the bounded read:
+    # retired inside it, they took half the slots and halved the drain (see
+    # ``Store.retire_due_bare_conversation_holds``). Reported as before.
+    try:
+        bare_retired = store.retire_due_bare_conversation_holds(owner, now=_time.time())
+    except StoreRefused:
+        bare_retired = []  # fenced owner: the next live pass owns the rows
+    for message_id in bare_retired:
+        _RETRY_ATTEMPTS.pop(message_id, None)
     due = store.due_screening_holds(owner, now=_time.time(), limit=limit)
     # HELD MESSAGES ARE RE-SCREENED IN BATCHES TOO (PR #3400). A budget refill
     # makes a whole backlog due at once; re-driving it one model call per
@@ -439,7 +448,9 @@ async def retry_due_holds(
         raise
     except Exception as failure:  # noqa: BLE001 — never stops the retry pass
         _log_delivery_failure("batch_screen_retry", failure)
-    outcomes: list[dict[str, Any]] = []
+    outcomes: list[dict[str, Any]] = [
+        {"message_id": message_id, "action": "retired"} for message_id in bare_retired
+    ]
     for row in due:
         message_id = row["message_id"]
         if is_conversation_message_id(message_id):
@@ -608,7 +619,16 @@ async def retry_due_holds(
                     message_id,
                     new_code or "hold",
                     retry_at=_hold_due(outcome.get("retry_at"), _time.time() + gap),
-                    tier=outcome.get("tier"),
+                    # A conversation handler stamps its own tier; the pair
+                    # spine never does, and a pair message is addressed to this
+                    # agent by construction. Without this a pair row born from
+                    # a stale-claim park (no tier) stayed NULL and ranked last
+                    # for its whole retry life (#3400 R3-m1).
+                    tier=(
+                        outcome.get("tier")
+                        if parsed is not None
+                        else Store.SCREENING_TIER_ADDRESSED
+                    ),
                     no_batch=bool(outcome.get("no_batch")),
                 )
             except StoreRefused:
@@ -622,7 +642,9 @@ async def retry_due_holds(
     # it ends only once no budget hold is left, so a sustained flood is ONE
     # episode and one notice, and the next exhaustion is a new, unread one.
     store.close_budget_episode_if_drained(owner)
-    return {"due": len(due), "outcomes": outcomes}
+    # ``due`` keeps counting every due row the pass handled, retired duplicates
+    # included, as it did when they were read inside the bounded slots.
+    return {"due": len(bare_retired) + len(due), "outcomes": outcomes}
 
 
 def _stale_claim_disposition(

@@ -2803,24 +2803,23 @@ def _expected_model_calls(source: str, intent: str, change: str) -> int:
     cache then serves). A stop at ANY point after that screen leaves a recorded
     decision — the message's own receipt (stopped before the ACK), or its read
     intent — and the restart hands off on it with NO second model call, even
-    under a changed model. Two cases re-screen, by design: a re-login (a new
+    under a changed model. One case re-screens, by design: a re-login (a new
     enrollment generation is a new owner, whose decision must be its own; the
-    cache is generation-fenced too), and a CACHE-SERVED message stopped before
-    its ACK under a model change — the cache writes no row for it and the hub
-    was never told, so there is no decision to carry and re-screening under
-    the new model is harmless."""
+    cache is generation-fenced too).
 
+    A CACHE-SERVED message now behaves exactly like a fresh one. The cache hit
+    records the message's OWN receipt (#3400 follow-up: without it a
+    byte-identical second message was held ``receipt_unavailable`` forever),
+    so a stop before its ACK leaves the same recorded decision a fresh screen
+    leaves, and a model change or rename carries it instead of re-screening.
+    ``source`` therefore no longer changes the count."""
+
+    del source  # kept in the signature: the matrix still runs both sources
     # A re-login re-screens only where the hub holds no verdict yet (r7 M8):
     # a recorded intent, pending or confirmed, is the hub's write-once
     # decision and is carried, never re-made.
     relogin = "relogin" in change and intent == "none"
-    # The fingerprint cache keys on the FULL envelope, display name included
-    # (A6), so a rename misses it exactly like a model change does; with no
-    # record and nothing at the hub, that re-screen is the only honest path.
-    model_miss = (
-        source == "cache_hit" and intent == "none" and ("model" in change or "rename" in change)
-    )
-    return 1 + (1 if relogin or model_miss else 0)
+    return 1 + (1 if relogin else 0)
 
 
 def _run_recovery_cell(
@@ -3336,3 +3335,41 @@ def test_a_pair_hold_ranks_as_addressed_not_behind_ambient(tmp_path, monkeypatch
 
 async def _no_retry(*args, **kwargs):
     return {"due": 0, "outcomes": []}
+
+
+def test_a_pair_hold_redriven_from_a_stale_claim_keeps_the_addressed_tier(
+    tmp_path, monkeypatch
+) -> None:
+    """#3400 round 3, R3-m1: a pair message whose connector died mid-spine is
+    parked (``stale_claim``, no tier), re-coded for the re-drive (no tier), and
+    a hold on that re-drive went through the retry pass's writer with
+    ``outcome.get("tier")``, which the pair spine never sets. The row stayed
+    NULL, so it ranked behind every ambient row for its whole retry life. A
+    pair row is addressed to this agent by construction, wherever it is held."""
+
+    clock = _FakeClock()
+    monkeypatch.setattr(time, "time", clock)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    store, owner = _enroll(tmp_path)
+    _wire_spine(monkeypatch, tmp_path, disposition="hold")
+    monkeypatch.setattr(pull_mod, "events", _quiet_events)
+    store.claim(
+        owner, "bmsg_1", "sess_cos", "connector:dead-owner", expiry=clock.now + wake_mod.CLAIM_TTL_S
+    )
+    _one_pending_ref(store, owner)
+    _iterate(owner, tmp_path)
+    clock.now += wake_mod.CLAIM_TTL_S + loop_mod.STALE_CLAIM_MARGIN_S + 1
+    retried = _iterate(owner, tmp_path)
+    assert retried["retries"]["outcomes"] == [{"message_id": "bmsg_1", "action": "hold"}]
+    with store._connect() as conn:  # noqa: SLF001 — test introspection
+        row = conn.execute(
+            "SELECT hold_code, tier FROM screening_holds WHERE message_id = ?", ("bmsg_1",)
+        ).fetchone()
+    assert row is not None and row[0] == "screening_hold"
+    assert row[1] == store_mod.Store.SCREENING_TIER_ADDRESSED
+    for index in range(10):
+        store.persist_hold(
+            owner, f"conv_amb{index}", "budget_exhausted", retry_at=clock.now - 5, tier=0
+        )
+    due = store.due_screening_holds(owner, now=clock.now + 7200, limit=8)
+    assert due[0]["message_id"] == "bmsg_1"

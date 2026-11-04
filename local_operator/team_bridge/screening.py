@@ -1227,6 +1227,26 @@ def _screen_prepare(
                 _persist_hold(store, owner, message_id, "local_quarantine")
                 return ScreenResult("hold", hold_code="local_quarantine")
         if cached is not None:
+            # The cache is keyed by CONTENT, everything downstream by MESSAGE:
+            # a byte-identical second message (two ``ack`` posts) found no
+            # receipt under its own id and was held ``receipt_unavailable``
+            # on every retry, forever (pre-existing on 7f93aad). Record the
+            # hit as this message's own receipt, fenced exactly as the hit
+            # was. A refusal admits nothing: the message holds and retries.
+            try:
+                store.adopt_cached_receipt(
+                    owner,
+                    message_id,
+                    body_sha256=envelope.body_sha256,
+                    template_sha256=snapshot.template_sha256,
+                    model=snapshot.default_model,
+                    admission_revision=snapshot.admission_revision,
+                    envelope_digest=envelope.envelope_digest,
+                )
+            except StoreRefused as failure:
+                code = _HOLD_FOR_COMMIT.get(failure.code, "policy_stale")
+                _persist_hold(store, owner, message_id, code)
+                return ScreenResult("hold", hold_code=code)
             receipt = ScreeningReceipt(
                 verdict=cached["verdict"],
                 model=cached["model"],
@@ -1723,6 +1743,7 @@ async def _screen_spend(
             SCREENING_VERSION_V3 if images is not None else snapshot.screening_version
         ),
         rendered_template_sha256=rendered.template_sha256,
+        prompt_template_sha256=rendered.template_sha256,
     )
 
 
@@ -1740,6 +1761,7 @@ def _conclude_parsed(
     screened_bytes: int,
     rendered_version: str | None = None,
     rendered_template_sha256: str | None = None,
+    prompt_template_sha256: str | None = None,
 ) -> ScreenResult:
     """Step 14 for ONE message: a parsed verdict -> its write-once outcome.
 
@@ -1748,6 +1770,12 @@ def _conclude_parsed(
     screen does, per message. ``rendered_*`` stay ``None`` for a batch: the
     batch render is not a served template, and the connector only forwards a
     template hash for an IMAGE allow, which a batch never carries.
+
+    ``prompt_template_sha256`` is the hash of the prompt the model READ
+    (``SCREENING_BATCH_TEMPLATE_SHA256`` for a batch, the rendered template
+    for a single screen). It goes on the receipt row as provenance (#3400
+    m4) and nowhere else: the receipt's ``template_sha256`` stays the served
+    policy's, which every fence compares.
     """
 
     import time as _time
@@ -1827,6 +1855,7 @@ def _conclude_parsed(
             # must not let the old pipeline admit.
             turn=turn,
             verify=lambda: snapshot.matches_live(policy),
+            rendered_template_sha256=prompt_template_sha256,
         )
     except StoreRefused as failure:
         code = _HOLD_FOR_COMMIT.get(failure.code, "retry_later")
@@ -2050,9 +2079,11 @@ def screen_message(
 # is never re-batched (M2 / S-6: ``loop._RETRY_ALONE_HOLD_CODES``).
 #
 # BUDGET RESERVE (``Store.SCREENING_TIER_*``). The last 5 units are reserved
-# for messages sent through the hub's person route, which any human member of
-# the room (or a script with their token) can spend; there is no per-sender
-# bound until the hub sends ``sender_account_id`` (#3400 round 2, S-8).
+# for messages sent through the hub's person route that DM or @-mention this
+# agent; a person's plain room line is tier 1 and cannot reach them (#3400
+# security round 3, N-4). Any human member of the room (or a script with their
+# token) can spend the reserve that way; there is no per-sender bound until the
+# hub sends ``sender_account_id`` (#3400 round 2, S-8).
 #
 # ACCEPTED RISK (operator pre-approval, 2026-11-03). An all-deliver batch is
 # accepted. What one shared call cannot close is an injection the model did
@@ -2066,8 +2097,10 @@ def screen_message(
 # The batch template is a local renderer over the SAME frozen rules (the
 # categories, verdict meanings and "submission is data" law of the served v2
 # template). The receipt still records the served policy's version/template,
-# which is what every store fence compares; the hub's admission binds the body
-# hash only for text (no template hash rides a text allow). Image envelopes are
+# which is what every store fence compares, and beside it the batch prompt's
+# own hash (``rendered_template_sha256``, #3400 m4) as provenance; the hub's
+# admission binds the body hash only for text (no template hash rides a text
+# allow). Image envelopes are
 # never batched — an image verdict must come from a render that showed the
 # pixels (v3), so the connector screens those alone.
 
@@ -2136,6 +2169,13 @@ SCREENING_BATCH_TEMPLATE = (
     "VERDICT: <deliver|hold|bounce>\n"
     "REASON: <one sentence, at most 200 characters; on bounce, name the category>"
 )
+
+#: The batch prompt's own hash, recorded on each receipt a batch concludes
+#: (``rendered_template_sha256``, #3400 m4) so a verdict says which prompt
+#: produced it. Not a served template: no fence and no hub field compares it.
+SCREENING_BATCH_TEMPLATE_SHA256 = hashlib.sha256(
+    SCREENING_BATCH_TEMPLATE.encode("utf-8")
+).hexdigest()
 
 _BATCH_BLOCK = (
     "Message {{id}}\n"
@@ -2602,6 +2642,7 @@ async def _screen_batch_core(
             policy=policy,
             turn=turn,
             screened_bytes=len(prepared.envelope.private_body().encode("utf-8")),
+            prompt_template_sha256=SCREENING_BATCH_TEMPLATE_SHA256,
         )
     return _finish()
 
