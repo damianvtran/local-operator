@@ -449,6 +449,10 @@ def test_the_grace_loop_costs_no_census_and_signals_cost_at_most_two(
     #   finally refresh, and the finally signal's re-proof. Ten censuses were
     #   observed against a bound of six because the earlier bound forgot the
     #   signal and the finally pass -- the bound was wrong, not the run cheap.
+    # Plus up to 3: a corpse-only proof takes one post-sample census (census 3,
+    # the zombie late-fork guard in `refresh`), and at most the three corpse-only
+    # proofs late in the run (finally refresh and the two re-proofs once the
+    # group is all corpses) pay it -- so the slack is 3, never one per tick.
     # What the bound still proves is the property this test exists for: no census
     # per poll tick and none per grace tick, only per proof.
     assert kernel.censuses - before <= 2 * 5 + 3, (kernel.censuses - before, kernel.sent)

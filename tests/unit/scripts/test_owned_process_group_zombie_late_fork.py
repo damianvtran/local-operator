@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 
 from local_operator import owned_process_group as owned
-from tests.unit.scripts.test_owned_process_group_departed import LEADER, World
+from tests.unit.scripts.test_owned_process_group_departed import LEADER, World, bbed
 
 MEMBER = 21
 LATE = 30
@@ -120,6 +120,54 @@ def test_threaded_zombie_member_is_not_corpse_only(monkeypatch):
     assert MEMBER in verdict.members, verdict
     # It is decided as live at the sample: no census 3 is needed.
     assert world.calls == 2
+    # The record says WHY a `zombie: true` member counted as live (S3).
+    assert world.cap.probe["observed"][str(MEMBER)]["before"] == {
+        "birth": "201",
+        "zombie": True,
+        "threads": 2,
+    }
+
+
+def test_single_threaded_rows_record_no_thread_count(monkeypatch):
+    # S3 keeps the record bounded: an ordinary row is exactly what it was.
+    world = zworld(monkeypatch, [])
+    verdict = world.refresh(terminal=True)
+    assert verdict.status == "OBSERVED_EMPTY", verdict
+    assert world.cap.probe["observed"][str(MEMBER)]["before"] == {"birth": "201", "zombie": True}
+
+
+def test_member_reborn_as_another_corpse_is_late(monkeypatch):
+    # R2: census 3 lists only {L, 21} and 21 still reads a single-threaded "Z" --
+    # but with a NEW birth. A different process died at that number after the
+    # sample (it could have forked first), so the sampled corpse no longer
+    # describes it: the birth comparison alone makes it late.
+    world = zworld(monkeypatch, [])
+
+    def reborn():
+        world.kernel.rows[MEMBER] = (LEADER, LEADER, LEADER, "777")
+
+    _on_call(world, 3, reborn)
+    verdict = world.refresh(terminal=True)
+    assert world.cap.probe["sample_retries"][0]["late"] == [MEMBER], world.cap.probe
+    # Cycle 1 samples the reborn corpse fresh and its census 3 agrees.
+    assert verdict.status == "OBSERVED_EMPTY" and world.calls == 6, (verdict, world.calls)
+
+
+def test_a_discarded_cycle_publishes_no_vanished(monkeypatch):
+    # R1/S1: cycle 0 prunes 20/21 as departed, is corpse-only, and its census 3
+    # shows late pid 30, so it is DISCARDED. Cycle 1 decides on {L, 30}; the
+    # departures of the discarded cycle must not ride along beside it.
+    world = bbed(
+        monkeypatch,
+        first=[LEADER, 20, 21],
+        second=[LEADER],
+        live=(LATE,),
+        script=[[LEADER, 20, 21], [LEADER], [LEADER, LATE], [LEADER, LATE], [LEADER, LATE]],
+    )
+    verdict = world.refresh(terminal=True)
+    assert verdict.status == "VERIFIED" and verdict.members == (LEADER, LATE), verdict
+    assert world.cap.probe["sample_retries"][0]["late"] == [LATE]
+    assert "vanished" not in world.cap.probe, world.cap.probe["vanished"]
 
 
 # Refusals: the guard never turns doubt into emptiness -----------------------
@@ -179,6 +227,59 @@ def test_census_three_failure_refuses_not_empty(monkeypatch):
     world.cap.census = census
     verdict = world.refresh(terminal=True)
     assert verdict.status == "REFUSED", verdict
+    assert verdict.refusal_class == "unproven", verdict
+
+
+def _foreign_leader(world):
+    """The leader's number now hosts a readable process with ANOTHER birth."""
+    world.kernel.rows[LEADER] = (*world.kernel.rows[LEADER][:3], "777")
+
+
+def test_census_three_failure_with_a_reaped_leader_is_pin_lost(monkeypatch):
+    # R3/Q1: census 3 raises and the witness re-reads as a foreign birth. Loss
+    # outranks the unreadable census: PinLost, and the capability is revoked.
+    world = zworld(monkeypatch, [])
+    base = world.census
+
+    def census(pgid, deadline):
+        if world.calls == 2:
+            world.calls += 1
+            _foreign_leader(world)
+            raise owned.Unknown("strict /proc census deadline")
+        return base(pgid, deadline)
+
+    world.cap.census = census
+    verdict = world.refresh(terminal=True)
+    assert verdict.status == "REFUSED", verdict
+    assert verdict.reason == "PinLost:reservation lost during the post-sample census", verdict
+    assert verdict.refusal_class == "pin_lost", verdict
+    assert not world.cap.accepted_terminal(verdict)
+
+
+def _late_every_cycle(monkeypatch):
+    world = zworld(monkeypatch, [[LEADER, MEMBER], [LEADER, MEMBER], [LEADER, MEMBER, LATE]] * 3)
+    world.kernel.rows[LATE] = (LEADER, LEADER, LEADER, "300")
+    world.kernel.corpses.add(LATE)
+    return world
+
+
+def test_late_refusal_with_a_reaped_leader_is_pin_lost(monkeypatch):
+    # S2: the last cycle's census 3 still shows a late pid, and by then the
+    # leader's number hosts a foreign birth. The refusal is loss, not unproven.
+    world = _late_every_cycle(monkeypatch)
+    _on_call(world, 9, lambda: _foreign_leader(world))
+    verdict = world.refresh(terminal=True)
+    assert verdict.reason == "PinLost:reservation lost after the corpse-only sample", verdict
+    assert verdict.refusal_class == "pin_lost", verdict
+
+
+def test_late_refusal_with_an_unreadable_leader_stays_unknown(monkeypatch):
+    # S2 stays fail-closed: an unreadable witness is doubt, never loss.
+    world = _late_every_cycle(monkeypatch)
+    _on_call(world, 9, lambda: world.errors.__setitem__(LEADER, PermissionError(13, "synthetic")))
+    verdict = world.refresh(terminal=True)
+    assert verdict.reason == "Unknown:group changed after the corpse-only sample", verdict
+    assert verdict.refusal_class == "unproven", verdict
 
 
 def test_budget_guard_counts_census_three(monkeypatch):

@@ -755,7 +755,14 @@ def _observed(before, after):
     rows = {}
     for stage, samples in (("before", before or {}), ("after", after or {})):
         for pid, sample in samples.items():
-            rows.setdefault(str(pid), {})[stage] = {"birth": sample.birth, "zombie": sample.zombie}
+            row = {"birth": sample.birth, "zombie": sample.zombie}
+            # Only a multi-threaded count is recorded (security S3): it is the one
+            # value that explains why a `zombie: true` member counted as LIVE (see
+            # `_exited`), and omitting the ordinary case keeps every other row --
+            # and the record's size -- exactly as before.
+            if sample.threads is not None and sample.threads > 1:
+                row["threads"] = sample.threads
+            rows.setdefault(str(pid), {})[stage] = row
     return rows
 
 
@@ -1401,7 +1408,10 @@ class OwnedGroup:
                 # raises or is incomplete, its sample overruns) must not show a
                 # DISCARDED cycle's members/observations beside its refusal; the
                 # `sample_retries` rows are the only record of earlier cycles.
-                for stale in ("members", "observed"):
+                # `vanished` too (review R1/S1): the late-member door below is the
+                # first way to discard a cycle AFTER it pruned departures, and those
+                # departures authorised nothing the deciding cycle proved.
+                for stale in ("members", "observed", "vanished"):
                     self.probe.pop(stale, None)
                 try:
                     first = self._members(deadline)
@@ -1533,6 +1543,14 @@ class OwnedGroup:
                             "late_count": len(late),
                             "sample_retries": list(self.probe.get("sample_retries", [])),
                         }
+                        # Loss outranks the unproven refusal (security S2), as in
+                        # `_late_members`' own failure path: a leader that re-reads
+                        # as a foreign birth is a pin lost, and the capability must
+                        # be revoked. Anything short of `reaped` -- including an
+                        # unreadable witness -- stays the fail-closed `Unknown`.
+                        lost, _ = self._leader_witness(deadline)
+                        if lost == "reaped":
+                            raise PinLost("reservation lost after the corpse-only sample")
                         raise Unknown("group changed after the corpse-only sample")
                 # This cycle produced a complete, resolved sample: it alone is the
                 # evidence the proof below rests on.
