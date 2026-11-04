@@ -4542,6 +4542,10 @@ class Session:
         self._context_tokens_hint: int | None = (
             self._last_usage.context_tokens if self._last_usage is not None else None
         )
+        # Whether an operator authorised ``guardrails.critical_override`` in this
+        # process (see ``_apply_config_change``). False at boot on purpose: a
+        # value already in config.yml cannot prove who wrote it.
+        self._guard_override_authorised = False
         self._last_activity_ms: int = 0  # epoch ms; drives idle-flush pruning
         self._generation = 0  # monotonic turn counter for agent_start/end
         # Boundary-event suppression across a post-compaction continuation:
@@ -19742,6 +19746,11 @@ class Session:
                 # so a subagent's calls cannot contaminate this session's hint;
                 # see ``LoopConfig.get_context_tokens_hint``.
                 get_context_tokens_hint=lambda: self._context_tokens_hint,
+                # The guardrail's forked judge: one context-free errand call (see
+                # ``_guard_judge``) — deliberately not ``complete_aside``, which
+                # ships the live conversation the judge must not be primed by.
+                guard_judge=self._guard_judge,
+                guard_override_authorised=lambda: self._guard_override_authorised,
                 # The request render, not the bare one: the stored-location
                 # hints for the turn's images ride the wire from HERE and from
                 # ``_read_only_prompt`` — the same function, so the aside
@@ -26722,6 +26731,25 @@ class Session:
         spec = self._lowest_effort(self.effective_model)
         return await self._drain_errand(self._errand_request(spec, system, prompt))
 
+    async def _guard_judge(self, system: str, prompt: str) -> str:
+        """The guardrail judge's single model call (``local_operator.guardrails``).
+
+        CONTEXT-FREE by construction: one system block and one user message,
+        no tools, no transcript. Added after the 2026-11-04 state-root deletion,
+        whose command came out of a ~312k-token garbled unattended run; a judge
+        fed that transcript would inherit the confusion it is meant to catch,
+        and paying for it on every flagged call is slow. Runs on THIS
+        conversation's model (``guardrails.judge_model`` is not in v1) at the
+        lowest effort, through the errand request shape (isolated, token-capped,
+        tools-free) so a check cannot disturb the turn's routing state. Errors
+        propagate: the guardrail turns every failure into a block.
+        """
+        spec = self._lowest_effort(self.effective_model)
+        request = self._errand_request(spec, system, prompt).model_copy(
+            update={"purpose": "guardrail"}
+        )
+        return await self._drain_errand(request)
+
     def _errand_request(self, model: ModelSpec, system: str, prompt: str) -> ChatRequest:
         """The errand's request shape, in ONE place.
 
@@ -31442,6 +31470,19 @@ class Session:
         # conservative default: only the model branch below consults it, and
         # only to stay quiet about a write this process already reported.
         source = getattr(change, "source", "disk")
+        if "guardrails.critical_override" in changed:
+            # The CRITICAL-deletion override is a LOOSENING of a safety gate, so it
+            # follows the approval gate's rule: honoured only for an operator write
+            # through this process's own settings facade, never for a file edit
+            # the model (or anything else) made. Any other delivery re-arms.
+            # Boot-time file contents are unattributable and start un-authorised.
+            from local_operator.harness.approval import loosening_is_authorised
+
+            override = values.get("guardrails")
+            wanted = isinstance(override, Mapping) and override.get("critical_override") is True
+            self._guard_override_authorised = wanted and loosening_is_authorised(
+                source=source, gate_is_here=True
+            )
         if any(key.startswith("compaction.") for key in changed):
             # Same outcome as the factory's ``coerce_compaction_settings`` at
             # build (dict -> validated, invalid -> defaults, absent -> None,

@@ -66,6 +66,7 @@ from local_operator.i18n import runtime as _i18n_runtime
 from local_operator.i18n import text as _i18n_text
 from local_operator.i18n.keys import wire_aida_cadence as _ac
 from local_operator.i18n.keys import wire_console as _cs
+from local_operator.i18n.keys import wire_guardrails as _gr
 from local_operator.i18n.keys import wire_host_speed as _hs
 from local_operator.i18n.keys import wire_memory as _mm
 from local_operator.i18n.keys import wire_radient_saver as _rsv
@@ -124,6 +125,7 @@ _CHILD_SETTINGS_NAMESPACES = (
     "wire.settings.hub_org",
     "wire.aida_cadence",
     "wire.host_speed",
+    "wire.guardrails",
     "wire.console",
     "wire.memory",
     "wire.radient_saver",
@@ -790,6 +792,16 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ws.tools_title()),
         Scope.LIVE,
         _t(_ws.tools_description()),
+    ),
+    # LIVE: ``guardrails.check.read_settings`` reads a fresh ``ConfigManager``
+    # on every checked tool call. Its own section because these are SAFETY
+    # levers, not "how a tool executes"; the critical override additionally
+    # needs an attributed operator write (see ``Session._apply_config_change``).
+    Section(
+        "guardrails",
+        _t(_gr.section_title()),
+        Scope.LIVE,
+        _t(_gr.section_description()),
     ),
     # LIVE: ``hook_forwarding.native_hooks_enabled`` / ``forwarding_enabled``
     # read these through a fresh ``ConfigManager(config_dir())`` on every
@@ -4620,6 +4632,51 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.TEXT,
         default="",
         help=_BASH_SHELL_HELP,
+        empty_unsets=True,
+    ),
+    # -- guardrails -----------------------------------------------------------
+    # ``path`` mirrors ``guardrails.check.GUARDRAILS_*_PATH`` (pinned together by
+    # ``test_guardrails_rows_share_the_consumer_paths``). Added after the
+    # 2026-11-04 state-root deletion; the built-in dangerous-delete check has no
+    # row on purpose — a config file the model can write must not switch off
+    # the guard that protects that file.
+    Setting(
+        key="guardrails.enabled",
+        path=("guardrails", "enabled"),
+        section="guardrails",
+        label=_t(_gr.enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_gr.enabled_help()),
+    ),
+    Setting(
+        key="guardrails.critical_override",
+        path=("guardrails", "critical_override"),
+        section="guardrails",
+        label=_t(_gr.critical_override_label()),
+        kind=Kind.BOOL,
+        default=False,
+        help=_t(_gr.critical_override_help()),
+    ),
+    Setting(
+        key="guardrails.judge_timeout_s",
+        path=("guardrails", "judge_timeout_s"),
+        section="guardrails",
+        label=_t(_gr.judge_timeout_s_label()),
+        kind=Kind.FLOAT,
+        default=20.0,
+        help=_t(_gr.judge_timeout_s_help()),
+        minimum=1.0,
+        maximum=120.0,
+    ),
+    Setting(
+        key="guardrails.rules_dir",
+        path=("guardrails", "rules_dir"),
+        section="guardrails",
+        label=_t(_gr.rules_dir_label()),
+        kind=Kind.TEXT,
+        default="",
+        help=_t(_gr.rules_dir_help()),
         empty_unsets=True,
     ),
     # Cross-session SENDS. A `send` row rather than a `tools.send.*` one because

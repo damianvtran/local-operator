@@ -4085,6 +4085,44 @@ async def _github_git_injections(context: ToolContext | None) -> dict[str, str]:
     return env
 
 
+def _bash_env_policy(confinement: Any, shell_write: Any) -> Any:
+    """The shell-environment policy a bash child runs under.
+
+    A confined session runs STRICT (see ``shell_env.policy_for_confinement``):
+    the model's own command must not read ambient credentials out of its
+    environment. A write-confined shell runs STRICT for the same reason (the
+    provider key in lop's own environment is a credential too). Ordinary
+    sessions keep the process's configured policy. Shared with
+    :func:`bash_guard_environment` so the guardrail resolves ``$VAR`` against
+    the same environment the child will actually see.
+    """
+    if shell_write is not None:
+        return shell_env.CONFINED_SHELL_POLICY
+    return shell_env.policy_for_confinement(None if confinement is None else confinement.root)
+
+
+def bash_guard_environment(context: ToolContext | None) -> tuple[dict[str, str], str | None]:
+    """``(env, scratchpad)`` for the pre-execution guardrail's path resolution.
+
+    The guardrail (``local_operator.guardrails``) expands ``$VAR`` in a command
+    WITHOUT running it, so it must expand against what the bash child would
+    receive — a variable the child sees as unset is exactly the empty-expansion
+    shape behind the 2026-11-04 state-root deletion. Built from the same policy
+    and the same scratchpad export ``execute_bash`` uses; credential and GitHub
+    injections are deliberately left out (they never name paths, and resolving
+    them would mean a broker round trip per classified call).
+    """
+    confinement = confinement_of(context)
+    shell_write = None if confinement is not None else shell_write_confinement_of(context)
+    scratch_root = scratchpad_dir_of(context)
+    injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
+    injections.update(scratchpad_env_injection(scratch_root))
+    if (temp_owner := confinement if confinement is not None else shell_write) is not None:
+        injections["TMPDIR"] = str(temp_owner.temp_dir())
+    env = shell_env.child_environment(_bash_env_policy(confinement, shell_write), injections=injections)
+    return env, scratch_root
+
+
 @_guard("bash")
 async def execute_bash(
     tool_call_id: str,
@@ -4348,16 +4386,7 @@ async def execute_bash(
         injections["TMPDIR"] = str(temp)
         injections["TMP"] = str(temp)
     env = shell_env.child_environment(
-        # A confined session runs STRICT (see ``shell_env.policy_for_confinement``):
-        # the model's own command must not read ambient credentials out of its
-        # environment. A write-confined shell runs STRICT for the same reason
-        # (the provider key in lop's own environment is a credential too).
-        # Ordinary sessions keep the process's configured policy.
-        (
-            shell_env.CONFINED_SHELL_POLICY
-            if shell_write is not None
-            else shell_env.policy_for_confinement(None if confinement is None else confinement.root)
-        ),
+        _bash_env_policy(confinement, shell_write),
         injections=injections,
     )
 

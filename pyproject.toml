@@ -269,6 +269,8 @@ include = ["local_operator*"]
 local_operator = [
     "prompts_md/*.md",
     "guides/*/*.md",
+    # The shipped default guardrail rules (guardrails/rules.py loads them).
+    "guardrails/defaults/*.md",
     # The builtin skill catalog. Discovered as the LAST root (skills/api.py), so a
     # user copy in any earlier root always wins. Enumerated per directory because
     # package-data globbing does not recurse on all admitted setuptools versions;

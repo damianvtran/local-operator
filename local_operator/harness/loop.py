@@ -25,6 +25,7 @@ import hashlib
 import inspect
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -1100,6 +1101,26 @@ class _PlannedCall:
     # None means the tool has not declared independently lockable resources.
     # An empty tuple is a valid declaration of no exclusive resources.
     resources: tuple[str, ...] | None = None
+
+
+#: Appended to a bash TIMEOUT whose command the guardrail classified as
+#: destructive. In the 2026-11-04 incident the timeout killed a recursive delete
+#: midway and the agent retried as if nothing had happened.
+DESTRUCTIVE_TIMEOUT_NOTE = "Command killed mid-run — verify what changed before retrying."
+
+
+def _annotate_guarded_result(result: ToolResult, guard: Any) -> ToolResult:
+    """Fold a non-blocking guard outcome into the result the tool returned."""
+    notes: list[str] = []
+    first = next((c.text for c in result.content if isinstance(c, TextContent)), "")
+    if getattr(guard, "destructive", False) and first.startswith("TIMEOUT after"):
+        notes.append(DESTRUCTIVE_TIMEOUT_NOTE)
+    notes.extend(getattr(guard, "warnings", ()) or ())
+    if not notes:
+        return result
+    return result.model_copy(
+        update={"content": [*result.content, TextContent(text="\n".join(notes))]}
+    )
 
 
 def _tool_start_event(
@@ -5982,6 +6003,18 @@ class AgentLoop:
                     details={FAULT_KEY: FAULT_DENIED},
                 )
 
+        # PRE-EXECUTION GUARDRAIL (local_operator/guardrails). After the approval
+        # gate on purpose: under auto approval or --yolo the gate above approves
+        # everything, and on 2026-11-04 that is how an empty-substitution delete
+        # of the state root ran with nothing in its way. A human "approve" in ask
+        # mode still meets the CRITICAL hard stop here. Refusals come back as the
+        # call's own result so the model reads them as the outcome of its call.
+        guard = await self._guardrail_outcome(item, context, config)
+        if guard is not None and guard.blocked:
+            return self._synthetic_result(
+                call, guard.text, details={FAULT_KEY: FAULT_DENIED, "__guardrail": guard.rule}
+            )
+
         def on_update(update: AgentToolUpdate) -> None:
             if context.one_turn_secret_leases:
                 # Executor arguments are deliberately raw. A synchronous update
@@ -6184,6 +6217,8 @@ class AgentLoop:
                     }
                 )
             result = await tool.execute(call.id, item.args, signal, on_update, execution_context)
+            if guard is not None:
+                result = _annotate_guarded_result(result, guard)
             result = self._capture_one_turn_secret(
                 context,
                 call,
@@ -7095,6 +7130,58 @@ class AgentLoop:
             )
         except Exception:  # noqa: BLE001 — analytics must never raise into a turn
             logger.debug("tool-call analytics hook failed", exc_info=True)
+
+    async def _guardrail_outcome(
+        self, item: _PlannedCall, context: LoopContext, config: LoopConfig
+    ) -> Any:
+        """Run the guardrail checkpoint for one call; ``None`` means proceed.
+
+        A fault INSIDE the guardrail fails closed for bash (the one tool whose
+        calls it classifies) and open for every other tool: refusing every
+        ``read`` because a user rule file is broken would be a harness outage,
+        while refusing a shell command the checkpoint could not vet is the
+        posture the incident asked for.
+        """
+        from local_operator.guardrails import check as guard_check
+
+        tool = item.tool
+        if tool is None:
+            return None
+        tool_context = context.tool_context
+        try:
+            authorised = bool(
+                config.guard_override_authorised and config.guard_override_authorised()
+            )
+            settings = guard_check.read_settings(override_authorised=authorised)
+            env: Mapping[str, str] = {}
+            scratchpad: str | None = None
+            if tool.name == "bash":
+                from local_operator.tools.builtin import bash_guard_environment
+
+                env, scratchpad = bash_guard_environment(tool_context)
+            ctx = guard_check.CallContext(
+                cwd=(tool_context.cwd if tool_context is not None else None) or os.getcwd(),
+                env=env,
+                scratchpad=scratchpad,
+                session_id=(tool_context.session_id if tool_context is not None else "") or "",
+                user_request=guard_check.last_user_request(context.messages),
+                intent=item.intent or "",
+            )
+            return await guard_check.check_tool_call(
+                tool.name, item.args, ctx, judge=config.guard_judge, settings=settings
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.error("guardrail checkpoint raised for %s", tool.name, exc_info=True)
+            if tool.name != "bash":
+                return None
+            return guard_check.GuardOutcome(
+                blocked=True,
+                text=f"{guard_check.BLOCK_MARKER} (error): the safety check failed, so this "
+                "command was not run. Ask the user how to proceed.",
+                rule="guardrail-error",
+            )
 
     @staticmethod
     def _synthetic_result(

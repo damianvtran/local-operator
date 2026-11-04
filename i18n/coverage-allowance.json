@@ -181,6 +181,139 @@
         "wire.settings.account_policy.reset_soonest.description",
         "wire.settings.account_policy.reset_soonest.label"
       ]
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.guardrails",
+      "reason": "New guardrail settings rows (dangerous-delete guardrail PR). Drafted translations exist but AGENTS.md requires an independent auditor before a ledger row ships, and shipping catalogues without ledger rows would unship the locale; English fallback is in effect until the audit wave lands (docs/I18N.md).",
+      "owner": "lopdev guardrails i18n audit wave",
+      "payoff": "2026-11-18",
+      "missing": [
+        "wire.guardrails.critical_override.help",
+        "wire.guardrails.critical_override.label",
+        "wire.guardrails.enabled.help",
+        "wire.guardrails.enabled.label",
+        "wire.guardrails.judge_timeout_s.help",
+        "wire.guardrails.judge_timeout_s.label",
+        "wire.guardrails.rules_dir.help",
+        "wire.guardrails.rules_dir.label",
+        "wire.guardrails.section.description",
+        "wire.guardrails.section.title"
+      ]
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.guardrails",
+      "reason": "New guardrail settings rows (dangerous-delete guardrail PR). Drafted translations exist but AGENTS.md requires an independent auditor before a ledger row ships, and shipping catalogues without ledger rows would unship the locale; English fallback is in effect until the audit wave lands (docs/I18N.md).",
+      "owner": "lopdev guardrails i18n audit wave",
+      "payoff": "2026-11-18",
+      "missing": [
+        "wire.guardrails.critical_override.help",
+        "wire.guardrails.critical_override.label",
+        "wire.guardrails.enabled.help",
+        "wire.guardrails.enabled.label",
+        "wire.guardrails.judge_timeout_s.help",
+        "wire.guardrails.judge_timeout_s.label",
+        "wire.guardrails.rules_dir.help",
+        "wire.guardrails.rules_dir.label",
+        "wire.guardrails.section.description",
+        "wire.guardrails.section.title"
+      ]
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.guardrails",
+      "reason": "New guardrail settings rows (dangerous-delete guardrail PR). Drafted translations exist but AGENTS.md requires an independent auditor before a ledger row ships, and shipping catalogues without ledger rows would unship the locale; English fallback is in effect until the audit wave lands (docs/I18N.md).",
+      "owner": "lopdev guardrails i18n audit wave",
+      "payoff": "2026-11-18",
+      "missing": [
+        "wire.guardrails.critical_override.help",
+        "wire.guardrails.critical_override.label",
+        "wire.guardrails.enabled.help",
+        "wire.guardrails.enabled.label",
+        "wire.guardrails.judge_timeout_s.help",
+        "wire.guardrails.judge_timeout_s.label",
+        "wire.guardrails.rules_dir.help",
+        "wire.guardrails.rules_dir.label",
+        "wire.guardrails.section.description",
+        "wire.guardrails.section.title"
+      ]
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.guardrails",
+      "reason": "New guardrail settings rows (dangerous-delete guardrail PR). Drafted translations exist but AGENTS.md requires an independent auditor before a ledger row ships, and shipping catalogues without ledger rows would unship the locale; English fallback is in effect until the audit wave lands (docs/I18N.md).",
+      "owner": "lopdev guardrails i18n audit wave",
+      "payoff": "2026-11-18",
+      "missing": [
+        "wire.guardrails.critical_override.help",
+        "wire.guardrails.critical_override.label",
+        "wire.guardrails.enabled.help",
+        "wire.guardrails.enabled.label",
+        "wire.guardrails.judge_timeout_s.help",
+        "wire.guardrails.judge_timeout_s.label",
+        "wire.guardrails.rules_dir.help",
+        "wire.guardrails.rules_dir.label",
+        "wire.guardrails.section.description",
+        "wire.guardrails.section.title"
+      ]
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.guardrails",
+      "reason": "New guardrail settings rows (dangerous-delete guardrail PR). Drafted translations exist but AGENTS.md requires an independent auditor before a ledger row ships, and shipping catalogues without ledger rows would unship the locale; English fallback is in effect until the audit wave lands (docs/I18N.md).",
+      "owner": "lopdev guardrails i18n audit wave",
+      "payoff": "2026-11-18",
+      "missing": [
+        "wire.guardrails.critical_override.help",
+        "wire.guardrails.critical_override.label",
+        "wire.guardrails.enabled.help",
+        "wire.guardrails.enabled.label",
+        "wire.guardrails.judge_timeout_s.help",
+        "wire.guardrails.judge_timeout_s.label",
+        "wire.guardrails.rules_dir.help",
+        "wire.guardrails.rules_dir.label",
+        "wire.guardrails.section.description",
+        "wire.guardrails.section.title"
+      ]
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.guardrails",
+      "reason": "New guardrail settings rows (dangerous-delete guardrail PR). Drafted translations exist but AGENTS.md requires an independent auditor before a ledger row ships, and shipping catalogues without ledger rows would unship the locale; English fallback is in effect until the audit wave lands (docs/I18N.md).",
+      "owner": "lopdev guardrails i18n audit wave",
+      "payoff": "2026-11-18",
+      "missing": [
+        "wire.guardrails.critical_override.help",
+        "wire.guardrails.critical_override.label",
+        "wire.guardrails.enabled.help",
+        "wire.guardrails.enabled.label",
+        "wire.guardrails.judge_timeout_s.help",
+        "wire.guardrails.judge_timeout_s.label",
+        "wire.guardrails.rules_dir.help",
+        "wire.guardrails.rules_dir.label",
+        "wire.guardrails.section.description",
+        "wire.guardrails.section.title"
+      ]
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.guardrails",
+      "reason": "New guardrail settings rows (dangerous-delete guardrail PR). Drafted translations exist but AGENTS.md requires an independent auditor before a ledger row ships, and shipping catalogues without ledger rows would unship the locale; English fallback is in effect until the audit wave lands (docs/I18N.md).",
+      "owner": "lopdev guardrails i18n audit wave",
+      "payoff": "2026-11-18",
+      "missing": [
+        "wire.guardrails.critical_override.help",
+        "wire.guardrails.critical_override.label",
+        "wire.guardrails.enabled.help",
+        "wire.guardrails.enabled.label",
+        "wire.guardrails.judge_timeout_s.help",
+        "wire.guardrails.judge_timeout_s.label",
+        "wire.guardrails.rules_dir.help",
+        "wire.guardrails.rules_dir.label",
+        "wire.guardrails.section.description",
+        "wire.guardrails.section.title"
+      ]
     }
   ]
 }

@@ -131,6 +131,10 @@ def test_shipped_wire_namespaces_exist() -> None:
         # receipts are new copy, and adding them to a namespace fr/hi/vi CARRY
         # would invalidate those locales' ledger rows.
         "wire.sessions",
+        # The guardrail settings rows (dangerous-delete guardrail PR): their own
+        # English-only namespace, the `wire.host_speed` shape, so no audited
+        # catalogue's hash moves; the seven locales land with their audit wave.
+        "wire.guardrails",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}

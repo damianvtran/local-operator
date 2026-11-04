@@ -3875,6 +3875,18 @@ class LoopConfig(BaseModel):
     # counted boundary; this scalar alone cannot authorize an input budget.
     get_context_tokens_hint: Callable[[], int | None] | None = Field(default=None, exclude=True)
 
+    # The pre-execution guardrail's forked judge (``local_operator.guardrails``):
+    # ``(system, user) -> answer`` as ONE context-free model call, no tools and
+    # no conversation. Added after the 2026-11-04 state-root deletion: calls the
+    # classifier ranks dangerous-but-plausible are reviewed here before they
+    # run. ``None`` (a host without wiring) means every such call is BLOCKED —
+    # fail closed; CRITICAL calls are refused without consulting it at all.
+    guard_judge: Callable[[str, str], Awaitable[str]] | None = Field(default=None, exclude=True)
+    # Whether an operator — not the model — authorised ``guardrails.
+    # critical_override`` in this process (``harness.approval.
+    # loosening_is_authorised``). Read per call; ``None`` means never.
+    guard_override_authorised: Callable[[], bool] | None = Field(default=None, exclude=True)
+
     interrupt_mode: Literal["immediate", "wait"] = "wait"
     # Epoch-ms deadline for the whole run, if any.
     deadline: float | None = None

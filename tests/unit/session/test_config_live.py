@@ -314,6 +314,13 @@ def _search_interception(watcher: ConfigWatcher) -> tuple[bool, bool, bool]:
     return _search_interception_config()
 
 
+def _guardrails(_watcher: ConfigWatcher, *, authorised: bool = True) -> Any:
+    """What the guardrail checkpoint resolves per checked call (``read_settings``)."""
+    from local_operator.guardrails.check import read_settings
+
+    return read_settings(override_authorised=authorised)
+
+
 def _child_knowledge_slimming(_watcher: ConfigWatcher) -> bool:
     """What a child build resolves for ``subagents.slim_child_knowledge``.
 
@@ -753,6 +760,20 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     # ``tools.search_interception.*`` is read per ``bash`` call through a fresh
     # ConfigManager (``builtin._search_interception_config``), so an edit lands on
     # the next command — observed through that same reader, not the raw mapping.
+    # ``guardrails.*``: read per checked call by ``guardrails.check.read_settings``.
+    # The critical override is a LOOSENING, so a write from another process (this
+    # probe's shape) reaches the file but NOT the session's authorisation flag:
+    # the probe observes the reader with the flag the session actually holds.
+    "guardrails.enabled": (False, lambda s, w: _guardrails(w).enabled),
+    "guardrails.judge_timeout_s": (7.5, lambda s, w: _guardrails(w).judge_timeout_s),
+    "guardrails.rules_dir": ("/tmp/rules-probe", lambda s, w: str(_guardrails(w).rules_dir)),
+    "guardrails.critical_override": (
+        True,
+        lambda s, w: (
+            _guardrails(w, authorised=True).critical_override
+            and not s._guard_override_authorised
+        ),
+    ),
     "tools.search_interception.enabled": (False, lambda s, w: _search_interception(w)[0]),
     "tools.search_interception.block": (False, lambda s, w: _search_interception(w)[1]),
     "tools.search_interception.rg_excludes": (False, lambda s, w: _search_interception(w)[2]),
@@ -2187,3 +2208,56 @@ async def test_the_model_default_notice_is_change_based(tmp_path, monkeypatch) -
     assert notices == [
         "keeping test/m; default changed for new sessions. /model saved adopts it here"
     ], notices
+
+
+@pytest.mark.asyncio
+async def test_critical_override_needs_an_operator_write_in_this_process(tmp_path) -> None:
+    """``guardrails.critical_override`` loosens a safety gate, so only a write
+    delivered as ``source="local"`` (the settings facade in this process) arms the
+    session's authorisation; a file edit from anywhere else never does, and a
+    later unattributed delivery disarms it again."""
+    from local_operator.config_watch import ConfigChange
+
+    session = make_session(tmp_path, RebindableStream({}))
+    try:
+        assert session._guard_override_authorised is False
+        on = {"guardrails": {"critical_override": True}}
+        key = frozenset({"guardrails.critical_override"})
+        session._apply_config_change(ConfigChange(values=on, changed_keys=key, source="disk"))
+        assert session._guard_override_authorised is False
+        session._apply_config_change(ConfigChange(values=on, changed_keys=key, source="local"))
+        assert session._guard_override_authorised is True
+        off = {"guardrails": {"critical_override": False}}
+        session._apply_config_change(ConfigChange(values=off, changed_keys=key, source="disk"))
+        assert session._guard_override_authorised is False
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_guard_judge_is_one_context_free_request(tmp_path) -> None:
+    """The guardrail judge never ships the conversation: one system block, one
+    user message, no tools — and it is wired onto every turn's LoopConfig."""
+    seen: list[ChatRequest] = []
+
+    class Recording(RebindableStream):
+        def __call__(self, request: ChatRequest, signal: AbortSignal | None):
+            seen.append(request)
+
+            async def gen():
+                yield StreamTextDelta(delta="ALLOW")
+                yield StreamEndEvent(stop_reason="stop")
+
+            return gen()
+
+    session = make_session(tmp_path, Recording({}))
+    try:
+        answer = await session._guard_judge("SYSTEM", "BRIEF")
+        assert answer == "ALLOW"
+        (request,) = seen
+        assert request.purpose == "guardrail"
+        assert request.system_blocks == ["SYSTEM"]
+        assert [m.text for m in request.messages] == ["BRIEF"]
+        assert request.tools == []
+    finally:
+        await session.dispose()

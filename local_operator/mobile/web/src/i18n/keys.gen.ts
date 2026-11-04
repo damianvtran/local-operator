@@ -704,6 +704,16 @@ export type MessageParams = {
   "wire.exec.tools_unreachable": { "names": string; "count": string };
   "wire.exec.turn_did_not_complete": undefined;
   "wire.exec.waiting_on_you": undefined;
+  "wire.guardrails.critical_override.help": undefined;
+  "wire.guardrails.critical_override.label": undefined;
+  "wire.guardrails.enabled.help": undefined;
+  "wire.guardrails.enabled.label": undefined;
+  "wire.guardrails.judge_timeout_s.help": undefined;
+  "wire.guardrails.judge_timeout_s.label": undefined;
+  "wire.guardrails.rules_dir.help": undefined;
+  "wire.guardrails.rules_dir.label": undefined;
+  "wire.guardrails.section.description": undefined;
+  "wire.guardrails.section.title": undefined;
   "wire.host_speed.retire_below_tps.help": undefined;
   "wire.host_speed.retire_below_tps.label": undefined;
   "wire.memory.capture.help": undefined;
