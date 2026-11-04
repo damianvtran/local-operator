@@ -130,18 +130,25 @@ PROBE_PYTHON = "/opt/bench/python/cpython-3.14-linux-x86_64-gnu/bin/python3.14"
 async def _preinference_checks(agent, environment) -> None:
     """Gold isolation + egress fence, as root, before any model request.
 
-    Without driver-provided inputs (BENCH_GOLD_DIGESTS, BENCH_GATE_PORTS) this
-    refuses: a paid trial must never start without both proofs. The JSON
+    Without driver-provided inputs (BENCH_GOLD_DIGESTS, BENCH_GATE_PORTS,
+    BENCH_EGRESS_CANARY_PORT) this refuses: a paid trial must never start
+    without both proofs. The canary is the driver's run-owned OPEN host
+    listener; it must be unreachable from ``main`` (R6 F16). The JSON
     results are kept on the host beside the agent logs.
     """
     digests = os.environ.get("BENCH_GOLD_DIGESTS", "")
     ports = os.environ.get("BENCH_GATE_PORTS", "")
-    if not digests or not ports or not all(p.isdigit() for p in ports.split(",")):
-        raise ValueError("BENCH_GOLD_DIGESTS and BENCH_GATE_PORTS are required before inference")
+    canary = os.environ.get("BENCH_EGRESS_CANARY_PORT", "")
+    if (not digests or not ports or not canary.isdigit()
+            or not all(p.isdigit() for p in ports.split(","))):
+        raise ValueError(
+            "BENCH_GOLD_DIGESTS, BENCH_GATE_PORTS and BENCH_EGRESS_CANARY_PORT are required "
+            "before inference"
+        )
     results = {}
     for check, args in (
         ("isolation", digests.split(",")),
-        ("egress", ports.split(",")),
+        ("egress", ["--canary", canary, *ports.split(",")]),
     ):
         result = await environment.exec(
             command=shlex.join([PROBE_PYTHON, f"{SUPPORT}/gold_probe.py", check, *args]),

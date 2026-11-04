@@ -134,6 +134,25 @@ def verify_imports(overlay: Path = OVERLAY) -> None:
                 raise SystemExit("module imported outside the overlay: " + name)
 
 
+def export_overlay_path() -> None:
+    """PREPEND the overlay to ``PYTHONPATH`` for LoP's tool children (R6 F18).
+
+    WHY PYTHONPATH (not only sys.path): LoP's own re-launches of
+    ``/opt/bench/lop/bin/lop`` (forks, subagents) must also import the
+    overlay, never the unreleased candidate in the venv's site-packages; this
+    is the method the overlay was qualified with (native-first-wire v2).
+
+    SCOPE: this process's environment only, so it reaches LoP and the tool
+    processes LoP spawns -- never Harbor, the verifier or other harnesses.
+    Prepending keeps an image's own entries (multi-source-data-merger sets
+    ``PYTHONPATH=/app``). Recorded side effect: a task Python started by a
+    LoP tool also sees the overlay (``local_operator`` + its dist-info).
+    """
+    overlay = str(OVERLAY)
+    rest = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p and p != overlay]
+    os.environ["PYTHONPATH"] = os.pathsep.join([overlay, *rest])
+
+
 def main() -> None:
     require_edge_environment()
     verify_overlay()
@@ -141,13 +160,7 @@ def main() -> None:
     # come from the frozen /opt/bench/lop venv this interpreter belongs to.
     if sys.path[:1] != [str(OVERLAY)]:
         sys.path.insert(0, str(OVERLAY))
-    # PYTHONPATH (not only sys.path) so LoP's own re-launches of
-    # ``/opt/bench/lop/bin/lop`` (forks, subagents) also import the overlay,
-    # never the unreleased candidate in the venv's site-packages. This is the
-    # method the overlay was qualified with (native-first-wire v2). Side effect,
-    # recorded rather than hidden: a task's Python tool also sees the overlay
-    # directory on sys.path; it holds only local_operator + its dist-info.
-    os.environ["PYTHONPATH"] = str(OVERLAY)
+    export_overlay_path()
     verify_imports()
     sys.argv = ["lop", *sys.argv[1:]]
     runpy.run_module("local_operator.cli", run_name="__main__")

@@ -42,6 +42,10 @@ import urllib.request
 from pathlib import Path
 from typing import TypedDict
 
+# Every docker call goes through the rig's pull guard (R6 F17); egress.py is a
+# sibling, importable because this script runs from its own directory.
+from egress import run_docker
+
 HERE = Path(__file__).resolve().parent
 TASKS = Path(os.environ.get("CODING_TASK_ROOT", "tasks/terminal-bench-2-1")).resolve()
 OUTPUT = Path(os.environ.get("CODING_ORACLE_OUTPUT", "oracle-output")).resolve()
@@ -178,7 +182,7 @@ def run_oracle(name: str) -> _OracleResult:
 
 
 def image_digest(image: str) -> str | None:
-    p = subprocess.run(
+    p = run_docker(
         ["docker", "image", "inspect", image, "--format", "{{json .RepoDigests}}"],
         capture_output=True,
         text=True,
@@ -193,7 +197,7 @@ def image_digest(image: str) -> str | None:
 def drop_image(image: str) -> None:
     # Remove only this task image. A global prune could remove another lane's
     # unused-but-needed image; Docker Desktop trims the freed blocks itself.
-    subprocess.run(["docker", "rmi", image], capture_output=True, check=True)
+    run_docker(["docker", "rmi", image], capture_output=True, check=True)
 
 
 def main() -> None:

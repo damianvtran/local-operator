@@ -21,6 +21,7 @@ import socket
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
@@ -69,7 +70,8 @@ class LauncherTests(unittest.TestCase):
 
     def check(self, env):
         with patch.object(self.launch, "CA_BUNDLE", str(self.ca)):
-            env = {k: (str(self.ca) if v == "/run/bench-ca/edge-ca.pem" else v) for k, v in env.items()}
+            env = {k: (str(self.ca) if v == "/run/bench-ca/edge-ca.pem" else v)
+                   for k, v in env.items()}
             self.launch.require_edge_environment(env)
 
     def test_dummy_key_equals_the_edge_dummy(self):
@@ -84,9 +86,11 @@ class LauncherTests(unittest.TestCase):
 
     def test_edge_environment_refusals(self):
         cases = {
-            "no proxy": self.env(HTTPS_PROXY=None, https_proxy=None, HTTP_PROXY=None, http_proxy=None),
-            "loopback edge": self.env(**{k: "http://r:n@127.0.0.1:1" for k in
-                                         ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")}),
+            "no proxy": self.env(HTTPS_PROXY=None, https_proxy=None, HTTP_PROXY=None,
+                                 http_proxy=None),
+            "loopback edge": self.env(**{
+                k: "http://r:n@127.0.0.1:1"
+                for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")}),
             "no identity": self.env(**{k: "http://bench-gate:41000" for k in
                                        ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")}),
             "lowercase empty": self.env(https_proxy=""),
@@ -135,6 +139,20 @@ class LauncherTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "not released revision"):
                 self.launch.verify_overlay(self._overlay(commit="0" * 40))
 
+    def test_overlay_prepends_to_existing_pythonpath(self):
+        # R6 F18: an image's own PYTHONPATH (multi-source-data-merger sets
+        # /app) must survive for LoP's tool children.
+        with patch.dict(os.environ, {"PYTHONPATH": "/app:/lib"}, clear=False):
+            self.launch.export_overlay_path()
+            self.assertEqual(os.environ["PYTHONPATH"],
+                             os.pathsep.join([str(self.launch.OVERLAY), "/app", "/lib"]))
+            self.launch.export_overlay_path()  # idempotent across re-launches
+            self.assertEqual(os.environ["PYTHONPATH"].split(os.pathsep).count(
+                str(self.launch.OVERLAY)), 1)
+        with patch.dict(os.environ, {}, clear=True):
+            self.launch.export_overlay_path()
+            self.assertEqual(os.environ["PYTHONPATH"], str(self.launch.OVERLAY))
+
     def test_main_checks_environment_before_importing_product(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(
             self.launch.runpy, "run_module", side_effect=AssertionError("product started")
@@ -153,6 +171,8 @@ class EgressTests(unittest.TestCase):
         o = self.override()
         main, gate = o["services"]["main"], o["services"][egress.GATE_SERVICE]
         self.assertEqual(main["networks"], [egress.INTERNAL_NETWORK])
+        # R6 F16: the name resolves in main, so the canary dial is a route test.
+        self.assertEqual(main["extra_hosts"], ["host.docker.internal:host-gateway"])
         self.assertIs(o["networks"][egress.INTERNAL_NETWORK]["internal"], True)
         self.assertNotIn("internal", o["networks"][egress.UPLINK_NETWORK])
         self.assertEqual(main["pull_policy"], "never")
@@ -161,6 +181,9 @@ class EgressTests(unittest.TestCase):
         self.assertEqual(gate["entrypoint"][2:], ["8787=8787", "8789=8789", "41000=41000"])
         self.assertTrue(all(v["read_only"] for v in gate["volumes"]))
         self.assertEqual(gate["cap_drop"], ["ALL"])
+        # R6 F16: main resolves the host gateway NAME (an /etc/hosts line, no
+        # route) so the egress canary tests routing, not DNS.
+        self.assertEqual(main["extra_hosts"], ["host.docker.internal:host-gateway"])
 
     def test_override_refusals(self):
         for bad in ([], [0], [70000], [8787, 8787], [True]):
@@ -172,23 +195,76 @@ class EgressTests(unittest.TestCase):
             egress.compose_override("../x", [1], self.IMAGE, Path("/s"), Path("/t"))
 
     def test_no_implicit_pull_guard(self):
-        ok = ["docker", "run", "--rm", "--pull", "never", "--platform", "linux/amd64", "img"]
+        ok = ["docker", "run", "--pull", "never", "--rm", "--platform", "linux/amd64", "img"]
+        # Rig convention: --pull never is the FIRST option after the verb.
         self.assertEqual(egress.require_no_implicit_pull(ok), ok)
-        egress.require_no_implicit_pull(["docker", "run", "--pull=never", "img"])
+        for good in (
+            ["docker", "run", "--pull=never", "img"],
+            ["docker", "--context", "x", "run", "--pull", "never", "img"],
+            ["docker", "-H", "unix:///s", "container", "create", "--pull=never", "img"],
+            ["docker", "compose", "-f", "a.yml", "up", "--pull", "never", "-d"],
+            ["docker", "rmi", "img"],
+            ["docker", "image", "inspect", "img"],
+            ["docker", "network", "connect", "n", "c"],
+        ):
+            with self.subTest(good):
+                egress.require_no_implicit_pull(good)
         for bad in (
             ["docker", "run", "--platform", "linux/amd64", "mongo:7.0"],  # the incident
             ["docker", "run", "img"],
             ["docker", "create", "img"],
             ["docker", "run", "--pull", "missing", "img"],
+            ["docker", "run", "--pull"],  # no value: ValueError, not IndexError
+            ["docker", "run", "img", "--pull", "never"],  # after the image = container argv
+            ["docker", "run", "--init", "img", "--pull", "never"],  # arity cannot be guessed
+            ["docker", "run", "--rm", "--pull", "never", "img"],  # rig rule: --pull first
             ["docker", "image", "inspect", "--platform", "linux/amd64", "img"],
+            # R6 F17 / P17: global options before the verb hid it.
+            ["docker", "--context", "x", "run", "img"],
+            ["docker", "-H", "unix:///s", "create", "img"],
+            ["docker", "-c", "x", "container", "run", "img"],
+            ["docker", "--unknown-global", "x", "run", "--pull", "never", "img"],
+            ["docker", "compose", "up"],
+            ["docker", "compose", "-p", "x", "run", "svc"],
+            ["docker", "compose", "create", "--pull", "always"],
+            ["docker", "compose", "pull"],
+            ["docker", "pull", "img"],  # only the driver's explicit, disk-gated pull
+            ["docker", "image", "pull", "img"],
+            ["docker", "build", "."],
+            ["podman", "run", "img"],
         ):
             with self.subTest(bad), self.assertRaises(ValueError):
                 egress.require_no_implicit_pull(bad)
+        egress.require_no_implicit_pull(["docker", "pull", "img"], explicit_pull=True)
+
+    def test_every_rig_docker_call_goes_through_the_guard(self):
+        # R6 F17: the guard existed only in tests. Any subprocess call whose
+        # argv literal starts with "docker" must be egress.run_docker instead.
+        for name in ("driver.py", "bench_verifier.py", "oracle_sweep.py"):
+            tree = ast.parse((HERE / name).read_text())
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not node.args:
+                    continue
+                first = node.args[0]
+                if (isinstance(first, ast.List) and first.elts
+                        and isinstance(first.elts[0], ast.Constant)
+                        and first.elts[0].value == "docker"):
+                    func = ast.unparse(node.func)
+                    self.assertIn(func, ("egress.run_docker", "run_docker"), f"{name}: {func}")
+
+    def test_run_docker_refuses_before_spawning(self):
+        with patch.object(egress.subprocess, "run", side_effect=AssertionError("spawned")):
+            with self.assertRaises(ValueError):
+                egress.run_docker(["docker", "--context", "x", "run", "img"])
 
     def test_support_mounts_read_only(self):
-        mounts = egress.support_mounts(Path("/s"), Path("/ca"))
-        self.assertEqual([m["target"] for m in mounts], [egress.SUPPORT, "/run/bench-ca"])
+        mounts = egress.support_mounts(Path("/s"), Path("/run-dir/edge-ca.pem"))
+        # R6 N6: the CA FILE only; the edge run dir also holds its request log.
+        self.assertEqual([m["target"] for m in mounts], [egress.SUPPORT, egress.CA_TARGET])
+        self.assertEqual(mounts[1]["source"], str(Path("/run-dir/edge-ca.pem").resolve()))
         self.assertTrue(all(m["read_only"] for m in mounts))
+        with self.assertRaises(ValueError):
+            egress.support_mounts(Path("/s"), Path("/run-dir"))
         for name in egress.SUPPORT_FILES:
             self.assertTrue((HERE / name).is_file())
 
@@ -206,29 +282,205 @@ class ProbeTests(unittest.TestCase):
             planted.unlink()
             self.assertEqual(gold_probe.isolation({digest}, root=tmp)["matched_paths"], [])
 
-    def test_egress_check_requires_denials_and_listed_gate_ports(self):
-        outcomes = {("bench-gate", 8787): "connected"}
+    def test_isolation_hashes_large_files_streaming(self):
+        # R6 F20 / P18: a 4 MiB + 1 copy of a gold file was skipped (ok=True).
+        blob = b"g" * (4 * 1024 * 1024 + 1)
+        with tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")) as tmp:
+            big = Path(tmp) / "big.bin"
+            big.write_bytes(blob)
+            hit = gold_probe.isolation({hashlib.sha256(blob).hexdigest()}, root=tmp)
+        self.assertEqual(hit["matched_paths"], [str(big)])
+        self.assertFalse(hit["ok"])
+        self.assertFalse(hasattr(gold_probe, "MAX_BYTES"))
 
+    CANARY = 41999
+
+    def _egress(self, outcomes, resolves="gaierror", ports=(8787,)):
         def fake(host, port):
-            return outcomes.get((host, port), "ConnectionRefusedError")
+            return outcomes.get((host, port), "ENETUNREACH")
 
         with patch.object(gold_probe, "_connects", side_effect=fake), patch.object(
-            gold_probe, "_resolves", return_value="gaierror"
+            gold_probe, "_resolves",
+            side_effect=lambda n: "resolved" if n == "host.docker.internal" else resolves,
         ):
-            self.assertTrue(gold_probe.egress([8787])["ok"])
-            self.assertFalse(gold_probe.egress([8787, 8789])["ok"])  # listed port dead
-            self.assertFalse(gold_probe.egress([])["ok"])
-            outcomes[("1.1.1.1", 443)] = "connected"  # a public route exists
-            self.assertFalse(gold_probe.egress([8787])["ok"])
-        with patch.object(gold_probe, "_connects", side_effect=fake), patch.object(
-            gold_probe, "_resolves", return_value="resolved"
-        ):
-            outcomes.pop(("1.1.1.1", 443))
-            self.assertFalse(gold_probe.egress([8787])["ok"])  # public DNS works
+            return gold_probe.egress(list(ports), canary_port=self.CANARY)
+
+    def test_egress_check_requires_denials_and_listed_gate_ports(self):
+        base = {("bench-gate", 8787): "connected", ("bench-gate", 1): "ECONNREFUSED",
+                ("bench-gate", self.CANARY): "ECONNREFUSED"}
+        self.assertTrue(self._egress(base)["ok"])
+        self.assertFalse(self._egress(base, ports=(8787, 8789))["ok"])  # listed port dead
+        self.assertFalse(self._egress(base, ports=())["ok"])
+        self.assertFalse(self._egress({**base, ("1.1.1.1", 443): "connected"})["ok"])
+        self.assertFalse(self._egress(base, resolves="resolved")["ok"])  # public DNS works
+
+    def test_egress_refused_is_a_route_not_a_denial(self):
+        # R6 F16: refused from an OPEN run-owned host port proves a route exists.
+        base = {("bench-gate", 8787): "connected", ("bench-gate", 1): "ECONNREFUSED",
+                ("bench-gate", self.CANARY): "ECONNREFUSED"}
+        for outcome in ("ECONNREFUSED", "connected", "ConnectionResetError"):
+            with self.subTest(outcome):
+                bad = {**base, ("host.docker.internal", self.CANARY): outcome}
+                self.assertFalse(self._egress(bad)["ok"])
+        for outcome in ("ENETUNREACH", "EHOSTUNREACH", "timeout"):
+            with self.subTest(outcome):
+                good = {**base, ("host.docker.internal", self.CANARY): outcome}
+                self.assertTrue(self._egress(good)["ok"])
+        self.assertFalse(self._egress({**base, ("1.1.1.1", 443): "ECONNREFUSED"})["ok"])
+        self.assertFalse(self._egress({**base, ("bench-gate", self.CANARY): "connected"})["ok"])
+
+    def test_egress_canary_needs_a_resolvable_host_gateway(self):
+        base = {("bench-gate", 8787): "connected", ("bench-gate", 1): "ECONNREFUSED",
+                ("bench-gate", self.CANARY): "ECONNREFUSED"}
+        with patch.object(gold_probe, "_connects",
+                          side_effect=lambda h, p: base.get((h, p), "ENETUNREACH")), \
+                patch.object(gold_probe, "_resolves", return_value="gaierror"):
+            # No host-gateway name: the canary never tested a route; not a pass.
+            self.assertFalse(gold_probe.egress([8787], canary_port=self.CANARY)["ok"])
+
+    def test_connects_classifies_by_errno(self):
+        import errno
+
+        cases = ((OSError(errno.ENETUNREACH, "x"), "ENETUNREACH"),
+                 (ConnectionRefusedError(errno.ECONNREFUSED, "x"), "ECONNREFUSED"),
+                 (TimeoutError(), "timeout"), (socket.gaierror(-2, "x"), "gaierror"))
+        for exc, want in cases:
+            with self.subTest(want), patch.object(socket, "create_connection", side_effect=exc):
+                self.assertEqual(gold_probe._connects("h", 1), want)
+
+    def _proc(self, root: Path, pid: int, cmd: bytes, inodes=(), state="S"):
+        d = root / str(pid)
+        (d / "fd").mkdir(parents=True)
+        (d / "cmdline").write_bytes(cmd)
+        (d / "status").write_text(f"Name:\tx\nState:\t{state} (sleeping)\n")
+        for i, inode in enumerate(inodes):
+            os.symlink(f"socket:[{inode}]", d / "fd" / str(i + 3))
+
+    def test_quiescence_records_survivors_with_hash_and_listening_ports(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")) as tmp:
+            root = Path(tmp)
+            (root / "net").mkdir()
+            # /proc/net/tcp layout: local "addr:port" hex, st 0A = LISTEN, inode col 9.
+            tail = " 00000000:00000000 00:00000000 00000000     0        0 {} 1\n"
+            hdr = "  sl  local_address rem_address   st ... inode\n"
+            (root / "net" / "tcp").write_text(
+                hdr + "   0: 00000000:1F90 00000000:0000 0A" + tail.format(777)
+                + "   1: 0100007F:14D0 0100007F:9999 01" + tail.format(778))
+            zero6 = "0" * 32
+            (root / "net" / "tcp6").write_text(
+                hdr + f"   0: {zero6}:14D0 {zero6}:0000 0A" + tail.format(779))
+            self._proc(root, 1, b"sleep\0infinity\0")
+            self._proc(root, 40, b"nginx: master process\0", inodes=(777, 778))
+            self._proc(root, 41, b"python\0server.py\0", inodes=(779,))
+            self._proc(root, 42, b"defunct\0", state="Z")
+            result = gold_probe.quiescence(proc_root=root)
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["survivors"],
+            [{"pid": 40, "cmd_sha256": hashlib.sha256(b"nginx: master process").hexdigest(),
+              "listening_ports": [8080]},
+             {"pid": 41, "cmd_sha256": hashlib.sha256(b"python server.py").hexdigest(),
+              "listening_ports": [5328]}],
+        )
+        # Hash only: the probe never echoes a command line (it may carry a value).
+        self.assertNotIn("server.py", json.dumps(result))
 
     def test_cli_usage(self):
         self.assertEqual(gold_probe.main(["egress", "x"]), 2)
+        self.assertEqual(gold_probe.main(["egress", "8787"]), 2)  # canary required
+        self.assertEqual(gold_probe.main(["egress", "--canary", "x", "8787"]), 2)
         self.assertEqual(gold_probe.main([]), 2)
+
+
+def _load_verifier(responses):
+    """bench_verifier against a stand-in Harbor base; ``responses`` are probe stdouts."""
+    calls = []
+
+    class _Base:
+        def __init__(self, environment, trial_paths):
+            self.environment, self.trial_paths = environment, trial_paths
+
+        async def verify(self):
+            calls.append("stock-verify")
+            return "graded"
+
+    class _Env:
+        session_id = "sess"
+
+        async def exec(self, command, user=None):
+            calls.append(command)
+            return type("R", (), {"stdout": responses.pop(0), "return_code": 0})()
+
+    real = importlib.import_module
+
+    def fake(name, *a, **k):
+        if name == "harbor.verifier.verifier":
+            return type("M", (), {"Verifier": _Base})
+        return real(name, *a, **k)
+
+    with patch("importlib.import_module", side_effect=fake):
+        spec = importlib.util.spec_from_file_location("coding_bench_verifier",
+                                                      HERE / "bench_verifier.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    return module, _Env(), calls
+
+
+class BenchVerifierTests(unittest.TestCase):
+    SURVIVOR = {"pid": 40, "cmd_sha256": "c" * 64, "listening_ports": [8080]}
+
+    def _verify(self, isolation_ok=True, survivors=()):
+        quiet = {"check": "quiescence", "ok": not survivors, "survivors": list(survivors)}
+        iso = {"check": "gold-isolation", "ok": isolation_ok}
+        module, env, calls = _load_verifier([json.dumps(iso), json.dumps(quiet)])
+        tmp = tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD"))
+        self.addCleanup(tmp.cleanup)
+        paths = SimpleNamespace(verifier_dir=Path(tmp.name) / "verifier")
+        verifier = module.BenchVerifier(env, paths)
+        with patch.object(module, "connect_uplink", return_value="cid"), patch.object(
+            module, "compose_project", return_value="proj"
+        ), patch.dict(os.environ, {"BENCH_GOLD_DIGESTS": "a" * 64}):
+            try:
+                result = asyncio.run(verifier.verify())
+            except RuntimeError as exc:
+                result = exc
+        record = json.loads((paths.verifier_dir / "bench-isolation.json").read_text())
+        return result, record, calls
+
+    def test_survivors_are_recorded_flagged_and_never_killed(self):
+        # R6 F15: nginx-request-logging / kv-store-grpc need the agent's
+        # server alive at test time; grading follows Harbor's stock behaviour.
+        result, record, calls = self._verify(survivors=[self.SURVIVOR])
+        self.assertEqual(result, "graded")
+        self.assertEqual(calls[-1], "stock-verify")
+        self.assertFalse(any("kill" in c.lower() for c in calls if isinstance(c, str)))
+        self.assertEqual(len([c for c in calls if "quiescence" in c]), 1)
+        self.assertEqual(record["survivors"], [self.SURVIVOR])
+        self.assertEqual(record["flags"], ["agent-processes-survived-into-grading"])
+        self.assertTrue(record["graded"])
+        self.assertFalse(hasattr(self._module(), "KILL_SURVIVORS"))
+
+    def _module(self):
+        return _load_verifier([])[0]
+
+    def test_quiet_trial_has_no_flag(self):
+        result, record, _ = self._verify()
+        self.assertEqual(result, "graded")
+        self.assertEqual(record["flags"], [])
+
+    def test_gold_isolation_failure_still_refuses_grading(self):
+        result, record, calls = self._verify(isolation_ok=False, survivors=[self.SURVIVOR])
+        self.assertIsInstance(result, RuntimeError)
+        self.assertNotIn("stock-verify", calls)
+        self.assertFalse(record["graded"])
+        self.assertEqual(record["survivors"], [self.SURVIVOR])
+
+    def test_no_per_task_required_services_allowlist(self):
+        for name in ("bench_verifier.py", "gold_probe.py", "driver.py"):
+            text = (HERE / name).read_text().lower()
+            self.assertNotIn("required_services", text, name)
+            self.assertNotIn("required services", text, name)
 
 
 class GateRelayTests(unittest.TestCase):
@@ -271,7 +523,7 @@ class DriverContainerTests(unittest.TestCase):
                      NO_PROXY="127.0.0.1,localhost,::1", RADIENT_API_KEY="dummy")
         plan = driver.container_plan(
             "run1", "local-operator", EgressTests.IMAGE, meter_port=8787, bridge_port=8789,
-            edge={"port": 41000, "env": child, "ca_dir": Path("/host")},
+            edge={"port": 41000, "env": child, "ca_file": Path("/host/edge-ca.pem")},
         )
         self.assertEqual(plan["ports"], [8787, 8789, 41000])
         self.assertEqual(plan["env"]["HTTPS_PROXY"], "http://run1:n@bench-gate:41000")
@@ -291,9 +543,46 @@ class DriverContainerTests(unittest.TestCase):
             driver.container_plan("r", "local-operator", "i", meter_port=1, bridge_port=2)
         with self.assertRaises(ValueError):
             driver.container_plan("r", "omp", "i", meter_port=1, bridge_port=2,
-                                  edge={"port": 3, "env": {}, "ca_dir": Path("/")})
+                                  edge={"port": 3, "env": {}, "ca_file": Path("/edge-ca.pem")})
         plan = driver.container_plan("r", "omp", "i", meter_port=8787, bridge_port=8789)
         self.assertEqual(plan["env"], {})
+
+    def test_edge_mount_is_the_ca_file(self):
+        # R6 N6: never the run dir (it holds edge-requests.jsonl).
+        src = (HERE / "driver.py").read_text()
+        self.assertIn('"ca_file": run_dir / "edge-ca.pem"', src)
+        self.assertNotIn('"ca_dir"', src)
+
+    def test_meter_is_the_single_budget_authority(self):
+        # R6 F19: budget_guard sat on no container route. One authority for
+        # both lanes: meter_proxy's ledger. No guard process, port or argument.
+        src = (HERE / "driver.py").read_text()
+        for gone in ("budget_guard", "8788", "container_guard_url", "container-guard-url"):
+            self.assertNotIn(gone, src, gone)
+        self.assertFalse((HERE / "budget_guard.py").exists())
+        names = {a.dest for a in driver.parser()._actions}
+        self.assertNotIn("container_guard_url", names)
+        self.assertIn("meter_current_run_file", names)
+
+    def test_codex_current_run_must_be_the_meters_file(self):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")) as tmp:
+            out = Path(tmp)
+            args = argparse.Namespace(output=out / "out", meter_current_run_file=out / "cr")
+            self.assertEqual(driver.current_run_file(args), (out / "cr").resolve())
+            for bad in (None, Path("relative")):
+                with self.subTest(bad), self.assertRaises(ValueError):
+                    driver.current_run_file(argparse.Namespace(output=out,
+                                                               meter_current_run_file=bad))
+
+    def test_egress_canary_is_a_run_owned_open_port_the_gate_never_forwards(self):
+        with driver.egress_canary() as port:
+            # Open on the host (connect succeeds), and outside the gate map.
+            with socket.create_connection(("127.0.0.1", port), timeout=2):
+                pass
+            plan = driver.container_plan("r", "omp", "i", meter_port=8787, bridge_port=8789)
+            self.assertNotIn(port, plan["ports"])
+        with self.assertRaises(OSError):
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
 
     def test_gold_digests_hash_only(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")) as tmp:

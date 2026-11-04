@@ -218,8 +218,8 @@ class DriverSafetyTests(unittest.TestCase):
                 "http://127.0.0.1:1",
                 "--translator-url",
                 "http://127.0.0.1:1",
-                "--container-guard-url",
-                "http://127.0.0.1:1",
+                "--meter-current-run-file",
+                str(Path(tmp) / "current_run"),
                 "--execute",
             ]
             for harness in driver.HARNESS:

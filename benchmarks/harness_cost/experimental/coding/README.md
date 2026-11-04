@@ -9,7 +9,7 @@ snapshot nor these offline checks establishes a working public coding run.
 
 ## Included and deliberately excluded
 
-Included: Python adapters/dispatcher/budget guard/Responses bridge/Local Operator
+Included: Python adapters/dispatcher/Responses bridge/Local Operator
 launcher/oracle selector, the incomplete subset metadata and the Codex model
 catalog. Task text, reference solutions, fixtures, runtime binaries, toolchains,
 logs, jobs, results, private profiles and credentials are **not included**.
@@ -28,14 +28,14 @@ not Codex as shipped. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 ## Cheap checks (no installation, network, Docker or model)
 
 ```sh
-python3 -B -m unittest -v test_guard
+python3 -B -m unittest -v test_guard test_driver_safety test_adapters test_lop_container
 python3 -B -c 'from pathlib import Path; [compile(p.read_text(), str(p), "exec") for p in Path(".").glob("*.py")]'
 python3 -B driver.py --help
 ```
 
-The stdlib-only tests exercise conservative budgets, corrupt ledgers, wrong
-routes at the accounting boundary, output-limit/model refusal, disk thresholds,
-frozen-file hashes and CLI refusal. They do **not** import Harbor, run ASGI,
+The stdlib-only tests exercise preflight refusals, disk thresholds, frozen-file
+hashes, CLI refusal and the container contracts (egress override, pull guard,
+gold/quiescence/egress probe, gate relay, verifier record). They do **not** import Harbor, run ASGI,
 start Docker, execute Linux runtimes or verify model-tool translation.
 
 ## External dependencies and paths
@@ -67,11 +67,12 @@ Responses translator is also separately provisioned; optional
 `CODING_TRANSLATOR_API_KEY` is read only from its host-side bridge environment.
 Never put a credential in URLs, CLI arguments, JSON attestations or logs.
 
-The host guard listens on loopback :8788; the bridge on loopback :8789. Ports
-must be free. `--container-guard-url` names the Docker-reachable mapping to that
-same guard (for example a Docker host gateway), not a direct model endpoint.
-Do not expose a bearerless guard beyond an isolated task network. The driver
-only owns/reaps the two processes it starts; it does not restart shared services.
+The lane's Codex bridge listens on loopback :8789 (must be free); containers
+reach it, the meter and the LoP edge only through the bench gate.
+`--meter-current-run-file` must be the meter's absolute `BENCH_CURRENT_RUN_FILE`:
+Codex rows are tagged from it, and a mismatch leaves the trial with no rows
+(recorded unverified, lane stops). The driver only owns/reaps the processes it
+starts (bridge, per-trial LoP edge); it does not restart shared services.
 
 ## Paid coding dispatch hard-blocked — evidence admission incomplete
 
@@ -120,21 +121,16 @@ hard hold; boolean assertions and arbitrary hashed text are insufficient:
   and payload changes fail. Freeze these only after independent review.
 
 Price bounds are **USD per million tokens**, not claims about current provider
-pricing. They must upper-bound the explicit tier's input/cache-write/read and
-output charges. The guard uses request UTF-8 bytes as a conservative text-token
-bound and requires a positive integer output cap on every forwarded POST. It
-rejects unknown models, multimodal inputs, unpriced routes and mismatched
-request service tiers. Helpers using an unpriced model are refused, not silently
-billed at the main model's rate. These restrictions may prevent a native harness
-from running; toolwire QA must demonstrate compatibility before freezing.
-
-Every outbound request reserves against **both trial and total USD caps** before
-forwarding, under an exclusive process lock. Reservations are atomic, durable,
-and **never automatically refunded** after a stream/error: this sacrifices
-capacity to avoid late-metering and restart gaps. The external ledger is the
-reservation source of truth, not a zeroed per-process counter. Corrupt or
-interrupted ledgers fail closed; reconcile deliberately outside a paid run.
-Measured `usage.cost` is reported separately; missing costs are never treated as
+pricing; they are preregistration bindings. **The external meter
+(`../meter_proxy.py`) is the single budget authority** for this lane, as for the
+desktop lane (R6 F19): every container route -- meter port, LoP edge, and Codex
+bridge -> translator -> meter -- ends at its ledger, which enforces the trial and
+campaign caps on durable reservations (`../ADAPTERS.md`). Start it with
+`BENCH_BUDGET_USD`/`BENCH_TRIAL_BUDGET_USD` equal to `--total-budget-usd` and
+`--trial-budget-usd`. The lane-local reservation guard that used to sit on
+:8788 was removed: after the bench gate it was on no container route, so it was
+a documented layer that bounded nothing. Measured `usage.cost` is reported
+separately; missing costs are never treated as
 free. Disk space is checked before pulls: >=21 GiB free and estimated >=17 GiB
 remaining (compressed bytes ×3 +512 MiB). Active trials stop below 17 GiB,
 protecting the **15 GiB hard floor**. Shared writers mean this is a guard, not a
@@ -152,7 +148,7 @@ without a separate resource lease. This publication task authorized no such run.
 
 ## Local Operator classifier gate remains pending
 
-The model-only budget guard does **not** bound Radient classifier spend or
+The model-only budget path does **not** bound Radient classifier spend or
 establish a classifier-envelope guarantee. The dispatcher **unconditionally
 rejects paid Local Operator trials**, even if arbitrary frozen JSON claims
 verification. Classifier reservation and complete accounting need executable

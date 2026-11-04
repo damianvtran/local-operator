@@ -1,4 +1,7 @@
-"""Offline negative controls for publication gates and durable budget accounting.
+"""Offline negative controls for publication gates and dispatcher refusals.
+
+Budget accounting is the external meter's (meter_proxy, tested with it): the
+lane-local reservation guard was removed in R6 F19, so its tests went with it.
 
 WHY: these stdlib-only tests must not bootstrap HTTP/native dependencies or send
 requests. They prove selected fail-closed properties, NOT Linux runtime, Docker,
@@ -17,7 +20,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import budget_guard
 import driver
 
 
@@ -26,74 +28,7 @@ class GuardTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(dir=os.environ.get("LOCAL_OPERATOR_SCRATCHPAD"))
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.ledger = self.root / "reservations.json"
         self.run_id = "coding__omp__tasktest__r60"
-
-    def budget(self, total: float = 1, trial: float = 0.6):
-        return budget_guard.Budget(self.ledger, total, trial, 4, 10, ["priced-model"])
-
-    def raw(self, **kwargs):
-        return json.dumps({"model": "priced-model", "max_tokens": 20000, **kwargs}).encode()
-
-    def test_trial_cap_is_independent_of_total(self):
-        guard = self.budget()
-        guard.reserve(self.run_id, self.raw())
-        guard.reserve(self.run_id, self.raw())
-        with self.assertRaises(OverflowError):
-            guard.reserve(self.run_id, self.raw())
-        guard.reserve("coding__dsh__tasktest__r60", self.raw())
-
-    def test_total_cap_includes_every_trial_and_restart(self):
-        guard = self.budget(total=0.5, trial=0.5)
-        guard.reserve(self.run_id, self.raw())
-        other = self.budget(total=0.5, trial=0.5)
-        other.reserve("coding__dsh__tasktest__r60", self.raw())
-        with self.assertRaises(OverflowError):
-            other.reserve("coding__omp__tasktest__r61", self.raw())
-
-    def test_missing_or_invalid_caps_fail_closed(self):
-        for value in (0, -1, float("nan"), float("inf")):
-            with self.subTest(value=value), self.assertRaises(ValueError):
-                self.budget(total=value)
-
-    def test_invalid_or_unpriced_requests_never_reserve(self):
-        guard = self.budget()
-        for raw in (
-            self.raw(model="other"),
-            self.raw(max_tokens=None),
-            self.raw(max_tokens=-1),
-            self.raw(max_tokens=True),
-            self.raw(max_tokens=1.5),
-            b"broken",
-            b"null",
-            self.raw(messages=[{"type": "image", "source": {"url": "example"}}]),
-        ):
-            with self.subTest(raw=raw), self.assertRaises((ValueError, AttributeError)):
-                guard.reserve(self.run_id, raw)
-        self.assertFalse(self.ledger.exists())
-        with self.assertRaises(ValueError):
-            guard.reserve("other-lane", self.raw())
-
-    def test_ledger_corruption_is_not_zero_spend(self):
-        for raw in (
-            '{"broken":',
-            '{"coding__omp__tasktest__r60": -1}',
-            '{"coding__omp__tasktest__r60": NaN}',
-            "[]",
-        ):
-            self.ledger.write_text(raw)
-            with self.assertRaises(ValueError):
-                self.budget()
-
-    def test_interrupted_reservation_and_wrong_tier_fail_closed(self):
-        self.ledger.with_suffix(".json.pending").write_text("{}")
-        with self.assertRaises(ValueError):
-            self.budget()
-        self.ledger.with_suffix(".json.pending").unlink()
-        with patch.dict(os.environ, {"CODING_BILLING_TIER": "explicit-tier"}):
-            with self.assertRaises(ValueError):
-                self.budget().reserve(self.run_id, self.raw(service_tier="priority"))
-        self.assertFalse(self.ledger.exists())
 
     def test_disk_thresholds(self):
         with patch.object(driver, "free_mb", return_value=21 * 1024):
@@ -168,7 +103,7 @@ class GuardTests(unittest.TestCase):
             rep=60,
             meter_url="http://localhost:8787",
             translator_url="http://localhost:4000",
-            container_guard_url="http://host.docker.internal:8788",
+            meter_current_run_file=self.root / "current_run",
             output=self.root / "out",
             preregistration="prereg",
             preregistration_sha256="p" * 64,

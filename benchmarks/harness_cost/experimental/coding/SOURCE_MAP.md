@@ -9,8 +9,8 @@ no absolute home path is embedded in runtime code.
 |---|---|---|
 | adapters.py | adapters.py | Ported; reviewed-source LOP label, shared loadout path, generated Dsh config |
 | driver.py | driver.py | Reworked portable dispatcher; frozen evidence/hashes, explicit auth/tier/caps |
-| budget_guard.py | budget_guard.py | Reworked durable conservative trial + total reservations |
-| test_guard.py | test_guard.py | Reworked stdlib offline guard/CLI negative controls |
+| budget_guard.py | (removed, R6 F19) | Superseded: the external meter is the single budget authority |
+| test_guard.py | test_guard.py | Reworked stdlib offline preflight/CLI negative controls (budget tests removed with the guard) |
 | codex_bridge.py | codex_bridge.py | Preserved translation; removed private YAML auth coupling |
 | lop_launch.py | lop_launch.py | Fail-closed refusal: LoP 500883ef is metered only via lop_edge |
 | oracle_sweep.py | oracle_sweep.py | Portable disk/external paths; explicit execution gate |

@@ -7,7 +7,15 @@ retained tool-wire capture admission are implemented; self-asserted hashes and
 verification booleans are not evidence. The remaining preflight is source-only.
 CONSTRAINTS: external task/toolchain/output paths, one image at a time, no host
 profiles/auth DB, no payloads here. An external meter owns OPENROUTER_API_KEY.
-Conservative durable reservations bound trial + total spend, including failures.
+
+Budget authority (R6 F19): the external ``meter_proxy`` ledger is the SINGLE
+spend authority for this lane, exactly as for the desktop lane -- every
+container route (meter port, LoP edge, Codex bridge -> translator -> meter)
+ends at it, and it enforces trial and campaign caps on durable reservations.
+The former lane-local reservation guard sat on no container route once the gate
+existed, so it was removed rather than kept as a silent second layer; the
+``--*-budget-usd`` and price arguments remain preregistration bindings that the
+operator must also give the meter (BENCH_BUDGET_USD, BENCH_TRIAL_BUDGET_USD).
 """
 
 from __future__ import annotations
@@ -23,13 +31,13 @@ import subprocess
 import sys
 import time
 import tomllib
-import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PUBLIC_LOADOUT = (HERE / "../../public_loadout").resolve()
 SOURCE_REVISION = "500883ef56ca504325ffd80c5b90bf2435d00e3f"  # released v0.94.22
+BRIDGE_PORT = 8789  # lane-owned Codex Responses bridge, loopback only
 HARNESS = {
     "claude-code": ("FrozenClaudeCode", "2.1.274"),
     "codex-best": ("FrozenCodex", "0.147.0"),
@@ -142,17 +150,49 @@ def gold_digests(task_dir):
     """SHA-256 of every host-side solution/ and tests/ file (hashes only, never bytes)."""
     task_dir = Path(task_dir)
     digests = sorted(
-        {digest(p) for sub in ("solution", "tests") for p in (task_dir / sub).rglob("*") if p.is_file()}
+        {digest(p) for sub in ("solution", "tests")
+         for p in (task_dir / sub).rglob("*") if p.is_file()}
     )
     if not digests:
         raise ValueError("task has no solution/tests files to guard")
     return digests
 
 
+@contextmanager
+def egress_canary():
+    """A run-owned, OPEN loopback listener the gate never forwards (R6 F16).
+
+    The in-container egress probe dials it via the host-gateway name: because
+    the port is known open, only a missing route can make that dial fail, so
+    "refused" is not mistaken for "fenced". Never accepted or read; the kernel
+    backlog completes a handshake, which is all a route test needs.
+    """
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(8)
+        yield sock.getsockname()[1]
+
+
+def current_run_file(args):
+    """The meter's ``BENCH_CURRENT_RUN_FILE``, named explicitly (R6 F19).
+
+    Codex reaches the meter through a translator with a fixed base URL, so the
+    meter tags its rows from this file. A mismatch is fail-closed, not silent:
+    the meter would tag another id, ``wire_rows`` finds no rows for this run
+    and the trial is recorded unverified and stops the lane.
+    """
+    path = getattr(args, "meter_current_run_file", None)
+    if path is None or not Path(path).is_absolute():
+        raise ValueError("--meter-current-run-file must be the meter's absolute path")
+    return Path(path).resolve()
+
+
 def container_plan(run_id, harness, image, *, meter_port, bridge_port, edge=None):
     """Harbor arguments that put one paid trial behind the gate (egress.py).
 
-    ``edge`` (LoP only) is ``{"port": int, "env": dict, "ca_dir": Path}`` from
+    ``edge`` (LoP only) is ``{"port": int, "env": dict, "ca_file": Path}`` from
     the host lop_edge; its loopback proxy URL is rewritten to the gate host on
     the SAME port, so the gate relays exactly the edge. Returns ``ports`` (the
     gate map), ``env`` (``--ae`` entries) and ``urls`` for the adapters.
@@ -173,7 +213,9 @@ def container_plan(run_id, harness, image, *, meter_port, bridge_port, edge=None
         proxy = urlsplit(child["HTTPS_PROXY"])
         if proxy.hostname != "127.0.0.1" or proxy.port != edge["port"]:
             raise ValueError("edge announced an unexpected proxy address")
-        gated = child["HTTPS_PROXY"].replace(f"@127.0.0.1:{edge['port']}", f"@{egress.GATE_SERVICE}:{edge['port']}")
+        gated = child["HTTPS_PROXY"].replace(
+            f"@127.0.0.1:{edge['port']}", f"@{egress.GATE_SERVICE}:{edge['port']}"
+        )
         for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
             child[key] = gated
         for key in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
@@ -205,7 +247,8 @@ def preflight(args):
     oracle = frozen(args.oracle_attestation, args.oracle_sha256)
     if not args.tasks.strip() or not args.harnesses.strip() or args.rep < 0:
         raise ValueError("nonempty task/harness lists and nonnegative rep needed")
-    for url in (args.meter_url, args.translator_url, args.container_guard_url):
+    current_run_file(args)
+    for url in (args.meter_url, args.translator_url):
         from urllib.parse import urlsplit
 
         parsed = urlsplit(url)
@@ -405,33 +448,25 @@ def stop(proc):
 
 @contextmanager
 def lane_services(args):
-    """Own only lane guard/bridge; external meter and translator are never killed."""
+    """Own only the lane's Codex bridge; external meter and translator are never killed.
+
+    No lane budget process: the meter is the single budget authority (module
+    docstring, R6 F19).
+    """
     block_paid_coding(args)
     import socket
 
-    for port in (8788, 8789):
-        with socket.socket() as sock:
-            sock.bind(("127.0.0.1", port))
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", BRIDGE_PORT))
     args.output.mkdir(parents=True, exist_ok=True)
     env = {
         **os.environ,
-        "CODING_RESERVATION_LEDGER": str(args.output / "reservations.json"),
-        "CODING_CURRENT_RUN": str(args.output / "current_run"),
-        "CODING_TOTAL_BUDGET_USD": str(args.total_budget_usd),
-        "CODING_TRIAL_BUDGET_USD": str(args.trial_budget_usd),
-        "CODING_INPUT_USD_PER_M": str(args.input_usd_per_m),
-        "CODING_OUTPUT_USD_PER_M": str(args.output_usd_per_m),
-        "CODING_PRICED_MODELS": args.model,
-        "CODING_METER_URL": args.meter_url,
-        "CODING_BRIDGE_URL": "http://127.0.0.1:8789",
         "BRIDGE_UPSTREAM": args.translator_url,
         "BRIDGE_LOG": str(args.output / "bridge.jsonl"),
-        "CODING_GUARD_PORT": "8788",
-        "CODING_BILLING_TIER": args.billing_tier,
     }
     processes, streams = [], []
     try:
-        for name, extra in (("codex_bridge", ["8789"]), ("budget_guard", [])):
+        for name, extra in (("codex_bridge", [str(BRIDGE_PORT)]),):
             stream = (args.output / (name + ".log")).open("a")
             streams.append(stream)
             processes.append(
@@ -447,14 +482,14 @@ def lane_services(args):
         for _ in range(40):
             if any(p.poll() is not None for p in processes):
                 raise RuntimeError("lane service failed setup; inspect local service logs")
+            # The bridge has no health route; a listening socket is readiness.
             try:
-                with urllib.request.urlopen("http://127.0.0.1:8788/health", timeout=1) as response:
-                    if json.load(response).get("ok"):
-                        break
+                with socket.create_connection(("127.0.0.1", BRIDGE_PORT), timeout=1):
+                    break
             except OSError:
                 time.sleep(0.25)
         else:
-            raise RuntimeError("guard startup failed")
+            raise RuntimeError("bridge startup failed")
         yield
     finally:
         for proc in processes:
@@ -482,7 +517,6 @@ def run_trial(args, harness, task):
     if job.exists() or (args.request_log.exists() and wire_rows(args.request_log, run_id)):
         raise ValueError("refusing reused run ID")
     cls, version = HARNESS[harness]
-    import egress
     from urllib.parse import urlsplit
 
     # Inside the container every host service is reached ONLY via the gate,
@@ -491,10 +525,16 @@ def run_trial(args, harness, task):
     edge = start_edge(args, run_id) if harness == "local-operator" else None
     try:
         plan = container_plan(
-            run_id, harness, args.image, meter_port=meter_port, bridge_port=8789,
-            edge=edge and {"port": edge["port"], "env": edge["env"], "ca_dir": edge["ca_dir"]},
+            run_id, harness, args.image, meter_port=meter_port, bridge_port=BRIDGE_PORT,
+            edge=edge and {"port": edge["port"], "env": edge["env"], "ca_file": edge["ca_file"]},
         )
-        return _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge)
+        # Held open for the whole Harbor run: the pre-inference probe dials it.
+        with egress_canary() as canary:
+            if canary in plan["ports"]:
+                raise ValueError("egress canary collides with a gate port")
+            return _run_gated_trial(
+                args, harness, task, run_id, job, cls, version, plan, edge, canary
+            )
     finally:
         stop_edge(edge)
 
@@ -524,7 +564,9 @@ def start_edge(args, run_id):
         stop(proc)
         raise ValueError("lop_edge exited during startup")
     announced = json.loads(line)
-    return {"proc": proc, "port": announced["port"], "env": announced["env"], "ca_dir": run_dir}
+    # The CA FILE only (R6 N6): run_dir also holds edge-requests.jsonl.
+    return {"proc": proc, "port": announced["port"], "env": announced["env"],
+            "ca_file": run_dir / "edge-ca.pem"}
 
 
 def stop_edge(edge):
@@ -539,7 +581,7 @@ def stop_edge(edge):
     stop(proc)
 
 
-def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge):
+def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge, canary):
     import egress
 
     support = args.output / "support" / run_id
@@ -551,7 +593,6 @@ def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge)
         egress.compose_override(run_id, plan["ports"], plan["image"], support, args.toolchain),
     )
     url = plan["urls"]["anthropic"]
-    base = url.rsplit("/r/", 1)[0]
     mounts = [
         {
             "type": "bind",
@@ -559,7 +600,7 @@ def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge)
             "target": "/opt/bench",
             "read_only": True,
         },
-        *egress.support_mounts(support, edge and edge["ca_dir"]),
+        *egress.support_mounts(support, edge and edge["ca_file"]),
     ]
     argv = [
         args.harbor,
@@ -611,7 +652,7 @@ def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge)
     if harness == "claude-code":
         argv += ["--ae", "ENABLE_TOOL_SEARCH=true", "--effort", "high"]
     if harness == "codex-best":
-        (args.output / "current_run").write_text(run_id)
+        current_run_file(args).write_text(run_id)  # the meter tags Codex rows from it
         config = {
             "model_provider": "bench",
             "model_catalog_json": "/tmp/bench-support/codex-model-catalog.json",
@@ -650,6 +691,7 @@ def _run_gated_trial(args, harness, task, run_id, job, cls, version, plan, edge)
         CODING_MODEL=args.model,
         BENCH_GOLD_DIGESTS=",".join(gold_digests(args.task_root / task["name"])),
         BENCH_GATE_PORTS=",".join(str(p) for p in plan["ports"]),
+        BENCH_EGRESS_CANARY_PORT=str(canary),
     )
     started, disk_stop = time.time(), False
     with (args.output / (run_id + ".log")).open("x") as stream:
@@ -716,12 +758,15 @@ def parser():
         "harnesses",
         "meter-url",
         "translator-url",
-        "container-guard-url",
     ):
         ap.add_argument("--" + name, required=True)
     for name in ("total-budget-usd", "trial-budget-usd", "input-usd-per-m", "output-usd-per-m"):
         ap.add_argument("--" + name, type=float, required=True)
     ap.add_argument("--rep", type=int, required=True)
+    ap.add_argument(
+        "--meter-current-run-file", type=Path, required=True,
+        help="absolute path of the meter's BENCH_CURRENT_RUN_FILE (Codex run tagging)",
+    )
     ap.add_argument("--subset", type=Path, default=HERE / "subset.json")
     ap.add_argument("--disk-volume", type=Path, default=Path.cwd())
     ap.add_argument("--harbor", default="harbor")
@@ -731,6 +776,8 @@ def parser():
 
 
 def main():
+    import egress
+
     ap = parser()
     args = ap.parse_args()
     try:
@@ -756,7 +803,8 @@ def main():
                 # The ONLY pull on this path: explicit, digest-pinned, behind a
                 # fresh disk gate. Compose services carry pull_policy: never.
                 check_space(args.disk_volume, task["hub_tag_full_size_bytes"])
-                subprocess.run(["docker", "pull", "--platform", "linux/amd64", image], check=True)
+                egress.run_docker(["docker", "pull", "--platform", "linux/amd64", image],
+                                  explicit_pull=True, check=True)
                 try:
                     config.write_text(replacement)
                     for harness in harnesses:
@@ -765,7 +813,7 @@ def main():
                 finally:
                     config.write_text(original)
                     # Only this lane's exact image, never global prune.
-                    subprocess.run(["docker", "rmi", image], check=True, capture_output=True)
+                    egress.run_docker(["docker", "rmi", image], check=True, capture_output=True)
     except (ValueError, OSError, KeyError, RuntimeError) as exc:
         ap.error(str(exc))
 

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 GATE_SERVICE = "bench-gate"
@@ -89,6 +90,9 @@ def compose_override(
                 # the only attached network is internal (no route, no ext DNS).
                 "networks": [INTERNAL_NETWORK],
                 "depends_on": {GATE_SERVICE: {"condition": "service_healthy"}},
+                # A hosts-file NAME only, no route (main has no gateway): the
+                # egress canary must reach routing, not fail at DNS (R6 F16).
+                "extra_hosts": ["host.docker.internal:host-gateway"],
             },
             GATE_SERVICE: {
                 "image": image,
@@ -142,43 +146,117 @@ def write_override(path: Path, override: dict[str, object]) -> Path:
     return path
 
 
-def support_mounts(support_dir: Path, ca_dir: Path | None) -> list[dict[str, object]]:
+def support_mounts(support_dir: Path, ca_file: Path | None) -> list[dict[str, object]]:
     """Read-only binds for ``main``: probe/launcher scripts and (LoP) the run CA.
 
     Read-only matters: a writable launcher or CA bundle would let a model tool
-    replace the edge checks or trust its own CA.
+    replace the edge checks or trust its own CA. The CA is bound as a single
+    FILE (R6 N6): the edge's run directory also holds its live request log,
+    which the agent has no business reading.
     """
     mounts: list[dict[str, object]] = [
         {"type": "bind", "source": str(Path(support_dir).resolve()), "target": SUPPORT,
          "read_only": True}
     ]
-    if ca_dir is not None:
-        mounts.append({"type": "bind", "source": str(Path(ca_dir).resolve()),
-                       "target": str(Path(CA_TARGET).parent), "read_only": True})
+    if ca_file is not None:
+        if Path(ca_file).name != Path(CA_TARGET).name:
+            raise ValueError("mount the edge CA certificate file, not a directory")
+        mounts.append({"type": "bind", "source": str(Path(ca_file).resolve()),
+                       "target": CA_TARGET, "read_only": True})
     return mounts
 
 
-def require_no_implicit_pull(argv: list[str]) -> list[str]:
-    """Refuse a ``docker run``/``create`` that could pull an image implicitly.
+# Docker CLI global options that take a value (docker 2x/Desktop). An unknown
+# leading option is refused: guessing its arity is how ``--context x run``
+# once read ``x`` as the verb (R6 F17 / P17).
+_GLOBAL_VALUED = {"--config", "-c", "--context", "-H", "--host", "-l", "--log-level",
+                  "--tlscacert", "--tlscert", "--tlskey"}
+_GLOBAL_FLAGS = {"-D", "--debug", "--tls", "--tlsverify"}
+_COMPOSE_VALUED = {"-f", "--file", "-p", "--project-name", "--profile", "--env-file",
+                   "--project-directory", "--ansi", "--progress", "--parallel"}
+_COMPOSE_FLAGS = {"--compatibility", "--dry-run", "--all-resources"}
+# Verbs that may fetch an image when it is absent locally.
+_RUN_VERBS = {("run",), ("create",), ("container", "run"), ("container", "create")}
+_COMPOSE_RUN_VERBS = {"up", "run", "create"}
+_PULL_VERBS = {("pull",), ("image", "pull"), ("build",), ("image", "build"),
+               ("buildx",), ("compose", "pull"), ("compose", "build")}
+
+
+def _skip_options(argv: list[str], i: int, valued: set[str], flags: set[str]) -> int:
+    while i < len(argv) and argv[i].startswith("-"):
+        name = argv[i].split("=", 1)[0]
+        if name in valued:
+            i += 1 if "=" in argv[i] else 2
+        elif name in flags:
+            i += 1
+        else:
+            raise ValueError(f"unrecognised docker option before the verb: {name}")
+    return i
+
+
+def _leads_with_pull_never(opts: list[str]) -> bool:
+    """True iff the command's options OPEN with ``--pull never``.
+
+    Rig convention, chosen because it needs no knowledge of option arity:
+    anywhere later, ``--pull`` might be the container's own argv (after the
+    image) or the value of an unknown option, and guessing which is how a
+    guard gets bypassed.
+    """
+    return opts[:2] == ["--pull", "never"] or opts[:1] == ["--pull=never"]
+
+
+def require_no_implicit_pull(argv: list[str], *, explicit_pull: bool = False) -> list[str]:
+    """Refuse a docker invocation that could pull an image implicitly.
 
     WHY (2026-11-03 incident): ``docker run --platform linux/amd64 <tag>``
     silently pulled a second platform variant of an image already on disk,
-    below the disk gate. Every rig/probe docker invocation that names an image
-    must carry ``--pull never``; ``--platform`` is accepted only alongside it.
-    Pulls happen only through the driver's explicit, disk-gated ``docker pull``.
+    below the disk gate. Every docker invocation on the rig must name
+    ``--pull never`` when its verb can fetch an image (``run``/``create``,
+    ``compose up/run/create``); ``--platform`` is accepted only alongside it.
+    Pulls and builds happen only through the driver's explicit, disk-gated
+    ``docker pull`` (``explicit_pull=True``).
+
+    CONSTRAINT: ``--pull never`` must be the FIRST option after the verb
+    (``docker run --pull never ...``, ``docker compose up --pull never ...``);
+    see ``_leads_with_pull_never``. Global options before the verb are parsed
+    against a fixed table, and an unknown one is refused.
     """
     if argv[:1] != ["docker"]:
         raise ValueError("not a docker invocation")
-    verb = next((a for a in argv[1:] if not a.startswith("-")), "")
-    if verb in {"run", "create"} and "--pull" not in argv and "--pull=never" not in argv:
-        raise ValueError(f"docker {verb} must pass --pull never")
-    if "--pull" in argv and argv[argv.index("--pull") + 1] != "never":
-        raise ValueError("--pull must be never")
-    if any(a == "--platform" or a.startswith("--platform=") for a in argv) and not (
-        "--pull=never" in argv or ("--pull" in argv and argv[argv.index("--pull") + 1] == "never")
-    ):
+    i = _skip_options(argv, 1, _GLOBAL_VALUED, _GLOBAL_FLAGS)
+    rest = argv[i:]
+    if not rest:
+        raise ValueError("docker invocation without a verb")
+    if rest[0] == "compose":
+        j = _skip_options(rest, 1, _COMPOSE_VALUED, _COMPOSE_FLAGS)
+        verb = tuple(rest[j:j + 1])
+        if ("compose", *verb) in _PULL_VERBS:
+            raise ValueError("compose pull/build is not allowed on the rig")
+        if verb and verb[0] in _COMPOSE_RUN_VERBS:
+            if not _leads_with_pull_never(rest[j + 1:]):
+                raise ValueError(f"docker compose {verb[0]} must pass --pull never")
+        return argv
+    verb = tuple(rest[:2]) if rest[0] in {"container", "image"} else tuple(rest[:1])
+    opts = rest[len(verb):]
+    if verb in _PULL_VERBS:
+        if not explicit_pull or verb != ("pull",):
+            raise ValueError("pulls happen only through the driver's disk-gated pull")
+        return argv
+    if verb in _RUN_VERBS:
+        if not _leads_with_pull_never(opts):
+            raise ValueError(f"docker {' '.join(verb)} must pass --pull never")
+    elif any(a == "--platform" or a.startswith("--platform=") for a in opts):
         raise ValueError("--platform only together with --pull never")
     return argv
+
+
+def run_docker(argv: list[str], *, explicit_pull: bool = False, **kwargs):
+    """The ONE way rig code shells out to docker: guard, then ``subprocess.run``.
+
+    Wired into every driver/verifier/oracle docker call (R6 F17); a test
+    walks their ASTs so a bare ``subprocess.run(["docker", ...])`` fails CI.
+    """
+    return subprocess.run(require_no_implicit_pull(argv, explicit_pull=explicit_pull), **kwargs)
 
 
 # Support files the gate and the trial need, copied into one per-run directory.

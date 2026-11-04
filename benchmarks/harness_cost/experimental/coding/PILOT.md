@@ -12,7 +12,7 @@ native/runtime/toolwire evidence. See STATUS.md for the exact validation boundar
 
 ## Local Operator classifier gate remains pending
 
-The model-only budget guard does **not** bound Radient classifier spend or
+The model-only budget path does **not** bound Radient classifier spend or
 establish a classifier-envelope guarantee. The dispatcher **unconditionally
 rejects paid Local Operator trials**, even if arbitrary frozen JSON claims
 verification. Classifier reservation and complete accounting need executable

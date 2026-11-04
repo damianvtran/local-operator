@@ -49,8 +49,8 @@
     },
     {
       "path": "experimental/EXPERIMENTAL-MANIFEST.json",
-      "bytes": 10210,
-      "sha256": "c84e24f28c54be464a8597591ae2b273f8804e30d81b47d1cc9a916b1c99e0f7"
+      "bytes": 9921,
+      "sha256": "009944189147fdb182c99ab92418656bfbd8f2a26fd6301029c18cec7ee2b9eb"
     },
     {
       "path": "experimental/LOP-EDGE-VERIFICATION.md",
@@ -74,8 +74,8 @@
     },
     {
       "path": "experimental/SOURCE-AUDIT.json",
-      "bytes": 28949,
-      "sha256": "7d730b29ee6b47dc8aa349202a1509f60a8afcebcc1c12e2324412999a9aa5d0"
+      "bytes": 27983,
+      "sha256": "5dc5f0acbe12e2e4ff7fca80ef690440f8276705d99bb2209049871d9f97fe15"
     },
     {
       "path": "experimental/TASKS.md",
@@ -139,23 +139,23 @@
     },
     {
       "path": "experimental/coding/PILOT.md",
-      "bytes": 1240,
-      "sha256": "14a0e724cc0b193be1f1e64cc65ad0290379b0c154121f899d7ce8ee5f945a2a"
+      "bytes": 1239,
+      "sha256": "b9fe2b99ab52ed5e8fa582ff3d6558a1fe3b16f9ba5a47b9d66747c2691a7366"
     },
     {
       "path": "experimental/coding/README.md",
-      "bytes": 10351,
-      "sha256": "941c4fc411359a59a1cebd9d36f14d1c2f0c82e2619138de9fc4f23b7b894e9c"
+      "bytes": 10120,
+      "sha256": "2d157bd0f5cd070238381fac9e73fee7aa286863ba7868bbdfe4d8433c0e6fac"
     },
     {
       "path": "experimental/coding/SOURCE_MAP.md",
-      "bytes": 2349,
-      "sha256": "2d054155ef01e675b14afd2d062fe09bf103624cf3a1d8b86d185bbf539e3bf2"
+      "bytes": 2398,
+      "sha256": "ab55c3e3c97cae690a0febaf2ab66da288339f9adc75dbda5ad3ff9b1672b2ae"
     },
     {
       "path": "experimental/coding/STATUS.md",
-      "bytes": 4673,
-      "sha256": "e74e96c9b8381c5afc6153f98f22ffdb73d3ec86910fceb07ce0e3d40e84354e"
+      "bytes": 5748,
+      "sha256": "43b181d2b7f3babbeb73d35abc42a1eb8589b03b952eeaff6e27d265c70fe646"
     },
     {
       "path": "experimental/coding/THIRD_PARTY_NOTICES.md",
@@ -164,18 +164,13 @@
     },
     {
       "path": "experimental/coding/adapters.py",
-      "bytes": 18682,
-      "sha256": "37316e5ca1e3aa28ef07d36d8b4b68eb1b179f7216c329989eff8c0bc129e131"
+      "bytes": 19004,
+      "sha256": "96dc2adf85ec12dbed1b187727565bb4d7df319ad4ffe6d8cc6c72c2f8607a20"
     },
     {
       "path": "experimental/coding/bench_verifier.py",
-      "bytes": 4768,
-      "sha256": "8e028813f69eac5fcc7afa0f23f765458b11c9754fe0cec5da2683d4c0b76d31"
-    },
-    {
-      "path": "experimental/coding/budget_guard.py",
-      "bytes": 9178,
-      "sha256": "6feaafc7943ff8d3f2d3221e997afff90e09de5e5fb61c1977b19884c707fe69"
+      "bytes": 5208,
+      "sha256": "b2ba9cd482d350af165fcf65fb370cb438240bc8dba9022620e1832e645eb16d"
     },
     {
       "path": "experimental/coding/codex-model-catalog.json",
@@ -189,13 +184,13 @@
     },
     {
       "path": "experimental/coding/driver.py",
-      "bytes": 31459,
-      "sha256": "8aedeac7e614a115b58c2bf9b290b8221e1ff042b13a4c8a31f64270710bff4f"
+      "bytes": 33392,
+      "sha256": "c44f0e6bafe41008fa984811ac3e0065a81cdfcd17a9d1708cfc89bfe4fe63d4"
     },
     {
       "path": "experimental/coding/egress.py",
-      "bytes": 8456,
-      "sha256": "d08382ddafdbb06fa4d65d633884fd6995c49e8e7db50c856cff8bd11611f778"
+      "bytes": 12267,
+      "sha256": "f0b6a5f79d64c0a8f3bcb2f4edb97f8d49b2b0a607e37225416802f8280ef69a"
     },
     {
       "path": "experimental/coding/gate_relay.py",
@@ -204,18 +199,18 @@
     },
     {
       "path": "experimental/coding/gold_probe.py",
-      "bytes": 6158,
-      "sha256": "174fa9819a436e409cbc40356633b34efd04034ed3bcc54bf942a687c110101e"
+      "bytes": 9561,
+      "sha256": "369157ee83c1cb0f552277aea7944b19ef6ff8e8131b59d28b4605b0dae82d09"
     },
     {
       "path": "experimental/coding/lop_launch.py",
-      "bytes": 7523,
-      "sha256": "bb72308d5b4d81cc0d60a9bada0579f5a73a05572d96246bdb62f1da52483237"
+      "bytes": 8026,
+      "sha256": "ee72621286be05fd11388744d1e96e7c83c602d09f38b4bf0d1fab643b925154"
     },
     {
       "path": "experimental/coding/oracle_sweep.py",
-      "bytes": 10655,
-      "sha256": "54e9d53cfc7560fb34a9f9cc14890defa91ba600bf52f76efb394fdafbbed4b6"
+      "bytes": 10828,
+      "sha256": "38d43c41d75d3111572fd3995dd3bad5ee6118a1323d692eae419558a46bae9f"
     },
     {
       "path": "experimental/coding/subset.json",
@@ -229,23 +224,18 @@
     },
     {
       "path": "experimental/coding/test_driver_safety.py",
-      "bytes": 10119,
-      "sha256": "cf9993392e501c0e70905605d7d643f62119570ebcce681d780873fc8c66c62d"
+      "bytes": 10132,
+      "sha256": "73dcffae74f6df698862e66a112209b06f25bba005ee0828ec6b4e5025e677b7"
     },
     {
       "path": "experimental/coding/test_guard.py",
-      "bytes": 10611,
-      "sha256": "3483e8fe0dfebdc6a5f459979530a407895b275b4d11d36a56aef338ba5bbb47"
-    },
-    {
-      "path": "experimental/coding/test_guard_asgi.py",
-      "bytes": 2618,
-      "sha256": "59863cca976bcc2c2616242d10d5adf28b62579dce984f8a7cc91edbdb25e317"
+      "bytes": 7849,
+      "sha256": "5bf759f765c33ddaad7c707f3223243b7a6d6591d4a9bb59e924f14eb6b62009"
     },
     {
       "path": "experimental/coding/test_lop_container.py",
-      "bytes": 16846,
-      "sha256": "8741dd9f39dfe323c2b386dc733c3b891022f19a9494822d43ecbf8c5324d4ea"
+      "bytes": 32533,
+      "sha256": "c9cc5a1b2dbdf0a5539d2f21565d3aa955fec8b5b9dcdb4e636c491fa66dd4d4"
     },
     {
       "path": "experimental/evaluate.py",

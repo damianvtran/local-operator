@@ -663,7 +663,7 @@ jobs:
           offline_python -m unittest -q test_cache_namespace test_cache_forwarder \
             test_adapters test_runner_v2 test_bridge_sse test_cache_bridge.PluginBoundaryTests test_clone_path
           cd coding
-          offline_python -m unittest -q test_guard test_driver_safety test_guard_asgi test_adapters
+          offline_python -m unittest -q test_guard test_driver_safety test_adapters test_lop_container
 
       - name: Verify browser extension protocol sync
         # Main CI owns this too: a Python-only protocol edit must fail even if

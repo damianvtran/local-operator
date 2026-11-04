@@ -7,8 +7,13 @@
   image, frozen-toolchain Python, `gate_relay.py`) on that network plus an uplink
   relays a fixed port map to the host meter (`/r/<run_id>`), Codex bridge and
   LoP edge. Rejected: host-gateway + host firewall (Docker Desktop's VM traffic
-  never crosses host `pf`). Compose services use `pull_policy: never`; rigs use
-  `egress.require_no_implicit_pull` (`--pull never`; `--platform` only with it).
+  never crosses host `pf`). Compose services use `pull_policy: never`; every
+  driver/verifier/oracle docker call goes through `egress.run_docker`, which
+  parses global options and refuses run/create/compose up|run|create without a
+  leading `--pull never`, and any pull/build except the driver's one explicit,
+  disk-gated `docker pull` (R6 F17). The egress probe dials a run-owned OPEN
+  host listener the gate never forwards and passes only on no-route/timeout,
+  never on "refused" (R6 F16).
 * **LoP:** `lop_launch.py` (read-only mount) requires `HTTPS_PROXY` =
   `bench-gate:<edge port>` with run identity, the read-only run CA, the edge's
   dummy `RADIENT_API_KEY`, and the `lop-baseline-500883ef` overlay (direct_url
@@ -17,8 +22,18 @@
   container file has the bytes of any host `solution/`/`tests/` file (hashes
   only), `/solution` and `/tests` are absent, and `/logs/verifier` is empty;
   `egress` checks the fence. `bench_verifier.BenchVerifier` repeats isolation,
-  proves quiescence (kills and records survivors; refuses on a second failure),
-  attaches the uplink, then runs Harbor's stock verifier unchanged.
+  records quiescence (survivors' pid, command-line hash and listening ports, as
+  a disclosed `agent-processes-survived-into-grading` flag; never killed, never
+  a void), attaches the uplink, then runs Harbor's stock verifier unchanged
+  (R6 F15: nginx-request-logging and kv-store-grpc grade the agent's running
+  server). Only a gold-isolation failure refuses grading. The isolation scan
+  hashes every regular file streaming, with no size cut-off (R6 F20);
+  partial-content matches (archives, concatenations) are out of scope.
+* **Budget:** the external meter is the single budget authority for both lanes
+  (R6 F19); the lane-local reservation guard was removed.
+* **REQUIRED before any pilot:** re-qualify the oracle for the subset under
+  `BenchVerifier` (Docker; not run). The earlier oracle acceptance used Harbor's
+  stock verifier and does not carry over to this grading path.
 
 
 ## Historical source status, not new validation
@@ -69,7 +84,7 @@ budget estimate from it.
 
 ## Local Operator classifier gate remains pending
 
-The model-only budget guard does **not** bound Radient classifier spend or
+The model-only budget path does **not** bound Radient classifier spend or
 establish a classifier-envelope guarantee. The dispatcher **unconditionally
 rejects paid Local Operator trials**, even if arbitrary frozen JSON claims
 verification. Classifier reservation and complete accounting need executable

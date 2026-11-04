@@ -8,7 +8,8 @@
     "private request/profile bodies",
     "credentials/auth databases",
     "runtime binaries/toolchains",
-    "job logs/results/archives"
+    "job logs/results/archives",
+    "coding/budget_guard.py and coding/test_guard_asgi.py (removed in review round 6, F19: the external meter is the single coding-lane budget authority)"
   ],
   "entries": [
     {
@@ -245,19 +246,6 @@
       ],
       "treatment": "sanitized/adapted derivative",
       "previous_destination_sha256": "e52cbc0913b1b18c20fa321fe7de8add5fbb690a7a8a8e7fc0de8b74833acbba",
-      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
-    },
-    {
-      "destination": "coding/budget_guard.py",
-      "destination_sha256": "6feaafc7943ff8d3f2d3221e997afff90e09de5e5fb61c1977b19884c707fe69",
-      "sources": [
-        {
-          "path": "harness-cost-bench/coding/budget_guard.py",
-          "sha256": "db5888eb2e88fdb1b4f7cef9c009ccba9aa3ab32f3086e6301eb47c1ebd19268"
-        }
-      ],
-      "treatment": "sanitized/adapted derivative",
-      "previous_destination_sha256": "8155383fa0d51b0fdab9f4adfb6f407481919ad33c74b07b73c946e8fab08579",
       "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
@@ -598,14 +586,6 @@
       "sources": [],
       "treatment": "new experimental documentation or offline guard/check",
       "previous_destination_sha256": "387866a212f24662f176f9b06fd93527e9198df59cf91ed784ddf89fba7fc9cf",
-      "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
-    },
-    {
-      "destination": "coding/test_guard_asgi.py",
-      "destination_sha256": "59863cca976bcc2c2616242d10d5adf28b62579dce984f8a7cc91edbdb25e317",
-      "sources": [],
-      "treatment": "new real in-process ASGI lifecycle and refusal regression controls; no paid dispatch",
-      "previous_destination_sha256": "8caa433e276e7652493bf0edf676b66ff37c834ee6258060734295abe05b9e8c",
       "remediation": "CI lint/type correctness, validated optional plugin boundaries, portable offline tests"
     },
     {
