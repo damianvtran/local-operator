@@ -1849,6 +1849,25 @@ def _conclude_parsed(
     envelope, snapshot, epoch = prepared.envelope, prepared.snapshot, prepared.epoch
     message_id = envelope.message_id
     disposition, categories, reason, _verdict = parsed
+    if disposition == "hold" and _work_scope_hold_conversion(
+        store, snapshot, reason, actual_model=actual_model, served_provider=served_provider
+    ):
+        # B4b scope update (2026-11-04, operator + Aida): under v2 the B4 relay
+        # (rel-l01) is a HOLD naming new_work_request, not a bounce — measured on
+        # #3434's committed trials, 8/10 holds on both Sonnet 5.5 and Opus 5.5.
+        # From an allowlisted screener that hold is the same owner decision as
+        # the bounce below, recorded the same way (same code, budget, no re-draw,
+        # signed record).
+        return _commit_work_scope_hold(
+            store,
+            owner,
+            prepared,
+            attempt_id=attempt_id,
+            fingerprint=fingerprint,
+            categories=("new_work_request",),
+            actual_model=actual_model,
+            served_provider=served_provider,
+        ).set_private_reason(reason)
     if disposition == "hold":
         _commit_hold(store, owner, message_id, attempt_id, fingerprint, epoch, "model_hold")
         _remember_answer_hold(
@@ -2121,6 +2140,52 @@ def _work_scope_conversion(store: Store, snapshot: "PolicySnapshot", categories:
     if snapshot.screening_version != SCREENING_VERSION_V2:
         return False
     if not hold_release.converts(tuple(categories)):
+        return False
+    return hold_release.enabled(store.config_dir)
+
+
+def _reason_categories(reason: str) -> tuple[str, ...]:
+    """The category tokens a REASON names: ``parse_verdict``'s bounce rule.
+
+    ``parse_verdict`` extracts no categories from a v2 HOLD (its tuple is
+    empty, and the setting-off path must stay byte-identical), so the B4b hold
+    conversion reads them here with the SAME exact-token rule: canonical order,
+    de-duplicated, never a substring of a longer word.
+    """
+
+    return tuple(
+        category
+        for category in SCREENING_CATEGORIES
+        if re.search(rf"(?<![A-Za-z_]){re.escape(category)}(?![A-Za-z_])", reason)
+    )
+
+
+def _work_scope_hold_conversion(
+    store: Store,
+    snapshot: "PolicySnapshot",
+    reason: str,
+    *,
+    actual_model: str,
+    served_provider: str,
+) -> bool:
+    """Whether a v2 HOLD is recorded as a releasable ``work_scope_hold`` instead.
+
+    Narrower than the bounce conversion on purpose: a doubt hold is the
+    screener saying it could not tell, so it is converted ONLY when the hop
+    that answered is allowlisted (D4) — a non-preferred screener's hold stays
+    ``model_hold``, byte-identical to today, rather than becoming an ineligible
+    work-scope row. The reason must name EXACTLY ``new_work_request`` (D1);
+    any other or extra category, or none, leaves it a ``model_hold``.
+    """
+
+    from local_operator.team_bridge import hold_release
+    from local_operator.team_bridge.client import SCREENING_VERSION_V2
+
+    if snapshot.screening_version != SCREENING_VERSION_V2:
+        return False
+    if not hold_release.eligible_screener(served_provider, actual_model):
+        return False
+    if not hold_release.converts(_reason_categories(reason)):
         return False
     return hold_release.enabled(store.config_dir)
 

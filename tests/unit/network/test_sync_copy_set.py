@@ -982,9 +982,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "session directory",
     ),
     "local_operator/tools/builtin.py": (
-        3,
+        4,
         "the ripgrep excludes file under the agent home, plus two HOST-id fragments "
-        "(``ui``/``bridge``) that name a front end inside a session id, never a filename",
+        "(``ui``/``bridge``) that name a front end inside a session id, and "
+        "``_RESERVED_NOTIFY_KEY_PREFIX`` ('team-bridge-'), an inbox-item KEY prefix the "
+        "notify tool refuses (B4b), never a filename",
     ),
     "local_operator/wakes/store.py": (1, "``wakes`` under the store root"),
     "local_operator/wakes/deliveries.py": (1, "``deliveries`` under ``wakes/``"),

@@ -200,6 +200,75 @@ def test_every_other_decision_is_unchanged_and_never_releasable(rig, reply, expe
     assert getattr(refused.value, "code", "") == "hold_not_releasable"
 
 
+# rel-l01's committed v2 trial reasons (#3434, v4r1-relay): a HOLD that names
+# the category token, and one that also names a second category.
+REL_L01_HOLD = (
+    'VERDICT: hold\nREASON: The note refers to "that" and "these" with no context, '
+    "and it seems to ask for new team work to start, so I can't tell whether it is a "
+    "misrouted message or a new_work_request."
+)
+HOLD_MULTI = "VERDICT: hold\nREASON: Maybe a new_work_request, maybe a personal_info_request."
+OPUS = ("anthropic", "claude-opus-5-5")
+
+
+@pytest.mark.parametrize("screener", [SONNET, OPUS])
+@pytest.mark.parametrize("reply", [NEW_WORK, REL_L01_HOLD], ids=["v2-bounce", "v2-hold"])
+def test_a_preferred_screeners_new_work_decision_is_releasable(rig, screener, reply) -> None:
+    """Scope update 2026-11-04: v2 bounce AND v2 hold, exactly {new_work_request}."""
+
+    config_dir, store, owner = rig
+    out = _screen(config_dir, owner, Runner(reply, model=screener[1]), policy=Policy(screener))
+    assert out.disposition == "hold" and out.hold_code == hr.WORK_SCOPE_HOLD
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["eligible"] == 1
+    assert (decision["screener_provider"], decision["screener_model"]) == screener
+    assert json.loads(decision["categories"]) == ["new_work_request"]
+    assert _decide(config_dir, owner, "deliver")["state"] == "released"
+
+
+def test_a_non_preferred_screeners_new_work_hold_stays_a_model_hold(rig) -> None:
+    """D4 is the gate: a fallback hop's hold is not converted, and not releasable."""
+
+    config_dir, store, owner = rig
+    out = _screen(config_dir, owner, Runner(REL_L01_HOLD, model="auto"), policy=Policy(AUTO))
+    assert out.hold_code == "model_hold"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+    with pytest.raises(HoldRefused) as refused:
+        _decide(config_dir, owner, "deliver")
+    assert refused.value.code == "hold_not_releasable"
+
+
+def test_a_hold_naming_an_extra_category_is_not_releasable(rig) -> None:
+    config_dir, store, owner = rig
+    out = _screen(config_dir, owner, Runner(HOLD_MULTI))
+    assert out.hold_code == "model_hold"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+
+
+def test_the_converted_hold_is_not_re_drawn(rig) -> None:
+    """A v2 hold converted once is replayed: no second model call on the re-drive."""
+
+    config_dir, _store, owner = rig
+    _screen(config_dir, owner, Runner(REL_L01_HOLD))
+    again = Runner(DELIVER)
+    out = _screen(config_dir, owner, again)
+    assert out.hold_code == hr.WORK_SCOPE_HOLD and again.calls == 0
+
+
+def test_setting_off_keeps_the_v2_hold_a_model_hold(tmp_path) -> None:
+    config_dir = tmp_path / "off"
+    config_dir.mkdir()
+    store = Store(config_dir)
+    owner = _owner()
+    store.commit_enrollment(owner, OwnerReceipt("bridge_consent_v1", "ref-1"))
+    _setting(config_dir, False)
+    out = _screen(config_dir, owner, Runner(REL_L01_HOLD))
+    assert out.hold_code == "model_hold"
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "work_scope_decisions" not in names
+
+
 def test_radient_auto_is_never_an_eligible_screener(rig) -> None:
     config_dir, store, owner = rig
     out = _screen(config_dir, owner, Runner(NEW_WORK, model="auto"), policy=Policy(AUTO))

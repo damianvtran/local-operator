@@ -1,0 +1,10 @@
+{
+  "cli.team_bridge_hold.held.title": "智能体消息：有一条消息等你审阅",
+  "cli.team_bridge_hold.held.body": "一条发给你智能体的消息已被暂扣，因为它可能在请你的智能体承接新工作。打开智能体消息，即可将其送达或舍弃。",
+  "cli.team_bridge_hold.more.title": "智能体消息：还有更多消息等你审阅",
+  "cli.team_bridge_hold.more.body": "{count, plural, other {还有#条暂扣消息}}等你审阅。打开智能体消息即可查看。",
+  "cli.team_bridge_hold.delivered.title": "智能体消息：你已送达一条暂扣消息",
+  "cli.team_bridge_hold.delivered.body": "你已允许智能体阅读这条暂扣消息。",
+  "cli.team_bridge_hold.discarded.title": "智能体消息：你已舍弃一条暂扣消息",
+  "cli.team_bridge_hold.discarded.body": "你已舍弃这条暂扣消息，并已告知发送者该消息未送达。"
+}

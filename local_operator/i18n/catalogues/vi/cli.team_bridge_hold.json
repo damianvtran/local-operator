@@ -1,0 +1,10 @@
+{
+  "cli.team_bridge_hold.held.title": "Tin nhắn tác nhân: có tin nhắn đang chờ bạn xem xét",
+  "cli.team_bridge_hold.held.body": "Một tin nhắn gửi tác nhân của bạn đã bị giữ vì có thể đang đề nghị tác nhân nhận việc mới. Mở Tin nhắn tác nhân để chuyển hoặc loại bỏ tin nhắn này.",
+  "cli.team_bridge_hold.more.title": "Tin nhắn tác nhân: có thêm tin nhắn đang chờ bạn xem xét",
+  "cli.team_bridge_hold.more.body": "{count, plural, other {Thêm # tin nhắn bị giữ}} đang chờ bạn xem xét. Mở Tin nhắn tác nhân để xem.",
+  "cli.team_bridge_hold.delivered.title": "Tin nhắn tác nhân: bạn đã chuyển một tin nhắn bị giữ",
+  "cli.team_bridge_hold.delivered.body": "Bạn đã cho tác nhân của mình đọc tin nhắn bị giữ.",
+  "cli.team_bridge_hold.discarded.title": "Tin nhắn tác nhân: bạn đã loại bỏ một tin nhắn bị giữ",
+  "cli.team_bridge_hold.discarded.body": "Bạn đã loại bỏ tin nhắn bị giữ. Người gửi đã được báo là tin nhắn không được chuyển."
+}
