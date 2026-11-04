@@ -1,0 +1,6 @@
+record.json   sha256=0a581144daaf43d6a7ae0e7c0c993c291c772b57707a0e3bd22549e5fb095848  bytes=7830
+report.md     sha256=0f061200d60d6dce4cb323663a2472094a48909290cc4bd1e94661b2b979900e  bytes=5361
+audit.log     sha256=05b3f7bf6001610abf37e87fbb370e52cd0ea9e437866224bfc8bb73a7b1634e  bytes=2075
+
+Hashes computed with hashlib after the final write of each file, session 425221b9b2c6, 2026-11-03.
+record.json cannot carry its own digest (the value would change the file), so it lives here.

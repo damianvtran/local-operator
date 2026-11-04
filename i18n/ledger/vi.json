@@ -2814,6 +2814,46 @@
     },
     {
       "locale": "vi",
+      "namespace": "wire.errors.hosting",
+      "source_sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two independent sessions: 54cb9d3782eb, 6431174917d4)",
+        "model": "radient/auto (served model not disclosed by the route)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "New namespace wire.errors.hosting (1 key: the owned display cause the startup refusal splices into its {error} slot) authored at base 87ca846245b2 against frozen English sha256 458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63. vi 'Chưa cấu hình nhà cung cấp nào.' states the unconfigured condition without restating the remedy or naming a provider. Two independent readers, neither the translator nor the code author, both PASSED on these bytes with 0 blocker/major/minor/nit (sessions 54cb9d3782eb, 6431174917d4). Source-only assembly: no rendered, native-speaker, width, RTL or validator proof, and no activation, shipped or release claim. Evidence: i18n/audits/evidence/vi/wire.errors.hosting/ (bundles ['vihost1', 'vihost2'], frozen inputs under _inputs/)."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.errors.sdk_startup",
+      "source_sha256": "5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd",
+      "translator": {
+        "agent": "i18n-translator, remedy session 15986c0af719",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (two fresh independent sessions: ebf74725105d, 7188e3347110)",
+        "model": "radient/auto (served model not disclosed)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Target catalogue_sha256 7c9a6bfb0907dc38d2b22e8dfb808f61852479b1d8d9b10b7ad8c7c8c99ef95e supersedes ac6858150eb6e5d0856bafa729764e61d400fd6bdf3504d4b2ffa4cbb4300abd at the unchanged English source 5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd: one value reworded (wire.errors.sdk_startup.attach_hosting_unconfigured — the English loanword replaced by the native provider term), the other three values byte-identical to the superseded file. Two fresh independent readers, neither the translator nor the code author, PASSED 0 blocker/major; reader 1 filed 2 nits and reader 2 confirmed 1 pre-existing nit outside this delta (tool inventory wording), none gating and none fixed here. The previous row for this namespace stays as history. Source-only: no rendered, native or width proof. Evidence: i18n/audits/evidence/vi/wire.errors.sdk_startup/ (bundles vistfix1, vistfix2)."
+    },
+    {
+      "locale": "vi",
       "namespace": "wire.skill_adoption",
       "source_sha256": "362cda832d4e052352a38049e1d9acb2366aaa0d9f35a0a3dc1bb3ee51611094",
       "translator": {

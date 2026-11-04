@@ -2,7 +2,7 @@
   "wire.errors.sdk_startup.attach_hosting_unconfigured": {
     "role": "SDK post-isolation attach startup refusal",
     "tone": "diagnostic with remedy; preserve the existing exception text",
-    "note": "resume is an already repr-quoted identifier; error is opaque producer text, including whitespace, quotes, braces, percent tokens and Unicode. Never interpret either as ICU or a message code. Preserve config.yml and spawn_session()/deliver() literally. English-only child namespace falls back under RFC §6 per-CARRIED policy; future translated consumers still owe the RFC migration boundary."
+    "note": "`message` is the refusal template; the first placeholder is an already-quoted identifier and the second carries the reason. That cause text is not always opaque: when it is the product's own not-configured hosting error (its exact type and published sentence), the caller substitutes the separately localized cause sentence, so this frame must never contain English cause wording of its own. Any other producer's reason stays opaque and verbatim, including whitespace, quotes, percent signs, brackets and non-ASCII text; neither placeholder is ever an ICU pattern or a message id. Keep the config file name and the two function names literally. The frame renders in the resolved locale, never an English pin, and locales that do not carry this namespace fall back per-namespace to English (RFC §6)."
   },
   "wire.errors.sdk_startup.attach_runtime_missing": {
     "role": "SDK attach refusal after disposing a cold owning runtime",
