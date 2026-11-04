@@ -128,7 +128,7 @@ def _run(root: Path, journal: Path, appends: int, store: bool) -> dict[str, floa
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     parser.add_argument("--turns", type=int, default=14000)
     parser.add_argument("--appends", type=int, default=20)
     parser.add_argument("--keep", action="store_true")

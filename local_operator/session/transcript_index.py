@@ -1369,7 +1369,7 @@ def _publish_store(
         candidate = _delta_frame(base, index)
         if _frame_is_exact(base, index, candidate):
             frame = candidate
-    if frame is not None and store is not None:
+    if frame is not None and store is not None and base is not None:
         snapshot_bytes = int(store.get("snapshot_bytes") or 0)
         length, frames = int(store["length"]), int(store["frames"])
         if _frame_is_empty(base, frame):
@@ -1715,6 +1715,15 @@ def write_index(
                     _remember_parse(path, (st.st_ino, st.st_size, st.st_mtime_ns), index, head)
                 except OSError:
                     pass
+                if moved:
+                    # INSIDE the lock, unlike the read-model collect below: the
+                    # set this keeps is "what the head names NOW", and only the
+                    # lock makes that true. Outside it, another process could
+                    # commit a newer snapshot between this head and the sweep,
+                    # and the sweep would delete the file its head names. A few
+                    # unlinks is the whole cost. A reader still holding an older
+                    # head re-reads on the missing file (see ``_read_raw``).
+                    _retire(path.parent, session_id, store)
         finally:
             tmp.unlink(missing_ok=True)
     except OSError:
@@ -1727,10 +1736,6 @@ def write_index(
             )
         return
     # Reclaim outside the lock: unlink cost must not sit in the critical section.
-    # A store file is only reclaimable once no head names it; a reader still
-    # holding an older head re-reads on the missing file (see ``_read_raw``).
-    if moved:
-        _retire(path.parent, session_id, store)
     try:
         index_read_model.collect(config_dir, session_id, index_read_model.token_for(index))
     except OSError:

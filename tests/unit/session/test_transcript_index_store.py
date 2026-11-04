@@ -337,7 +337,9 @@ def test_the_receipt_names_the_head_and_moves_on_every_publication(tmp_path):
     st = ti.index_path(tmp_path, SID).stat()
     assert second["_publication_identity"] == (st.st_ino, st.st_size, st.st_mtime_ns)
     assert first["_publication_identity"] != second["_publication_identity"]
-    assert ti.read_index(tmp_path, SID).publication_identity == second["_publication_identity"]
+    served = ti.read_index(tmp_path, SID)
+    assert served is not None
+    assert served.publication_identity == second["_publication_identity"]
 
 
 def test_the_resume_head_prices_hydration_from_the_store(tmp_path):
