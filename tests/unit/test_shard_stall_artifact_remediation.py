@@ -147,6 +147,9 @@ def test_r2_lifecycle_registration_before_tests_and_consumed_handoff(tmp_path, m
         assert manifest["files"][0]["status"] == "retained"
         assert manifest["output_bytes"] == len("synthetic writer data")
     finally:
+        # Soft mode starts main's session reporter thread at construction.
+        if timer._reporter is not None:
+            timer._reporter.stop()
         if timer._handle is not None:
             timer._handle.close()
 
@@ -455,7 +458,15 @@ def test_r5_closed_handle_readonly_run_cannot_authorize_fallback(
     run.chmod(run_mode)
     try:
         timer.arm("tests/synthetic.py::test_fallback_must_never_be_registered")
-        assert calls == ([(300, True)] if hard else [(240, False)])
+        # Soft mode no longer arms faulthandler: the GIL-held Python reporter
+        # owns the report, so prove it was armed on the NON-registered fallback
+        # handle (the borrowed handle is what its snapshot lines are written to).
+        if hard:
+            assert calls == [(300, True)]
+        else:
+            assert calls == []
+            job = timer._reporter._job
+            assert job is not None and job[2] == 240 and job[4] is timer._handle
         assert timer._armed and not timer._registered
         result = cli(run.parent, tmp_path / "out", registry)
         manifest = json.loads((tmp_path / "out/manifest.json").read_text())
@@ -469,6 +480,8 @@ def test_r5_closed_handle_readonly_run_cannot_authorize_fallback(
         assert timer._path.read_bytes() == b""
     finally:
         run.chmod(0o700)
+        if timer._reporter is not None:
+            timer._reporter.stop()
         if timer._handle is not None:
             timer._handle.close()
 
