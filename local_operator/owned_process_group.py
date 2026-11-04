@@ -341,6 +341,13 @@ _LINUX_CENSUS_RELISTS = 8
 # failures and departures are all rebuilt -- and a retry is attempted only when
 # `_rerunnable` holds and another cycle fits the deadline. Three cycles keep
 # the cost bounded; a trigger persisting through all of them still refuses.
+#
+# A SECOND RETRY TRIGGER shares the same cap: a corpse-only cycle (every member
+# exited at sample time) takes a post-sample CENSUS 3 (`_late_members`), and if
+# that census shows a new pid -- or a member that is no longer the exited
+# process sampled -- the cycle is discarded exactly like the ENOENT shape above.
+# One 3-cycle budget covers both triggers together, and still no evidence is
+# carried across cycles.
 _SAMPLE_CYCLES = 3
 
 
@@ -686,6 +693,22 @@ def bounded_samples(pids, deadline, clock=time.monotonic, *, diagnostics=None):
     if clock() >= deadline:
         raise Unknown("canonical birth fallback exceeded deadline")
     return result
+
+
+def _exited(sample):
+    """Whether ``sample`` is a process that can no longer fork: a single-threaded corpse.
+
+    A ``Z`` state is not enough on Linux. When a thread-group leader's MAIN thread
+    exits while other threads live, the leader lingers as a zombie until the group
+    empties (kernel/exit.c:1505 and ``delay_group_leader`` in
+    include/linux/sched/signal.h:776), ``/proc/<pid>/stat`` reports the LEADER's
+    state (fs/proc/array.c:491) -- so ``Z`` -- and its surviving threads can still
+    fork into our group. ``num_threads`` (field 20, fs/proc/array.c:609) tells the
+    two apart. ``threads is None`` (platforms without a count) keeps the old
+    meaning; the Linux reader omits a row with an unparseable count instead of
+    producing ``None`` there.
+    """
+    return sample.zombie and not (sample.threads is not None and sample.threads > 1)
 
 
 def kernel_identity(pid):
@@ -1477,10 +1500,49 @@ class OwnedGroup:
                         "sample_retries": list(self.probe.get("sample_retries", [])),
                     }
                     raise Unknown("census member sample unreadable")
+                live = [pid for pid in members if not _exited(samples[pid])]
+                if not live:
+                    # CENSUS 3, the zombie late-fork guard. Censuses 1 and 2 both
+                    # PRECEDE the sample, so a member can fork a child after census
+                    # 2 and then die: at sample time every member reads exited, and
+                    # the live child was seen by neither census. Measured on main
+                    # before this guard: OBSERVED_EMPTY with members (10, 21) while
+                    # pid 30 ran -- false cleanup. Only a census taken AFTER the
+                    # sample can see that child, so a corpse-only verdict waits for
+                    # one; a live-member cycle needs none (its members are
+                    # signalled and re-proved anyway).
+                    third, late = self._late_members(members, samples, deadline)
+                    if late:
+                        now = self.clock()
+                        if cycle < _SAMPLE_CYCLES - 1 and now + 2 * (now - started) < deadline:
+                            self.probe.setdefault("sample_retries", []).append(
+                                {
+                                    "cycle": cycle,
+                                    "late": late[:16],
+                                    "late_count": len(late),
+                                    "censuses": [first[:16], second[:16], third[:16]],
+                                }
+                            )
+                            continue
+                        self.probe["sample_failure"] = {
+                            "phase": "post-sample-census",
+                            "witness": state,
+                            "censuses": [first[:16], second[:16], third[:16]],
+                            "census_counts": [len(first), len(second), len(third)],
+                            "late": late[:16],
+                            "late_count": len(late),
+                            "sample_retries": list(self.probe.get("sample_retries", [])),
+                        }
+                        raise Unknown("group changed after the corpse-only sample")
                 # This cycle produced a complete, resolved sample: it alone is the
                 # evidence the proof below rests on.
                 break
-            live = [pid for pid in members if not samples[pid].zombie]
+            else:
+                # Unreachable: the last cycle may not `continue` (both retry doors
+                # require `cycle < _SAMPLE_CYCLES - 1`), so it breaks or raises.
+                # Spelled out FAIL-CLOSED rather than pre-binding `live = []`,
+                # which would default an exhausted loop to the corpse-only verdict.
+                raise Unknown("sample cycles exhausted without a decided cycle")
             if not live:
                 # Corpse-only: allowed ONLY under a retained matching witness, and a
                 # witness that has become a READABLE FOREIGN BIRTH is loss, not an
@@ -1545,6 +1607,53 @@ class OwnedGroup:
             # already paid for supply the birth for a member that was never enrolled.
             self.probe["residuals"] = _identities(self.receipts, samples, members)
         return self.last
+
+    def _late_members(self, members, samples, deadline):
+        """Census 3 for a corpse-only cycle: return ``(third, late)``.
+
+        ``late`` empty means the corpse-only sample still describes the group.
+        Anything else is a pid the sample did not certify as exited:
+
+        * a pid in ``third`` that censuses 1 and 2 never listed -- a child forked
+          after census 2 (the measured hole);
+        * a member whose re-sample is missing, no longer exited, or carries a
+          missing or different birth -- the pid now hosts something else (PID
+          reuse can put a live late child at a member's number, so a census that
+          is a subset of ``members`` proves nothing on its own).
+
+        A member ABSENT from ``third`` is fine: it was sampled exited and has
+        since been reaped. The leader is excluded from the re-sample because
+        ``_leader_witness`` owns its identity and runs after this anyway.
+
+        The census uses the same strict ``_members`` reader as censuses 1 and 2;
+        a failure re-reads the witness once so a reaped pin still reports as
+        loss rather than as an unreadable census.
+        """
+        try:
+            third = self._members(deadline)
+        except Exception:
+            lost, _ = self._leader_witness(deadline)
+            if lost == "reaped":
+                raise PinLost("reservation lost during the post-sample census") from None
+            raise
+        sampled = set(members)
+        late = [pid for pid in third if pid not in sampled]
+        if late:
+            return third, late
+        rest = [pid for pid in third if pid != self.leader]
+        if not rest:
+            return third, []
+        again = self._samples(rest, deadline)
+        for pid in rest:
+            row = again.get(pid)
+            if (
+                row is None
+                or not _exited(row)
+                or row.birth is None
+                or row.birth != samples[pid].birth
+            ):
+                late.append(pid)
+        return third, late
 
     def _departed(self, absent, first, second, failures):
         """Split unsampled members into ``(departed, unresolved)``.

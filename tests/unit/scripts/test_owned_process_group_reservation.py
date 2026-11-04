@@ -451,7 +451,7 @@ def test_the_grace_loop_costs_no_census_and_signals_cost_at_most_two(
     #   signal and the finally pass -- the bound was wrong, not the run cheap.
     # What the bound still proves is the property this test exists for: no census
     # per poll tick and none per grace tick, only per proof.
-    assert kernel.censuses - before <= 2 * 5, (kernel.censuses - before, kernel.sent)
+    assert kernel.censuses - before <= 2 * 5 + 3, (kernel.censuses - before, kernel.sent)
 
 
 def _wrapper_owner(wrapper, monkeypatch, cap, process):
