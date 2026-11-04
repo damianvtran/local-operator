@@ -2927,6 +2927,30 @@
       },
       "status": "passed",
       "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. ES1 semantic correction applied: digest is «hash», not «resumen» (textual summary), in both source-input help strings. Neutral tú and infinitive actions preserved. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/es/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/es/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
     }
   ]
 }

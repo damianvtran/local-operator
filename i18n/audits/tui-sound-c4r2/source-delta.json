@@ -1,0 +1,42 @@
+{
+  "changed": [
+    "tui.sound.id_help",
+    "tui.sound.list_title",
+    "tui.sound.list_yours",
+    "tui.sound.usage"
+  ],
+  "added": [
+    "tui.sound.list_hint",
+    "tui.sound.list_yours_hint",
+    "tui.sound.section_description"
+  ],
+  "deleted": [
+    "tui.sound.default"
+  ],
+  "carried": [
+    "tui.sound.added",
+    "tui.sound.added_selected",
+    "tui.sound.disabled",
+    "tui.sound.enabled",
+    "tui.sound.not_found",
+    "tui.sound.off",
+    "tui.sound.on",
+    "tui.sound.preview_failed",
+    "tui.sound.preview_muted",
+    "tui.sound.preview_playing",
+    "tui.sound.preview_silent",
+    "tui.sound.preview_ssh",
+    "tui.sound.preview_system",
+    "tui.sound.read_failed",
+    "tui.sound.removed",
+    "tui.sound.renamed",
+    "tui.sound.save_failed",
+    "tui.sound.selected",
+    "tui.sound.slash",
+    "tui.sound.status",
+    "tui.sound.volume_range",
+    "tui.sound.volume_set"
+  ],
+  "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+  "scope": "27695a49855f..bd9ad6f041ca"
+}

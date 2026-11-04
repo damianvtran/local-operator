@@ -2928,6 +2928,30 @@
       "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. ES1 semantic correction applied: digest is «hash», not «resumen» (textual summary), in both source-input help strings. Neutral tú and infinitive actions preserved. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
     },
     {
+      "locale": "es",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/es/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/es/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
+    },
+    {
       "locale": "fr",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -5831,6 +5855,30 @@
       },
       "status": "passed",
       "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. FR1 minor fixed: typographic apostrophes and U+202F before prose punctuation; «empreinte» correctly denotes content digest. Vous and French Mo retained. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/fr/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/fr/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
     },
     {
       "locale": "hi",
@@ -8812,6 +8860,30 @@
       },
       "status": "passed",
       "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. HI1 minor fixed: content digest clarified as हैश. HI2 minor fixed: character limit uses वर्ण, not letters-only wording. HI3 minor fixed: सहेजी for save and explicit स्टोरेज वॉल्यूम to distinguish storage from audio volume. Polite imperatives retained. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/hi/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/hi/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
     },
     {
       "locale": "ru",
@@ -11813,6 +11885,30 @@
       "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. RU1 minor fixed: content digest clarified as хеш rather than the summary-associated дайджест. Infinitive actions and impersonal errors retained. 50 звуков and 40 символов match actual fixed limits. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
     },
     {
+      "locale": "ru",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/ru/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/ru/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
+    },
+    {
       "locale": "ur",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
@@ -14592,6 +14688,30 @@
       },
       "status": "passed",
       "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. UR1 minor fixed: content digest clarified as ہیش. UR2 minor fixed: character limit uses کریکٹر, not letters-only حروف. UR3 minor fixed: explicit اسٹوریج والیوم distinguishes storage from loudness. Respectful imperative and Urdu punctuation retained; no manual bidi controls. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/ur/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/ur/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
     },
     {
       "locale": "vi",
@@ -17614,6 +17734,30 @@
       "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. No linguistic changes needed. Mã băm correctly identifies content hash; có sẵn/tùy chỉnh distinguish built-in/custom; NFC and approved orthography retained. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
     },
     {
+      "locale": "vi",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/vi/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/vi/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
+    },
+    {
       "locale": "zh-CN",
       "namespace": "cli.agents_help",
       "source_sha256": "d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3",
@@ -20279,6 +20423,30 @@
       },
       "status": "passed",
       "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. ZH1 minor fixed: explicit 哈希值 for content digest, removed added 请 absent from source, removed Chinese/Latin boundary spaces per guide. Modern terse voice, full-width punctuation and technical tokens retained. Existing hold-lift policy unchanged. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/zh-CN/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/zh-CN/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
     }
   ]
 }

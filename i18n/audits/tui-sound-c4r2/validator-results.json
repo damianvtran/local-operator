@@ -1,0 +1,106 @@
+[
+  {
+    "name": "generate",
+    "command": [
+      "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--timeout",
+      "600",
+      "--memory-mb",
+      "1500",
+      "--",
+      "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+      "scripts/i18n/generate.py"
+    ],
+    "cwd": "/Users/damian/local-operator/.worktrees/c4-i18n-r2",
+    "exit_code": 0,
+    "contract": "command-status",
+    "cleanup": "unknown (Darwin runner cannot certify)"
+  },
+  {
+    "name": "generate-check",
+    "command": [
+      "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--timeout",
+      "600",
+      "--memory-mb",
+      "1500",
+      "--",
+      "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+      "scripts/i18n/generate.py",
+      "--check"
+    ],
+    "cwd": "/Users/damian/local-operator/.worktrees/c4-i18n-r2",
+    "exit_code": 0,
+    "contract": "command-status",
+    "cleanup": "unknown (Darwin runner cannot certify)"
+  },
+  {
+    "name": "coverage-test",
+    "command": [
+      "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--timeout",
+      "1800",
+      "--memory-mb",
+      "1500",
+      "--",
+      "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+      "-m",
+      "pytest",
+      "tests/unit/i18n/test_language_manifest.py",
+      "-n",
+      "1",
+      "-q"
+    ],
+    "cwd": "/Users/damian/local-operator/.worktrees/c4-i18n-r2",
+    "exit_code": 0,
+    "contract": "command-status",
+    "cleanup": "unknown (Darwin runner cannot certify)"
+  },
+  {
+    "name": "catalogue-probe",
+    "command": [
+      "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--timeout",
+      "1800",
+      "--memory-mb",
+      "1500",
+      "--",
+      "/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/bin/python",
+      "/Users/damian/.local-operator/sessions/304e031dccf4/scratchpad/c4-i18n-audit-r2/catalogue_probe.py"
+    ],
+    "cwd": "/Users/damian/local-operator/.worktrees/c4-i18n-r2",
+    "exit_code": 0,
+    "contract": "command-status",
+    "cleanup": "unknown (Darwin runner cannot certify)"
+  },
+  {
+    "name": "check",
+    "command": [
+      ".venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--timeout",
+      "1800",
+      "--memory-mb",
+      "1500",
+      "--",
+      ".venv/bin/python",
+      "scripts/i18n/check.py",
+      "--allowance-base",
+      "27695a49855f"
+    ],
+    "exit_code": 0,
+    "contract": "command-status",
+    "cleanup": "unknown",
+    "base": "previous reviewed head 27695a49855f",
+    "notes": "Default origin/main comparison first hit the 600s bound, not a checker defect. Scoped full checker passed against review delta base; scanner and catalogue checks still full."
+  }
+]
