@@ -419,6 +419,9 @@ class PushWorker:
         #: What the last successful write put on disk, so an unchanged position
         #: costs no rename (see :meth:`_save`).
         self._written: dict[str, Any] | None = None
+        #: The last ``data.sound`` read from a GOOD config (see :meth:`_sound`),
+        #: kept so a torn read repeats the user's choice instead of the default.
+        self._last_sound: str | None = None
         #: The single-claimant guard over one pass (see :meth:`tick`).
         self._pass = threading.Lock()
         #: The highest positions READ this run, so the cursor can move to them
@@ -1070,12 +1073,7 @@ class PushWorker:
         count = self._count()
         emit_id = item.emit_id or uuid.uuid4().hex
         payload: dict[str, Any]
-        # Read at composition, like ``count``: the sound section is LIVE, so a
-        # change in /settings applies to the next push without a daemon restart.
-        # ``read_config_values`` memoises an unchanged file to one fstat; a torn
-        # read (``None``) takes the defaults, because an emit that waited for a
-        # clean read would delay a banner the user is waiting for.
-        sound = push_sound(read_config_values(self.config_dir))
+        sound = self._sound()
         if item.kind == EVENT_COMPLETION:
             conversation_identity = item.conversations[0] if item.conversations else ""
             session_id = _session_id_of(conversation_identity)
@@ -1131,6 +1129,29 @@ class PushWorker:
         if self._report_block is None:
             return payload
         return emit_body(payload, self._report_block())
+
+    def _sound(self) -> str:
+        """``data.sound`` for the emit being composed; never raises.
+
+        Read at composition, like ``count``: the sound section is LIVE, so a
+        change in /settings applies to the next push without a daemon restart,
+        and ``read_config_values`` memoises an unchanged file to one fstat.
+
+        A read that fails (``None``: a torn editor save, a bad byte) repeats the
+        LAST GOOD value, as that reader's contract asks ("keep what it had"): a
+        user who turned sound off must not hear Soft pulse because a save raced
+        a push. The default is used only when no good read has happened yet.
+        Waiting for a clean read instead would delay a banner the user is
+        waiting for, and an exception here would stall every queued emit
+        (#3405 R1-M1), so anything unexpected degrades the same way.
+        """
+        try:
+            values = read_config_values(self.config_dir)
+            if values is not None:
+                self._last_sound = push_sound(values)
+        except Exception:  # noqa: BLE001 — a sound setting must never block a push
+            logger.warning("push worker could not read the sound setting", exc_info=True)
+        return self._last_sound if self._last_sound is not None else push_sound({})
 
     def _handle(self, session_id: str | None) -> str | None:
         """The conversation handle for one session id, or ``None``.

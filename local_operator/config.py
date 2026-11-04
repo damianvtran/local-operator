@@ -244,7 +244,10 @@ def read_config_values(config_dir: Path) -> "Dict[str, Any] | None":
     try:
         with open(path, "r", encoding="utf-8") as stream:
             parsed = _parse_config_stream(path, stream)
-    except (OSError, yaml.YAMLError):
+    # UnicodeDecodeError is a ValueError, not an OSError: a hand-saved Latin-1
+    # byte would otherwise escape a reader whose contract is "None when the file
+    # cannot be read" (the writer below already catches it; #3405 R1-M1).
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return None
     if parsed is None:
         return {}
