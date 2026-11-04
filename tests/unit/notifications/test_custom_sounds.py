@@ -475,3 +475,18 @@ def test_cli_refusals_render_in_the_active_locale(store: Path, capsys) -> None:
     assert "son intégré" in refusal, refusal
     # The route envelope stays en (the desktop keys on `code`).
     assert "built-in sound" in caught.value.envelope()["text"]
+
+
+def test_pure_silence_is_its_own_code_not_undecodable(store: Path, capsys) -> None:
+    """UI D2 QA r2 Q5: a silent clip decodes fine; it must not read as damaged."""
+    from local_operator import sound_cli
+
+    refusal = _code(tone(1.0, amplitude=0.0), "quiet.wav")
+    assert (refusal.code, refusal.status) == ("silent", 422)
+    assert refusal.envelope()["code"] == "silent"
+    assert "is silent" in refusal.text
+    clip = store / "quiet.wav"
+    clip.write_bytes(tone(1.0, amplitude=0.0))
+    assert sound_cli.add_command(str(clip), name=None, select=False, keep_loudness=False) == 1
+    err = capsys.readouterr().err
+    assert "quiet.wav is silent" in err and "(silent)" in err

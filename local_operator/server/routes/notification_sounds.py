@@ -30,7 +30,7 @@ so at most ``MAX_INPUT_BYTES`` plus multipart framing is ever spooled (see
 REFUSALS use the RFC §2.6 ``{code, params, text}`` envelope with the codes the
 settings spec's error table switches on: ``too_large`` 413,
 ``unsupported_format`` 415 (``params.format`` names opus/m4a/aac),
-``too_long`` / ``undecodable`` / ``limit_reached`` / ``invalid_name`` 422,
+``too_long`` / ``undecodable`` / ``silent`` / ``limit_reached`` / ``invalid_name`` 422,
 ``not_found`` 404, ``builtin_readonly`` 409, ``store_failed`` 503.
 """
 

@@ -593,10 +593,11 @@ def prepare(raw: bytes, *, file_label: str, keep_loudness: bool = False) -> Prep
     threshold = 10 ** (SILENCE_DBFS / 20)
     first = next((i for i in range(frames) if any(abs(ch[i]) > threshold for ch in channels)), None)
     if first is None:
-        # A file of pure silence decodes, but there is nothing to play: the
-        # same code as a broken file (the desktop has one row for both), with
-        # its own sentence so the CLI user learns why.
-        raise SoundRejected("undecodable", 422, _ns.error_silent(file=file_label))
+        # A file of pure silence decodes, but there is nothing to play. Its own
+        # code, not `undecodable` (UI D2 QA r2, Q5): the file is not damaged,
+        # and a client keyed on `code` must not tell the user it might be. The
+        # sentence is the already-audited `error.silent`.
+        raise SoundRejected("silent", 422, _ns.error_silent(file=file_label))
     last = next(
         i for i in range(frames - 1, -1, -1) if any(abs(ch[i]) > threshold for ch in channels)
     )

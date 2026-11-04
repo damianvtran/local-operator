@@ -46,6 +46,16 @@ def tone(seconds: float) -> bytes:
     return buffer.getvalue()
 
 
+def silence(seconds: float) -> bytes:
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(22050)
+        out.writeframes(b"\0\0" * int(seconds * 22050))
+    return buffer.getvalue()
+
+
 @pytest_asyncio.fixture
 async def desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -128,10 +138,13 @@ async def test_upload_rename_audio_delete_round_trip(desktop) -> None:
         (b"OggS" + b"\0" * 24 + b"OpusHead" + b"\0" * 64, "a.opus", 415, "unsupported_format"),
         (None, "long.wav", 422, "too_long"),
         (b"just some text\n" * 50, "text.wav", 422, "undecodable"),
+        (b"SILENT", "quiet.wav", 422, "silent"),
     ],
 )
 async def test_upload_refusals_carry_their_code(desktop, raw, filename, status, code) -> None:
     client, _ = desktop
+    if raw == b"SILENT":  # a valid 1 s WAV of digital silence (UI D2 QA r2, Q5)
+        raw = silence(1.0)
     response = await _upload(client, tone(10.6) if raw is None else raw, filename)
     assert response.status_code == status
     detail = response.json()["detail"]
