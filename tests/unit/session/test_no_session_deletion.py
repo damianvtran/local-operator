@@ -1425,6 +1425,25 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "both fixed avatar.png|jpg FILEs in an agent dir, absent is fine; never sessions/",
     ),
+    # The picture's size-variant cache (``.avatar.<sha12>.<size>.<ext>``) lives
+    # beside it in the same agent directory: built from verified original bytes,
+    # swept on set/clear. Names are derived from the sha and a fixed size set.
+    (
+        "local_operator/agent_avatar.py::_sized",
+        "os.replace",
+        "staging temp FILE -> agents/<id>/.avatar.<sha12>.<size>.<ext> variant; never sessions/",
+    ),
+    (
+        "local_operator/agent_avatar.py::_sized",
+        "<path>.unlink",
+        "only the same-directory variant staging temp FILE this write created",
+    ),
+    (
+        "local_operator/agent_avatar.py::remove_derivatives",
+        "<path>.unlink",
+        "cached .avatar.<sha12>.<size>.<ext> variant FILEs (and their staging temps) "
+        "in agents/<id>/, matched by _is_derivative_name; never sessions/",
+    ),
     (
         "local_operator/agent_avatar.py::subscribe._unsubscribe",
         "<path>.remove",
