@@ -1147,6 +1147,9 @@ class ServingSessionHandle(SessionHandle):
         #: :meth:`_schedule_model_access_publish`.
         self._model_access_publish: asyncio.Task[None] | None = None
         self._model_access_publish_selector = ""
+        #: Unsubscribes :meth:`_on_access_receipt`; a no-op until it is installed
+        #: at the end of construction, so a dispose of a half-built handle is safe.
+        self._remove_access_listener: Callable[[], None] = lambda: None
         #: ``(selected_selector, provider, model_id)`` of a re-home this owner
         #: REFUSED because the conversation was busy, retried at the turn end
         #: (``_retry_deferred_rehome``). Also serves as the reply classified by
@@ -1374,6 +1377,15 @@ class ServingSessionHandle(SessionHandle):
         # store. `publish_model_access` carries its own never-raises guard, so
         # it cannot fail the boot it rides in on.
         self.publish_model_access()
+        # ...AND WHENEVER THE BORROWED-ACCESS EVIDENCE BEHIND IT MOVES. The claim
+        # embeds this process's effective-access receipt (state and its
+        # ``observed_at``, the band's "Last checked"), and a receipt changes on
+        # every resolve, not only on a model edge: a band published as
+        # ``owner_unavailable`` while the owner slept stayed frozen through
+        # every later verified borrow until the next model switch.
+        from local_operator.network.credentials import effective as _effective
+
+        self._remove_access_listener = _effective.add_listener(self._on_access_receipt)
         # Last, so a handle that could not be fully built never leaves a live
         # registration behind (see :meth:`_register_secret_session`). The call
         # is synchronous and can stall the loop for up to ``STARTUP_TIMEOUT_S``
@@ -2016,6 +2028,7 @@ class ServingSessionHandle(SessionHandle):
             task.cancel()
         # The access-claim read is additive state about a session that is going
         # away; nothing may publish into its store after disposal.
+        self._remove_access_listener()
         publish = self._model_access_publish
         if publish is not None and not publish.done():
             publish.cancel()
@@ -6073,6 +6086,34 @@ class ServingSessionHandle(SessionHandle):
         # come back round. The claim follows within one read.
         self._schedule_model_access_publish()
         return f"model: {self._projection.model_label}"
+
+    def _on_access_receipt(self, root: str, provider: str) -> None:
+        """Republish the claim when THIS session's serving provider's receipt moved.
+
+        Called from whichever thread wrote the receipt (a resolve runs on the
+        session loop, a lifecycle frame may not), so the republish is handed to
+        the session loop. Filtered on provider and root here, because the
+        receipts are process-wide and several sessions on different roots and
+        providers share them: a GitHub or another provider's change must not
+        restate this band, and the republish recomputes the claim from the
+        store and receipt rather than trusting anything the writer said.
+        """
+        if self._disposing:
+            return
+        spec = getattr(self._session, "effective_model", None) or getattr(
+            self._session, "model", None
+        )
+        if spec is None or spec.provider != provider:
+            return
+        # The receipts' own spelling of a root, so both sides compare equal.
+        from local_operator.network.credentials.effective import _root
+
+        if root != _root(self._config_dir):
+            return
+        try:
+            self._loop.call_soon_threadsafe(self._schedule_model_access_publish)
+        except RuntimeError:  # the loop has closed: nothing is served any more
+            return
 
     def _schedule_model_access_publish(self) -> "asyncio.Task[None] | None":
         """Start (or join) the off-loop access-claim publish for the serving model.
