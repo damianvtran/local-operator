@@ -3411,6 +3411,7 @@ class FrontendModelAccess(BaseModel):
             "local",
             "eligible_borrow_unverified",
             "effective_borrow",
+            "held_offline",
             "expired",
             "pending",
             "owner_unavailable",

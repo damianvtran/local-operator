@@ -35,6 +35,7 @@ WHAT THIS MODULE GUARANTEES, and the mechanism for each:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import threading
 import time
@@ -63,9 +64,21 @@ from local_operator.network.credentials.types import (
     Grant,
     credential_key_for_mcp,
     credential_key_for_provider,
+    is_device_bound_provider,
+    is_mcp_key,
 )
 
 logger = logging.getLogger("local_operator.network.credentials.client")
+
+#: The outcomes that mean "the owner did not answer" and nothing more. Only these may
+#: be bridged by a grant this process already holds (:meth:`_held_or`).
+_HOLDABLE_REFUSALS: frozenset[str] = frozenset({"owner_offline", "owner_unreachable"})
+
+#: Outcomes that are not an owner answer about permission either, so they neither
+#: serve nor drop a held grant: a local broker fault, a busy owner, a quota rest.
+_TRANSIENT_REFUSALS: frozenset[str] = frozenset(
+    {"internal", "rate_limited", "quota_blocked", "unsupported"}
+)
 
 #: The borrower's whole budget for one borrow, in seconds. Below the local secret
 #: broker's 10 s (see this module's docstring) and far below the owner-side
@@ -655,6 +668,11 @@ class MeshCredentialClient:
         # (see ``PlacementState.cool_down``). An explicit refresh still carries
         # them: a forced refresh is a repair of the bearer, not a request to be
         # served by a row the provider said is spent.
+        # What this device last heard about ``key``, read BEFORE the dial overwrites
+        # it: a non-transport refusal recorded by ANOTHER process (another session,
+        # the relay's own pull) is an owner answer this process's memory never saw,
+        # and it must keep a held grant from being served (:meth:`_held_or`).
+        prior_status = self.state.status(key)
         resting = self.state.cooldowns(key, model_id, owner_device=self.owner_of(key))
         excluded = sorted({int(row["credential_id"]) for row in resting})
         try:
@@ -663,7 +681,13 @@ class MeshCredentialClient:
 
             record = store.find_own_relay(self.root)
             if record is None:
-                return self._offline(key, label)
+                return self._held_or(
+                    self._offline(key, label),
+                    key,
+                    session_id,
+                    force_refresh=force_refresh,
+                    prior_status=prior_status,
+                )
             extra: dict[str, Any] = {}
             if excluded:
                 # Only when there is something to hide, so the frame an older relay
@@ -694,7 +718,93 @@ class MeshCredentialClient:
                 owner_device_name=self.owner_label(key),
                 message=exc.__class__.__name__,
             )
-        return self._from_reply(reply, key, label, session_id, resting=resting)
+        outcome = self._from_reply(reply, key, label, session_id, resting=resting)
+        if isinstance(outcome, BrokerError):
+            return self._held_or(
+                outcome, key, session_id, force_refresh=force_refresh, prior_status=prior_status
+            )
+        return outcome
+
+    def _held_or(
+        self,
+        refusal: BrokerError,
+        key: str,
+        session_id: str,
+        *,
+        force_refresh: bool,
+        prior_status: str = "",
+    ) -> Grant | BrokerError:
+        """The grant this process already holds, when the owner simply did not answer.
+
+        WHY (the 09:26 incident): the operator closed the owner laptop for a walk and
+        the node's very next request was refused ``owner_offline`` while it held a
+        grant the owner had lent minutes earlier, still inside the lease the owner
+        set. The dial stays FIRST (``request_grant_sync``), so rotation, logout and
+        revocation are seen whenever the owner answers; this is consulted only after
+        the dial, only for a TRANSPORT outcome, and only within these bounds:
+
+        * the outcome is ``owner_offline``/``owner_unreachable`` and nothing else.
+          ANY answer from the owner (not_a_holder, revoked, grant_invalid, consent,
+          scope, no_local_credential, epoch_stale, refresh_failed, ...) is
+          authority, so the held grant is DROPPED and that answer stands;
+        * this device is still a holder and still an active member (re-read now:
+          a revoke or removal the owner already pushed must win over memory), and
+          no live non-transport refusal stood for the key before this dial
+          (``prior_status``: another process may have heard the owner say no);
+        * ``now < grant_expires_at_ms``: the owner's own lease, already capped at
+          this device's ``now + grant_ttl_s`` by :meth:`_bounded`. Never the
+          bearer's own expiry and never extended: this serves 0..ttl seconds of
+          continuity depending on the grant's age, not a guaranteed window;
+        * not a forced refresh (a repair must reach the owner), not MCP (a
+          rotating server token whose owner may already have rotated it), not a
+          device-bound provider, and not GitHub, whose installation-token cache
+          is its own established branch above.
+
+        Memory only: :class:`GrantCache` has no serializer and this adds none.
+        """
+        from local_operator.network.credentials.github import is_github_key
+
+        if is_mcp_key(key) or is_device_bound_provider(key) or is_github_key(key):
+            # Not holdable, and their existing cache behaviour is left exactly as it
+            # was: this branch neither serves nor drops anything for them.
+            return refusal
+        if refusal.code not in _HOLDABLE_REFUSALS:
+            if refusal.code not in _TRANSIENT_REFUSALS:
+                # An owner ANSWER. Whatever it said, a bearer from before it is not
+                # evidence of permission any more, for any session of this key.
+                self.grants.drop(key)
+            return refusal
+        if force_refresh:
+            return refusal
+        held = self.grants.peek(key, session_id)
+        if held is None:
+            return refusal
+        refused_before = prior_status not in ("", "active") and (
+            prior_status not in _HOLDABLE_REFUSALS | _TRANSIENT_REFUSALS
+        )
+        if (
+            refused_before
+            or not held.usable_at()
+            or not self.should_borrow(key)
+            or not self._self_membership_active()
+        ):
+            self.grants.drop(key, session_id)
+            return refusal
+        # A COPY carries the mark: the cached grant stays exactly what the owner
+        # lent, so the next successful dial replaces it with no state to unwind.
+        held = dataclasses.replace(held, held_offline=True)
+        from local_operator.network.credentials.effective import note_resolution
+
+        # Overwrites the ``owner_unavailable`` receipt the refusal just wrote: the
+        # session IS working, on the owner's grant, and says why.
+        note_resolution(self.root, key, held)
+        logger.info(
+            "mesh credential %s: owner unreachable, serving the grant it lent "
+            "(%.0f s of its lease left)",
+            key,
+            max(0.0, held.grant_expires_at_ms / 1000.0 - time.time()),
+        )
+        return held
 
     def _resting_refusal(self, key: str, label: str, resting: list[dict[str, Any]]) -> BrokerError:
         """``quota_blocked`` built from this device's own cooldowns. Not cached.
