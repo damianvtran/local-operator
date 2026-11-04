@@ -2747,6 +2747,47 @@
     },
     {
       "locale": "ur",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "4377ea85eeccf9d6625e7fd490cf31d92fd11a0ccf23b0331094323dad2a957b",
+      "translator": {
+        "agent": "coder — PR #3400 implementer",
+        "model": "unrecorded — PR #3400 does not name the implementer's model; not inferred",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, session 0ca4d09f6337), independent of the translator",
+        "model": "anthropic/claude-opus-5-5 (no provider fallback)",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent audit PR #3400 budget_exhausted title/body at en 4377ea85eecc. 2 major, 1 minor (U1, U2, U3), all fixed by auditor; unresolved blocker/major 0. Evidence: i18n/audits/evidence/ur/cli.team_bridge/tbb3400/record.json"
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge_alert",
+      "source_sha256": "f433a71daee9d3e6904a04084ee4d59fc2e7015b4252acd47d2e388154cf564f",
+      "translator": {
+        "agent": "i18n-translator (coder subagent)",
+        "session": "unknown",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02"
+      },
+      "auditor": {
+        "agent": "i18n-auditor-r2b (task subagent, independent of translator)",
+        "session": "26723730f2f9",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-02",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Single independent audit at the current English bytes (not dual-blind; high-visibility copy may still need a second audit per docs/I18N.md). Re-verified the earlier plural-agreement major as fixed: long_hold.body now puts the verb in its own count plural ('1 پیغام ... روکا ہوا ہے' / '2, 5 پیغامات ... روکے ہوئے ہیں'); minutes arms are invariant (منٹ) by design. Checked: 4/4 keys present; ICU placeholder parity ({count},{minutes}); one/other CLDR arms rendered at counts 1, 2, 5 and minutes 60; backticked `lop team-bridge receiver status` byte-identical LTR island, no bidi control characters; NFC; آپ register; meaning preserved (held longer than N minutes, not reached the agent, cleared = none held longer than the threshold); 'روکا' consistent with cli.team_bridge ('روکا گیا'). 0 findings."
+    },
+    {
+      "locale": "ur",
       "namespace": "wire.notification_sound",
       "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
       "translator": {

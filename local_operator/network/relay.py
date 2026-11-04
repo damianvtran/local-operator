@@ -14865,17 +14865,18 @@ def _unit_config_root() -> Path | None:
     return Path(value) if value else None
 
 
-def _mark_unit_stop(reason: str) -> bool:
-    """Mark a product stop verb's stop in the UNIT's root; ``False`` if none.
+def _mark_unit_stop(reason: str) -> Path | None:
+    """Mark a product stop in the UNIT's root and return that root, or ``None``.
 
     Linux only: on macOS the marker is never consulted (:func:`_exit_status`
     answers 0 there), so writing one would be dead state.
     """
     root = _unit_config_root()
-    if root is None:
-        return False
-    mark_deliberate_stop(reason, root)
-    return True
+    if root is not None:
+        mark_deliberate_stop(reason, root)
+    # The unit may be replaced while its manager is acting. Failure cleanup must
+    # target this exact root, never a fresh parse (or the caller's default root).
+    return root
 
 
 def mark_deliberate_stop(reason: str, root: Path | None = None) -> None:
@@ -15610,8 +15611,23 @@ def uninstall(
             if supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
                 # A DELIBERATE STOP: marked before the signal, so the exit it
                 # causes reads as asked-for (DELIBERATE_STOP_EXIT_STATUS).
-                _mark_unit_stop("uninstall")
-                supervisors.systemctl_user("disable", "--now", SYSTEMD_UNIT)
+                marked_root = _mark_unit_stop("uninstall")
+                try:
+                    disabled = supervisors.systemctl_user("disable", "--now", SYSTEMD_UNIT)
+                except BaseException:
+                    if marked_root is not None:
+                        clear_deliberate_stop(marked_root)
+                    raise
+                if disabled.returncode != 0:
+                    # A refused disable leaves a running service, not a completed
+                    # uninstall. Keep its unit and all purge targets so a retry is
+                    # possible; its next crash must not look like a requested stop.
+                    if marked_root is not None:
+                        clear_deliberate_stop(marked_root)
+                    raise MeshRefusal(
+                        "service_failed",
+                        supervisors.translate_systemctl_error(disabled.stderr)[:300],
+                    )
                 systemd_path().unlink(missing_ok=True)
                 supervisors.systemctl_user("daemon-reload")
                 steps.append(f"disabled and removed the systemd user service ({SYSTEMD_UNIT})")
@@ -16295,7 +16311,7 @@ def _supervised_action(
     refused = guard(action)
     if refused is not None:
         return refused
-    marked = False
+    marked_root: Path | None = None
     if action == "stop":
         # THE OPERATOR'S STOP VERB (`lop network stop`) IS DELIBERATE: marked
         # before the arm signals, so the exit reads as asked-for whichever route
@@ -16303,7 +16319,7 @@ def _supervised_action(
         # only — a no-op on macOS, where the marker is never read — and in the
         # UNIT's config root (_unit_config_root). After the guard, so a
         # redirected HOME writes nothing.
-        marked = _mark_unit_stop("lop network stop")
+        marked_root = _mark_unit_stop("lop network stop")
     port = _service_port()
     before = _supervision_state(port)
     replaced: list[dict[str, Any]] = []
@@ -16319,14 +16335,22 @@ def _supervised_action(
             if outcome not in ("stopped", "gone"):
                 return _adoption_refusal(action, port, holder, outcome, replaced)
             replaced.append({**holder, "outcome": outcome})
-    result = arm(action)
+    try:
+        result = arm(action)
+    except BaseException:
+        # A timeout/cancellation is no acknowledgement that the stop completed.
+        # Preserve the exception, but do not let its stale marker suppress a
+        # subsequent crash restart. systemd-initiated stops stay down regardless.
+        if marked_root is not None:
+            clear_deliberate_stop(marked_root)
+        raise
     if not result.get("ok"):
-        if marked:
+        if marked_root is not None:
             # THE STOP DID NOT HAPPEN (review m1: e.g. `systemctl --user stop`
             # could not reach the bus), so the relay is still running and its
             # next exit is NOT asked-for. Left in place, the marker would keep a
             # genuine crash inside its TTL down instead of restarting it.
-            clear_deliberate_stop(_unit_config_root())
+            clear_deliberate_stop(marked_root)
         return _service_failure(action, port, result, replaced=replaced)
     verdict = _verify_service_action(action, before)
     if not verdict.get("ok"):

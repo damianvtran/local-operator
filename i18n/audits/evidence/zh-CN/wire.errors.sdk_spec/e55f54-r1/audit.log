@@ -1,0 +1,26 @@
+PASS wire.errors.sdk_spec.agent_identity_conflict args=() Cf=0; technical tokens=['agent_id', 'agent_name']
+PASS wire.errors.sdk_spec.approval_callback_gate_required args=() Cf=0; technical tokens=['ApprovalPolicy.callback()']
+PASS wire.errors.sdk_spec.approval_declared_tools_empty args=() Cf=0; technical tokens=['ApprovalPolicy.declared()', 'ApprovalPolicy.refuse()']
+PASS wire.errors.sdk_spec.approval_handler_wrong_mode args=(('mode', 'simple'),) Cf=0; technical tokens=['ApprovalPolicy.handler']
+PASS wire.errors.sdk_spec.approval_tools_wrong_mode args=(('mode', 'simple'),) Cf=0; technical tokens=['ApprovalPolicy.tools']
+PASS wire.errors.sdk_spec.attach_fields_unsupported args=(('fields', 'simple'),) Cf=0; technical tokens=['resume', 'spec.resume']
+PASS wire.errors.sdk_spec.attach_output_unsupported args=() Cf=0; technical tokens=[]
+PASS wire.errors.sdk_spec.attach_resume_required args=() Cf=0; technical tokens=['spec.resume']
+PASS wire.errors.sdk_spec.mode_invalid args=(('mode', 'simple'),) Cf=0; technical tokens=[]
+PASS wire.errors.sdk_spec.output_format_invalid args=(('formats', 'simple'),) Cf=0; technical tokens=['output_format']
+PASS wire.errors.sdk_spec.output_retries_range args=() Cf=0; technical tokens=['output_retries']
+PASS wire.errors.sdk_spec.output_retries_requires_format args=() Cf=0; technical tokens=['output_format', 'output_retries']
+PASS wire.errors.sdk_spec.output_schema_requires_format args=() Cf=0; technical tokens=['output_format', 'output_schema']
+PASS wire.errors.sdk_spec.resume_empty args=() Cf=0; technical tokens=['@latest', 'resume']
+PASS wire.errors.sdk_spec.spawn_birth_effort_pair_required args=() Cf=0; technical tokens=['birth_effort', 'hosting/model', 'open_session']
+PASS wire.errors.sdk_spec.spawn_fields_unsupported args=(('fields', 'simple'),) Cf=0; technical tokens=['dispose', 'open_session', 'resume', 'spawn_session()']
+PASS wire.errors.sdk_spec.spawn_model_pair_required args=() Cf=0; technical tokens=['hosting/model', 'spawn_session()']
+PASS wire.errors.sdk_spec.spawn_output_unsupported args=(('fields', 'simple'),) Cf=0; technical tokens=['open_session', 'spawn_session()']
+PASS wire.errors.sdk_spec.tools_empty args=() Cf=0; technical tokens=['None']
+PASS wire.errors.sdk_spec.world_root_empty args=() Cf=0; technical tokens=['world_root']
+PASS wire.errors.sdk_spec.yolo_approval_unreachable args=(('approval_mode', 'simple'),) Cf=0; technical tokens=['ApprovalPolicy.auto()', 'approval_mode', 'yolo']
+PASS pinned producer AST: 21/21 force locale=en; source inspection, not live exception execution
+PASS negative control invalid ICU rejected
+PASS negative control added placeholder rejected
+RESULT PASS 21/21 staged catalogue mechanical checks; no global scanner/build/native suite
+PASS additional literal guards: tools/None, 0..5, mode/spec/resume, exact open_session signature and source yolo assignment literal preserved

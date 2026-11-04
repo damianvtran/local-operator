@@ -1270,6 +1270,24 @@ def _sound_plan(env: EnvMap | None = None) -> "SoundPlan | None":
         return None
 
 
+def play_raised_banner_sound(leg: str, env: EnvMap | None = None) -> None:
+    """Play the configured sound for a banner a caller OUTSIDE this module raised.
+
+    The TUI's background-completion announcer spawns its own `cmux notify`
+    (``tui/app.py``, the digest and the per-session branch) rather than going
+    through :class:`Notifier` or :func:`detached_notify`, so without this those
+    two banners played cmux's default sound instead of the configured one
+    (parity addendum 2, G1). Same steps as ``Notifier._sound``: the plan (None
+    over SSH or on a broken install), the rig guard, then the player, which
+    applies ``enabled``, volume and the machine-wide throttle. Call it only
+    after the banner actually went out (rule 1). Never raises.
+    """
+    plan = _sound_plan(env)
+    if plan is None or not desktop_belongs_to_this_process():
+        return
+    _play_sound(plan, leg)
+
+
 def _play_sound(plan: "SoundPlan", leg: str) -> None:
     try:
         from local_operator.notifications.sound import play_for_banner

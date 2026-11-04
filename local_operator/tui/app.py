@@ -32930,6 +32930,7 @@ class OperatorApp(App[None]):
             desktop_belongs_to_this_process,
             detached_notify,
             digest_subtitle,
+            play_raised_banner_sound,
         )
 
         # ONE SET, READ TWICE. The title is the line that survives macOS's clip
@@ -32950,9 +32951,15 @@ class OperatorApp(App[None]):
             # `detached_notify`, which asks the same gate and is answered the
             # same way.
             if surface is not None and desktop_belongs_to_this_process():
-                return bool(
+                raised = bool(
                     spawn_detached(cmux_command(surface, title, subtitle, BODY_BACKGROUND_DIGEST))
                 )
+                # `cmux notify` is spawned here, not via `Notifier`, so the
+                # configured sound has to be asked for here too (G1); the
+                # `detached_notify` branch below plays its own.
+                if raised:
+                    play_raised_banner_sound("cmux")
+                return raised
             # No `session_id`: a digest covers several sessions, so there is no
             # single transcript for a click to reopen — which is why the body
             # names the sidebar rather than leaving the one inert banner in the
@@ -33217,6 +33224,7 @@ class OperatorApp(App[None]):
             cmux_surface_id,
             desktop_belongs_to_this_process,
             detached_notify,
+            play_raised_banner_sound,
         )
 
         # THREE STATES, THREE SENTENCES. `interrupted` is not folded into
@@ -33264,6 +33272,10 @@ class OperatorApp(App[None]):
                 delivered = bool(
                     spawn_detached(cmux_command(surface, title, CONTEXTS.get(kind, ""), body))
                 )
+                # Same as the digest's cmux branch (G1): this spawn bypasses
+                # `Notifier`, so it asks for the configured sound itself.
+                if delivered:
+                    play_raised_banner_sound("cmux")
             else:
                 delivered = detached_notify(
                     # `argv_safe` on BOTH values for parity with the cmux branch

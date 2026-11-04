@@ -90,6 +90,15 @@ _AMBIENT_VARS = (
     # `isolate_environment` below so the escape is closed for every test at once
     # rather than by each test remembering.
     "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH",
+    # Notification sounds (notifications/sound.py, play.py). The mute switch is
+    # scrubbed so an inherited value cannot decide a test, and then RE-ARMED for
+    # every test by the `_PROCESS_DESKTOP_GATES` loop in `isolate_environment`
+    # (after this scrub), so the suite still never reaches the speakers. The
+    # backend selector names a real-machine resource (`null` vs the default
+    # audio device) and is scrubbed so a developer's shell cannot steer which
+    # one a player child opens; sound tests pass it explicitly.
+    "LOCAL_OPERATOR_NO_SOUND",
+    "LOCAL_OPERATOR_SOUND_BACKEND",
     "LOCAL_OPERATOR_DESKTOP_TOKEN",
     # The DESCRIPTOR channel for the same bearer (``server/desktop.TOKEN_FD_ENV``,
     # #3039): a number naming an inherited pipe the daemon reads its bearer from at
