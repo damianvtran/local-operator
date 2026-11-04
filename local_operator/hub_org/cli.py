@@ -61,6 +61,13 @@ def add_parser(subparsers: Any, *, parent_parser: Any, help_locale: str, config_
     # who types `lop hub org pull --help` while eligible sees everything.
     kwargs: dict[str, Any] = {"help": h(_hh.org())} if shown else {}
     org = subparsers.add_parser("org", parents=[parent_parser], **kwargs)
+    if not shown:
+        # Omitting ``help=`` keeps the row out of the command list, but argparse
+        # still spells every choice in the ``{a,b,...}`` usage metavar, so
+        # `lop hub --help` would print `{status,links,link,org}` to a signed-out
+        # user. Pin the metavar to the visible choices.
+        visible = [name for name in subparsers.choices if name != "org"]
+        subparsers.metavar = "{" + ",".join(visible) + "}"
     org_sub = org.add_subparsers(dest="hub_org_command")
 
     def common(p: Any) -> None:

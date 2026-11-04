@@ -57,7 +57,10 @@ def _hub_help() -> str:
 
 
 def test_help_hides_org_when_signed_out(_isolated: Path) -> None:
-    assert "org" not in _hub_help().split("positional arguments")[-1].split()
+    text = _hub_help()
+    # Neither the command row nor the usage metavar may name it.
+    assert "org" not in text.split("positional arguments")[-1].split()
+    assert "{status,links,link}" in text and ",org}" not in text
 
 
 def test_help_hides_org_with_no_team_plan(_isolated: Path) -> None:
@@ -68,7 +71,8 @@ def test_help_hides_org_with_no_team_plan(_isolated: Path) -> None:
 
 def test_help_lists_org_for_a_team_member(_isolated: Path) -> None:
     _seed(_isolated, MEMBER)
-    assert "Radient Team" in _hub_help()
+    text = _hub_help()
+    assert "Radient Team" in text and "{status,links,link,org}" in text
 
 
 def test_ineligible_invocation_prints_the_one_sentence(_isolated: Path, capsys) -> None:
