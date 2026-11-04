@@ -2309,3 +2309,153 @@ async def test_the_digest_never_uses_the_cmux_backend_for_a_run_that_is_not_your
 
         assert spawned and all(call[0] == "cmux" for call in spawned), spawned
         assert any(call[1:2] == ["notify"] for call in spawned), spawned
+
+
+# ---------------------------------------------------------------------------
+# G1 (parity addendum 2): the TUI's own cmux spawns play the CONFIGURED sound
+# ---------------------------------------------------------------------------
+#
+# Both cmux branches above spawn `cmux notify` themselves rather than going
+# through `Notifier`, so until G1 they played cmux's default sound and never
+# lop's. These cells run the player child FOR REAL on miniaudio's null device
+# and count its receipts, so "a sound was asked for" is proved by the decode
+# having happened, not by a call having been made.
+
+_PLAYER_MODULE = "local_operator.notifications.play"
+
+
+def _sound_rig(
+    store_root: Path, monkeypatch: pytest.MonkeyPatch, *, config: str = ""
+) -> list[list[str]]:
+    """Open the sound path for one test and return every cmux argv it raised.
+
+    Clears the suite-wide mute (the visible opt-in), answers the identity gate
+    for a real run, points the child's config dir at ``store_root`` (where the
+    receipt lands) and replaces the shared ``spawn_detached`` with one that RUNS
+    a player argv synchronously on the null backend and records anything else.
+    """
+    import os
+    import subprocess
+
+    if config:
+        (store_root / "config.yml").write_text(config)
+    # The same opt-in out of the suite-wide banner gate that `spawned` makes.
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", raising=False)
+    monkeypatch.delenv("LOCAL_OPERATOR_NO_SOUND", raising=False)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(store_root))
+    monkeypatch.setattr("local_operator.tui.notify.desktop_belongs_to_this_process", lambda: True)
+    child_env = {**os.environ, "LOCAL_OPERATOR_SOUND_BACKEND": "null"}
+    child_env.pop("LOCAL_OPERATOR_NO_SOUND", None)
+    raised: list[list[str]] = []
+
+    def spawn(argv: list[str], **_kwargs: Any) -> int:
+        if _PLAYER_MODULE in argv:
+            subprocess.run(argv, env=child_env, check=True, timeout=30)
+        else:
+            raised.append(list(argv))
+        return 1
+
+    monkeypatch.setattr("local_operator.proc.spawn_detached", spawn)
+    monkeypatch.setattr("local_operator.tui.notify.spawn_detached", spawn)
+    return raised
+
+
+def _sound_receipts(store_root: Path) -> list[dict[str, Any]]:
+    from local_operator.notifications import sound
+
+    path = store_root / "run" / sound.RECEIPT_FILE
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+async def _one_cmux_completion(
+    store_root: Path, monkeypatch: pytest.MonkeyPatch, raised: list[list[str]]
+) -> None:
+    _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Article-search-svc schema review")
+    store = AttentionStore(store_root / "attention.db")
+    token = str(uuid.uuid4())
+    store.publish(conversation_identity(background), token, "old", "complete")
+    store.acknowledge(conversation_identity(background), token)
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        raised.clear()
+        monkeypatch.setenv("CMUX_SURFACE_ID", _CMUX_SURFACE)
+        store.publish(conversation_identity(background), str(uuid.uuid4()), "fresh", "complete")
+        await _settle(app, pilot)
+
+
+@pytest.mark.asyncio
+async def test_a_cmux_background_completion_plays_the_configured_sound(
+    store_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raised = _sound_rig(
+        store_root,
+        monkeypatch,
+        config="values:\n  notifications:\n    sound:\n      id: felt-marimba\n      volume: 50\n",
+    )
+    await _one_cmux_completion(store_root, monkeypatch, raised)
+
+    assert [argv[0] for argv in raised] == ["cmux"], raised
+    receipts = _sound_receipts(store_root)
+    assert len(receipts) == 1, receipts
+    assert receipts[0]["sound_id"] == "felt-marimba" and receipts[0]["gain"] == 0.25
+    assert receipts[0]["leg"] == "cmux" and receipts[0]["backend"] == "null"
+
+
+@pytest.mark.asyncio
+async def test_a_cmux_background_completion_is_silent_when_sound_is_off(
+    store_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raised = _sound_rig(
+        store_root,
+        monkeypatch,
+        config="values:\n  notifications:\n    sound:\n      enabled: false\n",
+    )
+    await _one_cmux_completion(store_root, monkeypatch, raised)
+
+    # The banner still went out; only the sound is off.
+    assert [argv[0] for argv in raised] == ["cmux"], raised
+    assert _sound_receipts(store_root) == []
+
+
+@pytest.mark.asyncio
+async def test_the_cmux_digest_plays_the_configured_sound(
+    store_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The digest branch is a separate spawn site. With the throttle opened, every
+    cmux banner of the flood (each row and the digest) gets exactly one receipt."""
+    from local_operator.notifications import sound
+    from local_operator.tui.app import _BACKGROUND_NOTIFY_MAX_PER_TICK
+
+    raised = _sound_rig(store_root, monkeypatch)
+    monkeypatch.setattr(sound, "claim_throttle", lambda *a, **k: True)
+    _make_session(store_root, "current", "Current conversation")
+    seed = _make_session(store_root, "bg0000000000", "Seed")
+    store = AttentionStore(store_root / "attention.db")
+    seed_token = str(uuid.uuid4())
+    store.publish(conversation_identity(seed), seed_token, "old", "complete")
+    store.acknowledge(conversation_identity(seed), seed_token)
+    flood = [
+        _make_session(store_root, f"bg00000002{index:02d}", f"Later {index}")
+        for index in range(_BACKGROUND_NOTIFY_MAX_PER_TICK + 1)
+    ]
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot, rounds=8)
+        raised.clear()
+        monkeypatch.setenv("CMUX_SURFACE_ID", _CMUX_SURFACE)
+        for directory in flood:
+            store.publish(conversation_identity(directory), str(uuid.uuid4()), "fresh", "complete")
+        await _settle(app, pilot, rounds=8)
+
+    cmux = [argv for argv in raised if argv[0] == "cmux"]
+    assert cmux and len(cmux) == len(raised), raised
+    receipts = _sound_receipts(store_root)
+    assert len(receipts) == len(cmux), (receipts, cmux)
+    assert {r["sound_id"] for r in receipts} == {"soft-pulse"}
+    assert {r["leg"] for r in receipts} == {"cmux"}
