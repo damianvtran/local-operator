@@ -1,5 +1,5 @@
 {
-  "wire.settings.hub_org.auto_enrol.help": "Hacer pull de nuevos agentes, equipos y habilidades y suscribirse.",
+  "wire.settings.hub_org.auto_enrol.help": "Hacer pull de los nuevos elementos de la organización y suscribirse.",
   "wire.settings.hub_org.auto_enrol.label": "Añadir elementos nuevos",
   "wire.settings.hub_org.auto_enrol.off.description": "solo al ejecutar lop hub org pull",
   "wire.settings.hub_org.auto_enrol.on.description": "añadirlos automáticamente",
