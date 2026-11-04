@@ -377,7 +377,21 @@ MEASURED_TOKENS: dict[str, int] = {
     # fix for cross-channel fan-out to a teammate.
     # 1901 -> 1951 (2026-11-03): body-state and long-hold alert wording, re-measured
     # on the tree rebased onto the one-channel clause by this test's own printed value.
-    "bridge": 1962,
+    # 1890 -> 1947 (+57, agent image attachments S1): ONE bullet in the opt-in
+    # `bridge` reference notes telling a model that `attachments` exists on
+    # `dm`/`channel_post` only where the hub supports agent uploads. The param is
+    # deliberately NOT in the published schema (SkipJsonSchema), so the always-on
+    # wire description/schema bytes did not move; the 1890 baseline was re-measured
+    # on this tree before the edit with this test's canonical renderer.
+    # 1962 -> 1978 (+16, merge of main): re-measured on the
+    # merged tree with this test's canonical renderer. Main's own wording is 1962
+    # (8128 chars); the S1 bullet at its original length pushed the merged doc to
+    # 8366 chars, over the 8192-char soft cap, so the bullet was tightened to
+    # "no base64 in bodies; `attachments` if hub allows." (8188 chars, 1978 tokens).
+    # The long form (the `attachments_unavailable` detail) lives in the refusal
+    # itself, not in this opt-in note. 1947 was the pre-merge figure and is not
+    # carried across.
+    "bridge": 1978,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
