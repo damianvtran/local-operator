@@ -1013,6 +1013,7 @@ def notification_writes(
     in_tmux: bool = False,
     in_zellij: bool = False,
     silent: bool = False,
+    lop_plays_sound: bool = False,
 ) -> list[str]:
     """Everything that should be written to the terminal for one notification.
 
@@ -1021,9 +1022,20 @@ def notification_writes(
     outer terminal may or may not receive, and the BEL that flags the pane
     regardless. Under ``bell`` the sequence IS a BEL, so no second one is added
     — a double ring for one event is a bug users report.
+
+    ``lop_plays_sound`` (lop is about to play its own notification sound)
+    DROPS the bare BEL on the ``bell`` protocol: Terminal.app, Windows Terminal
+    and unrecognised terminals. There the BEL is only an audible ping, and
+    lop's sound replaces it rather than ringing on top of it (review round 1,
+    M1; manager decision). Under tmux or Zellij the BEL is KEPT, because it is
+    the only thing that flags the pane, so the terminal's bell may still
+    sound beside lop's. ``lop sound doctor`` says so and names the fix
+    (the terminal's bell setting, or ``notifications.sound.id system``).
     """
     sequence = notification_sequence(protocol, title, body, silent=silent)
     if protocol == "bell":
+        if lop_plays_sound and not (in_tmux or in_zellij):
+            return []
         return [sequence]
     if in_tmux:
         # Checked BEFORE Zellij, and correct when both are set (Zellij hosting
@@ -1871,6 +1883,13 @@ class Notifier:
         # 99 / notify-send hints and the sound itself must agree.
         plan = _sound_plan()
         mute_host = plan is not None and plan.mutes_host_sound
+        # Whether lop's OWN sound will play for this banner: a file plan that
+        # clears the same rig guard `_sound` applies. Only then may the bare BEL
+        # be dropped; a refused or throttled-out play must not also lose it.
+        # The throttle is checked by the player and is deliberately not
+        # consulted here: a BEL suppressed within 1.5 s of another sound is
+        # the burst the throttle exists to stop.
+        lop_plays = plan is not None and plan.kind == "file" and desktop_belongs_to_this_process()
 
         surface = cmux_surface_id(self._env)
         if surface is not None and desktop_belongs_to_this_process():
@@ -1898,6 +1917,7 @@ class Notifier:
             in_tmux=is_inside_tmux(self._env),
             in_zellij=is_inside_zellij(self._env),
             silent=mute_host,
+            lop_plays_sound=lop_plays,
         ):
             self._write(chunk)
 

@@ -151,3 +151,70 @@ def test_detached_linux_banner_carries_the_hint(
     monkeypatch.setattr(notify, "_spawn_detached_ok", lambda argv: spawned.append(argv) or True)
     assert notify.detached_notify("T", "B") is True
     assert SUPPRESS_SOUND_HINT in spawned[0]
+
+
+# -- M1 (review round 1): lop's sound replaces the bare BEL, never the pane flag --
+
+APPLE_TERMINAL_ENV = {"TERM_PROGRAM": "Apple_Terminal"}
+UNKNOWN_TERM_ENV = {"TERM": "xterm-unknown-thing"}
+
+
+@pytest.mark.parametrize("env", [APPLE_TERMINAL_ENV, UNKNOWN_TERM_ENV], ids=["apple", "unknown"])
+def test_lops_sound_replaces_the_bel_on_a_bell_only_terminal(
+    played: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
+) -> None:
+    _use(monkeypatch)
+    sink = Sink()
+    notifier = Notifier(sink, env=env, platform="darwin")
+    assert notifier.protocol == "bell"
+    assert notifier.notify_turn_complete(running_children=0) is True
+    assert sink.writes == []
+    assert played == [("file", "osc")]
+
+
+@pytest.mark.parametrize("env", [APPLE_TERMINAL_ENV, UNKNOWN_TERM_ENV], ids=["apple", "unknown"])
+def test_system_keeps_the_bel_on_a_bell_only_terminal(
+    played: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
+) -> None:
+    _use(monkeypatch, id="system")
+    sink = Sink()
+    Notifier(sink, env=env, platform="darwin").notify_turn_complete(running_children=0)
+    assert sink.writes == ["\a"]
+
+
+def test_sound_off_keeps_the_bel(
+    played: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off means "no sound from lop", not "drop the terminal's own signal"."""
+    _use(monkeypatch, enabled=False)
+    sink = Sink()
+    Notifier(sink, env=APPLE_TERMINAL_ENV, platform="darwin").notify_turn_complete(
+        running_children=0
+    )
+    assert sink.writes == ["\a"]
+
+
+def test_a_rig_keeps_the_bel_because_lop_will_not_play(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rig guard refuses lop's sound, so the BEL must survive."""
+    _use(monkeypatch)
+    monkeypatch.setattr(notify, "desktop_belongs_to_this_process", lambda: False)
+    sink = Sink()
+    Notifier(sink, env=APPLE_TERMINAL_ENV, platform="darwin").notify_turn_complete(
+        running_children=0
+    )
+    assert sink.writes == ["\a"]
+
+
+@pytest.mark.parametrize(
+    "mux", [{"TMUX": "/tmp/tmux-1/default,1,0"}, {"ZELLIJ": "0"}], ids=["tmux", "zellij"]
+)
+def test_the_pane_flag_bel_is_kept_under_a_multiplexer(
+    played: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch, mux: dict[str, str]
+) -> None:
+    _use(monkeypatch)
+    sink = Sink()
+    Notifier(sink, env={**APPLE_TERMINAL_ENV, **mux}, platform="darwin").notify_turn_complete(
+        running_children=0
+    )
+    assert sink.writes == ["\a"]
+    assert played == [("file", "osc")]

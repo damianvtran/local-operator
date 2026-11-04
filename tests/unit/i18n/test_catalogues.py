@@ -97,6 +97,10 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.tunnel_setup",
         # Memory settings copy (LOH-25): the registry rows resolve through it.
         "wire.memory",
+        # Notification sounds (#3398): the settings section, rows, the built-in
+        # sound names and `lop sound` help, in its own namespace so the audited
+        # wire.settings hashes are untouched.
+        "wire.notification_sound",
         # The tier-1 remote-compute CLI copy is its own English-only namespace,
         # the `wire.host_speed` shape: `lop exec --remote` adds keys to `wire.exec`,
         # which fr/hi/vi CARRY, and an English edit to a carried namespace

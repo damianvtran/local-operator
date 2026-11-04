@@ -40,6 +40,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -48,18 +49,59 @@ from pathlib import Path
 #: (the fade the masters were cut with) can be clipped off.
 _DRAIN_S = 0.25
 
+#: Headroom past the sound's own duration before the child gives up on a hung
+#: device or ``afplay`` (review round 1, m5). A wedged CoreAudio or PulseAudio
+#: daemon can block a device open or start forever, and one more child would
+#: start per notification after each throttle window, so every child must exit
+#: on its own. Five seconds is far past any healthy open (tens of ms).
+_HANG_MARGIN_S = 5.0
+#: The bound when the duration cannot even be read (the file then fails to
+#: decode anyway, so this is a backstop, not a budget).
+_UNKNOWN_DURATION_S = 30.0
+
 _ENV_NO_SOUND = "LOCAL_OPERATOR_NO_SOUND"
 _ENV_BACKEND = "LOCAL_OPERATOR_SOUND_BACKEND"
 
 
 def _scaled(samples: "array.array[int]", gain: float) -> "array.array[int]":
-    """``samples`` (signed 16-bit) times ``gain``, clamped to the 16-bit range."""
+    """``samples`` (signed 16-bit) times ``gain``.
+
+    One comprehension into a fresh array, not an indexed loop (review round 1,
+    n2): about 5x faster in CPython, roughly 15 ms for a 0.8 s stereo sound.
+    numpy would do better but is not a dependency, and this child must not add
+    one. ``gain`` is clamped to [0, 1] by every caller, so ``|value * gain|``
+    never exceeds 32768 and no per-sample range clamp is needed; ``round``
+    keeps the requantisation symmetric about zero.
+    """
     if gain >= 0.9999:
         return samples
-    out = array.array("h", samples)
-    for index, value in enumerate(out):
-        out[index] = max(-32768, min(32767, int(round(value * gain))))
-    return out
+    return array.array("h", [round(value * gain) for value in samples])
+
+
+def _hard_deadline(path: Path) -> float:
+    """Seconds after which this child must exit, whatever it is blocked on."""
+    try:
+        import miniaudio
+
+        duration = float(miniaudio.get_file_info(str(path)).duration)
+    except Exception:  # noqa: BLE001 — unreadable file: use the backstop
+        duration = _UNKNOWN_DURATION_S
+    return duration + _DRAIN_S + _HANG_MARGIN_S
+
+
+def _arm_watchdog(seconds: float) -> threading.Timer:
+    """Hard-exit the process after ``seconds``.
+
+    ``os._exit`` from a daemon timer rather than an exception or a signal. The
+    thing that hangs is a C call inside miniaudio (device open, start or
+    close), and neither an exception raised in another thread nor ``SIGALRM``
+    (main thread only, absent on Windows) can interrupt it. Exiting the process
+    is the one action that always works, and the OS releases the device.
+    """
+    timer = threading.Timer(seconds, os._exit, args=(3,))
+    timer.daemon = True
+    timer.start()
+    return timer
 
 
 def _play_miniaudio(path: Path, gain: float, *, null_backend: bool) -> int:
@@ -102,17 +144,23 @@ def _play_miniaudio(path: Path, gain: float, *, null_backend: bool) -> int:
     return frames
 
 
-def _play_afplay(path: Path, gain: float) -> bool:
+def _play_afplay(path: Path, gain: float, timeout_s: float = _UNKNOWN_DURATION_S) -> bool:
     afplay = shutil.which("afplay") if sys.platform == "darwin" else None
     if not afplay:
         return False
-    result = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        [afplay, "-v", f"{gain:.4f}", str(path)],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    try:
+        result = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [afplay, "-v", f"{gain:.4f}", str(path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            # `run` kills the child on expiry, so a hung afplay cannot outlive
+            # this player (m5).
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return False
     return result.returncode == 0
 
 
@@ -135,14 +183,39 @@ def play(
     sha256: str = "",
     leg: str = "",
     env: dict[str, str] | None = None,
+    arm_watchdog: bool = False,
 ) -> int:
-    """Play once, synchronously. The importable core of the CLI below."""
+    """Play once, synchronously. The importable core of the CLI below.
+
+    ``arm_watchdog`` is for the detached child only (:func:`main`): its timer
+    ``os._exit``s the whole process, which is right for a child that exists to
+    play one sound and wrong for ``lop sound preview`` or a test calling this
+    in-process. Those still get the ``afplay`` timeout.
+    """
     source = os.environ if env is None else env
     if source.get(_ENV_NO_SOUND):
         return 0
     null_backend = source.get(_ENV_BACKEND, "").strip().lower() == "null"
     if gain <= 0.0:
         return 0
+    deadline = _hard_deadline(path)
+    watchdog = _arm_watchdog(deadline + 1.0) if arm_watchdog else None
+    try:
+        return _play_once(path, gain, sound_id, sha256, leg, null_backend, deadline)
+    finally:
+        if watchdog is not None:
+            watchdog.cancel()
+
+
+def _play_once(
+    path: Path,
+    gain: float,
+    sound_id: str,
+    sha256: str,
+    leg: str,
+    null_backend: bool,
+    deadline: float,
+) -> int:
     try:
         frames = _play_miniaudio(path, gain, null_backend=null_backend)
         backend = "null" if null_backend else "miniaudio"
@@ -151,7 +224,7 @@ def play(
             # The NULL seam must never reach real speakers: a QA rig asked for
             # silence, so a failure here is reported, not "fixed" by afplay.
             return 1
-        return 0 if _play_afplay(path, gain) else 1
+        return 0 if _play_afplay(path, gain, deadline) else 1
     if null_backend:
         _write_receipt(
             {
@@ -182,6 +255,7 @@ def main(argv: list[str] | None = None) -> int:
         sound_id=args.sound_id,
         sha256=args.sha256,
         leg=args.leg,
+        arm_watchdog=True,
     )
 
 

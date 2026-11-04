@@ -199,6 +199,12 @@ class SoundPlan:
         return self.kind != "system"
 
 
+def read_values() -> Mapping[str, Any]:
+    """The config ``values`` this module reads, for callers that also want
+    :func:`configured` and :func:`resolve` over the SAME snapshot (``lop sound``)."""
+    return _config_values()
+
+
 def _config_values() -> Mapping[str, Any]:
     try:
         from local_operator.config import read_config_values
@@ -219,6 +225,74 @@ def _walk(values: Mapping[str, Any], *path: str) -> Any:
     return current
 
 
+def _strict_bool(value: Any, default: bool) -> bool:
+    """``settings_io.strict_bool``, imported lazily.
+
+    THE SAME READER AS THE SETTINGS PAGE, deliberately (review round 1, m1): a
+    hand-edited ``enabled: "off"`` must read as off here exactly as the page
+    paints it, or the page shows "off" while the sound plays. Lazy because
+    ``settings_io`` materialises the whole registry (~0.35 s) and this module is
+    on the banner path; the import only happens for a non-bool value, which
+    the registry never writes, so a real config never pays it.
+    """
+    if isinstance(value, bool):
+        return value
+    from local_operator.settings_io import strict_bool
+
+    return strict_bool(value, default)
+
+
+@dataclasses.dataclass(frozen=True)
+class Configured:
+    """The three keys as STORED, before any fallback, for ``lop sound`` to report.
+
+    Public so ``sound_cli`` reads the same values ``resolve`` does without
+    reaching into this module's private helpers (review round 1, n2).
+    """
+
+    #: ``enabled`` after ``strict_bool`` (what the page shows and resolve obeys).
+    enabled: bool
+    #: The stored id (may name nothing; ``resolve`` then plays the default).
+    sound_id: str
+    #: The stored volume, or ``None`` when unset or not a number.
+    volume: float | None
+    #: The volume as it will be USED: clamped to 0-100, default when unusable.
+    effective_volume: float
+    #: Why the stored volume is not used as written ("" when it is).
+    volume_problem: str
+
+
+def configured(values: Mapping[str, Any] | None = None) -> Configured:
+    """Read the three keys the way :func:`resolve` does, without deciding anything."""
+    source = _config_values() if values is None else values
+    enabled = _strict_bool(_walk(source, "notifications", "sound", "enabled"), DEFAULT_ENABLED)
+    raw_id = _walk(source, "notifications", "sound", "id")
+    sound_id = raw_id if isinstance(raw_id, str) and raw_id else DEFAULT_SOUND_ID
+    raw_volume = _walk(source, "notifications", "sound", "volume")
+    volume: float | None = None
+    problem = ""
+    if raw_volume is None:
+        effective = float(DEFAULT_VOLUME)
+    elif (
+        isinstance(raw_volume, bool)
+        or not isinstance(raw_volume, (int, float))
+        or math.isnan(raw_volume)
+    ):
+        effective = float(DEFAULT_VOLUME)
+        problem = (
+            f"notifications.sound.volume {raw_volume!r} is not a number; using {DEFAULT_VOLUME}"
+        )
+    else:
+        volume = float(raw_volume)
+        effective = min(100.0, max(0.0, volume))
+        if effective != volume:
+            problem = (
+                f"notifications.sound.volume {raw_volume!r} is outside 0-100; "
+                f"clamped to {effective:g}"
+            )
+    return Configured(enabled, sound_id, volume, effective, problem)
+
+
 def resolve(
     values: Mapping[str, Any] | None = None, env: Mapping[str, str] | None = None
 ) -> SoundPlan:
@@ -229,27 +303,26 @@ def resolve(
     A hand-edited id that names nothing falls back to the DEFAULT sound, not to
     silence. The user's intent ("play a sound") is clear and only its spelling
     is wrong, and a notification that goes quiet with nothing on screen is the
-    worse failure. ``lop sound doctor`` reports the fallback.
+    worse failure. ``lop sound doctor`` reports the fallback (it compares
+    :func:`configured`'s id with the plan's).
+
+    A hand-edited out-of-range or non-numeric volume is clamped or defaulted
+    rather than refused (the registry already refuses such writes), and the
+    silent plan's ``reason`` names the bad value instead of claiming "0".
     """
     source_env = os.environ if env is None else env
-    source = _config_values() if values is None else values
-    enabled = _walk(source, "notifications", "sound", "enabled")
-    if enabled is None:
-        enabled = DEFAULT_ENABLED
-    sound_id = _walk(source, "notifications", "sound", "id")
-    if not isinstance(sound_id, str) or not sound_id:
-        sound_id = DEFAULT_SOUND_ID
+    stored = configured(values)
+    sound_id = stored.sound_id
     if source_env.get(ENV_NO_SOUND):
         return SoundPlan("silent", sound_id, reason=f"{ENV_NO_SOUND} is set")
-    # `is not True` would make a hand-written "yes" mean off; only a real
-    # boolean False turns the sound off, matching `settings_io.strict_bool`.
-    if enabled is False:
+    if not stored.enabled:
         return SoundPlan("silent", sound_id, reason="notifications.sound.enabled is off")
     if sound_id == SYSTEM_SOUND_ID:
         return SoundPlan("system", sound_id)
-    amplitude = gain(_walk(source, "notifications", "sound", "volume"))
+    amplitude = gain(stored.effective_volume)
     if amplitude <= 0.0:
-        return SoundPlan("silent", sound_id, reason="notifications.sound.volume is 0")
+        reason = stored.volume_problem or "notifications.sound.volume is 0"
+        return SoundPlan("silent", sound_id, reason=reason)
     sound = builtin(sound_id)
     if sound is None:
         logger.debug("unknown notification sound %r; using %s", sound_id, DEFAULT_SOUND_ID)

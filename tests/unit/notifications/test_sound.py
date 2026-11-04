@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -173,3 +174,68 @@ def test_play_plan_is_throttled(config_dir: Path, monkeypatch: pytest.MonkeyPatc
     assert sound.play_plan(plan, leg="osc") is False
     assert len(started) == 1
     assert sound.play_plan(sound.resolve(_values(id="system"), env={}), leg="osc") is False
+
+
+@pytest.mark.parametrize("raw", ["off", "no", "false", 0])
+def test_enabled_reads_like_the_settings_page(raw: object) -> None:
+    """Review round 1, m1: the same `strict_bool` the page uses."""
+    from local_operator.settings_io import strict_bool
+
+    assert strict_bool(raw, True) is False
+    assert sound.resolve(_values(enabled=raw), env={}).kind == "silent"
+
+
+def test_a_garbage_enabled_value_reads_as_the_default() -> None:
+    assert sound.resolve(_values(enabled="maybe"), env={}).kind == "file"
+
+
+def test_an_out_of_range_volume_names_itself_not_zero() -> None:
+    """QA Q2."""
+    plan = sound.resolve(_values(volume=-3), env={})
+    assert plan.kind == "silent"
+    assert plan.reason == "notifications.sound.volume -3 is outside 0-100; clamped to 0"
+    stored = sound.configured(_values(volume=250))
+    assert stored.effective_volume == 100 and "clamped to 100" in stored.volume_problem
+
+
+def test_a_hung_afplay_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 1, m5: a wedged audio daemon cannot leave a player behind."""
+    calls: list[float] = []
+
+    def hang(*_a: object, timeout: float, **_kwargs: object) -> object:
+        calls.append(timeout)
+        raise subprocess.TimeoutExpired("afplay", timeout)
+
+    monkeypatch.setattr(play.sys, "platform", "darwin")
+    monkeypatch.setattr(play.shutil, "which", lambda _n: "/usr/bin/afplay")
+    monkeypatch.setattr(play.subprocess, "run", hang)
+    assert play._play_afplay(Path("x.flac"), 0.5, 6.0) is False
+    assert calls == [6.0]
+
+
+def test_the_child_deadline_covers_the_sound_plus_margin() -> None:
+    entry = sound.builtin("hum-swell")
+    assert entry is not None
+    deadline = play._hard_deadline(entry.path)
+    assert entry.duration_s + 5.0 <= deadline <= entry.duration_s + 6.0
+    assert play._hard_deadline(Path("/nonexistent.flac")) >= 30.0
+
+
+def test_a_hung_device_makes_the_child_exit(tmp_path: Path) -> None:
+    """The watchdog is a real ``os._exit``: run it in a child whose play hangs."""
+    script = (
+        "import time\n"
+        "from local_operator.notifications import play\n"
+        "play._hard_deadline = lambda _p: 0.3\n"
+        "play._play_miniaudio = lambda *a, **k: time.sleep(60)\n"
+        "raise SystemExit(play.main(['x.flac', '--gain', '0.5']))\n"
+    )
+    started = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={"HOME": str(tmp_path), "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path)},
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 3
+    assert time.monotonic() - started < 10
