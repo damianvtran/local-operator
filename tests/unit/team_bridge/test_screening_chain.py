@@ -60,12 +60,13 @@ _MONKEYPATCH: list[pytest.MonkeyPatch] = []
 def _chain_rig(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Let each test name its hops; every provider counts as credentialed.
 
-    The screening chain IS the closed allowlist walked in order
-    (``model_boundary.resolve_screening_chain``), so this rig expresses "hop 0
-    then hop 1" by installing the fixture models AS that table. Which models
-    may screen is policy, pinned against the real table in
-    ``test_screening_model_allowlist.py``; this file pins the WALK (what
-    advances, what holds, identity, breaker, receipts) on stand-in models.
+    The screening chain is the PREFERRED table walked in order, then the
+    receiver's own cascade (``model_boundary.resolve_screening_chain``). This
+    rig expresses "hop 0 then hop 1" by installing the fixture models AS the
+    preferred table, with the same pairs as the configured default, so the
+    cascade stage adds nothing. Which models are preferred, and the cascade
+    itself, are pinned in ``test_screening_model_allowlist.py``; this file pins
+    the WALK (what advances, what holds, identity, breaker, receipts).
     """
 
     from local_operator.team_bridge import model_boundary
@@ -316,7 +317,7 @@ def test_every_hop_failing_is_one_breaker_failure_and_one_classed_hold(
 
     result = _cycle(tmp_path, owner)
 
-    assert result.disposition == "hold" and result.hold_code == "provider_error"
+    assert result.disposition == "hold" and result.hold_code == "screening_model_unavailable"
     assert [s["model"] for s in wire.sends] == ["gpt-5.4", "deepseek-flash", "qa-model"]
     breaker = store.screening_breaker_state(owner)
     assert breaker is not None and int(breaker["failures"]) == 1
@@ -325,7 +326,9 @@ def test_every_hop_failing_is_one_breaker_failure_and_one_classed_hold(
         "SELECT hold_code, failure_class FROM screening_holds WHERE owner_key = ?",
         _owner_key(owner),
     )
-    assert holds == [("provider_error", "chain_exhausted")]
+    # Every hop failed on a route error: nothing could screen, so this is the
+    # owner-notice hold, still classed by the chain walk.
+    assert holds == [("screening_model_unavailable", "chain_exhausted")]
     assert _rows(tmp_path, "SELECT 1 FROM screening_receipts") == []
     # No vendor prose was persisted anywhere.
     assert VENDOR_CANARY.encode() not in state_db_path(tmp_path).read_bytes()
@@ -409,7 +412,7 @@ def test_foreign_provider_serving_an_approved_model_id_is_refused(tmp_path, monk
 
     result = _cycle(tmp_path, owner)
 
-    assert result.disposition == "hold" and result.hold_code == "provider_error"
+    assert result.disposition == "hold" and result.hold_code == "screening_model_unavailable"
     assert _rows(tmp_path, "SELECT 1 FROM screening_receipts") == []
     assert _rows(tmp_path, "SELECT failure_class FROM screening_holds") == [("chain_exhausted",)]
 
@@ -456,7 +459,7 @@ def test_a_single_evaluated_model_is_a_single_attempt(tmp_path, monkeypatch) -> 
 
     result = _cycle(tmp_path, owner)
 
-    assert result.disposition == "hold" and result.hold_code == "provider_error"
+    assert result.disposition == "hold" and result.hold_code == "screening_model_unavailable"
     assert [s["model"] for s in wire.sends] == ["gpt-5.4"]
     breaker = store.screening_breaker_state(owner)
     assert breaker is not None and int(breaker["failures"]) == 1

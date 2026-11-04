@@ -97,7 +97,6 @@ _SCREENING_UNAVAILABLE = {
     "batch_unresolved",
     # No evaluated screening model is reachable: nothing judged the message.
     "screening_model_unavailable",
-    "screening_credit_exhausted",
 }
 _DELIVERY_PENDING = {"delivery_failed", "bridge_off", "phase_refused"}
 

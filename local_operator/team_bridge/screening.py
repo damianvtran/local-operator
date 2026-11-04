@@ -141,15 +141,12 @@ HOLD_CODES = (
     # owner has no designated session, or a session/spine holds the claim.
     "badge_only",
     "claimed_elsewhere",
-    # No EVALUATED screening model is reachable (model_boundary
-    # ``SCREENING_EVALUATED_MODELS``): an infra hold, never a verdict. Never
-    # answer-cached, never releasable, and re-screened on the retry pass, which
-    # re-resolves the model -- so configuring Anthropic or a Radient concrete
-    # model clears it.
+    # NOTHING could screen: every preferred screener and the owner's own
+    # default/fallback cascade failed on route errors (no credential, rate
+    # limit, out of quota or credit), or nothing is configured. An infra hold,
+    # never a verdict: never answer-cached, never releasable, re-screened on
+    # the retry pass, which re-resolves the chain.
     "screening_model_unavailable",
-    # The screening route refused for want of credit (HTTP 402): an infra
-    # hold with an owner notice, never a fallback to another model.
-    "screening_credit_exhausted",
 )
 
 #: Per-type RAW utf8 caps on the fetched body (§8.3 screening inputs).
@@ -283,6 +280,18 @@ class ScreenResult:
     #: cache hit, which rendered nothing.
     rendered_version: str | None = None
     rendered_template_sha256: str | None = None
+
+    @property
+    def screener_preferred(self) -> bool:
+        """Whether a PREFERRED screener produced this verdict (``False`` for a hold).
+
+        Read from the receipt, the one record of who answered, so the result
+        and the stored proof can never disagree. A non-preferred allow is
+        delivered normally; it is excluded only from receipt reuse and from
+        B4b release (operator directive 2026-11-04).
+        """
+
+        return bool(self.receipt is not None and self.receipt.screener_preferred)
 
     def __post_init__(self) -> None:
         self._private_reason: str | None = None
@@ -1279,6 +1288,7 @@ def _screen_prepare(
                 template_sha256=cached["template_sha256"],
                 body_sha256=cached["body_sha256"],
                 categories=tuple(cached["categories"]),
+                screener_preferred=bool(cached.get("screener_preferred")),
             )
             disposition = "deliver" if cached["verdict"] == "allow" else "bounce"
             return ScreenResult(
@@ -1777,6 +1787,27 @@ async def _screen_spend(
         ),
         rendered_template_sha256=rendered.template_sha256,
         prompt_template_sha256=rendered.template_sha256,
+        screener_preferred=_answered_preferred(runner, actual_model),
+    )
+
+
+def _answered_preferred(runner: Any, actual_model: str | None) -> bool:
+    """Whether the screener that answered is a PREFERRED one.
+
+    The chain runner knows which hop answered (``answered_hop``); a bare runner
+    (a test seam, an embedding host) does not, so its answer is judged by the
+    model id alone against the preferred table. ``False`` whenever unsure: a
+    non-preferred verdict is only denied the receipt cache and B4b release,
+    never delivery, so erring that way costs a re-screen, not safety.
+    """
+
+    flag = getattr(runner, "answered_preferred", None)
+    if isinstance(flag, bool):
+        return flag
+    from local_operator.team_bridge.model_boundary import SCREENING_EVALUATED_MODELS
+
+    return bool(actual_model) and any(
+        model_id == actual_model for _provider, model_id in SCREENING_EVALUATED_MODELS
     )
 
 
@@ -1795,6 +1826,7 @@ def _conclude_parsed(
     rendered_version: str | None = None,
     rendered_template_sha256: str | None = None,
     prompt_template_sha256: str | None = None,
+    screener_preferred: bool = False,
 ) -> ScreenResult:
     """Step 14 for ONE message: a parsed verdict -> its write-once outcome.
 
@@ -1872,6 +1904,10 @@ def _conclude_parsed(
         template_sha256=snapshot.template_sha256,
         body_sha256=envelope.body_sha256,
         categories=categories,
+        # Which screener answered: a fallback (non-preferred) verdict is
+        # delivered like any other, but is never reused from the receipt
+        # cache and never feeds a B4b release (operator directive 2026-11-04).
+        screener_preferred=screener_preferred,
     )
     try:
         store.finish_screening(
@@ -2678,6 +2714,7 @@ async def _screen_batch_core(
             turn=turn,
             screened_bytes=len(prepared.envelope.private_body().encode("utf-8")),
             prompt_template_sha256=SCREENING_BATCH_TEMPLATE_SHA256,
+            screener_preferred=_answered_preferred(runner, actual_model),
         )
     return _finish()
 

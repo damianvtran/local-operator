@@ -2959,7 +2959,7 @@ def _run_recovery_cell(
 
     # -- while the device is down (a compound change applies each part) ----
     for part in change.split("+"):
-        owner = _apply_matrix_change(part, store, owner, status, hub, sender, tmp_path)
+        owner = _apply_matrix_change(part, store, owner, status, hub, sender, tmp_path, monkeypatch)
 
     out: dict[str, Any] = {}
     drive(owner)
@@ -2982,7 +2982,9 @@ def _run_recovery_cell(
     return out
 
 
-def _apply_matrix_change(part, store, owner, status, hub, sender, tmp_path) -> OwnerSnapshot:
+def _apply_matrix_change(
+    part, store, owner, status, hub, sender, tmp_path, monkeypatch
+) -> OwnerSnapshot:
     """One change while the device is down; returns the (possibly new) owner."""
 
     if part == "none":
@@ -2991,7 +2993,15 @@ def _apply_matrix_change(part, store, owner, status, hub, sender, tmp_path) -> O
         sender["name"] = "Org Member (renamed)"
         return owner
     if part == "model":
-        _matrix_config(tmp_path, "gpt-5.4-mini")  # a ``lop`` update moved the default
+        # A ``lop`` update moved the SCREENING model: the chat default no longer
+        # picks it, so the change is the allowlist's first entry.
+        from local_operator.team_bridge import model_boundary as boundary_mod
+
+        monkeypatch.setattr(
+            boundary_mod,
+            "SCREENING_EVALUATED_MODELS",
+            (("openai", "gpt-5.4-mini"),) + boundary_mod.SCREENING_EVALUATED_MODELS,
+        )
         return owner
     if part == "relogin":
         owner = OwnerSnapshot(
@@ -3172,7 +3182,13 @@ def test_recovery_matrix_request_across_a_policy_republish(tmp_path, monkeypatch
     assert recorded is not None and recorded["state"] == "confirmed"
     request_calls = len(model_calls)
 
-    _matrix_config(tmp_path, "gpt-5.4-mini")  # an update changes the default model
+    # An update changes the SCREENING model. The chat default no longer picks
+    # it (the screener is the allowlist walked in order), so the change is the
+    # table's first entry, which is what republishes the policy.
+    table = boundary_mod.SCREENING_EVALUATED_MODELS
+    monkeypatch.setattr(
+        boundary_mod, "SCREENING_EVALUATED_MODELS", (("openai", "gpt-5.4-mini"),) + table
+    )
     publish_by_screening("bmsg_8")
     for _ in range(4):
         _iterate(owner, tmp_path, access)
@@ -3180,7 +3196,7 @@ def test_recovery_matrix_request_across_a_policy_republish(tmp_path, monkeypatch
     refused = len(record["delivered"])
     held = store.screening_hold(owner, "bmsg_1")
 
-    _matrix_config(tmp_path, "gpt-5.4")  # rolled back
+    monkeypatch.setattr(boundary_mod, "SCREENING_EVALUATED_MODELS", table)  # rolled back
     publish_by_screening("bmsg_9")
     for _ in range(4):
         _iterate(owner, tmp_path, access)

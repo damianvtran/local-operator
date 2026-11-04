@@ -889,57 +889,31 @@ async def deliver_wake(
     return f"engaged {session_id} ({getattr(outcome, 'state', 'started')})"
 
 
-def _screening_infra_notices() -> dict[str, tuple[str, Any, Any]]:
-    """Infra hold code -> (notification key family, i18n title, i18n body).
-
-    The two holds only the OWNER can clear: no evaluated screening model is
-    reachable, or the screening route is out of credit.
-    """
-
-    from local_operator.i18n.keys import cli_team_bridge as _k
-    from local_operator.team_bridge.model_boundary import (
-        SCREENING_CREDIT_EXHAUSTED,
-        SCREENING_MODEL_UNAVAILABLE,
-    )
-
-    return {
-        SCREENING_MODEL_UNAVAILABLE: (
-            "team-bridge-screening-model",
-            _k.notify_screening_model_unavailable_title,
-            _k.notify_screening_model_unavailable_body,
-        ),
-        SCREENING_CREDIT_EXHAUSTED: (
-            "team-bridge-screening-credit",
-            _k.notify_screening_credit_exhausted_title,
-            _k.notify_screening_credit_exhausted_body,
-        ),
-    }
-
-
 async def notify_screening_infra_hold(
     owner: Any, config_dir: Path, session_id: str, hold_code: Any
 ) -> None:
     """Tell the owner ONCE why agent messages are held when only they can fix it.
 
-    WHY. Screening runs only on an evaluated model
-    (``model_boundary.SCREENING_EVALUATED_MODELS``, PROTOCOL A6 on PR #3438)
-    and never falls back to another. An owner whose only model is
-    ``radient/auto`` or another unevaluated model, or whose Radient balance
-    cannot pay for the screen, gets every inbound message held, and the hold
-    does not clear on its own. So the owner is told what is wrong and how to
-    fix it.
+    WHY. Screening tries the preferred screeners
+    (``model_boundary.SCREENING_EVALUATED_MODELS``; PROTOCOL A6/A7 on PR #3438)
+    and then the owner's own configured model and fallbacks (operator directive
+    2026-11-04). ``screening_model_unavailable`` means EVERY one of them failed
+    or none is configured, so every inbound message is held, fail-closed, and
+    the hold may not clear on its own: the owner is told what is wrong and how
+    to fix it.
 
-    ONCE per receiving endpoint and reason: the item is keyed by endpoint with
-    fixed copy, so a repeat is absorbed by the notification store (same key,
-    same content hash) instead of adding one item per held message. Contentless
-    like the budget notice: no sender, body or conversation. Any other hold
-    code is a no-op. Best-effort: never turns the hold into a failure.
+    ONCE per receiving endpoint: the item is keyed by endpoint with fixed copy,
+    so a repeat is absorbed by the notification store (same key, same content
+    hash) instead of adding one item per held message. Contentless like the
+    budget notice: no sender, body or conversation. Any other hold code is a
+    no-op. Best-effort: never turns the hold into a failure.
     """
 
-    entry = _screening_infra_notices().get(hold_code) if isinstance(hold_code, str) else None
-    if entry is None:
+    from local_operator.team_bridge.model_boundary import SCREENING_MODEL_UNAVAILABLE
+
+    if hold_code != SCREENING_MODEL_UNAVAILABLE:
         return
-    family, title, body = entry
+    from local_operator.i18n.keys import cli_team_bridge as _k
     from local_operator.i18n.text import tr
     from local_operator.notifications.store import NotificationStore
 
@@ -947,16 +921,16 @@ async def notify_screening_infra_hold(
         t = tr("cli.team_bridge")
         NotificationStore(config_dir).notify(
             session_id,
-            title=t(title()),
-            body_md=t(body()),
+            title=t(_k.notify_screening_model_unavailable_title()),
+            body_md=t(_k.notify_screening_model_unavailable_body()),
             priority="high",
-            key=f"{family}:{owner.endpoint_id}",
+            key=f"team-bridge-screening-model:{owner.endpoint_id}",
         )
 
     try:
         await asyncio.to_thread(_notify)
     except Exception:  # noqa: BLE001 — a notification is chrome, the hold stands
-        logger.info("bridge: screening infra notification unrecorded code=notify_failed")
+        logger.info("bridge: screening-model notification unrecorded code=notify_failed")
 
 
 def _badge_only(config_dir: Path, message_id: str) -> dict[str, Any]:

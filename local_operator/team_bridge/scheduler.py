@@ -879,8 +879,9 @@ async def run_screening_cycle(
     # own chain for isolated requests (see resolve_screening_chain).
     chain = resolve_screening_chain(config_dir, settings)
     if not chain:
-        # FAIL CLOSED (PROTOCOL A6, PR #3438): no evaluated screening model is
-        # reachable, so nothing screens -- not radient/auto, not the default.
+        # FAIL CLOSED: no preferred screener is credentialed AND the owner has
+        # no usable configured model, so nothing can screen and the message is
+        # held, never delivered unscreened.
         # A TYPED hold rather than ``None`` so the owner surface can say why;
         # it is decided before any status fetch, reservation or spend, and it
         # writes no receipt and no answer cache, so the retry pass re-screens

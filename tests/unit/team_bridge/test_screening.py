@@ -90,7 +90,17 @@ def _fixture_models_are_evaluated(monkeypatch: pytest.MonkeyPatch) -> None:
 
     from local_operator.team_bridge import model_boundary
 
-    fixtures = (("openai", "gpt-5.4"),)
+    # The bare test Runner answers as ``qa/...`` ids; listing them makes those
+    # verdicts PREFERRED, so the receipt-reuse tests below exercise the cache
+    # (a non-preferred allow is never reused: pinned in
+    # ``test_screening_model_allowlist.py``).
+    fixtures = (
+        ("openai", "gpt-5.4"),
+        ("qa", "qa/default-model"),
+        ("qa", "qa/default-model-2026-01"),
+        ("qa", "qa/new-default"),
+        ("qa", "qa/alias"),
+    )
     monkeypatch.setattr(
         model_boundary,
         "SCREENING_EVALUATED_MODELS",
