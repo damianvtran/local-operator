@@ -478,6 +478,14 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Drops <config>/operator/anchor.json, the staged statement this run wrote",
         2,
     ),
+    # The effective-access listener registry is a module-level ``list`` of
+    # callbacks, so ``.remove`` there is ``list.remove`` on that registry: the
+    # guard cannot see a NAME's type, only a literal receiver (PR #3427 R1-2).
+    (
+        "local_operator/network/credentials/effective.py::add_listener.remove",
+        "<path>.remove",
+        "list.remove on the in-memory _listeners callback registry; no filesystem path",
+    ),
     (
         "local_operator/tui/app.py::OperatorApp._release_sidebar_preparation",
         "<path>.remove",
