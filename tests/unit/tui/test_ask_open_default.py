@@ -441,9 +441,14 @@ async def test_state_all_addressed_a_settled_queue_stays_shut_once_the_surface_h
         await _pump(pilot)
         assert _surface(app) == "closed", "a settled view reopened"
         session.publish([_ask("late-new", when_ms=_AFTER_MS)])
-        await _pump(pilot)
+        # Wait on the bar's own display first: it is the observable effect of the
+        # publish having been processed, so the "stays closed" assertion after it
+        # is not a vacuous pass on a view that simply had not seen the ask yet,
+        # and the positive state is no longer asserted after a fixed pump.
+        assert await _until(
+            pilot, lambda: app.query_one(AskBar).display
+        ), "the bar is how the new ask announces itself"
         assert _surface(app) == "closed", "an arrival reopened a view that had decided"
-        assert app.query_one(AskBar).display, "the bar is how the new ask announces itself"
 
 
 # -- state 4: the user closed it while asks were pending -> stays closed ---------------
