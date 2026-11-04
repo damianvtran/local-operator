@@ -3294,3 +3294,45 @@ def test_a_confirmed_read_ack_under_a_revoked_sender_holds_then_recovers(
     assert len(record["delivered"]) == 1
     assert store.screening_hold(owner, "bmsg_1") is None
     assert len(model_calls) == 1 and hub.applied.count("bmsg_1") == 1
+
+
+def test_a_pair_hold_ranks_as_addressed_not_behind_ambient(tmp_path, monkeypatch) -> None:
+    """#3400 round 2, R2-m1: the pair lane writes its hold with the
+    agent-addressed tier (a pair message is addressed to this agent by
+    construction), so the bounded retry pass serves it before a newer
+    ambient conversation backlog, as it did before tiers existed."""
+
+    store, owner = _enroll(tmp_path)
+    for index in range(10):
+        store.persist_hold(
+            owner, f"conv_amb{index}", "budget_exhausted", retry_at=time.time() - 5, tier=0
+        )
+    ref = "message_available:message_id=bmsg_pair1"
+
+    async def events(owner_, **kwargs):
+        store.record_feed_batch(owner, feed_seq(1), [ref], resync_required=False)
+        return {"cursor": 1, "refs": [ref], "resync": False}
+
+    async def pair_spine(owner_, message_id, **kwargs):
+        return {"action": "hold", "message_id": message_id, "code": "provider_error"}
+
+    monkeypatch.setattr(pull_mod, "events", events)
+    monkeypatch.setattr(loop_mod, "handle_message_available", pair_spine)
+    monkeypatch.setattr(loop_mod, "retry_due_holds", _no_retry)
+    loop_mod._RETRY_ATTEMPTS.clear()
+    asyncio.run(
+        loop_mod.run_iteration(owner, config_dir=tmp_path, access=_access(owner), auth_store=None)
+    )
+    loop_mod._RETRY_ATTEMPTS.clear()
+    due = store.due_screening_holds(owner, now=time.time() + 7200, limit=8)
+    assert due[0]["message_id"] == "bmsg_pair1"
+    # The row carries the tier itself, not only the NULL-ranks-as-2 reading.
+    with store._connect() as conn:  # noqa: SLF001 — test introspection
+        row = conn.execute(
+            "SELECT tier FROM screening_holds WHERE message_id = ?", ("bmsg_pair1",)
+        ).fetchone()
+    assert row is not None and row[0] == store_mod.Store.SCREENING_TIER_ADDRESSED
+
+
+async def _no_retry(*args, **kwargs):
+    return {"due": 0, "outcomes": []}

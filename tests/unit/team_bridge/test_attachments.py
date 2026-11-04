@@ -1238,7 +1238,12 @@ async def test_screening_hold_on_an_image_message_admits_nothing(
 
     monkeypatch.setattr(conversation_mod, "screen_item", held)
     out = await _deliver(owner, ref, tmp_path, hub)
-    assert out == {"action": "hold", "message_id": MID, "code": "parse_failed"}
+    # The hold carries its budget tier for the retry order (#3400). This ref is
+    # a mention and the body read states no ``sender_kind``, so it is the
+    # agent-addressed tier (2): an unstated sender never claims the person
+    # reserve (tier 3).
+    assert out == {"action": "hold", "message_id": MID, "code": "parse_failed", "tier": 2}
+    assert screened[0]["allocation"]["tier"] == 2
     assert hub.admits == [] and cards == []
     assert ("attachments" in screened[0]) is vision
     data, _mime = hub.fetch(hub.descriptors[0]["id"], "screen")

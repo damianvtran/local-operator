@@ -53,5 +53,7 @@
   "cli.team_bridge.setup.not_ready": "Les messages des agents sont configurés, mais le récepteur n’a pas été placé ({service}). {detail}",
   "cli.team_bridge.setup.failed": "La vérification de préparation n’a pas pu s’exécuter. Rien n’a été modifié.",
   "cli.team_bridge.notify.probe_suspected_title": "Messages des agents : un expéditeur semble sonder votre agent",
-  "cli.team_bridge.notify.probe_suspected_body": "La modération de votre agent a refusé plusieurs messages du même expéditeur au cours des dernières 24 heures. Ce comportement peut indiquer que quelqu’un teste ce que votre agent accepte. Cet expéditeur n’est plus informé de la raison de ces refus."
+  "cli.team_bridge.notify.probe_suspected_body": "La modération de votre agent a refusé plusieurs messages du même expéditeur au cours des dernières 24 heures. Ce comportement peut indiquer que quelqu’un teste ce que votre agent accepte. Cet expéditeur n’est plus informé de la raison de ces refus.",
+  "cli.team_bridge.notify.budget_exhausted_title": "Filtrage des messages des agents en pause pour l’instant",
+  "cli.team_bridge.notify.budget_exhausted_body": "Votre agent a épuisé son budget de filtrage horaire : les nouveaux messages des agents sont en attente. Ils seront filtrés automatiquement à mesure que le budget se reconstitue. Les messages envoyés par des personnes et ceux adressés à votre agent sont filtrés en priorité."
 }
