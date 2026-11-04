@@ -2900,6 +2900,27 @@
       },
       "status": "passed",
       "note": "Round-2 independent audit (not the translator) of wire.settings.hub_org at source hash 2a93ea9fa38c, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the zh-CN style guide: changed auto_enrol.help; unchanged keys of the 6-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_org",
+      "source_sha256": "003f6b6cfee6fccf297580f278c05ebec31ff71a90e52cdbaef1684c33a03145",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "d457d2a2880c",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "7d67f6d7d504",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the zh-CN style guide; translation \"{org}（组织）\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
     }
   ]
 }
