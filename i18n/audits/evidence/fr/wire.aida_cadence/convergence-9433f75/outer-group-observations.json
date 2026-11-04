@@ -1,0 +1,73 @@
+[
+  {
+    "gate": "generator",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--memory-mb",
+      "512",
+      "--timeout",
+      "90",
+      "--",
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/generate.py",
+      "--check"
+    ],
+    "outer_pid": 23961,
+    "outer_pgid": 23961,
+    "rc": 0,
+    "group_rows_after_exit": [],
+    "group_rows_after_supervisor": [],
+    "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"
+  },
+  {
+    "gate": "catalogues",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--memory-mb",
+      "512",
+      "--timeout",
+      "90",
+      "--",
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/check.py",
+      "--catalogues-only"
+    ],
+    "outer_pid": 24120,
+    "outer_pgid": 24120,
+    "rc": 0,
+    "group_rows_after_exit": [],
+    "group_rows_after_supervisor": [],
+    "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"
+  },
+  {
+    "gate": "affected-pytest",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--memory-mb",
+      "512",
+      "--timeout",
+      "90",
+      "--",
+      "/Users/damian/local-operator/.venv/bin/python",
+      "-m",
+      "pytest",
+      "tests/unit/i18n/test_language_manifest.py",
+      "tests/unit/i18n/test_ledger_shards.py",
+      "tests/unit/aida/test_aida_interval.py",
+      "-q",
+      "-n0"
+    ],
+    "outer_pid": 24209,
+    "outer_pgid": 24209,
+    "rc": 0,
+    "group_rows_after_exit": [],
+    "group_rows_after_supervisor": [],
+    "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"
+  }
+]

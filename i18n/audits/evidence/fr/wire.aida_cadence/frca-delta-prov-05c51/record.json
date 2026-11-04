@@ -1,0 +1,66 @@
+{
+  "kind": "author_corrected_provenance_addendum",
+  "locale": "fr",
+  "namespace": "wire.aida_cadence",
+  "audit_date": "2026-11-03",
+  "addendum_date": "2026-11-03",
+  "key_count": 2,
+  "prior_immutable_bundle": {
+    "intended_tracked_root": "i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-05c51",
+    "scratch_path": "/Users/damian/.local-operator/sessions/05c51f9b1aba/scratchpad/frca-delta-05c51",
+    "record_sha256": "e496265ee2a3e61354c47d296ee49c45a068f22056022bdf0a5718fcb4f833af",
+    "receipt_sha256": "aca68d2849c256a281795855eed5223d935cde28dbc54816b8508269549ece4d"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "05c51f9b1aba",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "a58a48732351",
+    "actual_model_source": "Manager-supplied historical host wait completion record in current delegation; historical per-response usage metadata unavailable to this resumed child",
+    "verification_level": "host_reported_not_independently_usage_verified",
+    "requested_header_model": "anthropic/claude-sonnet-5-5",
+    "fallback_used": "unknown; prior no-fallback assertion withdrawn",
+    "fallback_sequence": "unavailable"
+  },
+  "superseded_claims": [
+    "prior auditor.model=anthropic/claude-sonnet-5-5 as verified serving model",
+    "prior fallback_used=false",
+    "prior actual_model_source treats current header as historical serving evidence"
+  ],
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.aida_cadence.json",
+      "sha256": "3bb421a58f2ffa4fec089421d9cb91257fa626d66b2e215b3e120c068bb8e5dd"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.aida_cadence.context.json",
+      "sha256": "6efad501b08345b72e5d4d19cfee3dd27a02a48c2eb721780cf9d7f8c7694d0e"
+    },
+    "fr": {
+      "path": "local_operator/i18n/catalogues/fr/wire.aida_cadence.json",
+      "sha256": "42333772890dd59733f0bcff715c9d608ff1f7c069c8dbb025ee3b2f0548ed63"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [],
+    "severity_counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    }
+  },
+  "semantics_findings_input_hashes_unchanged": true,
+  "scope": "provenance only; no check reset",
+  "artifacts": [
+    {
+      "path": "i18n/audits/evidence/fr/wire.aida_cadence/frca-delta-prov-05c51/report.md",
+      "sha256": "1559ee792f99011e7fee5f1ff113200df711d3919cc6a77acc9ed6d82d40e359"
+    }
+  ],
+  "audit_notes_not_execution_log": "report.md is provenance reasoning and source attribution, not execution proof",
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false
+}

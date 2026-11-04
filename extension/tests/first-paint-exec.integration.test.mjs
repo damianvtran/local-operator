@@ -97,7 +97,7 @@ test("an unrecognised hint falls back rather than pinning something unmeasured",
     reads.includes("lop:pin-hint"),
     "a stale value must still be read and rejected, not skipped by an undeclared identifier",
   );
-  assert.equal(minHeight(css), "219px", "the pairing pin is the documented fallback");
+  assert.equal(minHeight(css), "284px", "the pairing pin is the documented fallback");
 });
 
 test("the legacy boolean key still pre-paints the connected card", async () => {
@@ -110,7 +110,7 @@ test("the legacy boolean key still pre-paints the connected card", async () => {
 });
 
 test("no hint at all is the pairing pin, and storage that throws is survived", async () => {
-  assert.equal(minHeight((await runFirstPaint({})).css), "219px");
+  assert.equal(minHeight((await runFirstPaint({})).css), "284px");
   const source = await readFile(SCRIPT, "utf8");
   globalThis.localStorage = {
     getItem: () => {

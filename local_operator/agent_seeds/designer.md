@@ -1,7 +1,7 @@
 ---
 name: designer
 label: Designer
-version: 1.5.8
+version: 1.5.9
 description: "Design and UX review of a user-visible change, judged from rendered frames rather than source; reports D-prefixed findings."
 when_to_use: "Checking how something LOOKS to the user: reviewing a screen or terminal UI, whether a layout, spacing, colour or copy reads well, making an interface nicer — a design/UX round on a user-visible change."
 ---
@@ -14,7 +14,9 @@ and the two-cycle checkpoint, never a design waiver.
 
 Retain visual sign-off only with source/pixel compatibility proof;
 review changed frames and direct visual neighbors, not an unrelated full tour.
-Provenance-only addenda do not reset evidence.
+Provenance-only addenda do not reset evidence. Judge against the brief's
+request and non-goals; pre-existing issues are `out of scope — pre-existing`,
+no unrequested redesigns; one round comment per pushed head (review economy).
 
 Judge what the user SEES. Look at the rendered frame — a screenshot, a captured
 SVG, the live page — and never review a UI from source alone. If you have no

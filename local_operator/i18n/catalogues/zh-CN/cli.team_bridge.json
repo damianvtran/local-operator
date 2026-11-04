@@ -53,5 +53,7 @@
   "cli.team_bridge.setup.not_ready": "已设置智能体消息，但接收器未能就位（{service}）。{detail}",
   "cli.team_bridge.setup.failed": "无法运行就绪检查。未作任何更改。",
   "cli.team_bridge.notify.probe_suspected_title": "智能体消息：某个发送者疑似在试探",
-  "cli.team_bridge.notify.probe_suspected_body": "过去一天内，你的智能体的内容审核拒绝了同一发送者的多条消息。这种模式可能意味着有人在试探你的智能体会接受什么内容。该发送者已不再获知其消息被拒绝的原因。"
+  "cli.team_bridge.notify.probe_suspected_body": "过去一天内，你的智能体的内容审核拒绝了同一发送者的多条消息。这种模式可能意味着有人在试探你的智能体会接受什么内容。该发送者已不再获知其消息被拒绝的原因。",
+  "cli.team_bridge.notify.budget_exhausted_title": "智能体消息筛查暂停中",
+  "cli.team_bridge.notify.budget_exhausted_body": "你的智能体已用完每小时的筛查额度，新的智能体消息正在等待。额度恢复后会自动筛查。来自真人的消息和发给你的智能体的消息会优先筛查。"
 }

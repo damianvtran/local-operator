@@ -68,12 +68,20 @@ async def clean_kernels():
     own (the sync tests in this module) still owes a finalizer, and CI failed the
     shard with ``Event loop is closed`` for every test in the file -- teardown only,
     all six passed (run 40623539454, shard 0). Only the kernel test asks for it.
+
+    ONLY THIS TEST'S KERNELS. ``_KERNELS`` is process-wide, and under xdist a
+    worker runs many files: a kernel an earlier test left behind was spawned on
+    THAT test's event loop, and its asyncio subprocess transport stays bound to
+    it. Awaiting its ``process.wait()`` from this test's loop raised "Future
+    attached to a different loop" in teardown -- CI runs 40723144396,
+    40709881051, 40691919499 and 40683352008, all on unrelated branches. A key
+    snapshot taken before the test scopes the reap to what this test spawned.
     """
 
+    before = set(eval_tool._KERNELS)
     yield
-    for kernel in list(eval_tool._KERNELS.values()):
-        await eval_tool._close_kernel(kernel)
-    eval_tool._KERNELS.clear()
+    for key in [key for key in eval_tool._KERNELS if key not in before]:
+        await eval_tool._close_kernel(eval_tool._KERNELS.pop(key))
 
 
 def _curl(url: str, token_expr: str) -> str:

@@ -1,0 +1,33 @@
+VI i18n audit vi1r — verification stdout (executed in session ebf74725105d, 2026-11-03)
+[1] sha256 vs binding:
+    en: 5390ecb2413e0978c34541a9a0db6c2a004ae86446d1c0fa0d2e697e4f9ca6bd  match=True
+    context: 82f193fd3c3e84526cbfaa0498fc47b776dd84df128cea3442df6d13369bb13e  match=True
+    old_vi: ac6858150eb6e5d0856bafa729764e61d400fd6bdf3504d4b2ffa4cbb4300abd  match=True
+    new_vi: 7c9a6bfb0907dc38d2b22e8dfb808f61852479b1d8d9b10b7ad8c7c8c99ef95e  match=True
+[2] JSON validity / duplicate keys / key sets:
+    parses=True entries=4 dup_keys=False key_set_equal_en_old_new=True key_count=4
+[3] delta scope:
+    changed_keys=['wire.errors.sdk_startup.attach_hosting_unconfigured']
+    other_3_values_identical=True
+    other_3_raw_lines_byte_identical=True
+    exact_replacement_reconstructs_new=True
+    old_phrase_occurrences_in_old=1 present_in_new=False
+[4] placeholder / ICU / literal-token parity (vi new vs en):
+    en=['resume', 'error'] old=['resume', 'error'] new=['resume', 'error'] identical=True
+    braces_balanced=True plural_or_select_in_namespace=False
+    literal 'config.yml' present=True unchanged_vs_old=True
+    literal '{resume}' present=True unchanged_vs_old=True
+    literal '{error}' present=True unchanged_vs_old=True
+    literal 'spawn_session()/deliver()' present=True unchanged_vs_old=True
+[5] orthography/typography:
+    NFC_new=True leading_or_trailing_space=False double_space=False ascii_ellipsis=False
+    cells en=210 new_vi=252 delta=42 (phrase delta 'nhà cung cấp' - 'hosting' = 5 chars; en sidecar carries no maxCells/maxChars hint for this key)
+[6] corpus precedent for the hosting concept (same repo catalogue):
+    cli.exec_worker_help.hosting: en='Hosting platform override' vi='Ghi đè nhà cung cấp'
+    config.py:630 => hosting (str): AI model hosting provider
+    config.py:750 => "hosting": "",
+[7] sibling locales for this key (context, not gating):
+    hi: {resume} को कोई लाइव रनटाइम सर्व नहीं कर रहा, और यह रूट एक शुरू नहीं कर सकता: {error} इस रूट के लिए होस्टिंग कॉन्फ़िगर क…
+    ru: ни один живой рантайм не обслуживает {resume}, и этот корень не может запустить его: {error} Настройте размещение для эт…
+    ur: {resume} کو کوئی فعال رن ٹائم سروس نہیں دے رہا، اور یہ روٹ ایک شروع نہیں کر سکتا: {error} اس روٹ کے لیے ہوسٹنگ کنفیگر کر…
+

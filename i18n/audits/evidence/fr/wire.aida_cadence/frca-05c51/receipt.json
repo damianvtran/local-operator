@@ -1,0 +1,21 @@
+{
+  "locale": "fr",
+  "namespace": "wire.aida_cadence",
+  "audit_id": "frca-05c51",
+  "provenance_record": "i18n/audits/evidence/fr/wire.aida_cadence/frca-05c51/record.json",
+  "provenance_record_sha256": "cc1c00c28fcdd73f681abfdb0cbbeb067192eca134cc5f1dfcef6831b18a6a6c",
+  "files": [
+    {
+      "path": "i18n/audits/evidence/fr/wire.aida_cadence/frca-05c51/record.json",
+      "sha256": "cc1c00c28fcdd73f681abfdb0cbbeb067192eca134cc5f1dfcef6831b18a6a6c"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.aida_cadence/frca-05c51/report.md",
+      "sha256": "ed677df394c8988eb120ca034793693cde408e3fbba32ec409ee2a3afde33b70"
+    },
+    {
+      "path": "i18n/audits/evidence/fr/wire.aida_cadence/frca-05c51/audit.log",
+      "sha256": "aa720b417da5e2cfc21de2db7cb2d35b6fda8f87822dc67bd99857d4f50ee5b1"
+    }
+  ]
+}

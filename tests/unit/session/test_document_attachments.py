@@ -28,6 +28,11 @@ from local_operator.compaction.marker import (
     render_compaction_marker,
     with_attachment_manifest,
 )
+from local_operator.harness.document_limits import (
+    DOCUMENT_CHARS_PER_TOKEN,
+    DOCUMENT_WINDOW_SHARE,
+    MAX_NATIVE_PDF_PAGES,
+)
 from local_operator.harness.types import (
     ChatRequest,
     DocumentContent,
@@ -48,6 +53,7 @@ from local_operator.providers.documents import (
     document_form,
     document_injection,
     document_native_ok,
+    document_text_cap,
     encoded_document_bytes,
     extract_document_text,
     fallback_document_text,
@@ -827,12 +833,19 @@ def test_documents_share_one_request_budget() -> None:
 
 
 def test_anthropic_page_limit_narrows_below_a_million_tokens() -> None:
-    """M2: 600 pages only with a 1M context; 100 otherwise, unknown included."""
+    """M2: 600 pages only with a 1M context; 100 otherwise, unknown included.
+
+    A KNOWN window is narrowed further to a quarter of itself at the per-page
+    token charge (``_window_page_cap``): 20 pages at 200k, 100 at 1M. The
+    provider's 100-page sub-limit is the ceiling, no longer the figure, for a
+    window that is known to be small. An UNKNOWN window carries no such
+    evidence and keeps the table's value.
+    """
     small = document_form("anthropic", "anthropic-messages", context_window=200_000)
     large = document_form("anthropic", "anthropic-messages", context_window=1_000_000)
     unknown = document_form("anthropic", "anthropic-messages")
-    assert small is not None and small.max_pages == 100
-    assert large is not None and large.max_pages == 600
+    assert small is not None and small.max_pages == 20
+    assert large is not None and large.max_pages == 100
     assert unknown is not None and unknown.max_pages == 100
 
     raw = _pdf_raw(pages=150)
@@ -843,7 +856,19 @@ def test_anthropic_page_limit_narrows_below_a_million_tokens() -> None:
         bytes=len(raw),
     )
     assert not document_native_ok(block, small)
-    assert document_native_ok(block, large)
+    # 150 pages is inside the provider's 600 at 1M but past this window's
+    # quarter share (100 pages), so it extracts instead of going native.
+    assert not document_native_ok(block, large)
+    within_share = _pdf_raw(pages=90)
+    assert document_native_ok(
+        DocumentContent(
+            data=base64.b64encode(within_share).decode("ascii"),
+            mime_type="application/pdf",
+            filename="ok.pdf",
+            bytes=len(within_share),
+        ),
+        large,
+    )
 
 
 def test_the_reference_fallback_never_names_the_origin_path() -> None:
@@ -1023,6 +1048,7 @@ def test_a_document_is_charged_by_its_page_count(store) -> None:
     it; compaction could then be skipped before an oversized send.
     """
     from local_operator.compaction.tokens import (
+        MAX_DOCUMENT_TOKEN_ESTIMATE,
         PDF_PAGE_TOKEN_ESTIMATE,
         _compute_tokens,
         messages_tokens_upper_bound,
@@ -1031,7 +1057,13 @@ def test_a_document_is_charged_by_its_page_count(store) -> None:
     raw = _pdf_raw(pages=120)
     message = Message.user("read", documents=[_pdf_block(raw)])
     charge = _compute_tokens(message)
-    assert charge >= 120 * PDF_PAGE_TOKEN_ESTIMATE
+    # Per page up to the ceiling: 100 pages is the most the request builder
+    # sends natively to a 1M model (``document_form``), and past it the PDF is
+    # extracted, so the old 600-page ceiling charged text it never renders.
+    ceiling = min(120 * PDF_PAGE_TOKEN_ESTIMATE, MAX_DOCUMENT_TOKEN_ESTIMATE)
+    # The prompt text adds a token or two on top of the document's charge.
+    assert ceiling <= charge <= ceiling + 10
+    assert charge >= 100 * PDF_PAGE_TOKEN_ESTIMATE
     # The cheap bound must never fall below the estimate it stands for.
     assert messages_tokens_upper_bound([message]) >= charge
 
@@ -1174,3 +1206,292 @@ def test_cjk_text_is_charged_by_utf8_bytes_at_the_anthropic_body() -> None:
     ascii_body = body_for("x" * 200_000)
     assert wire_bytes(ascii_body) <= 32_000_000
     assert any(part["type"] == "document" for part in ascii_body["messages"][0]["content"])
+
+
+# ---------------------------------------------------------------------------
+# M. window-aware render caps: one file may not fill a small model by itself
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("window", "native_cap"),
+    [(1_000_000, 100), (200_000, 20), (128_000, 12)],
+)
+def test_a_long_pdf_goes_native_only_within_its_share_of_the_window(window, native_cap) -> None:
+    """600 pages is Anthropic's ceiling at 1M, but at 2,500 tokens a page it is
+    1.5M tokens: more than the window. The cap is a quarter of the window at the
+    per-page charge, so the rest of the window stays for the conversation."""
+    for provider, wire in (
+        ("anthropic", "anthropic-messages"),
+        ("google", "google-content"),
+        ("openai", "openai-chat"),
+        ("openai", "openai-responses"),
+    ):
+        form = document_form(provider, wire, context_window=window)
+        assert form is not None and form.max_pages == native_cap, provider
+
+    long = _pdf_block(_pdf_raw(pages=600))
+    form = document_form("anthropic", "anthropic-messages", context_window=window)
+    assert not document_native_ok(long, form)
+    short = _pdf_block(_pdf_raw(pages=native_cap))
+    assert document_native_ok(short, form)
+
+
+def test_an_unknown_window_takes_the_native_page_ceiling() -> None:
+    """Unknown is not evidence of room: it gets the ceiling, never "unlimited"."""
+    for provider, wire in (
+        ("openai", "openai-chat"),
+        ("openai", "openai-responses"),
+        ("openrouter", "openai-chat"),
+        ("google", "google-content"),
+    ):
+        form = document_form(provider, wire)
+        assert form is not None and form.max_pages == MAX_NATIVE_PDF_PAGES, (provider, wire)
+
+
+@pytest.mark.parametrize("window", [1_000_000, 200_000, 32_000])
+def test_a_text_file_renders_within_its_share_of_the_window(window) -> None:
+    block = DocumentContent(
+        data=base64.b64encode(b"x" * 2_000_000).decode("ascii"),
+        mime_type="text/plain",
+        filename="big.txt",
+        bytes=2_000_000,
+    )
+    cap = document_text_cap(window)
+    assert cap is not None
+    rendered = fallback_document_text(block, cap)
+    assert "characters truncated from big.txt" in rendered
+    # The fence and notice add a fixed few hundred characters around the body.
+    assert len(rendered) <= min(cap, 400_000) + 300
+    # Without a cap only the global bound applies.
+    assert len(fallback_document_text(block)) <= 400_000 + 300
+
+
+def test_a_long_pdf_extraction_is_clipped_to_the_window_and_the_cache_stays_whole(store) -> None:
+    raw = _pdf_raw(pages=12)
+    block = _pdf_block(raw)
+    block.digest = "e" * 32
+    full = extract_document_text(block)
+    clipped = extract_document_text(block, 100)
+    assert len(clipped) < len(full)
+    assert "to fit the model's context window" in clipped
+    # The cache keeps the FULL extraction so a bigger model is not served a clip.
+    assert store.root.joinpath(f"{'e' * 32}.txt").read_text(encoding="utf-8") in full
+    assert extract_document_text(block) == full
+
+
+def test_every_wire_clips_a_fallback_text_to_the_window() -> None:
+    """The cap reaches all four serializers, not only the helper that takes it."""
+    block = DocumentContent(
+        data=base64.b64encode(b"y" * 600_000).decode("ascii"),
+        mime_type="text/plain",
+        filename="big.txt",
+        bytes=600_000,
+    )
+    model = ModelSpec(provider="test", model_id="m", context_window=32_000)
+    cap = document_text_cap(32_000)
+    assert cap is not None and cap < 600_000
+    message = Message(role="user", content=[TextContent(text="read"), block])
+    request = ChatRequest(model=model, messages=[message])
+
+    chat = _message_to_openai(message, None, None, cap)["content"][1]["text"]
+    anthropic = AnthropicClient._message_blocks(message, None, None, cap)[1]["text"]
+    responses = _messages_to_openai_responses([message], model, request=request)
+    responses_text = responses[0]["content"][1]["text"]
+    for text in (chat, anthropic, responses_text):
+        assert "characters truncated from big.txt" in text
+        assert len(text) <= cap + 300
+
+
+def test_google_wire_clips_a_fallback_text_to_the_window() -> None:
+    block = DocumentContent(
+        data=base64.b64encode(b"z" * 600_000).decode("ascii"),
+        mime_type="text/plain",
+        filename="big.txt",
+        bytes=600_000,
+    )
+    model = ModelSpec(
+        provider="google", model_id="gemini-x", context_window=32_000, supports_images=False
+    )
+    request = ChatRequest(
+        model=model, messages=[Message(role="user", content=[TextContent(text="read"), block])]
+    )
+    body = GoogleClient()._build_body(request)
+    texts = [p["text"] for c in body["contents"] for p in c["parts"] if "text" in p]
+    clipped = [t for t in texts if "characters truncated from big.txt" in t]
+    cap = document_text_cap(32_000)
+    assert cap is not None and clipped and len(clipped[0]) <= cap + 300
+
+
+def test_the_responses_wire_takes_the_window_page_cap_too() -> None:
+    """The Responses row used to return before the window cap, so a 600-page PDF
+    went native while the refusal assumed it was cut to the window share."""
+    from local_operator.compaction.tokens import PDF_PAGE_TOKEN_ESTIMATE
+
+    long = _pdf_block(_pdf_raw(pages=600))
+    for window in (128_000, 200_000, 400_000):
+        form = document_form("openai", "openai-responses", context_window=window)
+        assert form is not None and form.max_pages is not None
+        share = window // DOCUMENT_WINDOW_SHARE
+        assert form.max_pages * PDF_PAGE_TOKEN_ESTIMATE <= share
+        assert (form.max_pages + 1) * PDF_PAGE_TOKEN_ESTIMATE > share
+        assert not document_native_ok(long, form)
+    # A text-only model still gets no file part at all.
+    assert document_form("openai", "openai-responses", supports_images=False) is None
+
+
+def test_native_pages_never_exceed_the_ruler_ceiling_on_a_huge_window() -> None:
+    """A 2M window's quarter share would allow 200 native pages (500k tokens)
+    while one PDF is charged at most ``MAX_DOCUMENT_TOKEN_ESTIMATE``."""
+    from local_operator.compaction.tokens import (
+        MAX_DOCUMENT_TOKEN_ESTIMATE,
+        PDF_PAGE_TOKEN_ESTIMATE,
+        _compute_tokens,
+    )
+
+    assert MAX_DOCUMENT_TOKEN_ESTIMATE == MAX_NATIVE_PDF_PAGES * PDF_PAGE_TOKEN_ESTIMATE
+    block = _pdf_block(_pdf_raw(pages=150))
+    for provider, wire in (
+        ("anthropic", "anthropic-messages"),
+        ("openai", "openai-responses"),
+        ("google", "google-content"),
+    ):
+        form = document_form(provider, wire, context_window=2_000_000)
+        assert form is not None and form.max_pages == MAX_NATIVE_PDF_PAGES, provider
+        assert not document_native_ok(block, form)
+    # Whatever IS native is charged in full: no page count can slip past the cap.
+    native = _pdf_block(_pdf_raw(pages=MAX_NATIVE_PDF_PAGES))
+    assert _compute_tokens(Message.user("x", documents=[native])) >= MAX_DOCUMENT_TOKEN_ESTIMATE
+
+
+def test_an_uncountable_pdf_is_never_native_even_without_a_page_limit() -> None:
+    """The ruler charges a corrupt PDF as its ~50-token reference; that is only
+    true if no row can send it natively, a row with ``max_pages=None`` included."""
+    broken = DocumentContent(
+        data=base64.b64encode(b"%PDF-1.4 not really").decode(),
+        mime_type="application/pdf",
+        filename="broken.pdf",
+        bytes=20,
+    )
+    no_limit = DocumentForm("openai_chat", 32_000_000, None, "openai")
+    assert not document_native_ok(broken, no_limit)
+    for window in (None, 200_000):
+        for provider, wire in (("openai", "openai-responses"), ("openai", "openai-chat")):
+            assert not document_native_ok(
+                broken, document_form(provider, wire, context_window=window)
+            )
+
+
+def test_a_scanned_pdf_extraction_says_its_pages_were_empty(store) -> None:
+    """A PDF with no text layer extracts to bare page markers; the model must
+    be told, not left to answer as if the document were blank."""
+    block = _pdf_block(_pdf_raw(pages=3), filename="scan.pdf")
+    text = extract_document_text(block)
+    assert "3 of 3 extracted pages of scan.pdf contained no readable text" in text
+    assert "NOT passed to you" in text
+    # Served from the cache the second time, with the same note.
+    block.digest = "f" * 32
+    assert extract_document_text(block) == extract_document_text(block)
+    assert "contained no readable text" in extract_document_text(block)
+
+
+def test_a_pdf_with_text_gets_no_empty_page_note(store, monkeypatch) -> None:
+    from local_operator.providers import documents as documents_mod
+
+    body = "--- page 1 ---\nhello\n--- page 2 ---\nworld"
+    assert documents_mod._empty_pages_notice(body, "ok.pdf") == ""
+    mixed = "--- page 1 ---\nhello\n--- page 2 ---\n\n--- page 3 ---\nbye"
+    assert "1 of 3 extracted pages of ok.pdf" in documents_mod._empty_pages_notice(mixed, "ok.pdf")
+
+
+_RESERVE = 8192  # the reply headroom a request must still leave
+
+
+def _random_text(kind: str, count: int) -> str:
+    """``count`` random characters of one script, seeded so a failure repeats."""
+    import random
+
+    ranges = {
+        "cjk": (0x4E00, 0x9FFF),
+        "hangul": (0xAC00, 0xD7A3),
+        "emoji": (0x1F300, 0x1F64F),
+        "cjk_ext_b": (0x20000, 0x2A6DF),
+    }
+    low, high = ranges[kind]
+    rng = random.Random(f"{kind}-{count}")
+    return "".join(chr(rng.randint(low, high)) for _ in range(count))
+
+
+def _text_block(text: str, name: str = "dense.txt") -> DocumentContent:
+    raw = text.encode("utf-8")
+    return DocumentContent(
+        data=base64.b64encode(raw).decode("ascii"),
+        mime_type="text/plain",
+        filename=name,
+        bytes=len(raw),
+    )
+
+
+@pytest.mark.parametrize("window", [32_000, 128_000, 200_000])
+@pytest.mark.parametrize("kind", ["cjk", "hangul", "emoji", "cjk_ext_b"])
+def test_no_script_can_render_past_the_window_and_the_refusal_sees_it(kind, window) -> None:
+    """A cap in CHARACTERS cannot bound a script that costs more than the ratio
+    per character: at 400k characters random CJK filled 96-100% of a 128k/200k
+    window, Hangul 112%, emoji 110% and CJK Extension B ~200%, while the refusal
+    figure said 8k-50k, so the provider answered 400 and the session was stuck.
+    The real o200k count of what is actually rendered, plus the reply reserve,
+    must fit; and the figure the refusal reads must not be far under it."""
+    tiktoken = pytest.importorskip("tiktoken")
+    from local_operator.providers.clients import _estimated_prompt_tokens
+
+    encoding = tiktoken.get_encoding("o200k_base")
+    block = _text_block(_random_text(kind, 400_000))
+    rendered = fallback_document_text(block, document_text_cap(window))
+    real = len(encoding.encode(rendered, disallowed_special=()))
+    assert real + _RESERVE <= window, f"{kind}@{window}: {real} tokens rendered"
+    assert "characters truncated from dense.txt" in rendered, "the cut must be announced"
+
+    request = ChatRequest(
+        model=ModelSpec(provider="test", model_id="m", context_window=window),
+        messages=[Message(role="user", content=[block])],
+    )
+    _, measured = _estimated_prompt_tokens(request)
+    # One token per UTF-8 byte is a ceiling, so the refusal figure may not sit
+    # below the measured count (it does not, with the 200-char framing allowance).
+    assert measured >= real
+
+
+def test_ascii_text_is_cut_exactly_where_it_always_was() -> None:
+    """Prose and code are 1 unit a character: the weighted cap must leave their
+    output byte-identical to the character cap it replaced (head b08929512)."""
+    prose = ("The quick brown fox jumps over the lazy dog; return x if y else z.\n" * 9000)[
+        :400_000
+    ]
+    block = DocumentContent(
+        data=base64.b64encode(prose.encode()).decode("ascii"),
+        mime_type="text/plain",
+        filename="notes.txt",
+        bytes=len(prose),
+    )
+    for window in (32_000, 128_000, 200_000):
+        cap = document_text_cap(window)
+        assert cap is not None
+        assert cap == window * DOCUMENT_CHARS_PER_TOKEN // DOCUMENT_WINDOW_SHARE
+        expected_body = prose[:cap]
+        expected = (
+            "[Document: notes.txt (text/plain)]\n```\n"
+            f"{expected_body}\n[... {len(prose) - cap} characters truncated from notes.txt]\n```"
+        )
+        assert fallback_document_text(block, cap) == expected
+
+
+def test_a_mixed_text_file_is_cut_at_its_weight_not_its_length() -> None:
+    from local_operator.harness.document_limits import text_weight, weighted_prefix_len
+
+    text = "abc" + "\u6f22" * 10 + "tail"
+    assert text_weight("abc") == 3
+    assert text_weight("\u6f22") == 3 * DOCUMENT_CHARS_PER_TOKEN
+    keep = weighted_prefix_len(text, 3 + 4 * 3 * DOCUMENT_CHARS_PER_TOKEN)
+    assert text[:keep] == "abc" + "\u6f22" * 4
+    assert weighted_prefix_len("abc", 100) == 3
+    assert weighted_prefix_len("abc", 0) == 0

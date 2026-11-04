@@ -3,6 +3,7 @@
  * timer hides an outage here. Age is local time since that fact went false,
  * not a claim about an unexposed server timestamp. Only the transition is a
  * live announcement; five-second age ticks must not interrupt reading. */
+import { contentDir } from "../lib/content-direction";
 import { useEffect, useRef, useState } from "react";
 import { blockingPending } from "../lib/asks";
 import { formatElapsed } from "../lib/format";
@@ -47,6 +48,6 @@ export function SessionSubtitle({ projection, connected }: { projection: Session
 	return <>
 		{/* No dot of its own: the header's status control draws the ONE dot
 		    beside this line (the link-down mark used to live here). */}
-		<span className="block truncate text-meta text-ink-dim">{label}</span>
+		<span dir={contentDir(label)} className="block truncate text-meta text-ink-dim">{label}</span>
 	</>;
 }

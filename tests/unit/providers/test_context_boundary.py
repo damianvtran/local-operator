@@ -42,6 +42,34 @@ def request():
     )
 
 
+@pytest.mark.parametrize("size", [1_000_000, 4_900_000, 29_600_000])
+def test_a_large_octet_stream_document_does_not_make_the_prompt_too_large(size):
+    """The session-killing shape: an mp4 (``application/octet-stream`` here)
+    was charged one token per base64 character, so the local refusal fired on
+    every request. The same request must now be admitted, with the reply budget
+    untouched."""
+    import base64
+
+    from local_operator.harness.types import DocumentContent
+
+    block = DocumentContent(
+        data=base64.b64encode(b"\x00" * size).decode("ascii"),
+        mime_type="application/octet-stream",
+        filename="demo.mp4",
+        bytes=size,
+        injection="reference",
+    )
+    req = ChatRequest(
+        model=ModelSpec(
+            provider="openai", model_id="gpt-5", context_window=200_000, max_output_tokens=8192
+        ),
+        messages=[Message(role="user", content=[TextContent(text="look at this"), block])],
+        system_blocks=["fixed instructions"],
+    )
+    assert _estimated_prompt_tokens(req)[1] < 10_000
+    assert _effective_max_tokens(req) == 8192
+
+
 def test_counted_boundary_adds_new_content_and_invalidates_edited_prefix():
     initial = request()
     tracker = ContextTokenTracker()

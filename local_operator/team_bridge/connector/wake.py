@@ -398,8 +398,6 @@ async def screen_item(
     caller treats it as a hold (fail-closed), never as an implicit deliver.
     """
 
-    from local_operator.team_bridge import scheduler as _scheduler
-
     # F3 (live E2E): the cycle treats a missing status source as NO authority
     # and holds every screen ``policy_stale`` before any model call — correct
     # fail-closed behaviour, but no production caller ever supplied one, so
@@ -408,20 +406,64 @@ async def screen_item(
     # OAuth row, re-verified before and after the await. It is built per call
     # so it always binds THIS owner snapshot; nothing here can mint authority
     # — the cycle still refuses anything but a sealed ``VerifiedStatus``.
+    return await _screening_cycle(
+        owner, [item], config_dir=config_dir, auth_store=auth_store, settings=settings, batch=False
+    )
+
+
+async def screen_items(
+    owner: Any,
+    items: "list[Mapping[str, Any]]",
+    *,
+    config_dir: Path,
+    auth_store: Any,
+    settings: Any = None,
+) -> Any:
+    """SEAM: screen several items in ONE model call (the batch pipeline).
+
+    One result per item, in order; ``None`` when no default is configured or
+    the account turn is busy (the caller then falls back to ``screen_item``
+    per message, whose own holds are the fail-closed answer). Same identity
+    and authority hold mapping as :func:`screen_item`, applied to every item.
+    """
+
+    return await _screening_cycle(
+        owner, items, config_dir=config_dir, auth_store=auth_store, settings=settings, batch=True
+    )
+
+
+async def _screening_cycle(
+    owner: Any,
+    items: "list[Mapping[str, Any]]",
+    *,
+    config_dir: Path,
+    auth_store: Any,
+    settings: Any,
+    batch: bool,
+) -> Any:
+    """The one cycle call behind both seams, with its local-refusal holds."""
+
+    from local_operator.team_bridge import scheduler as _scheduler
     from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
     from local_operator.team_bridge.screening import ScreenResult
     from local_operator.team_bridge.store import StoreRefused
+
+    def _held(code: str) -> Any:
+        if batch:
+            return [ScreenResult("hold", hold_code=code) for _ in items]
+        return ScreenResult("hold", hold_code=code)
 
     try:
         return await _scheduler.run_screening_cycle(
             config_dir=config_dir,
             owner=owner,
-            items=[item],
+            items=items,
             auth_store=auth_store,
             settings=settings,
             status_fetcher=_scheduler.default_status_fetcher(
                 config_dir=config_dir, owner=owner, auth_store=auth_store
             ),
+            batch=batch,
         )
     except (BridgeRefusal, BridgeSignInRequired) as failure:
         # A LOCAL identity/sign-in refusal (the signed-in row is not the
@@ -448,7 +490,7 @@ async def screen_item(
                 else failure.code
             ),
         )
-        return ScreenResult("hold", hold_code="policy_stale")
+        return _held("policy_stale")
     except StoreRefused as refusal:
         # The cycle's AUTHORITY refusals (a withdrawn status, an ineligible
         # org, stale consent, a moved owner) are typed ``policy_stale``
@@ -459,7 +501,7 @@ async def screen_item(
         if refusal.code != "policy_stale":
             raise
         logger.warning("bridge: screening held code=policy_stale cause=authority")
-        return ScreenResult("hold", hold_code="policy_stale")
+        return _held("policy_stale")
 
 
 def _owner_wire(owner: Any, config_dir: Path, auth_store: Any) -> Any:

@@ -34,33 +34,141 @@
     "tone": "Preserve current copy and casing. The ellipsis is U+2026, not three dots.",
     "note": "Owned relay SPA shell chrome. Rendered when the projection stream is not connected; paired with relay.shell.session.waiting."
   },
-  "relay.shell.usage.title": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.cached": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.unavailable": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.loading": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.empty": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.last_known": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.continue": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.family_caps": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.paid": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.family": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.included": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.amount_unknown": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.blocked": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.eligibility_unknown": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.unlimited": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.window_five": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.window_week": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.window_month": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.window_lifetime": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.window_unknown": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.remaining": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "{value} is a numeric amount, formatted by ICU number (up to three decimals) in the actual selected catalogue locale. {unit} is a localized measurement label; translators may reorder/rephrase the complete message to avoid forced gender/plural agreement with this invariant label. Never display a raw API unit token."},
-  "relay.shell.usage.used": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "{value} is a numeric amount, formatted by ICU number (up to three decimals) in the actual selected catalogue locale. {unit} is a localized measurement label; rephrase/reorder the complete sentence as needed to avoid forced gender/plural agreement."},
-  "relay.shell.usage.fraction": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "{value} is a numeric FRACTION, e.g. 0.29 means 29 percent used. ICU percent owns rounding, spacing and percent sign in the actual catalogue locale. Never multiply or append a second percent sign."},
-  "relay.shell.usage.reset": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "{value} is the reset timestamp as epoch milliseconds in the phone, or datetime in Python. ICU date medium/time short formats it in the actual selected catalogue locale and the phone time zone, consistently with as_of; not an ISO machine token."},
-  "relay.shell.usage.command": {"role": "cached usage sheet display", "tone": "Factual, concise; no guarantee beyond explicit eligibility.", "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."},
-  "relay.shell.usage.as_of": {"role": "cache freshness disclosure", "tone": "Factual timestamp, no live-refresh promise.", "note": "{value} is the immutable cached timestamp as epoch milliseconds in the phone, or datetime in Python. ICU date medium/time short formats it in the actual selected catalogue locale and phone time zone, consistently with reset; not the browser default locale."},
-  "relay.shell.usage.stale": {"role": "cache freshness warning", "tone": "Clear and non-alarmist.", "note": "Disclose may_be_stale from uncheckpointed WAL; do not infer freshness from per-report times."},
+  "relay.shell.usage.title": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Bottom-sheet title for the phone's provider usage sheet; sentence case."
+  },
+  "relay.shell.usage.unavailable": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Error when neither the cached read nor the refresh returned data. A Try again button follows."
+  },
+  "relay.shell.usage.loading": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Status while the first usage read is in flight."
+  },
+  "relay.shell.usage.empty": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "No logged-in provider has usage to show. Not a zero balance."
+  },
+  "relay.shell.usage.last_known": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.continue": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.family_caps": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.paid": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.family": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.included": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.amount_unknown": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.blocked": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.eligibility_unknown": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.unlimited": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.unlimited_generic": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Amount column of an included (non-paid) usage window that has no limit. Short; unlimited (the paid variant) stays for wallets."
+  },
+  "relay.shell.usage.window_five": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.window_week": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.window_month": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.window_lifetime": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.window_unknown": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.remaining": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "{value} is a numeric amount, formatted by ICU number (up to three decimals) in the actual selected catalogue locale. {unit} is a localized measurement label; translators may reorder/rephrase the complete message to avoid forced gender/plural agreement with this invariant label. Never display a raw API unit token."
+  },
+  "relay.shell.usage.used": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "{value} is a numeric amount, formatted by ICU number (up to three decimals) in the actual selected catalogue locale. {unit} is a localized measurement label; rephrase/reorder the complete sentence as needed to avoid forced gender/plural agreement."
+  },
+  "relay.shell.usage.fraction": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "{value} is a numeric FRACTION, e.g. 0.29 means 29 percent used. ICU percent owns rounding, spacing and percent sign in the actual catalogue locale. Never multiply or append a second percent sign."
+  },
+  "relay.shell.usage.reset": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Exact reset time, shown when the countdown is tapped. {when} is pre-formatted by the phone: time only when today, otherwise short date + time (year only when not this year)."
+  },
+  "relay.shell.usage.command": {
+    "role": "cached usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Paired-phone read-only cached provider usage. Windows/families are allowlisted normalized metadata; unknown is not zero. Parameters are display amounts or reset times, never credentials."
+  },
+  "relay.shell.usage.as_of": {
+    "role": "cache freshness disclosure",
+    "tone": "Factual timestamp, no live-refresh promise.",
+    "note": "{value} is the immutable cached timestamp as epoch milliseconds in the phone, or datetime in Python. ICU date medium/time short formats it in the actual selected catalogue locale and phone time zone, consistently with reset; not the browser default locale."
+  },
+  "relay.shell.usage.stale": {
+    "role": "cache freshness warning",
+    "tone": "Clear and non-alarmist.",
+    "note": "Disclose may_be_stale from uncheckpointed WAL; do not infer freshness from per-report times."
+  },
   "relay.shell.usage.row": {
     "role": "complete usage allowance row without a named model family",
     "tone": "Compact, neutral status summary.",
@@ -110,5 +218,170 @@
     "role": "amount with unknown measurement unit",
     "tone": "Neutral.",
     "note": "{value} is the numeric amount. Deliberately omit unrecognized/unknown API unit tokens rather than inventing currency, translating untrusted metadata or discarding a measured value."
+  },
+  "relay.shell.usage.refresh": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Accessible label of the icon-only refresh button in the sheet header (no visible text)."
+  },
+  "relay.shell.usage.refreshing": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "One-line status while the phone asks the computer to fetch fresh usage; cached numbers stay visible."
+  },
+  "relay.shell.usage.updated": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Status line under the sheet title. {when} is a time, already formatted by the phone: time only when today, otherwise short date + time (year only when not this year). It is when this refresh last reached the vendors."
+  },
+  "relay.shell.usage.refresh_failed": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Refresh failed; the sheet keeps showing the last known numbers."
+  },
+  "relay.shell.usage.refresh_timeout": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Refresh took too long; the sheet keeps the last known numbers (the refresh keeps running on the computer)."
+  },
+  "relay.shell.usage.throttled": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "A 15-second cooldown between manual refreshes, NOT a usage limit: do not use the word \"limit\". seconds is a live countdown (1-15). Keep the plural forms."
+  },
+  "relay.shell.usage.refresh_ready": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Screen-reader only: announced once when the 15-second refresh cooldown ends (after the Updated sentence). Not a usage limit."
+  },
+  "relay.shell.usage.retry": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Button under the load error that repeats the read and refresh."
+  },
+  "relay.shell.usage.account": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Label above one account's card when a provider has several logins. index starts at 1. Never shows an email."
+  },
+  "relay.shell.usage.accounts_order": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Fine print under a provider with several logins. Explains that \"Account N\" follows the order the logins were added on the computer; no email is ever shown."
+  },
+  "relay.shell.usage.resets_in": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "When a usage window resets; countdown is one of the countdown_* messages. Lowercase start: it follows a tone word on the same line. Tapping shows the exact time."
+  },
+  "relay.shell.usage.reset_now": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "The reset time has arrived or passed; replaces resets_in."
+  },
+  "relay.shell.usage.countdown_days": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Compact two-unit countdown, days and hours (e.g. 2d 4h). Use the locale's short unit abbreviations; must stay very short (about 8 cells)."
+  },
+  "relay.shell.usage.countdown_day": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Compact countdown of whole days when the hour part is zero (e.g. 3d). Locale short abbreviation; very short."
+  },
+  "relay.shell.usage.countdown_hours": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Compact two-unit countdown, hours and minutes (e.g. 14h 5m). Locale short abbreviations; very short."
+  },
+  "relay.shell.usage.countdown_hour": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Compact countdown of whole hours when the minute part is zero (e.g. 2h). Locale short abbreviation; very short."
+  },
+  "relay.shell.usage.countdown_minutes": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Compact countdown under one hour, minutes only (e.g. 42m). Locale short abbreviation."
+  },
+  "relay.shell.usage.row_label_family": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Label of a model-family cap row: family name then window (e.g. Fable · 7-day). Truncates at narrow widths."
+  },
+  "relay.shell.usage.family_opus": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Model family product name. Keep as-is (Latin script) in every locale."
+  },
+  "relay.shell.usage.family_sonnet": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Model family product name. Keep as-is (Latin script) in every locale."
+  },
+  "relay.shell.usage.family_fable": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Model family product name. Keep as-is (Latin script) in every locale."
+  },
+  "relay.shell.usage.family_zread": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Model family product name. Keep as-is (Latin script) in every locale."
+  },
+  "relay.shell.usage.family_unknown": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Generic label for a per-model-family cap whose family is not one we can name."
+  },
+  "relay.shell.usage.tone_ok": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Status word for a usage window with comfortable headroom. Always shown beside the colour; short."
+  },
+  "relay.shell.usage.tone_warning": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Status word for a usage window that is 85% or more used. Short."
+  },
+  "relay.shell.usage.tone_exhausted": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Status word for a usage window that is fully used; requests on it are refused until it resets. Short."
+  },
+  "relay.shell.usage.tone_unknown": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Status word when the provider did not report how much is used. Not zero, not exhausted. Short."
+  },
+  "relay.shell.usage.reauth": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "This account's login expired on the computer; only a new login there fixes it. Numbers shown are the last known."
+  },
+  "relay.shell.usage.reauth_short": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Card header word for the same state as reauth. Very short."
+  },
+  "relay.shell.usage.row_a11y": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Screen-reader sentence for one usage bar: label, amount, status word. Not shown visually."
+  },
+  "relay.shell.usage.row_a11y_reset": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Same as row_a11y plus the reset phrase (resets_in or reset_now). Not shown visually."
+  },
+  "relay.shell.usage.row_a11y_bare": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Screen-reader sentence for a usage bar with no status word (a paid balance, or an amount not reported): label and amount. Not shown visually."
+  },
+  "relay.shell.usage.row_a11y_bare_reset": {
+    "role": "usage sheet display",
+    "tone": "Factual, concise; no guarantee beyond explicit eligibility.",
+    "note": "Same as row_a11y_bare plus the reset phrase (resets_in or reset_now). Not shown visually."
   }
 }

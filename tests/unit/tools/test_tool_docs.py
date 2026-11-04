@@ -372,7 +372,12 @@ MEASURED_TOKENS: dict[str, int] = {
     # name lives in dm's refusal, not in per-request schema prose. Measured by
     # this test's own printed table on the rebased head; the paired start-context
     # figure is in scripts/bench_context_budget.py.
-    "bridge": 1890,
+    # 1890 -> 1901 (2026-11-03): the one-channel clause in the description
+    # ("The one channel for teammates; reply where it arrived") — the incident
+    # fix for cross-channel fan-out to a teammate.
+    # 1901 -> 1951 (2026-11-03): body-state and long-hold alert wording, re-measured
+    # on the tree rebased onto the one-channel clause by this test's own printed value.
+    "bridge": 1962,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -406,8 +411,22 @@ MEASURED_TOKENS: dict[str, int] = {
     # note drop the host-only clause they each duplicated from the other
     # (-5 tokens against the branch's own +131); the number below is measured
     # on the rebased tree by this test's own print, not a sum of branch deltas.
+    # 2097 -> 2104 (+7, opt-in high-quality recording): `quality='high'` (H.264,
+    # plays in Chrome, costs more CPU) is the one fact a model must meet at the
+    # op, since the default AV1 clip is the lower-quality choice. To stay under the
+    # 8192-char soft cap (8188 chars before this change) the note drops the
+    # width/height bounds the param descriptions and the validator's refusal already
+    # carry, and the op row drops its width/height clause. The when-to-use guidance
+    # and the measured costs live in `guide://browser`. Measured by this test's
+    # own print.
+    # 2104 -> 2116 (+12, review M1 and m-A on the high-quality PR): the earlier
+    # "costs more CPU" was wrong against the measurements (whole-app CPU is LOWER
+    # for `high` on macOS arm64; what rises is main-process CPU and about
+    # 0.5-0.7 GB of RAM), so the note states the RAM cost and the tested
+    # playback instead. Measured by this test's own print; the doc is 8190 chars against
+    # the 8192 cap.
     # No other tool's entry moved.
-    "browser": 2094,
+    "browser": 2116,
     # NEW (code-requests PR1b): the ``code_requests`` doc — relation and lane
     # vocabulary, the freshness rule and the data-not-instructions framing.
     # 475 tokens is the deliberate cost of the reference detail staying OFF the

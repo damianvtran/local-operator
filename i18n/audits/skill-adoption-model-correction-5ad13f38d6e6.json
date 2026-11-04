@@ -1,0 +1,93 @@
+{
+  "schema": 1,
+  "record_kind": "model_identity_metadata_correction",
+  "date": "2026-11-03",
+  "actor_session": "5ad13f38d6e6",
+  "actual_model": "openai/gpt-6.1-sol",
+  "reason": "Prior resumed runtime startup labels incorrectly named anthropic/claude-opus-5-5. Structural transcript provider/model_id records show only openai/gpt-6.1-sol for auditor and both translators. Startup/requested labels are not serving evidence.",
+  "method": "Parsed JSON structure only; skipped content/text/arguments/command/message fields. No textual model-name search, product-content re-audit or claim of an additional independent audit. Transcript prefix hashes pin this exact observation; live transcripts may grow.",
+  "transcripts": [
+    {
+      "session": "5ad13f38d6e6",
+      "transcript_path_template": "~/.local-operator/sessions/5ad13f38d6e6/transcript.jsonl",
+      "observed_prefix_bytes": 973056,
+      "observed_prefix_lines": 191,
+      "observed_prefix_sha256": "df7262dc33741914e2a96172f4f012413c38053daa2a113c833f9feae62193d3",
+      "structural_model_record_count": 140,
+      "unique_served_models": [
+        {
+          "provider": "openai",
+          "model_id": "gpt-6.1-sol",
+          "records": 140
+        }
+      ],
+      "paths": {
+        "/payload/details/last_identity": 47,
+        "/payload/details/by_identity/openai/gpt-6.1-sol": 47,
+        "/payload/usage": 46
+      },
+      "model_metadata_sha256": "3c02bb839398bbe0aaaa446b64f143f641ff9922864e9986aee3049e0b514f4d"
+    },
+    {
+      "session": "5984801ad25d",
+      "transcript_path_template": "~/.local-operator/sessions/5984801ad25d/transcript.jsonl",
+      "observed_prefix_bytes": 587377,
+      "observed_prefix_lines": 174,
+      "observed_prefix_sha256": "6df90ae2c0a92fc0f7d8f652c2c55f32a6b84edd0a3123463141cd345617483a",
+      "structural_model_record_count": 147,
+      "unique_served_models": [
+        {
+          "provider": "openai",
+          "model_id": "gpt-6.1-sol",
+          "records": 147
+        }
+      ],
+      "paths": {
+        "/payload/details/last_identity": 49,
+        "/payload/details/by_identity/openai/gpt-6.1-sol": 49,
+        "/payload/usage": 49
+      },
+      "model_metadata_sha256": "b6ae1f548fae1e11da2a366a91bb354330cf2ee1c04951d089b38f8cb001c3e9"
+    },
+    {
+      "session": "e24a2cdfdbcd",
+      "transcript_path_template": "~/.local-operator/sessions/e24a2cdfdbcd/transcript.jsonl",
+      "observed_prefix_bytes": 1148706,
+      "observed_prefix_lines": 323,
+      "observed_prefix_sha256": "166b0cbc188476e7a1e433d1fd60cfdbae5358fb580959b21528a3a12236346d",
+      "structural_model_record_count": 294,
+      "unique_served_models": [
+        {
+          "provider": "openai",
+          "model_id": "gpt-6.1-sol",
+          "records": 294
+        }
+      ],
+      "paths": {
+        "/payload/details/last_identity": 98,
+        "/payload/details/by_identity/openai/gpt-6.1-sol": 98,
+        "/payload/usage": 98
+      },
+      "model_metadata_sha256": "42ffe1de169c7aaeff7d25456ecb6f60fbae2d57ba35fbe2c50993acccd1bd7e"
+    }
+  ],
+  "delegator_prior_observation_counts": {
+    "5ad13f38d6e6": 123,
+    "5984801ad25d": 147,
+    "e24a2cdfdbcd": 294
+  },
+  "count_note": "Current auditor count is higher because this resumed correction adds tool calls. Prior delegation counts are historical observations, not overwritten.",
+  "corrected_roles": {
+    "auditor_5ad13f38d6e6": "openai/gpt-6.1-sol",
+    "core_translator_5984801ad25d": "openai/gpt-6.1-sol",
+    "ui_translator_e24a2cdfdbcd": "openai/gpt-6.1-sol"
+  },
+  "scope": "Superseding same-source/same-target ledger rows only: core wire.skill_adoption and wire.errors.desktop in seven locales; UI ui.hub.adoption in seven locales. Prior labels retained as history.",
+  "content_verdict": "unchanged; terminal clean, with UI pre-existing minor/nit follow-ups retained",
+  "no_content_reaudit": true,
+  "no_catalogue_changes": true,
+  "no_generation": true,
+  "core_ledger_rows_appended": 14,
+  "ui_ledger_rows_appended": 7,
+  "ui_receipt_policy": "Existing UI receipts remain byte-identical to preserve historical receipt_sha256 bindings. Corrected successor receipts carry explicit model_identity_correction fields and link prior immutable receipts."
+}

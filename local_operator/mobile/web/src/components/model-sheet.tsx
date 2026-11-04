@@ -172,7 +172,7 @@ export function ModelSheet({
 								)}
 								aria-hidden
 							/>
-							<span className="min-w-0 flex-1 truncate text-body">
+							<span data-ltr className="min-w-0 flex-1 truncate text-body">
 								{m.name}
 							</span>
 							{/* The provider moves onto the row now that there

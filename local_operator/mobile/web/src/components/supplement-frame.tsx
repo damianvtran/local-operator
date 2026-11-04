@@ -45,6 +45,7 @@
  * rule 1). A future addition that gave this frame a privileged channel would
  * be a bridge and needs the security round, not a prop.
  */
+import { contentDir } from "../lib/content-direction";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
 	PING_INTERVAL_MS,
@@ -502,7 +503,7 @@ export function SupplementFrame({
 			 * per component, `text-meta`/`ink-muted`, single line with the full
 			 * text in the tooltip. The document prints none (§2.8, D13).
 			 */}
-			<span
+			<span dir={contentDir(sourceLine(component.source))}
 				className="block truncate text-meta text-ink-muted"
 				title={sourceLine(component.source)}
 				data-supplement-source=""
