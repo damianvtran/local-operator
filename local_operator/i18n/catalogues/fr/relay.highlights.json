@@ -1,0 +1,7 @@
+{
+  "relay.highlights.withheld.line": "{count, plural, one {# fichier non affiché} many {# de fichiers non affichés} other {# fichiers non affichés}} : {reasons}",
+  "relay.highlights.withheld.reason.outside": "hors des emplacements autorisés",
+  "relay.highlights.withheld.reason.sensitive": "fichier sensible",
+  "relay.highlights.withheld.reason.missing": "le fichier n’existe plus",
+  "relay.highlights.withheld.reason.too_large": "trop volumineux pour un aperçu"
+}

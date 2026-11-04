@@ -255,11 +255,13 @@ def _supplement_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     from local_operator.redaction_shapes import scrub_shapes
     from local_operator.supplements.contract import (
         SOUNDS_MAX,
+        WITHHELD_MAX,
         SupplementComponent,
         SupplementDetails,
         SupplementFile,
         SupplementImage,
         SupplementSound,
+        SupplementWithheld,
     )
 
     details = payload.get("details")
@@ -288,6 +290,9 @@ def _supplement_payload(payload: Mapping[str, Any]) -> dict[str, Any] | None:
         # lower would take sounds off a page the durable row already carries in full,
         # which is exactly the "the collage shows three" defect one layer down.
         "sounds": (SupplementSound, SOUNDS_MAX),
+        # A list of {name, reason}: through ``scalar()`` it became ``None`` and the
+        # cold-opened desktop lost the "N files not shown" line (UI review R2).
+        "withheld": (SupplementWithheld, WITHHELD_MAX),
     }
     for key in SupplementDetails.__annotations__:
         value = details.get(key)

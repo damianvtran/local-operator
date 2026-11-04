@@ -1832,9 +1832,14 @@ def serve_daemon_row(
         # A peer that predates identity proofs sends no ``identity``: its pid was
         # never checked against a start time, so it is UNPROVEN, never proven.
         identity = entry.get("identity", "unproven")
+        # A peer PID is a positive signed pid_t, not an arbitrary JSON integer.
+        # Reject group/broadcast selectors and overflow before rendering; bounding
+        # strings alone leaves hostile integer detail unbounded. Do not use this
+        # viewer's host-specific PID limit to judge a different device's PID.
         if (
             not isinstance(pid, int)
             or isinstance(pid, bool)
+            or not 1 <= pid <= 2**31 - 1
             or version is None
             or ref is None
             or (cgroup is not None and not isinstance(cgroup, str))
