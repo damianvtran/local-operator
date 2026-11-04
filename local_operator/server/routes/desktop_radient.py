@@ -7,6 +7,7 @@ Workspace consent is deliberately NOT here: effective MCP grants own that flow.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from typing import Annotated, Any, Literal
@@ -14,6 +15,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field, StrictBool, model_validator
 
+from local_operator.config import ConfigManager
 from local_operator.i18n.keys import wire_errors_desktop as _wd
 from local_operator.providers.auth_store import (
     DEFAULT_BLOCK_MS,
@@ -24,6 +26,7 @@ from local_operator.providers.auth_store import (
     StoredCredential,
 )
 from local_operator.providers.registry import get_provider_definition
+from local_operator.server.dependencies import get_config_manager
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.auth import get_desktop_auth
@@ -1420,9 +1423,41 @@ async def agent_statuses(body: RadientRequest, auth: DesktopAuth) -> dict[str, A
     }
 
 
+logger = logging.getLogger(__name__)
+
+
+def _invalidate_team_bridge_status(config_manager: ConfigManager) -> None:
+    """Drop the cached Team Bridge status after a trial start.
+
+    WHY: the status discipline caches one answer per account for
+    ``STATUS_CACHE_TTL_S`` (5 min, RFC §5.1), and that answer -- surface A, "no
+    eligible organization" -- is exactly what a trial start makes false. The
+    renderer refetches ``/v1/desktop/team-bridge/status`` right after the start
+    so the discipline's auto-enrolment runs (teams-trial design §9 Lane E);
+    without this the refetch is served the stale A for up to five minutes and
+    the user lands on a plan-required page for an org they just activated.
+    ``invalidate`` is the discipline's own documented move "after a sign-in,
+    where new eligibility may have arrived", which this is.
+
+    The import stays inside the function: the team_bridge client stack must
+    never ride ``lop serve``'s boot path (``desktop_team_bridge`` module
+    docstring). A failure here is logged and swallowed -- the trial started,
+    and the worst outcome is the 5-minute staleness this exists to remove.
+    """
+    try:
+        from local_operator.team_bridge.client import get_status_discipline
+
+        get_status_discipline(config_manager.config_dir).invalidate()
+    except Exception:  # noqa: BLE001 -- the start's answer must not depend on a cache drop
+        logger.warning("team trial start: Team Bridge status cache was not invalidated")
+
+
 @router.post("/v1/desktop/radient", response_model=CRUDResponse[Result])
 async def radient(
-    body: RadientRequest, request: Request, auth: DesktopAuth = Depends(get_desktop_auth)
+    body: RadientRequest,
+    request: Request,
+    auth: DesktopAuth = Depends(get_desktop_auth),
+    config_manager: ConfigManager = Depends(get_config_manager),
 ):
     if body.operation == "agents.statuses":
         # Dispatched before `endpoint` builds a path, because this op's real work
@@ -1516,6 +1551,8 @@ async def radient(
             auth.store.upsert_credential(
                 "radient", {"type": "api_key", "source": "login", "key": stored_key}
             )
+        if body.operation == "team_trial.start":
+            _invalidate_team_bridge_status(config_manager)
         return {"data": public_data(value, [token, stored_key])}
 
     async with errors(request):

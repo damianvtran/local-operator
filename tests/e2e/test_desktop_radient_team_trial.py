@@ -130,6 +130,33 @@ async def test_start_sends_the_designed_body_once_and_replays_from_the_receipt(
         assert len(stub.requests) == 1  # a lost response never re-submits consent
 
 
+async def test_a_start_drops_the_cached_team_bridge_status(headless_tui_env, monkeypatch) -> None:
+    """The renderer's post-start status refetch must not be served the stale A.
+
+    The discipline caches one answer for 5 minutes; a start is exactly the event
+    that makes the cached "no eligible organization" false, so the proxy drops it
+    and the next status read (the one whose discipline auto-enrolls) is fresh.
+    A refused start keeps the cache: nothing changed upstream.
+    """
+    from local_operator.team_bridge import client as tb_client
+
+    dropped: list[str] = []
+    monkeypatch.setattr(
+        tb_client.StatusDiscipline, "invalidate", lambda self: dropped.append("invalidate")
+    )
+    refused = TrialStub(403, {"code": "trial_not_eligible", "details": {"reason": "trial_used"}})
+    async with proxy(headless_tui_env, monkeypatch, refused) as client:
+        response = await client.post("/v1/desktop/radient", json=_start())
+        assert response.status_code == 403
+    assert dropped == []
+
+    stub = TrialStub()
+    async with proxy(headless_tui_env, monkeypatch, stub) as client:
+        response = await client.post("/v1/desktop/radient", json=_start())
+        assert response.status_code == 200, response.text
+    assert dropped == ["invalidate"]
+
+
 async def test_status_reads_the_trial_block(headless_tui_env, monkeypatch) -> None:
     stub = TrialStub(
         200,
