@@ -10535,7 +10535,10 @@ class Session:
                 except Exception:  # noqa: BLE001 — a display lookup must
                     # not abort the receive; absent beats guessed.
                     account_display = ""
-            from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+            from local_operator.harness.message_types import (
+                BRIDGE_CONFIG_REQUEST_RULE,
+                BRIDGE_UNTRUSTED_CLAUSE,
+            )
 
             wrapped = (
                 f"<team-bridge-message "
@@ -10545,6 +10548,8 @@ class Session:
                 # wrap, ahead of the body, so the model reads the content as
                 # data — never as instructions from a colleague's agent.
                 f"{BRIDGE_UNTRUSTED_CLAUSE}\n"
+                # B5: a teammate's config suggestion is relayed, never applied.
+                f"{BRIDGE_CONFIG_REQUEST_RULE}\n"
                 f"{Session._neutralize_bridge_tag(text)}\n"
                 "</team-bridge-message>"
             )

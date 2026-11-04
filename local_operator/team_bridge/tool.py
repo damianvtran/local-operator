@@ -166,7 +166,10 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
-from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+from local_operator.harness.message_types import (
+    BRIDGE_CONFIG_REQUEST_RULE,
+    BRIDGE_UNTRUSTED_CLAUSE,
+)
 from local_operator.harness.types import (
     AgentTool,
     Content,
@@ -3644,8 +3647,10 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
                 # §11.1: the take_up result marks the body as external and
                 # untrusted, exactly as the wake wrap does — the ONE clause
                 # constant (D6), so a copy edit cannot silently un-mark this hop.
+                # B5: take_up hands over the full body, so it is where a config
+                # suggestion is read in full; the receiver rule rides with it.
                 content = (
-                    f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n"
+                    f"{BRIDGE_UNTRUSTED_CLAUSE}\n{BRIDGE_CONFIG_REQUEST_RULE}\n\n"
                     f"message {outcome.get('message_id')}\n\n{outcome['text']}"
                 )
             else:

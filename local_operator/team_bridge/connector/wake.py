@@ -44,6 +44,7 @@ from typing import Any, Mapping
 
 from local_operator.harness.message_types import (
     BRIDGE_META_MAX_BYTES,
+    BRIDGE_CONFIG_REQUEST_RULE,
     BRIDGE_UNTRUSTED_CLAUSE,
     DISPLAY_CONTEXT_BOUNDS,
     TEAM_BRIDGE_MESSAGE_TYPE,
@@ -244,6 +245,8 @@ def build_wake_payload(
         # spelling here is a hop that silently un-marks the next time the copy
         # is edited.
         BRIDGE_UNTRUSTED_CLAUSE,
+        # B5: the same receiver rule the conversation card carries (one constant).
+        BRIDGE_CONFIG_REQUEST_RULE,
         f"message_id: {message_id}",
         f"sender: {resolved_name}" + (f" ({organization})" if organization else ""),
         f"thread: {thread.get('id') or message.get('thread_id') or 'unknown'}",
