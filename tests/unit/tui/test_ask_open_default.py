@@ -440,13 +440,14 @@ async def test_state_all_addressed_a_settled_queue_stays_shut_once_the_surface_h
         session.publish([_ask("late-old")])  # looks pending: it predates the view
         await _pump(pilot)
         assert _surface(app) == "closed", "a settled view reopened"
-        session.publish([_ask("late-new", when_ms=_AFTER_MS)])
-        # Wait on the bar's own display first: it is the observable effect of the
-        # publish having been processed, so the "stays closed" assertion after it
-        # is not a vacuous pass on a view that simply had not seen the ask yet,
-        # and the positive state is no longer asserted after a fixed pump.
+        session.publish([_ask("late-new", "Late arrival question?", when_ms=_AFTER_MS)])
+        # `late-old` already left the bar displayed, so display alone cannot tell
+        # whether THIS publish was processed. The bar's head text is the first
+        # pending question, which only `late-new` carries, so waiting on it gates
+        # the closed-surface assertion below on the view having folded `late-new`.
         assert await _until(
-            pilot, lambda: app.query_one(AskBar).display
+            pilot,
+            lambda: "Late arrival" in app.query_one(AskBar)._head and app.query_one(AskBar).display,
         ), "the bar is how the new ask announces itself"
         assert _surface(app) == "closed", "an arrival reopened a view that had decided"
 

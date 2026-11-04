@@ -301,7 +301,9 @@ async def test_agent_entered_at_t0_on_a_cold_viewer_binds_then_routes(
             # The ROUTE call is observed on the owner's socket before the
             # receipt renders; reading the transcript at that instant raced the
             # render (hosted CI saw an empty transcript). Wait for the receipt.
-            await _until(pilot, lambda: "agent reviewer is active" in _transcript_text(app))
+            assert await _until(
+                pilot, lambda: "agent reviewer is active" in _transcript_text(app)
+            ), "the agent receipt never rendered"
             text = _transcript_text(app)
             assert "but not attach one" not in text, text
             assert "agent reviewer is active" in text, text
@@ -346,7 +348,9 @@ async def test_credential_on_a_cold_viewer_opens_the_paste_only_after_binding(
             assert ("store", "DEMO_TOKEN", len(placeholder)) in handle.credential_calls
             # Same shape: the store call reaches the owner before the receipt
             # renders, so wait on the receipt rather than the call alone.
-            await _until(pilot, lambda: "Stored DEMO_TOKEN" in _transcript_text(app))
+            assert await _until(
+                pilot, lambda: "Stored DEMO_TOKEN" in _transcript_text(app)
+            ), "the store receipt never rendered"
             text = _transcript_text(app)
             assert "Stored DEMO_TOKEN" in text, text
             assert placeholder not in text
