@@ -309,3 +309,90 @@ def test_verified_ultra_weekly_exhaustion_binds_fresh_and_stale(age_ms):
     assert candidate.five_hour_ms is None
     fresh = age_ms <= 1_800_000
     assert candidate.reopens_at_ms == (weekly_reset if fresh else None)
+
+
+_DAY = 86_400_000
+
+
+@pytest.mark.parametrize("age", [0, 45 * 60_000])
+def test_five_day_reset_ranks_before_six_day_fresh_and_stale(age):
+    """2026-11-04: an account resetting in 5 days is consumed before one in 6.
+
+    Staleness makes utilization unreliable, not a reset instant, so a 45-minute
+    old report still ranks by its deadlines (and is never called "healthy").
+    """
+    later = reset_candidate(1, report(limit("7 day", 6 * _DAY, 0.2), age=age), "m", NOW)
+    sooner = reset_candidate(2, report(limit("7 day", 5 * _DAY, 0.6), age=age), "m", NOW)
+    assert sooner.weekly_ms == NOW + 5 * _DAY and later.weekly_ms == NOW + 6 * _DAY
+    assert sooner.state == ("healthy" if age == 0 else "unknown")
+    assert sooner.reopens_at_ms is None
+    for i in range(100):
+        assert reset_ranked_ids([later, sooner], f"session-{i}")[0] == 2
+
+
+@pytest.mark.parametrize("delta,in_bucket", [(60_000, True), (60_001, False)])
+def test_stale_deadlines_keep_the_inclusive_tie_bucket(delta, in_bucket):
+    rows = [
+        reset_candidate(i, report(limit("7 day", offset), age=45 * 60_000), "m", NOW)
+        for i, offset in [(1, 5 * _DAY), (2, 5 * _DAY + delta)]
+    ]
+    firsts = {reset_ranked_ids(rows, f"session-{i}")[0] for i in range(100)}
+    assert firsts == ({1, 2} if in_bucket else {1})
+
+
+@pytest.mark.parametrize("age", [31 * 60_000, 2 * 3_600_000])
+def test_incident_replay_never_routes_new_sessions_to_the_later_reset(age):
+    """Replay of the 2026-11-04 warmer row: 255/270 sessions followed the hash.
+
+    gominerva 26% resetting in 6d14h beside local-operator 61% and pergamonhq
+    63% resetting in 6d1h, plus two depleted accounts. Past the 30-minute
+    freshness cutoff the old code ranked the three non-depleted accounts as
+    one neutral bucket, so the 13h-later reset took about a third of sessions.
+    """
+    hour = 3_600_000
+    accounts = [
+        (1, 0.26, 6 * _DAY + 14 * hour),  # gominerva
+        (2, 1.0, 5 * _DAY + 2 * hour),  # depleted
+        (3, 1.0, 2 * _DAY + 2 * hour),  # depleted
+        (4, 0.61, 6 * _DAY + hour),  # local-operator
+        (5, 0.63, 6 * _DAY + hour),  # pergamonhq
+    ]
+    rows = [
+        reset_candidate(
+            account_id,
+            report(
+                limit("7 day", offset, used),
+                limit("7 day", offset, 0.0, tier="fable"),
+                age=age,
+            ),
+            "claude-opus-5",
+            NOW,
+        )
+        for account_id, used, offset in accounts
+    ]
+    assert [row.state for row in rows] == ["unknown", "depleted", "depleted", "unknown", "unknown"]
+    firsts = {reset_ranked_ids(rows, f"session-{i}")[0] for i in range(300)}
+    assert firsts == {4, 5}
+
+
+def test_stale_report_with_an_elapsed_window_still_ranks_nowhere():
+    # The 5-hour window has reset since the fetch: that report no longer
+    # describes the account, so its surviving weekly deadline must not rank.
+    elapsed = report(limit("5 hour", -1), limit("7 day", 5 * _DAY), age=45 * 60_000)
+    assert reset_candidate(1, elapsed, "m", NOW) == ResetCandidate(1)
+    spent = report(limit("5 hour", -1, 1), limit("7 day", 5 * _DAY, 1), age=45 * 60_000)
+    assert reset_candidate(1, spent, "m", NOW) == ResetCandidate(1)
+    # A stale depletion keeps blocking but states no deadline or reopening.
+    held = report(limit("7 day", 5 * _DAY, 1), age=45 * 60_000)
+    assert reset_candidate(1, held, "m", NOW) == ResetCandidate(1, "depleted")
+
+
+def test_stale_deadline_bound_is_measured_from_the_fetch():
+    # A deadline more than one period past the report's own fetch is garbled,
+    # even though it is less than a period from now.
+    age = 2 * 3_600_000
+    edge = 7 * _DAY + 60_000 - age
+    ok = reset_candidate(1, report(limit("7 day", edge), age=age), "m", NOW)
+    assert ok.weekly_ms == NOW + edge
+    bad = reset_candidate(1, report(limit("7 day", edge + 1), age=age), "m", NOW)
+    assert bad.weekly_ms is None and bad.state == "unknown"
