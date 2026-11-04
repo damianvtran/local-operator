@@ -66,7 +66,8 @@ class SlowProc:
             self.rows[filler] = (1, 1, 1, "filler")
             filler += 1
         self.corpses = {LEADER} if leader_exited else set()
-        self.leader_ignores_term = leader_ignores_term
+        #: Signals the leader's group survives. Only SIGKILL cannot be ignored.
+        self.ignored = {signal.SIGTERM} if leader_ignores_term else set()
         self.now = 0.0
         self.row_cost = 0.0
         self.scans = 0
@@ -133,7 +134,7 @@ class SlowProc:
 
     def send(self, pgid, signum):
         self.sent.append(signum)
-        if signum == signal.SIGTERM and self.leader_ignores_term:
+        if signum in self.ignored:
             return
         # The group dies: the leader becomes our unreaped corpse (the pin), the
         # grandchild -- whose parent is that corpse -- is reparented and reaped.
@@ -178,7 +179,7 @@ def _per_scan(seconds):
     return seconds / ROWS
 
 
-def _run(wrapper, monkeypatch, world, *, timeout=None, grace=0.05):
+def _run(wrapper, monkeypatch, world, *, timeout=None, grace=0.05, keep_budget=False):
     """Drive the real ``run`` against ``world``; return (rc, stream, cleanup wall).
 
     Capture is free (``row_cost`` is applied only after it) because this file is
@@ -227,9 +228,10 @@ def _run(wrapper, monkeypatch, world, *, timeout=None, grace=0.05):
         "subprocess",
         NS(Popen=lambda *a, **k: Process(), TimeoutExpired=subprocess.TimeoutExpired),
     )
-    monkeypatch.setattr(
-        wrapper, "_memory_budget", lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture")
-    )
+    if not keep_budget:
+        monkeypatch.setattr(
+            wrapper, "_memory_budget", lambda _: (NS(ceiling_mb=0, reason="fixture"), "fixture")
+        )
     cap.refresh = refresh
     out = io.StringIO()
     rc = wrapper.run(["synthetic"], timeout=timeout, grace=grace, stream=out)
@@ -358,7 +360,12 @@ def test_a_foreign_leader_birth_is_still_pin_lost_whatever_the_bound(
     assert rc == wrapper.EXIT_CLEANUP_UNPROVEN, out
     assert signal.SIGKILL not in world.sent, world.sent
     assert GRANDCHILD in world.rows
-    del tmp_path
+    # The refusal must be the PIN loss, not any refusal: an unreadable row or an
+    # expired bound would also send nothing, and this test is about reuse.
+    records = [json.loads(path.read_text()) for path in sorted(Path(tmp_path).rglob("*.json"))]
+    classes = [r["ownership"].get("refusal_class") for r in records if "ownership" in r]
+    assert "pin_lost" in classes, (classes, out)
+    assert "unproven" not in classes, (classes, out)
 
 
 def test_a_member_alive_after_the_kill_is_still_refused(wrapper, monkeypatch, tmp_path):
@@ -399,3 +406,90 @@ def test_a_proof_that_ends_past_the_deadline_is_refused_before_the_syscall():
     assert verdict.status == "REFUSED", verdict
     assert verdict.reason == "expired before syscall", verdict
     assert world.sent == [], world.sent
+
+
+def test_a_small_grace_still_proves_the_term_and_kills(wrapper, monkeypatch, tmp_path):
+    """Test 5 (QA Q1, #3368 c2): ``--grace 0.2`` must not starve the SIGTERM proof.
+
+    The SIGTERM was proved against ``start + grace``, and the required refresh
+    just before it spent most of that window: at 0.09 s a scan the TERM was
+    refused mid-row-scan. A refused proof is a lost authority, after which no
+    signal is retried (the ``finally`` rule) -- so the SIGKILL was never even
+    attempted and the grandchild outlived an rc 124 run. ``--grace`` is how long
+    the group gets to exit AFTER the SIGTERM, not a bound on proving it.
+    """
+    world = SlowProc(leader_ignores_term=True, leader_exited=False)
+    world.row_cost = _per_scan(0.09)
+    rc, out, _wall = _run(wrapper, monkeypatch, world, timeout=0.5, grace=0.2)
+    assert rc == wrapper.EXIT_TIMEOUT, out
+    assert world.sent[:2] == [signal.SIGTERM, signal.SIGKILL], (world.sent, out)
+    assert GRANDCHILD not in world.rows, out
+    assert "refused" not in out, out
+    del tmp_path
+
+
+def test_a_forwarded_sigint_with_a_small_grace_still_kills(wrapper, monkeypatch, tmp_path):
+    """Test 6 (R1-m1): the signal path forwards, TERMs, waits ``grace``, then KILLs.
+
+    The group ignores both the forwarded SIGINT and the SIGTERM, so only the
+    checked SIGKILL can end it. SIGINT is latched by calling the handler the
+    wrapper installed (no OS signal leaves this test), once the run is polling.
+    """
+    world = SlowProc(leader_ignores_term=True, leader_exited=False)
+    world.ignored.add(signal.SIGINT)
+    world.row_cost = _per_scan(SLOW_SCAN)
+    sleep = world.sleep
+
+    def sleep_then_interrupt(seconds):
+        sleep(seconds)
+        if world.now >= 0.2 and not world.sent:
+            handler = signal.getsignal(signal.SIGINT)
+            assert callable(handler), "the wrapper must have installed its forwarder"
+            handler(signal.SIGINT, None)
+
+    world.sleep = sleep_then_interrupt
+    rc, out, _wall = _run(wrapper, monkeypatch, world, grace=0.2)
+    assert rc == 128 + signal.SIGINT, out
+    assert world.sent[:3] == [signal.SIGINT, signal.SIGTERM, signal.SIGKILL], (world.sent, out)
+    assert GRANDCHILD not in world.rows, out
+    assert "refused" not in out, out
+    del tmp_path
+
+
+def test_a_memory_kill_at_census_cost_reclaims_the_grandchild(wrapper, monkeypatch, tmp_path):
+    """Test 7 (R1-m1): the memory-kill site opens the cleanup bound itself.
+
+    No timeout or signal has opened it first, so its allowance is the one the
+    kill, finally and terminal phases share -- it must pay for the census.
+    """
+    world = SlowProc(leader_exited=False)
+    world.row_cost = _per_scan(SLOW_SCAN)
+
+    class Guard:
+        tick_s = 0.25
+
+        def __init__(self, *_a, **_k):
+            pass
+
+        def sample_sync(self):
+            return NS(bytes_used=1)
+
+        def should_kill(self, _sample):
+            return world.now >= 0.2
+
+        def over_budget_message(self, *_a, **_k):
+            return "over budget (fixture)"
+
+        def soft_notice(self, _sample):
+            return None
+
+    monkeypatch.setattr(wrapper.memory_guard, "Guard", Guard)
+    budget = (NS(ceiling_mb=64, reason="fixture"), "fixture")
+    monkeypatch.setattr(wrapper, "_memory_budget", lambda _: budget)
+    monkeypatch.setattr(wrapper, "_child_environment", lambda _b: {})
+    rc, out, _wall = _run(wrapper, monkeypatch, world, keep_budget=True)
+    assert rc == wrapper.EXIT_MEMORY, out
+    assert world.sent[:1] == [signal.SIGKILL], (world.sent, out)
+    assert GRANDCHILD not in world.rows, out
+    assert "refused" not in out, out
+    del tmp_path

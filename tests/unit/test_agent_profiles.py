@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from local_operator.agent_profiles import (
+    DELIVERY_POINTER,
     MAX_INSTRUCTIONS_CHARS,
     READ_ONLY_NETWORK_TOOLS,
     READ_ONLY_TOOLS,
@@ -387,7 +388,10 @@ def test_convergence_cues_reach_delegated_prompt(tmp_path, role, cue) -> None:
     registry.set_agent_system_prompt(installed_profile.agent_id, "Override control")
     control, _ = _effective_prompt(brief, role, parent)
     assert "Override control" in control
-    assert cue not in control and "guide://delivery" not in control
+    # The override stays authoritative (no seed cue leaks in); a stale
+    # engineering override gains only the one-line delivery pointer.
+    assert cue not in control and control.count("guide://delivery") == 1
+    assert DELIVERY_POINTER in control
     assert control != loaded, "a seed-only probe must not masquerade as rollout"
 
 
@@ -696,7 +700,7 @@ def test_an_untouched_copy_updates_in_place_when_the_starter_moves(scratch_seeds
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
     # Stamped from the packaged reviewer at install, before the simulated move.
-    assert verdict.installed_version == "1.3.12"
+    assert verdict.installed_version == "1.3.13"
     assert verdict.packaged_version == "2.0.0"
     assert verdict.diverged_fields == ("instructions",)
     # The echo: recoverable by copy-paste, the same guarantee reset gives.
@@ -834,7 +838,7 @@ def test_an_unbumped_body_change_is_still_an_update(scratch_seeds, tmp_path) -> 
     assert verdict.verdict == "outdated-clean"
     assert verdict.applied is True
     # Both sides read the seed's version, untouched by the body-only move.
-    assert verdict.installed_version == verdict.packaged_version == "1.3.12"
+    assert verdict.installed_version == verdict.packaged_version == "1.3.13"
     assert verdict.replaced_instructions == before_prompt
     assert registry.get_agent_system_prompt(row.id).strip() == "REVIEWER, SAME VERSION, NEW TEXT"
 

@@ -1,0 +1,104 @@
+{
+  "schema": 1,
+  "audit_id": "rg6a1",
+  "audit_kind": "independent_current_byte_namespace_audit",
+  "locale": "fr",
+  "namespace": "wire.tool_rows.bridge.skipped",
+  "audit_date": "2026-11-04",
+  "source_audit_revision": "287c53e0a267f85119c26f3eaa1f4245794fef1d",
+  "source_audit_revision_note": "PR #3417 head 287c53e plus this audit's catalogue remediation, committed together with this record",
+  "current_bytes_match_audited_hashes": true,
+  "key_count": {
+    "en": 3,
+    "target": 3
+  },
+  "verdict": "passed",
+  "result": "clean-with-findings",
+  "auditor": {
+    "agent": "i18n-auditor (radientdev team)",
+    "session": "3dcc5dbc44d0",
+    "model": "anthropic/claude-opus-5-5",
+    "actual_model_source": "Session runtime header: Model: anthropic/claude-opus-5-5",
+    "fallback_used": false,
+    "independent_from_translator_session": true,
+    "independence": "Separate agent/session from the implementer-translator (62d5b457bcf6) and from the retranslating subagent (c9f77e05a801). Same model family (claude-opus-5-5) as both translators — disclosed; no cross-model second pass. The auditor did not draft any value; it commissioned retranslation of flagged keys and audited the result."
+  },
+  "translator": {
+    "agent": "coder (PR #3417 implementer)",
+    "session": "62d5b457bcf6",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-04",
+    "source": "PR #3417 body: implementer authored all seven locales, no provider fallback"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.tool_rows.bridge.skipped.json",
+      "sha256": "e633a96f66d65a159322d4110035dab8139cce5b441c7a9c52a9e5e1d9dca865"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.tool_rows.bridge.skipped.context.json",
+      "sha256": "c726ec8a9c1d0f5a9bc8d77096c24b16dc78ed6a9622ecb2edfaf44e2875ca51"
+    },
+    "target": {
+      "path": "local_operator/i18n/catalogues/fr/wire.tool_rows.bridge.skipped.json",
+      "sha256": "3111891175262cdeb72274695c49e25a224e6c07f41f851dc722083765853b7e"
+    }
+  },
+  "guidance": {
+    "glossary": {
+      "path": "i18n/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    "style_guide": {
+      "path": "i18n/style-guides/fr.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "audit.log",
+      "sha256": "2927a15306dff123c04b1cb85e130269f97112deb03a0240e42d1c70ac719dde"
+    },
+    {
+      "path": "report.md",
+      "sha256": "4afa211c9c37f88703207c2a8061c54b65b1f0c28f1bbb63ed4b7865b2372d1d"
+    },
+    {
+      "path": "recheck.py.txt",
+      "sha256": "34577965921703dfb1cd74419842b9101687efaefbe538a76c20bd94fc486307"
+    }
+  ],
+  "audit_log": {
+    "path": "audit.log",
+    "state": "present",
+    "actual_output": true
+  },
+  "audit_notes_not_execution_log": "report.md reasoning, glossary/style-guide reads and cross-catalogue term comparison are notes; only audit.log is command output.",
+  "findings": [
+    {
+      "id": "FR-RG6-1",
+      "severity": "NIT",
+      "key": "wire.tool_rows.bridge.skipped.verb.dm",
+      "current_text": "Message ignoré pour",
+      "proposed_text": "(keep)",
+      "reason": "«Message ignoré pour Maya» is understandable; «pour» is looser than the audited «Envoyé à», but «ignoré à» is ungrammatical and target-last forbids «Envoi à … ignoré». Accepted as-is.",
+      "disposition": "not edited; accepted"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": [
+      "FR-RG6-1"
+    ],
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 1
+  },
+  "limitations": [
+    "LLM linguistic audit, not a native-speaker attestation.",
+    "No terminal bidi/shaping or rendered-frame claim.",
+    "Same model family as translators; no cross-model second pass."
+  ]
+}

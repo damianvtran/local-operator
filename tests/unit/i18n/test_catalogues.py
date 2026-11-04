@@ -122,6 +122,11 @@ def test_shipped_wire_namespaces_exist() -> None:
         # Its own namespace so no audited catalogue's hash moves; the
         # translation wave lands its seven locales in a follow-up.
         "wire.tool_rows.bridge",
+        # The reply guard's skipped double send (#3377 follow-up, design D1/D2):
+        # a dedicated verb and expanded sentence as a CHILD of the bridge rows,
+        # so the 85 audited `wire.tool_rows.bridge` bytes and their ledger
+        # hashes do not move. Carried by all seven locales.
+        "wire.tool_rows.bridge.skipped",
         # The sessions tool's own operator-visible stop receipts (agent review
         # round 1 R2). Its own namespace, the `wire.host_speed` shape: the
         # receipts are new copy, and adding them to a namespace fr/hi/vi CARRY
