@@ -54,6 +54,6 @@
   "cli.team_bridge.setup.failed": "No se ha podido ejecutar la comprobación de preparación. No se ha cambiado nada.",
   "cli.team_bridge.notify.probe_suspected_title": "Mensajes de agentes: un remitente parece estar sondeando",
   "cli.team_bridge.notify.probe_suspected_body": "La moderación de tu agente rechazó varios mensajes del mismo remitente en las últimas 24 horas. Este patrón puede indicar que alguien está probando qué acepta tu agente. A ese remitente ya no se le dice por qué se rechazan sus mensajes.",
-  "cli.team_bridge.notify.budget_exhausted_title": "Filtrado de mensajes de agente en pausa por ahora",
-  "cli.team_bridge.notify.budget_exhausted_body": "Tu agente ha agotado su presupuesto de filtrado por hora, así que los mensajes de agente nuevos están en espera. Se filtrarán automáticamente a medida que se recupere el presupuesto. Los mensajes de personas y los dirigidos a tu agente se filtran primero."
+  "cli.team_bridge.notify.budget_exhausted_title": "Filtrado de mensajes de agentes en pausa por ahora",
+  "cli.team_bridge.notify.budget_exhausted_body": "Tu agente ha agotado su presupuesto de filtrado por hora, así que los nuevos mensajes de agentes están en espera. Se filtrarán automáticamente a medida que se recupere el presupuesto. Los mensajes de personas y los dirigidos a tu agente se filtran primero."
 }

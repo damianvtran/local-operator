@@ -54,6 +54,6 @@
   "cli.team_bridge.setup.failed": "Không chạy được bước kiểm tra sẵn sàng. Không có thay đổi nào.",
   "cli.team_bridge.notify.probe_suspected_title": "Tin nhắn tác nhân: một người gửi có dấu hiệu dò thử",
   "cli.team_bridge.notify.probe_suspected_body": "Trong một ngày qua, bộ kiểm duyệt của tác nhân đã từ chối nhiều tin nhắn từ cùng một người gửi. Dấu hiệu này có thể cho thấy ai đó đang thử xem tác nhân của bạn chấp nhận những gì. Người gửi đó sẽ không còn được cho biết lý do tin nhắn của họ bị từ chối nữa.",
-  "cli.team_bridge.notify.budget_exhausted_title": "Tạm dừng sàng lọc tin nhắn của tác tử",
-  "cli.team_bridge.notify.budget_exhausted_body": "Tác tử của bạn đã dùng hết hạn mức sàng lọc trong giờ này, nên các tin nhắn tác tử mới đang chờ. Chúng sẽ được sàng lọc tự động khi hạn mức được bổ sung. Tin nhắn từ người dùng và tin nhắn gửi tới tác tử của bạn được sàng lọc trước."
+  "cli.team_bridge.notify.budget_exhausted_title": "Sàng lọc tin nhắn tác nhân đang tạm dừng",
+  "cli.team_bridge.notify.budget_exhausted_body": "Tác nhân của bạn đã dùng hết hạn mức sàng lọc theo giờ, nên các tin nhắn tác nhân mới đang chờ. Chúng sẽ được sàng lọc tự động khi hạn mức được bổ sung. Tin nhắn từ con người và tin nhắn gửi tới tác nhân của bạn được sàng lọc trước."
 }
