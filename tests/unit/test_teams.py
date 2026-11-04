@@ -1511,6 +1511,27 @@ def test_create_fsync_failure_is_not_adopted(
     assert TeamRegistry(tmp_path).list_teams() == []
 
 
+@pytest.fixture
+def long_recovery_cooldown(monkeypatch: pytest.MonkeyPatch) -> float:
+    """Make "inside one cooldown" a property of the test, not of runner speed.
+
+    The product gates re-attempts on ``time.monotonic()`` against
+    ``_READ_RECOVERY_COOLDOWN_S`` (1.0 s), so a test that asserts "exactly one
+    attempt for the whole burst" silently also asserts "the burst finished in
+    under a second". A loaded CI runner took 1.142 s for a 200-read burst and
+    the cooldown correctly expired mid-burst (hosted run 41813249869).
+
+    The constant is raised rather than the clock frozen on purpose: the same
+    ``time.monotonic`` also drives the lock-acquisition deadline, which a frozen
+    clock would turn into a hang. Tests that deliberately cross the cooldown do
+    so by rewinding ``_recovery_attempted_at`` by the module's *current*
+    constant, so they follow this value unchanged.
+    """
+    cooldown = 3600.0
+    monkeypatch.setattr(teams_module, "_READ_RECOVERY_COOLDOWN_S", cooldown)
+    return cooldown
+
+
 def _strand_backup(registry: TeamRegistry, team_id: str) -> Path:
     target = registry.teams_dir / team_id
     backup = registry.teams_dir / f".{team_id}.backup.interrupted"
@@ -1916,6 +1937,7 @@ def test_contended_read_recovers_once_the_peer_releases(tmp_path: Path) -> None:
     assert (registry.teams_dir / team.id).is_dir()
 
 
+@pytest.mark.usefixtures("long_recovery_cooldown")
 def test_repeated_reads_make_at_most_one_recovery_attempt_per_cooldown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1973,6 +1995,7 @@ def test_failed_restore_keeps_raising_rather_than_reporting_empty(
     assert backup.is_dir()
 
 
+@pytest.mark.usefixtures("long_recovery_cooldown")
 def test_repaired_registry_heals_within_one_cooldown_without_a_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2048,6 +2071,7 @@ def test_still_broken_registry_keeps_failing_closed_across_cooldowns(
     assert backup.is_dir()
 
 
+@pytest.mark.usefixtures("long_recovery_cooldown")
 def test_latched_reads_do_not_churn_the_lock_or_grow_the_traceback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2107,6 +2131,7 @@ def test_latched_reads_do_not_churn_the_lock_or_grow_the_traceback(
     assert all(err.__suppress_context__ for err in raised)
 
 
+@pytest.mark.usefixtures("long_recovery_cooldown")
 def test_both_proven_failed_branches_keep_the_original_cause(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
