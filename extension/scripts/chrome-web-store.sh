@@ -23,11 +23,37 @@ set -euo pipefail
 #       draws HTTP 400 FAILED_PRECONDITION / NOT_UPDATEABLE. Takes no arguments
 #       beyond the mode (and refuses any it is given, rather than ignoring an
 #       argument a caller believes it is acting on), and exits non-zero on a
-#       non-2xx response like every other mode. No workflow dispatches it yet:
-#       the store credentials exist only inside the protected environments, so
-#       exposing it needs a dispatch path of its own, which is a release-process
-#       decision rather than a diagnostic one (docs/store/release-record.md
-#       states the same: there is no status-only workflow to dispatch).
+#       non-2xx response like every other mode. Dispatched (hourly and on
+#       demand) by .github/workflows/chrome-web-store-status.yml, which runs it
+#       with the two read-only controls below.
+#
+# Read-only controls, used by the status workflow and by nothing else:
+#
+#   CWS_READ_ONLY=1
+#       Refuses every mode except `status`, and makes request() refuse every
+#       HTTP method except GET. The status workflow holds a real store token on
+#       an unattended hourly schedule, so "it only calls status" must not rest
+#       on one argument in YAML: with this set, a later edit that passes `stage`
+#       or `promote` -- or a code path that reaches publish_staged() -- fails
+#       before any request leaves the runner. The workflow also mints the token
+#       with the chromewebstore.readonly scope, so the store itself would refuse
+#       a write; this flag is the half of that pair that fails without a round
+#       trip and is testable offline.
+#
+#   CWS_STATUS_OUTPUT=PATH
+#       `status` additionally writes a small JSON record (schema
+#       local-operator/chrome-web-store-status/v1) to PATH -- on success AND on
+#       failure, so a monitor that downloads the artifact always learns which of
+#       the two happened. Every store-supplied value in it passes the same
+#       redact-then-bound rules as the log line. CWS_STATUS_EXPECTED_VERSION, when
+#       set, is copied in and compared, so a monitor can read one boolean for
+#       "the submitted revision is this exact version, STAGED, at 100%".
+#
+# What fetchStatus cannot tell you: WHY a revision was rejected. The v2
+# FetchItemStatusResponse carries a REJECTED state and the `warned`/`takenDown`
+# booleans, but no reason text (discovery document, read 2026-11-03); the reason
+# is only in the Developer Dashboard and the review email. The record carries
+# those three fields verbatim rather than inventing a reason.
 #
 # What the summary says, and why those fields. Per revision:
 #   submitted state=STAGED distributionChannels=[crxVersion=0.1.10 deployPercentage=100]
@@ -65,9 +91,21 @@ API_ROOT=${CWS_API_ROOT:-https://chromewebstore.googleapis.com}
 EXPECTED_EXTENSION_ID=omibaecbjdhgbbcedbnnnmjpmopfheof
 
 fail() {
-  printf 'Chrome Web Store publish failed: %s\n' "$*" >&2
+  # Kept for the status record's EXIT trap, which reports why a read failed.
+  failure_message="$*"
+  # `status` reads and never publishes, so its failures must not say "publish
+  # failed": a monitor or operator reading the poll log would take a failed read
+  # for a failed release. stage/promote keep the old prefix verbatim, because
+  # docs/store/release-record.md and past run logs are grepped for it.
+  if [[ "$MODE" == "status" ]]; then
+    printf 'Chrome Web Store status read failed: %s\n' "$*" >&2
+  else
+    printf 'Chrome Web Store publish failed: %s\n' "$*" >&2
+  fi
   exit 1
 }
+failure_message=""
+last_http_status=""
 
 for command in curl jq; do
   command -v "$command" >/dev/null || fail "$command is required"
@@ -79,12 +117,128 @@ done
   || fail "CWS_EXTENSION_ID must be the permanent Local Operator ID $EXPECTED_EXTENSION_ID"
 [[ "$MODE" == "stage" || "$MODE" == "promote" || "$MODE" == "status" ]] \
   || fail "usage: chrome-web-store.sh stage ZIP VERSION | promote VERSION | status"
+# Exactly "1", not "non-empty": an accidental CWS_READ_ONLY=0 must not read as
+# read-only, and a typo in the value must not silently disarm the guard either,
+# so anything other than unset/empty/"1" is refused.
+case "${CWS_READ_ONLY:-}" in
+  "") ;;
+  1) [[ "$MODE" == "status" ]] \
+       || fail "CWS_READ_ONLY=1 permits only the status mode, refusing $MODE" ;;
+  *) fail "CWS_READ_ONLY must be unset or 1" ;;
+esac
+[[ -z "${CWS_STATUS_OUTPUT:-}" || "$MODE" == "status" ]] \
+  || fail "CWS_STATUS_OUTPUT applies only to the status mode"
 
 item="publishers/$CWS_PUBLISHER_ID/items/$CWS_EXTENSION_ID"
 status_url="$API_ROOT/v2/$item:fetchStatus"
 publish_url="$API_ROOT/v2/$item:publish"
 tmp_dir=$(mktemp -d)
-trap 'rm -rf "$tmp_dir"' EXIT
+
+# The status record (see CWS_STATUS_OUTPUT in the header). One writer for every
+# outcome, so the success and failure records cannot drift apart in shape.
+# Store-supplied text reaches jq through the environment and never argv (ps),
+# and is redacted BEFORE it is bounded -- the same order, for the same reason,
+# as summarize_status. $1 is the fetchStatus file (empty on failure), $2 the
+# summary line, $3 an error excerpt (empty on success).
+STATUS_RECORD_ERROR_LIMIT=1000
+write_status_record() {
+  local response=${1:-}
+  [[ -n "$response" && -s "$response" ]] || response=/dev/null
+  CWS_RECORD_SUMMARY=${2-} CWS_RECORD_ERROR=${3-} \
+  CWS_RECORD_HTTP_STATUS=$last_http_status \
+  CWS_RECORD_CHECKED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+    jq -n \
+    --argjson channel_limit "$STATUS_CHANNEL_LIMIT" \
+    --argjson value_limit "$STATUS_VALUE_LIMIT" \
+    --argjson error_limit "$STATUS_RECORD_ERROR_LIMIT" \
+    --arg extension_id "$CWS_EXTENSION_ID" \
+    --arg expected "${CWS_STATUS_EXPECTED_VERSION:-}" \
+    --slurpfile responses "$response" '
+    (env.CWS_ACCESS_TOKEN // "") as $token
+    | def redact($text):
+        if $token == "" then $text
+        else ($text | split($token) | join("<redacted CWS_ACCESS_TOKEN>")) end;
+      def bounded($text; $limit):
+        if ($text | length) > $limit then $text[0:$limit] + "..." else $text end;
+      # null stays null (the store did not say); anything else becomes a
+      # redacted, bounded string, so a wrong-typed field cannot inflate the file.
+      def text($value; $limit):
+        if $value == null then null
+        else (try bounded(redact($value | if type == "string" then . else tojson end); $limit)
+              catch "<unrenderable>") end;
+      def flag($value): if ($value | type) == "boolean" then $value else null end;
+      def percent($value): if ($value | type) == "number" then $value else text($value; $value_limit) end;
+      def revision($status):
+        if ($status | type) != "object" then null
+        else {
+          state: text($status.state; $value_limit),
+          channels: (if ($status.distributionChannels | type) == "array"
+            then [$status.distributionChannels[0:$channel_limit][]
+                  | if type == "object"
+                    then {crxVersion: text(.crxVersion; $value_limit),
+                          deployPercentage: percent(.deployPercentage)}
+                    else {unrecognised: text(.; $value_limit)} end]
+            else [] end),
+          channel_count: (if ($status.distributionChannels | type) == "array"
+            then ($status.distributionChannels | length) else 0 end)
+        } end;
+      ($responses[0] // null) as $r
+      | (if ($r | type) == "object" then $r else {} end) as $o
+      | ($expected | if . == "" then null else . end) as $want
+      | {
+          schema: "local-operator/chrome-web-store-status/v1",
+          checked_at: env.CWS_RECORD_CHECKED_AT,
+          extension_id: $extension_id,
+          ok: (env.CWS_RECORD_ERROR == "" and ($r | type) == "object"),
+          http_status: (env.CWS_RECORD_HTTP_STATUS | if . == "" then null else (tonumber? // .) end),
+          expected_version: $want,
+          submitted: revision($o.submittedItemRevisionStatus),
+          published: revision($o.publishedItemRevisionStatus),
+          last_async_upload_state: text($o.lastAsyncUploadState; $value_limit),
+          warned: flag($o.warned),
+          taken_down: flag($o.takenDown),
+          # The one boolean the promote gate also requires: the SUBMITTED
+          # revision is STAGED and carries exactly the expected version at 100%.
+          # Every branch yields exactly one boolean: an expression that yielded
+          # nothing for an odd shape would drop the whole record, not the field.
+          expected_version_staged_at_full: (
+            if $want == null then false
+            else ($o.submittedItemRevisionStatus
+              | if type == "object" and .state == "STAGED"
+                then ((.distributionChannels | if type == "array" then . else [] end)
+                      | any(type == "object" and .crxVersion == $want and .deployPercentage == 100))
+                else false end)
+            end),
+          summary: (env.CWS_RECORD_SUMMARY | if . == "" then null else text(.; 4 * $value_limit * 8) end),
+          error: (env.CWS_RECORD_ERROR | if . == "" then null else text(.; $error_limit) end)
+        }
+    ' >"$CWS_STATUS_OUTPUT.partial" 2>/dev/null \
+    && mv -f "$CWS_STATUS_OUTPUT.partial" "$CWS_STATUS_OUTPUT" && return 0
+  # Fail closed. The record IS this mode's deliverable: a poll that read the
+  # store but left no record (or a truncated one) would let a monitor treat the
+  # missing artifact as "nothing new" while the job shows green. Writing to a
+  # sibling then renaming means a failed write never leaves a half-written
+  # file at PATH for the upload step to publish as if it were the answer.
+  rm -f "$CWS_STATUS_OUTPUT.partial" 2>/dev/null || true
+  printf 'Chrome Web Store status read failed: could not write the status record to %s\n' \
+    "$CWS_STATUS_OUTPUT" >&2
+  return 1
+}
+
+status_record_written=""
+on_exit() {
+  local rc=$?
+  # A failed status read still leaves a record, so a monitor never has to guess
+  # from a missing artifact. report_api_error writes its own (it has the body);
+  # this covers transport failures, non-JSON answers and the itemId check.
+  if [[ "$MODE" == "status" && -n "${CWS_STATUS_OUTPUT:-}" && -z "$status_record_written" ]]; then
+    # rc is already non-zero on this path; a write failure here is reported by
+    # the writer, and the shell's exit status stays the original failure.
+    write_status_record "" "" "${failure_message:-status read exited with code $rc}" || true
+  fi
+  rm -rf "$tmp_dir"
+}
+trap on_exit EXIT
 
 # Print the store's own explanation of a rejected request, then fail.
 #
@@ -154,6 +308,13 @@ report_api_error() {
     truncated=" (truncated to $BODY_PRINT_LIMIT of ${#body} characters)"
     body=${body:0:$BODY_PRINT_LIMIT}
   fi
+  if [[ "$MODE" == "status" && -n "${CWS_STATUS_OUTPUT:-}" ]]; then
+    # $body is already redacted and bounded above; the writer bounds it again.
+    # Marked written either way: a failed write is reported by the writer, and
+    # retrying it from the EXIT trap would only print the same error twice.
+    status_record_written=1
+    write_status_record "" "" "$label call returned HTTP $status: $body" || true
+  fi
   printf 'Chrome Web Store %s call returned HTTP %s for extension %s v%s.\n' \
     "$label" "$status" "$CWS_EXTENSION_ID" "${EXPECTED_VERSION:-<unknown>}" >&2
   if [[ -n "$body" ]]; then
@@ -168,10 +329,18 @@ report_api_error() {
     # operations the REST reference documents. This paragraph interprets the
     # body, so it stays inside this branch: with no body there is nothing for it
     # to refer to.
-    printf 'That body is the store speaking, not this script. If it reports that a\n' >&2
-    printf 'submission is already under review, the documented remedies are to wait for\n' >&2
-    printf 'that review to finish, or to withdraw it (the cancelSubmission method, or\n' >&2
-    printf 'Cancel in the Developer Dashboard) before submitting again.\n' >&2
+    # The withdraw remedy concerns a refused SUBMISSION, which a read-only poll
+    # never makes; printing it in an unattended poll's log would advertise
+    # cancelling a pending review, which forfeits the queue position (AGENTS.md).
+    # The non-read-only text stays byte-identical so existing log greps match.
+    if [[ "${CWS_READ_ONLY:-}" == 1 ]]; then
+      printf 'That body is the store speaking, not this script.\n' >&2
+    else
+      printf 'That body is the store speaking, not this script. If it reports that a\n' >&2
+      printf 'submission is already under review, the documented remedies are to wait for\n' >&2
+      printf 'that review to finish, or to withdraw it (the cancelSubmission method, or\n' >&2
+      printf 'Cancel in the Developer Dashboard) before submitting again.\n' >&2
+    fi
   else
     printf 'The store returned no response body to explain this.\n' >&2
   fi
@@ -188,6 +357,10 @@ request() {
   shift 4
   local status
   local rc=0
+  # The read-only guard sits at the one place every store call passes through,
+  # so no future caller of request() can route around it.
+  [[ "${CWS_READ_ONLY:-}" != 1 || "$method" == GET ]] \
+    || fail "CWS_READ_ONLY=1 refuses $method $label; only GET is permitted"
   # `--write-out %{http_code}` decides the outcome here instead of
   # `--fail-with-body`. That flag downloads the body and STILL exits 22, so
   # `set -e` killed the script before anything read the file: run 34178951112
@@ -201,6 +374,7 @@ request() {
     "$@" \
     -o "$output" \
     "$url") || rc=$?
+  last_http_status=$status
   [[ $rc -eq 0 ]] \
     || fail "$label call could not reach the Chrome Web Store (curl exit $rc)"
   [[ "$status" == 2[0-9][0-9] ]] || report_api_error "$label" "$status" "$output"
@@ -462,6 +636,14 @@ else
   [[ -z "$ZIP_PATH" && -z "$EXPECTED_VERSION" ]] \
     || fail "status takes no arguments (usage: chrome-web-store.sh status)"
   fetch_status "$tmp_dir/status.json"
+  status_summary=$(summarize_status "$tmp_dir/status.json")
   printf 'Chrome Web Store status for extension %s: %s\n' \
-    "$CWS_EXTENSION_ID" "$(summarize_status "$tmp_dir/status.json")"
+    "$CWS_EXTENSION_ID" "$status_summary"
+  if [[ -n "${CWS_STATUS_OUTPUT:-}" ]]; then
+    status_record_written=1
+    # The read succeeded but its record could not be kept: exit non-zero so the
+    # job is red, never green with no artifact (exit, not fail(), so the error
+    # is printed once, by the writer).
+    write_status_record "$tmp_dir/status.json" "$status_summary" "" || exit 1
+  fi
 fi

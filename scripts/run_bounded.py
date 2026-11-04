@@ -221,6 +221,25 @@ _POLL_SECONDS = 0.05
 #: between them.
 _AUTHORITY_REFRESH_SECONDS = 1.0
 
+#: Wall-time bound on the cleanup proof: the slice past any grace wait in which
+#: the kill, finally and terminal phases must re-prove authority and send.
+#: 3.0 s because that is the bound the SAME census work already gets at capture
+#: and at the steady-state required refresh (``now + 3.0`` below). It replaced a
+#: 0.25 s allowance inherited from the pre-#3274 five-sleep sweep, which was
+#: never sized for a census: a successful leader-exit sweep now runs ~10 full
+#: strict ``/proc`` scans (each refresh is two censuses, and ``signal()``
+#: refreshes again before its syscall). On a preempted CI worker 0.25 s ran out
+#: mid-scan, the SIGKILL was refused and the grandchild survived -- the
+#: 2026-10-30 incident shape (#3365, CI 41684135750).
+#:
+#: NOT a grace period: nothing waits for it, it only caps how long a proof may
+#: take before it refuses. It does not extend the census's six-attempt churn
+#: limit, and it buys no time for an unreadable or malformed row, which still
+#: refuses at once. Signal authority rests on the reservation witness (our
+#: unreaped zombie leader, re-checked immediately before every syscall), never
+#: on elapsed time, so a longer bound weakens no pin.
+_CLEANUP_PROOF_SECONDS = 3.0
+
 #: Wall-clock ceiling for one run record's filesystem work. Every other step of a
 #: refusal is deadline-bounded; a wedged home directory must not be the one
 #: unbounded operation on a path that is already refusing.
@@ -543,7 +562,7 @@ def _reap(owner, grace, stream, *, reason, send, require, deadline):
         if owner.leader_terminal(deadline):
             return
         time.sleep(min(_POLL_SECONDS, max(0, deadline - time.monotonic())))
-    send(signal.SIGKILL, reason + ":kill", deadline + 0.25)
+    send(signal.SIGKILL, reason + ":kill", deadline + _CLEANUP_PROOF_SECONDS)
 
 
 def _memory_budget(override_mb: int | None) -> tuple[memory_guard.Budget, str]:
@@ -551,7 +570,8 @@ def _memory_budget(override_mb: int | None) -> tuple[memory_guard.Budget, str]:
 
     Missing means canonical auto policy; zero is an explicit, disclosed disable.
     Invalid metadata is an error, never a spelling of unlimited. This only
-    prices the owned child PG, not the wrapper+child aggregate or later setsid.
+    prices the owned child PG plus descendants that left it by setsid (charged by
+    ancestry), not the wrapper itself or a descendant re-parented to pid 1.
     """
     raw = os.environ.get(memory_guard.RESOLVED_MEMORY_MB_ENV)
     inherited: int | None = None
@@ -679,7 +699,7 @@ def _run_cleanup_required(
     if budget.ceiling_mb > 0:
         stream.write(
             f"[run_bounded] memory budget {budget.ceiling_mb} MiB ({budget_source}); "
-            "sampled owned child group only\n"
+            "sampled owned child group and escaped descendants\n"
         )
     else:
         stream.write(bounded_contract.disabled_budget_line(budget_source, budget) + "\n")
@@ -838,7 +858,12 @@ def _run_cleanup_required(
     unanswered = 0
     try:
         require(owner.last, "acquire")
-        guard = memory_guard.Guard(pgid, budget) if budget.ceiling_mb > 0 else None
+        # descendants=True: charge descendants that called setsid() and left the
+        # group too (see memory_guard.Guard._escaped_descendants for the measured
+        # 1,852 MB-under-1,536 MB miss this closes).
+        guard = (
+            memory_guard.Guard(pgid, budget, descendants=True) if budget.ceiling_mb > 0 else None
+        )
         next_sample = started
         next_probe = started + _AUTHORITY_REFRESH_SECONDS
         unmeasured_reported = False
@@ -861,12 +886,14 @@ def _run_cleanup_required(
             # cadence rather than once per poll: see _AUTHORITY_REFRESH_SECONDS.
             if signum or timed_out or now >= next_probe:
                 probe_until = (
-                    begin_cleanup(grace + 0.25) if signum or timed_out else min(deadline, now + 3.0)
+                    begin_cleanup(grace + _CLEANUP_PROOF_SECONDS)
+                    if signum or timed_out
+                    else min(deadline, now + 3.0)
                 )
                 require(owner.refresh(deadline=probe_until), "required-refresh")
                 next_probe = now + _AUTHORITY_REFRESH_SECONDS
             if signum:
-                until = begin_cleanup(grace + 0.25)
+                until = begin_cleanup(grace + _CLEANUP_PROOF_SECONDS)
                 send(signum, "forward", until)
                 _reap(
                     owner,
@@ -875,12 +902,12 @@ def _run_cleanup_required(
                     reason=f"signal {signum} received",
                     send=send,
                     require=require,
-                    deadline=until - 0.25,
+                    deadline=until - _CLEANUP_PROOF_SECONDS,
                 )
                 rc = 128 + signum
                 break
             if timed_out:
-                until = begin_cleanup(grace + 0.25)
+                until = begin_cleanup(grace + _CLEANUP_PROOF_SECONDS)
                 _reap(
                     owner,
                     grace,
@@ -888,7 +915,7 @@ def _run_cleanup_required(
                     reason=f"timeout after {timeout:g}s",
                     send=send,
                     require=require,
-                    deadline=until - 0.25,
+                    deadline=until - _CLEANUP_PROOF_SECONDS,
                 )
                 _report(
                     stream,
@@ -930,14 +957,42 @@ def _run_cleanup_required(
             if guard is not None and now >= next_sample:
                 sample = guard.sample_sync()
                 next_sample = now + guard.tick_s
+                # Disclosed ONCE per pid (review R1): unreadable by credential is
+                # named, never counted toward fail-closed.
+                fresh = (
+                    guard.new_not_permitted(sample) if hasattr(guard, "new_not_permitted") else []
+                )
+                if fresh:
+                    _report(
+                        stream, f"[run_bounded] {memory_guard.not_permitted_line(sample, fresh)}"
+                    )
                 if guard.should_kill(sample):
+                    # getattr: guard and sample are injectable seams; a
+                    # stand-in that predates descendant accounting has neither.
+                    if getattr(sample, "unaccounted", None):
+                        _report(stream, f"[run_bounded] {memory_guard.unaccounted_line(sample)}")
                     message = guard.over_budget_message(sample, unit="MiB", escape=_memory_escape())
                     _report(stream, f"[run_bounded] {message}")
                     rc = EXIT_MEMORY
                     if _outcome is not None:
                         _outcome.termination_cause = "memory-policy"
                         _outcome.wrapper_exit_code = rc
-                    send(signal.SIGKILL, "memory", begin_cleanup(0.25))
+                    # Escaped descendants FIRST: their parent edge is the only
+                    # ownership proof, and it is gone once the group dies.
+                    stop_escaped = getattr(guard, "stop_escaped", None)
+                    stopped = stop_escaped(signal.SIGKILL) if stop_escaped else []
+                    if stopped:
+                        _report(
+                            stream,
+                            "[run_bounded] SIGKILL to escaped descendant(s) "
+                            + ", ".join(str(pid) for pid in stopped),
+                        )
+                    unsignalled = getattr(guard, "unsignalled", None)
+                    if unsignalled:
+                        _report(
+                            stream, f"[run_bounded] {memory_guard.unsignalled_line(unsignalled)}"
+                        )
+                    send(signal.SIGKILL, "memory", begin_cleanup(_CLEANUP_PROOF_SECONDS))
                     break
                 notice = guard.soft_notice(sample)
                 if notice:
@@ -968,9 +1023,9 @@ def _run_cleanup_required(
         raise
     finally:
         try:
-            # Retain the existing quarter-second final allowance, not a new
-            # grace period per pass. Never claim a requested signal means reaped.
-            until = begin_cleanup(0.25)
+            # One shared cleanup-proof bound (see _CLEANUP_PROOF_SECONDS), not a
+            # new grace period per pass. Never claim a requested signal means reaped.
+            until = begin_cleanup(_CLEANUP_PROOF_SECONDS)
             for attempt in range(5):
                 if proof_failed:
                     break  # no automatic signal retry after loss of authority

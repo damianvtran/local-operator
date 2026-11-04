@@ -71,6 +71,12 @@ __all__ = [
 _SCREEN_MAX_TOKENS = 1024
 #: Bound on consumed reply text (defence against a runaway stream).
 _SCREEN_TEXT_CAP = 4096
+#: Per EXTRA message of a batch screen (``screening.screen_batch_async``): one
+#: ``ID:`` line plus the two-line verdict, whose reason is capped at 200 chars.
+#: 96 tokens / 300 chars cover that triple with headroom; the first message
+#: keeps the full single-screen allowance, which is what bounds the thinking.
+_BATCH_TOKENS_PER_EXTRA_MESSAGE = 96
+_BATCH_TEXT_PER_EXTRA_MESSAGE = 300
 #: The screening wall deadline, per the frozen contract — NOT the ordinary
 #: session HTTP read timeout (600 s) and not max_tokens alone.
 _SCREEN_WALL_DEADLINE_S = 45.0
@@ -965,7 +971,14 @@ class ScreenModelRunner:
         job_ref: dict[str, Any] | None = None,
         ensure_fn: Any | None = None,
         lazy_state: dict[str, Any] | None = None,
+        reply_messages: int = 1,
     ) -> None:
+        # A BATCH reply carries one ID/VERDICT/REASON triple per message, so
+        # its output and text ceilings grow with the batch; a single screen
+        # (``reply_messages == 1``) keeps exactly the measured ceilings above.
+        extra = max(0, int(reply_messages) - 1)
+        self._max_tokens = _SCREEN_MAX_TOKENS + extra * _BATCH_TOKENS_PER_EXTRA_MESSAGE
+        self._text_cap = _SCREEN_TEXT_CAP + extra * _BATCH_TEXT_PER_EXTRA_MESSAGE
         self._stream_fn = stream_fn
         self._selection = selection
         self._deadline_s = deadline_s
@@ -1114,7 +1127,7 @@ class ScreenModelRunner:
             tool_choice="none",
             isolated=True,
             purpose="team_bridge_screen",
-            max_tokens=_SCREEN_MAX_TOKENS,
+            max_tokens=self._max_tokens,
             # A verdict should be a function of the bytes, not of sampling
             # noise: identical submissions were measured flipping 2 of 4
             # verdicts at the model's default temperature. Safe on every hop:
@@ -1163,7 +1176,7 @@ class ScreenModelRunner:
                 text = getattr(event, "delta", None)
                 if isinstance(text, str) and text:
                     consumed += len(text)
-                    if consumed > _SCREEN_TEXT_CAP:
+                    if consumed > self._text_cap:
                         raise _ScreeningStreamRefused("over_cap")
                     parts.append(text)
             elif etype == "reasoning_delta":
@@ -1252,6 +1265,14 @@ class ScreenChainRunner:
     @property
     def hops(self) -> list[DefaultSelection]:
         return list(self._hops)
+
+    @property
+    def bound_job(self) -> "AdmissionJob | None":
+        """The job bound for the coming dispatch (a batch's factory reads its
+        message id lazily: which message carries the call is only known once
+        the cache hits and early holds have dropped out)."""
+
+        return self._job
 
     def bind_job(self, job: AdmissionJob) -> None:
         """Bind the minted job to every hop built so far and every later one."""
@@ -1427,6 +1448,7 @@ def make_screening_runner(
     fingerprint: str | None = None,
     expected_epoch: int | None = None,
     selection: "DefaultSelection | None" = None,
+    reply_messages: int = 1,
 ) -> "ScreenModelRunner | None":
     """The production builder: canonical default + a fresh GUARDED transport.
 
@@ -1506,4 +1528,5 @@ def make_screening_runner(
         ensure_fn=_ensure,
         lazy_state=lazy,
         job_ref=job_state,
+        reply_messages=reply_messages,
     )

@@ -8,8 +8,8 @@
   "wire.errors.desktop.skill_alias_occupied": {
     "role": "API refusal text shown in the Skills tab",
     "tone": "plain, calm, tells the user the next step",
-    "width": "one sentence, shown inline under a skill editor or in a toast",
-    "note": "409; creating a skill whose name is taken by a folder or a hub-linked skill. 'name' = the skill's folder name; no placeholders"
+    "width": "two sentences; wraps inline or in a toast",
+    "note": "409 name collision. For Hub pulls, --dry-run previews adoption instead of moving/deleting the local folder; choosing another name remains valid. --dry-run is untranslated; no placeholders."
   },
   "wire.errors.desktop.skill_local_changes_unpublished": {
     "role": "API refusal text shown in the Skills tab",

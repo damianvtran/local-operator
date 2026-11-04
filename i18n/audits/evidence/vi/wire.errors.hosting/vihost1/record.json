@@ -1,0 +1,191 @@
+{
+  "schema": 1,
+  "audit_id": "i18n-vi-hosting-20261103-54cb9d37",
+  "audit_kind": "independent_translation_audit",
+  "locale": "vi",
+  "namespace": "wire.errors.hosting",
+  "key": "wire.errors.hosting.not_configured",
+  "key_count": 1,
+  "audit_date": "2026-11-03",
+  "reader": 1,
+  "state": "INDEPENDENT AUDIT — staged candidate; not committed, activated, ledgered, shipped or frame-cleared",
+  "source_state": {
+    "base_commit": "87ca846245b2",
+    "status": "NEW UNCOMMITTED namespace, absent at the base commit; not shipped or activated",
+    "verification": "Per the task and the author record; no Git command was run in this strict source-only pass."
+  },
+  "source_hashes": {
+    "en": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63"
+    },
+    "context": {
+      "path": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9"
+    },
+    "vi": {
+      "path": "/Users/damian/.local-operator/sessions/15986c0af719/scratchpad/hosting-vi/target/vi/wire.errors.hosting.json",
+      "sha256": "4a9d101e5c8ddba0c55f1428427f26174b0e10055701d896d0ce68cc1312c647"
+    },
+    "author_record": {
+      "path": "/Users/damian/.local-operator/sessions/15986c0af719/scratchpad/hosting-vi/record.json",
+      "sha256": "c0f9f5ec0629c41e60a0c108670c3f4d55ebafb0b8bf463cc2ebc44b07eb0391"
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "wire.errors.hosting.json",
+      "root": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63"
+    },
+    "context": {
+      "path": "wire.errors.hosting.context.json",
+      "root": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9"
+    },
+    "vi": {
+      "path": "target/vi/wire.errors.hosting.json",
+      "root": "/Users/damian/.local-operator/sessions/15986c0af719/scratchpad/hosting-vi",
+      "sha256": "4a9d101e5c8ddba0c55f1428427f26174b0e10055701d896d0ce68cc1312c647"
+    },
+    "policy": [
+      {
+        "path": "i18n/style-guides/vi.md",
+        "note": "Read in this conversation; no fresh hash recomputation was required for this one-key audit."
+      },
+      {
+        "path": "i18n/glossary.md",
+        "note": "Read in this conversation; no fresh hash recomputation was required for this one-key audit."
+      }
+    ]
+  },
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "15986c0af719",
+    "requested_model": "radient/auto",
+    "served_model": "UNKNOWN — the aggregate route does not expose the underlying model",
+    "actual_model_source": "Author record cites the host session-state header ('Model: radient/auto').",
+    "independent_from_translator": true
+  },
+  "code_author": {
+    "session": "94dcef624dec",
+    "independent_from_code_author": true
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "54cb9d3782eb",
+    "requested_model": "UNKNOWN — no model header was exposed in this audit turn; the last host-exposed session model in this conversation was radient/auto",
+    "served_model": "UNKNOWN",
+    "underlying_served_model": "UNKNOWN",
+    "actual_model_source": "No fresh served-model header in this audit turn; no proprietary model or fallback identity is invented or claimed.",
+    "fallback_disclosed": "none claimed",
+    "independent_from_translator_session": true,
+    "independent_from_code_author": true,
+    "read_own_report": true,
+    "read_new_author_notes": true,
+    "read_other_reader_verdict": false
+  },
+  "mechanical": {
+    "key_parity": {
+      "en": 1,
+      "vi": 1,
+      "context": 1,
+      "sets_equal": true,
+      "order_equal": true
+    },
+    "json_valid": true,
+    "value": "Chưa cấu hình nhà cung cấp nào.",
+    "english_source": "Hosting platform is not configured.",
+    "codepoints": 31,
+    "nfc": true,
+    "cf_characters": 0,
+    "manual_bidi_controls": 0,
+    "combining_marks": 0,
+    "edge_whitespace": false,
+    "double_spaces": false,
+    "terminal_period": true,
+    "initial_capital": true,
+    "icu_braces": false,
+    "placeholders": "NONE — zero arguments in source and target; no plural/select",
+    "cldr": "N/A — no plural or select construct, so no CLDR category applies",
+    "english_fallback_check": {
+      "provider": false,
+      "hosting": false,
+      "platform": false,
+      "configure": false,
+      "result": "No English remnant; the target is Vietnamese throughout."
+    },
+    "width": "No maxCells/maxChars budget in this key's context sidecar; no width or cell measurement performed."
+  },
+  "semantic_review": {
+    "condition_meaning": "PASS — the target names the owned condition: no provider has been configured. It is not an opaque external error and does not restate a remedy.",
+    "no_added_remedy_or_detail": "PASS — no Hãy…, connect, try-again, or extra explanation; the surrounding refusal carries the remedy.",
+    "complete_sentence_after_colon": "PASS — capitalised `Chưa`, one line, terminal period, complete statement.",
+    "negative_polarity": "PASS — `nào` completes the negative (`no provider at all`), matching the source context and the existing corpus sentence.",
+    "native_idiom": "PASS — `Chưa cấu hình nhà cung cấp nào.` is natural Vietnamese diagnostic copy and matches the product's no-provider precedent."
+  },
+  "terminology": {
+    "call": "hosting platform → nhà cung cấp (provider)",
+    "corpus_evidence": [
+      "wire.settings.hosting.label = `Nhà cung cấp mặc định`",
+      "wire.settings.hosting.help = `Nhà cung cấp cho các cuộc trò chuyện mới. /model saved sẽ áp dụng vào đây.`",
+      "wire.errors.desktop.aida_no_provider = `Chưa cấu hình nhà cung cấp nào, nên {name} không có gì để chào bạn. Hãy kết nối một nhà cung cấp rồi thử lại.`",
+      "wire.errors.media.unknown_provider = `Nhà cung cấp {provider} không xác định.`"
+    ],
+    "assessment": "The vi provider term is the established hosting vocabulary and names the condition the preflight actually resolved (no provider). A literal `nền tảng lưu trữ` would misname it as storage hosting; the provider rendering is correct for this locale."
+  },
+  "consumer_contract": {
+    "display_only": true,
+    "legacy_exception": "session_factory.py:816 raises HostingNotConfiguredError(\"Hosting platform is not configured.\") — English by contract.",
+    "supporting_comment": "sdk.py documents the cause string as English and the catalogue entry as the display copy.",
+    "edits": "None — no API error, caller, repo, target, ledger, generated file or baseline was edited."
+  },
+  "findings": [],
+  "advisories": [
+    "The provider-vs-platform choice is a deliberate vi locale call supported by the hosting corpus, not a terminology defect.",
+    "`Chưa` carries the natural not-yet-configured nuance and matches the existing no-provider sentence; it adds no remedy or promise.",
+    "There is no maxCells budget for this key; no width claim is made.",
+    "Native/render/runtime proof remains a separate future consumer/renderer hold; this audit does not claim it."
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "minor_count": 0,
+    "nit_count": 0,
+    "finding_ids": [],
+    "counts": {
+      "BLOCKER": 0,
+      "MAJOR": 0,
+      "MINOR": 0,
+      "NIT": 0
+    },
+    "rationale": "The single key preserves the condition meaning, adds no remedy, reads as a complete capitalised sentence with its terminal period, uses the established vi provider term, has exact key parity and no ICU arguments, and is NFC with no Cf/bidi controls or English fallback."
+  },
+  "native_holds": {
+    "pseudo_localization": "NOT RUN",
+    "rtl": "N/A — vi is LTR and the target has no bidi controls",
+    "renderer": "NOT RUN",
+    "native_fit": "NOT RUN — separate future consumer/renderer proof, not frame clearance",
+    "width": "NOT RUN — no budget in the sidecar"
+  },
+  "second_reader": "PENDING — reader 1 only; no second independent reader or high-visibility sign-off is claimed here",
+  "artifacts": [
+    {
+      "path": "report.md",
+      "sha256": "59622da452b133ddc38b69cb6f2217d98c7ad5f29fa42502b90492d1dabd0e03",
+      "role": "human-readable audit report"
+    },
+    {
+      "path": "record.json",
+      "role": "this immutable record"
+    }
+  ],
+  "limitations": [
+    "Strict source-only: no process/bash/subprocess, test, formatter, project import, native app, install, CI or Git.",
+    "The source namespace is uncommitted and absent at base 87ca846245b2; no shipped, activated or frame-cleared status is claimed.",
+    "No native, renderer, pseudo-localization, RTL or width evidence; those remain separate holds.",
+    "No second independent reader or high-visibility sign-off claimed; this is reader 1.",
+    "The policy files were read in this conversation but their hashes were not recomputed in this one-key pass; the audited source/context/target hashes were recomputed independently."
+  ],
+  "audit_notes_not_execution_log": "The semantic, terminology and fit judgments are audit notes, not command output. Hash, parity, NFC/Cf and character-class figures were computed with Python stdlib json/hashlib/unicodedata; no formatter, runtime, test or native run was performed."
+}

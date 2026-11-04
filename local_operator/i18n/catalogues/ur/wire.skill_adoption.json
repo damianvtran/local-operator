@@ -1,0 +1,19 @@
+{
+  "wire.skill_adoption.preview_required": "اس مقامی مہارت کو لنک کرنے سے پہلے merge کا پیش منظر ضروری ہے۔ `lop skills pull` اسی مہارت کی ID، اسی دائرے اور انہی اختیارات کے ساتھ چلائیں اور `--dry-run` شامل کریں۔ دونوں فرق دیکھیں، پھر تصدیق کے لیے انہی اختیارات کے ساتھ `--adopt-receipt <receipt> --yes` استعمال کریں۔",
+  "wire.skill_adoption.preview_changed": "اس پیش منظر کے بعد مقامی مہارت، Hub کا ورژن یا لنک کی پالیسی بدل گئی ہے۔ نیا پیش منظر بنائیں اور اسے لاگو کرنے سے پہلے جائزہ لیں۔",
+  "wire.skill_adoption.needs_choice": "یکجا ورژن محفوظ طریقے سے نہیں بنایا جا سکا۔ واضح انتخاب کا پیش منظر دیکھیں: مقامی ورژن رکھ کر لنک کریں، یا بیک اپ کے ساتھ Hub کا ورژن لیں۔",
+  "wire.skill_adoption.preview_title": "لنک کرنے سے پہلے مقامی اور Hub کی ہدایات کا جائزہ لیں",
+  "wire.skill_adoption.confirm": "مہارت کو Hub سے منسلک کرنے کا یہ جائزہ شدہ منصوبہ لاگو کریں؟ [y/N] ",
+  "wire.skill_adoption.cancelled": "منسوخ کر دیا گیا۔ مقامی مہارت نہیں بدلی۔",
+  "wire.skill_adoption.dry_run_help": "مقامی مہارت بدلے بغیر تنصیب یا Hub سے منسلک کرنے کا پیش منظر دیکھیں",
+  "wire.skill_adoption.receipt_help": "Hub سے منسلک کرنے کا پہلے سے جائزہ شدہ پیش منظر لاگو کریں",
+  "wire.skill_adoption.strategy_help": "پیش منظر کے لیے merge، keep-local یا take-hub چنیں",
+  "wire.skill_adoption.no_llm_help": "مہارت کا متن merge ماڈل کو نہ بھیجیں",
+  "wire.skill_adoption.backup_label": "اصل فولڈر کا اسنیپ شاٹ: {path} (SHA-256 {hash})",
+  "wire.skill_adoption.receipt_label": "Hub سے منسلک کرنے کے پیش منظر کی رسید: {receipt}",
+  "wire.skill_adoption.no_apply": "صرف پیش منظر۔ کچھ بھی نصب یا لنک نہیں کیا گیا۔",
+  "wire.skill_adoption.inherited_assets": "مقامی وسائل محفوظ رہتے ہیں اور merge ماڈل کو نہیں بھیجے جاتے۔",
+  "wire.skill_adoption.yes_help": "تنصیب یا Hub سے منسلک کرنے کے جائزہ شدہ پیش منظر کی تصدیق کریں",
+  "wire.skill_adoption.alias_occupied": "ایک مقامی مہارت پہلے سے یہ نام استعمال کر رہی ہے۔ Hub کی مہارت کا pull --dry-run کے ساتھ کریں تاکہ منسلک کرنے کے merge کا جائزہ لے سکیں، یا کوئی دوسرا نام چنیں۔",
+  "wire.skill_adoption.projection_unsupported": "اس پلیٹ فارم پر موجودہ مقامی مہارت کو جائزے کے بعد Hub سے منسلک کرنے کی سہولت ابھی دستیاب نہیں ہے۔ مقامی مہارت اور اس کا لنک نہیں بدلے گئے۔ اس عمل کے لیے معاون پلیٹ فارم استعمال کریں؛ Hub کی مہارتوں کی عام تنصیب اب بھی دستیاب ہے۔"
+}

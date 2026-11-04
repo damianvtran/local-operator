@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "locale": "es",
+  "namespace": "wire.errors.hosting",
+  "inputs": [
+    {
+      "canonical": "en/wire.errors.hosting.json",
+      "origin": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.json",
+      "sha256": "458d8f8be304428ccb6a328ce22e5a86515e9f44f869f0138a5cc6dfde964b63",
+      "role": "English source"
+    },
+    {
+      "canonical": "en/wire.errors.hosting.context.json",
+      "origin": "/Users/damian/.local-operator/sessions/3ef6295a5545/scratchpad/hosting-source-v1/wire.errors.hosting.context.json",
+      "sha256": "ed0ae50fa465a010a2907bc680771dae80bc716d3a186b0af37e31e0d7063cf9",
+      "role": "English context sidecar"
+    },
+    {
+      "canonical": "target/wire.errors.hosting.json",
+      "origin": "/Users/damian/.local-operator/sessions/804764f54d82/scratchpad/hosting-es/wire.errors.hosting.json",
+      "sha256": "8de6f07aa22bb654bc0e45390bc803ba28f37698e6e08ffe95399d895ff3c5cf",
+      "role": "audited target catalogue"
+    }
+  ]
+}

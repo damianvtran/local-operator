@@ -283,7 +283,11 @@ async def test_an_unsanctioned_broadcast_sigterm_is_refused_and_every_turn_finis
             # THE REFUSAL, per victim: the receipt records the arrival in
             # ``refusals`` — never in ``signals`` — and the run keeps serving.
             for session_id in session_ids:
-                refusals = await _wait_refusals(rig.directories[session_id])
+                refusals = await _wait_refusals(
+                    rig.directories[session_id],
+                    child=rig.children[session_id],
+                    config=config,
+                )
                 assert refusals["refusals"][0]["disposition"] == "refused", refusals["refusals"]
                 assert (
                     registry.read_signal_receipt(rig.directories[session_id]) is None
@@ -1105,7 +1109,92 @@ def _receipt(directory: Path) -> dict[str, Any] | None:
     return registry.read_signal_receipt(directory)
 
 
-async def _wait_receipt(directory: Path, timeout: float = 90.0) -> dict[str, Any]:
+def _receipt_timeout_evidence(
+    what: str,
+    directory: Path,
+    child: subprocess.Popen[bytes] | None,
+    config: Path | None,
+) -> str:
+    """Name WHICH of three indistinguishable causes a receipt/refusal timeout was.
+
+    WHY: ``test_an_idle_runtime_leaves_a_receipt_for_an_unsanctioned_sigterm``
+    failed once on hosted CI only (tui-e2e macos-latest shard 0, run 41713767368)
+    with a bare "no refusal record appeared"; it passed 20/20 on a dev machine
+    (10 serial, 10 under CPU hogs), so the cause is UNKNOWN. The refusal is
+    written on the runtime's loop thread by ``signal_receipt._write``, which never
+    raises (it logs "refusal receipt logged only" when the dir is missing, or warns
+    on a write error), so a stalled loop, a silent write failure and a child that
+    exited without writing all produced the same message.
+
+    This runs ONLY on the timeout path, so the passing path is unchanged, and it
+    never raises (every probe is bounded and caught): evidence must not mask the
+    timeout. It is diagnostics, not a fix. The child's stdio is DEVNULL by design;
+    the runtime's own ``logs/runtime.log`` (shared by the config's runtimes) is the
+    log that exists, so its tail is reported instead.
+    """
+
+    def listing(path: Path) -> str:
+        try:
+            names = sorted(os.listdir(path))
+        except OSError as error:
+            return f"  {path}: unreadable: {error!r}"
+        rows = [f"  {path} ({len(names)} entries)"]
+        for name in names[:30]:
+            try:
+                st = os.lstat(path / name)
+                rows.append(f"    {name}  size={st.st_size}  mtime={st.st_mtime:.3f}")
+            except OSError as error:
+                rows.append(f"    {name}  lstat failed: {error!r}")
+        if len(names) > 30:
+            rows.append(f"    ... {len(names) - 30} more")
+        return "\n".join(rows)
+
+    sections = [f"{what} timed out; diagnostics follow (cause unknown, not a fix)"]
+    try:
+        if child is None:
+            sections.append("child: not supplied")
+        else:
+            code = child.poll()
+            if code is None:
+                state = "alive (stayed up and wrote no record)"
+            elif code < 0:
+                # A negative code is death BY that signal: SIGTERM here means the
+                # default action ran, i.e. no handler had taken the signal.
+                try:
+                    state = f"killed by signal {signal.Signals(-code).name} (returncode={code})"
+                except ValueError:
+                    state = f"killed by signal {-code} (returncode={code})"
+            else:
+                state = f"exited returncode={code} (left on its own without a record)"
+            sections.append(f"child pid={child.pid}: {state}")
+    except Exception as error:  # noqa: BLE001 - diagnostics must never mask the timeout
+        sections.append(f"child state unavailable: {error!r}")
+    try:
+        sections.append("=== directory listings ===\n" + listing(directory))
+        sections.append(listing(directory.parent))
+        for name in sorted(os.listdir(directory))[:30]:
+            if "signal" in name or "refusal" in name or "receipt" in name:
+                body = (directory / name).read_text(encoding="utf-8", errors="replace")
+                sections.append(f"=== {name} (first 4000 chars) ===\n{body[:4000]}")
+    except Exception as error:  # noqa: BLE001
+        sections.append(f"signal files unavailable: {error!r}")
+    if config is None:
+        sections.append("runtime log: config not supplied")
+    else:
+        try:
+            tail = "\n".join(_runtime_log(config).splitlines()[-40:])
+            sections.append("=== runtime.log tail (40 lines, 8000 chars) ===\n" + tail[-8000:])
+        except Exception as error:  # noqa: BLE001
+            sections.append(f"runtime.log unavailable: {error!r}")
+    return "\n".join(sections)
+
+
+async def _wait_receipt(
+    directory: Path,
+    timeout: float = 90.0,
+    child: subprocess.Popen[bytes] | None = None,
+    config: Path | None = None,
+) -> dict[str, Any]:
     """Wait for the receipt a real runtime writes at signal arrival.
 
     GENEROUS BY CONSTRUCTION (QA round 1, Q2): the arrival is one small staged
@@ -1120,10 +1209,18 @@ async def _wait_receipt(directory: Path, timeout: float = 90.0) -> dict[str, Any
         if found is not None:
             return found
         await asyncio.sleep(0.05)
-    raise AssertionError(f"no signal receipt appeared in {directory}")
+    raise AssertionError(
+        f"no signal receipt appeared in {directory}\n"
+        + _receipt_timeout_evidence("signal receipt wait", directory, child, config)
+    )
 
 
-async def _wait_refusals(directory: Path, timeout: float = 30.0) -> dict[str, Any]:
+async def _wait_refusals(
+    directory: Path,
+    timeout: float = 30.0,
+    child: subprocess.Popen[bytes] | None = None,
+    config: Path | None = None,
+) -> dict[str, Any]:
     """Wait for the refusal record a real runtime writes at an unsanctioned arrival.
 
     Its own file (``registry.SIGNAL_REFUSALS_NAME``), deliberately not the receipt:
@@ -1137,7 +1234,10 @@ async def _wait_refusals(directory: Path, timeout: float = 30.0) -> dict[str, An
         if found is not None:
             return found
         await asyncio.sleep(0.05)
-    raise AssertionError(f"no refusal record appeared in {directory}")
+    raise AssertionError(
+        f"no refusal record appeared in {directory}\n"
+        + _receipt_timeout_evidence("refusal wait", directory, child, config)
+    )
 
 
 @pytest.mark.asyncio
@@ -1151,7 +1251,9 @@ async def test_an_idle_runtime_leaves_a_receipt_for_an_unsanctioned_sigterm(
             directory = rig.seed_and_spawn("rcptidle01")
             record = await _wait_record(config, "rcptidle01")
             os.kill(rig.children["rcptidle01"].pid, signal.SIGTERM)
-            refusal_doc = await _wait_refusals(directory)
+            refusal_doc = await _wait_refusals(
+                directory, child=rig.children["rcptidle01"], config=config
+            )
             refusal = refusal_doc["refusals"][0]
             assert refusal["disposition"] == "refused", refusal
             assert (refusal["name"], refusal["number"]) == ("SIGTERM", 15)
@@ -1209,7 +1311,9 @@ async def test_a_runtime_signalled_mid_turn_writes_its_receipt_before_the_drain_
             await _wait_record(config, "rcptbusy01", busy=True)
             _stage_sanction(config, "rcptbusy01", directory)
             os.kill(rig.children["rcptbusy01"].pid, signal.SIGTERM)
-            receipt = await _wait_receipt(directory)
+            receipt = await _wait_receipt(
+                directory, child=rig.children["rcptbusy01"], config=config
+            )
             entry = receipt["signals"][0]
             assert entry["action"] == "drain" and entry["in_flight"] is True
             assert entry["sanction"] == "marker"
@@ -1302,7 +1406,9 @@ async def test_sigkill_still_ends_a_runtime_that_refused_a_sigterm(
             await _wait_record(config, "hardkill01")
 
             os.kill(rig.children["hardkill01"].pid, signal.SIGTERM)
-            refusals = await _wait_refusals(directory)
+            refusals = await _wait_refusals(
+                directory, child=rig.children["hardkill01"], config=config
+            )
             assert refusals["refusals"][0]["disposition"] == "refused"
             assert rig.children["hardkill01"].poll() is None, "the refusal did not hold"
 

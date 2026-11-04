@@ -203,6 +203,12 @@ class SkillPull(Input):
     confirm_publisher_id: str | None = Field(default=None, min_length=1, max_length=256)
     confirm_bundle_hash: str | None = Field(default=None, min_length=64, max_length=64)
     confirm: StrictBool = False
+    #: Adoption consent is bound to reviewed local bytes AND the remote revision.
+    #: Old renderers cannot accidentally approve an authored-folder replacement:
+    #: their ordinary confirm flag carries no adoption receipt.
+    adoption_receipt: str | None = Field(default=None, min_length=16, max_length=128)
+    adoption_strategy: Literal["merge", "keep-local", "take-hub"] = "merge"
+    allow_llm: StrictBool = True
 
 
 class SkillSubscribe(Input):
@@ -378,7 +384,7 @@ def _raise_skill_refusal(error: Any) -> NoReturn:
         raise _refusal(401, ORG_LOGIN_REMEDY) from None
     if code == "skill-not-found":
         raise _refusal(404, str(error), code=code) from None
-    if code == "policy-revision-changed":
+    if code in ("policy-revision-changed", "adoption-preview-changed", "adoption-needs-choice"):
         raise _refusal(409, str(error), code=code) from None
     if code in _BUNDLE_STATE_REFUSALS:
         # The request is well-formed; the CURRENT STATE refuses it (local edits,
@@ -989,6 +995,9 @@ async def skill_pull(
                 confirm=bool(body.confirm),
                 dry_run=bool(body.dry_run),
                 form=body.form,
+                adoption_receipt=body.adoption_receipt,
+                adoption_strategy=body.adoption_strategy,
+                allow_llm=body.allow_llm,
             )
         except LinkError as error:
             _raise_skill_refusal(error)

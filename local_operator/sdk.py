@@ -584,18 +584,52 @@ async def _build_session(
     config_manager = ConfigManager(config_dir=roots.config_path)
     agent_registry = AgentRegistry(config_dir=roots.config_path)
 
-    def startup_refusal_text(message: "Msg") -> str:
+    def startup_refusal_locale() -> str:
         # The SDK still raises a plain, one-argument SessionSpecError: the
         # envelope is an internal rendering boundary, not a new exception API.
         # Only refusals pay for locale imports/reads, AFTER public root isolation.
         # Reuse this already-scoped manager; None would make the resolver build
         # another manager (and potentially repair config/load credentials).
-        from local_operator.i18n.messages import render
         from local_operator.i18n.resolve import DEFAULT_LANGUAGE, resolve_language
 
         language = config_manager.get_config().values.get("language")
-        locale = resolve_language(language if isinstance(language, str) else DEFAULT_LANGUAGE)
-        return render(message.code, message.params, locale=locale)
+        return resolve_language(language if isinstance(language, str) else DEFAULT_LANGUAGE)
+
+    def startup_refusal_text(message: "Msg") -> str:
+        from local_operator.i18n.messages import render
+
+        return render(message.code, message.params, locale=startup_refusal_locale())
+
+    def startup_cause_text(error: BaseException) -> str:
+        # WHY this exists: a refusal frame is catalogued and renders in the
+        # resolved locale, but its ``{error}`` slot carries a CAUSE, and the one
+        # owned cause on this path is an exception whose ``str``/args are English
+        # by contract (``HostingNotConfiguredError``, unchanged on purpose).
+        # Splicing ``str(error)`` therefore left the single sentence WE author
+        # English inside an otherwise translated refusal — visible the moment a
+        # non-English locale is selected.
+        #
+        # Ownership is tested by exact type AND the catalogued English source:
+        # a subclass names a DIFFERENT condition with different text, and a
+        # foreign exception's text is not ours to translate, so both must keep
+        # passing through untouched. Comparing against the catalogue rather
+        # than a copied literal keeps the test from drifting away from the
+        # exception's own sentence (a test pins the two together).
+        from local_operator.i18n import catalogues
+        from local_operator.i18n.keys import wire_errors_hosting
+        from local_operator.i18n.messages import render
+
+        message = wire_errors_hosting.not_configured()
+        if type(error) is HostingNotConfiguredError:
+            try:
+                source = catalogues.load_catalogue("en", "wire.errors.hosting").get(message.code)
+            except (catalogues.CatalogueNotFound, catalogues.CatalogueInvalid):
+                # A degraded catalogue must not turn a refusal into a different
+                # failure: an unreadable namespace simply means "not ours here".
+                source = None
+            if source is not None and str(error) == source:
+                return render(message.code, message.params, locale=startup_refusal_locale())
+        return str(error)
 
     # ``Any`` on purpose: ``create_session``'s declared return is
     # ``SessionProtocol``, and the attachment calls below (``attach_team``,
@@ -626,7 +660,7 @@ async def _build_session(
         raise SessionSpecError(
             startup_refusal_text(
                 wire_errors_sdk_startup.attach_hosting_unconfigured(
-                    resume=repr(spec.resume), error=str(error)
+                    resume=repr(spec.resume), error=startup_cause_text(error)
                 )
             )
         ) from error
