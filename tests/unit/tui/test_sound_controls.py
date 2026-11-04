@@ -154,6 +154,15 @@ async def _settle(pilot: Any, seconds: float) -> None:
     await pilot.pause()
 
 
+def _select_row(view: Any, key: str) -> None:
+    for index, row in enumerate(view._rows):
+        if row.kind == "setting" and row.setting is not None and row.setting.key == key:
+            view._selected = index
+            view._repaint()
+            return
+    raise AssertionError(f"no row for {key}")
+
+
 def _open_sound_list(app: Any) -> Any:
     from local_operator.tui.widgets.settings_view import SettingsView
 
@@ -293,3 +302,72 @@ async def test_sound_add_rename_remove_round_trip(tmp_path: Path) -> None:
         app._run_slash_command("/sound frobnicate")
         await pilot.pause()
         assert any(text.startswith("Use /sound list") for text in _notices(app))
+
+
+# -- U4: an open /settings page follows a change from another process ----------
+
+
+def _external_write(tmp_path: Path, volume: int) -> None:
+    """What `lop config edit` does from ANOTHER process: a fresh manager write."""
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    settings_io.write_setting(
+        ConfigManager(tmp_path), settings_io.BY_KEY["notifications.sound.volume"], volume
+    )
+
+
+def _row_value(view: Any, key: str) -> Any:
+    return (
+        view._manager.get_config()
+        .values.get("notifications", {})
+        .get("sound", {})
+        .get(key.rsplit(".", 1)[1])
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_open_page_reloads_on_an_external_change(tmp_path: Path) -> None:
+    from local_operator.config_watch import ConfigChange
+
+    app = _app()
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        view = _open_sound_list(app)
+        await pilot.pause()
+        _external_write(tmp_path, 40)
+        app._on_config_change(
+            ConfigChange(values={}, changed_keys=("notifications.sound.volume",), source="disk")
+        )
+        await pilot.pause()
+        assert _row_value(view, "notifications.sound.volume") == 40
+        assert "40" in view._list_text.plain
+
+
+@pytest.mark.asyncio
+async def test_a_row_in_edit_is_not_clobbered_and_catches_up_after(tmp_path: Path) -> None:
+    from local_operator.config_watch import ConfigChange
+
+    app = _app()
+    async with app.run_test(size=(120, 32)) as pilot:
+        await pilot.pause()
+        view = _open_sound_list(app)
+        await pilot.pause()
+        _select_row(view, "notifications.sound.volume")
+        view.action_activate()  # opens the inline editor seeded with 70
+        await pilot.pause()
+        assert view._editing == "notifications.sound.volume"
+        buffer = view._buffer
+        _external_write(tmp_path, 40)
+        app._on_config_change(
+            ConfigChange(values={}, changed_keys=("notifications.sound.volume",), source="disk")
+        )
+        await pilot.pause()
+        # The editor and its buffer are untouched; the page still holds 70.
+        assert view._editing == "notifications.sound.volume" and view._buffer == buffer
+        assert _row_value(view, "notifications.sound.volume") in (None, 70)
+        await pilot.press("escape")
+        await pilot.pause()
+        # The cancel ends the gesture; the held reload lands on the next paint.
+        assert view._editing is None
+        assert _row_value(view, "notifications.sound.volume") == 40

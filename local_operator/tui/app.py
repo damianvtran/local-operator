@@ -42844,6 +42844,16 @@ class OperatorApp(App[None]):
         changed = sorted(getattr(change, "changed_keys", ()))
         if not changed:
             return
+        if getattr(change, "source", "disk") != "local" and self._settings_view is not None:
+            # An OPEN /settings page holds its own snapshot (TUI audit U4): a
+            # write from another process must reach it, or the page keeps
+            # painting a value the file no longer has. A LOCAL write came from
+            # this page (or a /sound verb, whose write also re-read the file)
+            # and is already painted. The page defers itself mid-edit.
+            try:
+                self._settings_view.reload_from_disk()
+            except Exception:  # noqa: BLE001 — a stale page must not break the listener
+                logger.debug("settings page reload failed", exc_info=True)
         if "aida.name" in changed:
             # THE SETTING-PATH LAG (review round 1, R1-M3): a rename written
             # outside `/aida rename` — the /settings page, `lop config edit`,

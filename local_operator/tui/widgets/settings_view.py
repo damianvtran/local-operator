@@ -1003,6 +1003,10 @@ class SettingsView(Vertical):
         #: time: two open dropdowns in a vertical list make the second one's
         #: choices read as the first one's.
         self._expanded: str | None = None
+        #: A config change from another process arrived while a gesture held
+        #: snapshot-seeded state (`reload_from_disk`); the next repaint after
+        #: the gesture ends adopts it.
+        self._reload_pending = False
         #: The row being text-edited, its buffer, and the last rejection. The
         #: error is held on the WIDGET rather than flashed as a notice because
         #: it has to survive the repaint that follows the rejected Enter — an
@@ -2567,6 +2571,48 @@ class SettingsView(Vertical):
         except Exception:  # noqa: BLE001 — no manager on the bare test hosts
             return {}
 
+    def reload_from_disk(self) -> bool:
+        """Re-read ``config.yml`` and repaint, unless the user is mid-gesture.
+
+        WHY (TUI audit U4). The page holds its own ``ConfigManager``, read once
+        at open. A change from anywhere else (``lop config edit``, the desktop
+        Settings page, a phone, another TUI) reached the app's config listener
+        and the transcript notice, but the OPEN page kept painting the old
+        value — so a user looking at the Sound row read a selection that was no
+        longer true, and an Enter there would write over the newer value.
+
+        WHEN IT DOES NOT. A row in edit (the buffer is the user's typing), an
+        expanded choice list (the cursor is on a choice and a rebuild could
+        move it), a hotkey capture, a chain editor and a pending delete
+        confirmation all hold state seeded from the old snapshot. Reloading
+        under them would either clobber what the user is doing or re-anchor the
+        cursor beneath their finger. The reload is then HELD (``False``) and
+        taken by the first repaint after the gesture ends (``_repaint``), so a
+        cancelled edit lands on the newer value rather than the stale one.
+
+        ``True`` when the page reloaded now.
+        """
+        if self._mid_gesture():
+            self._reload_pending = True
+            return False
+        self._reload_pending = False
+        try:
+            self._manager.reload()
+        except Exception:  # noqa: BLE001 — a torn read keeps the last good paint
+            return False
+        self._repaint()
+        return True
+
+    def _mid_gesture(self) -> bool:
+        """Whether page state seeded from the current snapshot is in use."""
+        return (
+            self._editing is not None
+            or self._expanded is not None
+            or self._capture is not None
+            or self._chain is not None
+            or self._confirm_delete is not None
+        )
+
     # -- text editing -------------------------------------------------------
     def _begin_edit(self, row: "_Row") -> None:
         """Open the inline editor on ``row``, seeded with its STORED value.
@@ -3679,6 +3725,14 @@ class SettingsView(Vertical):
 
     # -- painting -----------------------------------------------------------
     def _repaint(self) -> None:
+        if self._reload_pending and not self._mid_gesture():
+            # A config change arrived mid-gesture (`reload_from_disk`); the
+            # gesture has ended, so adopt the newer file before painting.
+            self._reload_pending = False
+            try:
+                self._manager.reload()
+            except Exception:  # noqa: BLE001 — keep the last good snapshot
+                pass
         # Height ladder BEFORE the paints: it toggles `display` / padding
         # on the chrome widgets, which is what the layout reads, and the
         # paints (detail text, pane budget) have to see the same decision.
