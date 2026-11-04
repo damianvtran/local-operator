@@ -1,0 +1,23 @@
+{
+  "audit_id": "ruh-r2a1",
+  "locale": "ru",
+  "namespace": "wire.errors.hosting",
+  "audit_date": "2026-11-03",
+  "record": {
+    "path": "/Users/damian/.local-operator/sessions/ac46f9462716/scratchpad/i18n/audits/ru/wire.errors.hosting/ruh-r2a1/record.json",
+    "sha256": "f0756cf8aa9869619485d0995df51c5f6fc46d0dd3f183f7b723c620ddc2f614"
+  },
+  "report": {
+    "path": "/Users/damian/.local-operator/sessions/ac46f9462716/scratchpad/i18n/audits/ru/wire.errors.hosting/ruh-r2a1/report.md",
+    "sha256": "8fad20ce9bd75e2fc7245647e41189cc44075659fd8617c730f1f038c82b717b"
+  },
+  "verdict": "passed",
+  "unresolved_blocker_major_count": 0,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "ac46f9462716",
+    "requested_model": "radient/auto",
+    "served_model": "UNKNOWN"
+  },
+  "status": "scratch-only, uncommitted; no ledger row written (source-only override)"
+}

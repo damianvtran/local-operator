@@ -1,0 +1,53 @@
+# i18n-auditor — execution log, session 9f874dd64c37, 2026-11-03
+# Audit: ru / wire.errors.hosting / key wire.errors.hosting.not_configured / pass r2b (fresh reviewer #2)
+# This is a tool-call log of THIS session. No repo validator, generator, test or mutation was run.
+# Order preserved as executed. Each line: tool -> target => result.
+
+00 deviation: at the very start this session made two process calls before adopting the source-only
+   rule — a trivial `echo ok` probe (no content) and one `ls` listing the worktree root and the
+   hosting-ru-r2 directory (directory names only, no file contents, no mutation). Nothing in the
+   audit depends on them; the listings were redone with glob. Disclosed rather than omitted.
+00b deviation: two eval calls during composition were aborted placeholders that computed nothing
+   (printed "skip" / "placeholder"); the real verification is call 20. No output from them is used.
+
+01 glob   /Users/local-operator/.worktrees/.../i18n/**/*.md            => style guides + evidence tree located; ru guide at i18n/style-guides/ru.md
+02 read   repo worktree listing                                        => CORE worktree present; ru catalogues at local_operator/i18n/catalogues
+03 read   i18n/style-guides/ru.md                                      => formality, typography, plurals, width rules, wave-2 recorded calls
+04 read   hosting-source-v1/wire.errors.hosting.json                   => 1 key: "Hosting platform is not configured."
+05 read   hosting-source-v1/wire.errors.hosting.context.json           => role/tone/note only; splice-after-colon contract; no maxCells
+06 read   hosting-ru-r2/target/ru/wire.errors.hosting.json             => "Платформа размещения не настроена."
+07 glob   scratchpad hosting-ru*/**/*                                   => R1 and R2 trees both present; R2 target under target/ru/
+08 read   hosting-ru-r2/record.json (156 lines)                        => author record: delta one word, RU-HOST-1/2 dispositions, corpus examples
+09 glob   hosting-ru-r2/record.json range 50-156                        => corpus example list, mechanical_checks_executed, scope, glossary proposals
+10 grep   worktree ru catalogues  /хостинг|размещени/                    => 6 matching lines, all "размещени", none "хостинг"
+11 grep   main-checkout ru catalogues /хостинг|размещени/                => 0 matches (the tree R1 searched)
+12 read   hosting-ru/target/ru/wire.errors.hosting.json                 => R1 value "Платформа хостинга не настроена." (preserved)
+13 grep   i18n/glossary.md /hosting|хостинг|размещени/                   => 0 matches — no glossary entry for the term
+14 grep   worktree local_operator/*.py /HostingNotConfiguredError|Hosting platform is not configured/ => exceptions, sdk.py frame, cli.py handlers, launch.py actionable text
+15 grep   worktree ru catalogues /хостинг/                              => 0 matches (no transliterated loan anywhere in ru catalogues)
+16 glob   main-checkout catalogues ru/*.json                            => 40 files; no cli.global_help / cli.exec_worker_help / cli.credential_help / wire.errors.sdk_startup / wire.errors.hosting
+17 read   worktree local_operator/sdk.py 596-640                        => startup_cause_text(): exact type + en-catalogue text match, then render in locale
+18 grep   worktree session_factory.py class + message                   => class HostingNotConfiguredError(ValueError); raises "Hosting platform is not configured." at line 816
+19 glob   worktree **/wire.errors.hosting*                              => only en catalogue + context sidecar exist in repo; no ru copy
+20 eval   stdlib hashlib/json/unicodedata over 6 files                  => all four declared hashes match; repo en+ctx byte-identical to frozen source;
+                                                                          key parity 1:1; NFC true; 0 Cf/Cc/bidi; no ICU braces; len 34; capital + "." ;
+                                                                          old->new differs by exactly one word ("хостинга"->"размещения")
+21 read   worktree en/wire.errors.sdk_startup.json                      => frame ends "…cannot start one: {error} Configure hosting for this root…"
+22 grep   worktree local_operator /wire_errors_hosting/                 => consumer: sdk.py:619-631; keys module registration only
+23 grep   worktree en catalogues /hosting platform|Configure hosting/   => 7 lines; every ru counterpart uses "платформа размещения"/"размещение"
+24 grep   worktree ru catalogues /платформ[аыу]? размещения|размещени/  => 6 matching lines (same six as #10)
+25 grep   worktree ru/wire.settings.json /Провайдер|hosting/            => label "Провайдер по умолчанию"; provider noun kept separate
+26 grep   worktree ru catalogues /развёрт|разверт|деплой/               => 0 matches — no deployment-term collision for "размещение"
+27 glob   main-checkout **/wire.errors.hosting*                         => 0 paths — namespace absent from main checkout
+28 eval   context sidecar fields                                        => role/tone/note only; no maxCells/maxChars
+29 glob   worktree scripts/*i18n*                                       => scripts/i18n/
+30 glob   worktree scripts/i18n/*                                      => check.py, generate.py, emit.mjs, login.py, shard_ledger.py, deferred_watch.py
+31 eval   stdlib hashlib of author record + R1 record                   => author 1b9876bb…4684 (9632 B); R1 2734a647…dfcd (5943 B), both present
+32 write  this log                                                      => audit.log created
+33 write  report.md                                                     => 8147 B
+34 write  record.json + receipt.json (eval, stdlib only)                 => scratch bundle complete, hashes embedded after write
+
+# Findings: none (0 blocker / 0 major / 0 minor / 0 nit). Verdict: passed.
+# Explicitly NOT executed: scripts/i18n/check.py, generate.py, emit.mjs, shard_ledger.py, pytest, any
+# render/native/pseudo-localisation run, any repo file write, any ledger write. Reason: source-only
+# override for this pass (read/grep/glob/write/eval with pure stdlib json/hash/unicode only).

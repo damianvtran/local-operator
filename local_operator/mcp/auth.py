@@ -589,6 +589,16 @@ _LOCK_RETRY_SLEEP_S = 0.05
 _LOCK_RETRY_SLEEP_MAX_S = 0.25
 
 
+#: Longest a request waits on the refresh coordination (cross-process lock,
+#: store re-read, exchange) while its access token is still valid inside the
+#: pre-expiry lead. Past it the request deliberately sends the still-valid old
+#: token rather than burn validity it could use (see
+#: ``_coordinate_inflight_refresh``). A named module constant, not an inline
+#: literal, so tests can pin or widen the bound instead of racing real lock
+#: timing.
+_EARLY_REFRESH_WAIT_BUDGET_S = 0.25
+
+
 class McpAuthRequiredError(RuntimeError):
     """An MCP server needs an interactive OAuth grant this run cannot open.
 
@@ -5505,7 +5515,7 @@ def _make_refresh_coordinating_provider(
                 if remaining <= 0:
                     return
                 try:
-                    async with asyncio.timeout(min(0.25, remaining / 2)):
+                    async with asyncio.timeout(min(_EARLY_REFRESH_WAIT_BUDGET_S, remaining / 2)):
                         await self._coordinate_refresh_attempt(previous_access)
                 except TimeoutError:
                     return

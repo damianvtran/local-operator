@@ -9,33 +9,17 @@ older hub has no such rule, and the server cannot see what one endpoint spends.
 This module is the client's own bound, enforced at the one place an agent
 writes into a conversation (``bridge channel_post``):
 
-* **Reply budget** — at most ``BUDGET_POSTS`` agent-initiated posts per
-  conversation per ``BUDGET_WINDOW_S`` (6 / 10 min). A post that ANSWERS A
-  PERSON (the connector recorded a human trigger for this conversation) is
-  exempt: a human talking to their own agent must never be throttled.
-* **Agent-to-agent cool-down** — after ``COOLDOWN_AFTER`` (3) consecutive
-  agent-to-agent turns (a post whose triggering wake was AGENT-sent), further
-  posts to that conversation are refused for ``COOLDOWN_S`` (10 min).
-  A human-sent mention resets the consecutive counter and lifts a cool-down,
-  and a human-prompted post is exempt from the refusal: a person asking the
-  agent directly is exactly the case the guard must not block.
-* **The exemption is deliberately WIDER than the reset** (review round 2, m5).
-  ANY human trigger exempts the next post, not only a mention: a person typing
-  in the conversation — a DM has no mentions by nature — is exactly when an
-  agent must be able to answer, and requiring a mention would silence a 1:1
-  thread. What a human line does NOT do is lift a stored cool-down (only the
-  mention reset in :func:`record_trigger` and expiry do), so a busy channel
-  cannot be used to unlock agent-versus-agent traffic. The absolute cap below
-  is what bounds the wider reading.
-* **Absolute cap** — ``ABSOLUTE_POSTS`` (30) posts per conversation per
-  ``BUDGET_WINDOW_S``, counting EVERY post including human-prompted ones. The
-  two bounds above are policy; this one is a floor so no bug, no stuck loop and
-  no flood of human pings can turn one conversation into an unbounded spend.
-  Its refusal is a DISTINCT code (``reply_absolute_cap``) because the agent's
-  answer differs: the budget says "let the humans talk", the cap says "stop".
+* **No agent-to-agent limit** (urgent hotfix, operator direction 2026-11-03:
+  "no limit on the number of agent replies"). The per-window agent budget and
+  the agent-to-agent cool-down are gone, and a stale ``runs.cooldown_until``
+  row left by an earlier build is never read, so an upgraded machine is
+  unblocked at once. The SERVER's soft/hard run caps remain the loop bound.
+* **Absolute cap** — ``ABSOLUTE_POSTS`` (120) posts per conversation per
+  ``BUDGET_WINDOW_S``, counting EVERY post. It is a floor so no bug or stuck
+  loop can turn one conversation into an unbounded spend, not a policy limit.
 
-Both policy refusals are STRUCTURED (``code`` + ``retry_after_s``) so an agent
-can end its turn with ``no_reply`` instead of retrying.
+The refusal is STRUCTURED (``code`` + ``retry_after_s``) so an agent keeps its
+draft and posts it once the window frees.
 
 WHO WRITES WHAT. Two processes share this state: the connector (which knows
 what woke the agent) records each delivered wake's TRIGGER — sender kind and
@@ -61,24 +45,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-#: Max agent posts per conversation per window (wake contract). Counts posts
-#: the agent made on its own or in answer to another AGENT; a human-prompted
-#: post does not spend this budget (see the module docstring).
-BUDGET_POSTS = 6
 BUDGET_WINDOW_S = 600.0
-#: Hard ceiling per conversation per window, over EVERY post including the
-#: human-prompted ones (see the module docstring).
-ABSOLUTE_POSTS = 30
-#: Consecutive agent-to-agent turns before the cool-down starts.
-COOLDOWN_AFTER = 3
-COOLDOWN_S = 600.0
+#: Hard ceiling per conversation per window, over EVERY post. Raised from 30 to
+#: 120 so live agent coordination is never throttled while a runaway keeps a floor.
+ABSOLUTE_POSTS = 120
 
 #: A trigger older than this no longer explains a post: the agent is acting on
 #: its own (or on a human's DM), not answering an agent.
 TRIGGER_TTL_S = 1800.0
 
-CODE_BUDGET = "reply_budget_exhausted"
-CODE_COOLDOWN = "reply_cooldown"
 CODE_ABSOLUTE = "reply_absolute_cap"
 CODE_UNAVAILABLE = "reply_guard_unavailable"
 
@@ -104,6 +79,8 @@ CREATE TABLE IF NOT EXISTS posts (
 );
 CREATE INDEX IF NOT EXISTS posts_by_conversation
     ON posts (endpoint_id, conversation_id, at);
+-- RETIRED: neither read nor written since the cool-down was removed; kept so a
+-- guard file from an earlier build opens unchanged.
 CREATE TABLE IF NOT EXISTS runs (
     endpoint_id TEXT NOT NULL,
     conversation_id TEXT NOT NULL,
@@ -161,8 +138,8 @@ class Refusal:
             "code": self.code,
             "error": self.message,
             "retry_after_s": self.retry_after_s,
-            # The one action that ends the turn cheaply and quietly.
-            "next": "end this turn with no_reply; do not retry the post",
+            # The cap frees as the window slides; the post is worth keeping.
+            "next": "not sent; keep your draft and retry after retry_after_s",
         }
 
 
@@ -209,17 +186,12 @@ def record_trigger(
     """Record what last woke ``endpoint_id`` in ``conversation_id``.
 
     Called by the connector for every admitted message it hands to the agent
-    (coalesced or not, oldest → newest, so the newest wins). A HUMAN message that
-    was DIRECTED at this agent resets the agent-to-agent run and lifts a
-    cool-down: ``directed`` is the connector's STRICT addressedness predicate (an
-    @-mention, or a reply the server states this endpoint FOLLOWS), so a person
-    answering in a followed thread counts exactly like a mention — while an
-    ambient reply, or any thread reply on a server that sends no follower bit,
-    does not (round 6, M2). ``directed=None`` keeps the mention-only rule for a
-    caller that predates the bit. The value is ALSO written to the trigger row as
-    a diagnostic record of what the brake decided; nothing reads it back — the
-    brake decides here, from the argument. Never raises: a trigger that cannot be
-    recorded leaves the previous one, and the post side still fails closed on its
+    (coalesced or not, oldest → newest, so the newest wins). ``directed`` (the
+    connector's strict addressedness predicate; ``None`` falls back to
+    ``mention``) is written as a diagnostic record only: since the cool-down was
+    removed nothing reads it and no run state is written here. Never raises: a
+    trigger that cannot be recorded leaves the previous one, and the post side
+    still fails closed on its
     own.
     """
 
@@ -243,13 +215,6 @@ def record_trigger(
                     1 if addressed else 0,
                 ),
             )
-            if kind == "human" and addressed:
-                conn.execute(
-                    "INSERT INTO runs (endpoint_id, conversation_id, consecutive, cooldown_until) "
-                    "VALUES (?, ?, 0, 0) ON CONFLICT(endpoint_id, conversation_id) DO UPDATE SET "
-                    "consecutive = 0, cooldown_until = 0",
-                    (endpoint_id, conversation_id),
-                )
     except ReplyGuardUnavailable:
         pass
 
@@ -263,14 +228,10 @@ def reserve_post(
 ) -> Reservation | Refusal:
     """Grant one post slot, or say why not. Raises ``ReplyGuardUnavailable``.
 
-    ORDER IS THE POLICY. The ABSOLUTE cap is decided first: it covers every
-    post, human-prompted ones included. Then a post that ANSWERS A PERSON skips
-    the two agent-versus-agent limits entirely — ANY human trigger counts, which
-    is deliberately wider than the mention-only reset (see the module docstring,
-    review m5); otherwise the cool-down applies and then the per-window budget,
-    which counts only the posts that were not human-prompted. The recorded slot
-    carries both facts (``agent_to_agent``, ``human_prompted``) so the limits
-    stay countable separately.
+    Only the ABSOLUTE cap can refuse; it counts every post. The trigger still
+    labels the slot (``agent_to_agent``, ``human_prompted``) for diagnostics.
+    ``runs.cooldown_until`` is deliberately NOT read: a cool-down an earlier
+    build armed must not keep blocking an upgraded machine.
 
     The slot is recorded BEFORE the post goes out (so a concurrent post sees
     it) and must be given back through :func:`release` when the hub did not
@@ -279,26 +240,17 @@ def reserve_post(
 
     now = time.time() if now is None else now
     with _connect(config_dir) as conn:
-        run = conn.execute(
-            "SELECT consecutive, cooldown_until FROM runs "
-            "WHERE endpoint_id = ? AND conversation_id = ?",
-            (endpoint_id, conversation_id),
-        ).fetchone()
-        consecutive, cooldown_until = (int(run[0]), float(run[1])) if run else (0, 0.0)
         window_start = now - BUDGET_WINDOW_S
         recent = [
-            (float(row[0]), bool(row[1]))
+            float(row[0])
             for row in conn.execute(
-                "SELECT at, human_prompted FROM posts "
+                "SELECT at FROM posts "
                 "WHERE endpoint_id = ? AND conversation_id = ? AND at > ? ORDER BY at",
                 (endpoint_id, conversation_id, window_start),
             )
         ]
-        # THE ABSOLUTE CAP, decided first and counting EVERYTHING. Its refusal is
-        # its own code because the answer differs from the budget's: no amount
-        # of human participation opens this window back up.
         if len(recent) >= ABSOLUTE_POSTS:
-            freeing = recent[len(recent) - ABSOLUTE_POSTS][0]
+            freeing = recent[len(recent) - ABSOLUTE_POSTS]
             return Refusal(
                 code=CODE_ABSOLUTE,
                 retry_after_s=max(1, int(freeing + BUDGET_WINDOW_S - now + 0.999)),
@@ -316,30 +268,6 @@ def reserve_post(
         if trigger is not None and now - float(trigger[0]) <= TRIGGER_TTL_S:
             human_prompted = trigger[1] == "human"
             agent_to_agent = trigger[1] == "agent"
-        if not human_prompted:
-            # A person asked: neither the cool-down nor the budget may silence
-            # the answer (review round 1, m2 — an ordinary 1:1 conversation must
-            # not die in the middle). The absolute cap above still applies.
-            if cooldown_until > now:
-                return Refusal(
-                    code=CODE_COOLDOWN,
-                    retry_after_s=max(1, int(cooldown_until - now + 0.999)),
-                    message=(
-                        f"cool-down: {COOLDOWN_AFTER} consecutive replies to agents in this "
-                        "conversation; posting resumes later or when a person @-mentions you"
-                    ),
-                )
-            posted = [slot for slot, human in recent if not human]
-            if len(posted) >= BUDGET_POSTS:
-                oldest = posted[0]
-                return Refusal(
-                    code=CODE_BUDGET,
-                    retry_after_s=max(1, int(oldest + BUDGET_WINDOW_S - now + 0.999)),
-                    message=(
-                        f"reply budget: {BUDGET_POSTS} agent posts in this conversation "
-                        f"within {int(BUDGET_WINDOW_S // 60)} minutes"
-                    ),
-                )
         cursor = conn.execute(
             "INSERT INTO posts (endpoint_id, conversation_id, at, agent_to_agent, human_prompted) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -351,25 +279,6 @@ def reserve_post(
                 1 if human_prompted else 0,
             ),
         )
-        # A human-prompted (or unprompted) post breaks the agent-to-agent run.
-        consecutive = consecutive + 1 if agent_to_agent else 0
-        if consecutive >= COOLDOWN_AFTER:
-            # THIS post is allowed (it is the third); the next is refused.
-            cooldown, consecutive = now + COOLDOWN_S, 0
-        elif human_prompted:
-            # A human turn resets the RUN (it is not an agent-to-agent turn) but
-            # does not LIFT a cool-down: only the mention reset in
-            # ``record_trigger`` and expiry do (wake contract). The post itself
-            # was exempt above; agent-versus-agent traffic waits it out.
-            cooldown = cooldown_until
-        else:
-            cooldown = 0.0
-        conn.execute(
-            "INSERT INTO runs (endpoint_id, conversation_id, consecutive, cooldown_until) "
-            "VALUES (?, ?, ?, ?) ON CONFLICT(endpoint_id, conversation_id) DO UPDATE SET "
-            "consecutive = excluded.consecutive, cooldown_until = excluded.cooldown_until",
-            (endpoint_id, conversation_id, consecutive, cooldown),
-        )
         # Bound the table: rows older than 2x the window carry no decision.
         conn.execute("DELETE FROM posts WHERE at <= ?", (now - 2 * BUDGET_WINDOW_S,))
         return Reservation(post_id=int(cursor.lastrowid or 0), agent_to_agent=agent_to_agent)
@@ -380,9 +289,7 @@ def release(
 ) -> None:
     """Give back a slot whose post the hub did not accept.
 
-    The budget slot is returned. The run counter is NOT rolled back: a failed
-    agent-to-agent attempt still spent a model turn, and erring towards an
-    earlier cool-down is the safe direction for a cost guard.
+    The slot is returned to the absolute cap's window.
     """
 
     try:
@@ -397,14 +304,9 @@ def release(
 
 __all__ = [
     "ABSOLUTE_POSTS",
-    "BUDGET_POSTS",
     "BUDGET_WINDOW_S",
     "CODE_ABSOLUTE",
-    "CODE_BUDGET",
-    "CODE_COOLDOWN",
     "CODE_UNAVAILABLE",
-    "COOLDOWN_AFTER",
-    "COOLDOWN_S",
     "Refusal",
     "ReplyGuardUnavailable",
     "Reservation",

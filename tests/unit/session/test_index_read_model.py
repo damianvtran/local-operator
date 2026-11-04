@@ -244,13 +244,17 @@ async def test_an_exact_parsed_hit_materializes_without_a_second_hydration(tmp_p
     monkeypatch.setattr(ti, "_read_raw", counted)
     first = await ti.checkpoints_view(tmp_path, SID)
     assert first["index"]["state"] == "ready"
-    assert reads == [1], "the first view is base's one hydration"
+    # The refresh above published this document from THIS process, so the parse
+    # memo (keyed by the head's identity) serves it: at most base's one hydration,
+    # and in practice none.
+    assert len(reads) <= 1, "the first view hydrated the index more than once"
+    hydrations = len(reads)
     task = next(iter(rm._MIGRATIONS.values()), None)
     if task is not None:
         await task
     served = await ti.checkpoints_view(tmp_path, SID)
     assert served["checkpoints"] == first["checkpoints"]
-    assert len(reads) == 1, "the materialised companion re-hydrated the index"
+    assert len(reads) == hydrations, "the materialised companion re-hydrated the index"
 
 
 # ---------------------------------------------------------------------------
@@ -1022,7 +1026,11 @@ def test_the_companion_stays_a_small_fraction_of_the_index(tmp_path):
     index = ti.refresh_index(tmp_path, SID)
     assert index is not None
     _materialize(tmp_path, index)
-    index_bytes = ti.index_path(tmp_path, SID).stat().st_size
+    # What a reader decodes for this publication: the head alone for a classic
+    # document, head + snapshot + committed delta for an incremental store.
+    head = ti._read_resume_head(tmp_path, SID)
+    assert head is not None
+    index_bytes = head[3]
     companion_bytes = rm.header(tmp_path, SID).value.path.stat().st_size
     share = companion_bytes / index_bytes
     print(f"index={index_bytes} companion={companion_bytes} share={share:.1%}")

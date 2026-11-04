@@ -1,0 +1,7 @@
+{
+  "wire.errors.hosting.not_configured": {
+    "role": "owned cause clause composed into startup refusals",
+    "tone": "diagnostic; names the condition, never restates the remedy",
+    "note": "The hosting preflight resolved no provider at all, so a session cannot start; the surrounding refusal supplies the remedy. The clause is spliced in mid-sentence after a colon and must read as a complete statement, so keep its terminal period and its capitalization. This is the ONE copy for the condition: translate the sentence itself and never the surrounding frame's wording into it. No placeholders and no dynamic detail, so the sentence is identical for every root. The English source is also the exact text of the legacy exception (session_factory.HostingNotConfiguredError), which stays English by contract and is not this key's consumer text."
+  }
+}

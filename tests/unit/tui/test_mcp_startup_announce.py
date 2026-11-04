@@ -1438,16 +1438,33 @@ async def test_notice_readiness_waits_for_real_layout_not_the_expected_width(mon
 
             # A REAL incorrect layout must remain ready: equality belongs to the
             # oracle, never the wait predicate (otherwise it could hide a defect).
-            published = False
             old_width = blocks[0].styles.width
-            try:
-                blocks[0].styles.width = 79
-                assert await _until(pilot, lambda: published and _painted_boxes_ready(blocks))
-                assert blocks[0].size.width == 79
-                with pytest.raises(AssertionError, match="layout pinned 79"):
-                    _assert_notice_budget(app, blocks, 84, False)
-            finally:
-                blocks[0].styles.width = old_width
+            # The app legitimately REPAIRS a wrong notice width: a
+            # ``WelcomeView.BlockResized`` runs ``_sync_boot_layout`` ->
+            # ``_sync_boot_column_width``, which resets every ``.notice-block`` to
+            # ``1fr`` when the boot card is not up at 84 columns. Whether that
+            # resync lands before the injected 79 is laid out is a scheduling race
+            # (about 1 in 3 whole-file on a loaded host), so inhibit ONLY that
+            # resync for this step: the injected defect must survive long enough
+            # to be observed. The product's repair path is covered elsewhere.
+            with monkeypatch.context() as inhibit:
+                inhibit.setattr(OperatorApp, "_sync_boot_column_width", lambda _app, _width: None)
+                try:
+                    blocks[0].styles.width = 79
+                    # Wait for the test's OWN injected layout, not for "a layout
+                    # was published": the boxes are already painted-ready at 80
+                    # before the style change and any unrelated refresh flips
+                    # ``published``. The wait guards non-vacuity of "a real
+                    # incorrect layout is ready"; the oracle reads styles, not size.
+                    assert await _until(pilot, lambda: blocks[0].size.width == 79), (
+                        f"injected 79 never laid out: styles.width={blocks[0].styles.width!r} "
+                        f"size={blocks[0].size!r}"
+                    )
+                    assert _painted_boxes_ready(blocks)
+                    with pytest.raises(AssertionError, match="layout pinned 79"):
+                        _assert_notice_budget(app, blocks, 84, False)
+                finally:
+                    blocks[0].styles.width = old_width
         finally:
             held = False
             screen._on_timer_update()
