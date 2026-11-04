@@ -326,6 +326,9 @@ def _main_run(**over):
         "event": "push",
         "head_sha": "a" * 40,
         "created_at": _old(0.5),
+        # Workflow path as the Actions API reports it; ci.yml is the only
+        # `main` workflow the reaper may cancel (rule 2e).
+        "path": reaper.SUPERSEDABLE_MAIN_WORKFLOW,
     }
     base.update(over)
     return _run(**base)
@@ -695,3 +698,83 @@ def test_a_409_for_a_COMPLETED_run_is_not_labelled_a_ghost(monkeypatch, capsys):
     assert rc == 0
     assert "GHOST" not in out
     assert "REFUSE" in out
+
+
+# --- rule 2e: only ci.yml's post-merge run is reapable --------------------
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".github/workflows/release-gate.yml",
+        ".github/workflows/publish.yml",
+        ".github/workflows/windows-anchor.yml",
+        ".github/workflows/extension.yml",
+        ".github/workflows/mobile-web.yml",
+        None,
+    ],
+)
+def test_a_queued_main_run_of_any_other_workflow_is_never_cancelled(api, path):
+    """Release Gate also fires on `push: main`. AGENTS.md treats its run on the
+    bump commit as the wheel-installs proof, and that commit is untagged until
+    `gh release create`, so rule 2b cannot protect it. An ancestor, untagged,
+    old enough run of a non-ci.yml workflow must still be KEPT; a run with no
+    readable workflow path fails closed too.
+    """
+    api["tip"][reaper.PROTECTED_MAIN] = "b" * 40
+    api["ancestor"] = True
+    should, reason = reaper.decide("o/r", _main_run(path=path), 5.0, 24.0, frozenset())
+    assert not should, reason
+    assert "rule 2e" in reason
+
+
+def test_a_ref_pinned_ci_path_is_still_ci(api):
+    api["tip"][reaper.PROTECTED_MAIN] = "b" * 40
+    api["ancestor"] = True
+    run = _main_run(path=reaper.SUPERSEDABLE_MAIN_WORKFLOW + "@refs/heads/main")
+    should, reason = reaper.decide("o/r", run, 5.0, 24.0, frozenset())
+    assert should, reason
+
+
+def test_the_sweep_cancels_ci_but_not_a_release_gate_on_the_same_commit(monkeypatch, capsys):
+    """Real path through main(): both workflows queued on one ancestor commit."""
+    ci = _main_run(id=601)
+    gate = _main_run(id=602, path=".github/workflows/release-gate.yml", name="Release Gate")
+    cancelled = []
+
+    def fake_gh(path: str, *, method: str = "GET"):
+        if method == "POST":
+            cancelled.append(path)
+            return None
+        return {"status": "queued"}
+
+    monkeypatch.setattr(reaper, "queued_runs", lambda repo: [ci, gate])
+    monkeypatch.setattr(reaper, "tag_targets", lambda repo: frozenset())
+    monkeypatch.setattr(reaper, "branch_tip", lambda repo, b: "b" * 40)
+    monkeypatch.setattr(reaper, "is_ancestor", lambda repo, older, newer: True)
+    monkeypatch.setattr(reaper, "gh_api", fake_gh)
+    monkeypatch.setattr(reaper.sys, "argv", ["x", "--repo", "o/r"])
+
+    assert reaper.main() == 0
+    out = capsys.readouterr().out
+    assert cancelled == ["repos/o/r/actions/runs/601/cancel"], (cancelled, out)
+    assert "KEEP" in out and "run 602" in out
+
+
+def test_a_sweep_with_only_a_release_gate_on_main_never_reads_the_tag_list(monkeypatch, capsys):
+    runs = [_main_run(id=7, path=".github/workflows/release-gate.yml")]
+    reads = []
+    monkeypatch.setattr(reaper, "queued_runs", lambda repo: runs)
+    monkeypatch.setattr(reaper, "tag_targets", lambda repo: reads.append(repo) or frozenset())
+    monkeypatch.setattr(reaper.sys, "argv", ["x", "--repo", "o/r", "--dry-run"])
+    assert reaper.main() == 0
+    capsys.readouterr()
+    assert reads == []
+
+
+def test_a_tag_listing_at_the_page_cap_raises_instead_of_returning_a_partial_set(monkeypatch):
+    """A partial set would read as "no tag points here" for the unread pages."""
+    page = [{"commit": {"sha": f"{i:040d}"}} for i in range(reaper.SEARCH_LIMIT)]
+    monkeypatch.setattr(reaper, "gh_api", lambda path, *, method="GET": page)
+    with pytest.raises(reaper.ApiError, match="partial"):
+        reaper.tag_targets("o/r")

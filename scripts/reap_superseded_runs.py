@@ -52,6 +52,12 @@ one prevents:
    reading `git merge-base --is-ancestor` gives. A transient failure on that read
    keeps the run.
 
+2e. Only `ci.yml`. Release Gate (also `push: main`) on an untagged bump commit
+   is the wheel-installs proof for a release; cancelling it while queued would
+   destroy that evidence before `gh release create` tags the commit, so rule 2b
+   cannot cover it. Every other `push: main` workflow (windows-anchor,
+   extension, mobile-web) is likewise kept: the allowlist is `ci.yml` alone.
+
 2d. Only `push`. A `workflow_dispatch` run on `main` was asked for by a person,
    not produced by the merge, and is kept whatever its age.
 3. For a pull_request run the PULL REQUEST's head is authoritative.
@@ -132,6 +138,16 @@ PROTECTED_PREFIXES = ("release-next",)
 #: The post-merge branch. Its QUEUED push runs are eligible under rule 2a-2d;
 #: everything else about it is still protected.
 PROTECTED_MAIN = "main"
+#: The ONLY workflow whose queued `main` push runs rule 2a may cancel.
+#: Several other workflows also fire on `push: main` (release-gate.yml,
+#: windows-anchor.yml, extension.yml, mobile-web.yml, ...). Release Gate is the
+#: dangerous one: AGENTS.md treats its run on the bump commit as the
+#: wheel-installs proof for a release, and that commit is untagged until
+#: `gh release create` runs -- so rule 2b's tag exclusion cannot protect it
+#: while it is still queued. An allowlist rather than a denylist, so a workflow
+#: added later is kept until someone decides it is supersedable. Matched on the
+#: run's workflow `path` (stable) rather than `name` (freely renamed).
+SUPERSEDABLE_MAIN_WORKFLOW = ".github/workflows/ci.yml"
 SEARCH_LIMIT = 100
 
 
@@ -292,8 +308,12 @@ def tag_targets(repo: str) -> frozenset[str]:
         page += 1
         if len(batch) < SEARCH_LIMIT:
             return frozenset(out)
-        if page > 20:  # more than 2000 tags is not this script's problem
-            return frozenset(out)
+        if page > 20:
+            # NOT a quiet return: a partial set reads as "no tag points at this
+            # commit" for every tag past the cap, which is the one reading that
+            # lets a release's CI record be cancelled. Refuse; the caller then
+            # keeps every `main` run (rule 2b's fail-closed half).
+            raise ApiError("the tag listing exceeds 2000 entries; refusing a partial set")
 
 
 def is_ancestor(repo: str, older: str, newer: str) -> bool:
@@ -308,6 +328,17 @@ def is_ancestor(repo: str, older: str, newer: str) -> bool:
     """
     data = gh_api(f"repos/{repo}/compare/{older}...{newer}")
     return ((data or {}).get("status")) in ("ahead", "identical")
+
+
+def is_post_merge_ci(run: dict[str, Any]) -> bool:
+    """Whether `run` is `ci.yml`'s post-merge record (the only reapable `main` run).
+
+    A run object with no readable `path` is NOT ci.yml as far as we can prove:
+    it is kept (fail closed), because the alternative is guessing a release
+    gate away. `path` may carry an `@refs/...` suffix for ref-pinned workflows.
+    """
+    path = str(run.get("path") or "").split("@", 1)[0]
+    return path == SUPERSEDABLE_MAIN_WORKFLOW
 
 
 def is_protected(branch: str) -> bool:
@@ -349,6 +380,13 @@ def _post_merge_decision(
     """
     if run.get("event") != "push":
         return False, f"{PROTECTED_MAIN} run from {run.get('event')!r} -- kept (rule 2d)"
+    if not is_post_merge_ci(run):
+        # Rule 2e: not ci.yml. Release Gate above all -- see
+        # SUPERSEDABLE_MAIN_WORKFLOW for why a queued one must never be reaped.
+        return False, (
+            f"{PROTECTED_MAIN} run of {run.get('path') or 'an unknown workflow'!r} -- only "
+            f"{SUPERSEDABLE_MAIN_WORKFLOW} is supersedable (rule 2e)"
+        )
     if tag_targets is None:
         return False, (
             "tag targets unreadable -- every "
@@ -501,7 +539,10 @@ def main() -> int:
     # the two readings that decide whether a published release's CI record can be
     # cancelled.
     needs_tags = any(
-        run.get("head_branch") == PROTECTED_MAIN and run.get("event") == "push" for run in runs
+        run.get("head_branch") == PROTECTED_MAIN
+        and run.get("event") == "push"
+        and is_post_merge_ci(run)
+        for run in runs
     )
     tags: frozenset[str] | None = frozenset()
     if needs_tags:

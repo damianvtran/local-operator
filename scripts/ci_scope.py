@@ -242,7 +242,9 @@ PACKAGING_SCRIPTS = frozenset(
 #: Categories that cannot change the built wheel, and the ONLY reason the flag
 #: may go false. `docs/**` and root `*.md` are not package data (the shipped
 #: markdown lives under `local_operator/`, which `category_of` reports as
-#: `python`), and `tests/**` is excluded from the wheel by the manifest. The
+#: `python`), and `tests/**` is excluded from the wheel by the manifest. One
+#: nuance: root `README.md` DOES reach the wheel, but only as metadata (the
+#: long description), never as content the package executes or installs. The
 #: predicate is a SUBSET test on this closed set rather than "no category is
 #: live", so a category nobody enumerated here arms the flag rather than
 #: silencing it.
