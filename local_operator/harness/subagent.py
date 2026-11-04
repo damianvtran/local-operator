@@ -1848,9 +1848,14 @@ def run_subagent(
 #: failing, so the launch receipt names the omission to the one who can fix it.
 READER_ROLES = frozenset({"reviewer", "qa-tester", "designer", "ux-reviewer", "copy-reviewer"})
 
-#: ``Worktree: <path>`` at the start of a line, optionally followed by
+#: ``Worktree: <path>`` ANYWHERE in the brief, optionally followed by
 #: ``@ <sha>`` and the other brief fields (guide://delivery, context contract).
-_WORKTREE_FIELD = re.compile(r"^\s*Worktree:\s*(\S+)", re.MULTILINE)
+#: Not anchored to line start: managers inline it (``PR: #1 · Worktree: ~/w @
+#: abc``), list it (``- Worktree:``) or decorate it (``**Worktree:**``,
+#: `` `~/w` ``), and a line-start anchor false-fired the notice on all of
+#: those. Markdown emphasis/code marks around the path are skipped, never
+#: captured, so they cannot make a real directory look missing.
+_WORKTREE_FIELD = re.compile(r"\bWorktree:[*_`\s]*([^\s`*]+)")
 
 #: Shown to the PARENT only. The child never sees it: a reader cannot fix a
 #: brief it was handed, and a refusal would cost a whole relaunch for a field
@@ -1872,9 +1877,18 @@ def missing_worktree_notice(agent: str, prompt: str) -> str | None:
 
     if agent.strip().lower() not in READER_ROLES:
         return None
-    for match in _WORKTREE_FIELD.finditer(prompt or ""):
-        if Path(match.group(1)).expanduser().is_dir():
-            return None
+    named = [match.group(1) for match in _WORKTREE_FIELD.finditer(prompt or "")]
+    if any(Path(path).expanduser().is_dir() for path in named):
+        return None
+    if named:
+        # The field is there but points nowhere: name the path so the parent
+        # can spot the typo or the reaped worktree instead of re-adding a
+        # field it already wrote.
+        return (
+            f"note: brief's `Worktree:` path {named[0]} is not an existing "
+            "directory; brief the shared PR worktree so this reader does not "
+            "clone or cut its own."
+        )
     return MISSING_WORKTREE_NOTICE
 
 

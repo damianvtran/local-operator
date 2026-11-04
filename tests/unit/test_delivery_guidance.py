@@ -310,9 +310,27 @@ def test_reader_launch_without_worktree_field_notices_the_parent_only(tmp_path):
     assert missing_worktree_notice("qa-tester", "Test PR #1") == MISSING_WORKTREE_NOTICE
     # A named but nonexistent path is the same omission.
     gone = tmp_path / "gone"
-    assert missing_worktree_notice("Reviewer", f"Worktree: {gone} @ abc") is not None
+    unresolved = missing_worktree_notice("Reviewer", f"Worktree: {gone} @ abc")
+    assert unresolved is not None and str(gone) in unresolved
     brief = f"Request: x\nWorktree: {tmp_path} @ abc1234 · Round: 2 · Scope: a..b"
     assert missing_worktree_notice("reviewer", brief) is None
+    # The field is found wherever and however managers write it.
+    for brief in (
+        f"PR: #1 · Worktree: {tmp_path} @ abc",
+        f"Worktree: `{tmp_path}` @ abc",
+        f"`Worktree: {tmp_path} @ abc`",
+        f"**Worktree:** {tmp_path} @ abc",
+        f"- Worktree: {tmp_path} @ abc",
+    ):
+        assert missing_worktree_notice("qa-tester", brief) is None, brief
+
+
+def test_worktree_field_expands_home(tmp_path, monkeypatch):
+    from local_operator.harness.subagent import missing_worktree_notice
+
+    (tmp_path / "w").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert missing_worktree_notice("reviewer", "PR: #1 · Worktree: ~/w @ abc") is None
     # Writers and plain tasks own their tree; no notice.
     assert missing_worktree_notice("coder", "no field") is None
     assert missing_worktree_notice("task", "no field") is None
