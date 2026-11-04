@@ -1965,7 +1965,10 @@ async def _op_org(
         return _error(tool_call_id, "agent", f"several organizations; pass org= one of: {listed}")
     registry = _registry(context)
     if params.op == "org_pull" and getattr(registry, "session_registry", None) is not None:
-        from local_operator.profile_scope import durable_write_decision, durable_write_refusal
+        from local_operator.profile_scope import (
+            durable_write_decision,
+            durable_write_refusal,
+        )
 
         # ``sync``: the closed intent vocabulary's account-update class, which
         # an org pull is (it writes account rows the runner keeps current).
