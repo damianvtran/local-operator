@@ -283,7 +283,11 @@ async def test_an_unsanctioned_broadcast_sigterm_is_refused_and_every_turn_finis
             # THE REFUSAL, per victim: the receipt records the arrival in
             # ``refusals`` — never in ``signals`` — and the run keeps serving.
             for session_id in session_ids:
-                refusals = await _wait_refusals(rig.directories[session_id])
+                refusals = await _wait_refusals(
+                    rig.directories[session_id],
+                    child=rig.children[session_id],
+                    config=config,
+                )
                 assert refusals["refusals"][0]["disposition"] == "refused", refusals["refusals"]
                 assert (
                     registry.read_signal_receipt(rig.directories[session_id]) is None
@@ -1151,7 +1155,17 @@ def _receipt_timeout_evidence(
             sections.append("child: not supplied")
         else:
             code = child.poll()
-            state = "alive" if code is None else f"exited returncode={code}"
+            if code is None:
+                state = "alive (stayed up and wrote no record)"
+            elif code < 0:
+                # A negative code is death BY that signal: SIGTERM here means the
+                # default action ran, i.e. no handler had taken the signal.
+                try:
+                    state = f"killed by signal {signal.Signals(-code).name} (returncode={code})"
+                except ValueError:
+                    state = f"killed by signal {-code} (returncode={code})"
+            else:
+                state = f"exited returncode={code} (left on its own without a record)"
             sections.append(f"child pid={child.pid}: {state}")
     except Exception as error:  # noqa: BLE001 - diagnostics must never mask the timeout
         sections.append(f"child state unavailable: {error!r}")
@@ -1297,7 +1311,9 @@ async def test_a_runtime_signalled_mid_turn_writes_its_receipt_before_the_drain_
             await _wait_record(config, "rcptbusy01", busy=True)
             _stage_sanction(config, "rcptbusy01", directory)
             os.kill(rig.children["rcptbusy01"].pid, signal.SIGTERM)
-            receipt = await _wait_receipt(directory)
+            receipt = await _wait_receipt(
+                directory, child=rig.children["rcptbusy01"], config=config
+            )
             entry = receipt["signals"][0]
             assert entry["action"] == "drain" and entry["in_flight"] is True
             assert entry["sanction"] == "marker"
@@ -1390,7 +1406,9 @@ async def test_sigkill_still_ends_a_runtime_that_refused_a_sigterm(
             await _wait_record(config, "hardkill01")
 
             os.kill(rig.children["hardkill01"].pid, signal.SIGTERM)
-            refusals = await _wait_refusals(directory)
+            refusals = await _wait_refusals(
+                directory, child=rig.children["hardkill01"], config=config
+            )
             assert refusals["refusals"][0]["disposition"] == "refused"
             assert rig.children["hardkill01"].poll() is None, "the refusal did not hold"
 
