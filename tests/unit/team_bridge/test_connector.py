@@ -1920,7 +1920,18 @@ async def message(owner, message_id, *, config_dir, access, client=None):
     return SimpleNamespace(message_id=message_id)
 
 async def fetch(owner, message_id, *, config_dir, access, auth_store):
-    return {"message": {"id": message_id}}
+    import hashlib
+    # Recovery now validates the envelope before consulting an unsent receipt.
+    # This stop-signal rig must reach screen(), not hold on malformed input.
+    body = "stop-signal fixture"
+    return {
+        "message": {
+            "id": message_id, "type": "note", "body": {"text": body},
+            "body_hash": hashlib.sha256(body.encode()).hexdigest(),
+        },
+        "sender": {"account_id": "acc_sender"},
+        "thread": {"tenant_id": owner.tenant_id},
+    }
 
 async def screen(owner, item, *, config_dir, auth_store, settings=None):
     marker.write_text("in-spine")  # the claim is held from here on

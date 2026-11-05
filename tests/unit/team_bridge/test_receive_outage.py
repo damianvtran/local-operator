@@ -450,8 +450,21 @@ def test_legacy_row_mismatch_writes_a_policy_stale_hold_and_backs_off(
         return SimpleNamespace(message_id=message_id)
 
     async def fetch_item(owner_: Any, message_id: str, **kwargs: Any) -> Any:
+        import hashlib
+
         fetched.append(message_id)
-        return {"message": {"id": message_id, "body": {"text": "x"}}}
+        # Reach the owner/status refusal this regression measures. A minimal
+        # pre-recovery DTO with no type/hash now correctly holds earlier.
+        return {
+            "message": {
+                "id": message_id,
+                "type": "note",
+                "body": {"text": "x"},
+                "body_hash": hashlib.sha256(b"x").hexdigest(),
+            },
+            "sender": {"account_id": "acc_sender"},
+            "thread": {"tenant_id": owner_.tenant_id},
+        }
 
     monkeypatch.setattr(pull_mod, "events", events)
     monkeypatch.setattr(pull_mod, "message", message)
