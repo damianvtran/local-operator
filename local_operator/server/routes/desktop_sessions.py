@@ -4423,7 +4423,7 @@ async def prompt(session_id: str, body: Prompt, request: Request):
                 # admission frame -- and before this the operator's message was
                 # answered ``runtime_busy`` and, once the renderer's resends were
                 # spent, dropped (2026-11-04: two messages to a busy Aida never
-                # reached the transcript). See :func:`_queue_for_busy_owner` for
+                # reached the transcript). See :func:`_queue_or_refuse` for
                 # when queueing is honest and why it is at-most-once.
                 if not _owner_busy(error):
                     raise

@@ -1797,6 +1797,17 @@ async def _queued_outcome(
 ) -> DeliveryOutcome:
     """Queue one message to a running-but-wedged owner's inbox. Never a refusal.
 
+    WIRE COMPATIBILITY (review n2): ``DELIVERY_DELIVERED`` here means the spool
+    durably accepted the message, NOT that it is in the target's transcript.
+    State-only consumers cannot distinguish those facts; consumers needing the
+    distinction must read ``route == "spool"`` and ``cause == "queued_busy"``.
+    A distinct ``queued`` state needs a coordinated renderer change: the desktop
+    ``SendDeliveryState`` / ``SEND_DELIVERY_STATES`` whitelist currently accepts
+    only delivered/mailbox/unconfirmed/failed for send, and ``request_update``
+    treats unknown states as failed. Adding a token in this backend-only slice
+    would silently lose the receipt's disposition on existing renderers. Keep
+    the cold-spool precedent until that wire/UI change is coordinated.
+
     The receipt says QUEUED, not delivered (``inbox.SPOOL_RECEIPT_LIVE``): the
     row is durable in the owner's spool and its live drain
     (``process._watch_live_inbox``) runs it through ``receive_peer_message`` the
