@@ -30,7 +30,6 @@ from local_operator.definition_transaction import (
     commitment,
     definition_lock,
 )
-from local_operator.types import TeamRegistryRecoveryError
 
 ProfileActionState = Literal["available", "pending", "succeeded", "stale", "failed", "unavailable"]
 
@@ -343,6 +342,10 @@ class ProfileActions:
         from local_operator.definition_transaction import transact
         from local_operator.profile_approval import snapshot, write_image
 
+        # The TUI imports receipt descriptors at startup; reconciliation alone
+        # needs this canonical storage error and its otherwise optional closure.
+        from local_operator.types import TeamRegistryRecoveryError
+
         root = self._roots[action_id]
         state = None
         try:
@@ -454,6 +457,7 @@ class ProfileActions:
             import json
 
             from local_operator.profile_approval import snapshot
+            from local_operator.types import TeamRegistryRecoveryError
 
             try:
                 try:
