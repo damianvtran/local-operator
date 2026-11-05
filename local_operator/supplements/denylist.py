@@ -292,6 +292,65 @@ def is_sensitive(path: str | os.PathLike[str], *, cwd: str | None = None) -> str
     return _rule_for(resolved, roots)
 
 
+#: The two ROOT rules the supplements carve-out may lift. Every other rule (names, suffixes,
+#: components, sequences, dir+file pairs, patterns) still applies inside the carve-out.
+_CARVED_ROOT_RULES: Final = frozenset({RULE_CONFIG_DIR, RULE_SCRATCHPAD})
+
+
+def is_sensitive_for_supplements(
+    path: str | os.PathLike[str],
+    *,
+    cwd: str | None = None,
+    session_scratchpad: str | None = None,
+) -> str:
+    """:func:`is_sensitive`, except under THIS session's own scratchpad. Supplements only.
+
+    WHY A SECOND ENTRY POINT. The system prompt tells every agent to put scratch work --
+    including the deliverables it makes for the operator -- under ``scratchpad://``, which
+    lives at ``<config dir>/sessions/<id>/scratchpad``. :func:`is_sensitive` denies the whole
+    config dir and the scratchpad root absolutely, so every scratchpad deliverable was
+    silently dropped from Highlights (session 7c5c172b0e89: ten mp3 picks, no callouts).
+    The fix cannot change :func:`is_sensitive` itself: memory, variables, confinement, the
+    Files service and the mobile daemon read its meaning, and for them the config dir must
+    stay closed.
+
+    WHAT IS LIFTED, EXACTLY. Only the ``config-dir``/``scratchpad`` ROOT verdicts, and only
+    for a path whose written AND resolved forms are both inside ``session_scratchpad``. A
+    symlink from the scratchpad into ``secrets/`` resolves outside it and is judged by the
+    full rules; another session's scratchpad is not this one, so it stays denied by the
+    config-dir root; and the credential vocabulary (``.env``, ``id_rsa``, ``*token*``...)
+    applies inside the carve-out exactly as anywhere else. ``None``/``""`` means no
+    carve-out: the result is then identical to :func:`is_sensitive`.
+    """
+    pad = (session_scratchpad or "").strip()
+    if not pad:
+        return is_sensitive(path, cwd=cwd)
+    raw = os.fspath(path)
+    expanded = os.path.expanduser(raw)
+    if not os.path.isabs(expanded):
+        if not cwd:
+            # No process-cwd guess here (the cwd-omission census): a relative path with no
+            # caller cwd cannot be placed inside the scratchpad, so it gets no carve-out
+            # and is judged exactly as ``is_sensitive`` judges it.
+            return is_sensitive(path, cwd=cwd)
+        expanded = os.path.join(cwd, expanded)
+    written = os.path.normpath(expanded)
+    try:
+        resolved = os.path.realpath(written)
+    except (OSError, ValueError):
+        resolved = written
+    pad_abs = os.path.abspath(os.path.expanduser(pad))
+    pad_forms = {pad_abs, os.path.realpath(pad_abs)}
+    inside = all(any(_under(form, root) for root in pad_forms) for form in {written, resolved})
+    roots = _live_roots()
+    if inside:
+        roots = [(rule, root) for rule, root in roots if rule not in _CARVED_ROOT_RULES]
+    verdict = _rule_for(written, roots)
+    if verdict or resolved == written:
+        return verdict
+    return _rule_for(resolved, roots)
+
+
 def is_allowed(path: str | os.PathLike[str] | Path, *, cwd: str | None = None) -> bool:
     """Convenience inverse of :func:`is_sensitive`."""
     return not is_sensitive(path, cwd=cwd)

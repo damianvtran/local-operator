@@ -3111,6 +3111,46 @@
     },
     {
       "locale": "vi",
+      "namespace": "relay.highlights",
+      "source_sha256": "8d1002cbbc015243fdf7709ec51b7179d40a508a042e38f7085e7bdaad5cf131",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (relay.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the vi style guide. No findings. Arm other only ('# tệp không được hiển thị'); 'tệp' per vi guide; 'xem trước' matches 37 shipped vi keys; no space before ':'. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.highlights",
+      "source_sha256": "cc19a5f6e319d21b5be6230957644e6182c5e760dbda1df88e2f79fe620c36af",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the vi style guide. No findings. Arm other only ('# tệp không được hiển thị'); 'tệp' per vi guide; 'xem trước' matches 37 shipped vi keys; no space before ':'. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "vi",
       "namespace": "wire.notification_sound",
       "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
       "translator": {

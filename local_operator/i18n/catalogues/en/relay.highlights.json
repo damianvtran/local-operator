@@ -1,0 +1,7 @@
+{
+  "relay.highlights.withheld.line": "{count, plural, one {# file not shown} other {# files not shown}}: {reasons}",
+  "relay.highlights.withheld.reason.outside": "outside allowed locations",
+  "relay.highlights.withheld.reason.sensitive": "sensitive file",
+  "relay.highlights.withheld.reason.missing": "file no longer exists",
+  "relay.highlights.withheld.reason.too_large": "too large to preview"
+}

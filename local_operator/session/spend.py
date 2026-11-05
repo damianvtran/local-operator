@@ -214,6 +214,16 @@ def has_reported_tokens(usage: Any) -> bool:
     while a call with no tokens at all — an aborted or never-answered request —
     is not spend and contributes nothing to either count.
     """
+    # A first-party unknown-tier stamp can only be emitted with a usage
+    # receipt. Even an all-zero receipt is a call whose price coverage is
+    # unresolved; dropping it on rebuild would turn a partial total into free.
+    tier = (
+        usage.get("openai_service_tier")
+        if isinstance(usage, Mapping)
+        else getattr(usage, "openai_service_tier", None)
+    )
+    if tier == "unknown":
+        return True
     for field_name in (
         "input_tokens",
         "output_tokens",
