@@ -853,3 +853,50 @@ def test_nonfinite_extension_json_refuses_before_receipt_writes(tmp_path, litera
     assert result.returncode == 2
     assert {p: p.read_bytes() for p in tmp_path.rglob("*.json")} == before
     assert not (tmp_path / "i18n/audit-history").exists()
+
+
+@pytest.mark.parametrize("event", ["push", "release", "workflow_dispatch"])
+def test_release_shallow_checkout_needs_the_actual_parent(tmp_path, monkeypatch, event):
+    """Release pushes have no PR-base payload or origin/main ref. Fetching the
+    event's parent must enable append-only validation, not just structure."""
+    from scripts.i18n import check, ledger
+
+    parent = git_fixture(tmp_path)
+    git(tmp_path, "checkout", "-qb", "release-next-fixture")
+    git(tmp_path, "branch", "-D", "main")
+    ledger.append(
+        tmp_path,
+        receipt(note="genuine append"),
+        expected_history_sha=ledger.history_sha256([receipt()]),
+        apply=True,
+    )
+    git(tmp_path, "add", "i18n")
+    git(tmp_path, "commit", "-qm", "append before release")
+    head = git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+    shallow = tmp_path / ".git/shallow"
+    shallow.write_text(head + "\n")
+    monkeypatch.setattr(check, "REPO", tmp_path)
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", event)
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+    problems = check.check_audit_history()
+    assert any("readable audit base required" in p for p in problems), problems
+    assert git(tmp_path, "rev-parse", "--verify", "HEAD^", ok=False).returncode != 0
+
+    # The objects already exist locally, so moving the shallow boundary to the
+    # actual parent models checkout's depth=2 fetch without a network or clone.
+    shallow.write_text(parent + "\n")
+    assert git(tmp_path, "rev-parse", "HEAD^").stdout.strip() == parent
+    assert check.check_audit_history("HEAD^") == []
+
+    # A readable base is meaningful: recomputing a valid head-only digest must
+    # NOT make an immutable baseline rewrite pass the recovered gate.
+    snapshot = tmp_path / "i18n/ledger.json"
+    snapshot.write_bytes(snapshot.read_bytes() + b"\n")
+    marker_path = tmp_path / "i18n/audit-history.json"
+    marker = json.loads(marker_path.read_text())
+    marker["baseline"]["i18n/ledger.json"] = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    write_json(marker_path, marker)
+    assert len(ledger.load_entries(tmp_path)) == 2  # head-only structure is valid
+    problems = check.check_audit_history("HEAD^")
+    assert problems and any("baseline" in p or "snapshot" in p for p in problems), problems
