@@ -156,8 +156,38 @@ def builtin(sound_id: str) -> BuiltinSound | None:
 
 
 def sound_ids() -> tuple[str, ...]:
-    """Every value ``notifications.sound.id`` accepts, in picker order."""
-    return tuple(sound.id for sound in builtin_sounds()) + (SYSTEM_SOUND_ID,)
+    """Every value ``notifications.sound.id`` accepts, in picker order.
+
+    Built-ins, then ``system``, then the user's custom sounds oldest first
+    (``custom_sounds``), the order the settings choices and the desktop list use.
+    """
+    from local_operator.notifications import custom_sounds
+
+    return (
+        tuple(sound.id for sound in builtin_sounds())
+        + (SYSTEM_SOUND_ID,)
+        + tuple(sound.id for sound in custom_sounds.list_sounds())
+    )
+
+
+def playable(sound_id: str) -> tuple[str, Path, str] | None:
+    """``(id, file, sha256)`` for a built-in or custom id whose file exists, else ``None``.
+
+    The one lookup both the notification resolver and the desktop's render
+    route use, so "which ids can be played" has one answer. A custom id is
+    looked up in the index and its path built by ``custom_sounds`` (regex plus
+    resolved containment); nothing from a caller is joined to a path here.
+    """
+    entry = builtin(sound_id)
+    if entry is not None:
+        return (entry.id, entry.path, entry.sha256) if entry.path.is_file() else None
+    from local_operator.notifications import custom_sounds
+
+    found = custom_sounds.resolve_file(sound_id)
+    if found is None:
+        return None
+    row, path = found
+    return row.id, path, row.sha256
 
 
 def gain(volume: Any) -> float:
@@ -323,13 +353,17 @@ def resolve(
     if amplitude <= 0.0:
         reason = stored.volume_problem or "notifications.sound.volume is 0"
         return SoundPlan("silent", sound_id, reason=reason)
-    sound = builtin(sound_id)
-    if sound is None:
+    # Custom ids resolve through the user's store (C2). A custom id whose row or
+    # file has gone (hand-deleted, or a config copied from another machine)
+    # takes the same default fallback as a misspelt id, for the same reason.
+    found = playable(sound_id)
+    if found is None:
         logger.debug("unknown notification sound %r; using %s", sound_id, DEFAULT_SOUND_ID)
-        sound = builtin(DEFAULT_SOUND_ID)
-    if sound is None or not sound.path.is_file():
+        found = playable(DEFAULT_SOUND_ID)
+    if found is None:
         return SoundPlan("silent", sound_id, reason="the sound file is missing from this install")
-    return SoundPlan("file", sound.id, amplitude, sound.path, sound.sha256)
+    resolved_id, path, sha = found
+    return SoundPlan("file", resolved_id, amplitude, path, sha)
 
 
 def run_dir() -> Path:

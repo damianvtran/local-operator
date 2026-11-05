@@ -3336,6 +3336,25 @@
       },
       "status": "passed",
       "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. HI1 minor fixed in four strings: made volume explicitly वॉल्यूम rather than the ambiguous general noun आवाज़. Polite imperatives, Hindi full stops and Latin digits retained. Descriptive sound-name adaptations accepted. Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. HI1 minor fixed: content digest clarified as हैश. HI2 minor fixed: character limit uses वर्ण, not letters-only wording. HI3 minor fixed: सहेजी for save and explicit स्टोरेज वॉल्यूम to distinguish storage from audio volume. Polite imperatives retained. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
     }
   ]
 }

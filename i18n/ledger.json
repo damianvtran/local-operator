@@ -3282,6 +3282,25 @@
       "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. ES1 minor fixed: replaced the literal handshake calque with «Saludo de señales». ES2 minor fixed: explicitly retained “default” in the system choice. Tú, neutral Spanish and infinitive actions retained. Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
     },
     {
+      "locale": "es",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. ES1 semantic correction applied: digest is «hash», not «resumen» (textual summary), in both source-input help strings. Neutral tú and infinitive actions preserved. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
       "locale": "fr",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -6558,6 +6577,25 @@
       },
       "status": "passed",
       "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. FR1 minor fixed in four strings: U+202F before prose : ; ?. Vous, typographic apostrophes and French decimal comma retained. Descriptive sound-name adaptations accepted, including «Bulle brève». Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. FR1 minor fixed: typographic apostrophes and U+202F before prose punctuation; «empreinte» correctly denotes content digest. Vous and French Mo retained. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
     },
     {
       "locale": "hi",
@@ -9893,6 +9931,25 @@
       },
       "status": "passed",
       "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. HI1 minor fixed in four strings: made volume explicitly वॉल्यूम rather than the ambiguous general noun आवाज़. Polite imperatives, Hindi full stops and Latin digits retained. Descriptive sound-name adaptations accepted. Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. HI1 minor fixed: content digest clarified as हैश. HI2 minor fixed: character limit uses वर्ण, not letters-only wording. HI3 minor fixed: सहेजी for save and explicit स्टोरेज वॉल्यूम to distinguish storage from audio volume. Polite imperatives retained. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
     },
     {
       "locale": "ru",
@@ -13269,6 +13326,25 @@
       "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. RU1 minor fixed: replaced the literal “handshake of signals” calque with «Обмен сигналами». Impersonal/infinitive voice and notification/system distinctions retained. Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
     },
     {
+      "locale": "ru",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. RU1 minor fixed: content digest clarified as хеш rather than the summary-associated дайджест. Infinitive actions and impersonal errors retained. 50 звуков and 40 символов match actual fixed limits. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
       "locale": "ur",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
@@ -16402,6 +16478,25 @@
       },
       "status": "passed",
       "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. UR1 minor fixed: changed the bare-noun calque to «اشاروں کا تبادلہ». Respectful imperatives, logical storage order, Urdu punctuation and Latin digits retained. No manual bidi controls. TUI RTL/shaping not certified. Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. UR1 minor fixed: content digest clarified as ہیش. UR2 minor fixed: character limit uses کریکٹر, not letters-only حروف. UR3 minor fixed: explicit اسٹوریج والیوم distinguishes storage from loudness. Respectful imperative and Urdu punctuation retained; no manual bidi controls. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
     },
     {
       "locale": "vi",
@@ -19778,6 +19873,25 @@
       "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. VI1 minor fixed in three strings: «dải thông báo» for a UI notification banner instead of the generic slogan/banner word «biểu ngữ». VI2 minor fixed: «Marimba êm» for the softened instrument image. VI3 minor fixed: idiomatic gradual hum «Tiếng ngân tăng dần». All NFC; config token `system` retained. Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
     },
     {
+      "locale": "vi",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. No linguistic changes needed. Mã băm correctly identifies content hash; có sẵn/tùy chỉnh distinguish built-in/custom; NFC and approved orthography retained. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
       "locale": "zh-CN",
       "namespace": "cli.agents_help",
       "source_sha256": "d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3",
@@ -22837,6 +22951,25 @@
       },
       "status": "passed",
       "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. No linguistic changes. Modern terse voice, localized descriptive sound names, full-width prose punctuation and unchanged technical tokens accepted. Current 2026-10-24 hold-lift supersedes the older historical held table; no policy change performed. Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. ZH1 minor fixed: explicit 哈希值 for content digest, removed added 请 absent from source, removed Chinese/Latin boundary spaces per guide. Modern terse voice, full-width punctuation and technical tokens retained. Existing hold-lift policy unchanged. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
     }
   ]
 }

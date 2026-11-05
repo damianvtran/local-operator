@@ -525,7 +525,7 @@
  "wire.settings.notifications_sound_enabled.choice.true.label": "on",
  "wire.settings.notifications_sound_enabled.help": "Plays with each desktop notification. Off keeps banners silent wherever Local Operator controls their sound.",
  "wire.settings.notifications_sound_enabled.label": "Play a sound",
- "wire.settings.notifications_sound_id.help": "A built-in sound, or `system` to keep your terminal's or system's own sound. Hearing two sounds? Run `lop sound doctor`.",
+ "wire.settings.notifications_sound_id.help": "A built-in sound, one of yours (add them with `lop sound add`), or `system` to keep your terminal's or system's own sound. Hearing two sounds? Run `lop sound doctor`.",
  "wire.settings.notifications_sound_id.label": "Sound",
  "wire.settings.notifications_sound_volume.help": "0–100; default 70. 0 is silent. Sets this sound only; your system volume still applies.",
  "wire.settings.notifications_sound_volume.label": "Volume",
