@@ -649,7 +649,7 @@ def test_cached_reject_replays_without_rebill(tmp_path) -> None:
 
 def test_missing_v3_table_refuses_instead_of_resetting_spend(tmp_path) -> None:
     store, owner = _setup(tmp_path)
-    for _ in range(40):
+    for _ in range(20):
         store.reserve_screening_attempt(owner, message_id="bmsg_1", fingerprint="rev-1|env")
     conn = sqlite3.connect(state_db_path(tmp_path))
     conn.execute("DROP TABLE screening_attempts")
@@ -823,7 +823,7 @@ def test_budget_boundaries_aggregation_and_kinds(tmp_path) -> None:
         store.reserve_screening_attempt(owner, message_id="m", fingerprint="f")
     with pytest.raises(StoreRefused) as refusal:
         store.reserve_screening_attempt(owner, message_id="m", fingerprint="f")
-    assert refusal.value.code == "budget_exhausted"
+    assert refusal.value.code == "sender_exhausted"
     # The HTTP bucket is separate, with the same unknown-provenance bound.
     for _ in range(20):
         store.reserve_http_attempt(owner, message_id="m")
@@ -834,7 +834,7 @@ def test_budget_boundaries_aggregation_and_kinds(tmp_path) -> None:
     store.commit_enrollment(other, OwnerReceipt("bridge_consent_v1", "ref-2"))
     with pytest.raises(StoreRefused) as refusal:
         store.reserve_http_attempt(other, message_id="m")
-    assert refusal.value.code == "budget_exhausted"
+    assert refusal.value.code == "sender_exhausted"
     # A different account is separate.
     third = _owner(account="acc_other", endpoint="bep_9")
     store.commit_enrollment(third, OwnerReceipt("bridge_consent_v1", "ref-3"))

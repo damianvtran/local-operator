@@ -1751,12 +1751,14 @@ async def _screen_spend(
             return ScreenResult("hold", hold_code=answered)
 
         failure_class = screening_failure_class(failure)
-        retry_at = (None if _is_input_refusal(failure) else
-                    _record_failure(store, owner, failure_class=failure_class))
+        retry_at = (
+            None
+            if _is_input_refusal(failure)
+            else _record_failure(store, owner, failure_class=failure_class)
+        )
         # A 402 is its own owner-visible reason (an empty balance only a
         # top-up clears), still a route failure for the breaker.
         from local_operator.team_bridge.model_boundary import provider_hold_code
-
 
         route_code = provider_hold_code(failure)
         _commit_hold(

@@ -301,6 +301,20 @@ def _one_line(value: Any, *, limit: int = 200) -> str:
     return " ".join(value.split())[:limit]
 
 
+def _allocation_sender(display: Mapping[str, Any]) -> dict[str, str]:
+    """Use only this gated body read, identically for single and batch paths."""
+
+    account = display.get("sender_account_id", "")
+    kind = display.get("sender_kind", "")
+    if not isinstance(account, str) or len(account) > 256 or kind not in ("", "human", "agent"):
+        raise ValueError("invalid classification sender")
+    return {
+        "account_id": account if kind in ("human", "agent") else "",
+        "kind": kind if account else "",
+        "display_label": display.get("sender_label", ""),
+    }
+
+
 def _screening_item(
     *,
     owner: Any,
@@ -1150,17 +1164,10 @@ async def handle_conversation_available(
         # Only THIS gated classification read supplies allocation identity.
         # Old servers omit it: keep unknown provenance (conservative budget),
         # never recover it from a durable ref, label or a human history route.
-        account = display.get("sender_account_id", "")
-        kind = display.get("sender_kind", "")
-        if not isinstance(account, str) or len(account) > 256:
+        try:
+            sender = _allocation_sender(display)
+        except ValueError:
             return await held("sender_malformed")
-        if kind not in ("", "human", "agent"):
-            return await held("sender_malformed")
-        sender = {
-            "account_id": account if kind in ("human", "agent") else "",
-            "kind": kind if account else "",
-            "display_label": display.get("sender_label", ""),
-        }
         if fetched.attachments is None:
             # Descriptors the hub sent but this build cannot validate: never
             # screen a guessed subset of the images; keep it retryable.

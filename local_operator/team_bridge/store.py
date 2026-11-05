@@ -4829,7 +4829,7 @@ class Store:
                 for message_id, fingerprint, sender in entries:
                     sender_kind = ""
                     if isinstance(fingerprint, str) and fingerprint.startswith(_PROOF_PREFIX):
-                        proof = json.loads(fingerprint[len(_PROOF_PREFIX):])
+                        proof = json.loads(fingerprint[len(_PROOF_PREFIX) :])
                         sender_kind = proof.get("sender_kind", "")
                     attempt_id = str(uuid.uuid4())
                     conn.execute(
@@ -4861,9 +4861,13 @@ class Store:
     def _proof_sender(proof: Mapping[str, Any] | None) -> str:
         account = (proof or {}).get("sender_account_id", "")
         kind = (proof or {}).get("sender_kind", "")
-        if (not isinstance(account, str) or len(account) > 256
-                or not isinstance(kind, str) or kind not in ("", "human", "agent")
-                or bool(account) != bool(kind)):
+        if (
+            not isinstance(account, str)
+            or len(account) > 256
+            or not isinstance(kind, str)
+            or kind not in ("", "human", "agent")
+            or bool(account) != bool(kind)
+        ):
             raise StoreRefused("proof_corrupt", "sender provenance is incomplete")
         return account
 
@@ -5950,7 +5954,8 @@ class Store:
                 raise StoreRefused("policy_stale", "published policy moved after job mint")
             self._ensure_attempt_allocation_columns(conn)
             logical = conn.execute(
-                "SELECT fingerprint, message_id, sender_account_id, sender_kind, priority, batch_id "
+                "SELECT fingerprint, message_id, sender_account_id, sender_kind, "
+                "priority, batch_id "
                 "FROM screening_attempts "
                 "WHERE attempt_id = ? AND owner_key = ? AND kind = 'logical'",
                 (job.attempt_id, _owner_key(owner)),
@@ -6002,27 +6007,55 @@ class Store:
                     digest, proof = _decode_bound_proof(row["fingerprint"])
                     if digest != _canonical_proof_digest(proof, row["attempt_id"], turn):
                         raise StoreRefused("attempt_mismatch", "batch proof changed")
-                    if any(proof.get(field) != registered.get(field) for field in (
-                        "owner", "template", "version", "revision", "epoch", "model",
-                        "provider", "approved",
-                    )):
+                    if any(
+                        proof.get(field) != registered.get(field)
+                        for field in (
+                            "owner",
+                            "template",
+                            "version",
+                            "revision",
+                            "epoch",
+                            "model",
+                            "provider",
+                            "approved",
+                        )
+                    ):
                         raise StoreRefused("attempt_mismatch", "batch authority changed")
-                    if any((row[field] or "") != proof.get(field, "")
-                           for field in ("sender_account_id", "sender_kind")):
+                    if any(
+                        (row[field] or "") != proof.get(field, "")
+                        for field in ("sender_account_id", "sender_kind")
+                    ):
                         raise StoreRefused("attempt_mismatch", "batch sender attribution changed")
             tier = max(int(row["priority"] if row["priority"] is not None else 3) for row in rows)
-            self._check_budget(conn, scope, "http", now, tier=tier,
-                               senders=[row["sender_account_id"] or "" for row in rows])
+            self._check_budget(
+                conn,
+                scope,
+                "http",
+                now,
+                tier=tier,
+                senders=[row["sender_account_id"] or "" for row in rows],
+            )
             # Multiple attribution rows, ONE actual HTTP unit, including retries.
             batch_id = attempt_id if len(rows) > 1 else None
             for index, row in enumerate(rows):
                 conn.execute(
                     "INSERT INTO screening_attempts "
                     "(attempt_id, kind, account_scope, owner_key, message_id, fingerprint, at, "
-                    "batch_id, priority, sender_account_id, sender_kind) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    (attempt_id if index == 0 else str(uuid.uuid4()), "http", scope,
-                     _owner_key(owner), row["message_id"], job.digest, now, batch_id, tier,
-                     row["sender_account_id"], row["sender_kind"]),
+                    "batch_id, priority, sender_account_id, sender_kind) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        attempt_id if index == 0 else str(uuid.uuid4()),
+                        "http",
+                        scope,
+                        _owner_key(owner),
+                        row["message_id"],
+                        job.digest,
+                        now,
+                        batch_id,
+                        tier,
+                        row["sender_account_id"],
+                        row["sender_kind"],
+                    ),
                 )
             return attempt_id
 

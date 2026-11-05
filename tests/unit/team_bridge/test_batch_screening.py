@@ -110,6 +110,41 @@ def _units(tmp_path: Path) -> int:
         conn.close()
 
 
+def _reserve_batch(store, owner, entries, *, tier):
+    """Populate tier/unit fixtures with VERIFIED participants, not unknown spend.
+
+    Round-robin background senders keep these existing aggregate-cap tests
+    independent of the twenty-per-sender fence. Explicit sender tests retain
+    their chosen participant. Unknown migration coverage uses the native API.
+    """
+    index = getattr(store, "_fixture_sender_index", 0)
+    store._fixture_sender_index = index + 1
+    entries = [
+        dict(
+            entry,
+            input_proof={
+                "sender_account_id": entry.get("sender_account_id", f"fixture-{index % 3}"),
+                "sender_kind": "agent",
+            },
+        )
+        for entry in entries
+    ]
+    return store.reserve_screening_batch(owner, entries, tier=tier)
+
+
+def _reserve_attempt(store, owner, **kwargs):
+    index = getattr(store, "_fixture_sender_index", 0)
+    store._fixture_sender_index = index + 1
+    return store.reserve_screening_attempt(
+        owner,
+        input_proof={
+            "sender_account_id": f"fixture-{index % 3}",
+            "sender_kind": "agent",
+        },
+        **kwargs,
+    )
+
+
 # --------------------------- render + parse laws ---------------------------
 
 
@@ -342,15 +377,16 @@ def test_cached_messages_drop_out_and_are_not_charged(tmp_path: Path) -> None:
 def test_budget_counts_one_unit_per_call_not_per_message(tmp_path: Path) -> None:
     store, owner = _setup(tmp_path)
     for _ in range(Store.SCREENING_BUDGET_PER_HOUR):
-        store.reserve_screening_batch(
+        _reserve_batch(
+            store,
             owner,
             [{"message_id": f"bmsg_{i}", "fingerprint": "f"} for i in range(20)],
             tier=Store.SCREENING_TIER_HUMAN_ADDRESSED,
         )
     # 40 calls x 20 messages = 800 rows, 40 units: the 41st call is refused.
     with pytest.raises(StoreRefused) as refused:
-        store.reserve_screening_batch(
-            owner, [{"message_id": "bmsg_x"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
+        _reserve_batch(
+            store, owner, [{"message_id": "bmsg_x"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
         )
     assert refused.value.code == "budget_exhausted"
     assert _units(tmp_path) == Store.SCREENING_BUDGET_PER_HOUR
@@ -359,18 +395,18 @@ def test_budget_counts_one_unit_per_call_not_per_message(tmp_path: Path) -> None
 def test_ambient_chatter_leaves_the_reserve_for_humans_and_addressed(tmp_path: Path) -> None:
     store, owner = _setup(tmp_path)
     for i in range(Store.SCREENING_AMBIENT_BUDGET_PER_HOUR):
-        store.reserve_screening_batch(owner, [{"message_id": f"bmsg_{i}"}], tier=0)
+        _reserve_batch(store, owner, [{"message_id": f"bmsg_{i}"}], tier=0)
     with pytest.raises(StoreRefused) as refused:
-        store.reserve_screening_batch(owner, [{"message_id": "bmsg_amb"}], tier=0)
+        _reserve_batch(store, owner, [{"message_id": "bmsg_amb"}], tier=0)
     assert refused.value.code == "ambient_exhausted"
     reserve = Store.SCREENING_BUDGET_PER_HOUR - Store.SCREENING_AMBIENT_BUDGET_PER_HOUR
     for i in range(reserve):
-        store.reserve_screening_batch(
-            owner, [{"message_id": f"bmsg_dm{i}"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
+        _reserve_batch(
+            store, owner, [{"message_id": f"bmsg_dm{i}"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
         )
     with pytest.raises(StoreRefused) as full:
-        store.reserve_screening_batch(
-            owner, [{"message_id": "bmsg_dm_x"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
+        _reserve_batch(
+            store, owner, [{"message_id": "bmsg_dm_x"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
         )
     assert full.value.code == "budget_exhausted"
 
@@ -382,17 +418,17 @@ def test_a_persons_room_lines_cannot_spend_the_addressed_only_units(tmp_path: Pa
 
     store, owner = _setup(tmp_path)
     for i in range(Store.SCREENING_AMBIENT_BUDGET_PER_HOUR):
-        store.reserve_screening_batch(owner, [{"message_id": f"bmsg_a{i}"}], tier=0)
+        _reserve_batch(store, owner, [{"message_id": f"bmsg_a{i}"}], tier=0)
     room = Store.SCREENING_UNADDRESSED_BUDGET_PER_HOUR - Store.SCREENING_AMBIENT_BUDGET_PER_HOUR
     for i in range(room):
-        store.reserve_screening_batch(owner, [{"message_id": f"bmsg_h{i}"}], tier=1)
+        _reserve_batch(store, owner, [{"message_id": f"bmsg_h{i}"}], tier=1)
     with pytest.raises(StoreRefused) as refused:
-        store.reserve_screening_batch(owner, [{"message_id": "bmsg_h_more"}], tier=1)
+        _reserve_batch(store, owner, [{"message_id": "bmsg_h_more"}], tier=1)
     assert refused.value.code == "unaddressed_exhausted"
     addressed = Store.SCREENING_BUDGET_PER_HOUR - Store.SCREENING_UNADDRESSED_BUDGET_PER_HOUR
     for i in range(addressed):
-        store.reserve_screening_batch(
-            owner, [{"message_id": f"bmsg_dm{i}"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
+        _reserve_batch(
+            store, owner, [{"message_id": f"bmsg_dm{i}"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
         )
 
 
@@ -404,15 +440,18 @@ def test_an_agent_mentioning_the_recipient_cannot_spend_the_last_five(tmp_path: 
     accepted = 0
     with pytest.raises(StoreRefused) as refused:
         for i in range(Store.SCREENING_BUDGET_PER_HOUR):
-            store.reserve_screening_batch(
-                owner, [{"message_id": f"bmsg_at{i}"}], tier=Store.SCREENING_TIER_ADDRESSED
+            _reserve_batch(
+                store, owner, [{"message_id": f"bmsg_at{i}"}], tier=Store.SCREENING_TIER_ADDRESSED
             )
             accepted += 1
     assert accepted == Store.SCREENING_UNADDRESSED_BUDGET_PER_HOUR
     assert refused.value.code == "unaddressed_exhausted"
     for i in range(Store.SCREENING_BUDGET_PER_HOUR - Store.SCREENING_UNADDRESSED_BUDGET_PER_HOUR):
-        store.reserve_screening_batch(
-            owner, [{"message_id": f"bmsg_owner{i}"}], tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
+        _reserve_batch(
+            store,
+            owner,
+            [{"message_id": f"bmsg_owner{i}"}],
+            tier=Store.SCREENING_TIER_HUMAN_ADDRESSED,
         )
 
 
@@ -428,25 +467,26 @@ def test_an_unknown_tier_hint_never_reaches_the_persons_reserve() -> None:
 def test_one_verified_sender_cannot_spend_more_than_its_share(tmp_path: Path) -> None:
     store, owner = _setup(tmp_path)
     for i in range(Store.SCREENING_SENDER_BUDGET_PER_HOUR):
-        store.reserve_screening_batch(
-            owner, [{"message_id": f"bmsg_{i}", "sender_account_id": "acc_loud"}], tier=3
+        _reserve_batch(
+            store, owner, [{"message_id": f"bmsg_{i}", "sender_account_id": "acc_loud"}], tier=3
         )
     with pytest.raises(StoreRefused) as refused:
-        store.reserve_screening_batch(
-            owner, [{"message_id": "bmsg_more", "sender_account_id": "acc_loud"}], tier=3
+        _reserve_batch(
+            store, owner, [{"message_id": "bmsg_more", "sender_account_id": "acc_loud"}], tier=3
         )
     assert refused.value.code == "sender_exhausted"
-    # Another sender, and unverified provenance, still screen.
-    store.reserve_screening_batch(
-        owner, [{"message_id": "bmsg_q", "sender_account_id": "acc_quiet"}], tier=3
+    # Another verified sender still screens; losing provenance cannot reset spend.
+    _reserve_batch(
+        store, owner, [{"message_id": "bmsg_q", "sender_account_id": "acc_quiet"}], tier=3
     )
-    store.reserve_screening_batch(owner, [{"message_id": "bmsg_u"}], tier=3)
+    with pytest.raises(StoreRefused, match="sender hourly"):
+        store.reserve_screening_batch(owner, [{"message_id": "bmsg_u"}], tier=3)
 
 
 def test_exhaustion_holds_with_a_refill_retry_and_notifies_once(tmp_path: Path) -> None:
     store, owner = _setup(tmp_path)
     for i in range(Store.SCREENING_AMBIENT_BUDGET_PER_HOUR):
-        store.reserve_screening_batch(owner, [{"message_id": f"bmsg_s{i}"}], tier=0)
+        _reserve_batch(store, owner, [{"message_id": f"bmsg_s{i}"}], tier=0)
     ambient = [dict(item, allocation={"tier": 0}) for item in _items("a", "b")]
     runner = BatchRunner(lambda _p: _triples(("m1", "deliver"), ("m2", "deliver")))
     results = _batch(owner, tmp_path, runner, ambient)
@@ -464,10 +504,10 @@ def test_exhaustion_holds_with_a_refill_retry_and_notifies_once(tmp_path: Path) 
     assert store.claim_budget_notification(owner) is None
     # A successful reservation does NOT end it while budget holds remain (m2):
     # a flood re-opening at each refill is still one episode, one notice.
-    store.reserve_screening_batch(owner, [{"message_id": "bmsg_dm"}], tier=3)
+    _reserve_batch(store, owner, [{"message_id": "bmsg_dm"}], tier=3)
     assert store.close_budget_episode_if_drained(owner) is False
     with pytest.raises(StoreRefused):
-        store.reserve_screening_batch(owner, [{"message_id": "bmsg_more"}], tier=0)
+        _reserve_batch(store, owner, [{"message_id": "bmsg_more"}], tier=0)
     assert store.claim_budget_notification(owner) is None
     # Drained backlog: the episode ends; the next exhaustion is a NEW episode
     # with its own start (the notice key), so it arrives unread (Q-2).
@@ -476,7 +516,7 @@ def test_exhaustion_holds_with_a_refill_retry_and_notifies_once(tmp_path: Path) 
     assert store.close_budget_episode_if_drained(owner) is True
     time.sleep(0.01)
     with pytest.raises(StoreRefused):
-        store.reserve_screening_batch(owner, [{"message_id": "bmsg_again"}], tier=0)
+        _reserve_batch(store, owner, [{"message_id": "bmsg_again"}], tier=0)
     second = store.claim_budget_notification(owner)
     assert second is not None and second > first
 
@@ -484,7 +524,7 @@ def test_exhaustion_holds_with_a_refill_retry_and_notifies_once(tmp_path: Path) 
 def test_held_message_is_screened_once_the_budget_refills(tmp_path: Path) -> None:
     store, owner = _setup(tmp_path)
     for i in range(Store.SCREENING_BUDGET_PER_HOUR):
-        store.reserve_screening_batch(owner, [{"message_id": f"bmsg_s{i}"}], tier=3)
+        _reserve_batch(store, owner, [{"message_id": f"bmsg_s{i}"}], tier=3)
     runner = BatchRunner(lambda _p: _triples(("m1", "deliver"), ("m2", "deliver")))
     held = _batch(owner, tmp_path, runner, _items("a", "b"))
     assert {r.hold_code for r in held} == {"budget_exhausted"} and runner.calls == []
@@ -506,9 +546,7 @@ def test_pre_upgrade_ledger_rows_still_count(tmp_path: Path) -> None:
 
     store, owner = _setup(tmp_path)
     for _ in range(Store.SCREENING_BUDGET_PER_HOUR):
-        store.reserve_screening_attempt(
-            owner, message_id=None, tier=Store.SCREENING_TIER_HUMAN_ADDRESSED
-        )
+        _reserve_attempt(store, owner, message_id=None, tier=Store.SCREENING_TIER_HUMAN_ADDRESSED)
     conn = sqlite3.connect(state_db_path(tmp_path))
     try:
         conn.execute("UPDATE screening_attempts SET batch_id = NULL, priority = NULL")
@@ -516,7 +554,7 @@ def test_pre_upgrade_ledger_rows_still_count(tmp_path: Path) -> None:
     finally:
         conn.close()
     with pytest.raises(StoreRefused) as refused:
-        store.reserve_screening_batch(owner, [{"message_id": "bmsg_1"}], tier=3)
+        _reserve_batch(store, owner, [{"message_id": "bmsg_1"}], tier=3)
     assert refused.value.code == "budget_exhausted"
 
 
@@ -805,7 +843,7 @@ def _edge_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vendor) -> Any:
     start = clock.now
     for i in range(Store.SCREENING_AMBIENT_BUDGET_PER_HOUR):
         clock.now = start + 60.0 * i
-        store.reserve_screening_batch(owner, [{"message_id": f"bmsg_fill{i}"}], tier=0)
+        _reserve_batch(store, owner, [{"message_id": f"bmsg_fill{i}"}], tier=0)
     clock.now = start + 60.0 * Store.SCREENING_AMBIENT_BUDGET_PER_HOUR
     return SimpleNamespace(
         rig=rig,
@@ -929,9 +967,9 @@ def test_the_episode_ends_only_when_every_endpoint_of_the_account_drained(
     second = _owner(tenant="tnt_2", endpoint="bep_2")
     store.commit_enrollment(second, OwnerReceipt("bridge_consent_v1", "ref-2"))
     for i in range(Store.SCREENING_AMBIENT_BUDGET_PER_HOUR):
-        store.reserve_screening_batch(first, [{"message_id": f"bmsg_f{i}"}], tier=0)
+        _reserve_batch(store, first, [{"message_id": f"bmsg_f{i}"}], tier=0)
     with pytest.raises(StoreRefused):
-        store.reserve_screening_batch(second, [{"message_id": "bmsg_x"}], tier=0)
+        _reserve_batch(store, second, [{"message_id": "bmsg_x"}], tier=0)
     assert store.claim_budget_notification(first) is not None
     store.persist_hold(first, "bmsg_a", "budget_exhausted", retry_at=0.0, tier=0)
     store.persist_hold(second, "bmsg_b", "budget_exhausted", retry_at=0.0, tier=0)

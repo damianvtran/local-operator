@@ -936,6 +936,9 @@ class Wire:
                 "Ada" if msg.sender_endpoint is None else f"{msg.sender_endpoint}-agent"
             ),
             "sender_kind": msg.sender_kind,
+            "sender_account_id": (
+                "acc_human" if msg.sender_endpoint is None else "acc_" + msg.sender_endpoint
+            ),
             # The live row's own routing facts (agent-server #255). Absent for an
             # older hub; the card falls back to the pre-#255 derivation then.
             "conversation_kind": msg.kind,
