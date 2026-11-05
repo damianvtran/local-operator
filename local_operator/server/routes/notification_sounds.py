@@ -45,7 +45,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict
 
 from local_operator.i18n.keys import wire_errors_desktop as _wd
-from local_operator.notifications import custom_sounds
+from local_operator.notifications import catalog_view, custom_sounds
 from local_operator.notifications import sound as _sound
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
@@ -86,35 +86,23 @@ def _row(row: custom_sounds.CustomSound) -> dict[str, Any]:
 
 
 def _listing() -> dict[str, Any]:
-    from local_operator.settings_io import BY_KEY
-
-    labels = {
-        str(choice.value): str(choice.description)
-        for choice in BY_KEY["notifications.sound.id"].resolved_choices
-    }
+    # Rows come from the builder the phone's list shares (`catalog_view`), so
+    # the desktop and the phone can never disagree about which sounds exist,
+    # in which order, under which label; this route adds only its own columns.
     sounds: list[dict[str, Any]] = [
-        {
-            "id": entry.id,
-            # Localized through the registry's keyed choices (follows `language`).
-            "label": labels.get(entry.id, entry.id),
-            "builtin": True,
-            "duration_s": entry.duration_s,
-            "is_default": entry.id == _sound.DEFAULT_SOUND_ID,
-        }
-        for entry in _sound.builtin_sounds()
+        (
+            _row(entry.custom)
+            if entry.custom is not None
+            else {
+                "id": entry.id,
+                "label": entry.label,
+                "builtin": True,
+                "duration_s": entry.duration_s,
+                "is_default": entry.id == _sound.DEFAULT_SOUND_ID,
+            }
+        )
+        for entry in catalog_view.entries()
     ]
-    # `system` is a row too (the settings spec lists 11 built-in rows): it has
-    # no audio, which `duration_s: null` says, and the audio route 404s it.
-    sounds.append(
-        {
-            "id": _sound.SYSTEM_SOUND_ID,
-            "label": labels.get(_sound.SYSTEM_SOUND_ID, _sound.SYSTEM_SOUND_ID),
-            "builtin": True,
-            "duration_s": None,
-            "is_default": False,
-        }
-    )
-    sounds.extend(_row(row) for row in custom_sounds.list_sounds())
     # The same reading `resolve` uses (C1's `configured`), so the list reports
     # exactly what the next notification will obey.
     stored = _sound.configured()
