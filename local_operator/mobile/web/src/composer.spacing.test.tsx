@@ -35,18 +35,30 @@ describe("the composer's spacing constants", () => {
 		expect(shell?.className).toContain("pb-0.5");
 	});
 
-	it("puts every control in the row 2 px apart, and groups the right-hand pair", () => {
+	it("puts the row's controls 2 px apart and the two action slots 8 px apart", () => {
 		const { container } = render(<ComposerFrame />);
 		const row = container.querySelector(".lo-composer > div");
 		expect(row?.className).toContain("gap-x-0.5");
 		const cluster = row?.lastElementChild;
-		expect(cluster?.className).toContain("gap-0.5");
-		// The cluster holds the submit disc; the real composer puts stop beside it
-		// in the same cluster, which is where the 2 px between them comes from.
-		expect(cluster?.children.length).toBe(1);
+		/* 8 px between the slots, constant in every state (the cluster is [mic][primary]
+		   and a reflex tap on one must not be able to reach the other). */
+		expect(cluster?.className).toContain("gap-2");
+		expect(cluster?.className).not.toContain("gap-0.5");
 		// `ms-auto` pins the pair to the inline end now that the meta facts sit
 		// on their own line below it.
 		expect(cluster?.className).toContain("ms-auto");
+	});
+
+	it("reserves the same cluster the live composer settles into (no shift on load)", () => {
+		/* The frame holds the primary disc always, and the mic's 44 px box exactly
+		   when the live composer would hold or draw one. Under happy-dom there is no
+		   MediaRecorder, so the browser cannot record and the mic slot collapses in
+		   BOTH the frame and the composer; the capability-known cases are pinned
+		   against `micSlot` in lib/composer-slots.test.ts. */
+		const { container } = render(<ComposerFrame />);
+		const cluster = container.querySelector(".lo-composer > div")?.lastElementChild;
+		expect(cluster?.children.length).toBe(1);
+		expect(cluster?.querySelector("[data-mic-reserve]")).toBeNull();
 	});
 
 	it("gives the meta facts their own full-width line, in the first frame too", () => {

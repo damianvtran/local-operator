@@ -239,6 +239,16 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.chrome.spend.title": "Gasto y contexto",
     },
   },
+  "relay.composer": {
+    "es": {
+      "relay.composer.action.connecting": "Conectando",
+      "relay.composer.action.send": "enviar",
+      "relay.composer.action.steer": "guiar",
+      "relay.composer.action.stop": "detener",
+      "relay.composer.action.stop_agent": "detener al agente",
+      "relay.composer.action.stopping": "deteniendo",
+    },
+  },
   "relay.health": {
     "es": {
       "relay.health.dropped_detail": "Tu m\u00e1quina no logra comunicarse con esta sesi\u00f3n ahora mismo y sigue intent\u00e1ndolo. Hasta que lo consiga, cualquier env\u00edo falla de inmediato y lo que escribiste se queda en el campo de texto.",
