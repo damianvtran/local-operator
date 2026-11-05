@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "es",
   "namespace": "wire.settings",
-  "history_sha256": "e4c2674fb1311be679839dba2ce8c18df31ea99925e671babd790d7b961219be",
+  "history_sha256": "e38138fc63b0b3f5a3890140b463d80abb8d6e2b98806746c2c3968d2a652a69",
   "entries": [
     {
       "locale": "es",
@@ -69,6 +69,26 @@
           "wire.settings.guardrails_rules_dir.help": "wire.guardrails.rules_dir.help"
         }
       }
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings",
+      "source_sha256": "55e4545f2bbd8a698b792d04b1f9f4285898247028316a3611e948304bacd9d5",
+      "translator": {
+        "agent": "translator specialist (local-operator subagent 467cd3fc70cc)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol; chain openai/gpt-6.1-sol -> anthropic/claude-opus-5-5 -> kimi/k3.1-pro -> radient/auto)",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator subagent i18n-auditor)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol; chain openai/gpt-6.1-sol -> anthropic/claude-opus-5-5 -> kimi/k3.1-pro -> radient/auto)",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 6,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Read all 8 team_bridge_screening_ values against en, the sidecar and the es guide, plus 3,709 shipped es values for precedents: mechanics clean (8 additions only, sorted, no placeholders/digits, labels 25/25/27/29 of 29), all four copy rules carried (ceiling-as-maximum, sliding hour, no numeric default, carve-out-not-addition), no blocker or major. Accepted MINORs: shipped 'móvil' unused for the rolling hour, and 'tope' for ceiling where shipped wire.settings says 'límite máximo' (kept because every label family that fits the 29-cell cap needs it); recommend a style-guide record rather than a copy change."
     }
   ]
 }

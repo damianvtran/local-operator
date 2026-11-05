@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.settings",
-  "history_sha256": "3bf52be804d9e69eba34b8cfcf04c959686d5612d1983d2b37e5304be6c8e5a6",
+  "history_sha256": "37fcc097e471a567218b700ccaaf7f703cce743677a99891c83b77314ad0e43e",
   "entries": [
     {
       "locale": "zh-CN",
@@ -69,6 +69,26 @@
           "wire.settings.guardrails_rules_dir.help": "wire.guardrails.rules_dir.help"
         }
       }
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "55e4545f2bbd8a698b792d04b1f9f4285898247028316a3611e948304bacd9d5",
+      "translator": {
+        "agent": "translator specialist (local-operator subagent 01493b0688b6)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol; chain openai/gpt-6.1-sol -> anthropic/claude-opus-5-5 -> kimi/k3.1-pro -> radient/auto)",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator subagent i18n-auditor)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol; chain openai/gpt-6.1-sol -> anthropic/claude-opus-5-5 -> kimi/k3.1-pro -> radient/auto)",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 7,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Audited the 8 team_bridge_screening_ keys against the English source and shipped zh-CN corpus: 筛查/上限/发送者/真人/滚动 all match shipped terms, formatting is byte-identical to canonical sorted JSON, labels max 18/29 cells, no digits or placeholders; two MINOR consistency drifts accepted (account rendered 账户 here but 账号 in the same feature's CLI copy; 'addressing your agent' phrased 直接联系 where cli.team_bridge already ships 发给你的智能体) and five optional NITs, none gating this delta."
     }
   ]
 }

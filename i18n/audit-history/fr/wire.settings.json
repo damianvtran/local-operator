@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "fr",
   "namespace": "wire.settings",
-  "history_sha256": "1df8daf67c78ec04240510dacd7f03b6508a0ba72252751e84a4576373481d47",
+  "history_sha256": "74a9d4d4ce99728a7ea3aa27aef782d921a224e144e52f9d110115acda354331",
   "entries": [
     {
       "locale": "fr",
@@ -69,6 +69,26 @@
           "wire.settings.guardrails_rules_dir.help": "wire.guardrails.rules_dir.help"
         }
       }
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings",
+      "source_sha256": "55e4545f2bbd8a698b792d04b1f9f4285898247028316a3611e948304bacd9d5",
+      "translator": {
+        "agent": "translator specialist (local-operator subagent 61b05d1d1988)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol; chain openai/gpt-6.1-sol -> anthropic/claude-opus-5-5 -> kimi/k3.1-pro -> radient/auto)",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator subagent i18n-auditor)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol; chain openai/gpt-6.1-sol -> anthropic/claude-opus-5-5 -> kimi/k3.1-pro -> radient/auto)",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "All 8 fr wire.settings screening keys re-read in bytes after the applied fix; keys sorted, 2-space, UTF-8 unescaped, trailing newline, additions-only 8/0, no digits/ICU/bidi, U+202F/U+2019 correct, and filtrage/plafond/expéditeur/compte/glissant all match shipped fr. Verdict passed with minors, 0 blocker/major. resolved: sender label shortened from 30 to 28 cells on audit recommendation - 'Plafond d’expéditeur / heure' verified byte-exact with U+2019 and cell_len 28 vs the 29 maxCells; remaining MINOR accepted as-is (bare plural in 'Plafond non adressés / heure', 28 cells, because every grammatical repair is over budget or changes the meaning) and one NIT (bavardage/salon unrecorded first-use coinages, judged the best available terms and defined in the help)."
     }
   ]
 }

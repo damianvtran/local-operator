@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "vi",
   "namespace": "wire.settings",
-  "history_sha256": "a3f7c5c0dd88b115eb92e2e26265fd1771e4488a906915d242e93555a1ad43a1",
+  "history_sha256": "2ebbd0cf00284a2f86fea8a89de05d5df5e718c66f3cbbb17d6180dddf59c23a",
   "entries": [
     {
       "locale": "vi",
@@ -69,6 +69,26 @@
           "wire.settings.guardrails_rules_dir.help": "wire.guardrails.rules_dir.help"
         }
       }
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings",
+      "source_sha256": "55e4545f2bbd8a698b792d04b1f9f4285898247028316a3611e948304bacd9d5",
+      "translator": {
+        "agent": "translator specialist (local-operator subagent 0154d7878b84)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol; chain openai/gpt-6.1-sol -> anthropic/claude-opus-5-5 -> kimi/k3.1-pro -> radient/auto)",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator subagent i18n-auditor)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol; chain openai/gpt-6.1-sol -> anthropic/claude-opus-5-5 -> kimi/k3.1-pro -> radient/auto)",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 3,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Read all 8 screening-budget values (4 labels, 4 helps) against the en authority and context sidecars, plus corpus greps for six terms; mechanics clean (keys sorted, additions-only 8/0, NFC, trailing newline, no digits/placeholders/bidi) and all four labels inside the 29-cell budget (21/20/27/28 by rich.cells.cell_len). Confirmed ceiling->'trần' and budget->'hạn mức' is the corpus-consistent split (compaction 'Hard ceiling' -> 'Trần cứng'), so the notification's existing 'hạn mức' is not drift; the 3 NIT-severity items accepted as-is (DM/@mention nuance in 'nhắn trực tiếp', first-use 'phòng chung', and the budget-forced ellipsis in the unaddressed label)."
     }
   ]
 }
