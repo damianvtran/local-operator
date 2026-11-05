@@ -168,6 +168,7 @@ from local_operator.harness.types import (
 
 from . import agent_attachments, agent_files, reply_guard, secret_guard
 from .client import ATTACHMENT_MAX_COUNT, TeamBridgeClient
+from .inline_data import bound_inline_data_payload, bound_inline_data_uris
 from .outbox import Outbox, send_from_outbox
 from .recipient_resolution import (
     ResolutionAuditUnavailable,
@@ -270,6 +271,15 @@ HISTORY_IMAGES_MAX = 8
 #: the outcome becomes ``ToolResult.details`` — details persist with the
 #: transcript row, and image bytes must exist only in the content blocks.
 _IMAGES_KEY = "_images"
+
+#: Private outcome key for the MODEL-FACING page: the same history result with
+#: every inline ``data:`` payload replaced by a withholding placeholder. Same
+#: rule as ``_IMAGES_KEY``: ``details`` keeps `outcome["content"]` (the raw page
+#: a human's renderer reads, unchanged), and this bounded copy is what the model
+#: sees. It exists because the bounding must happen while the body is still a
+#: plain string: ``json.dumps`` turns a wrapped payload's newlines into `\\n`
+#: escapes, so a scan of the serialised page cannot see the folds.
+_INLINE_DATA_KEY = "_content_without_inline_data"
 
 #: Local claim lifetime for ``ack working`` — generous enough for a CoS turn,
 #: short enough that a crashed session's claim frees itself.
@@ -1508,7 +1518,17 @@ async def _shared_history(
     return {
         "ok": True,
         "state": "ok",
+        # ``content`` stays the RAW page: it persists in ``details`` and is what a
+        # human's renderer reads. The bounded copy is the private key, popped by
+        # ``_execute`` before details is built — exactly the ``_IMAGES_KEY`` rule.
         "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+        # Bound while the body is still a plain Python string: json.dumps rewrites
+        # a folded payload's newlines into ``\n`` escapes, so a scan of the
+        # SERIALISED page cannot see the fold and would stop at the first line.
+        _INLINE_DATA_KEY: (
+            f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n"
+            f"{json.dumps(bound_inline_data_payload(result), ensure_ascii=False)}"
+        ),
     }
 
 
@@ -2612,7 +2632,13 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         return {
             "ok": True,
             "state": "ok",
+            # See _shared_history: content is the raw page, the bounded copy rides
+            # the private key so ``details`` keeps what humans read.
             "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+            _INLINE_DATA_KEY: (
+                f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n"
+                f"{json.dumps(bound_inline_data_payload(result), ensure_ascii=False)}"
+            ),
             _IMAGES_KEY: images,
         }
 
@@ -2661,7 +2687,13 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         return {
             "ok": True,
             "state": "ok",
+            # See _shared_history: content is the raw page, the bounded copy rides
+            # the private key so ``details`` keeps what humans read.
             "content": f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n{json.dumps(result, ensure_ascii=False)}",
+            _INLINE_DATA_KEY: (
+                f"{BRIDGE_UNTRUSTED_CLAUSE}\n\n"
+                f"{json.dumps(bound_inline_data_payload(result), ensure_ascii=False)}"
+            ),
             _IMAGES_KEY: images,
         }
 
@@ -3035,6 +3067,10 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
         outcome = await execute_bridge(runtime, args)
         # Bytes never ride ``details`` (persisted with the transcript row).
         images = outcome.pop(_IMAGES_KEY, None) or []
+        # The model gets the page with inline data URIs withheld; ``details`` keeps
+        # ``outcome["content"]``, the raw page a human's renderer reads. Popped for
+        # the same reason the images are: it is a model-facing copy, not state.
+        bounded_page = outcome.pop(_INLINE_DATA_KEY, None)
         if outcome.get("ok"):
             peer_receipt = args.get("op") in ("send", "reply")
             if peer_receipt:
@@ -3043,6 +3079,9 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
                 # acceptance boundary from a model. The executor's receipt is
                 # closed metadata; never serialize the request or server body.
                 content = json.dumps(outcome, ensure_ascii=False)
+            elif bounded_page is not None:
+                # The history page with its inline payloads already withheld.
+                content = str(bounded_page)
             elif outcome.get("content") is not None:
                 # Read-shaped channel results carry their own model-facing
                 # rendering (JSON page, or the untrusted-wrapped history).
@@ -3057,6 +3096,20 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
                 )
             else:
                 content = f"bridge {args.get('op')}: {outcome.get('state', 'ok')}"
+            # A body is sender-controlled and may carry an inline
+            # ``data:image/…;base64,…`` URI — legal text that is unreadable and
+            # unbounded in context (the operator's 600 KB repro). Bound it HERE,
+            # once, on the way into model context: every branch above reads a
+            # body (history pages, take_up, a receipt echoing a request), so one
+            # choke point cannot be reopened by a new read shape. ``details``
+            # stays untouched — it is never serialized to providers, and the
+            # wire, the hub row and ``body_hash`` are not ours to rewrite.
+            #
+            # The ``is_error`` branch below returns only ``outcome["error"]``,
+            # which ``_failure_text`` guarantees is a refusal sentence and never
+            # a body, so it needs no bound — if that invariant ever changes,
+            # this is the line that must move above the ``ok`` test (review N-1).
+            content = bound_inline_data_uris(content)
             notes = _model_notes(outcome)
             if notes and not peer_receipt:
                 # A peer receipt is already the whole outcome as JSON, warning
