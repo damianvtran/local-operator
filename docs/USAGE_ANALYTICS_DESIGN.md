@@ -38,15 +38,49 @@ the displayed dollar amount remains a token-price estimate.
 
 The estimate cannot yet be labelled reliably as metered spend versus an API-rate
 equivalent for every call. Credential selection happens inside the failover
-iterator, which currently stamps only the serving `provider` and `model_id` onto
-`Usage`; it does not expose the selected credential's identity or kind. Inferring
-billing from the provider id would be wrong because one id can rotate between API
-keys and OAuth credentials, and provider variants include token-plan and local
-endpoints with different economics. Billing provenance therefore needs a new
-per-attempt field stamped beside the serving identity after credential selection,
-then preserved through transcript, subagent, analytics, and TUI aggregation.
-Until that contract exists, the implementation deliberately does not guess a
-billing mode from the session's selected provider.
+iterator, and it now stamps the serving `provider`, `model_id`, `billing_basis`
+and `account_ref` onto `Usage`, all from the credential that actually went on
+the wire. Inferring billing from the provider id would be wrong because one id
+can rotate between API keys and OAuth credentials, and provider variants include
+token-plan and local endpoints with different economics, so the stamp is the only
+source and nothing guesses a billing mode from the session's selected provider.
+
+`account_ref` answers WHICH account served the call. It is 16 hex characters. For
+an OAuth row with an IdP identity it is `sha256("<provider>\0<org_id or account_id>")`:
+global, so a re-login of the same account keeps it and every host that knows the
+account agrees. For a stored API-key row, and for an OAuth row whose IdP returned
+no identity, it is `sha256("<key|oauth>\0<store_uid>\0<credential_id>\0<created_at>")`,
+where `store_uid` is a random id minted once in that `auth.db`
+(`auth_store_meta`), so two machines' row 1 never share a ref, and `created_at`
+stops a reused row id from aliasing a deleted account. A key names no account, so
+the row is the unit. Without a `store_uid` (an older database opened read-only) or
+with a non-positive row id there is no durable identity and the ref is absent.
+
+A mesh borrower never derives a ref: the credential id it sees is a synthetic
+stand-in. The owner puts its own ref on the grant (`credential_ref.account_ref`,
+validated as 16 lowercase hex on receipt) and the borrower stamps that, so owner
+and borrower attribute the same account identically and two rows behind one owner
+stay distinct. An owner that predates the field yields no ref for a key, and the
+global identity ref for an OAuth login that carries an org or account id. A ref is
+also absent (`None`) for an environment, CLI or config-override credential, which
+has no stored row to attribute to, and for any call recorded before the stamp
+existed. It is opaque by
+construction: it never contains, and cannot be reversed to, an email, an
+organization name or a raw IdP id. It is recorded in the nullable
+`calls.account_ref` column (additive migration; old rows read NULL) and omitted
+from serialized `Usage` when unset. An aggregate (a turn, a job row, a child
+roll-up) carries a single `account_ref` only while every call folded into it came
+from one account, and drops it when they are mixed, as `billing_basis` does.
+
+The same ref is published for terminal hosts in `account.json` (see
+`docs/account-file.md`), so a host's per-terminal attribution and the per-call
+ledger name an account identically. The file follows the credential cascade: it
+names one account per provider only when exactly one enabled row sits in the
+winning tier (OAuth, then login-stored keys, then other stored keys), and
+otherwise reports `account_ref: null` with an `accounts` inventory, because the
+per-session pick or an environment key decides. Publication is serialized under
+`.account-file.lock` and rebuilt from the current rows, so a stale publisher
+cannot resurrect a logged-out account.
 
 ## 2. The extension
 

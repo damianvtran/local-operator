@@ -272,6 +272,9 @@ class CallSnapshot:
     cache_missed_tokens: int = 0
     # Nullable: historical rows never established a terminal service tier.
     openai_service_tier: str | None = None
+    #: Opaque non-secret id of the account that served the call, or ``None``
+    #: when unknown (legacy row, env credential, unstamped stream).
+    account_ref: str | None = None
 
 
 def price_snapshot(snapshot: "CallSnapshot") -> tuple[int, bool]:

@@ -581,6 +581,8 @@ class MeshAwareAuthStore:
             org_id=grant.identity.get("org_id"),
             kind=credential_kind,
             raw=None,
+            # The OWNER's ref, never one derived from the synthetic id above.
+            account_ref=grant.credential_ref.account_ref or None,
         )
         ref = grant.credential_ref
         self._lent_access[access] = _LentRow(

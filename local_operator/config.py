@@ -1530,6 +1530,17 @@ class ConfigManager:
                 pass
             raise
 
+        # A default-model change moves ``account.json``'s ``default`` entry (the
+        # login a host attributes a terminal to). Compared against the bytes this
+        # write replaced, so the unrelated writes that dominate (``/settings``
+        # toggles) cost one dict lookup. Best-effort and never raises.
+        if (disk_values.get("hosting") if isinstance(disk_values, Mapping) else None) != (
+            document["values"].get("hosting") if isinstance(document.get("values"), dict) else None
+        ):
+            from local_operator.providers.account_provenance import refresh_account_file
+
+            refresh_account_file(self.config_dir)
+
         if drops and _declared_path_existed(disk_values or {}, drops):
             # A removal THIS BUILD performed must not be reported next launch as "a
             # writer outside this build removed them" — and because the shrink

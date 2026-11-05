@@ -851,6 +851,45 @@ def test_cache_write_1h_tokens_is_recorded_and_migrated(tmp_path):
     store.close()
 
 
+def test_account_ref_is_recorded_and_migrated(tmp_path):
+    """The serving account's opaque ref lands in a nullable ``calls`` column; a
+    database from before the column gains it on open and its old rows read NULL
+    (unknown), never an empty-string account."""
+    import dataclasses
+
+    db = tmp_path / "preaccount.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(f"""
+        CREATE TABLE calls (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER, session_id TEXT,
+          provider TEXT, model_id TEXT, ok INTEGER, input_tokens INTEGER,
+          output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+          reasoning_tokens INTEGER, context_tokens INTEGER,
+          cost_micro INTEGER NOT NULL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 0,
+          {_PRE_IMAGES_COMPONENT_COLUMNS}, c_images INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE session_names (
+          session_id TEXT PRIMARY KEY, name TEXT, updated_at_ms INTEGER
+        );
+        """)
+    conn.execute(
+        "INSERT INTO calls (ts_ms, session_id, provider, model_id, ok, input_tokens, "
+        "output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, "
+        "context_tokens) VALUES (1, 'old', 'anthropic', 'claude', 1, 1, 1, 0, 0, 0, 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    store = AnalyticsStore(db)
+    stamped = dataclasses.replace(_snap(), account_ref="0123456789abcdef")
+    assert store.record_batch([stamped, _snap()]) == 2
+    conn = store._connect()
+    assert conn is not None
+    rows = conn.execute("SELECT session_id, account_ref FROM calls ORDER BY id").fetchall()
+    assert rows == [("old", None), ("s1", "0123456789abcdef"), ("s1", None)]
+    store.close()
+
+
 # -- session-name precedence -------------------------------------------------
 #
 # The ledger's name row is now written by several sources that do not arrive in

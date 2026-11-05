@@ -293,6 +293,13 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "not entries to copy within an individual session directory. In particular "
         "sessions names the parent of session directories, not a session child.",
     ),
+    "local_operator/providers/account_provenance.py": (
+        2,
+        "``ACCOUNT_FILE_NAME`` ('account.json') and ``_LOCK_FILE_NAME`` "
+        "('.account-file.lock') both live at the CONFIG ROOT beside auth.db "
+        "(<config dir>/account.json, <config dir>/.account-file.lock), never inside a "
+        "session directory -- so no session copy carries them.",
+    ),
     "local_operator/agent_avatar.py": (
         3,
         "``PNG_NAME``/``JPEG_NAME`` ('avatar.png', 'avatar.jpg'): an AGENT's picture, "
