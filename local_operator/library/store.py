@@ -688,7 +688,12 @@ class LibraryStore:
                     else False
                 )
                 raise IndexUnavailable(str(error), corrupt=corrupt) from error
-        assert connection is not None
+        if connection is None:
+            # Unreachable after the loop above (it either breaks with a handle or
+            # raises), but kept as a real branch so ``-O`` cannot erase the guard.
+            raise IndexUnavailable(
+                "library index connection was not established", corrupt=False
+            )
         try:
             if not self._schema_present(connection):
                 # The verdict this process stored was about a file, and this

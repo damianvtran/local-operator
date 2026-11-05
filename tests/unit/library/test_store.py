@@ -980,6 +980,66 @@ def test_a_transient_io_error_is_retried_once_and_never_recovered(
     assert recovery_calls == [1], "only damage licenses the recovery"
 
 
+def test_a_transient_pragma_error_closes_the_poisoned_handle_and_retries(
+    tmp_path, monkeypatch
+) -> None:
+    """A pragma failure after open must close that handle before a fresh retry."""
+    from local_operator.library import store as store_module
+
+    root = config_root(monkeypatch, tmp_path)
+    seed(root)
+    store = LibraryStore(root)
+    real_connect = store_module.sqlite3.connect
+    handles: list[Any] = []
+    state = {"failed": False}
+
+    class PragmaFailureConnection:
+        def __init__(self, real) -> None:
+            object.__setattr__(self, "_real", real)
+            object.__setattr__(self, "closed", False)
+            object.__setattr__(self, "queries", 0)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def __setattr__(self, name, value) -> None:
+            if name in {"_real", "closed", "queries"}:
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self._real, name, value)
+
+        def execute(self, sql, *args, **kwargs):
+            if not state["failed"] and str(sql).lstrip().upper().startswith(
+                "PRAGMA BUSY_TIMEOUT"
+            ):
+                state["failed"] = True
+                error = sqlite3.OperationalError("disk I/O error")
+                error.sqlite_errorcode = 10
+                raise error
+            object.__setattr__(self, "queries", self.queries + 1)
+            return self._real.execute(sql, *args, **kwargs)
+
+        def close(self):
+            object.__setattr__(self, "closed", True)
+            return self._real.close()
+
+    def connect(*args, **kwargs):
+        handle = PragmaFailureConnection(real_connect(*args, **kwargs))
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(store_module.sqlite3, "connect", connect)
+    with store.read() as connection:
+        assert connection.execute("SELECT 1").fetchone()[0] == 1
+
+    assert len(handles) == 2, "one failed handle plus exactly one fresh handle"
+    first, second = handles
+    assert first.closed is True, "the poisoned handle must be closed before retrying"
+    assert second is not first, "the retry must use a fresh handle"
+    assert second.closed is True
+    assert second.queries > 0, "the fresh handle carries the successful read"
+
+
 def test_a_torn_authoritative_table_refuses_rather_than_serving_empty(
     tmp_path, monkeypatch
 ) -> None:
