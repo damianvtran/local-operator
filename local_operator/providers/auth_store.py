@@ -2068,6 +2068,7 @@ class AuthStore:
             )
             self._conn.commit()
             stored = self._reread_after_write(stored.id)
+            self._publish_account_file()
         if stored.disabled_cause is not None:
             return stored
         hub = payload["api_endpoint"]
@@ -2434,7 +2435,25 @@ class AuthStore:
         # cancellation check, never in this shared metadata-write hook.
         self.clear_blocks(stored.id)
         self._rearm_parked_tunnel_login(provider, stored)
+        self._publish_account_file()
         return stored
+
+    def _publish_account_file(self) -> None:
+        """Refresh the hosts' ``account.json`` after a credential change.
+
+        Beside ``auth.db``, from the rows this store just committed. Skipped for
+        a read-only store (it must write nothing). Never raises, see
+        :func:`~local_operator.providers.account_provenance.refresh_account_file`.
+        """
+        if self._read_only:
+            return
+        from local_operator.providers.account_provenance import refresh_account_file
+
+        try:
+            rows = self.list_credentials(include_disabled=True)
+        except Exception:  # noqa: BLE001 — a login must not fail over a host convenience file
+            return
+        refresh_account_file(self._db_path.parent, rows)
 
     def _rearm_parked_tunnel_login(self, provider: str, stored: StoredCredential) -> None:
         """Let a login that fixed a dead grant bring the tunnel connector back.
@@ -2599,6 +2618,7 @@ class AuthStore:
             (cause, self._now_ms(), credential_id),
         )
         self._conn.commit()
+        self._publish_account_file()
 
     def delete_credential(self, credential_id: int) -> None:
         """Remove a row entirely (logout)."""
@@ -2673,12 +2693,14 @@ class AuthStore:
                         # The outer transaction releases its reservation only
                         # after the sealed-key ownership check/restore finishes.
                         raise
+            self._publish_account_file()
             return
         self._conn.execute(
             "DELETE FROM auth_credential_blocks WHERE credential_id = ?", (credential_id,)
         )
         self._conn.execute("DELETE FROM auth_credentials WHERE id = ?", (credential_id,))
         self._conn.commit()
+        self._publish_account_file()
 
     def delete_credentials_for_provider(
         self, provider: str, disabled_cause: str = "logged-out"

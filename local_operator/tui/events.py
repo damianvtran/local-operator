@@ -1041,6 +1041,14 @@ class EventController:
                     )
                     else None
                 ),
+                account_ref=(
+                    cost_components[0].account_ref
+                    if cost_components
+                    and all(
+                        c.account_ref == cost_components[0].account_ref for c in cost_components
+                    )
+                    else None
+                ),
             )
         # The aggregate still prices the calls. A post-turn compaction can stamp
         # a newer occupancy level on the boundary without corrupting that bill.

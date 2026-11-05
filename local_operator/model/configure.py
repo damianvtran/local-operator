@@ -8013,6 +8013,7 @@ class SessionStreamFn:
                     ok=ok,
                     usd_cost=getattr(usage, "usd_cost", None),
                     billing_basis=billing_basis,
+                    account_ref=getattr(usage, "account_ref", None),
                     cost_source=cost_source,
                     request_id=request_id,
                     parent_session_id=getattr(self, "_parent_session_id", "") or "",

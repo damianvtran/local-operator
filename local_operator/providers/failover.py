@@ -4015,6 +4015,7 @@ def _stamp_serving_spec(
     if usage is None:
         return event
     try:
+        from local_operator.providers.account_provenance import account_ref
         from local_operator.providers.registry import env_secret_is_oauth
         from local_operator.session.spend import inference_billing_labels
 
@@ -4028,8 +4029,26 @@ def _stamp_serving_spec(
         basis, _ = inference_billing_labels(
             spec.provider, getattr(usage, "usd_cost", None), credential_kind=kind
         )
+        # WHICH account served, as an opaque non-secret ref (``None`` for an
+        # env/override credential, which has no stored row to attribute to). The
+        # OAuth identity rides the access record; ``raw`` is the stored payload
+        # for the paths that built the record without the flat fields.
+        raw = getattr(access, "raw", None)
+        raw = raw if isinstance(raw, dict) else {}
+        ref = account_ref(
+            spec.provider,
+            kind=kind,
+            credential_id=int(getattr(access, "credential_id", 0) or 0),
+            org_id=getattr(access, "org_id", None) or raw.get("org_id"),
+            account_id=getattr(access, "account_id", None) or raw.get("account_id"),
+        )
         stamped = usage.model_copy(
-            update={"provider": spec.provider, "model_id": spec.model_id, "billing_basis": basis}
+            update={
+                "provider": spec.provider,
+                "model_id": spec.model_id,
+                "billing_basis": basis,
+                "account_ref": ref,
+            }
         )
         return event.model_copy(update={"usage": stamped})
     except Exception:  # noqa: BLE001 — a stamp failure must not drop the event

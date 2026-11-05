@@ -38,15 +38,31 @@ the displayed dollar amount remains a token-price estimate.
 
 The estimate cannot yet be labelled reliably as metered spend versus an API-rate
 equivalent for every call. Credential selection happens inside the failover
-iterator, which currently stamps only the serving `provider` and `model_id` onto
-`Usage`; it does not expose the selected credential's identity or kind. Inferring
-billing from the provider id would be wrong because one id can rotate between API
-keys and OAuth credentials, and provider variants include token-plan and local
-endpoints with different economics. Billing provenance therefore needs a new
-per-attempt field stamped beside the serving identity after credential selection,
-then preserved through transcript, subagent, analytics, and TUI aggregation.
-Until that contract exists, the implementation deliberately does not guess a
-billing mode from the session's selected provider.
+iterator, and it now stamps the serving `provider`, `model_id`, `billing_basis`
+and `account_ref` onto `Usage`, all from the credential that actually went on
+the wire. Inferring billing from the provider id would be wrong because one id
+can rotate between API keys and OAuth credentials, and provider variants include
+token-plan and local endpoints with different economics, so the stamp is the only
+source and nothing guesses a billing mode from the session's selected provider.
+
+`account_ref` answers WHICH account served the call. It is 16 hex characters of
+`sha256("<provider>\0<org_id or account_id>")` for an OAuth row with an IdP
+identity (a re-login of the same account keeps it), of
+`sha256("<provider>\0key\0<credential_id>")` for a stored API-key row (a key names
+no account, so the row is the unit), and of `sha256("<provider>\0oauth\0<credential_id>")`
+for an OAuth row whose IdP returned no identity. It is absent (`None`) for an
+environment, CLI or config-override credential, which has no stored row to
+attribute to, and for any call recorded before the stamp existed. It is opaque by
+construction: it never contains, and cannot be reversed to, an email, an
+organization name or a raw IdP id. It is recorded in the nullable
+`calls.account_ref` column (additive migration; old rows read NULL) and omitted
+from serialized `Usage` when unset. An aggregate (a turn, a job row, a child
+roll-up) carries a single `account_ref` only while every call folded into it came
+from one account, and drops it when they are mixed, as `billing_basis` does.
+
+The same ref is published for terminal hosts in `account.json` (see
+`docs/account-file.md`), so a host's per-terminal attribution and the per-call
+ledger name an account identically.
 
 ## 2. The extension
 
