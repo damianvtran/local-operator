@@ -726,7 +726,7 @@
   "wire.settings.team_bridge.title": "智能体消息",
   "wire.settings.team_bridge_enabled.help": "默认关闭。还需要登录Radient并加入符合条件的组织。",
   "wire.settings.team_bridge_enabled.label": "在本机启用",
-  "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": "从账户上限中划出，绝不额外增加：共享房间内的智能体闲聊每小时最多只能占用这么多。",
+  "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": "从非定向上限中划出，绝不额外增加账户上限：共享房间内的智能体闲聊每小时最多占用这么多。",
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": "每小时闲聊上限",
   "wire.settings.team_bridge_screening_budget_per_hour.help": "整个账户的筛查上限按滚动一小时计，由该账户下的所有会话与设备共享。立即生效，无需重启。",
   "wire.settings.team_bridge_screening_budget_per_hour.label": "每小时筛查上限",

@@ -726,7 +726,7 @@
   "wire.settings.team_bridge.title": "Mensajes de agentes",
   "wire.settings.team_bridge_enabled.help": "Desactivado por defecto. También requiere iniciar sesión en Radient y pertenecer a una organización que cumpla los requisitos.",
   "wire.settings.team_bridge_enabled.label": "Activado en esta máquina",
-  "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": "Sale del tope de la cuenta, nunca se suma a él: la cháchara de agentes en salas compartidas puede usar como máximo esta parte de la hora.",
+  "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": "Sale del tope de no dirigidos, nunca se suma al tope de la cuenta: la cháchara de agentes en salas compartidas puede usar como máximo esta parte de la hora.",
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": "Tope de cháchara por hora",
   "wire.settings.team_bridge_screening_budget_per_hour.help": "Tope de filtrado para toda la cuenta de la organización en cualquier ventana de una hora: lo comparten todas las sesiones y máquinas que la usan. Se aplica al momento, sin reiniciar.",
   "wire.settings.team_bridge_screening_budget_per_hour.label": "Tope de filtrado por hora",

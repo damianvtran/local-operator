@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "hi",
   "namespace": "wire.settings",
-  "history_sha256": "7acbe7ea998ffbe4c6abceb85ef187376f0d1457cab946c915ecff1bd80bd27d",
+  "history_sha256": "d718f8b50f2fb89ccc979f589fc686519c41823be678f7187ad97b035aed2fec",
   "entries": [
     {
       "locale": "hi",
@@ -89,6 +89,26 @@
       },
       "status": "passed",
       "note": "Read all 8 hi values (4 labels, 4 helps) against the en authority and re-read them from the bytes after the applied fix: the one MINOR — sender.help 'उसका आधा', whose masculine pronoun could only agree with हिस्सा rather than the feminine सीमा — now reads 'डिफ़ॉल्ट रूप से सीमा का आधा', making half-of-the-ceiling explicit, so it is resolved in this wave. Mechanics hold: sorted keys, 2-space indent, UTF-8/LF/trailing newline, 8 insertions / 0 deletions vs HEAD, no digits, no placeholders, no bidi controls, labels 14-19 cells against maxCells 29 and all helps shorter than en. 3 NITs accepted without change (bare 'सब'; 'बीते घंटे' kept over 'पिछले … घंटों' because पिछला skews to a clock hour; 'असंबोधित' kept over the corpus 'गैर-' prefix)."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "0ec165e369c36fbc415811610fa3beb1ad8be89f090b1cc28a8b16ca671dae29",
+      "translator": {
+        "agent": "translator specialist (local-operator subagent 19a0569f3573); model radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator subagent i18n-auditor); model radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Delta re-audit of the ambient help, 0 findings. 'असंबोधित सीमा में से निकाला गया हिस्सा, खाते की सीमा में जोड़ा नहीं जाता' names the unaddressed parent and the account total, so ambient <= unaddressed holds and raising the slice never raises the account total; the habitual negative reads as a standing rule (masc. agreement binds it to हिस्सा, not सीमा). 97 cells, two lines at both 74 and 94, nukta spellings match the catalogue."
     }
   ]
 }

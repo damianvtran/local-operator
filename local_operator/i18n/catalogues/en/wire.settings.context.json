@@ -269,7 +269,7 @@
     "tone": "concise, neutral"
   },
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": {
-    "note": "The point of the sentence is ORDER, not arithmetic: this slice is taken OUT of the account's total ceiling, so raising it never raises the total. Keep 'carved out of, never added to' as the shape of that claim even if the idiom changes. No numbers: do not transliterate a default. No ICU arguments.",
+    "note": "The point of the sentence is ORDER, not arithmetic: this slice is taken OUT of the unaddressed ceiling (only part of the account's total), and the account total is named only as the thing it is never ADDED to, so raising this slice never raises the total. Keep 'carved out of, never added to' as the shape of that claim even if the idiom changes. No numbers: do not transliterate a default. No ICU arguments.",
     "role": "Settings row help",
     "tone": "concise, neutral"
   },

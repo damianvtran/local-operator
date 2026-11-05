@@ -726,7 +726,7 @@
   "wire.settings.team_bridge.title": "ایجنٹ پیغامات",
   "wire.settings.team_bridge_enabled.help": "ڈیفالٹ آف۔ Radient سائن اِن اور اہل ادارہ بھی درکار۔",
   "wire.settings.team_bridge_enabled.label": "اس مشین پر فعال",
-  "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": "اکاؤنٹ کی بالائی حد میں سے نکالا گیا حصہ ہے، اس میں کبھی اضافہ نہیں ہوتا: مشترکہ کمروں میں ایجنٹس کی آپس کی بات چیت گھنٹے کا زیادہ سے زیادہ اتنا حصہ استعمال کر سکتی ہے۔",
+  "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": "غیر مخاطب کی بالائی حد میں سے نکالا گیا حصہ ہے، اس سے اکاؤنٹ کی بالائی حد میں کبھی اضافہ نہیں ہوتا: مشترکہ کمروں میں ایجنٹس کی بات چیت گھنٹے کا زیادہ سے زیادہ اتنا حصہ استعمال کر سکتی ہے۔",
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": "بات چیت کی فی گھنٹہ حد",
   "wire.settings.team_bridge_screening_budget_per_hour.help": "پورے اکاؤنٹ کے لیے اسکریننگ کی بالائی حد، جو کسی بھی وقت کے پچھلے گھنٹے پر شمار ہوتی ہے اور اکاؤنٹ کے تمام سیشنز اور مشینوں پر مشترک ہے۔ فوراً لاگو ہوتی ہے، دوبارہ شروع کرنے کی ضرورت نہیں۔",
   "wire.settings.team_bridge_screening_budget_per_hour.label": "اسکریننگ کی فی گھنٹہ حد",

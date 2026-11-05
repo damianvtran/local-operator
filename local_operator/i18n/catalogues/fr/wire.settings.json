@@ -726,7 +726,7 @@
   "wire.settings.team_bridge.title": "Messages entre agents",
   "wire.settings.team_bridge_enabled.help": "Désactivé par défaut. Nécessite aussi une connexion à Radient et une organisation éligible.",
   "wire.settings.team_bridge_enabled.label": "Activé sur cette machine",
-  "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": "Prélevé sur le plafond du compte, jamais ajouté à celui-ci : le bavardage entre agents dans les salons partagés peut en consommer au plus cette part de l’heure.",
+  "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": "Prélevé sur le plafond des messages non adressés, jamais ajouté à celui du compte : le bavardage entre agents consomme au plus cette part de l’heure.",
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": "Plafond de bavardage / heure",
   "wire.settings.team_bridge_screening_budget_per_hour.help": "Plafond de filtrage sur une heure glissante pour tout le compte, partagé par toutes ses sessions et machines. S’applique immédiatement, sans redémarrage.",
   "wire.settings.team_bridge_screening_budget_per_hour.label": "Plafond de filtrage / heure",

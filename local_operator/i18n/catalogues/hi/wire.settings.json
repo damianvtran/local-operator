@@ -726,7 +726,7 @@
   "wire.settings.team_bridge.title": "एजेंट संदेश",
   "wire.settings.team_bridge_enabled.help": "डिफ़ॉल्ट रूप से बंद। Radient में साइन इन होना और आपके संगठन का पात्र होना भी ज़रूरी है।",
   "wire.settings.team_bridge_enabled.label": "इस डिवाइस पर चालू",
-  "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": "खाते की सीमा में से निकाला गया हिस्सा, उसमें जोड़ा नहीं जाता: साझा रूमों में एजेंटों की गपशप घंटे का ज़्यादा से ज़्यादा इतना ही हिस्सा ले सकती है।",
+  "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": "असंबोधित सीमा में से निकाला गया हिस्सा, खाते की सीमा में जोड़ा नहीं जाता: साझा रूमों में एजेंटों की गपशप घंटे का ज़्यादा से ज़्यादा इतना ही हिस्सा ले सकती है।",
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": "गपशप सीमा प्रति घंटा",
   "wire.settings.team_bridge_screening_budget_per_hour.help": "पूरे खाते के लिए किसी भी बीते घंटे के भीतर स्क्रीनिंग की सीमा, जिसे खाते का हर सत्र और मशीन साझा करते हैं। तुरंत लागू होती है, फिर से शुरू करने की ज़रूरत नहीं।",
   "wire.settings.team_bridge_screening_budget_per_hour.label": "स्क्रीनिंग सीमा प्रति घंटा",

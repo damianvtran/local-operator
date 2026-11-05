@@ -2,7 +2,7 @@
   "schema": 1,
   "locale": "zh-CN",
   "namespace": "wire.settings",
-  "history_sha256": "37fcc097e471a567218b700ccaaf7f703cce743677a99891c83b77314ad0e43e",
+  "history_sha256": "09c3404e61bda32b8c93d7954c86fdc4e52c6df349f9df664928d41a49af5b96",
   "entries": [
     {
       "locale": "zh-CN",
@@ -89,6 +89,26 @@
       },
       "status": "passed",
       "note": "Audited the 8 team_bridge_screening_ keys against the English source and shipped zh-CN corpus: 筛查/上限/发送者/真人/滚动 all match shipped terms, formatting is byte-identical to canonical sorted JSON, labels max 18/29 cells, no digits or placeholders; two MINOR consistency drifts accepted (account rendered 账户 here but 账号 in the same feature's CLI copy; 'addressing your agent' phrased 直接联系 where cli.team_bridge already ships 发给你的智能体) and five optional NITs, none gating this delta."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings",
+      "source_sha256": "0ec165e369c36fbc415811610fa3beb1ad8be89f090b1cc28a8b16ca671dae29",
+      "translator": {
+        "agent": "translator specialist (local-operator subagent 8ec3d3b51bf3); model radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "date": "2026-11-05"
+      },
+      "auditor": {
+        "agent": "translation-auditor specialist (local-operator subagent i18n-auditor); model radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "model": "radient/auto (provider-quota fallback from openai/gpt-6.1-sol)",
+        "date": "2026-11-05",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Delta re-audit of the ambient help. '从非定向上限中划出' matches the ambient <= unaddressed clamp and '绝不额外增加账户上限' reads as the order claim that the slice never raises the account total; dropping '只能' loses nothing because '最多' carries the bound. This space-free locale always takes the marked cut at the 74-cell band (a documented product-wide limit, shared by all four zh screening helps), and the value renders whole at 94 cells. No digits, placeholders or bidi controls."
     }
   ]
 }

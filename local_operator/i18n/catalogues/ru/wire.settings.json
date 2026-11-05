@@ -726,7 +726,7 @@
   "wire.settings.team_bridge.title": "Сообщения агентов",
   "wire.settings.team_bridge_enabled.help": "По умолчанию отключено. Также нужны вход в Radient и организация, для которой доступна эта функция.",
   "wire.settings.team_bridge_enabled.label": "Включено на этом компьютере",
-  "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": "Выделяется из потолка учётной записи и никогда не добавляется к нему: на болтовню агентов в общих комнатах приходится не больше этой доли часа.",
+  "wire.settings.team_bridge_screening_ambient_budget_per_hour.help": "Выделяется из потолка неадресованных и никогда не повышает потолок учётной записи: болтовня агентов в общих комнатах ограничена этой долей часа.",
   "wire.settings.team_bridge_screening_ambient_budget_per_hour.label": "Потолок болтовни в час",
   "wire.settings.team_bridge_screening_budget_per_hour.help": "Скользящий часовой потолок фильтрации для всей учётной записи: его делят все её сессии и компьютеры. Применяется сразу, без перезапуска.",
   "wire.settings.team_bridge_screening_budget_per_hour.label": "Потолок фильтрации в час",
