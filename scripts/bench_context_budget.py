@@ -1837,7 +1837,23 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # The +82 is exactly the two bullets. The base already overshot the old ceiling
 # here by 145 (pre-existing drift from main, not this branch), so the ceiling is
 # raised by the branch's own delta only, leaving CI's relative position unchanged.
-BUDGET_BILLED_TOKENS = 35_017
+# RAISED 35,017 -> 35,111 for the GUARDRAILS GUIDE's discoverability bullet in
+# ``system.md`` (the operator asked what the live built-in guardrail rules are and
+# whether an agent has instructions for creating new ones; it did not, so the
+# capability had no model-facing surface at all). Measured on this machine with an
+# ISOLATED HOME/config, because a configured ``values.subagents`` inflates the
+# local reading by 762 chars (see the entries above):
+#   base (9605fd32606)                  97,279 chars = ~34,992 billed
+#   head (this branch)                  97,456 chars = ~35,056 billed
+#   delta                                   +177 chars = ~+64
+# The +177 is exactly the one added bullet and nothing else: the prompt alone
+# re-read through ``count_text_tokens`` moves 2,872 -> 2,917 (+45) on
+# claude-sonnet-4-5, and the guide's own description never enters the start
+# context (guides are read on demand), so the other counters are byte-identical.
+# The base sat 25 under the old ceiling, i.e. inside the band rather than below
+# it, so the ceiling is re-derived the documented way — this tree's own
+# measurement plus the 55 band — and the next branch inherits 35,111.
+BUDGET_BILLED_TOKENS = 35_111
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -2028,7 +2044,17 @@ BUDGET_BILLED_TOKENS = 35_017
 #
 # RAISED 30,964 -> 31,046 with the top arm above (the same two system.md
 # bullets): base 86,549 chars = ~31,133, head 86,776 = ~31,214, delta +227 = ~+82.
-BUDGET_CHILD_BILLED_TOKENS = 31_046
+#: RAISED (with the top arm, same trees) 31,046 -> 31,164: the child arm carries
+#: the same ``system.md`` bullet, so it moves by the same copy and nothing else —
+#:
+#:   base  86,305 chars = ~31,045   (1 token of headroom at the old ratchet)
+#:   head  86,482 chars = ~31,109
+#:   delta     +177 chars = ~+64
+#:
+#: The raise lands the ceiling at head + 55 — the band this file keeps, which
+#: also clears the known CI-vs-local offset — and the tighten band below (1,200)
+#: is not in play.
+BUDGET_CHILD_BILLED_TOKENS = 31_164
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

@@ -66,6 +66,9 @@ call's `i` intent or open with filler ("Let me…"). Speak only on material chan
 - Never delete or move a path you did not create this session unless the user
   named it; never build delete paths from variables or substitutions.
 - A `BLOCKED by guardrail` result is final: do not reword or retry; report it.
+- Guardrail rules live in `<config_dir>/rules/*.md` (`~/.local-operator/rules`):
+  read `guide://guardrails` before writing one; rules only add restriction, never
+  loosen one.
 
 ## Tools
 
