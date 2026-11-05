@@ -315,6 +315,40 @@ def check_borrow(
             refuse("not_a_holder")
 
 
+def denied_accounts(
+    network_id: str, owner: str, recipient: str, key: str, root: Path | None = None
+) -> frozenset[str]:
+    """The ``account_ref`` values ``recipient`` is denied for ``key``. A pure read.
+
+    WHY (#3427 QA round 2, Q-4): an account-scoped denial covers ONE account, but
+    the owner's lend picks its row with a session-hashed order and only then meets
+    :func:`check_borrow` at mint. A pick that landed on the denied account refused
+    the whole borrow, though a permitted row sat beside it. The owner therefore hides
+    these accounts' rows from the resolve up front (``owner.grant`` step 2c); the
+    mint-time guard stays exactly as it is, as the backstop that keeps a denied
+    account's token from being lent even if a row escaped the exclusion.
+
+    Provider-wide denials (no ``account_ref``) are not returned: :func:`check_borrow`
+    refuses those before any resolve. Absent or unreadable consent is "no account
+    denials" here, because this read only NARROWS a lend; the guard still decides.
+    """
+    path = placement.placement_path(network_id, root).with_name("consent.json")
+    if not path.exists():
+        return frozenset()
+    try:
+        rec = ConsentDocument(network_id, owner, root).load()["recipients"].get(recipient)
+    except (MeshRefusal, OSError):
+        return frozenset()
+    if rec is None:
+        return frozenset()
+    return frozenset(
+        str(denial["selector"]["account_ref"])
+        for denial in rec["denies"]
+        if denial["selector"]["credential_key"] == key
+        and denial["selector"].get("account_ref") is not None
+    )
+
+
 @contextmanager
 def serving_guard(
     network_id: str,
