@@ -1444,7 +1444,10 @@ class _Walker:
         if name == "eval":
             inner = " ".join(w.text for w in args)
             if any(w.opaque for w in args):
-                if _DELETE_WORD_RE.search(inner):
+                # R9-1: an opaque word's text omits its substitution; the
+                # substitution's own text (a heredoc'd script) is what eval runs.
+                haystack = " ".join([inner, *(b for w in args for b in w.substitutions)])
+                if _DELETE_WORD_RE.search(haystack):
                     self.result.opaque_reasons.append("eval of an unresolvable command")
                 return
             self.walk(inner, depth + 1)

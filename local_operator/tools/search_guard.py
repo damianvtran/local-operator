@@ -68,6 +68,7 @@ import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass
+from typing import SupportsIndex
 
 #: The env var an agent sets inline to run an unbounded search as written.
 ALLOW_ENV = "LOCAL_OPERATOR_ALLOW_UNBOUNDED_SEARCH"
@@ -246,6 +247,37 @@ class Lexed:
 _QUOTE_FRAMES = frozenset({"'", '"', "$'"})
 
 
+class _FrameStack(list[str]):
+    """:func:`lex`'s context stack, with running counts by frame kind.
+
+    m4: asking "is any quote frame open?" by scanning the stack made every
+    operator character O(depth); the counts keep each question O(1).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.quotes = 0
+        self.subs = 0
+        self.arith = 0
+
+    def _count(self, frame: str, step: int) -> None:
+        if frame in _QUOTE_FRAMES:
+            self.quotes += step
+        elif frame in ("$(", "`"):
+            self.subs += step
+        elif frame in ("$((", "${"):
+            self.arith += step
+
+    def append(self, frame: str) -> None:
+        super().append(frame)
+        self._count(frame, 1)
+
+    def pop(self, index: SupportsIndex = -1) -> str:
+        frame = super().pop(index)
+        self._count(frame, -1)
+        return frame
+
+
 def lex(command: str) -> Lexed:
     """THE shell-line scanner shared by every bash guard (search, sleep, delete).
 
@@ -278,9 +310,10 @@ def lex(command: str) -> Lexed:
     # Bodies keyed by the index of the segment holding their ``<<`` opener.
     owned: dict[int, list[str]] = defaultdict(list)
     buf: list[str] = []
-    stack: list[str] = []
-    # (delimiter, owning segment index) for openers awaiting the next newline.
-    pending: list[tuple[str, int]] = []
+    stack = _FrameStack()
+    # (delimiter, owning segment index, opened inside a substitution) for
+    # openers awaiting the next newline.
+    pending: list[tuple[str, int, bool]] = []
     piped = False
     word_start = True
     unterminated_heredoc = False
@@ -288,7 +321,7 @@ def lex(command: str) -> Lexed:
     n = len(command)
 
     def quoted() -> bool:
-        return any(f in _QUOTE_FRAMES for f in stack)
+        return stack.quotes > 0
 
     while i < n:
         ch = command[i]
@@ -385,10 +418,10 @@ def lex(command: str) -> Lexed:
             i += 3
             word_start = False
             continue
-        if ch == "<" and command.startswith("<<", i) and not any(f in ("$((", "${") for f in stack):
+        if ch == "<" and command.startswith("<<", i) and not stack.arith:
             m = _HEREDOC_RE.match(command, i)
             if m is not None:
-                pending.append((m.group(2), len(segments)))
+                pending.append((m.group(2), len(segments), stack.subs > 0))
                 buf.append(command[i : m.end()])
                 i = m.end()
                 word_start = False
@@ -397,9 +430,9 @@ def lex(command: str) -> Lexed:
             # Bodies start after this newline, one per opener, in order.
             pos = i + 1
             resume = i
-            captured: list[tuple[str, int]] = []
+            captured: list[tuple[str, int, bool]] = []
             ok = True
-            for delim, owner in pending:
+            for delim, owner, in_sub in pending:
                 lines: list[str] = []
                 found = False
                 while pos <= n:
@@ -417,14 +450,26 @@ def lex(command: str) -> Lexed:
                 if not found:
                     ok = False
                     break
-                captured.append(("\n".join(lines), owner))
+                captured.append(("\n".join(lines), owner, in_sub))
             pending = []
             if ok:
-                for body, owner in captured:
-                    owned[owner].append(body)
-                # Resume AT the newline ending the last delimiter line, so it
-                # still ends the segment; the bodies never reach ``buf``.
-                buf.append(" ")
+                if any(in_sub for _b, _o, in_sub in captured):
+                    # R9-1: an opener inside ``$(…)``/backticks belongs to the
+                    # command INSIDE the substitution (``x="$(bash <<EOF …)"``),
+                    # not to the outer segment. Keep the body text inline so
+                    # the substitution carries it to whoever walks it; it is
+                    # still skipped here, so its newlines never split segments.
+                    # Inside the substitution the delimiter line's newline is
+                    # not a segment boundary either, so it is consumed too.
+                    resume = min(resume + 1, n) if stack.subs else resume
+                    buf.append(command[i:resume])
+                else:
+                    buf.append(" ")
+                for body, owner, in_sub in captured:
+                    if not in_sub:
+                        owned[owner].append(body)
+                # Otherwise resume AT the newline ending the last delimiter
+                # line, so it still ends the segment.
                 i = resume
                 continue
             # No delimiter: keep the text so it is still read (fail closed).

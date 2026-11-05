@@ -955,3 +955,60 @@ def test_r8_split_reports_end_state() -> None:
     assert split_state("echo $(abc; rm -rf x").open
     assert split_state("cat <<EOF\nrm -rf x").open
     assert not split_state("# it's\nls").open
+
+
+# -- Round 9 review repros (R9-1, m4, n2) -------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo "$(bash <<EOF\nrm -rf ~/.local-operator\nEOF\n)"',
+        "x=\"$(bash <<'EOF'\nrm -rf ~/.local-operator\nEOF\n)\"; echo $x",
+        f"echo \"$(sh <<'EOF'\n{_INCIDENT_BODY}\nEOF\n)\"",
+        f'out="$(bash <<\'EOF\'\n{_INCIDENT_BODY}; ls\nEOF\n)"; echo "$out"',
+        'x="`bash <<EOF\nrm -rf ~/.local-operator\nEOF\n`"',
+        "x=$(bash <<EOF\nrm -rf ~/.local-operator\nEOF\n)",
+        "x=`bash <<EOF\nrm -rf ~/.local-operator\nEOF\n`",
+    ],
+)
+def test_r9_1_heredoc_inside_substitution_is_walked(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -c \"$(cat <<'EOF'\nrm -rf ~/.local-operator\nEOF\n)\"",
+        "eval \"$(cat <<'EOF'\nrm -rf ~/.local-operator\nEOF\n)\"",
+    ],
+)
+def test_r9_1_shell_running_a_substituted_heredoc_is_at_least_high(
+    home: Path, command: str
+) -> None:
+    assert _classify(home, command).risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git commit -m \"$(cat <<'EOF'\nfix: remove dead code\nEOF\n)\"",
+        "gh pr create --title t --body \"$(cat <<'EOF'\n- remove stale cache\n"
+        f'{_INCIDENT_BODY}\nEOF\n)"',
+        'msg="$(cat <<\'EOF\'\nrm -rf ~/.local-operator\nEOF\n)"; echo "$msg"',
+    ],
+)
+def test_r9_1_substituted_heredoc_as_data_stays_low(home: Path, command: str) -> None:
+    assert _classify(home, command, cwd=home / "repo").risk is Risk.LOW
+
+
+def test_r9_m4_lex_is_linear_in_open_frames() -> None:
+    import time
+
+    from local_operator.tools.search_guard import lex
+
+    text = "$(" * 10_000 + "; x" * 10_000
+    start = time.perf_counter()
+    lex(text)
+    # Generous bound: the O(n * depth) scan measured 1.4 s here.
+    assert time.perf_counter() - start < 0.5
