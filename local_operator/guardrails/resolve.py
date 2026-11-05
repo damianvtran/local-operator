@@ -1051,6 +1051,89 @@ class _Feed:
     bodies: list[str] = field(default_factory=list)
     #: The upstream stages' raw text, nearest last (R3-4).
     stages: list[str] = field(default_factory=list)
+    #: R5 fallback: earlier bodies in the command line not provably sunk.
+    earlier: list[_Produced] = field(default_factory=list)
+
+
+@dataclass
+class _Produced:
+    """One heredoc/herestring body and what is known about where it went."""
+
+    body: str
+    #: Its segment redirects stdout to a file (``cat > notes.md <<EOF``).
+    to_file: bool = False
+    #: The next pipeline stage's text when the segment pipes onward.
+    consumer: str | None = None
+    #: The pipeline holding the segment ended before the current one.
+    pipeline_ended: bool = False
+
+    def provably_sunk(self) -> bool:
+        if self.to_file:
+            return True
+        if self.consumer is not None and self.pipeline_ended:
+            program = _stage_program(self.consumer)
+            return program is not None and program not in _SHELL_C_WORDS | {"source", "."}
+        return False
+
+
+#: Words that open/close a compound command whose output a ``|`` after the
+#: closer pipes onward, like a ``{ …; }`` group (R5-2).
+_COMPOUND_OPENERS = ("if", "for", "while", "until", "case", "select")
+_COMPOUND_CLOSERS = ("fi", "done", "esac")
+_TRAILING_REDIRECT_RE = re.compile(r"(?:\s+\d*(?:>>|>&|<&|>|<)\s*\S*|\s+&>>?\s*\S*)+\s*$")
+
+
+def _strip_trailing_redirects(text: str) -> str:
+    """``} 2>&1`` → ``}`` (R5-1): a redirect after a closer is still a closer."""
+    return _TRAILING_REDIRECT_RE.sub("", text.strip())
+
+
+def _group_opens(text: str) -> int:
+    """How many groups/compound commands open at the head of a piece."""
+    count = 0
+    head = text.strip()
+    while True:
+        if head.startswith(("{ ", "{\n", "{\t", "(")) and not head.startswith("(("):
+            count += 1
+            head = head[1:].lstrip()
+            continue
+        word = head.split(None, 1)[0] if head else ""
+        if word in _COMPOUND_OPENERS:
+            count += 1
+            head = head[len(word) :].lstrip()
+            # Only one compound keyword per piece; what follows is its test.
+            break
+        break
+    return count
+
+
+def _group_closes(text: str) -> int:
+    """How many ``}``/``fi``/``done``/``esac`` closers end a piece (R5-1/R5-2)."""
+    tail = _strip_trailing_redirects(text)
+    count = 0
+    while tail:
+        if tail == "}" or tail.endswith((" }", ";}")):
+            tail = tail[:-1].rstrip().rstrip(";").rstrip()
+            count += 1
+            continue
+        last = tail.rsplit(None, 1)[-1]
+        if last in _COMPOUND_CLOSERS:
+            tail = tail[: -len(last)].rstrip().rstrip(";").rstrip()
+            count += 1
+            continue
+        break
+    return count
+
+
+def _redirects_stdout_to_file(segment: str) -> bool:
+    """The segment sends stdout to a named file (not a descriptor, not /dev/*)."""
+    _words, redirects = scan(segment)
+    for op, raw in redirects:
+        if op in (">", ">>", ">|"):
+            target = "".join(p.text for p in raw.parts)
+            if target and not target.startswith("/dev/"):
+                return True
+    return False
 
 
 def _herestring_texts(segment: str) -> list[str]:
@@ -1150,8 +1233,21 @@ class _Walker:
         # R4-1: bodies produced inside a ``{ …; }``/``( … )`` group are the
         # group's output, which a ``} |``/``) |`` closer pipes onward.
         group_bodies: list[list[str]] = []
+        # R5 structural fallback: every body produced so far, with whether it is
+        # PROVABLY not a shell's script — redirected into a file by its own
+        # segment, or consumed by a non-shell in a pipeline that has ended.
+        # Precise attribution above handles the common shapes; this list
+        # exists because every review round found a new syntax shape that
+        # defeated it, so a pipe-fed shell also walks every earlier body not
+        # provably sunk elsewhere (fails toward scrutiny).
+        produced_so_far: list[_Produced] = []
         for index, (text, _flag, op) in enumerate(pieces):
             piped = piped_in[index]
+            if not piped:
+                # A new pipeline starts: earlier pipelines have ENDED, so their
+                # bodies' fates are now known.
+                for item in produced_so_far:
+                    item.pipeline_ended = True
             # R4: a subshell ``( … )``, any pipeline stage and a ``&`` job run in
             # a child process, so their cd/assignments do not reach later
             # segments. A subshell spans several pieces (``( cd x && rm y )``),
@@ -1166,11 +1262,7 @@ class _Walker:
             while tail.endswith(")") and tail.count(")") > tail.count("("):
                 closes += 1
                 tail = tail[:-1].rstrip()
-            brace_opens = 0
-            head = text.strip()
-            while head.startswith(("{ ", "{\n", "{\t", "(")) and not head.startswith("(("):
-                brace_opens += 1
-                head = head[1:].lstrip()
+            brace_opens = _group_opens(text)
             for _ in range(brace_opens):
                 group_bodies.append([])
             nxt_piped = index + 1 < len(pieces) and piped_in[index + 1]
@@ -1191,6 +1283,7 @@ class _Walker:
             feed = _Feed(
                 bodies=list(upstream_bodies),
                 stages=[p[0] for p in pieces[start:index]],
+                earlier=[item for item in produced_so_far if not item.provably_sunk()],
             )
             if isolated:
                 snap = self._save()
@@ -1206,10 +1299,11 @@ class _Walker:
             upstream_bodies = upstream_bodies + produced
             for bodies in group_bodies:
                 bodies.extend(produced)
-            tail_text = text.strip()
-            group_closes = closes + (
-                1 if tail_text == "}" or tail_text.endswith((" }", ";}")) else 0
-            )
+            to_file = _redirects_stdout_to_file(text)
+            consumer = pieces[index + 1][0] if nxt_piped else None
+            for body in produced:
+                produced_so_far.append(_Produced(body=body, to_file=to_file, consumer=consumer))
+            group_closes = closes + _group_closes(text)
             for _ in range(min(group_closes, len(group_bodies))):
                 # The closer's stage pipes the WHOLE group's output onward.
                 upstream_bodies = upstream_bodies + group_bodies.pop()
@@ -1515,11 +1609,19 @@ class _Walker:
     def _piped_script(
         self, segment: str, stdin_piped: bool, pipeline: str, feed: _Feed | None, depth: int
     ) -> None:
-        """A shell whose script is a pipe or a file (R3-1, R3-4)."""
-        if stdin_piped and feed is not None and feed.bodies:
-            # Upstream heredoc/herestring text IS the script: walk it.
-            self._walk_stdin_bodies(feed.bodies, [], depth)
-            return
+        """A shell whose script is a pipe or a file (R3-1, R3-4, R5)."""
+        if stdin_piped and feed is not None:
+            walked = list(feed.bodies)
+            # R5: plus every earlier delete-bearing body not provably sunk
+            # elsewhere — the class of shapes precise attribution misses.
+            walked += [
+                item.body
+                for item in feed.earlier
+                if item.body not in walked and _DELETE_WORD_RE.search(item.body)
+            ]
+            if walked:
+                self._walk_stdin_bodies(walked, [], depth)
+                return
         self._unseen_script(segment, stdin_piped, pipeline, feed)
 
     def _walk_stdin_bodies(self, heredocs: list[str], herestrings: list[str], depth: int) -> None:

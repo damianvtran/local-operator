@@ -4117,6 +4117,9 @@ def bash_guard_environment(context: ToolContext | None) -> tuple[dict[str, str],
     scratch_root = scratchpad_dir_of(context)
     injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
     injections.update(scratchpad_env_injection(scratch_root))
+    # R5-3: the same session-id arm ``execute_bash`` applies, so an inherited
+    # parent id the child will NOT see is not resolved as set here either.
+    injections.update(session_id_env_injection(getattr(context, "session_id", None)))
     if (temp_owner := confinement if confinement is not None else shell_write) is not None:
         injections["TMPDIR"] = str(temp_owner.temp_dir())
     env = shell_env.child_environment(

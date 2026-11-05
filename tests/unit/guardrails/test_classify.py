@@ -723,3 +723,65 @@ def test_r4_2_attached_script_is_not_in_place(home: Path, command: str) -> None:
 )
 def test_r4_3_attached_script_files_are_overwritten(home: Path, command: str) -> None:
     assert _classify(home, command).risk is Risk.CRITICAL
+
+
+# -- Round 5 review repros (R5-*) ---------------------------------------------
+
+_INCIDENT_BODY = "rm -rf ~/.local-operator/$(echo)/"
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        "{ cat <<'EOF'; } 2>&1 | bash",
+        "{ cat <<'EOF'; } 2>/dev/null | bash",
+        "{ cat <<'EOF'; } >&2 | bash",
+        "{ cat <<'EOF'; } </dev/null | bash",
+        "{ cat <<'EOF'; } 2>&1 |& bash",
+    ],
+)
+def test_r5_1_redirect_after_group_closer(home: Path, head: str) -> None:
+    assert _classify(home, f"{head}\n{_INCIDENT_BODY}\nEOF").risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        "if true; then cat <<'EOF'; fi | bash",
+        "for i in 1; do cat <<'EOF'; done | bash",
+        "while false; do :; done; case x in x) cat <<'EOF';; esac | bash",
+    ],
+)
+def test_r5_2_compound_command_piped_into_shell(home: Path, head: str) -> None:
+    assert _classify(home, f"{head}\n{_INCIDENT_BODY}\nEOF").risk is Risk.CRITICAL
+
+
+def test_r5_fallback_catches_a_non_attributable_shape(home: Path) -> None:
+    """A shape the precise binding cannot attribute: the heredoc's stage is a
+    function call whose output the shell reads. The structural fallback walks
+    every earlier delete-bearing body for a pipe-fed shell."""
+    command = f"f() {{ cat; }}; f <<'EOF' | bash\n{_INCIDENT_BODY}\nEOF"
+    assert _classify(home, command).risk is Risk.CRITICAL
+    command = f"exec 3<<'EOF'; cat <&3 | bash\n{_INCIDENT_BODY}\nEOF"
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"cat > notes.md <<'EOF'\n{_INCIDENT_BODY}\nEOF\nbash scripts/x.sh",
+        f"cat > notes.md <<'EOF'\n{_INCIDENT_BODY}\nEOF\necho hi | bash scripts/x.sh",
+        f"cat <<'EOF' | grep rm\n{_INCIDENT_BODY}\nEOF",
+        f"cat <<'EOF' | grep rm; echo ok | bash scripts/x.sh\n{_INCIDENT_BODY}\nEOF",
+    ],
+)
+def test_r5_fallback_keeps_provable_non_shell_bodies_low(home: Path, command: str) -> None:
+    assert _classify(home, command, cwd=home / "repo").risk is Risk.LOW
+
+
+def test_r5_3_guard_env_matches_child_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    from local_operator.tools.builtin import bash_guard_environment
+
+    monkeypatch.setenv("LOCAL_OPERATOR_SESSION_ID", "parent-sess")
+    env, _scratch = bash_guard_environment(None)
+    assert env.get("LOCAL_OPERATOR_SESSION_ID", "") == ""
