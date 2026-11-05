@@ -1,0 +1,84 @@
+{
+  "command": "node --max-old-space-size=256 --input-type=module (existing @formatjs/icu-messageformat-parser)",
+  "status": "PASS",
+  "key_count": 14,
+  "checks": [
+    "JSON",
+    "exact key set and order",
+    "source and target ICU literal-only; no arguments/plurals",
+    "no bidi controls",
+    "maxCells labels: conservative CJK width",
+    "true/false/value identifiers retained"
+  ],
+  "rows": [
+    {
+      "key": "wire.settings.account_policy.label",
+      "status": "PASS",
+      "cells": 12,
+      "maxCells": 29
+    },
+    {
+      "key": "wire.settings.account_policy.help",
+      "status": "PASS"
+    },
+    {
+      "key": "wire.settings.account_policy.reset_soonest.label",
+      "status": "PASS",
+      "cells": 8,
+      "maxCells": 29
+    },
+    {
+      "key": "wire.settings.account_policy.reset_soonest.description",
+      "status": "PASS"
+    },
+    {
+      "key": "wire.settings.account_policy.headroom.label",
+      "status": "PASS",
+      "cells": 12,
+      "maxCells": 29
+    },
+    {
+      "key": "wire.settings.account_policy.headroom.description",
+      "status": "PASS"
+    },
+    {
+      "key": "wire.settings.account_policy.fair.label",
+      "status": "PASS",
+      "cells": 8,
+      "maxCells": 29
+    },
+    {
+      "key": "wire.settings.account_policy.fair.description",
+      "status": "PASS"
+    },
+    {
+      "key": "wire.settings.account_policy.legacy.label",
+      "status": "PASS",
+      "cells": 16,
+      "maxCells": 29
+    },
+    {
+      "key": "wire.settings.account_policy.legacy.help",
+      "status": "PASS"
+    },
+    {
+      "key": "wire.settings.account_policy.error.unavailable",
+      "status": "PASS"
+    },
+    {
+      "key": "wire.settings.account_policy.error.invalid_shape",
+      "status": "PASS"
+    },
+    {
+      "key": "wire.settings.account_policy.error.invalid_json",
+      "status": "PASS"
+    },
+    {
+      "key": "wire.settings.account_policy.error.write_failed",
+      "status": "PASS"
+    }
+  ],
+  "rendered_fit": "NOT RUN",
+  "pseudo": "NOT RUN",
+  "RTL_rendering": "NOT RUN"
+}

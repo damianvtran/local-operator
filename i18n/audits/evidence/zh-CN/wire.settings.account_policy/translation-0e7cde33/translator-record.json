@@ -1,0 +1,66 @@
+{
+  "status": "translated_staged_only_not_audited",
+  "locale": "zh-CN",
+  "namespace": "wire.settings.account_policy",
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "key_count": 14,
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7fce46e29bee",
+    "actual_served_model": "openai/gpt-6.1-sol",
+    "actual_model_source": "latest completed assistant turn usage in own transcript.jsonl",
+    "usage_at_ms": 1793711554441,
+    "fallback": "Actual usage identifies openai/gpt-6.1-sol, differing from initial anthropic model header; fallback used. Header is not translation provenance."
+  },
+  "input_hashes": {
+    "local_operator/i18n/catalogues/en/wire.settings.account_policy.json": {
+      "bundle_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/en.json",
+      "sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25"
+    },
+    "local_operator/i18n/catalogues/en/wire.settings.account_policy.context.json": {
+      "bundle_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/context.json",
+      "sha256": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254"
+    },
+    "i18n/style-guides/zh-CN.md": {
+      "bundle_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/zh-CN.style.md",
+      "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+    },
+    "i18n/glossary.md": {
+      "bundle_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    "target": {
+      "bundle_path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/wire.settings.account_policy.json",
+      "sha256": "d9157b646961a96dc5fb2c234ff9ccbaa2faac5d162d134d0dbff6cbbef5f5f1"
+    }
+  },
+  "caller_proof": [
+    "settings_io.py:2358-2382: translated metadata label/help/Choice descriptions; enum values reset-soonest/headroom/fair unchanged",
+    "mobile/account_routing.py:25-77: human message is separate from stable code and status; payload carries key/value separately from label/help/choices",
+    "mobile/daemon.py:6403-6429: invalid JSON error text translated; invalid_setting code remains unchanged"
+  ],
+  "contract_caveat": "Pinned context explicitly calls namespace English-only. Callers prove human-rendered copy and separate machine tokens, not authority to remove restriction. Packet only; integration owner must reconcile restriction before activation.",
+  "glossary_proposals": {
+    "account": "账户 (existing zh-CN relay.account_policy vocabulary)",
+    "credential tier": "凭据层级 (凭据 already established in UI; this compound not endorsed in core glossary)",
+    "lease": "租约 (compatible unexpired affinity, not guaranteed cache hit)",
+    "headroom": "剩余额度 (not abstract space)",
+    "reset soonest": "最早重置",
+    "fair spread": "均衡分配"
+  },
+  "semantic_notes": [
+    "Same-provider AND same-credential-tier eligibility retained.",
+    "Compatible AND unexpired successful-request lease takes priority for ALL policies; no cache-hit guarantee retained.",
+    "Weekly refill priority then five-hour refill within one-minute ties retained.",
+    "Ten percentage points expressed as 十个百分点, not ten percent.",
+    "Explicit policy precedence, true/false mapping, reset-default and legacy-override clearing retained.",
+    "value/true/false/JSON kept English; wire identifiers not changed."
+  ],
+  "validation": "mechanical-validation.json: PASS; 256 MiB Node heap, existing ICU parser; 14 keys",
+  "rendered_fit": "NOT RUN",
+  "pseudo": "NOT RUN",
+  "RTL_rendering": "NOT RUN",
+  "native_fit": "Native phrasing supplied by translator; label widths mechanically bounded, no rendered evidence, no independent audit",
+  "repo_changes": "NONE; no UI census changes, commits, ledger writes or activation",
+  "independent_audits": "NOT RUN; first and second independent auditors required"
+}

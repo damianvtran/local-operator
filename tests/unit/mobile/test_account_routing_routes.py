@@ -1,8 +1,12 @@
 """Whitelisted account-policy API on the actual authenticated relay app."""
 
+import pytest
 from starlette.testclient import TestClient
 
+from local_operator import settings_io
 from local_operator.config import CONFIG_FILE_NAME, ConfigManager
+from local_operator.i18n import messages
+from local_operator.i18n.resolve import resolve_language
 from local_operator.mobile.daemon import MobileDaemon, build_app
 from local_operator.paths import config_dir
 from local_operator.providers.account_policy import effective_account_selection_policy
@@ -99,3 +103,61 @@ def test_unreadable_config_is_not_quarantined_or_overwritten():
         assert response.json()["code"] == "config_unreadable"
         assert path.read_bytes() == original
     assert not list(path.parent.glob("*.corrupt.*"))
+
+
+@pytest.mark.parametrize("language", ["fr", "zh-CN", "en", "unknown"])
+def test_account_policy_refusals_use_backend_language_without_mutation(language, monkeypatch):
+    """A translated GET must not be followed by English-only PATCH refusals.
+
+    Use the registered app/login rather than a helper-only formatter: missing
+    locale at the daemon boundary was invisible to catalogue parity checks.
+    """
+    monkeypatch.setenv("LOP_LANG", "en")
+    root = config_dir()
+    manager = ConfigManager(root)
+    manager.set_config_value("language", language)
+    locale = resolve_language()
+    assert locale == ("en" if language == "unknown" else language)
+    api = client()
+    path = root / CONFIG_FILE_NAME
+    before = path.read_bytes()
+    anonymous = TestClient(build_app(MobileDaemon(port=0, password="synthetic-routing-password")))
+    assert anonymous.patch(URL, content="{").status_code == 401
+    denied = api.patch(URL, content="{", headers={"Origin": "https://evil.example"})
+    assert denied.status_code == 403
+    for body, key in (("{", "invalid_json"), ('{"extra": 1}', "invalid_shape")):
+        response = api.patch(URL, content=body, headers={"Content-Type": "application/json"})
+        assert response.status_code == 422
+        assert response.json() == {
+            "code": "invalid_setting",
+            "error": messages.render(
+                f"wire.settings.account_policy.error.{key}", {}, locale=locale
+            ),
+        }
+        assert path.read_bytes() == before
+
+    def refuse(*args, **kwargs):
+        raise OSError("synthetic-private-path-must-not-leak")
+
+    monkeypatch.setattr(settings_io, "write_setting", refuse)
+    response = api.patch(URL, json={"value": "fair"})
+    assert response.status_code == 503
+    assert response.json() == {
+        "code": "setting_write_failed",
+        "error": messages.render(
+            "wire.settings.account_policy.error.write_failed", {}, locale=locale
+        ),
+    }
+    assert path.read_bytes() == before
+    assert "synthetic-private-path" not in response.text
+
+    monkeypatch.setattr(settings_io, "resolve_key", lambda key: None)
+    response = api.get(URL)
+    assert response.status_code == 404
+    assert response.json() == {
+        "code": "account_routing_unavailable",
+        "error": messages.render(
+            "wire.settings.account_policy.error.unavailable", {}, locale=locale
+        ),
+    }
+    assert path.read_bytes() == before

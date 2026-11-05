@@ -1,0 +1,41 @@
+{
+  "kind": "actual_execution_results",
+  "command": "~/local-operator/.venv/bin/python $LOCAL_OPERATOR_SCRATCHPAD/account-policy-second-audit.py (functions.bash memory_mb=512)",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "6433b7a5b3e9",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/transcript.jsonl",
+      "entry_id": "4692b65a628c4da4aba13b3975cdad1e",
+      "ts": 1793712970.736598,
+      "usage": {
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol",
+        "at_ms": 1793712970172
+      }
+    },
+    "fallback": "Served openai/gpt-6.1-sol differs from initial anthropic/claude-sonnet-5-5 header; actual completed usage is authoritative. No no-fallback claim.",
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_coder": true,
+    "second_independent_reader": true,
+    "other_reader_report_read": false
+  },
+  "positive": {
+    "check_catalogues": [],
+    "keys": 14,
+    "label_widths": {
+      "wire.settings.account_policy.label": 12,
+      "wire.settings.account_policy.reset_soonest.label": 8,
+      "wire.settings.account_policy.headroom.label": 12,
+      "wire.settings.account_policy.fair.label": 8,
+      "wire.settings.account_policy.legacy.label": 16
+    }
+  },
+  "negative_control": [
+    "zh-CN/wire.settings.account_policy: wire.settings.account_policy.label: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"
+  ],
+  "restored_control": "passed",
+  "setup_correction": "Initial probe wrongly used Unicode word boundaries on true选择/false选择 and stopped at assertion before final artifacts. Corrected to ASCII identifier boundaries; test-harness correction only."
+}

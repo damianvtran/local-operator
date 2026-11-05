@@ -1,0 +1,77 @@
+{
+  "wire.settings.account_policy.label": {
+    "role": "Account routing settings metadata shared by TUI, desktop and mobile clients",
+    "tone": "plain, neutral, honest about bounded affinity",
+    "note": "English-only child namespace; missing locale uses English fallback. Enum IDs are machine tokens and must not be translated. No ICU arguments.",
+    "maxCells": 29
+  },
+  "wire.settings.account_policy.help": {
+    "role": "Account routing settings metadata shared by TUI, desktop and mobile clients",
+    "tone": "plain, neutral, honest about bounded affinity",
+    "note": "English-only child namespace; missing locale uses English fallback. Enum IDs are machine tokens and must not be translated. No ICU arguments."
+  },
+  "wire.settings.account_policy.reset_soonest.label": {
+    "role": "Account routing settings metadata shared by TUI, desktop and mobile clients",
+    "tone": "plain, neutral, honest about bounded affinity",
+    "note": "English-only child namespace; missing locale uses English fallback. Enum IDs are machine tokens and must not be translated. No ICU arguments.",
+    "maxCells": 29
+  },
+  "wire.settings.account_policy.reset_soonest.description": {
+    "role": "Account routing settings metadata shared by TUI, desktop and mobile clients",
+    "tone": "plain, neutral, honest about bounded affinity",
+    "note": "English-only child namespace; missing locale uses English fallback. Enum IDs are machine tokens and must not be translated. No ICU arguments."
+  },
+  "wire.settings.account_policy.headroom.label": {
+    "role": "Account routing settings metadata shared by TUI, desktop and mobile clients",
+    "tone": "plain, neutral, honest about bounded affinity",
+    "note": "English-only child namespace; missing locale uses English fallback. Enum IDs are machine tokens and must not be translated. No ICU arguments.",
+    "maxCells": 29
+  },
+  "wire.settings.account_policy.headroom.description": {
+    "role": "Account routing settings metadata shared by TUI, desktop and mobile clients",
+    "tone": "plain, neutral, honest about bounded affinity",
+    "note": "English-only child namespace; missing locale uses English fallback. Enum IDs are machine tokens and must not be translated. No ICU arguments."
+  },
+  "wire.settings.account_policy.fair.label": {
+    "role": "Account routing settings metadata shared by TUI, desktop and mobile clients",
+    "tone": "plain, neutral, honest about bounded affinity",
+    "note": "English-only child namespace; missing locale uses English fallback. Enum IDs are machine tokens and must not be translated. No ICU arguments.",
+    "maxCells": 29
+  },
+  "wire.settings.account_policy.fair.description": {
+    "role": "Account routing settings metadata shared by TUI, desktop and mobile clients",
+    "tone": "plain, neutral, honest about bounded affinity",
+    "note": "English-only child namespace; missing locale uses English fallback. Enum IDs are machine tokens and must not be translated. No ICU arguments."
+  },
+  "wire.settings.account_policy.legacy.label": {
+    "role": "Account routing settings metadata shared by TUI, desktop and mobile clients",
+    "tone": "plain, neutral, honest about bounded affinity",
+    "note": "English-only child namespace; missing locale uses English fallback. Enum IDs are machine tokens and must not be translated. No ICU arguments.",
+    "maxCells": 29
+  },
+  "wire.settings.account_policy.legacy.help": {
+    "role": "Account routing settings metadata shared by TUI, desktop and mobile clients",
+    "tone": "plain, neutral, honest about bounded affinity",
+    "note": "English-only child namespace; missing locale uses English fallback. Enum IDs are machine tokens and must not be translated. No ICU arguments."
+  },
+  "wire.settings.account_policy.error.unavailable": {
+    "role": "Narrow authenticated relay account-policy refusal text",
+    "tone": "plain, concise",
+    "note": "Stable machine error code remains separate. English-only fallback; no arguments."
+  },
+  "wire.settings.account_policy.error.invalid_shape": {
+    "role": "Narrow authenticated relay account-policy refusal text",
+    "tone": "plain, concise",
+    "note": "Stable machine error code remains separate. English-only fallback; no arguments."
+  },
+  "wire.settings.account_policy.error.invalid_json": {
+    "role": "Narrow authenticated relay account-policy refusal text",
+    "tone": "plain, concise",
+    "note": "Stable machine error code remains separate. English-only fallback; no arguments."
+  },
+  "wire.settings.account_policy.error.write_failed": {
+    "role": "Persistent settings-write refusal shared by desktop and relay HTTP",
+    "tone": "plain, actionable",
+    "note": "Do not include credential paths or raw OS exception text. Stable code setting_write_failed remains untranslated. English-only fallback."
+  }
+}

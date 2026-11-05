@@ -1,0 +1,260 @@
+{
+  "type": "source_reading_not_execution_log",
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "target_absence": {
+    "path": "local_operator/i18n/catalogues/fr/wire.settings.account_policy.json",
+    "git_cat_file_exit_code": 128,
+    "stderr": "fatal: path 'local_operator/i18n/catalogues/fr/wire.settings.account_policy.json' does not exist in '0e7cde33ca8008d561e74f4aed774aa5f76ff7d5'"
+  },
+  "callers": [
+    {
+      "path": "local_operator/settings_io.py",
+      "sha256": "c6462e6b01cfd9f12610aadf24cb890ca97f3405a38c69b1290ddbadbe9ea724",
+      "excerpts": [
+        {
+          "line": 2359,
+          "text": "        key=\"retry.accountSelectionPolicy\","
+        },
+        {
+          "line": 2360,
+          "text": "        path=(\"retry\", \"accountSelectionPolicy\"),"
+        },
+        {
+          "line": 2361,
+          "text": "        section=\"failover\","
+        },
+        {
+          "line": 2362,
+          "text": "        label=_t(_ap.label()),"
+        },
+        {
+          "line": 2363,
+          "text": "        kind=Kind.ENUM,"
+        },
+        {
+          "line": 2364,
+          "text": "        default=DEFAULT_ACCOUNT_SELECTION_POLICY,"
+        },
+        {
+          "line": 2365,
+          "text": "        help=_t(_ap.help()),"
+        },
+        {
+          "line": 2366,
+          "text": "        choices=("
+        },
+        {
+          "line": 2367,
+          "text": "            Choice("
+        },
+        {
+          "line": 2368,
+          "text": "                \"reset-soonest\", _t(_ap.reset_soonest_label()), _t(_ap.reset_soonest_description())"
+        },
+        {
+          "line": 2369,
+          "text": "            ),"
+        },
+        {
+          "line": 2370,
+          "text": "            Choice(\"headroom\", _t(_ap.headroom_label()), _t(_ap.headroom_description())),"
+        },
+        {
+          "line": 2371,
+          "text": "            Choice(\"fair\", _t(_ap.fair_label()), _t(_ap.fair_description())),"
+        },
+        {
+          "line": 2372,
+          "text": "        ),"
+        },
+        {
+          "line": 2373,
+          "text": "    ),"
+        },
+        {
+          "line": 2374,
+          "text": "    Setting("
+        },
+        {
+          "line": 2375,
+          "text": "        key=\"retry.usageAwareAccountPick\","
+        },
+        {
+          "line": 2376,
+          "text": "        path=(\"retry\", \"usageAwareAccountPick\"),"
+        },
+        {
+          "line": 2377,
+          "text": "        section=\"failover\","
+        },
+        {
+          "line": 2378,
+          "text": "        label=_t(_ap.legacy_label()),"
+        },
+        {
+          "line": 2379,
+          "text": "        kind=Kind.BOOL,"
+        },
+        {
+          "line": 2380,
+          "text": "        default=True,"
+        },
+        {
+          "line": 2381,
+          "text": "        help=_t(_ap.legacy_help()),"
+        },
+        {
+          "line": 2382,
+          "text": "        choices=_bool_choices("
+        },
+        {
+          "line": 2383,
+          "text": "            _t(_ws.retry_usageawareaccountpick_choice_true_description()),"
+        },
+        {
+          "line": 2384,
+          "text": "            _t(_ws.retry_usageawareaccountpick_choice_false_description()),"
+        }
+      ]
+    },
+    {
+      "path": "local_operator/mobile/account_routing.py",
+      "sha256": "4d448f7851e6cc10a3f76d44a39627741043673fcf158eb3240fdd95364e7b7f",
+      "excerpts": [
+        {
+          "line": 30,
+          "text": "    setting = settings_io.resolve_key(POLICY_KEY)"
+        },
+        {
+          "line": 31,
+          "text": "    if setting is None:"
+        },
+        {
+          "line": 32,
+          "text": "        raise AccountRoutingError("
+        },
+        {
+          "line": 33,
+          "text": "            \"account_routing_unavailable\", _ap.error_unavailable().envelope()[\"text\"], 404"
+        },
+        {
+          "line": 34,
+          "text": "        )"
+        },
+        {
+          "line": 35,
+          "text": "    try:"
+        },
+        {
+          "line": 36,
+          "text": "        settings_io.require_readable_config_path(root / CONFIG_FILE_NAME)"
+        },
+        {
+          "line": 39,
+          "text": "        if write:"
+        },
+        {
+          "line": 40,
+          "text": "            if not isinstance(patch, dict) or set(patch) != {\"value\"}:"
+        },
+        {
+          "line": 41,
+          "text": "                raise AccountRoutingError("
+        },
+        {
+          "line": 42,
+          "text": "                    \"invalid_setting\", _ap.error_invalid_shape().envelope()[\"text\"], 422"
+        },
+        {
+          "line": 43,
+          "text": "                )"
+        },
+        {
+          "line": 44,
+          "text": "            # Interactive authenticated user action: retain the same attribution"
+        },
+        {
+          "line": 45,
+          "text": "            # as TUI/desktop HTTP, not the agent-only settings_control seam."
+        },
+        {
+          "line": 51,
+          "text": "        raise AccountRoutingError(\"invalid_setting\", str(exc), 422) from exc"
+        },
+        {
+          "line": 52,
+          "text": "    except OSError as exc:"
+        },
+        {
+          "line": 53,
+          "text": "        raise AccountRoutingError("
+        },
+        {
+          "line": 54,
+          "text": "            \"setting_write_failed\", _ap.error_write_failed().envelope()[\"text\"], 503"
+        },
+        {
+          "line": 55,
+          "text": "        ) from exc"
+        },
+        {
+          "line": 56,
+          "text": "    return {"
+        },
+        {
+          "line": 57,
+          "text": "        \"capability\": CAPABILITY,"
+        }
+      ]
+    },
+    {
+      "path": "local_operator/mobile/daemon.py",
+      "sha256": "a6f814a657021a6a51f8cac625a9ed49e77255624bd33bd7b9e4382381dd4301",
+      "excerpts": [
+        {
+          "line": 6412,
+          "text": "                return JSONResponse("
+        },
+        {
+          "line": 6413,
+          "text": "                    {"
+        },
+        {
+          "line": 6414,
+          "text": "                        \"code\": \"invalid_setting\","
+        },
+        {
+          "line": 6415,
+          "text": "                        \"error\": _ap.error_invalid_json().envelope()[\"text\"],"
+        },
+        {
+          "line": 6416,
+          "text": "                    },"
+        },
+        {
+          "line": 6417,
+          "text": "                    status_code=422,"
+        },
+        {
+          "line": 6418,
+          "text": "                )"
+        }
+      ]
+    }
+  ],
+  "machine_tokens": [
+    "reset-soonest",
+    "headroom",
+    "fair",
+    "true",
+    "false",
+    "value",
+    "JSON",
+    "retry.accountSelectionPolicy",
+    "retry.usageAwareAccountPick",
+    "setting_write_failed",
+    "invalid_setting",
+    "account_routing_unavailable"
+  ],
+  "conclusion": "Settings labels/help/choice descriptions and relay error text are localized separately from configuration keys, enum values, response codes and HTTP statuses. This is source inspection, not runtime proof."
+}
