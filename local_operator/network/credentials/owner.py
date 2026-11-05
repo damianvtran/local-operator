@@ -517,6 +517,10 @@ class MeshCredentialBroker:
                 detail = sync_mod.owner_copy(self, link, frame)
             else:
                 detail = sync_mod.owner_ack(self, link, frame)
+        elif kind == "catalogue":
+            from local_operator.network.credentials.catalogue import owner_catalogue
+
+            detail = owner_catalogue(self, link, frame)
         elif kind == "grant":
             detail = self.grant(link, frame)
         elif kind == "report":

@@ -114,6 +114,7 @@ LOCAL_PREFIX_LEN = 4  # uint32_be length prefix on every record
 #: Advertised together with its receiver and sender: an old peer negotiates
 #: neither and receives no lifecycle kinds; its finite-grant path is unchanged.
 CREDENTIAL_LIFECYCLE_V1 = "credential-lifecycle-v1"
+CREDENTIAL_CATALOGUE_METADATA_V1 = "credential-catalogue-metadata-v1"
 #: The consent reconciler's placement PUSH (``credentials/reconcile.py``). A DISTINCT
 #: feature from the lifecycle one on purpose: ``credential-lifecycle-v1`` shipped in
 #: v0.71.3 with no handler for ``net_broker kind=placement origin=consent_reconcile``,
@@ -129,6 +130,7 @@ LINK_CAPABILITIES: tuple[str, ...] = (
     "session-mobility-v1",
     "credential-broker-v1",
     CREDENTIAL_LIFECYCLE_V1,
+    CREDENTIAL_CATALOGUE_METADATA_V1,
     CREDENTIAL_PLACEMENT_PUSH_V1,
     "compute-pool-v1",
     "peer-readiness-v1",

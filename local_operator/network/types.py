@@ -499,6 +499,7 @@ LOCAL_OPS: tuple[str, ...] = (
     "session_receipt",
     # The credential broker's leg 1 (runtime → its own relay, §2.3).
     "credential_grant",
+    "credential_catalogue",
     "credential_report",
     "credential_placement",
     # The mint-revoke contract's operator half (github adapter, F4): the CLI's
