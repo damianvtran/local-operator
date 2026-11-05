@@ -213,6 +213,12 @@ export type MessageParams = {
   "relay.chrome.session.tray.tasks": { "done": number; "total": number };
   "relay.chrome.snackbar.dismiss": undefined;
   "relay.chrome.spend.title": undefined;
+  "relay.composer.action.connecting": undefined;
+  "relay.composer.action.send": undefined;
+  "relay.composer.action.steer": undefined;
+  "relay.composer.action.stop": undefined;
+  "relay.composer.action.stop_agent": undefined;
+  "relay.composer.action.stopping": undefined;
   "relay.health.dropped_detail": undefined;
   "relay.health.ended_detail": undefined;
   "relay.health.ended_send_failed": undefined;
@@ -1644,6 +1650,12 @@ export type MessageParams = {
   "wire.settings.hub_defaults.teams.label": undefined;
   "wire.settings.hub_defaults.teams.off.description": undefined;
   "wire.settings.hub_defaults.teams.on.description": undefined;
+  "wire.settings.hub_org.auto_enrol.help": undefined;
+  "wire.settings.hub_org.auto_enrol.label": undefined;
+  "wire.settings.hub_org.auto_enrol.off.description": undefined;
+  "wire.settings.hub_org.auto_enrol.on.description": undefined;
+  "wire.settings.hub_org.description": undefined;
+  "wire.settings.hub_org.title": undefined;
   "wire.skill_adoption.alias_occupied": undefined;
   "wire.skill_adoption.backup_label": { "path": string; "hash": string };
   "wire.skill_adoption.cancelled": undefined;

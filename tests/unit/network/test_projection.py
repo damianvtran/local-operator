@@ -358,3 +358,19 @@ def test_a_peer_rows_binding_is_carried_and_an_older_peer_is_no_claim() -> None:
     for garbage in ("lopdev", ["lopdev"], {"team": 7, "agent": True}):
         row = parse({"binding": garbage})
         assert (row.team, row.agent) == ("", ""), garbage
+
+
+@pytest.mark.parametrize("claim", [None, "openai", {}, ["openai", 1], [""]])
+def test_malformed_native_inventory_remains_unknown(claim) -> None:
+    """Malformed peer evidence must not become origin defaults or known empty."""
+    row = projection.PeerRow.from_json({"native_provider_ids": claim}, device_id="synthetic-owner")
+    assert row.native_provider_ids is None
+    assert row.to_record().native_provider_ids is None
+    assert projection.RemoteSessionFacts.from_row(row).record().native_provider_ids is None
+
+
+def test_absent_owner_metadata_stays_legacy_unknown() -> None:
+    row = projection.PeerRow.from_json({}, device_id="synthetic-owner")
+    for record in (row.to_record(), projection.RemoteSessionFacts.from_row(row).record()):
+        assert record.version == record.source_ref == ""
+        assert record.native_provider_ids is None

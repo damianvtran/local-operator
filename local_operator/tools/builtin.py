@@ -105,6 +105,7 @@ from local_operator.harness.subagent import (
     describe_effort_tiers,
     effort_tier_rejection,
     is_inherit_tier_sentinel,
+    missing_worktree_notice,
     model_may_choose_tier,
 )
 from local_operator.harness.types import (
@@ -32298,6 +32299,10 @@ async def execute_task(
                 # ``_not_applied_note``).
                 "effort": item.effort,
                 "model_pick": item.model,
+                # Parent-only advisory (never refuses, never reaches the
+                # child); see ``missing_worktree_notice``. Reads the FULL
+                # prompt so a field line in the shared ``context`` counts.
+                "brief_notice": missing_worktree_notice(item.agent, _full_prompt(item)),
             }
         )
     if not launched:
@@ -32311,6 +32316,7 @@ async def execute_task(
             else ""
         )
         + _not_applied_note(entry)
+        + (f"\n  {entry['brief_notice']}" if entry.get("brief_notice") else "")
         for entry in launched
     ]
     body = (

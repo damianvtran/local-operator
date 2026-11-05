@@ -1,0 +1,8 @@
+{
+  "wire.settings.hub_org.auto_enrol.help": "संगठन के नए एजेंट, टीमें और कौशल pull करें और सब्सक्राइब रखें।",
+  "wire.settings.hub_org.auto_enrol.label": "संगठन के नए आइटम जोड़ें",
+  "wire.settings.hub_org.auto_enrol.off.description": "केवल जब मैं lop hub org pull चलाऊँ",
+  "wire.settings.hub_org.auto_enrol.on.description": "नए आइटम अपने-आप जोड़ें",
+  "wire.settings.hub_org.description": "आपका संगठन अपने निजी Agent Hub के ज़रिए एजेंट, टीमें और कौशल साझा करता है। चुनें कि नए आइटम इस मशीन पर अपने-आप जोड़े जाएँ या नहीं।",
+  "wire.settings.hub_org.title": "संगठन Agent Hub"
+}

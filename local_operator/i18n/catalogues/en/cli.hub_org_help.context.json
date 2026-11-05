@@ -1,0 +1,62 @@
+{
+  "cli.hub_org_help.org": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "`Radient Team` is a product plan name; keep it verbatim"
+  },
+  "cli.hub_org_help.list": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `lop hub org list`"
+  },
+  "cli.hub_org_help.pull": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for `lop hub org pull`"
+  },
+  "cli.hub_org_help.org_flag": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for --org; accepts the organization's name, a unique prefix of it, or its tenant id (an identifier)"
+  },
+  "cli.hub_org_help.kind": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for --kind (agent|team|skill)"
+  },
+  "cli.hub_org_help.name": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for --name; hub id is an identifier"
+  },
+  "cli.hub_org_help.json": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for --json"
+  },
+  "cli.hub_org_help.on_conflict": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for --on-conflict; adopt-link/adopt/reconcile/skip are literal choice tokens and stay in English"
+  },
+  "cli.hub_org_help.no_subscribe": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for --no-subscribe"
+  },
+  "cli.hub_org_help.auto_push": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for --auto-push"
+  },
+  "cli.hub_org_help.no_llm": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for --no-llm"
+  },
+  "cli.hub_org_help.yes": {
+    "role": "lop CLI help text",
+    "tone": "terse, operator-facing, describes a flag or command",
+    "note": "help for --yes"
+  }
+}

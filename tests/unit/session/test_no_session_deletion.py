@@ -3721,6 +3721,58 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "shutil.rmtree",
         "Removes this publish's own <config_dir>/hub/downloads/<token_hex> archive directory",
     ),
+    # -- bundle adoption aside (org hub auto-enrol / install over a local skill) --
+    # ``install_skill`` moves the operator's occupying skill folder
+    # ``<config>/skills/<alias>`` to the dot-prefixed sibling
+    # ``<config>/skills/.adopt-<alias>-<hex12>`` (alias is ``validate_name``'d, so
+    # it cannot carry a separator or ``..``), restores it on a refused install,
+    # and drops it once the hub tree commits (the durable backup is in
+    # ``hub/backups/``). ``recover_bundle_adoption_asides`` settles the same
+    # asides after a crash, scanning ONLY direct children of ``<config>/skills``
+    # that match the prefix and are real directories (symlinks skipped). Every
+    # path is ``<config>/skills/...``, a sibling of sessions/; no session id or
+    # caller-named path reaches any of these calls.
+    (
+        "local_operator/hub_sync/service.py::install_skill",
+        "os.replace",
+        "Moves <config>/skills/<alias> to/from its own .adopt-<alias>-<hex> sibling only",
+        2,
+    ),
+    (
+        "local_operator/hub_sync/service.py::install_skill",
+        "shutil.rmtree",
+        "Drops this adoption's own <config>/skills/.adopt-<alias>-<hex> aside after commit",
+    ),
+    (
+        "local_operator/hub_sync/service.py::recover_bundle_adoption_asides",
+        "os.replace",
+        "Restores a crashed <config>/skills/.adopt-<alias>-<hex> aside to <config>/skills/<alias>",
+    ),
+    (
+        "local_operator/hub_sync/service.py::recover_bundle_adoption_asides",
+        "shutil.rmtree",
+        "Drops a <config>/skills/.adopt-* aside whose alias a hub link already owns",
+    ),
+    # -- org hub eligibility record ------------------------------------------
+    # ``hub_org/eligibility.py`` keeps ONE file, ``<config>/hub/org_catalogue.json``
+    # (``record_path``: a fixed name under the fixed hub dir). ``_atomic_write``
+    # replaces it from a mkstemp sibling temp and unlinks that temp on error;
+    # ``clear`` (sign-out) unlinks the record. No session path reaches either.
+    (
+        "local_operator/hub_org/eligibility.py::_atomic_write",
+        "os.replace",
+        "Atomic replace of <config>/hub/org_catalogue.json from its own sibling temp",
+    ),
+    (
+        "local_operator/hub_org/eligibility.py::_atomic_write",
+        "os.unlink",
+        "Clears this call's own same-directory temp on the error path only",
+    ),
+    (
+        "local_operator/hub_org/eligibility.py::clear",
+        "<path>.unlink",
+        "Removes the fixed <config>/hub/org_catalogue.json record on sign-out",
+    ),
     (
         "local_operator/hub_sync/skill_bundle.py::extract_archive",
         "shutil.rmtree",

@@ -1,0 +1,8 @@
+{
+  "relay.composer.action.send": "envoyer",
+  "relay.composer.action.steer": "orienter",
+  "relay.composer.action.stop": "arrêter",
+  "relay.composer.action.stopping": "arrêt en cours",
+  "relay.composer.action.connecting": "Connexion",
+  "relay.composer.action.stop_agent": "arrêter l’agent"
+}
