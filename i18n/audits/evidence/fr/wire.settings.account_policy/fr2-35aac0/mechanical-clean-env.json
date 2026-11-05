@@ -1,0 +1,107 @@
+{
+  "provenance_reference": "record.json:auditor",
+  "execution_kind": "actual namespace-only Python validator and discriminator execution",
+  "repo_validator": {
+    "function": "scripts.i18n.check.check_catalogues",
+    "problems": []
+  },
+  "locale": "fr",
+  "namespace": "wire.settings.account_policy",
+  "key_count": 14,
+  "arguments": {
+    "wire.settings.account_policy.label": [],
+    "wire.settings.account_policy.help": [],
+    "wire.settings.account_policy.reset_soonest.label": [],
+    "wire.settings.account_policy.reset_soonest.description": [],
+    "wire.settings.account_policy.headroom.label": [],
+    "wire.settings.account_policy.headroom.description": [],
+    "wire.settings.account_policy.fair.label": [],
+    "wire.settings.account_policy.fair.description": [],
+    "wire.settings.account_policy.legacy.label": [],
+    "wire.settings.account_policy.legacy.help": [],
+    "wire.settings.account_policy.error.unavailable": [],
+    "wire.settings.account_policy.error.invalid_shape": [],
+    "wire.settings.account_policy.error.invalid_json": [],
+    "wire.settings.account_policy.error.write_failed": []
+  },
+  "plural_and_select": "not applicable: all 14 source and target strings are argument-free",
+  "cf_count": 0,
+  "widths": [
+    {
+      "key": "wire.settings.account_policy.label",
+      "text": "politique de choix du compte",
+      "cells": 28,
+      "maxCells": 29
+    },
+    {
+      "key": "wire.settings.account_policy.reset_soonest.label",
+      "text": "Prochaine réinitialisation",
+      "cells": 26,
+      "maxCells": 29
+    },
+    {
+      "key": "wire.settings.account_policy.headroom.label",
+      "text": "Quota disponible maximal",
+      "cells": 24,
+      "maxCells": 29
+    },
+    {
+      "key": "wire.settings.account_policy.fair.label",
+      "text": "Répartition équitable",
+      "cells": 21,
+      "maxCells": 29
+    },
+    {
+      "key": "wire.settings.account_policy.legacy.label",
+      "text": "ancien choix selon l’usage",
+      "cells": 26,
+      "maxCells": 29
+    }
+  ],
+  "negative_controls": [
+    {
+      "name": "dropped_key",
+      "rejected_by": "repo check_catalogues",
+      "actual_errors": [
+        "fr/wire.settings.account_policy: missing key 'wire.settings.account_policy.error.unavailable'"
+      ]
+    },
+    {
+      "name": "unexpected_ICU_argument",
+      "rejected_by": "repo check_catalogues",
+      "actual_errors": [
+        "fr/wire.settings.account_policy: wire.settings.account_policy.error.unavailable: arguments (('account', 'simple'),) != en's (): en has 0 argument(s), translation has 1"
+      ]
+    },
+    {
+      "name": "machine_value_translated",
+      "rejected_by": "independent extra_checks"
+    },
+    {
+      "name": "label_width_overflow",
+      "rejected_by": "independent extra_checks"
+    },
+    {
+      "name": "bidi_control_injection",
+      "rejected_by": "independent extra_checks"
+    }
+  ],
+  "fixture_restored": true,
+  "tool_inputs": [
+    {
+      "path": "/Users/damian/local-operator/scripts/i18n/check.py",
+      "sha256": "98dee7f1112848163c7a3365c39668118caa4bfe13e3afee4b137478d0bf39fb"
+    },
+    {
+      "path": "/Users/damian/local-operator/local_operator/i18n/runtime.py",
+      "sha256": "50b11f4266c77f0eb74b65c9feb308530e15b06152564a865f84abbb58c757d5"
+    },
+    {
+      "path": "/Users/damian/local-operator/local_operator/i18n/catalogues.py",
+      "sha256": "437179854ac210daeaf01bbecf8d89bfb9c1a901b63c55cbb623d4e4985d351e"
+    }
+  ],
+  "pseudo": "NOT RUN",
+  "RTL_rendering": "NOT RUN",
+  "native_rendered_fit": "NOT RUN"
+}

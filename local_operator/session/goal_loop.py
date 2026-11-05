@@ -290,8 +290,17 @@ LOOP_PROMPT = (
     "If the goal is already fully met, say so plainly and stop."
 )
 
+#: Same automated marker as ``goal_judge.GOAL_CONTINUATION_MARKER`` (spelled
+#: here, not imported: goal_judge sits above this module's import path). Added
+#: after the 2026-11-04 incident, where the agent read an automated goal turn as
+#: a person telling it to keep going after it had been told to stop.
+LOOP_GOAL_MARKER = (
+    "[Automated goal check — not a message from the user. A stop or hold the user "
+    "gave still applies.]\n\n"
+)
+
 LOOP_GOAL_PROMPT = (
-    "Work toward this goal:\n\n{goal}\n\n"
+    LOOP_GOAL_MARKER + "Work toward this goal:\n\n{goal}\n\n"
     "Make concrete progress with the tools available, then briefly state what "
     "advanced and what remains. If the goal is already fully met, say so plainly."
 )
@@ -322,7 +331,13 @@ def is_loop_goal_instruction(text: str) -> bool:
     — the same inherent limit ``is_goal_continuation_instruction`` documents.
     """
     stripped = text.strip()
-    return stripped.startswith(LOOP_GOAL_HEAD.strip()) and stripped.endswith(LOOP_GOAL_TAIL.strip())
+    if not stripped.endswith(LOOP_GOAL_TAIL.strip()):
+        return False
+    # The legacy head (rows persisted before the marker) is still recognised so
+    # an old transcript's loop turns never repaint as the operator's words.
+    return stripped.startswith(LOOP_GOAL_HEAD.strip()) or stripped.startswith(
+        LOOP_GOAL_HEAD[len(LOOP_GOAL_MARKER) :].strip()
+    )
 
 
 LOOP_JUDGE_PROMPT = (

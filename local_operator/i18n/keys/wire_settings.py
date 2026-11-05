@@ -1102,6 +1102,46 @@ def fork_mode_label() -> Msg:
     return Msg("wire.settings.fork_mode.label", {})
 
 
+def guardrails_description() -> Msg:
+    return Msg("wire.settings.guardrails.description", {})
+
+
+def guardrails_title() -> Msg:
+    return Msg("wire.settings.guardrails.title", {})
+
+
+def guardrails_critical_override_help() -> Msg:
+    return Msg("wire.settings.guardrails_critical_override.help", {})
+
+
+def guardrails_critical_override_label() -> Msg:
+    return Msg("wire.settings.guardrails_critical_override.label", {})
+
+
+def guardrails_enabled_help() -> Msg:
+    return Msg("wire.settings.guardrails_enabled.help", {})
+
+
+def guardrails_enabled_label() -> Msg:
+    return Msg("wire.settings.guardrails_enabled.label", {})
+
+
+def guardrails_judge_timeout_s_help() -> Msg:
+    return Msg("wire.settings.guardrails_judge_timeout_s.help", {})
+
+
+def guardrails_judge_timeout_s_label() -> Msg:
+    return Msg("wire.settings.guardrails_judge_timeout_s.label", {})
+
+
+def guardrails_rules_dir_help() -> Msg:
+    return Msg("wire.settings.guardrails_rules_dir.help", {})
+
+
+def guardrails_rules_dir_label() -> Msg:
+    return Msg("wire.settings.guardrails_rules_dir.label", {})
+
+
 def hooks_description() -> Msg:
     return Msg("wire.settings.hooks.description", {})
 

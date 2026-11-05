@@ -853,3 +853,191 @@ def test_nonfinite_extension_json_refuses_before_receipt_writes(tmp_path, litera
     assert result.returncode == 2
     assert {p: p.read_bytes() for p in tmp_path.rglob("*.json")} == before
     assert not (tmp_path / "i18n/audit-history").exists()
+
+
+@pytest.mark.parametrize("event", ["push", "release", "workflow_dispatch"])
+def test_release_shallow_checkout_needs_the_actual_parent(tmp_path, monkeypatch, event):
+    """Release pushes have no PR-base payload or origin/main ref. Fetching the
+    event's parent must enable append-only validation, not just structure."""
+    from scripts.i18n import check, ledger
+
+    parent = git_fixture(tmp_path)
+    git(tmp_path, "checkout", "-qb", "release-next-fixture")
+    git(tmp_path, "branch", "-D", "main")
+    ledger.append(
+        tmp_path,
+        receipt(note="genuine append"),
+        expected_history_sha=ledger.history_sha256([receipt()]),
+        apply=True,
+    )
+    git(tmp_path, "add", "i18n")
+    git(tmp_path, "commit", "-qm", "append before release")
+    head = git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+    shallow = tmp_path / ".git/shallow"
+    shallow.write_text(head + "\n")
+    monkeypatch.setattr(check, "REPO", tmp_path)
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", event)
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
+    problems = check.check_audit_history()
+    assert any("readable audit base required" in p for p in problems), problems
+    assert git(tmp_path, "rev-parse", "--verify", "HEAD^", ok=False).returncode != 0
+
+    # The objects already exist locally, so moving the shallow boundary to the
+    # actual parent models checkout's depth=2 fetch without a network or clone.
+    shallow.write_text(parent + "\n")
+    assert git(tmp_path, "rev-parse", "HEAD^").stdout.strip() == parent
+    assert check.check_audit_history("HEAD^") == []
+
+    # A readable base is meaningful: recomputing a valid head-only digest must
+    # NOT make an immutable baseline rewrite pass the recovered gate.
+    snapshot = tmp_path / "i18n/ledger.json"
+    snapshot.write_bytes(snapshot.read_bytes() + b"\n")
+    marker_path = tmp_path / "i18n/audit-history.json"
+    marker = json.loads(marker_path.read_text())
+    marker["baseline"]["i18n/ledger.json"] = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    write_json(marker_path, marker)
+    assert len(ledger.load_entries(tmp_path)) == 2  # head-only structure is valid
+    problems = check.check_audit_history("HEAD^")
+    assert problems and any("baseline" in p or "snapshot" in p for p in problems), problems
+
+
+def provenance_graph(root):
+    """Queued event base predates main's lossless migration; merge has new P1."""
+    from scripts.i18n import ledger
+
+    stale = git_fixture(root, migrate=False)
+    git(root, "checkout", "-qb", "feature", stale)
+    git(root, "commit", "--allow-empty", "-qm", "feature")
+    feature = git(root, "rev-parse", "HEAD").stdout.strip()
+    git(root, "checkout", "-q", "main")
+    legacy(root, [receipt(), receipt(note="new main audit")])
+    commit(root, "main audit advances after queued event")
+    ledger.migrate(root, apply=True)
+    actual = commit(root, "main lossless migration")
+    git(root, "merge", "--no-ff", "-qm", "synthetic pull merge", "feature")
+    merged = git(root, "rev-parse", "HEAD").stdout.strip()
+    event = root / ".gha-event.json"
+    write_json(
+        event,
+        {
+            "number": 4242,
+            "pull_request": {
+                "base": {"sha": stale, "ref": "main"},
+                "head": {"sha": feature},
+                # This field has the SAME stale race and is deliberately not authority.
+                "merge_commit_sha": "0" * 40,
+            },
+        },
+    )
+    environment = {
+        **isolated_env(root),
+        "PYTHONPATH": str(SCRIPT.parents[2]),
+        "CI": "true",
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_EVENT_PATH": str(event),
+        "GITHUB_REF": "refs/pull/4242/merge",
+        "GITHUB_SHA": merged,
+    }
+    return stale, actual, feature, merged, event, environment
+
+
+def provenance_gate(root, environment, override="", *, allowance=False):
+    call = "check.check_allowance_growth" if allowance else "check.check_audit_history"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json,sys; from pathlib import Path; from scripts.i18n import check; "
+            "check.REPO=Path(sys.argv[1]); print(json.dumps(" + call + "(sys.argv[2] or None)))",
+            str(root),
+            override,
+        ],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("shallow", [False, True])
+@pytest.mark.parametrize("allowance", [False, True])
+@pytest.mark.parametrize("merge_field", ["absent", "null", "stale"])
+def test_gha_merged_checkout_uses_actual_parent(tmp_path, shallow, allowance, merge_field):
+    stale, actual, feature, merged, event, environment = provenance_graph(tmp_path)
+    payload = json.loads(event.read_text())
+    if merge_field == "absent":
+        payload["pull_request"].pop("merge_commit_sha")
+    elif merge_field == "null":
+        payload["pull_request"]["merge_commit_sha"] = None
+    write_json(event, payload)
+    if shallow:
+        (tmp_path / ".git/shallow").write_text(merged + "\n")
+        assert len(git(tmp_path, "rev-list", "--parents", "-1", "HEAD").stdout.split()) == 1
+    before = {p.relative_to(tmp_path): p.read_bytes() for p in (tmp_path / "i18n").rglob("*.json")}
+    assert provenance_gate(tmp_path, environment, allowance=allowance) == []
+    assert provenance_gate(tmp_path, environment, actual, allowance=allowance) == []
+    assert provenance_gate(tmp_path, environment, stale, allowance=allowance)
+    after = {p.relative_to(tmp_path): p.read_bytes() for p in (tmp_path / "i18n").rglob("*.json")}
+    assert before == after  # No history rewrite/repair is involved in selection.
+
+
+@pytest.mark.parametrize(
+    "damage", ["head", "ref", "second_parent", "nonmerge", "missing_first", "event"]
+)
+@pytest.mark.parametrize("allowance", [False, True])
+def test_gha_provenance_contradictions_fail_closed(tmp_path, damage, allowance):
+    stale, actual, feature, merged, event, environment = provenance_graph(tmp_path)
+    if damage == "head":
+        environment["GITHUB_SHA"] = actual
+    elif damage == "ref":
+        environment["GITHUB_REF"] = "refs/pull/4242/head"
+    elif damage == "second_parent":
+        data = json.loads(event.read_text())
+        data["pull_request"]["head"]["sha"] = stale
+        write_json(event, data)
+    elif damage == "nonmerge":
+        git(tmp_path, "checkout", "--detach", "-q", actual)
+        environment["GITHUB_SHA"] = actual
+    elif damage == "missing_first":
+        tree = git(tmp_path, "rev-parse", "HEAD^{tree}").stdout.strip()
+        body = (
+            f"tree {tree}\nparent {'1' * 40}\nparent {feature}\n"
+            "author Fixture <fixture@example.test> 1 +0000\n"
+            "committer Fixture <fixture@example.test> 1 +0000\n\nmissing parent fixture\n"
+        )
+        result = subprocess.run(
+            ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+            input=body,
+            cwd=tmp_path,
+            env=isolated_env(tmp_path),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        fake = result.stdout.strip()
+        git(tmp_path, "update-ref", "HEAD", fake)
+        environment["GITHUB_SHA"] = fake
+    else:
+        environment.pop("GITHUB_EVENT_PATH")
+    problems = provenance_gate(tmp_path, environment, allowance=allowance)
+    assert problems, (damage, allowance)
+    assert any("provenance" in problem for problem in problems), problems
+
+
+def test_gha_actual_base_preserves_genuine_history_denial(tmp_path):
+    _, actual, _, _, _, environment = provenance_graph(tmp_path)
+    path = tmp_path / "i18n/ledger/fr.json"
+    path.write_bytes(path.read_bytes() + b"\n")
+    problems = provenance_gate(tmp_path, environment)
+    assert problems and any("baseline" in problem for problem in problems)
+
+
+@pytest.mark.parametrize("event_name", ["push", "workflow_dispatch", ""])
+def test_non_pr_explicit_base_unchanged(tmp_path, event_name):
+    _, actual, _, _, _, environment = provenance_graph(tmp_path)
+    environment["GITHUB_EVENT_NAME"] = event_name
+    assert provenance_gate(tmp_path, environment, actual) == []

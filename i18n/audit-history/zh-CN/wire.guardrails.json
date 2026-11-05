@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "locale": "zh-CN",
+  "namespace": "wire.guardrails",
+  "history_sha256": "53e3d18d86c333b57471823d19e1b0ee5a5d9cffc668a4ec46cf7ce5c338f336",
+  "entries": [
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.guardrails",
+      "source_sha256": "2ab2689fe217cdee757173027e0ecb93c3ca75c9a9806047fe6a055b118ed664",
+      "translator": {
+        "agent": "coder (lopdev, PR #3440 implementer)",
+        "session": "a13d3cd32111",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (lopdev task subagent i18n-audit)",
+        "session": "03d9d36d99c8",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit of the PR #3440 coder draft against en at 2ab2689fe217 (b10c4017bb3; rules_dir.help changed in that commit). Target bytes sha256 51af497e9564. 10/10 keys, parity, no ICU arguments, '*.md' and 'dangerous-delete' byte-identical, label maxCells 29 met (rich cell_len), no manual bidi controls. 3 key(s) corrected by the auditor, all resolved in these bytes: critical_override.help: minor(consistency): secrets = 机密 in shipped zh-CN (cli.group_help.secret); 密钥 means key; enabled.help: minor(style): zh-CN guide forbids inserted spaces between Chinese and Latin runs; rules_dir.help: MAJOR(stale): superseded English semantics; also drops inserted spaces. second independent audit complete (see second_audit); same model family as translator (claude-opus-5-5) — disclosed. Audit record: PR #3440 thread.",
+      "second_audit": {
+        "status": "passed",
+        "agent": "i18n-auditor (lopdev task subagent, second independent audit)",
+        "session": "c3a461e17031",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "scope": "critical_override.label, critical_override.help, rules_dir.help at en source 2ab2689fe217",
+        "findings": 0,
+        "note": "0 findings; all three keys PASS (机密/主目录/本机 match shipped zh-CN; '一并加载' additive). Same model family as translator and first auditor (claude-opus-5-5) — disclosed."
+      }
+    }
+  ]
+}

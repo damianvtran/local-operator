@@ -1,0 +1,94 @@
+{
+  "locale": "zh-CN",
+  "namespace": "wire.settings.account_policy",
+  "audit_date": "2026-11-03T13:36:17.748352+00:00",
+  "key_count": 14,
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "6433b7a5b3e9",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/transcript.jsonl",
+      "entry_id": "4692b65a628c4da4aba13b3975cdad1e",
+      "ts": 1793712970.736598,
+      "usage": {
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol",
+        "at_ms": 1793712970172
+      }
+    },
+    "fallback": "Served openai/gpt-6.1-sol differs from initial anthropic/claude-sonnet-5-5 header; actual completed usage is authoritative. No no-fallback claim.",
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_coder": true,
+    "second_independent_reader": true,
+    "other_reader_report_read": false
+  },
+  "input_hashes": {
+    "en.json": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/en.json",
+      "sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25"
+    },
+    "context.json": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/context.json",
+      "sha256": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254"
+    },
+    "wire.settings.account_policy.json": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/wire.settings.account_policy.json",
+      "sha256": "d9157b646961a96dc5fb2c234ff9ccbaa2faac5d162d134d0dbff6cbbef5f5f1"
+    },
+    "audited_context": {
+      "path": "/Users/damian/local-operator/.worktrees/account-policy-context-backfill/local_operator/i18n/catalogues/en/wire.settings.account_policy.context.json",
+      "sha256": "2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02"
+    },
+    "zh-CN.style.md": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/zh-CN.style.md",
+      "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+    },
+    "glossary.md": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    "translator-record.json": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/translator-record.json",
+      "sha256": "53758744e289f0413fe73c5135b917e39e855d8e16dadefd766d434e69f2bf09"
+    },
+    "manifest.json": {
+      "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/manifest.json",
+      "sha256": "0c577c7d34421c895b03918c68ada5e7d1d8c35aaa91c6395b6bbc9d06fbf0bb"
+    }
+  },
+  "artifacts": {
+    "report.md": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-account-policy-second-6433b7a5b3e9/report.md",
+      "sha256": "64a4a5872187dd001bb6ca84439c4f448b9065adea0095c76c07c4ad6fb76841"
+    },
+    "mechanical.json": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-account-policy-second-6433b7a5b3e9/mechanical.json",
+      "sha256": "e33283ac2ed0b216acc5f90f18420b0bf9f9f7450e53eca504a1b4294c5ee6c0"
+    },
+    "audit.log": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-account-policy-second-6433b7a5b3e9/audit.log",
+      "sha256": "f8071e4fb450b81fa478bab369276ffd3e0dd31f8c9b2b98b4cfa6e06b992d53"
+    }
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "findings": [],
+  "audit_notes_not_execution_log": [
+    "Native linguistic reasoning is in report.md. audit.log contains actual validator outputs.",
+    "Original translator-input context and revised audit context both retained and separately hashed."
+  ],
+  "not_run": [
+    "pseudo",
+    "RTL rendering",
+    "native fit",
+    "real-path UI",
+    "design review"
+  ],
+  "retention": "Own scratch immutable audit bundle only; coordinator must retain under canonical tracked evidence root; not claimed on main."
+}

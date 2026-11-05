@@ -1,0 +1,525 @@
+{
+  "schema": 1,
+  "purpose": "Preserve rejected and non-held-out research history; no adoption or runtime change",
+  "sources": {
+    "pr3434": "0bfdd72f189004208f79d7bacbd680221f66896c",
+    "pr3438": "da9be1e257d3a5482b79474b3d2d642bdcecc706"
+  },
+  "files": [
+    {
+      "path": "evals/team_bridge_moderation/screen/corpus/ho2.jsonl",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/corpus/ho2.jsonl",
+      "source_sha256": "322f6079ab85b5ef27125f4ad3aef6ad96a253d9cd5783259fe72db46bae433c",
+      "sha256": "322f6079ab85b5ef27125f4ad3aef6ad96a253d9cd5783259fe72db46bae433c",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/corpus/relay.jsonl",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/corpus/relay.jsonl",
+      "source_sha256": "56d1be651787dfda21bbc73e3a1db117e2a250e25246b8a59dec7ba162ab8ad2",
+      "sha256": "56d1be651787dfda21bbc73e3a1db117e2a250e25246b8a59dec7ba162ab8ad2",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/README-v4-historical.md",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/README.md",
+      "source_sha256": "8025965e55d9901cfdff84ec55168460e52768d9e55ef2256d2d3fbccdf21be6",
+      "sha256": "8025965e55d9901cfdff84ec55168460e52768d9e55ef2256d2d3fbccdf21be6",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4-all/plan.json",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4-all/plan.json",
+      "source_sha256": "59dbb9ecd07a5dd86b3e2d49be38a79da17399f77f5cb5b776ea367dfe9d0b49",
+      "sha256": "65339d27467b658530d3c4df1c553202e129bbd6bba8b95a11be7e24b727f3ce",
+      "transformation": "plan-path-metadata-only"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4-all/summary.json",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4-all/summary.json",
+      "source_sha256": "2c4274eeabc64d718d384da46a99e61d81611db3f46745ffaa2e487776958240",
+      "sha256": "2c4274eeabc64d718d384da46a99e61d81611db3f46745ffaa2e487776958240",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4-all/summary.md",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4-all/summary.md",
+      "source_sha256": "cf405fb6a1122010ae15405a126e36bec88c1279b267efbebdc8210dc433556b",
+      "sha256": "cf405fb6a1122010ae15405a126e36bec88c1279b267efbebdc8210dc433556b",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4-all/trials.jsonl",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4-all/trials.jsonl",
+      "source_sha256": "43945863b61ef1ddf8e51d6bc0f0ef7692b191c24e4bce62fb61311497953296",
+      "sha256": "43945863b61ef1ddf8e51d6bc0f0ef7692b191c24e4bce62fb61311497953296",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4-vs-v2-heldout/compare.json",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4-vs-v2-heldout/compare.json",
+      "source_sha256": "4c361019d9b1cc913473cb850dfaf6c75c0486bc80b1e4d709804f4c9680f926",
+      "sha256": "4c361019d9b1cc913473cb850dfaf6c75c0486bc80b1e4d709804f4c9680f926",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4-vs-v2-heldout/compare.md",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4-vs-v2-heldout/compare.md",
+      "source_sha256": "f38eda7d566ace7815f28cfc859e156322ea0067c54f1c3d0ca88037358a3c91",
+      "sha256": "f38eda7d566ace7815f28cfc859e156322ea0067c54f1c3d0ca88037358a3c91",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4-vs-v2-heldout/trials.jsonl",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4-vs-v2-heldout/trials.jsonl",
+      "source_sha256": "606b09b051eaaf67b7ce8bf39873a7a99e5208416d845361afdbddb614339343",
+      "sha256": "606b09b051eaaf67b7ce8bf39873a7a99e5208416d845361afdbddb614339343",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4c-ho2/compare.json",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4c-ho2/compare.json",
+      "source_sha256": "0982ba1e717138f85dca0fb3b6f688d2b573a131e212e8221d78d2a911b5e2ab",
+      "sha256": "0982ba1e717138f85dca0fb3b6f688d2b573a131e212e8221d78d2a911b5e2ab",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4c-ho2/compare.md",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4c-ho2/compare.md",
+      "source_sha256": "f49371635ff855530c156a021dbbf24cb3b51b056204b123ac4031f61d8f564f",
+      "sha256": "f49371635ff855530c156a021dbbf24cb3b51b056204b123ac4031f61d8f564f",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4c-ho2/plan.json",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4c-ho2/plan.json",
+      "source_sha256": "7bcc999fce57827ae04be199185100659e115a2e9eae15216d182c65021fd627",
+      "sha256": "655d67aefd6a1af407dc665c31dc0968bbe64baf17f4a568fd5d5bd812882235",
+      "transformation": "plan-path-metadata-only"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4c-ho2/summary.json",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4c-ho2/summary.json",
+      "source_sha256": "025850cb07f76f17c67cb394c97afcf87ad9871eb901960956afe5cc4fbc24c0",
+      "sha256": "025850cb07f76f17c67cb394c97afcf87ad9871eb901960956afe5cc4fbc24c0",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4c-ho2/summary.md",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4c-ho2/summary.md",
+      "source_sha256": "55f024c7b266b057348118915ab6ddd14e306b1f596717b1140cc636530adafd",
+      "sha256": "55f024c7b266b057348118915ab6ddd14e306b1f596717b1140cc636530adafd",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4c-ho2/trials.jsonl",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4c-ho2/trials.jsonl",
+      "source_sha256": "67259ab2c3f81643093b5786199c51a5684d628df5859ad91bd43ec99c0bbc35",
+      "sha256": "67259ab2c3f81643093b5786199c51a5684d628df5859ad91bd43ec99c0bbc35",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-heldout/compare.json",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-heldout/compare.json",
+      "source_sha256": "7fa10833fd95507105ba284cf58f81d6b85b2dcb504a8cc52b23f995473f6d56",
+      "sha256": "7fa10833fd95507105ba284cf58f81d6b85b2dcb504a8cc52b23f995473f6d56",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-heldout/compare.md",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-heldout/compare.md",
+      "source_sha256": "49ef3b9f4eec80ab835f571f23fc656c3c688b1dfd0754515af3db6b0e738fb3",
+      "sha256": "49ef3b9f4eec80ab835f571f23fc656c3c688b1dfd0754515af3db6b0e738fb3",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-heldout/plan.json",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-heldout/plan.json",
+      "source_sha256": "e4d19c076acdb552800adb2c09b485b7ee72d12f2ae17d63409e65314260553a",
+      "sha256": "308f4e779111dacfe4a2343dc5513db4a730ef9c927bd3060c2e6a9aed374dfe",
+      "transformation": "plan-path-metadata-only"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-heldout/summary.json",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-heldout/summary.json",
+      "source_sha256": "657b91f8f641312172d1a95d6c7b37079accd6b4cf194fdef7eed47f316cb952",
+      "sha256": "657b91f8f641312172d1a95d6c7b37079accd6b4cf194fdef7eed47f316cb952",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-heldout/summary.md",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-heldout/summary.md",
+      "source_sha256": "18a45e755bdd10db9bd9924ad6d8820a5e8f49f5921d0eb388b93bd82342d3cb",
+      "sha256": "18a45e755bdd10db9bd9924ad6d8820a5e8f49f5921d0eb388b93bd82342d3cb",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-heldout/trials.jsonl",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-heldout/trials.jsonl",
+      "source_sha256": "7d20481ba3d341992e10efd55558005baf24679ba44b07de2de438da6c2fe888",
+      "sha256": "7d20481ba3d341992e10efd55558005baf24679ba44b07de2de438da6c2fe888",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-relay/plan.json",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-relay/plan.json",
+      "source_sha256": "c902840930f290e0719da3596dba80491f1b7aad93727b1c2bac2bd5250ffcab",
+      "sha256": "ad2b3aeb723505a494fc9ce5a30989adbd4092b5f557ca583044757780986e0d",
+      "transformation": "plan-path-metadata-only"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-relay/summary.json",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-relay/summary.json",
+      "source_sha256": "c11821fb81bcf396ca7e3e123d0e8ca6fc7297698ed0363fdbb01ca1bed5fbb7",
+      "sha256": "c11821fb81bcf396ca7e3e123d0e8ca6fc7297698ed0363fdbb01ca1bed5fbb7",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-relay/summary.md",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-relay/summary.md",
+      "source_sha256": "66779942dc9b7869f918e35e8d3bc9e967860882d3420d7cdca2af49269ea99a",
+      "sha256": "66779942dc9b7869f918e35e8d3bc9e967860882d3420d7cdca2af49269ea99a",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-relay/trials.jsonl",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v4r1-relay/trials.jsonl",
+      "source_sha256": "a287f8bc17bace2db6d6e3de12199f0ed9705b4700a7689ce43a2e3c4cf43410",
+      "sha256": "a287f8bc17bace2db6d6e3de12199f0ed9705b4700a7689ce43a2e3c4cf43410",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/templates/candidates/bridge-screen-v4-r1.txt",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/templates/candidates/bridge-screen-v4-r1.txt",
+      "source_sha256": "8c524b3f2261cc5c5dc377b51e8977cc06842ea2af91e26df6f51e7757bf99cf",
+      "sha256": "8c524b3f2261cc5c5dc377b51e8977cc06842ea2af91e26df6f51e7757bf99cf",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/templates/candidates/bridge-screen-v4c.txt",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/templates/candidates/bridge-screen-v4c.txt",
+      "source_sha256": "54ba09bc426435682db617927a47f41f98d3798ec753dd21f0abd0b60034daa5",
+      "sha256": "54ba09bc426435682db617927a47f41f98d3798ec753dd21f0abd0b60034daa5",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/corpus/ho3.jsonl",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/corpus/ho3.jsonl",
+      "source_sha256": "7b3534925d5c15b23a1554f113ab39a9ef5fd34fba032ebaf260dd5b3b3d278a",
+      "sha256": "7b3534925d5c15b23a1554f113ab39a9ef5fd34fba032ebaf260dd5b3b3d278a",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/a7-v2-models/README.md",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/a7-v2-models/README.md",
+      "source_sha256": "fcf0f3554aff1268de85f515e058fd3916c597623c700704e2483a071ad51938",
+      "sha256": "fcf0f3554aff1268de85f515e058fd3916c597623c700704e2483a071ad51938",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/a7-v2-models/anthropic_prompt_tokens.json",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/a7-v2-models/anthropic_prompt_tokens.json",
+      "source_sha256": "461a54a35284a3c2ee648866870fbed7e76840759fe6e968914ea9a835bcd785",
+      "sha256": "461a54a35284a3c2ee648866870fbed7e76840759fe6e968914ea9a835bcd785",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/a7-v2-models/plan.json",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/a7-v2-models/plan.json",
+      "source_sha256": "6be7dc7995d8257927eab91442209417472a5b9b2d82b8b9d4d07db28a7006a0",
+      "sha256": "47d6072d62772792cf84a8beb8e77050e98f1c0faf16a4218f23fd4268327f2b",
+      "transformation": "plan-path-metadata-only"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/a7-v2-models/tables.md",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/a7-v2-models/tables.md",
+      "source_sha256": "b5a67567def79a1e921c038e54cb344433f340366f320349da8babea46e3d120",
+      "sha256": "b5a67567def79a1e921c038e54cb344433f340366f320349da8babea46e3d120",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/a7-v2-models/trials.jsonl",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/a7-v2-models/trials.jsonl",
+      "source_sha256": "245fc762f60d9d58aba13cb810da91e5bdc0b5e673a3a4160d5ede7a134b9b70",
+      "sha256": "245fc762f60d9d58aba13cb810da91e5bdc0b5e673a3a4160d5ede7a134b9b70",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/agg.json",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/agg.json",
+      "source_sha256": "e0189adde3d56d85aa3c4d53f59de4eb41b492b4c51981ce325b7198014326ab",
+      "sha256": "e0189adde3d56d85aa3c4d53f59de4eb41b492b4c51981ce325b7198014326ab",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/analyze.py.txt",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/analyze.py",
+      "source_sha256": "547ed0d1b8c3c6fe0ea00e72a3252a09655b8312898363d610f72709fc647cb3",
+      "sha256": "547ed0d1b8c3c6fe0ea00e72a3252a09655b8312898363d610f72709fc647cb3",
+      "transformation": "none",
+      "archive_note": "Historical rig source stored as text, not executable/importable application code; bytes unchanged."
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/bridge-privacy-pass.txt",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/bridge-privacy-pass.txt",
+      "source_sha256": "5208c727ff308167e58707a7e15ee67b59fbf982668c1884b9199fba00bc8c3b",
+      "sha256": "5208c727ff308167e58707a7e15ee67b59fbf982668c1884b9199fba00bc8c3b",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/delivered.json",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/delivered.json",
+      "source_sha256": "8025cc0f9bae968866e85f478ebeb79c6fd4e50c71592ce235e0c5987c009d97",
+      "sha256": "8025cc0f9bae968866e85f478ebeb79c6fd4e50c71592ce235e0c5987c009d97",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/receiver-trials.jsonl",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/receiver-trials.jsonl",
+      "source_sha256": "f574961eb35c45e6875b5e3e2b8de7f8fe67323f629134fa8980fb1b27fb1f6e",
+      "sha256": "f574961eb35c45e6875b5e3e2b8de7f8fe67323f629134fa8980fb1b27fb1f6e",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/receiver.py.txt",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/receiver.py",
+      "source_sha256": "61eecad0e87f37632c2e5228836b5caa11c4e8f3e1339d89e5613cf1e3e0a66a",
+      "sha256": "61eecad0e87f37632c2e5228836b5caa11c4e8f3e1339d89e5613cf1e3e0a66a",
+      "transformation": "none",
+      "archive_note": "Historical rig source stored as text, not executable/importable application code; bytes unchanged."
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/second-pass-plan.json",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/second-pass-plan.json",
+      "source_sha256": "937edd461ea7960f804a47a8b317a53ed3aba4a6e522c67b066fa15907d93b5a",
+      "sha256": "11c91bbe603ce1f12fc8f99586417040bf5b011a0c9bcf83b2a5b48fb287ac86",
+      "transformation": "plan-path-metadata-only"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/second-pass-trials.jsonl",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/a8-fallback-e2e/second-pass-trials.jsonl",
+      "source_sha256": "f1026bc712420c3b02ee65262f1cbc8f5748e9748f287a7226c67d870b3d3a6a",
+      "sha256": "f1026bc712420c3b02ee65262f1cbc8f5748e9748f287a7226c67d870b3d3a6a",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/README.md",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/README.md",
+      "source_sha256": "e61a9b06ee713439295d4f1e4d68608c5b2ae4f185516f6c6ae4acf2ceea4aed",
+      "sha256": "e61a9b06ee713439295d4f1e4d68608c5b2ae4f185516f6c6ae4acf2ceea4aed",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/adherence.jsonl",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/adherence.jsonl",
+      "source_sha256": "0b719ab606262df1244568a10aa8f15770c1b48939c93d03d2058b9bfcf51c5e",
+      "sha256": "0b719ab606262df1244568a10aa8f15770c1b48939c93d03d2058b9bfcf51c5e",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/adherence.md",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/adherence.md",
+      "source_sha256": "4f7ca73df18150dd48497564418bb730137f1b201e24ef246ea3dd6f8cf2da0d",
+      "sha256": "4f7ca73df18150dd48497564418bb730137f1b201e24ef246ea3dd6f8cf2da0d",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho2/compare.json",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho2/compare.json",
+      "source_sha256": "24efd668d69fcc5003b7bbbe52f1590610eab5f5e14915a0a357e714aeebede7",
+      "sha256": "24efd668d69fcc5003b7bbbe52f1590610eab5f5e14915a0a357e714aeebede7",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho2/compare.md",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho2/compare.md",
+      "source_sha256": "3978fd822bbba5a93cfd90a40b57d145178dbc81d1c250fccbec1b1c3a1271d3",
+      "sha256": "3978fd822bbba5a93cfd90a40b57d145178dbc81d1c250fccbec1b1c3a1271d3",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho2/summary.json",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho2/summary.json",
+      "source_sha256": "89243808493414d79ef07a9f7555ed41bc0df0e8d294ce42c05b64f7ee5602d3",
+      "sha256": "89243808493414d79ef07a9f7555ed41bc0df0e8d294ce42c05b64f7ee5602d3",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho2/summary.md",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho2/summary.md",
+      "source_sha256": "b9a3ea8608d8881f399ce0d5cfa54d3db9d463c4eb77c1fd52a5b499769c189e",
+      "sha256": "b9a3ea8608d8881f399ce0d5cfa54d3db9d463c4eb77c1fd52a5b499769c189e",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho3/compare.json",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho3/compare.json",
+      "source_sha256": "ccd599e3c0498108f81996a7e38e243cef15f0b0a35562d8c64915a8ff7768c5",
+      "sha256": "ccd599e3c0498108f81996a7e38e243cef15f0b0a35562d8c64915a8ff7768c5",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho3/compare.md",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho3/compare.md",
+      "source_sha256": "017f0ba2269a4cda9002288b53ad984db6a46e3826d841139b28a1c480135da5",
+      "sha256": "017f0ba2269a4cda9002288b53ad984db6a46e3826d841139b28a1c480135da5",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho3/summary.json",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho3/summary.json",
+      "source_sha256": "f4b3037e818e6ba39f651bb29348d8223594ead065eeebc12381271fcf8553aa",
+      "sha256": "f4b3037e818e6ba39f651bb29348d8223594ead065eeebc12381271fcf8553aa",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho3/summary.md",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-ho3/summary.md",
+      "source_sha256": "f6ecc7c488ca9d0596608f6a63406141707e32d1cce2b56f3446d0c7e6ab4d68",
+      "sha256": "f6ecc7c488ca9d0596608f6a63406141707e32d1cce2b56f3446d0c7e6ab4d68",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-relay/compare.json",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-relay/compare.json",
+      "source_sha256": "403cf65f3b26bdd67b969205bdf5b669a311d5529532bfe863b291d2a4d22548",
+      "sha256": "403cf65f3b26bdd67b969205bdf5b669a311d5529532bfe863b291d2a4d22548",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-relay/compare.md",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-relay/compare.md",
+      "source_sha256": "00d767bf26b7fb66dd99b97ef4004a3545469f134d1872136ac187ef91a0f13a",
+      "sha256": "00d767bf26b7fb66dd99b97ef4004a3545469f134d1872136ac187ef91a0f13a",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-relay/summary.json",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-relay/summary.json",
+      "source_sha256": "d7bbc9829bf09fd84e58ce9ab79fcdcf89d93c049593597c562eddaf572281fc",
+      "sha256": "d7bbc9829bf09fd84e58ce9ab79fcdcf89d93c049593597c562eddaf572281fc",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-relay/summary.md",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/cmp-relay/summary.md",
+      "source_sha256": "605e4a06b7fceea1da288e181a7f9f05a5da2faedcd39a206f991ed2d004cd33",
+      "sha256": "605e4a06b7fceea1da288e181a7f9f05a5da2faedcd39a206f991ed2d004cd33",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/plan.json",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/plan.json",
+      "source_sha256": "37cef6dc78d9d491f62e39d4b92f486b8146c31fa03984cebe91ee715112f172",
+      "sha256": "fca41b397e31857cd9e3cb3876416824c0c94b6d053bf1a7db4c659588cc62c3",
+      "transformation": "plan-path-metadata-only"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/tables.md",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/tables.md",
+      "source_sha256": "63f4c3b950eeb81498043f700421be06140d416124198c74270a52a07d5e39ce",
+      "sha256": "63f4c3b950eeb81498043f700421be06140d416124198c74270a52a07d5e39ce",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/trials.jsonl",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/results/2026-11-04/v5-b5/trials.jsonl",
+      "source_sha256": "19dcdaa4170b4ca293b26e2e9d22262f32a4f06802d374876e580fc49b2e6a42",
+      "sha256": "19dcdaa4170b4ca293b26e2e9d22262f32a4f06802d374876e580fc49b2e6a42",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/templates/candidates/bridge-screen-v5.txt",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/templates/candidates/bridge-screen-v5.txt",
+      "source_sha256": "36f9ec97c386215aa6a853d06dd96394eb2a93e447785d5e4995499a5584cc14",
+      "sha256": "36f9ec97c386215aa6a853d06dd96394eb2a93e447785d5e4995499a5584cc14",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/PROTOCOL-v4-historical.md",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/PROTOCOL.md",
+      "source_sha256": "fa26c745203ef3dc51f3606ad088b17b2918baa75be571db295e7ee04939e0eb",
+      "sha256": "fa26c745203ef3dc51f3606ad088b17b2918baa75be571db295e7ee04939e0eb",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/results/2026-11-04/PROTOCOL-v5-historical.md",
+      "source_commit": "da9be1e257d3a5482b79474b3d2d642bdcecc706",
+      "source_path": "evals/team_bridge_moderation/screen/PROTOCOL.md",
+      "source_sha256": "fee63f3efee224333ea579a2f4e2db6b4efc660a8504d0ab4f550e1b22ef01af",
+      "sha256": "fee63f3efee224333ea579a2f4e2db6b4efc660a8504d0ab4f550e1b22ef01af",
+      "transformation": "none"
+    },
+    {
+      "path": "evals/team_bridge_moderation/screen/templates/candidates/bridge-screen-v4-served-proposal.txt",
+      "source_commit": "0bfdd72f189004208f79d7bacbd680221f66896c",
+      "source_path": "evals/team_bridge_moderation/screen/templates/bridge-screen-v4.txt",
+      "source_sha256": "6104f0caf9ab91b63f467fe7a1a33c6fef5b65c733541ade19027441d3649e4e",
+      "sha256": "6104f0caf9ab91b63f467fe7a1a33c6fef5b65c733541ade19027441d3649e4e",
+      "transformation": "none"
+    }
+  ],
+  "normalization": "Only plan path locators changed; source hashes and normalized artifact hashes both retained. Trials, corpus bytes, candidates and historical snapshots unchanged."
+}

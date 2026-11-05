@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "locale": "hi",
+  "namespace": "wire.settings",
+  "history_sha256": "af235233d934c08589d2695f421851a7d2f4122306275d37f165645013febef4",
+  "entries": [
+    {
+      "locale": "hi",
+      "namespace": "wire.settings",
+      "source_sha256": "9b75f7801d6de7b895d021dfc5261cc1c4951cf756269335a464fa4e2581ee36",
+      "translator": {
+        "agent": "coder (i18n-translator brief; local-operator subagent bfac07c3d927)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30"
+      },
+      "auditor": {
+        "agent": "copy-reviewer (independent i18n-auditor brief; local-operator subagent b0b53842a648/a97e38b65a18)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-10-30",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0,
+        "read_route_verified": false
+      },
+      "status": "passed",
+      "note": "Mechanical extraction compatibility carry: existing wire.settings values unchanged; 10 wire.settings.guardrails* slots copied byte-identically from the independently audited wire.guardrails catalogue in this locale. No new translation or linguistic audit claimed. Parent translator/auditor provenance above is carried unchanged; the copied slots carry both guardrails audits below. See docs/guardrails-settings-extraction.md and the all-locale equality regression test. Previous settings source 4cb113ca6fc28e2cb2a6b24d3aa1a7ece1a6dca7292bcf19cb359998af44080d; guardrails source 2ab2689fe217cdee757173027e0ecb93c3ca75c9a9806047fe6a055b118ed664; previous target settings af4528e17e0277f3b4812ea2c293168c49b47897d5328177608cf97ecdd1ce3e; guardrails target 3726341385b5bba088c782e83f0d6376b750f50a6321485e606c749bfd6295ee.",
+      "extraction_copy_audits": {
+        "guardrails": {
+          "locale": "hi",
+          "namespace": "wire.guardrails",
+          "source_sha256": "2ab2689fe217cdee757173027e0ecb93c3ca75c9a9806047fe6a055b118ed664",
+          "translator": {
+            "agent": "coder (lopdev, PR #3440 implementer)",
+            "session": "a13d3cd32111",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-04"
+          },
+          "auditor": {
+            "agent": "i18n-auditor (lopdev task subagent i18n-audit)",
+            "session": "03d9d36d99c8",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-04",
+            "result": "passed",
+            "findings": 0
+          },
+          "status": "passed",
+          "note": "Independent audit of the PR #3440 coder draft against en at 2ab2689fe217 (b10c4017bb3; rules_dir.help changed in that commit). Target bytes sha256 3726341385b5 (second-audit corrections applied). 10/10 keys, parity, no ICU arguments, '*.md' and 'dangerous-delete' byte-identical, label maxCells 29 met (rich cell_len), no manual bidi controls. 5 key(s) corrected by the auditor, all resolved in these bytes: critical_override.help: minor(style): hi guide prefers everyday Hindi over Sanskritised 'विलोपन'; shipped hi uses हटाएँ for delete; 'सेटिंग्स' plural as shipped; critical_override.label: minor(style): same 'विलोपन' register fix as the help; enabled.help: nit: dangling 'उन पर' after the object; reordered; judge_timeout_s.label: minor(consistency): unrecorded abbreviation 'से.'; shipped hi uses टाइमआउट and '(s)'; rules_dir.help: MAJOR(stale): superseded English semantics. second independent audit complete (see second_audit); same model family as translator (claude-opus-5-5) — disclosed. Audit record: PR #3440 thread.",
+          "second_audit": {
+            "status": "passed",
+            "agent": "i18n-auditor (lopdev task subagent, second independent audit)",
+            "session": "c3a461e17031",
+            "model": "anthropic/claude-opus-5-5",
+            "date": "2026-11-04",
+            "scope": "critical_override.label, critical_override.help, rules_dir.help at en source 2ab2689fe217",
+            "findings": 1,
+            "note": "0 blocker/1 major fixed: rules_dir.help 'के अलावा' alone also reads 'except' — the superseded replace semantics — fixed with 'के अलावा भी'. Other two keys PASS. Corrected bytes sha256 3726341385b5. Same model family as translator and first auditor (claude-opus-5-5) — disclosed."
+          }
+        },
+        "mapping": {
+          "wire.settings.guardrails.title": "wire.guardrails.section.title",
+          "wire.settings.guardrails.description": "wire.guardrails.section.description",
+          "wire.settings.guardrails_enabled.label": "wire.guardrails.enabled.label",
+          "wire.settings.guardrails_enabled.help": "wire.guardrails.enabled.help",
+          "wire.settings.guardrails_critical_override.label": "wire.guardrails.critical_override.label",
+          "wire.settings.guardrails_critical_override.help": "wire.guardrails.critical_override.help",
+          "wire.settings.guardrails_judge_timeout_s.label": "wire.guardrails.judge_timeout_s.label",
+          "wire.settings.guardrails_judge_timeout_s.help": "wire.guardrails.judge_timeout_s.help",
+          "wire.settings.guardrails_rules_dir.label": "wire.guardrails.rules_dir.label",
+          "wire.settings.guardrails_rules_dir.help": "wire.guardrails.rules_dir.help"
+        }
+      }
+    }
+  ]
+}

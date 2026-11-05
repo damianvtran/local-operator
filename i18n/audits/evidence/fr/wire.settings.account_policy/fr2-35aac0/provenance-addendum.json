@@ -1,0 +1,44 @@
+{
+  "kind": "author_corrected_provenance_only_addendum",
+  "locale": "fr",
+  "namespace": "wire.settings.account_policy",
+  "author": {"agent": "i18n-auditor", "session": "35aac0a677bc"},
+  "original_record": {
+    "path": "/Users/damian/.local-operator/sessions/35aac0a677bc/scratchpad/fr-account-policy-second-0e7cde33/record.json",
+    "sha256": "3e96e57801ef86e713d98b016c3c8f9613ceba145c4db76d7fc5525f80e0b140",
+    "preserved_unchanged": true
+  },
+  "correction": {
+    "field": "auditor.independent_from_coder_session",
+    "original_value": "196c3a94b346",
+    "original_value_kind": "coder_job_id_not_session_id",
+    "corrected_session_id": "eae0961e4e78",
+    "job_to_session_mapping": {
+      "job_id": "196c3a94b346",
+      "session_id": "eae0961e4e78",
+      "label": "PrepareFrenchcadencebackfillslice"
+    },
+    "source": "Coordinator-provided primary Hub roster mapping in the provenance-correction delegation",
+    "independently_requeried_by_author": false,
+    "historical_execution_evidence_claimed": false
+  },
+  "independence": {
+    "auditor_session": "35aac0a677bc",
+    "translator_session": "7b2ba4ed501d",
+    "coder_session": "eae0961e4e78",
+    "all_distinct": true
+  },
+  "unchanged_input_hashes": {
+    "en": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+    "fr": "f998c7a608a0023275a39f4c75ff7db65d107924c78db3907c7d0a28b2d30744",
+    "audited_context": "2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02",
+    "original_translator_context": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254"
+  },
+  "unchanged_verdict": {
+    "status": "passed",
+    "key_count": 14,
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "scope": "Identity provenance correction only. Original bundle, record, report and hashes preserved. No re-audit, validation rerun, source change, native proof, review/comment or activation; all prior evidence limits remain unchanged."
+}

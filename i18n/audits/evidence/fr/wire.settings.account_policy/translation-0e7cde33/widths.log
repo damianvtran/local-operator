@@ -1,0 +1,6 @@
+PASS 28/29 cells: wire.settings.account_policy.label = politique de choix du compte
+PASS 26/29 cells: wire.settings.account_policy.reset_soonest.label = Prochaine réinitialisation
+PASS 24/29 cells: wire.settings.account_policy.headroom.label = Quota disponible maximal
+PASS 21/29 cells: wire.settings.account_policy.fair.label = Répartition équitable
+PASS 26/29 cells: wire.settings.account_policy.legacy.label = ancien choix selon l’usage
+PASS: all five bounded labels fit; measured with existing rich.cells.cell_len. No rendered-frame claim.

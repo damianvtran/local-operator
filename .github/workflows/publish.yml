@@ -33,6 +33,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name || github.sha }}
+          # Audit receipts are append-only against the event commit's real
+          # parent. A depth-one release checkout has no origin/main and cannot
+          # validate history; fetch the parent, not a mutable branch fallback.
+          fetch-depth: 2
 
       - uses: actions/setup-python@v7
         with:
@@ -51,7 +55,7 @@ jobs:
           python -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
           node -e "if (process.versions.node.split('.')[0] !== '24') process.exit(1)"
           python scripts/i18n/generate.py --check
-          python scripts/i18n/check.py
+          python scripts/i18n/check.py --audit-base HEAD^
 
   # ---------------------------------------------------------------------------
   # Browser extension release asset.

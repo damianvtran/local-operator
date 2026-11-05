@@ -1,0 +1,12 @@
+{
+  "wire.guardrails.critical_override.help": "Désactivé par défaut. S’il est activé, les suppressions critiques (dossier d’état, config, secrets, dossier personnel) passent par la vérification de sécurité au lieu d’être refusées. Pris en compte uniquement s’il est réglé depuis les paramètres de cette machine, jamais par une modification de fichier.",
+  "wire.guardrails.critical_override.label": "Revoir suppressions critiques",
+  "wire.guardrails.enabled.help": "Applique vos fichiers de règles de garde-fou aux appels d’outils avant leur exécution. La vérification intégrée dangerous-delete reste active dans tous les cas.",
+  "wire.guardrails.enabled.label": "Règles de garde-fou",
+  "wire.guardrails.judge_timeout_s.help": "Durée maximale de la vérification de sécurité avant que l’appel soit bloqué. Une vérification qui ne répond pas bloque toujours.",
+  "wire.guardrails.judge_timeout_s.label": "Délai de vérification (s)",
+  "wire.guardrails.rules_dir.help": "Dossier supplémentaire de fichiers de règles de garde-fou (*.md), chargé en plus du dossier rules du répertoire de configuration.",
+  "wire.guardrails.rules_dir.label": "Dossier des règles",
+  "wire.guardrails.section.description": "Vérifications exécutées avant un appel d’outil, capables de refuser les appels dangereux.",
+  "wire.guardrails.section.title": "Garde-fous"
+}

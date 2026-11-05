@@ -60,6 +60,12 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.agent_profiles import AUTO_UPDATE_SEEDS_DEFAULT
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.cross_session import DEFAULT_HIDE_CROSS_SESSION
+    from local_operator.guardrails.check import (
+        GUARDRAILS_CRITICAL_OVERRIDE_DEFAULT,
+        GUARDRAILS_ENABLED_DEFAULT,
+        GUARDRAILS_RULES_DIR_DEFAULT,
+    )
+    from local_operator.guardrails.judge import GUARDRAILS_JUDGE_TIMEOUT_DEFAULT
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
     from local_operator.harness.subagent import (
         DEFAULT_MAX_TEAM_DEPTH,
@@ -254,6 +260,12 @@ def _consumer_defaults() -> dict[str, object]:
         "tools.defer": DEFAULT_TOOL_DEFERRAL,
         "tools.search_interception.block": SEARCH_INTERCEPTION_BLOCK_DEFAULT,
         "tools.search_interception.rg_excludes": SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
+        # The guardrail keys; consumer constants live beside the reader in
+        # guardrails/check.py and guardrails/judge.py.
+        "guardrails.enabled": GUARDRAILS_ENABLED_DEFAULT,
+        "guardrails.critical_override": GUARDRAILS_CRITICAL_OVERRIDE_DEFAULT,
+        "guardrails.judge_timeout_s": GUARDRAILS_JUDGE_TIMEOUT_DEFAULT,
+        "guardrails.rules_dir": GUARDRAILS_RULES_DIR_DEFAULT,
         # The three query_budget keys, whose consumer constants live in
         # tools/query_budget.py beside the predicates that read them — the same
         # arrangement, and for the same reason: a registry default that disagrees
@@ -1141,6 +1153,36 @@ def test_bash_shell_row_shares_the_consumer_path(manager: ConfigManager) -> None
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
         assert _configured_bash_shell() == "/opt/x/bash"
+
+
+def test_guardrails_rows_share_the_consumer_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``guardrails.*`` rows write exactly where ``guardrails.check`` reads,
+    and stored values round-trip through the real reader (with the critical
+    override honoured only when the host says the write was authorised)."""
+    from local_operator.guardrails import check
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    manager = ConfigManager(tmp_path)
+    assert settings_io.BY_KEY["guardrails.enabled"].path == check.GUARDRAILS_ENABLED_PATH
+    assert (
+        settings_io.BY_KEY["guardrails.critical_override"].path
+        == check.GUARDRAILS_CRITICAL_OVERRIDE_PATH
+    )
+    assert (
+        settings_io.BY_KEY["guardrails.judge_timeout_s"].path == check.GUARDRAILS_JUDGE_TIMEOUT_PATH
+    )
+    assert settings_io.BY_KEY["guardrails.rules_dir"].path == check.GUARDRAILS_RULES_DIR_PATH
+    settings_io.write_setting(manager, settings_io.BY_KEY["guardrails.enabled"], False)
+    settings_io.write_setting(manager, settings_io.BY_KEY["guardrails.critical_override"], True)
+    settings_io.write_setting(manager, settings_io.BY_KEY["guardrails.judge_timeout_s"], 7.5)
+    unauthorised = check.read_settings()
+    # Loosenings without an operator's proof read as their safe defaults (S5).
+    assert unauthorised.enabled is True and unauthorised.judge_timeout_s == 7.5
+    assert unauthorised.critical_override is False
+    authorised = check.read_settings(authorised=check.LOOSENING_KEYS)
+    assert authorised.critical_override is True and authorised.enabled is False
 
 
 def test_search_interception_rows_share_the_consumer_paths(manager: ConfigManager) -> None:

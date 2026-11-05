@@ -394,7 +394,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # The long form (the `attachments_unavailable` detail) lives in the refusal
     # itself, not in this opt-in note. 1947 was the pre-merge figure and is not
     # carried across.
-    "bridge": 1978,
+    # 1978 -> 1977: canonical isolated renderer re-measured after the explicit
+    # generic-file schema and compact description (including lowercase `read`).
+    # This records actual doc cost; the 8 KiB soft cap is deliberately unchanged.
+    "bridge": 1977,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds
@@ -478,7 +481,14 @@ MEASURED_TOKENS: dict[str, int] = {
     # 931 -> 975 (media artifact naming): the new ``filename`` stem field's
     # teaching description renders in the parameter table. The sanitising and
     # collision rules live in the image guide, so the wire keeps one sentence.
-    "generate_image": 975,
+    # 975 -> 984 (2026-11-05, image-intent routing lane): the source fields now
+    # say "not a path" and the note names BOTH digest origins, so a model that
+    # only reads `tool://generate_image` cannot pass a file path where a digest
+    # belongs. The wire pair got CHEAPER in the same pass (description 160 ->
+    # 157, schema 2,270 -> 2,259 chars) so this doc's growth is paid for on the
+    # always-loaded arm, which is why ``bench_context_budget.py`` was re-measured
+    # to a PASS at 97,038 chars / 34,906 billed (29 headroom) rather than raised.
+    "generate_image": 984,
     # NEW (sound-generation wave, 2026-10-17): the ``generate_sound_effect``
     # doc — the two rungs and the no-OpenAI rule, the REQUIRED duration and
     # what it costs, the estimate rules and the honest cancel paragraphs.

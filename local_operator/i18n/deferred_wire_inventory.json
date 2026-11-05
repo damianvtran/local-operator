@@ -50,7 +50,7 @@
         }
       ],
       "references": {
-        "settings_io.py": 10
+        "settings_io.py": 12
       }
     },
     "wire.memory": {
@@ -83,6 +83,19 @@
       ],
       "references": {
         "settings_io.py": 4
+      }
+    },
+    "wire.guardrails": {
+      "reason": "guardrails section title/description and row label/help rendered by settings_io._t",
+      "render_points": [
+        {
+          "path": "local_operator/settings_io.py",
+          "symbol": "settings_io._t",
+          "note": "guardrails section and row label/help rendered as plain strings"
+        }
+      ],
+      "references": {
+        "settings_io.py": 12
       }
     },
     "wire.radient_saver": {

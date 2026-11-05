@@ -1,0 +1,47 @@
+import hashlib
+import json
+from pathlib import Path
+from local_operator import settings_io
+from local_operator.i18n import messages, text
+from local_operator.i18n.keys import wire_settings_account_policy as keys
+
+ns = 'wire.settings.account_policy'
+root = Path.cwd()
+assert str(root) in str(__import__('local_operator').__file__)
+previous = text.active_locale()
+results = []
+try:
+    for locale in ('fr', 'zh-CN'):
+        target = root / f'local_operator/i18n/catalogues/{locale}/{ns}.json'
+        catalogue = json.loads(target.read_text())
+        text.set_active_locale(locale)
+        setting = settings_io.BY_KEY['retry.accountSelectionPolicy']
+        legacy = settings_io.BY_KEY['retry.usageAwareAccountPick']
+        assert setting.label == catalogue[ns + '.label']
+        assert setting.help == catalogue[ns + '.help']
+        assert legacy.label == catalogue[ns + '.legacy.label']
+        assert legacy.help == catalogue[ns + '.legacy.help']
+        choices = setting.resolved_choices
+        assert [c.value for c in choices] == ['reset-soonest', 'headroom', 'fair']
+        for choice, key in zip(choices, ('reset_soonest', 'headroom', 'fair')):
+            assert choice.label == catalogue[f'{ns}.{key}.label']
+            assert choice.description == catalogue[f'{ns}.{key}.description']
+        for code, value in catalogue.items():
+            rendered = messages.render_record(code, {}, locale=locale)
+            assert rendered.source_locale == locale
+            assert rendered.text == value
+        for factory in (keys.label, keys.help, keys.error_unavailable, keys.error_invalid_shape,
+                        keys.error_invalid_json, keys.error_write_failed):
+            envelope = factory().envelope(locale=locale)
+            assert envelope['text'] == catalogue[envelope['code']]
+            assert envelope['params'] == {}
+        control = messages.render_record(ns + '.label', {}, locale='unknown')
+        assert control.source_locale == 'en'
+        results.append({'locale': locale, 'keys': 14, 'source_locale': locale,
+                        'label': setting.label, 'target_sha256': hashlib.sha256(target.read_bytes()).hexdigest(),
+                        'choice_ids': [c.value for c in choices], 'unknown_fallback': control.text})
+finally:
+    text.set_active_locale(previous)
+print(json.dumps({'source': str(__import__('local_operator').__file__), 'results': results,
+                  'locale_restored': text.active_locale() == previous,
+                  'scope': 'Production registry refresh and explicit-locale generated envelopes only; no HTTP/native/pseudo/RTL execution'}, ensure_ascii=False, indent=2))

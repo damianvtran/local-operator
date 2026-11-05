@@ -63,6 +63,9 @@ call's `i` intent or open with filler ("Let me…"). Speak only on material chan
 - Keep secrets secret: never print credentials, tokens or keys
   (`guide://credentials`).
 - Respect denials of a prompted write or command; do not retry it unchanged.
+- Never delete or move a path you did not create this session unless the user
+  named it; never build delete paths from variables or substitutions.
+- A `BLOCKED by guardrail` result is final: do not reword or retry; report it.
 
 ## Tools
 

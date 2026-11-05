@@ -652,6 +652,7 @@ _CALL_COLUMNS = (
     "cost_source",
     "cache_miss_type",
     "cache_missed_tokens",
+    "account_ref",
 )
 
 #: Columns added AFTER the first shipped schema. A database created by an older
@@ -732,6 +733,13 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # over the 90-day ledger cannot.
     ("cache_miss_type", "TEXT NOT NULL DEFAULT ''"),
     ("cache_missed_tokens", "INTEGER NOT NULL DEFAULT 0"),
+    # Opaque id of the ACCOUNT that served the call (``Usage.account_ref``).
+    # NULL, not '': unknown is a different fact from "an account whose id is
+    # empty", and every row recorded before this column, every env-credential
+    # call and every unstamped stream is unknown. Raw-ledger only, like the
+    # cache diagnostics: the rollups have no ALTER-free way to take a new
+    # dimension, and per-account questions are GROUP BYs over this window.
+    ("account_ref", "TEXT"),
 )
 
 #: Columns added to the ``session_daily`` ROLLUP after it first shipped, in the
@@ -1260,6 +1268,7 @@ def _row_values(
         snapshot.cost_source,
         snapshot.cache_miss_type,
         int(snapshot.cache_missed_tokens),
+        snapshot.account_ref,
     )
 
 

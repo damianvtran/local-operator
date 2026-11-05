@@ -1,0 +1,64 @@
+{
+  "agent": "i18n-translator",
+  "session": "7b2ba4ed501d",
+  "actual_model": "openai/gpt-6.1-sol",
+  "actual_model_source": "Persisted assistant translation-writing and label-remediation tool-call usage.provider and usage.model_id, not the system model header",
+  "transcript_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/transcript.jsonl",
+  "translation_writing_usage": {
+    "entry_id": "b2aa25b6c8b443dc91bbf52ceb567528",
+    "timestamp": 1793712425.650454,
+    "usage": {
+      "billing_basis": "subscription_api_equivalent",
+      "input_tokens": 77620,
+      "output_tokens": 633,
+      "cache_read_tokens": 76672,
+      "context_tokens": 77620,
+      "reasoning_tokens": 28,
+      "at_ms": 1793712423008,
+      "provider": "openai",
+      "model_id": "gpt-6.1-sol"
+    },
+    "action_names": [
+      "write"
+    ]
+  },
+  "label_remediation_usage": {
+    "entry_id": "55a908ca38bd47d98ffc43fd9bde6101",
+    "timestamp": 1793712465.983051,
+    "usage": {
+      "billing_basis": "subscription_api_equivalent",
+      "input_tokens": 79411,
+      "output_tokens": 353,
+      "cache_read_tokens": 79104,
+      "context_tokens": 79411,
+      "reasoning_tokens": 270,
+      "at_ms": 1793712465476,
+      "provider": "openai",
+      "model_id": "gpt-6.1-sol"
+    },
+    "action_names": [
+      "edit"
+    ]
+  },
+  "fallback_routes": [
+    {
+      "entry_id": "b890d01d056149efa86ce524b5919819",
+      "primary": "anthropic/claude-sonnet-5-5",
+      "active": {
+        "selector": "anthropic/claude-opus-5-5",
+        "effort": "medium"
+      },
+      "reason": "provider failure: quota"
+    },
+    {
+      "entry_id": "9db45f79733b4e59a7181e007150d99f",
+      "primary": "anthropic/claude-sonnet-5-5",
+      "active": {
+        "selector": "openai/gpt-6.1-sol",
+        "effort": "medium"
+      },
+      "reason": "provider failure: quota"
+    }
+  ],
+  "translation_method": "Direct LLM reasoning; no MT API/SDK/service/site used."
+}

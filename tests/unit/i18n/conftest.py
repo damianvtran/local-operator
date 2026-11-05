@@ -28,6 +28,29 @@ def _load(name: str, path: Path) -> ModuleType:
     return module
 
 
+@pytest.fixture(autouse=True)
+def _local_cli_invocation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run these unit fixtures as a local CLI, never as a GHA merged checkout.
+
+    A unit shard exports its own pull-request provenance for the whole job, but
+    the repositories these tests drive are synthetic (or the real tree checked
+    out for a unit run, not the runner's merge commit). The strict merged-
+    checkout proof is right to reject that mismatch, so inheriting the ambient
+    provenance would only ever assert the fixture is not what CI checked out.
+    Remove it here and let each test state the contract it exercises; the real
+    provenance proof lives in test_audit_history's explicit environments and in
+    the dedicated i18n job, which invokes the unchanged script directly.
+    """
+    for name in (
+        "GITHUB_ACTIONS",
+        "GITHUB_EVENT_NAME",
+        "GITHUB_EVENT_PATH",
+        "GITHUB_REF",
+        "GITHUB_SHA",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture()
 def i18n_check(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     checker = _load("i18n_check_under_test", REPO / "scripts" / "i18n" / "check.py")

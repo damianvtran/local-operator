@@ -4,7 +4,7 @@ The map is safe to serve to any local client because it carries no credentials
 and no configuration values — with exactly one deliberate exception: the
 RESOLVED ``language`` tag (a shipped-locale string, not a raw config value;
 RFC §2.5). Authenticated desktop callers additionally receive the current
-owner's fresh, cached hub thread-read capability. This is observed support,
+owner's fresh, cached hub conversation capabilities. This is observed support,
 not a build fact; public callers receive only the ordinary runtime map.
 """
 
@@ -51,7 +51,7 @@ async def capabilities(request: Request):
                     features.update(
                         get_status_discipline(
                             config_manager.config_dir
-                        ).cached_thread_read_features()
+                        ).cached_conversation_features()
                     )
                 except (BridgeRefusal, BridgeSignInRequired):
                     pass  # Unknown/signed-out is absence, never invented support.

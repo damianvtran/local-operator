@@ -1,0 +1,12 @@
+{
+  "wire.guardrails.critical_override.help": "Tắt theo mặc định. Khi bật, các thao tác xóa quan trọng (thư mục trạng thái, cấu hình, bí mật, thư mục home) được gửi đến bước kiểm tra an toàn thay vì bị từ chối. Chỉ có hiệu lực khi đặt từ phần cài đặt trên máy này, không bao giờ qua việc sửa tệp.",
+  "wire.guardrails.critical_override.label": "Xét duyệt xóa quan trọng",
+  "wire.guardrails.enabled.help": "Áp dụng các tệp quy tắc bảo vệ của bạn cho lệnh gọi công cụ trước khi chạy. Bước kiểm tra dangerous-delete tích hợp luôn bật.",
+  "wire.guardrails.enabled.label": "Quy tắc bảo vệ",
+  "wire.guardrails.judge_timeout_s.help": "Thời gian tối đa cho bước kiểm tra an toàn trước khi lệnh gọi bị chặn. Bước kiểm tra không trả lời được luôn chặn.",
+  "wire.guardrails.judge_timeout_s.label": "Hạn kiểm tra an toàn (giây)",
+  "wire.guardrails.rules_dir.help": "Thư mục bổ sung chứa tệp quy tắc bảo vệ (*.md), được nạp thêm ngoài thư mục rules trong thư mục cấu hình.",
+  "wire.guardrails.rules_dir.label": "Thư mục quy tắc",
+  "wire.guardrails.section.description": "Các bước kiểm tra chạy trước lệnh gọi công cụ và có thể từ chối lệnh nguy hiểm.",
+  "wire.guardrails.section.title": "Bảo vệ"
+}

@@ -19,6 +19,13 @@ import pytest
 # Function identities, not line numbers: source formatting cannot waive the
 # guard. Reasons make every retained default reviewable in the producer census.
 SAFE_DEFAULTS = {
+    ("guardrails/classify.py", "classify_bash"): (
+        "HOME is a protected-path expansion root for static classification, not a spawn cwd"
+    ),
+    ("harness/loop.py", "_guardrail_outcome"): (
+        "execution-time cwd for inspecting an already-planned call; "
+        "does not write startup/session metadata or erase spawn omission"
+    ),
     ("hook_forwarding.py", "load_hook_commands"): "hook config discovery, not session startup",
     ("exec_session.py", "session_cwd"): "publishes the already-constructed Session's cwd",
     ("variables.py", "__init__"): "variable expansion context, not a spawn producer",

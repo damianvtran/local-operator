@@ -483,6 +483,10 @@ def _merge_accounting_component(
     # that is what bounds a deep roster's summary.
     if component.at_ms != total.at_ms:
         total.at_ms = None
+    # Same rule for the serving account: a row names one only while every call
+    # folded into it came from it (the key does not split on account).
+    if component.account_ref != total.account_ref:
+        total.account_ref = None
     if mode == "reported":
         total.usd_cost = (total.usd_cost or 0.0) + (receipt or 0.0)
     elif mode == "estimated":

@@ -1272,7 +1272,7 @@ def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
     invisibly, until the attach frame crosses its 1 MiB socket line limit again
     (review round 1, MINOR 2).
     """
-    for field in ("at_ms", "billing_basis", "openai_service_tier"):
+    for field in ("at_ms", "billing_basis", "openai_service_tier", "account_ref"):
         if data.get(field) is None:
             data.pop(field, None)
     if not data.get("openai_long_context"):
@@ -1338,6 +1338,10 @@ class Usage(BaseModel):
     # Durable per-call credential provenance: a provider can serve both plan and
     # API-key traffic, so consumers cannot reconstruct this from its id later.
     billing_basis: str | None = None
+    # Opaque, non-secret id of the ACCOUNT that served this call (see
+    # ``providers.account_ref``). Same legacy/unknown-means-omitted rule as
+    # ``billing_basis``; never an email, org name, or raw IdP id.
+    account_ref: str | None = None
 
     # Only the actual public adapter can assert this per-call pricing tier;
     # unknown legacy/gateway receipts stay false. Omitted when false to avoid
@@ -3874,6 +3878,21 @@ class LoopConfig(BaseModel):
     # SessionStreamFn reconciles admission against its conversation-owned
     # counted boundary; this scalar alone cannot authorize an input budget.
     get_context_tokens_hint: Callable[[], int | None] | None = Field(default=None, exclude=True)
+
+    # The pre-execution guardrail's forked judge (``local_operator.guardrails``):
+    # ``(system, user) -> answer`` as ONE context-free model call, no tools and
+    # no conversation. Added after the 2026-11-04 state-root deletion: calls the
+    # classifier ranks dangerous-but-plausible are reviewed here before they
+    # run. ``None`` (a host without wiring) means every such call is BLOCKED —
+    # fail closed; CRITICAL calls are refused without consulting it at all.
+    guard_judge: Callable[[str, str], Awaitable[str]] | None = Field(default=None, exclude=True)
+    # Which guardrail LOOSENINGS (``guardrails.check.LOOSENING_KEYS``) an
+    # operator — not the model — authorised in this process (``harness.approval.
+    # loosening_is_authorised``). Read per call; ``None`` means none. A bare
+    # bool is accepted as the critical-override-only spelling.
+    guard_override_authorised: Callable[[], "frozenset[str] | bool"] | None = Field(
+        default=None, exclude=True
+    )
 
     interrupt_mode: Literal["immediate", "wait"] = "wait"
     # Epoch-ms deadline for the whole run, if any.

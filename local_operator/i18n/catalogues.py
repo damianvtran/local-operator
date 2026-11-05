@@ -96,6 +96,9 @@ DEFERRED_NAMESPACES: dict[str, str] = {
     "wire.console": "console section title/description and row labels rendered by settings_io._t",
     "wire.memory": "memory section rows rendered by settings_io._t as plain label/help strings",
     "wire.host_speed": "host-speed threshold label/help rendered by settings_io._t",
+    "wire.guardrails": (
+        "guardrails section title/description and row label/help rendered by settings_io._t"
+    ),
     "wire.radient_saver": (
         "radient-saver section and mode choices rendered by settings_io._t; "
         "saver/chain.py::notice_message returns a Msg its caller prints"
