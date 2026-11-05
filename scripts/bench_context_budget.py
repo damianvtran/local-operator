@@ -1850,6 +1850,9 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # then +21 when review round 1 rewrote its parenthetical to name the config dir's
 # default instead of spelling the default path as if it were always the live one.
 # The head clears this ceiling by 47, so the ratchet is NOT moved a second time.
+# The calibration round adds 15 chars to the same bullet (``writing one`` ->
+# ``writing or calibrating one``): re-measured 97,492 chars = ~35,069 billed, 42
+# of headroom. The ceiling still stands, and its arithmetic here is not stale.
 # The prompt alone re-read through ``count_text_tokens`` moves 2,872 -> 2,924
 # (+52) on claude-sonnet-4-5. The guide's own description does not move THIS
 # number — the bench renders a fixed skills block and never selects a guide — but
@@ -2061,7 +2064,8 @@ BUDGET_BILLED_TOKENS = 35_111
 # The raise lands the ceiling at head + 55 — the band this file keeps, which
 # also clears the known CI-vs-local offset — and the tighten band below (1,200)
 # is not in play. The remediation round's +21 chars still leave 48 of headroom,
-# so the ratchet is not moved a second time.
+# so the ratchet is not moved a second time. The calibration round's +15 chars bring
+# it to 86,518 chars = ~31,122, 42 of headroom: still under, still not moved.
 BUDGET_CHILD_BILLED_TOKENS = 31_164
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.

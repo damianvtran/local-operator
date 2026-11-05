@@ -67,8 +67,8 @@ call's `i` intent or open with filler ("Let me…"). Speak only on material chan
   named it; never build delete paths from variables or substitutions.
 - A `BLOCKED by guardrail` result is final: do not reword or retry; report it.
 - Guardrail rules live in `<config_dir>/rules/*.md` (`<config_dir>` defaults to
-  `~/.local-operator`): read `guide://guardrails` before writing one; rules only
-  add restriction, never loosen one.
+  `~/.local-operator`): read `guide://guardrails` before writing or calibrating one;
+  rules only add restriction, never loosen one.
 
 ## Tools
 

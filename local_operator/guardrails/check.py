@@ -216,11 +216,30 @@ def _critical_text(verdict: Verdict) -> str:
     )
 
 
-def _review_text(rule: str, reason: str, targets: str) -> str:
+def review_text(rule: str, reason: str, targets: str) -> str:
     return (
         f"{BLOCK_MARKER} {rule} (review): {reason}. Targets: {targets}. Nothing was run. "
         "Ask the user, or target a narrower path."
     )
+
+
+def rule_block_text(rule: Rule) -> str:
+    """The result text of a user rule that refuses a call.
+
+    Named rather than inlined so ``guardrails/preview.py`` can print the string a
+    ``block`` would really produce: a preview that re-describes the refusal is a
+    preview that can promise text the checkpoint does not return.
+    """
+    body = f" {rule.body}" if rule.body else ""
+    return (
+        f"{BLOCK_MARKER} {rule.name} (block): this call matched a user rule. "
+        f"Nothing was run.{body}"
+    )
+
+
+def rule_warn_text(rule: Rule) -> str:
+    """The line a ``warn`` rule appends to the call's result (see rule_block_text)."""
+    return f"Guardrail {rule.name}: {rule.body}".strip()
 
 
 def _journal(rule: str, risk: str, verdict: str, latency: float, targets: str) -> None:
@@ -271,7 +290,7 @@ async def _dangerous_delete(
         _journal(DANGEROUS_DELETE_RULE, "high", "block", 0.0, targets)
         return GuardOutcome(
             blocked=True,
-            text=_review_text(DANGEROUS_DELETE_RULE, "an unresolvable target", targets),
+            text=review_text(DANGEROUS_DELETE_RULE, "an unresolvable target", targets),
             rule=DANGEROUS_DELETE_RULE,
             risk="high",
             destructive=True,
@@ -303,7 +322,7 @@ async def _dangerous_delete(
         )
     return GuardOutcome(
         blocked=True,
-        text=_review_text(DANGEROUS_DELETE_RULE, result.reason, targets),
+        text=review_text(DANGEROUS_DELETE_RULE, result.reason, targets),
         rule=DANGEROUS_DELETE_RULE,
         risk=risk_name,
         destructive=True,
@@ -387,16 +406,14 @@ async def _check_tool_call(
         if not rule.matches(tool_name, args):
             continue
         if rule.action == "warn":
-            warnings.append(f"Guardrail {rule.name}: {rule.body}".strip())
+            warnings.append(rule_warn_text(rule))
             _journal(rule.name, "rule", "warn", 0.0, "")
             continue
         if rule.action == "block":
             _journal(rule.name, "rule", "block", 0.0, "")
-            body = f" {rule.body}" if rule.body else ""
             return GuardOutcome(
                 blocked=True,
-                text=f"{BLOCK_MARKER} {rule.name} (block): this call matched a user rule. "
-                f"Nothing was run.{body}",
+                text=rule_block_text(rule),
                 rule=rule.name,
                 risk="rule",
                 destructive=bool(outcome and outcome.destructive),
@@ -418,7 +435,7 @@ async def _check_tool_call(
         if not result.allowed:
             return GuardOutcome(
                 blocked=True,
-                text=_review_text(rule.name, result.reason, f"this {tool_name} call"),
+                text=review_text(rule.name, result.reason, f"this {tool_name} call"),
                 rule=rule.name,
                 risk="rule",
                 destructive=bool(outcome and outcome.destructive),
