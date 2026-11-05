@@ -131,7 +131,7 @@ async def test_real_metadata_handoff_live_and_replay_keep_the_same_display_witho
 
     async def primitive(_context, **kwargs):
         sent.append(kwargs)
-        return SimpleNamespace(detail="delivered")
+        return SimpleNamespace(detail="delivered", state="delivered")
 
     monkeypatch.setattr(peer_send, "session_has_durable_history", lambda session_id: True)
     monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", primitive)

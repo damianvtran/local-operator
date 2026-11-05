@@ -1701,7 +1701,7 @@ async def test_atomic_card_wake_at_a_running_tool_boundary(
             sender=kwargs["sender"],
             custom_type=kwargs["custom_type"],
         )
-        return SimpleNamespace(detail=str(receipt))
+        return SimpleNamespace(detail=str(receipt), state="delivered")
 
     async def arrival():
         _reserve(store, config_dir=config_dir)
