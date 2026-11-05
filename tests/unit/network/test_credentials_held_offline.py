@@ -251,7 +251,9 @@ def test_any_owner_answer_drops_the_held_grant(
     # The owner then going silent cannot bring the grant back, though it had time left.
     _stop_owner(mesh)
     after = client.request_grant_sync(STUB_PROVIDER, session_id="sess-1")
-    assert isinstance(after, BrokerError) and after.code == "owner_offline", after
+    # The known owner answer remains the cause; loss of connectivity cannot
+    # launder it into a lesser, retry-only outage (R1-1 / Q1).
+    assert isinstance(after, BrokerError) and after.code == code, after
     assert _state(mesh, client).usable is False
 
 
@@ -324,8 +326,13 @@ async def test_the_served_session_band_stays_ok_while_held_and_blocks_at_lease_e
     unavailable, honestly, rather than serving past it.
     """
     import asyncio
+    from concurrent.futures import ThreadPoolExecutor
 
+    from local_operator.session.runtime import serving
     from local_operator.session.runtime.serving import ServingSessionHandle
+
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fixture-held-band")
+    monkeypatch.setattr(serving, "_switch_executor_pool", pool)
     from tests.unit.network.test_owner_return_clears_access_band import _band, _settle
     from tests.unit.session.runtime.test_serving import _AccessSession
 
@@ -354,7 +361,7 @@ async def test_the_served_session_band_stays_ok_while_held_and_blocks_at_lease_e
         assert isinstance(held, Grant) and held.held_offline, held
         await _settle(handle)
         band = _band(session)
-        assert (band.effective_state, band.state) == ("held_offline", "ok"), band
+        assert (band.effective_state, band.state) == ("effective_borrow", "ok"), band
         assert len(mesh.idp.posts) == posts
         assert net_fixtures.wait_for(lambda: time.time() * 1000 > grant.grant_expires_at_ms + 50)
         lapsed = client.request_grant_sync(STUB_PROVIDER, session_id="sess-1")
@@ -367,3 +374,4 @@ async def test_the_served_session_band_stays_ok_while_held_and_blocks_at_lease_e
         ), band
     finally:
         await handle.dispose()
+        pool.shutdown(wait=True, cancel_futures=True)

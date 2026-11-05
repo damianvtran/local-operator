@@ -3411,7 +3411,6 @@ class FrontendModelAccess(BaseModel):
             "local",
             "eligible_borrow_unverified",
             "effective_borrow",
-            "held_offline",
             "expired",
             "pending",
             "owner_unavailable",
@@ -3421,6 +3420,15 @@ class FrontendModelAccess(BaseModel):
         ]
         | None
     ) = None
+
+    @field_validator("effective_state", mode="before")
+    @classmethod
+    def _public_borrow_phase(cls, value: Any) -> Any:
+        # Current AND released readers understand effective_borrow, not a new
+        # held phase. Internal policy retains the distinction and original lease
+        # timestamps; the public claim is only that this grant remains usable.
+        return "effective_borrow" if value == "held_offline" else value
+
     #: Keyless borrow context, explicitly historical. A failed/expired reading
     #: retains the last successful grant's bound but NEVER marks it usable.
     #: Epoch seconds; None means this process has not observed that fact.
