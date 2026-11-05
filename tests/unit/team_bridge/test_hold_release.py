@@ -850,7 +850,7 @@ class _ChainPolicy(Policy):
     ids=["auto->opus", "sonnet->opus"],
 )
 def test_a_fallback_hops_answer_is_never_releasable(rig, primary, fallback, reply) -> None:
-    """Operator ruling 2026-11-04: a fallback verdict never feeds a release, even Opus."""
+    """Temporary hop-0 restriction until #3444 distinguishes preferred-chain provenance."""
 
     config_dir, store, owner = rig
     runner = _chain(primary, fallback, reply, fail_primary=True)

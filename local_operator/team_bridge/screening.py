@@ -2321,8 +2321,8 @@ def _work_scope_conversion(
     ``new_work_request``; ``out_of_scope_work`` and ``personal_info_request``
     are disclosure-class and stay terminal bounces under every template (S-1).
     Amendment 2 adds two gates, both of which only ever keep the pre-B4b
-    terminal reject: the answer must come from an allowlisted FIRST hop (a
-    fallback verdict never feeds a release, operator ruling 2026-11-04), and the
+    terminal reject: the answer currently must come from an allowlisted FIRST
+    hop (a TEMPORARY restriction until #3444 supplies preferred provenance), and the
     REASON must pass the release-only check (``hold_release.strict_release_reason``:
     no prose-named second category, no negation, no format characters). A
     non-preferred answer is therefore a bounce, not an ineligible hold (code
@@ -2373,7 +2373,8 @@ def _work_scope_hold_conversion(
 
     B4b Amendment 2 (operator + Aida, 2026-11-04): under v2 the B4 relay is a
     doubt hold naming ``new_work_request``. It converts ONLY from an allowlisted
-    FIRST hop (a fallback verdict never feeds a release), only when the reason's
+    FIRST hop (temporarily; #3444 must allow later explicitly preferred hops),
+    only when the reason's
     exact category tokens are ``new_work_request`` alone, and only when the
     reason passes the release-only check (no second category in prose, no
     negation, no format characters; security review #3443 S-2). Anything else

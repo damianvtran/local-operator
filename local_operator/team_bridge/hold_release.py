@@ -132,17 +132,18 @@ def eligible_screener(provider: str | None, model: str | None) -> bool:
 
 
 def preferred_answer(provider: str | None, model: str | None, hop: int | None) -> bool:
-    """Whether THIS answer may feed a release: an allowlisted FIRST hop (Amendment 2).
+    """Temporary fail-closed release gate until #3444 supplies trusted provenance.
 
-    Operator ruling 2026-11-04 (security review #3443 S-1): a verdict a fallback
-    hop gave never feeds a release, even when that fallback is itself Sonnet or
-    Opus. The chain falls back when the preferred route failed, and a release
-    must rest on the screener the receiver configured first, not on whichever
-    route happened to answer.
+    The corrected requirement distinguishes explicitly PREFERRED screening hops
+    from the receiver's ordinary DEFAULT/FALLBACK cascade. Preferred Opus after
+    Sonnet exhaustion MAY release; a default/fallback Opus answer MAY NOT. Model
+    names and hop positions alone cannot express that distinction.
 
-    TODO(#3444): once the pin lane lands, this is ``answered_hop.preferred`` on
-    hop 0 (``SCREENING_EVALUATED_MODELS``); until then the D4 allowlist plus the
-    hop index is the local equivalent.
+    TODO(#3444): consume the derived ``answered_preferred`` flag together with
+    the answering identity, and allow later explicitly preferred hops. Until
+    that dependency lands we temporarily require an allowlisted hop 0. This is
+    a conservative restriction, NOT an operator requirement or an equivalent
+    implementation of #3444's provenance contract (manager correction to S-1).
     """
 
     return hop == 0 and eligible_screener(provider, model)

@@ -1262,12 +1262,12 @@ class ScreenChainRunner:
         self._built: list[Any] = []
         #: Set by :meth:`acall` to the hop that answered (B4b D4); ``""`` until then.
         self.served_provider = ""
-        #: That hop's position in the chain, ``None`` until one answered. B4b
-        #: (security review round 1, S-1; operator ruling 2026-11-04): only a
-        #: hop-0 answer may feed a release — a fallback verdict never does,
-        #: even when the fallback is itself an allowlisted model.
-        # TODO(#3444): read ``answered_hop.preferred`` / ``answered_preferred``
-        # once the pin lane lands; this index is the local equivalent.
+        #: The answering hop's index, recorded for the signed B4b audit.
+        #: The current release gate temporarily restricts eligibility to hop 0;
+        #: this is NOT the product requirement (preferred Opus after preferred
+        #: Sonnet exhaustion may release). TODO(#3444): use its derived
+        #: ``answered_preferred`` flag to distinguish preferred-chain provenance
+        #: from the receiver's ordinary default/fallback cascade.
         self.served_hop_index: int | None = None
         self._job: AdmissionJob | None = None
 
