@@ -948,3 +948,85 @@ def test_a_job_parked_on_a_concurrency_group_is_unstarted_not_unreadable(monkeyp
         out = capsys.readouterr().out
         assert "unreadable" not in out, (state, out)
         assert "CANCEL" in out, (state, out)
+
+
+def test_a_parked_run_with_a_completed_step_is_still_kept(monkeypatch, capsys):
+    """The step check is what makes treating `waiting` as unstarted safe.
+
+    A job can sit in `waiting` AFTER it has already run work -- requeued by a
+    concurrency group, a retried step, or a job waiting on a later stage. The
+    status allowlist alone would call that unstarted and cancel it. This pins
+    the second line of defence: a completed, non-skipped step means the job has
+    started, whatever its status now says.
+
+    Round-1 review found this KEEP unpinned -- deleting the step guard left the
+    whole suite green while a `waiting` job with a completed step became
+    cancellable, so the safeguard could be removed by a future edit with no
+    test objecting.
+    """
+    parked_but_ran = {
+        "total_count": 1,
+        "jobs": [
+            {
+                "id": 1,
+                "name": "test",
+                "status": "waiting",
+                "steps": [{"name": "Run tests", "status": "completed", "conclusion": "success"}],
+            }
+        ],
+    }
+    calls = []
+
+    def fake(path, *, method="GET"):
+        calls.append((method, path))
+        if "/jobs?" in path:
+            return parked_but_ran
+        return {"status": "queued"} if method == "GET" else None
+
+    monkeypatch.setattr(reaper, "queued_runs", lambda repo: [_run()])
+    monkeypatch.setattr(reaper, "branch_tip", lambda repo, branch: "b" * 40)
+    monkeypatch.setattr(reaper.sys, "argv", ["reaper", "--repo", "synthetic/account"])
+    monkeypatch.setattr(reaper, "gh_api", fake)
+
+    assert reaper.main() == 0
+    out = capsys.readouterr().out
+    assert "job step execution has already begun" in out, out
+    assert not any(method == "POST" for method, _ in calls), calls
+
+
+def test_dry_run_does_not_write_even_when_the_run_would_be_cancelled(monkeypatch, capsys):
+    """The positive half of the dry-run contract: a WOULD run must not POST.
+
+    The earlier no-write assertion was vacuous -- it used a run with an
+    in_progress job, which the guard KEEPS, and the pre-fix code issued no POST
+    for a kept run either. So it passed on the broken tree. This drives a run
+    that genuinely CLEARS the guard (empty inventory) and proves the preview
+    reports it while issuing no write; without `--dry-run` the identical drive
+    must issue exactly one.
+    """
+    empty = {"total_count": 0, "jobs": []}
+
+    def drive(dry_run):
+        calls = []
+
+        def fake(path, *, method="GET"):
+            calls.append((method, path))
+            if "/jobs?" in path:
+                return empty
+            return {"status": "queued"} if method == "GET" else None
+
+        monkeypatch.setattr(reaper, "queued_runs", lambda repo: [_run()])
+        monkeypatch.setattr(reaper, "branch_tip", lambda repo, branch: "b" * 40)
+        argv = ["reaper", "--repo", "synthetic/account"]
+        monkeypatch.setattr(reaper.sys, "argv", argv + (["--dry-run"] if dry_run else []))
+        monkeypatch.setattr(reaper, "gh_api", fake)
+        assert reaper.main() == 0
+        return capsys.readouterr().out, calls
+
+    out, calls = drive(True)
+    assert "WOULD" in out, out
+    assert not any(method == "POST" for method, _ in calls), calls
+
+    out_real, calls_real = drive(False)
+    assert "CANCEL" in out_real, out_real
+    assert sum(1 for method, _ in calls_real if method == "POST") == 1, calls_real

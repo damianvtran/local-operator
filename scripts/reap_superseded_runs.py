@@ -532,9 +532,11 @@ def jobs_are_unstarted(repo: str, run_id: Any) -> tuple[bool, str]:
     with created_at, so that timestamp alone cannot distinguish execution.
     A partial, changing or unreadable inventory is not permission to cancel.
     Execution evidence is a runner assignment, an in-progress job, a started
-    STEP, or a completed job that was not skipped or cancelled -- a job that was
-    cancelled itself never did work, so it is not evidence that this run's work
-    mattered.
+    step, or a completed job that was not skipped. At JOB level a `cancelled`
+    job is also exempt: cancelling a job before it starts leaves no work behind,
+    so it is not evidence that this run's work mattered. That exemption is
+    job-level only -- at STEP level just `skipped` is exempt, which is the
+    stricter reading a step deserves.
     This read cannot make the subsequent POST atomic with runner assignment;
     it only prevents discarding work whose execution is already observable.
     """
