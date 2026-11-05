@@ -881,7 +881,10 @@ async def deliver_wake(
         # discard the feed ref, permanently losing the message on replay.
         # Mailbox/unconfirmed outcomes may already have landed: keep their
         # existing handoff semantics rather than risking a duplicate resend.
-        if outcome.state == DELIVERY_FAILED:
+        # Read the state defensively: a double or a pre-typed caller that
+        # carries no state has not reported a failure, so it keeps the
+        # historical delivered semantics instead of raising.
+        if getattr(outcome, "state", None) == DELIVERY_FAILED:
             raise DeliveryFailed(outcome.detail)
         return str(outcome.detail)
     # Cold with NO durable history: exactly the designated-CoS engagement

@@ -40,24 +40,74 @@ def _setup(tmp_path, monkeypatch, outcomes):
         if result != peer_send.DELIVERY_FAILED:
             accepted.append(kwargs)
         return peer_send.DeliveryOutcome(
-            result, "PRIVATE-TRANSPORT-DETAIL", f"peer-{len(attempts)}", "unconfirmed",
-            1, "peer_refused" if result == peer_send.DELIVERY_FAILED else "", "engaged", "sess_a",
+            result,
+            "PRIVATE-TRANSPORT-DETAIL",
+            f"peer-{len(attempts)}",
+            "unconfirmed",
+            1,
+            "peer_refused" if result == peer_send.DELIVERY_FAILED else "",
+            "engaged",
+            "sess_a",
         )
 
     monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", transport)
 
     def handle():
-        return asyncio.run(conversation.handle_conversation_available(
-            owner, rig._ref(server), config_dir=config_dir, auth_store=None,
-            access=SimpleNamespace(credential_id=owner.credential_id),
-        ))
+        return asyncio.run(
+            conversation.handle_conversation_available(
+                owner,
+                rig._ref(server),
+                config_dir=config_dir,
+                auth_store=None,
+                access=SimpleNamespace(credential_id=owner.credential_id),
+            )
+        )
 
     return owner, config_dir, attempts, accepted, handle
+
+
+def test_only_the_canonical_typed_failure_raises(tmp_path, monkeypatch):
+    """An outcome with no ``state`` is not a confirmed failure and must not raise.
+
+    Doubles and pre-typed callers report only ``detail``; reading the state
+    strictly would turn a delivered handoff into a retry and re-send a card the
+    recipient already holds. The canonical failed state still raises.
+    """
+    monkeypatch.setattr(peer_send, "session_has_durable_history", lambda *_a, **_k: True)
+    owner = SimpleNamespace(account_id="account")
+
+    async def detail_only(*args, **kwargs):
+        return SimpleNamespace(detail="delivered")
+
+    monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", detail_only)
+    detail = asyncio.run(
+        wake.deliver_wake(owner, "synthetic card", session_id="sess_a", config_dir=tmp_path)
+    )
+    assert detail == "delivered"
+
+    async def typed_failure(*args, **kwargs):
+        return peer_send.DeliveryOutcome(
+            peer_send.DELIVERY_FAILED,
+            "not delivered",
+            "peer-1",
+            peer_send.WAKE_NOT_REQUESTED,
+            1,
+            "peer_refused",
+            "engaged",
+            "sess_a",
+        )
+
+    monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", typed_failure)
+    with pytest.raises(peer_send.DeliveryFailed):
+        asyncio.run(
+            wake.deliver_wake(owner, "synthetic card", session_id="sess_a", config_dir=tmp_path)
+        )
 
 
 @pytest.mark.parametrize("failure", ["typed", "exception", "cancel"])
 def test_failed_handoff_remains_owed_and_retries_once(tmp_path, monkeypatch, caplog, failure):
     """The old adapter returned a failed outcome's prose as success and lost this card."""
+
     first = {
         "typed": peer_send.DELIVERY_FAILED,
         "exception": OSError("PRIVATE-TRANSPORT-DETAIL"),
@@ -75,7 +125,8 @@ def test_failed_handoff_remains_owed_and_retries_once(tmp_path, monkeypatch, cap
     row = rig._reservation_rows(config_dir)[0]
     assert row["state"] == "pending" and row["card_posted_at"] is None
     assert not accepted
-    assert Store(config_dir).claim_status(owner, rig.MESSAGE_ID)["state"] == "released"
+    claim = Store(config_dir).claim_status(owner, rig.MESSAGE_ID)
+    assert claim is not None and claim["state"] == "released"
     assert "PRIVATE-TRANSPORT-DETAIL" not in caplog.text
     # Every handle opens a new Store. No pending in-memory claim is needed for recovery.
     assert handle()["action"] == "delivered"
@@ -87,9 +138,14 @@ def test_failed_handoff_remains_owed_and_retries_once(tmp_path, monkeypatch, cap
     assert rig._reservation_rows(config_dir)[0]["card_posted_at"] is not None
 
 
-@pytest.mark.parametrize("state", [
-    peer_send.DELIVERY_DELIVERED, peer_send.DELIVERY_MAILBOX, peer_send.DELIVERY_UNCONFIRMED,
-])
+@pytest.mark.parametrize(
+    "state",
+    [
+        peer_send.DELIVERY_DELIVERED,
+        peer_send.DELIVERY_MAILBOX,
+        peer_send.DELIVERY_UNCONFIRMED,
+    ],
+)
 def test_accepted_or_uncertain_handoff_is_not_resent(tmp_path, monkeypatch, state):
     """An unknown old posted marker is not evidence of non-delivery: never reopen it."""
     _owner, config_dir, attempts, accepted, handle = _setup(tmp_path, monkeypatch, [state])
@@ -109,10 +165,14 @@ def test_coalesced_failed_handoff_recovers_after_connector_restart(tmp_path, mon
     monkeypatch.setattr(time, "time", clock)
 
     def iteration():
-        return asyncio.run(rig.loop_mod.run_iteration(
-            owner, config_dir=config_dir, access=SimpleNamespace(credential_id=owner.credential_id),
-            auth_store=None,
-        ))
+        return asyncio.run(
+            rig.loop_mod.run_iteration(
+                owner,
+                config_dir=config_dir,
+                access=SimpleNamespace(credential_id=owner.credential_id),
+                auth_store=None,
+            )
+        )
 
     result = iteration()
     assert result["coalesced_wakes"][0]["action"] == "hold"
@@ -141,10 +201,14 @@ def test_no_history_designated_neighbor_keeps_message_errand(tmp_path, monkeypat
         return SimpleNamespace(state="started")
 
     monkeypatch.setattr(launch, "engage_runtime", engage)
-    assert "engaged" in asyncio.run(wake.deliver_wake(
-        SimpleNamespace(account_id="account"), "synthetic card", session_id="sess_a",
-        config_dir=tmp_path,
-    ))
+    assert "engaged" in asyncio.run(
+        wake.deliver_wake(
+            SimpleNamespace(account_id="account"),
+            "synthetic card",
+            session_id="sess_a",
+            config_dir=tmp_path,
+        )
+    )
     assert len(errands) == 1
     assert errands[0].text == "synthetic card"
     assert errands[0].mode == "mailbox" and errands[0].wake is True
