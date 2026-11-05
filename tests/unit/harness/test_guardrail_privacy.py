@@ -305,7 +305,7 @@ async def test_s1_safe_child_inherit_is_unchanged(home, monkeypatch):
     config = LoopConfig(
         model=MODEL,
         stream_fn=lambda *_: None,
-        convert_to_llm=lambda messages: list(messages),
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
     )
     result = await AgentLoop()._runner_result(
         _PlannedCall(call=call, tool=tool, args=args),
