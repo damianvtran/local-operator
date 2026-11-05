@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 
 from local_operator.team_bridge import screening
-from local_operator.team_bridge.settings import ScreeningBudget
 from local_operator.team_bridge.client import (
     SCREENING_TEMPLATE_V1_SHA256,
     SCREENING_VERSION_V1,
@@ -23,6 +22,7 @@ from local_operator.team_bridge.model_boundary import (
     DefaultSelection,
     ScreenChainRunner,
 )
+from local_operator.team_bridge.settings import ScreeningBudget
 from local_operator.team_bridge.store import (
     SCHEMA_VERSION,
     OwnerReceipt,
