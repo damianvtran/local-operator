@@ -888,3 +888,70 @@ def test_r7_1_split_ends_comment_at_newline() -> None:
     texts = [t for t, _p, _o in _split("# it's stale\nrm -rf x")]
     assert texts[-1] == "rm -rf x"
     assert [t for t, _p, _o in _split('echo "it\'s # x"; ls')] == ['echo "it\'s # x"', "ls"]
+
+
+# -- Round 8 review repros (M1, m1-m3, n1) ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git commit -m \"$(cat <<'EOF'\nfix: remove dead code\nEOF\n)\"",
+        "gh pr create --title t --body \"$(cat <<'EOF'\n## Summary\n- remove stale cache\nEOF\n)\"",
+        'echo "$(pwd)"; rm -f x',
+        'echo "$(date)" > log; mv log old.log',
+        'find . -name "$(basename $PWD)*"',
+        'echo "$(case a in a) echo;; esac)"; rm -f x',
+        'echo "$( echo "$( pwd )" )"; rm -f x',
+        "echo \"$(echo ')')\"; rm -f x",
+        # m2: comment text and arithmetic shifts are not heredoc openers.
+        "# see <<EOF docs\nrm -f tmp",
+        "x=$((1<<shift))\nrm -f tmp",
+        # m3: ANSI-C quoting.
+        "echo $'it\\'s here' && rm -f x",
+    ],
+)
+def test_r8_m1_complete_constructs_stay_low(home: Path, command: str) -> None:
+    assert _classify(home, command, cwd=home / "repo").risk is Risk.LOW
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo ${x:- #}; rm -rf ~/.local-operator",
+        ": ${x:=a #b}; rm -rf ~/.local-operator",
+        "echo ${x/ #/y}; rm -rf ~/.local-operator",
+        "[[ $x == a\\ #* ]]; rm -rf ~/.local-operator",
+        "echo `ls #x`; rm -rf ~/.local-operator",
+        "echo $(ls #x\n); rm -rf ~/.local-operator",
+    ],
+)
+def test_r8_m1_hash_inside_expansion_is_not_a_comment(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize(
+    ("command", "last"),
+    [
+        ("echo ${x:- #}; ls", "ls"),
+        ("echo a\\ #b; ls", "ls"),
+        ("echo `ls #x`; ls", "ls"),
+        # A real comment: bash ignores ``# sum; ls`` entirely.
+        ("echo $((1 + 2)) # sum; ls", "echo $((1 + 2))"),
+    ],
+)
+def test_r8_n1_hash_shapes_split_like_the_shell(command: str, last: str) -> None:
+    from local_operator.tools.search_guard import _split
+
+    assert [t for t, _p, _o in _split(command)][-1] == last
+
+
+def test_r8_split_reports_end_state() -> None:
+    from local_operator.tools.search_guard import lex as split_state
+
+    assert not split_state('echo "$(pwd)"; ls').open
+    assert not split_state("git commit -m \"$(cat <<'EOF'\nx\nEOF\n)\"").open
+    assert split_state("echo 'abc; rm -rf x").open
+    assert split_state("echo $(abc; rm -rf x").open
+    assert split_state("cat <<EOF\nrm -rf x").open
+    assert not split_state("# it's\nls").open

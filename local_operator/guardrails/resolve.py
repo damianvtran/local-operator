@@ -45,10 +45,8 @@ from local_operator.tools.search_guard import (
     _WRAPPER_LONG_VALUE_FLAGS,
     _WRAPPER_VALUE_FLAGS,
     WRAPPER_WORDS,
-    _comment_end,
-    _split,
-    _strip_heredocs,
     _unquote,
+    lex,
 )
 
 #: Programs whose output never contains ``/`` or ``..`` in normal use, so a
@@ -909,86 +907,6 @@ _FIND_SELECTING = frozenset(
         "-iwholename",
     }
 )
-_HEREDOC_OPEN_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
-
-
-def _unterminated(command: str) -> bool:
-    """The command ends inside a quote, ``$(``, backtick or heredoc (R7-1).
-
-    A shell would reject or keep reading such text, so the splitter's segments
-    for it are not what would run. Comments are skipped exactly as ``_split``
-    skips them; heredoc bodies are data and are not scanned.
-    """
-    text = _strip_heredocs(command)
-    # The stripped text keeps every opener but blanks terminated bodies; an
-    # opener is unterminated when the ORIGINAL text has no delimiter line
-    # after it.
-    for m in _HEREDOC_OPEN_RE.finditer(command):
-        rest = command[m.end() :].split("\n")[1:]
-        if rest and not any(line.strip() == m.group(2) for line in rest):
-            return True
-    quote: str | None = None
-    depth = 0
-    backtick = False
-    i, n = 0, len(text)
-    while i < n:
-        ch = text[i]
-        if quote == "'":
-            if ch == "'":
-                quote = None
-            i += 1
-            continue
-        if ch == "\\":
-            i += 2
-            continue
-        if quote == '"':
-            if ch == '"':
-                quote = None
-            elif ch == "$" and text[i + 1 : i + 2] == "(":
-                depth += 1
-                i += 2
-                continue
-            elif ch == "`":
-                backtick = not backtick
-            i += 1
-            continue
-        if (end := _comment_end(text, i)) is not None:
-            i = end
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-        elif ch == "$" and text[i + 1 : i + 2] == "(":
-            depth += 1
-            i += 2
-            continue
-        elif ch == ")" and depth:
-            depth -= 1
-        elif ch == "`":
-            backtick = not backtick
-        i += 1
-    return quote is not None or depth > 0 or backtick
-
-
-def _heredoc_bodies(command: str) -> list[str]:
-    """The bodies of every heredoc in ``command`` (R2: walked when a shell reads one).
-
-    ``search_guard._split`` strips bodies so data is never read as commands;
-    this recovers them for the one case where the body IS the command.
-    """
-    bodies: list[str] = []
-    for m in _HEREDOC_OPEN_RE.finditer(command):
-        delim = m.group(2)
-        nl = command.find("\n", m.end())
-        if nl == -1:
-            continue
-        lines = command[nl + 1 :].split("\n")
-        body: list[str] = []
-        for line in lines:
-            if line.strip() == delim:
-                break
-            body.append(line)
-        bodies.append("\n".join(body))
-    return bodies
 
 
 def _peel_wrappers(words: list[Expanded]) -> tuple[list[Expanded], bool]:
@@ -1248,7 +1166,9 @@ def _stage_program(stage: str) -> str | None:
     return os.path.basename(peeled[0].text) if peeled else None
 
 
-def _fd_redirect_merge(pieces: list[tuple[str, bool, str]]) -> list[tuple[str, bool, str]]:
+def _fd_redirect_merge(
+    pieces: list[tuple[str, bool, str]], bodies: list[list[str]]
+) -> tuple[list[tuple[str, bool, str]], list[list[str]]]:
     """Re-join segments ``search_guard._split`` cut at a redirect's ``&`` (Q1).
 
     The shared splitter reads the ``&`` in ``2>&1``/``>&2``/``2>&-``/``&>file``
@@ -1257,14 +1177,17 @@ def _fd_redirect_merge(pieces: list[tuple[str, bool, str]]) -> list[tuple[str, b
     single ``&`` is glued back to what follows, operator included.
     """
     out: list[tuple[str, bool, str]] = []
-    for text, piped, op in pieces:
+    out_bodies: list[list[str]] = []
+    for (text, piped, op), owned in zip(pieces, bodies):
         if out:
             prev_text, prev_piped, prev_op = out[-1]
             if prev_op == "&" and re.search(r"[<>]$", prev_text):
                 out[-1] = (prev_text + "&" + text, prev_piped, op)
+                out_bodies[-1] = out_bodies[-1] + owned
                 continue
         out.append((text, piped, op))
-    return out
+        out_bodies.append(list(owned))
+    return out, out_bodies
 
 
 @dataclass
@@ -1309,13 +1232,13 @@ class _Walker:
         # S2-4: each heredoc body belongs to the segment whose ``<<`` opened it.
         # ``_split`` blanks the bodies but keeps the openers, in order, so the
         # bodies are dealt out to segments by counting the openers in each.
-        pending_bodies = list(_heredoc_bodies(command))
-        pieces = _fd_redirect_merge(_split(command))
-        # R7-1, structural: if the text ends inside a construct the splitter
-        # tracks (quote, ``$(``, backtick, heredoc), its segments are a guess.
-        # A delete word anywhere then fails toward scrutiny, which also covers
-        # the next tokenizer gap of this kind rather than one spelling.
-        if _DELETE_WORD_RE.search(command) and _unterminated(command):
+        lexed = lex(command)
+        pieces, owned_bodies = _fd_redirect_merge(lexed.segments, lexed.bodies)
+        # R7-1/R8, structural: if the text ends inside a construct the ONE
+        # shared scanner tracks (quote, ``$(``, ``${``, backtick, heredoc), its
+        # segments are a guess. A delete word anywhere then fails toward
+        # scrutiny — the next tokenizer gap of this kind, not one spelling.
+        if _DELETE_WORD_RE.search(command) and lexed.open:
             self.result.opaque_reasons.append(
                 "command ends inside an unterminated quote, substitution or heredoc"
             )
@@ -1366,8 +1289,7 @@ class _Walker:
                 group_bodies.append([])
             nxt_piped = index + 1 < len(pieces) and piped_in[index + 1]
             isolated = piped or nxt_piped or op == "&"
-            openers = len(_HEREDOC_OPEN_RE.findall(text))
-            heredocs, pending_bodies = pending_bodies[:openers], pending_bodies[openers:]
+            heredocs = owned_bodies[index]
             # The whole pipeline's text, so a pipe-fed shell can ask whether
             # anything upstream names a delete (S2-2).
             start = index

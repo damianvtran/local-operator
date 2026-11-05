@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 
 #: The env var an agent sets inline to run an unbounded search as written.
@@ -224,97 +225,234 @@ _STORE_STR_RE = re.compile(r"^(?:~|\$HOME|\$\{HOME\})/\.local-operator")
 _HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 
-def _comment_end(command: str, i: int) -> int | None:
-    """End of an unquoted ``#`` comment starting at ``i``, else None.
+@dataclass
+class Lexed:
+    """One pass of :func:`lex` over a command line.
 
-    A ``#`` starts a comment only at the start of a word (start of input, or
-    after whitespace, ``;``, ``&``, ``|``, ``(``) — ``a#b``, ``${#x}`` and
-    ``$#`` are not comments — and the comment runs to the next newline, which
-    is kept. Without this, an apostrophe in a comment (``# it's stale``) opens
-    a quote that swallows every later line, so a delete on the next line is
-    never seen as its own segment (guardrail review R7-1). Mirrors
-    ``builtin._strip_heredoc_bodies``.
+    ``segments`` is what :func:`_split` returns. ``bodies[k]`` holds the
+    heredoc bodies whose ``<<`` opener sits in segment ``k`` (in order).
+    ``open`` is True when the text ends inside a quote, ``$(``, ``${``,
+    ``$((``, backtick or a heredoc with no delimiter line — the segments are
+    then a guess about text a shell would reject or keep reading.
     """
-    if command[i] != "#" or (i > 0 and command[i - 1] not in " \t\n;&|("):
-        return None
-    nl = command.find("\n", i)
-    return len(command) if nl == -1 else nl
+
+    segments: list[tuple[str, bool, str]]
+    bodies: list[list[str]]
+    open: bool
 
 
-def _strip_heredocs(command: str) -> str:
-    """Blank out heredoc BODIES so their text is never read as commands.
+#: Frames of :func:`lex`'s context stack. A QUOTE frame suppresses operators,
+#: comments and heredoc openers for everything above it on the stack.
+_QUOTE_FRAMES = frozenset({"'", '"', "$'"})
 
-    `cat <<EOF … grep -rn x . … EOF` is one command whose body is data; a
-    splitter that reads the body sees a second segment and blocks a shell that
-    would never run it. Each body is replaced by a single space.
 
-    Quote-aware, and FAIL-CLOSED. Quote tracking matters because `<<` inside a
-    quoted string is not an operator: `git commit -m 'fix << a' && grep -rn p .`
-    is a normal command, and a scanner that treated the quoted `<<` as an opener
-    would swallow everything after it — silently dropping the unbounded grep
-    (review M3). An opener with no terminating delimiter line is left IN PLACE
-    rather than truncated, so the worst case is a command the guard still sees.
+def lex(command: str) -> Lexed:
+    """THE shell-line scanner shared by every bash guard (search, sleep, delete).
+
+    One scanner on purpose. The guardrail review found, round after round,
+    that a second hand-written scanner beside this one (a comment detector, a
+    "does the text end inside a quote" check) disagreed with it — an apostrophe
+    in a ``#`` comment hid every later line (R7-1); a ``$(`` opened inside
+    double quotes was never closed (R8 M1); ``#`` after a space inside
+    ``${…}`` was read as a comment (R8 m1). Every question about the line's
+    structure — where segments end, which ``#`` is a comment, which ``<<``
+    opens a heredoc, whether the text is complete — is answered here, from
+    the same context stack, so the answers cannot disagree.
+
+    Model (deliberately bash-like, not a full parser):
+    - Context stack frames: ``'``, ``"``, ``$'`` (ANSI-C, ``\\`` escapes),
+      ``$(``, ``$((``, ``${``, `````, plain ``(`` inside a substitution.
+    - Operators ``; | & newline`` split segments unless a QUOTE frame is on the
+      stack. Splitting inside an unquoted ``$(…)`` is kept on purpose: the
+      search guard has always looked at a ``grep`` behind ``$(cd x; …``.
+    - ``#`` starts a comment (to the newline) only with an EMPTY stack, at the
+      start of a word (input start, or after unescaped whitespace or one of
+      ``; & | (``).
+    - ``<<WORD`` opens a heredoc only with no quote frame and outside
+      ``$((``/``${``; its body is captured at the next newline and blanked
+      from the segment text (data is never read as commands), the opener kept.
+      An opener with no delimiter line leaves the text in place and marks the
+      result ``open`` (fail closed).
     """
-    out: list[str] = []
+    segments: list[tuple[str, bool, str]] = []
+    # Bodies keyed by the index of the segment holding their ``<<`` opener.
+    owned: dict[int, list[str]] = defaultdict(list)
+    buf: list[str] = []
+    stack: list[str] = []
+    # (delimiter, owning segment index) for openers awaiting the next newline.
+    pending: list[tuple[str, int]] = []
+    piped = False
+    word_start = True
+    unterminated_heredoc = False
     i = 0
     n = len(command)
-    quote: str | None = None
+
+    def quoted() -> bool:
+        return any(f in _QUOTE_FRAMES for f in stack)
+
     while i < n:
         ch = command[i]
-        if quote is not None:
-            out.append(ch)
-            if ch == "\\" and i + 1 < n:
-                out.append(command[i + 1])
+        top = stack[-1] if stack else None
+        if top == "'":
+            buf.append(ch)
+            if ch == "'":
+                stack.pop()
+            i += 1
+            continue
+        if ch == "\\" and top != "'":
+            buf.append(command[i : i + 2])
+            i += 2
+            word_start = False
+            continue
+        if top == "$'":
+            buf.append(ch)
+            if ch == "'":
+                stack.pop()
+            i += 1
+            continue
+        if top == '"':
+            buf.append(ch)
+            if ch == '"':
+                stack.pop()
+            elif command.startswith("$((", i):
+                stack.append("$((")
+                buf.append("((")
+                i += 3
+                continue
+            elif command.startswith("$(", i) or command.startswith("${", i):
+                stack.append(command[i : i + 2])
+                buf.append(command[i + 1])
                 i += 2
                 continue
-            if ch == quote:
-                quote = None
+            elif ch == "`":
+                stack.append("`")
             i += 1
             continue
-        if (end := _comment_end(command, i)) is not None:
-            out.append(command[i:end])
-            i = end
+        # Unquoted at this level (empty stack, or inside $( ${ $(( ` or "(").
+        if ch == "#" and not stack and word_start:
+            nl = command.find("\n", i)
+            i = n if nl == -1 else nl
             continue
         if ch in ("'", '"'):
-            quote = ch
-            out.append(ch)
+            stack.append(ch)
+            buf.append(ch)
+            i += 1
+            word_start = False
+            continue
+        if command.startswith("$'", i):
+            stack.append("$'")
+            buf.append("$'")
+            i += 2
+            word_start = False
+            continue
+        if command.startswith("$((", i):
+            stack.append("$((")
+            buf.append("$((")
+            i += 3
+            word_start = False
+            continue
+        if command.startswith("$(", i) or command.startswith("${", i):
+            stack.append(command[i : i + 2])
+            buf.append(command[i : i + 2])
+            i += 2
+            word_start = False
+            continue
+        if ch == "`":
+            if top == "`":
+                stack.pop()
+            else:
+                stack.append("`")
+            buf.append(ch)
+            i += 1
+            word_start = False
+            continue
+        if top == "${" and ch == "}":
+            stack.pop()
+            buf.append(ch)
             i += 1
             continue
-        if ch == "\\" and i + 1 < n:
-            out.append(ch)
-            out.append(command[i + 1])
+        if top == "$((" and command.startswith("))", i):
+            stack.pop()
+            buf.append("))")
             i += 2
             continue
-        if ch == "<" and command[i + 1 : i + 2] == "<":
+        if ch == "(" and stack:
+            stack.append("(")
+        elif ch == ")" and top in ("$(", "("):
+            stack.pop()
+        if command.startswith("<<<", i):
+            buf.append("<<<")
+            i += 3
+            word_start = False
+            continue
+        if ch == "<" and command.startswith("<<", i) and not any(f in ("$((", "${") for f in stack):
             m = _HEREDOC_RE.match(command, i)
             if m is not None:
-                delim = m.group(2)
-                nl = command.find("\n", m.end())
-                if nl != -1:
-                    pos = nl + 1
-                    delim_at = -1
-                    while pos <= n:
-                        line_end = command.find("\n", pos)
-                        line = command[pos : line_end if line_end != -1 else n]
-                        if line.strip() == delim:
-                            delim_at = line_end if line_end != -1 else n
-                            break
-                        if line_end == -1:
-                            break
-                        pos = line_end + 1
-                    if delim_at != -1:
-                        # Keep the opener, drop the body, resume at the delimiter.
-                        out.append(command[i : nl + 1])
-                        out.append(" ")
-                        i = delim_at
-                        continue
-                # No terminator: leave the opener verbatim (fail closed).
-            out.append(ch)
-            i += 1
+                pending.append((m.group(2), len(segments)))
+                buf.append(command[i : m.end()])
+                i = m.end()
+                word_start = False
+                continue
+        if ch == "\n" and pending:
+            # Bodies start after this newline, one per opener, in order.
+            pos = i + 1
+            resume = i
+            captured: list[tuple[str, int]] = []
+            ok = True
+            for delim, owner in pending:
+                lines: list[str] = []
+                found = False
+                while pos <= n:
+                    end = command.find("\n", pos)
+                    line = command[pos : end if end != -1 else n]
+                    if line.strip() == delim:
+                        resume = end if end != -1 else n
+                        pos = resume + 1
+                        found = True
+                        break
+                    lines.append(line)
+                    if end == -1:
+                        break
+                    pos = end + 1
+                if not found:
+                    ok = False
+                    break
+                captured.append(("\n".join(lines), owner))
+            pending = []
+            if ok:
+                for body, owner in captured:
+                    owned[owner].append(body)
+                # Resume AT the newline ending the last delimiter line, so it
+                # still ends the segment; the bodies never reach ``buf``.
+                buf.append(" ")
+                i = resume
+                continue
+            # No delimiter: keep the text so it is still read (fail closed).
+            unterminated_heredoc = True
+        if ch in ";|&\n" and not quoted():
+            # Collapse runs (``&&``, ``||``) and note a single ``|`` pipe.
+            j = i
+            while j < n and command[j] == ch:
+                j += 1
+            text = "".join(buf).strip()
+            if text:
+                segments.append((text, piped, command[i:j] if ch != "\n" else "\n"))
+            buf = []
+            piped = ch == "|" and (j - i) == 1
+            i = j
+            word_start = True
             continue
-        out.append(ch)
+        buf.append(ch)
+        word_start = ch in " \t\n;&|("
         i += 1
-    return "".join(out)
+    text = "".join(buf).strip()
+    if text:
+        segments.append((text, piped, ""))
+    return Lexed(
+        segments=segments,
+        bodies=[owned.get(k, []) for k in range(len(segments))],
+        open=bool(stack) or bool(pending) or unterminated_heredoc,
+    )
 
 
 def _segments(command: str) -> list[tuple[str, bool]]:
@@ -344,57 +482,7 @@ def _split(command: str) -> list[tuple[str, bool, str]]:
     tool call. One splitter serves both guards so they cannot disagree about
     where a command ends.
     """
-    command = _strip_heredocs(command)
-    out: list[tuple[str, bool, str]] = []
-    buf: list[str] = []
-    quote: str | None = None
-    piped = False
-    i = 0
-    n = len(command)
-    while i < n:
-        ch = command[i]
-        if quote is not None:
-            buf.append(ch)
-            if ch == quote:
-                quote = None
-            elif ch == "\\" and quote == '"' and i + 1 < n:
-                buf.append(command[i + 1])
-                i += 2
-                continue
-            i += 1
-            continue
-        if (end := _comment_end(command, i)) is not None:
-            i = end
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            buf.append(ch)
-            i += 1
-            continue
-        if ch == "\\":
-            buf.append(ch)
-            if i + 1 < n:
-                buf.append(command[i + 1])
-            i += 2
-            continue
-        if ch in ";|&\n":
-            # Collapse runs (``&&``, ``||``) and note a single ``|`` pipe.
-            j = i
-            while j < n and command[j] == ch:
-                j += 1
-            text = "".join(buf).strip()
-            if text:
-                out.append((text, piped, command[i:j] if ch != "\n" else "\n"))
-            buf = []
-            piped = ch == "|" and (j - i) == 1
-            i = j
-            continue
-        buf.append(ch)
-        i += 1
-    text = "".join(buf).strip()
-    if text:
-        out.append((text, piped, ""))
-    return out
+    return lex(command).segments
 
 
 def _strip_env_assignments(segment: str) -> tuple[str, dict[str, str]]:
