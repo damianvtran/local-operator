@@ -665,6 +665,7 @@ async def status(
         get_status_discipline,
         selected_tenant_id,
         surface_projection,
+        trial_ended_tenant,
     )
 
     # The read family's availability receipt lives with the read family, and the
@@ -729,6 +730,12 @@ async def status(
         # 1, R2): the first eligible tenant in the server's own order, else
         # the retained endpoint's row — never "several rows, so none".
         "tenant_id": selected_tenant_id(check.payload),
+        #: The org whose Team trial ENDED, ``{tenant_id, trial_ended_at}``, when
+        #: no org is eligible and the hub marked a row positively (teams-trial
+        #: QA round 1, Q5): with ``tenant_id`` null in state A this is the only
+        #: way the renderer can reach the paused band for the right org instead
+        #: of offering a new trial. ``None`` otherwise, and on an older hub.
+        "trial_ended": trial_ended_tenant(check.payload),
         "surface_state": projection["surface_state"],
         #: §5.6 F's sentence when this answer PROVES F — the neutral
         #: "Agent messages are turned off" in v1 (review round 2, R9) — else

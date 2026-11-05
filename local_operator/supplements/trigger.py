@@ -55,6 +55,10 @@ _ASK_RESPONSE_TYPE: Final = "ask_response"
 #: PATH, the shell/code string and the intent, nothing else.
 _KEPT_ARGS: Final = ("path", "command", "code", "i")
 _ARG_MAX_CHARS: Final = 8_192
+#: Pins kept per call, and characters per pin. A pin is a path, so 1 KiB is generous; the
+#: count bounds a looping agent that pins a whole tree (the row bounds what is SHOWN).
+_DELIVER_MAX: Final = 32
+_DELIVER_MAX_CHARS: Final = 1_024
 
 
 @dataclass(frozen=True)
@@ -64,6 +68,10 @@ class ToolCallItem:
     args: Mapping[str, str]
     #: Exact current-turn HTML, never classifier evidence or a path reread.
     prepared_html: str = ""
+    #: The ``deliver`` pins of a ``bash``/``eval`` call: paths the agent asked to show under
+    #: its answer (``candidates.TIER_PIN``). A separate field rather than an ``args`` entry
+    #: because ``args`` is ``str -> str`` and a pin list is a list; bounded at snapshot.
+    deliver: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -216,6 +224,16 @@ def snapshot_message(
             if isinstance(arguments, Mapping)
             else {}
         )
+        pins = arguments.get("deliver") if isinstance(arguments, Mapping) else None
+        deliver = (
+            tuple(
+                item[:_DELIVER_MAX_CHARS]
+                for item in list(pins)[:_DELIVER_MAX]
+                if isinstance(item, str) and item.strip()
+            )
+            if isinstance(pins, (list, tuple))
+            else ()
+        )
         prepared = ""
         if prepared_budget > 0 and str(getattr(call, "id", "")) in successful_calls:
             path = kept.get("path", "")
@@ -237,6 +255,7 @@ def snapshot_message(
                 name=str(getattr(call, "name", "") or ""),
                 args=kept,
                 prepared_html=prepared,
+                deliver=deliver,
             )
         )
     artifacts: list[Mapping[str, Any]] = []

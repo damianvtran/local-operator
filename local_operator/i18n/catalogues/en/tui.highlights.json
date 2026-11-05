@@ -1,0 +1,7 @@
+{
+  "tui.highlights.withheld.line": "{count, plural, one {# file not shown} other {# files not shown}}: {reasons}",
+  "tui.highlights.withheld.reason.outside": "outside allowed locations",
+  "tui.highlights.withheld.reason.sensitive": "sensitive file",
+  "tui.highlights.withheld.reason.missing": "file no longer exists",
+  "tui.highlights.withheld.reason.too_large": "too large to preview"
+}
