@@ -88,6 +88,7 @@ from local_operator.mobile.types import (
     PendingRequest,
     SessionRecord,
 )
+from local_operator.profile_actions import ProfileActionReply
 from local_operator.providers.local import LOCAL_PROVIDER_IDS
 from local_operator.session.attachments import AttachmentStore, store_for_transcript_dir
 from local_operator.session.cold_metadata import (
@@ -3743,13 +3744,27 @@ class AttachedSession:
         except Exception:  # noqa: BLE001 — a lost withdrawal is a cost, not a defect
             logger.debug("desktop watch withdrawal failed", exc_info=True)
 
-    async def profile_action_status(self, **identity: str) -> dict[str, str]:
+    async def profile_action_status(
+        self,
+        *,
+        action_id: str,
+        receipt_id: str,
+        profile_kind: str,
+        profile_name: str,
+        tool_call_id: str,
+    ) -> ProfileActionReply:
         client = self._client
         if client is None or not client.connected:
-            return {"action_id": identity["action_id"], "state": "unavailable"}
-        return await client.profile_action_status(**identity)
+            return {"action_id": action_id, "state": "unavailable"}
+        return await client.profile_action_status(
+            action_id=action_id,
+            receipt_id=receipt_id,
+            profile_kind=profile_kind,
+            profile_name=profile_name,
+            tool_call_id=tool_call_id,
+        )
 
-    async def answer_profile_action(self, action_id: str, approved: bool) -> dict[str, str]:
+    async def answer_profile_action(self, action_id: str, approved: bool) -> ProfileActionReply:
         client = self._client
         if client is None or not client.connected:
             raise ValueError("the action's live session is unavailable")

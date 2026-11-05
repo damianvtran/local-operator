@@ -31,6 +31,7 @@ from local_operator.harness.types import (
     ToolResult,
     Usage,
 )
+from local_operator.profile_actions import ProfileActionReply
 from local_operator.session.naming import ConversationName
 from local_operator.session.spend import SessionSpend
 
@@ -2181,6 +2182,18 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     async def supplement_restart(self, anchor: str, job: str) -> str:
         """Start version + 1 with the previous instruction (the Retry)."""
         ...
+
+    async def profile_action_status(
+        self,
+        *,
+        action_id: str,
+        receipt_id: str,
+        profile_kind: str,
+        profile_name: str,
+        tool_call_id: str,
+    ) -> ProfileActionReply: ...
+
+    async def answer_profile_action(self, action_id: str, approved: bool) -> ProfileActionReply: ...
 
 
 @runtime_checkable

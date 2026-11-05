@@ -20,7 +20,7 @@ import copy
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, TypedDict, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,6 +30,32 @@ from local_operator.definition_transaction import (
     commitment,
     definition_lock,
 )
+
+ProfileActionState = Literal["available", "pending", "succeeded", "stale", "failed", "unavailable"]
+
+
+class ProfileActionReply(TypedDict):
+    action_id: str
+    state: ProfileActionState
+
+
+@runtime_checkable
+class ProfileActionStatusCapability(Protocol):
+    """Additive owner capability; older handles need not implement receipt reads.
+
+    Discovery is not authorization: the transport applies its existing view and
+    operator checks before dispatch. Explicit keys cannot become transport kwargs.
+    """
+
+    async def profile_action_status(
+        self,
+        *,
+        action_id: str,
+        receipt_id: str,
+        profile_kind: str,
+        profile_name: str,
+        tool_call_id: str,
+    ) -> ProfileActionReply: ...
 
 
 class ProfileAction(BaseModel):
@@ -66,7 +92,7 @@ class _BoundAction:
     after: dict[str, Any]
     backup_path: Path
     backup_commitment: str
-    state: str = "available"
+    state: ProfileActionState = "available"
 
 
 def restore_bound_profile(
@@ -196,6 +222,8 @@ class ProfileActions:
             model.model_validate(image)
             if image["id"] != target_id or image["name"] != profile_name:
                 raise ValueError("receipt action does not match its target")
+        if profile_kind not in ("agent", "team"):
+            raise ValueError("unknown profile kind")
         descriptor = ProfileAction(
             action_id="prv_" + secrets.token_urlsafe(24),
             profile_kind=profile_kind,
@@ -308,7 +336,7 @@ class ProfileActions:
             one_shot=True,
         )
 
-    def _settle(self, action_id: str, record: _BoundAction) -> str:
+    def _settle(self, action_id: str, record: _BoundAction) -> ProfileActionState:
         import json
 
         from local_operator.definition_transaction import transact
@@ -373,7 +401,7 @@ class ProfileActions:
         profile_kind: str,
         profile_name: str,
         tool_call_id: str,
-    ) -> dict[str, str]:
+    ) -> ProfileActionReply:
         if action_id not in self._records:
             self._recover_signed(
                 dict(
@@ -399,7 +427,7 @@ class ProfileActions:
     def knows(self, action_id: str) -> bool:
         return action_id.startswith("prv_")
 
-    def activate(self, action_id: str, *, approved: bool, remember: bool) -> dict[str, str]:
+    def activate(self, action_id: str, *, approved: bool, remember: bool) -> ProfileActionReply:
         record = self._records.get(action_id)
         if record is None:
             return {"action_id": action_id, "state": "unavailable"}

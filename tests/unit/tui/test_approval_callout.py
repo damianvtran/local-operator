@@ -910,9 +910,12 @@ async def test_queued_profile_gate_cannot_inherit_allow_all(config_dir):
 
 def test_approve_all_still_owes_profile_gate_card():
     from types import SimpleNamespace
+    from typing import cast
 
     from local_operator.harness.approval import ACCOUNT_PROFILE_GATE
+    from local_operator.tui.session_interaction import SessionInteraction
 
+    # A deliberately minimal branch double, not a substitute for live/Pilot proof.
     app = SimpleNamespace(_ask_screen=None, _approval=None)
     source = SimpleNamespace(
         session=SimpleNamespace(
@@ -920,15 +923,21 @@ def test_approve_all_still_owes_profile_gate_card():
         ),
         draft=SimpleNamespace(approve_all=True),
     )
-    assert not OperatorApp._sidebar_gate_card_ready(app, source)
+    assert not OperatorApp._sidebar_gate_card_ready(
+        cast(OperatorApp, app), cast(SessionInteraction, source)
+    )
     source.session.pending_gate.title = "bash"
-    assert OperatorApp._sidebar_gate_card_ready(app, source)
+    assert OperatorApp._sidebar_gate_card_ready(
+        cast(OperatorApp, app), cast(SessionInteraction, source)
+    )
 
 
 def test_approve_all_does_not_skip_prearming_profile_card():
     from types import SimpleNamespace
+    from typing import cast
 
     from local_operator.harness.approval import ACCOUNT_PROFILE_GATE
+    from local_operator.tui.session_interaction import SessionInteraction
 
     mounted = []
     source = SimpleNamespace(
@@ -954,5 +963,5 @@ def test_approve_all_does_not_skip_prearming_profile_card():
     )
     app._interaction = source
     source.session.owns_runtime = False
-    OperatorApp._prearm_known_gate(app, source)
+    OperatorApp._prearm_known_gate(cast(OperatorApp, app), cast(SessionInteraction, source))
     assert mounted == ["profile-card"]

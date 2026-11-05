@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Callable, TypedDict
 
 import pytest
 
 from local_operator.agents import AgentRegistry
+from local_operator.harness.types import TextContent
 from local_operator.hub_sync.definition import (
     DefinitionRevisionMismatch,
     definition_revision,
@@ -21,6 +23,15 @@ from local_operator.hub_sync.definition import (
 from local_operator.profile_scope import scope_agent_registry
 from local_operator.tools.agent_tool import AgentParams, write_profile
 from tests.unit.tools.test_agent_tool import _edit_fields
+
+
+class _TransactionKwargs(TypedDict, total=False):
+    transaction_id: str
+    before: str
+    after: str
+    read: Callable[[], str]
+    write: Callable[[str], None]
+    backup: Callable[[str], None]
 
 
 def test_metadata_prompt_window_does_not_clobber_competing_writer(tmp_path, monkeypatch):
@@ -128,6 +139,7 @@ print('written', flush=True)
                 text=True,
                 env=dict(os.environ),
             )
+            assert child.stdout is not None
             assert child.stdout.readline().strip() == "ready"
             assert account.get_agent_system_prompt(row.id) == "Before."
             assert child.poll() is None
@@ -160,7 +172,7 @@ def test_signed_transaction_reconcile_stale_and_duplicate(tmp_path):
         writes.append(value)
         state["value"] = value
 
-    kwargs = dict(
+    kwargs: _TransactionKwargs = _TransactionKwargs(
         transaction_id="signed-test",
         before="before",
         after="after",
@@ -209,7 +221,7 @@ def test_interrupted_after_image_finishes_bookkeeping_without_second_write(tmp_p
         state["value"] = value
         raise KeyboardInterrupt("simulated process death after canonical write")
 
-    args = dict(
+    args: _TransactionKwargs = _TransactionKwargs(
         transaction_id="restart-test",
         before="before",
         after="after",
@@ -297,7 +309,7 @@ def test_completed_transaction_never_replays_after_later_restore(tmp_path):
         writes.append(value)
         state["value"] = value
 
-    args = dict(
+    args: _TransactionKwargs = _TransactionKwargs(
         transaction_id="consumed-test",
         before="before",
         after="after",
@@ -334,7 +346,7 @@ def test_a_missing_journal_is_never_a_fresh_authorisation(tmp_path):
     def write(value):
         state["value"] = value
 
-    args = dict(
+    args: _TransactionKwargs = _TransactionKwargs(
         transaction_id="deleted-journal",
         before="before",
         after="after",
@@ -381,7 +393,7 @@ def test_in_process_consumption_blocks_an_edited_back_record(tmp_path):
     def write(value):
         state["value"] = value
 
-    args = dict(
+    args: _TransactionKwargs = _TransactionKwargs(
         transaction_id="consumed-in-process",
         before="before",
         after="after",
@@ -474,6 +486,7 @@ def test_the_interrupted_save_surface_asks_the_person_again(tmp_path):
     finally:
         agent_tool.write_profile = monkeypatch_target
     assert result.is_error
+    assert isinstance(result.content[0], TextContent)
     text = result.content[0].text
     assert "ask the user to ask for this change again" in text.lower()
     assert "retry" not in text.lower()
@@ -564,3 +577,128 @@ def test_non_one_shot_save_fault_never_completes_a_partial_image(tmp_path, outco
     assert calls == ["after", "before"]
     if outcome != "rollback_failure":
         assert journal["state"] == "rolled_back"
+
+
+def test_team_snapshot_never_recovers_or_replaces_hydrated_identity(tmp_path, monkeypatch):
+    from local_operator.definition_transaction import definition_lock, team_image
+    from local_operator.teams import TeamEditFields, TeamRegistry
+
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(
+        TeamEditFields(name="lane", manager="manager", instructions="persisted")
+    )
+    loaded = registry.get_team(team.id)
+    loaded.instructions = "unsaved caller edit"
+    hydration = set(registry._briefs_loaded)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("a definition image must not load/recover a registry")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(registry, "_load", forbidden)
+        patch.setattr(registry, "get_team", forbidden)
+        with definition_lock(tmp_path):
+            image = team_image(registry, team.id)
+    assert image is not None and image["instructions"] == "persisted"
+    assert registry._teams[team.id] is loaded
+    assert loaded.instructions == "unsaved caller edit"
+    assert registry._briefs_loaded == hydration
+    # An intentional clear remains authoritative on the exact hydrated object.
+    loaded.instructions = ""
+    registry.save_team(loaded)
+    assert TeamRegistry(tmp_path).get_team(team.id).instructions == ""
+
+
+def test_unpublished_team_backup_is_unknown_and_primary_save_error_survives(tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
+
+    from local_operator.definition_transaction import definition_lock, team_image
+    from local_operator.teams import (
+        TeamEditFields,
+        TeamRegistry,
+        TeamRegistryRecoveryError,
+    )
+
+    registry = TeamRegistry(tmp_path)
+    team = registry.create_team(
+        TeamEditFields(name="lane", manager="manager", instructions="before")
+    )
+    loaded = registry.get_team(team.id)
+    loaded.description, loaded.instructions = "new", "after"
+    replace = os.replace
+
+    def fail_publish(source, target):
+        if Path(target).name == team.id and Path(source).name.startswith("."):
+            raise OSError("injected publish and recovery fault")
+        return replace(source, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", fail_publish)
+        with pytest.raises(Exception, match="Failed to save team metadata") as raised:
+            registry.save_team(loaded)
+        assert any("recovery required" in note for note in raised.value.__notes__)
+        journals = [
+            json.loads(path.read_text())
+            for path in (tmp_path / "profile-transactions").glob("*.json")
+        ]
+        assert any(item["state"] == "prepared" for item in journals)
+        before_paths = sorted(path.name for path in registry.teams_dir.iterdir())
+        with definition_lock(tmp_path), pytest.raises(TeamRegistryRecoveryError):
+            team_image(registry, team.id)
+        assert sorted(path.name for path in registry.teams_dir.iterdir()) == before_paths
+    # Ordinary access AFTER the fault ends owns recovery, not the snapshot.
+    fresh = TeamRegistry(tmp_path).get_team(team.id)
+    assert fresh.instructions == "before" and fresh.description == ""
+    same = registry.get_team(team.id)
+    assert same.instructions == "before"
+    same.instructions = "retry"
+    registry.save_team(same)
+    assert TeamRegistry(tmp_path).get_team(team.id).instructions == "retry"
+    assert not any(path.name.startswith(".") for path in registry.teams_dir.iterdir())
+
+
+@pytest.mark.parametrize("operation", ["save", "update", "delete"])
+def test_team_invalid_identity_precedes_both_lock_wrappers(tmp_path, operation):
+    from local_operator.teams import Team, TeamEditFields, TeamRegistry
+
+    directory = tmp_path / "untouched"
+    registry = TeamRegistry(directory)
+    hostile = Team.model_construct(id="../outside", name="hostile", manager="manager")
+    with pytest.raises(ValueError):
+        if operation == "save":
+            registry.save_team(hostile)
+        elif operation == "update":
+            registry.update_team(hostile.id, TeamEditFields(description="no"))
+        else:
+            registry.delete_team(hostile.id)
+    assert not directory.exists()
+
+
+def test_definition_file_publish_cannot_replace_or_unlink_a_directory(tmp_path):
+    from local_operator.definition_transaction import _durable_json, atomic_edit
+    from local_operator.profile_scope import update_profile_backup
+
+    directory = tmp_path / "protected"
+    directory.mkdir()
+    (directory / "sentinel").write_text("keep")
+    with pytest.raises(OSError):
+        _durable_json(directory, {"value": "no"})
+    session = tmp_path / "session"
+    target = session / "profile-backups" / "bound.json"
+    target.mkdir(parents=True)
+    # Best-effort backup lookup refuses an unreadable directory before publish.
+    update_profile_backup(str(session), "bound", saved_revision="no")
+    journal = tmp_path / "profile-transactions" / "directory.json"
+    journal.mkdir(parents=True)
+    with pytest.raises(OSError):
+        with atomic_edit(
+            tmp_path,
+            owner=object(),
+            read=lambda: "before",
+            restore=lambda value: None,
+            transaction_id="directory",
+        ):
+            pytest.fail("a directory cannot be a prepared journal")
+    assert (directory / "sentinel").read_text() == "keep"
+    assert target.is_dir() and journal.is_dir()

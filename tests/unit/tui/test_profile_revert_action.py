@@ -4,14 +4,16 @@ import os
 from pathlib import Path
 
 import pytest
+from rich.text import Text
 
+from local_operator.harness.types import TextContent
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.tool_card import ToolCard
 from scripts.visual_capture import save_capture
-from tests.unit.session.test_account_profile_consent import (
-    SEED_INSTRUCTIONS,
+from tests.unit.session.test_account_profile_consent import SEED_INSTRUCTIONS
+from tests.unit.session.test_account_profile_consent import (  # noqa: F401
+    stores as consent_stores,
 )
-from tests.unit.session.test_account_profile_consent import stores as consent_stores  # noqa: F401
 from tests.unit.session.test_profile_actions import saved
 from tests.unit.tui.test_app_pilot import Editor, _await_session, _factory
 
@@ -130,6 +132,7 @@ async def test_live_proof_and_transport_uncertainty_never_enable_a_blind_retry(
                 await pilot.pause()
                 if client.status_lost:
                     assert card._profile_action_state == "pending"
+                    assert isinstance(card._content, Text)
                     assert "Check status" in card._content.plain
                     assert client.calls == 1
                     client.status_lost = False
@@ -210,8 +213,10 @@ async def test_disabled_action_states_render_safe_guidance(
                 break
         assert card._profile_action_state == state
         if state != "pending":
+            assert isinstance(card._content, Text)
             assert "Inspect" in card._content.plain
         else:
+            assert isinstance(card._content, Text)
             assert "Check status" in card._content.plain
         directory = Path(_EVIDENCE_ROOT or tmp_path) / "profile-action-r3-frames"
         directory.mkdir(parents=True, exist_ok=True)
@@ -235,7 +240,10 @@ async def test_actual_saved_receipt_body_is_readable_and_header_opens_once(
     async with app.run_test(size=(columns, 30)) as pilot:
         await _await_session(app, pilot)
         card = ToolCard(result.tool_call_id, result.tool_name, {"op": "update", "name": "reviewer"})
-        card.mark_done("\n".join(item.text for item in result.content), details=result.details)
+        card.mark_done(
+            "\n".join(item.text for item in result.content if isinstance(item, TextContent)),
+            details=result.details,
+        )
         app._append_block(card)
         for _ in range(12):
             await pilot.pause()
@@ -244,11 +252,13 @@ async def test_actual_saved_receipt_body_is_readable_and_header_opens_once(
         await pilot.click(card, offset=(18, 0))
         await pilot.pause()
         assert card.expanded
+        assert isinstance(card._content, Text)
         assert "instructions" in card._content.plain
         directory = Path(_EVIDENCE_ROOT or tmp_path) / "profile-action-r3-frames"
         directory.mkdir(parents=True, exist_ok=True)
         save_capture(app, directory / f"expanded-{columns}.svg")
         style = bindings.style("tool.row.chip_settled")
+        assert style.color is not None
         foreground = style.color.get_truecolor()
         background = style.bgcolor or card.rich_style.bgcolor
         assert background is not None

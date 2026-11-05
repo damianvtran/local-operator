@@ -455,15 +455,26 @@ def atomic_edit(
                 backup(before)
             try:
                 yield
-            except Exception:
-                if commitment(read()) != record["before"]:
-                    restore(before)
+            except Exception as primary:
+                try:
+                    # Read only the published row. Recovery here could rename a
+                    # backup under the still-active fault and mask the save error.
                     if commitment(read()) != record["before"]:
-                        raise DefinitionTransactionConflict(
-                            "rollback did not restore its commitment; recovery required"
-                        )
-                record["state"] = "rolled_back"
-                _durable_json(path, record)
+                        restore(before)
+                        if commitment(read()) != record["before"]:
+                            raise DefinitionTransactionConflict(
+                                "rollback did not restore its commitment; recovery required"
+                            )
+                    record["state"] = "rolled_back"
+                    _durable_json(path, record)
+                except Exception as secondary:
+                    # Leave prepared/unknown bookkeeping intact unless readback
+                    # proved rollback. Normal registry access owns later recovery.
+                    primary.add_note(
+                        "definition rollback is unconfirmed; recovery required "
+                        f"({type(secondary).__name__})"
+                    )
+                    raise primary from secondary
                 raise
             record.update(state="complete", after=commitment(read()))
             _durable_json(path, record)
@@ -474,11 +485,36 @@ def atomic_edit(
 
 def team_image(registry: Any, team_id: str) -> dict[str, Any] | None:
     """Fresh team metadata AND briefs, under the shared definition boundary."""
-    registry._load()
-    try:
-        return registry.get_team(team_id).model_dump(mode="json")
-    except KeyError:
-        return None
+    from local_operator.teams import read_team_snapshot
+
+    row = read_team_snapshot(Path(registry.teams_dir), team_id)
+    return None if row is None else row.model_dump(mode="json")
+
+
+def team_definition_preflight(fn: Callable[P, R]) -> Callable[P, R]:
+    """Reject detached invalid identities before either outer lock creates files."""
+
+    @wraps(fn)
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        from local_operator.teams import Team, validate_team_id
+
+        target = (
+            args[1]
+            if len(args) > 1
+            else kwargs["team" if fn.__name__ == "save_team" else "team_id"]
+        )
+        if fn.__name__ == "save_team":
+            if not isinstance(target, Team):
+                raise TypeError("save_team needs a Team")
+            candidate = Team.model_validate(target.model_dump())
+            validate_team_id(candidate.id)
+        else:
+            if not isinstance(target, str):
+                raise TypeError("team identity must be a string")
+            validate_team_id(target)
+        return fn(*args, **kwargs)
+
+    return wrapped
 
 
 def team_definition_writer(fn: Callable[P, R]) -> Callable[P, R]:
@@ -502,8 +538,14 @@ def team_definition_writer(fn: Callable[P, R]) -> Callable[P, R]:
         with definition_lock(root):
             if getattr(_LOCAL, "owners", {}).get(str(root.resolve())) is registry:
                 return fn(*args, **kwargs)
-            team_id = str(target.id) if fn.__name__ == "save_team" else str(target)
             from local_operator.teams import Team
+
+            if fn.__name__ == "save_team":
+                if not isinstance(target, Team):
+                    raise TypeError("save_team needs a Team")
+                team_id = target.id
+            else:
+                team_id = str(target)
 
             def restore(image: Any) -> None:
                 if image is None:

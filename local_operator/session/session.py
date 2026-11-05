@@ -10980,7 +10980,7 @@ class Session:
             self._spawn_background(
                 self.receive_profile_save_result(message_id or "", wait_for_boundary=True)
             )
-            return "profile receipt queued for verification"
+            return PeerReceiveDetail("profile receipt queued for verification", {})
         from local_operator.mobile.peer_send import valid_peer_message_id
 
         incoming = message_id if valid_peer_message_id(message_id) else None
@@ -14590,6 +14590,8 @@ class Session:
             from local_operator.harness.types import QueuedProfileWrite
 
             registry = self.agent_registry if intent.kind == "agent" else self.team_registry
+            if registry is None:
+                return None
             root = Path(registry.config_dir)
             data = profile_approval.build(
                 root,

@@ -81,6 +81,7 @@ from pydantic import (
 # differ from the agent side's ONE refinement (the casefold derived match).
 from local_operator.definition_transaction import (
     definition_writer,
+    team_definition_preflight,
     team_definition_writer,
 )
 from local_operator.display_labels import LABEL_MAX_CHARS, bounded_form
@@ -2155,6 +2156,7 @@ class TeamRegistry:
             )
             return self._save_team_locked(team, briefs_authoritative=True)
 
+    @team_definition_preflight
     @definition_writer
     @team_definition_writer
     def update_team(
@@ -2251,6 +2253,7 @@ class TeamRegistry:
                 candidate.model_suggestion = fields.model_suggestion
             return self._save_team_locked(candidate, briefs_authoritative=True)
 
+    @team_definition_preflight
     @definition_writer
     @team_definition_writer
     def save_team(self, team: Team) -> Team:
@@ -2493,6 +2496,7 @@ class TeamRegistry:
                     "fix registry permissions and retry"
                 ) from exc
 
+    @team_definition_preflight
     @definition_writer
     @team_definition_writer
     def delete_team(self, team_id: str) -> None:
@@ -2857,6 +2861,32 @@ def _published_row_matches(team_dir: Path, expected_id: str) -> bool:
     except OSError:
         return False
     return team is not None and team.id == expected_id
+
+
+def read_team_snapshot(teams_dir: Path, team_id: str) -> Team | None:
+    """Read published bytes without recovery or touching a registry's hydration.
+
+    Absence is conclusive only without an interrupted-save backup. A malformed,
+    inaccessible or racing row is unknown, never an empty before-image. Writers
+    call this under the shared definition boundary, before taking the team lock.
+    """
+    team_id = validate_team_id(team_id)
+    target = teams_dir / team_id
+    row = _read_row_snapshot(target, team_id)
+    if row is not None:
+        return row
+    try:
+        target.lstat()
+    except FileNotFoundError:
+        try:
+            interrupted = any(_backup_row_id(child) == team_id for child in teams_dir.iterdir())
+        except FileNotFoundError:
+            return None
+        if not interrupted:
+            return None
+    raise TeamRegistryRecoveryError(
+        f"Published team {team_id!r} is unreadable or interrupted; recovery required"
+    )
 
 
 def _read_row_snapshot(team_dir: Path, expected_id: str) -> Team | None:

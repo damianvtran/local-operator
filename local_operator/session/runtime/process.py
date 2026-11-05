@@ -4959,6 +4959,8 @@ async def _drain_inbox_into_claimed(handle: object, batch) -> int:
         owner_row = getattr(line, "source", "") == SOURCE_USER
         try:
             if getattr(line, "custom_type", "") == "profile_save_result":
+                if session is None:
+                    raise ValueError("profile receipt needs a live owner session")
                 await admit_batch_row(
                     batch,
                     ordinals[id(line)],

@@ -130,11 +130,10 @@ def snapshot(root: Path, kind: str, target_id: str) -> dict[str, Any] | None:
             }
             data["instructions"] = registry.get_agent_system_prompt(target_id)
         elif kind == "team":
-            from local_operator.teams import TeamRegistry
+            from local_operator.teams import read_team_snapshot
 
-            try:
-                row = TeamRegistry(root).get_team(target_id)
-            except KeyError:
+            row = read_team_snapshot(root / "teams", target_id)
+            if row is None:
                 return None
             data = {key: row.model_dump(mode="json")[key] for key in TeamImage.model_fields}
         else:
@@ -443,16 +442,10 @@ def apply(approval_id: str, expected_block: dict[str, Any], root: Path) -> dict[
                 from local_operator.agents import AgentRegistry
                 from local_operator.teams import TeamRegistry
 
-                r = (
-                    AgentRegistry(root, migrate=False)
-                    if p.profile_kind == "agent"
-                    else TeamRegistry(root)
-                )
-                existing = (
-                    r.get_agent_by_name(p.name)
-                    if p.profile_kind == "agent"
-                    else r.get_team_by_name(p.name)
-                )
+                if p.profile_kind == "agent":
+                    existing = AgentRegistry(root, migrate=False).get_agent_by_name(p.name)
+                else:
+                    existing = TeamRegistry(root).get_team_by_name(p.name)
                 if existing is not None and str(existing.id) != p.target_id:
                     raise _refuse("profile_name_conflict", "the requested name is now in use")
             # Never prepare here: a missing queued journal is a refusal even
@@ -608,9 +601,8 @@ def applied_tool_result(root: Path, receipt_id: str, session_id: str):
     ]
     values = {key: (before.get(key), p.after[key]) for key in fields}
     if p.profile_kind == "agent":
-        from types import SimpleNamespace
 
-        from local_operator.agent_profiles import profile_from_agent
+        from local_operator.agent_profiles import profile_from_definition
 
         def view(image):
             data = {
@@ -623,9 +615,15 @@ def applied_tool_result(root: Path, receipt_id: str, session_id: str):
                 "hosting": "",
                 "instructions": "",
             } | image
-            return profile_from_agent(
-                SimpleNamespace(get_agent_system_prompt=lambda _: data["instructions"]),
-                SimpleNamespace(**data),
+            return profile_from_definition(
+                name=data["name"],
+                label=data["label"],
+                description=data["description"],
+                tags=data["tags"],
+                model=data["model"],
+                hosting=data["hosting"],
+                instructions=data["instructions"],
+                agent_id=data["id"],
             )
 
         left, right = view(before), view(p.after)
@@ -702,7 +700,9 @@ class _ProfileOp:
 
     disclosure = staticmethod(disclosure)
     expected = staticmethod(expected)
-    apply = staticmethod(apply)
+
+    def apply(self, approval_id: str, expected: dict[str, Any], root: Path) -> dict[str, Any]:
+        return apply(approval_id, expected, root)
 
     def generic_refusal(self, record, approval_id):
         return _refuse(

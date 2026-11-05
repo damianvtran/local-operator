@@ -384,9 +384,7 @@ PEER_FAMILY_INPUT_TYPES = frozenset(
 #: than a refused send. Distinct from ``PEER_FAMILY_INPUT_TYPES``: this set
 #: governs what may be STAMPED on delivery; that set governs what reaches the
 #: model as input.
-PEER_DELIVERABLE_CUSTOM_TYPES = frozenset(
-    {PEER_MESSAGE_MESSAGE_TYPE, TEAM_BRIDGE_MESSAGE_TYPE, "profile_save_result"}
-)
+PEER_DELIVERABLE_CUSTOM_TYPES = frozenset({PEER_MESSAGE_MESSAGE_TYPE, TEAM_BRIDGE_MESSAGE_TYPE})
 
 #: The CLOSED key set of the internal ``bridge_meta`` locator (H5 F3; S-3/S-7
 #: binding): a bounded hint carried beside a bridge WAKE so the RECEIVER can

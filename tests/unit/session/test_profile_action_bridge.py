@@ -41,7 +41,9 @@ async def test_real_desktop_profile_status_and_answer_without_conversational_gat
     )
     remote._client = wire
     epoch = session.frontend_state.epoch
-    remote._frontend_store = SimpleNamespace(state=SimpleNamespace(epoch=epoch))
+    from local_operator.session.frontend_state import FrontendStateStore
+
+    remote._frontend_store = FrontendStateStore(session.frontend_state)
     sid = live.record.session_id
 
     @contextlib.asynccontextmanager
@@ -123,7 +125,7 @@ async def test_real_desktop_profile_status_and_answer_without_conversational_gat
             import os
             from pathlib import Path
 
-            evidence = Path(os.environ.get("PROFILE_R3_EVIDENCE", tmp_path))
+            evidence = Path(os.environ.get("PROFILE_R3_EVIDENCE", str(tmp_path)))
             evidence.mkdir(parents=True, exist_ok=True)
             (evidence / "desktop-action-http.json").write_text(
                 json.dumps(

@@ -262,11 +262,17 @@ async def test_owner_message_naming_the_profile_saves_with_receipt_and_revert(st
         assert not result.is_error, body
         assert gate.cards == []  # no card: the user asked
         details = result.details
+        assert details is not None
         assert details["authorized_by"].startswith("owner-prompt:")
+        assert details is not None
         assert details["fields"] == ["instructions"]
+        assert details is not None
         assert "+Demand tests." in details["diff"] and "-Be terse." in details["diff"]
+        assert details is not None
         assert details["backup_id"] and details["revision"]
+        assert details is not None
         assert details["revert"] == {"op": "revert", "backup_id": details["backup_id"]}
+        assert details is not None
         assert f"backup_id='{details['backup_id']}'" in body
         account = stores["account"]
         row = account.get_agent_by_name("reviewer")
@@ -276,6 +282,7 @@ async def test_owner_message_naming_the_profile_saves_with_receipt_and_revert(st
 
         # Revert, asked for by name in the user's next message.
         _start_run(session, Message.user("Revert the reviewer change"))
+        assert details is not None
         reverted = await _agent(
             _context(session, stores), op="revert", backup_id=details["backup_id"]
         )
@@ -323,6 +330,7 @@ async def test_policy_field_changes_are_named_in_the_receipt(stores) -> None:
             tools=["read"],
         )
         assert not result.is_error, _text(result)
+        assert result.details is not None
         diff = "\n".join(result.details["diff"])
         assert "model/effort:" in diff and "class:" in diff and "tools:" in diff
     finally:
@@ -423,12 +431,11 @@ async def test_agent_initiated_edit_saves_on_approve(stores) -> None:
         assert applied["state"] == "complete"
         # The executor may be another process; inspect persisted metadata rather
         # than this Session's interval-cached pre-approval registry object.
-        assert (
-            AgentRegistry(stores["account"].config_dir, migrate=False)
-            .get_agent_by_name("reviewer")
-            .description
-            == "Sharper"
+        stored = AgentRegistry(stores["account"].config_dir, migrate=False).get_agent_by_name(
+            "reviewer"
         )
+        assert stored is not None
+        assert stored.description == "Sharper"
     finally:
         await session.dispose()
 
@@ -536,7 +543,9 @@ async def test_team_update_follows_the_same_paths_and_reverts(stores) -> None:
             _context(session, stores),
         )
         assert not result.is_error, _text(result)
+        assert result.details is not None
         assert result.details["authorized_by"].startswith("owner-prompt:")
+        assert result.details is not None
         backup = result.details["backup_id"]
         assert teams.get_team_by_name("lopdev").instructions == "Ship carefully."
 
@@ -575,6 +584,7 @@ async def test_agent_revert_after_a_later_edit_is_refused(stores) -> None:
         saved = await _agent(
             _context(session, stores), op="update", name="reviewer", instructions="V2."
         )
+        assert saved.details is not None
         backup = saved.details["backup_id"]
         row = account.get_agent_by_name("reviewer")
         account.set_agent_system_prompt(row.id, "V3 by hand.")
@@ -651,11 +661,13 @@ async def test_revert_refuses_mismatched_backup_identity(stores):
         saved = await _agent(
             _context(session, stores), op="update", name="reviewer", instructions="V2."
         )
+        assert saved.details is not None
         backup = stores["session_dir"] / "profile-backups" / (saved.details["backup_id"] + ".json")
         record = json.loads(backup.read_text())
         record["name"] = "another-profile"
         backup.write_text(json.dumps(record))
         _start_run(session, Message.user("revert another-profile"))
+        assert saved.details is not None
         refused = await _agent(
             _context(session, stores), op="revert", backup_id=saved.details["backup_id"]
         )
@@ -665,7 +677,7 @@ async def test_revert_refuses_mismatched_backup_identity(stores):
 
 
 @pytest.mark.asyncio
-async def test_remote_server_dispatch_forwards_host_origin_only():
+async def test_remote_server_dispatch_forwards_host_origin_only(monkeypatch):
     from types import SimpleNamespace
 
     from local_operator.session.runtime.server import (
@@ -680,7 +692,9 @@ async def test_remote_server_dispatch_forwards_host_origin_only():
         return "ok"
 
     server = object.__new__(RuntimeServer)
-    server._handle = SimpleNamespace(prompt=prompt, steer=prompt)
+    monkeypatch.setattr(
+        server, "_handle", SimpleNamespace(prompt=prompt, steer=prompt), raising=False
+    )
     for op in ("prompt", "steer"):
         await server._dispatch(
             op,
@@ -696,7 +710,7 @@ async def test_remote_server_dispatch_forwards_host_origin_only():
 
 
 @pytest.mark.asyncio
-async def test_detached_viewer_never_sends_background_profile_approval():
+async def test_detached_viewer_never_sends_background_profile_approval(monkeypatch):
     from types import SimpleNamespace
 
     from local_operator.mobile.types import PendingRequest
@@ -712,7 +726,9 @@ async def test_detached_viewer_never_sends_background_profile_approval():
         pytest.fail("a detached profile gate must wait for a person")
 
     viewer._approval_handler = unexpected
-    viewer._client = SimpleNamespace(approval_answer=unexpected)
+    monkeypatch.setattr(
+        viewer, "_client", SimpleNamespace(approval_answer=unexpected), raising=False
+    )
     pending = PendingRequest(
         request_id="profile-request",
         kind="approval",

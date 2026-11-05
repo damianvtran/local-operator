@@ -42,6 +42,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Sequence
 
+from local_operator.profile_actions import ProfileActionReply
 from local_operator.session.runtime.types import JOURNAL_ORDER_CAPABILITY
 
 if TYPE_CHECKING:
@@ -2569,7 +2570,7 @@ class AttachClient:
             "rehome_if_current", expected=expected, provider=provider, model_id=model_id
         )
 
-    def _profile_action_detail(self, reply: dict[str, Any], action_id: str) -> dict[str, str]:
+    def _profile_action_detail(self, reply: dict[str, Any], action_id: str) -> ProfileActionReply:
         self._raise_for_reply_error(reply)
         detail = reply.get("detail")
         if (
@@ -2581,13 +2582,28 @@ class AttachClient:
             raise ValueError("the live owner could not verify this receipt action")
         return {"action_id": detail["action_id"], "state": detail["state"]}
 
-    async def profile_action_status(self, **identity: str) -> dict[str, str]:
+    async def profile_action_status(
+        self,
+        *,
+        action_id: str,
+        receipt_id: str,
+        profile_kind: str,
+        profile_name: str,
+        tool_call_id: str,
+    ) -> ProfileActionReply:
         # Ordinary _request stringifies ack.detail for legacy prose callers.
         # Preserve the structured owner proof, never parse a Python repr.
-        reply = await self._request_frame("profile_action_status", **identity)
-        return self._profile_action_detail(reply, identity["action_id"])
+        reply = await self._request_frame(
+            "profile_action_status",
+            action_id=action_id,
+            receipt_id=receipt_id,
+            profile_kind=profile_kind,
+            profile_name=profile_name,
+            tool_call_id=tool_call_id,
+        )
+        return self._profile_action_detail(reply, action_id)
 
-    async def profile_revert(self, action_id: str, *, approved: bool = True) -> dict[str, str]:
+    async def profile_revert(self, action_id: str, *, approved: bool = True) -> ProfileActionReply:
         reply = await self._request_frame(
             "approval_answer", request_id=action_id, approved=approved, remember=False
         )

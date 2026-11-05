@@ -824,7 +824,7 @@ def _team_receipt(
     update_profile_backup(getattr(context, "session_dir", None), backup_id, saved_revision=revision)
     details["revert"] = {"op": "revert", "backup_id": backup_id}
     register = getattr(context, "register_profile_action", None)
-    if register is not None and backup_payload:
+    if register is not None and backup_payload and context is not None and context.session_dir:
         from pathlib import Path
 
         from local_operator.definition_transaction import commitment

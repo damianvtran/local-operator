@@ -78,6 +78,7 @@ from local_operator.harness.types import (
     SubagentStartEvent,
 )
 from local_operator.harness.wire import bound_agent_end_for_wire
+from local_operator.profile_actions import ProfileActionReply
 from local_operator.session.runtime.types import JOURNAL_ORDER_EVENT
 
 if TYPE_CHECKING:
@@ -113,10 +114,7 @@ from local_operator.session.approval_policy import (
 # one window and start one toward the literal goal `--stop` in another.
 from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.session.runtime.inbox import SOURCE_PEER, SOURCE_USER
-from local_operator.session.runtime.server import (
-    AckDetail,
-    SessionHandle,
-)
+from local_operator.session.runtime.server import AckDetail, SessionHandle
 from local_operator.session.runtime.server import audio_blocks as _audio_blocks
 from local_operator.session.runtime.server import document_blocks as _document_blocks
 from local_operator.session.runtime.server import (
@@ -6759,13 +6757,33 @@ class ServingSessionHandle(SessionHandle):
         raise ValueError("pick the session from the session list instead")
 
     @_on_session_loop
-    async def profile_action_status(self, **identity: str) -> dict[str, str]:
-        return self._session._profile_actions.status(**identity)
+    async def receive_profile_save_result(self, receipt_id: str) -> str:
+        """A hint confers no provenance: reverify the signed local result first."""
+        await self._session.receive_profile_save_result(receipt_id)
+        return "profile receipt queued for verification"
+
+    @_on_session_loop
+    async def profile_action_status(
+        self,
+        *,
+        action_id: str,
+        receipt_id: str,
+        profile_kind: str,
+        profile_name: str,
+        tool_call_id: str,
+    ) -> ProfileActionReply:
+        return self._session._profile_actions.status(
+            action_id=action_id,
+            receipt_id=receipt_id,
+            profile_kind=profile_kind,
+            profile_name=profile_name,
+            tool_call_id=tool_call_id,
+        )
 
     @_on_session_loop
     async def approval_answer(
         self, request_id: str, approved: bool, remember: bool
-    ) -> str | dict[str, str]:
+    ) -> str | ProfileActionReply:
         if request_id.startswith("prv_") and hasattr(self._session, "_profile_actions"):
             return self._session._profile_actions.activate(
                 request_id, approved=approved, remember=remember

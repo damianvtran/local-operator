@@ -17,7 +17,7 @@ import re
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeVar, cast
 from unittest.mock import patch
 
 import pytest
@@ -807,7 +807,10 @@ class FakeSession:
             handler(event)
 
 
-async def _factory(session: FakeSession) -> FakeSession:
+_SessionT = TypeVar("_SessionT")
+
+
+async def _factory(session: _SessionT) -> _SessionT:
     return session
 
 

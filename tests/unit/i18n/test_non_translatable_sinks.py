@@ -23,7 +23,9 @@ PATHS = {
     # 5: the roster/override lines the model reads (tier, effort, saver, the
     # aliases row, the "roster:" header). One more than before the Saver pin
     # landed, which is why this moved rather than the file being allowlisted.
-    "local_operator/tools/team_tool.py": 5,
+    # Sixth exemption: _team_diff_summary's model-facing roster/policy
+    # field names, not user chrome. The scanner and negative activation remain.
+    "local_operator/tools/team_tool.py": 6,
     "local_operator/supplements/generator.py": 13,
     "local_operator/evaluation/runner/episode.py": 8,
 }

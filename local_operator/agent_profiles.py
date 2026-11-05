@@ -513,7 +513,35 @@ def profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentPr
     semantic routing text.
     """
 
-    tags = [str(tag) for tag in (agent.tags or [])]
+    return profile_from_definition(
+        name=agent.name,
+        label=str(getattr(agent, "label", "") or ""),
+        description=str(agent.description or ""),
+        tags=list(agent.tags or []),
+        instructions=_agent_instructions(registry, agent),
+        agent_id=agent.id,
+        model=agent.model,
+        hosting=str(agent.hosting or ""),
+    )
+
+
+def profile_from_definition(
+    *,
+    name: str,
+    label: str,
+    description: str,
+    tags: list[str],
+    instructions: str,
+    agent_id: str,
+    model: str | None,
+    hosting: str,
+) -> AgentProfile:
+    """Project authored values without inventing a registry or reading live state.
+
+    Signed before/after receipt images must use exactly the same tag projection
+    as stored agents, even when their instructions differ from the current row.
+    """
+    tags = [str(tag) for tag in tags]
     tools: tuple[str, ...] | None = None
     effort: str | None = None
     may_delegate = False
@@ -537,22 +565,22 @@ def profile_from_agent(registry: "AgentRegistry", agent: "AgentData") -> AgentPr
     # installed proactive row resolves proactive without a schema migration —
     # and an absent tag reads reactive, which is what every pre-class row is.
     return AgentProfile(
-        name=agent.name,
+        name=name,
         # The label rides the ROW, not the tags: it is not a role field (a
         # label-only edit must never read as seed divergence -- see
         # ``_SEED_FIELDS``), so there is nothing to encode.
-        label=str(getattr(agent, "label", "") or ""),
-        description=str(agent.description or ""),
-        when_to_use=str(agent.description or ""),
-        instructions=_agent_instructions(registry, agent),
+        label=label,
+        description=description,
+        when_to_use=description,
+        instructions=instructions,
         tools=tools,
         effort=effort,
         saver=saver,
         may_delegate=may_delegate,
         action_class=class_from_tags(tags),
-        agent_id=agent.id,
-        model=str(agent.model or ""),
-        hosting=str(agent.hosting or ""),
+        agent_id=agent_id,
+        model=str(model or ""),
+        hosting=hosting,
     )
 
 

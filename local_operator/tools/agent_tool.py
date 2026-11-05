@@ -151,10 +151,7 @@ class AgentParams(BaseModel):
     # spaced name authors a profile the user cannot invoke from that surface.
     name: str | None = Field(
         default=None,
-        description=(
-            "Role or specialist name (all ops but search); no spaces — it doubles "
-            "as the /agent slash-command argument."
-        ),
+        description=("Role/specialist name (except search); no spaces; also the /agent argument."),
     )
     label: str | None = Field(
         default=None,
@@ -171,9 +168,8 @@ class AgentParams(BaseModel):
     instructions: str | None = Field(
         default=None,
         description=(
-            "create/update: standing guidance prepended to every run of the "
-            "profile. Imperative and short — it is billed on each of that "
-            "profile's turns. Teams layer briefs on top without rewriting it."
+            "create/update: short imperatives prepended and billed each turn; "
+            "team briefs add, never replace."
         ),
     )
     tools: list[str] | None = Field(
@@ -1522,7 +1518,7 @@ def write_profile(
         definition_lock,
         restore_agent_image,
     )
-    from local_operator.profile_scope import row_scope, scope_store
+    from local_operator.profile_scope import _ScopedAgentWrites, row_scope, scope_store
 
     if registry is None:
         raise ValueError("no agent registry attached to this session; cannot save roles.")
@@ -1546,7 +1542,9 @@ def write_profile(
                 raise DefinitionRevisionMismatch("the definition changed since it was read")
         target = row_scope(registry, existing) if existing is not None else scope
         adapter = scope_store(registry, target)
-        store = getattr(adapter, "_store", adapter)
+        # Only the known composite adapter is unwrapped: a similarly named
+        # attribute on an arbitrary SDK registry is not a definition owner.
+        store = adapter._store if isinstance(adapter, _ScopedAgentWrites) else adapter
         # THE CHANGE'S OWN IDENTITY names the journal, so a retry of THIS save
         # cannot become a second write and a dead attempt cannot be replayed as
         # a fresh grant. It is derived from the host's authorization string,
@@ -2096,10 +2094,10 @@ def _plan_account_save(registry: Any, existing: Any, params: AgentParams) -> _Ac
     before: dict[str, Any] = {}
     base_revision: str | None = None
     agent_id = str(existing.id) if existing is not None else None
-    if agent_id is not None:
-        before = dict(registry.definition_revision_fields(agent_id))
+    if existing is not None:
+        before = dict(registry.definition_revision_fields(str(existing.id)))
         before["saver"] = profile_from_agent(registry, existing).saver
-        base_revision = definition_revision("agent", agent_id, before)
+        base_revision = definition_revision("agent", str(existing.id), before)
     changes = tuple(field for field, _key in _SAVE_FIELDS if getattr(params, field) is not None)
     lines: list[str] = []
     for field, key in _SAVE_FIELDS:
@@ -2254,7 +2252,12 @@ def _account_save_receipt(
     update_profile_backup(session_dir, plan.backup_id, saved_revision=revision)
     details["revert"] = {"op": "revert", "backup_id": plan.backup_id}
     register = getattr(context, "register_profile_action", None)
-    if register is not None and plan.backup_payload is not None and plan.after_image is not None:
+    if (
+        register is not None
+        and session_dir is not None
+        and plan.backup_payload is not None
+        and plan.after_image is not None
+    ):
         from local_operator.definition_transaction import commitment
         from local_operator.profile_approval import AgentImage
 

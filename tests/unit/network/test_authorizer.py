@@ -580,3 +580,18 @@ def test_the_new_local_verbs_are_total_and_never_peer_ops() -> None:
     assert az.op_tables_are_total() == []
     assert "broker_credential" not in types.ROLE_CAPABILITIES["drive"]
     assert "broker_credential" not in types.ROLE_CAPABILITIES["read"]
+
+
+def test_profile_action_status_is_exactly_a_session_view_not_local_or_approval_authority():
+    from local_operator.network.types import (
+        INNER_OP_CAPABILITY,
+        LOCAL_OPS,
+        OP_CAPABILITY,
+    )
+
+    assert INNER_OP_CAPABILITY["profile_action_status"] == "view"
+    assert "profile_action_status" not in LOCAL_OPS
+    assert "profile_action_status" not in OP_CAPABILITY
+    # Activation keeps its existing independent owner/operator checks; a status
+    # read must not invent an approval capability or broaden the outer plane.
+    assert INNER_OP_CAPABILITY["approval_answer"] == "prompt"

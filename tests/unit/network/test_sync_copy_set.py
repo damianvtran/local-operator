@@ -62,6 +62,7 @@ def _entry_owners() -> dict[str, str]:
     from local_operator.fork import FORK_BOUNDARY_NAME
     from local_operator.memory import SESSION_EXPORT_NAME
     from local_operator.monitors.arm import MONITOR_LOCK_NAME
+    from local_operator.profile_scope import PROFILE_BACKUPS_DIRNAME
     from local_operator.resume import (
         ATTACHMENT_SIDECAR_NAME,
         ORIGIN_CACHE_NAME,
@@ -93,6 +94,7 @@ def _entry_owners() -> dict[str, str]:
     from local_operator.wakes.lock import WAKE_LOCK_NAME
 
     return {
+        PROFILE_BACKUPS_DIRNAME: "profile_scope",
         TRANSCRIPT_FILENAME: "session.transcript",
         SESSION_EXPORT_NAME: "memory",
         TITLE_SIDECAR_NAME: "resume",
@@ -2231,3 +2233,19 @@ def test_the_approval_sidecar_is_classified_and_never_copied(tmp_path: Path) -> 
     sync.assert_complete(session_dir)  # no SyncRefused
     assert OVERRIDE_FILENAME in sync.NEVER_COPIED
     assert OVERRIDE_FILENAME not in sync.copy_set(tmp_path, "s1")
+
+
+def test_profile_backup_before_images_are_origin_local_for_copy_and_move(tmp_path):
+    from local_operator.profile_scope import PROFILE_BACKUPS_DIRNAME
+
+    directory = tmp_path / "sessions" / "s1"
+    backup = directory / PROFILE_BACKUPS_DIRNAME / "receipt.json"
+    backup.parent.mkdir(parents=True)
+    backup.write_text('{"before": "origin-private"}')
+    (directory / sync.TRANSCRIPT_NAME).write_text("")
+    sync.assert_complete(directory)  # deleting move classification, not a fake non-session name
+    assert PROFILE_BACKUPS_DIRNAME in sync.NEVER_COPIED
+    assert not any(
+        name.startswith(PROFILE_BACKUPS_DIRNAME) for name in sync.copy_set(tmp_path, "s1")
+    )
+    assert backup.read_text() == '{"before": "origin-private"}'

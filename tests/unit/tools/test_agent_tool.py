@@ -269,7 +269,7 @@ async def test_create_specialist_is_not_a_role(context, registry) -> None:
         description="Knows user-dashboard release practices",
         instructions="Follow the user-dashboard SDLC. Never skip the design review.",
     )
-    assert "created specialist" in body
+    assert "created agent" in body
     agent = registry.get_agent_by_name("user-dashboard")
     assert agent is not None
     assert "role" not in (agent.tags or [])
@@ -1878,7 +1878,7 @@ async def test_the_desktop_editors_specialist_defaults_are_a_no_op_not_a_refusal
         context, op="update", name="scout", effort="inherit", tools=[], delegate=False
     )
 
-    assert "updated specialist" in body
+    assert "updated agent" in body
     after = registry.get_agent_by_name("scout")
     assert after is not None and after.tags == before.tags
 
@@ -2324,5 +2324,6 @@ async def test_a_declined_promote_changes_nothing_and_says_so(registry) -> None:
 
     result = await execute_agent("tc", {"op": "promote", "name": "one"}, None, None, context)
 
-    assert "declined to copy this agent into their account" in result.text
+    assert "declined to save this agent for every conversation" in result.text
+    assert "Do not retry" in result.text
     assert registry.global_registry.get_agent_by_name("one") is None

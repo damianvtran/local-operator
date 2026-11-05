@@ -8,6 +8,7 @@ import time
 import pytest
 
 from local_operator.agents import AgentRegistry
+from local_operator.harness.types import Message
 from local_operator.network import approvals as A
 from local_operator.network.types import MeshRefusal
 from tests.unit.network.test_approvals_store import _make_key, _sign_decision
@@ -36,6 +37,7 @@ def proposal(root):
     row = registry.create_agent(_edit_fields(name="reviewer", tags=["role"], categories=["role"]))
     registry.set_agent_system_prompt(row.id, "Before.")
     before = P.snapshot(root, "agent", row.id)
+    assert before is not None
     after = dict(before, instructions="Approved after restart.")
     return P.build(
         root,
@@ -125,7 +127,9 @@ def test_stale_queued_save_never_takes_backup(root):
     AgentRegistry(root).set_agent_system_prompt(data.target_id, "Later edit.")
     with pytest.raises(MeshRefusal):
         P.apply(record["approval_id"], P.expected(record), root)
-    assert P.snapshot(root, "agent", data.target_id)["instructions"] == "Later edit."
+    checked_image_0 = P.snapshot(root, "agent", data.target_id)
+    assert checked_image_0 is not None
+    assert checked_image_0["instructions"] == "Later edit."
     assert not (root / "sessions" / data.session_id / "profile-backups").exists()
 
 
@@ -241,9 +245,11 @@ async def test_unattached_session_tool_queues_immediately(root):
     data = proposal(root)
     directory = root / "sessions" / "synthetic-session"
     registry = scope_agent_registry(AgentRegistry(root, migrate=False), directory)
+    from tests.unit.session.test_account_profile_consent import _never_stream
+
     session = Session(
         model=ModelSpec(provider="test", model_id="m", context_window=100000),
-        stream_fn=lambda *args: None,
+        stream_fn=_never_stream,
         tools=[],
         transcript=Transcript(directory),
         system_blocks_provider=lambda: [],
@@ -269,6 +275,7 @@ async def test_unattached_session_tool_queues_immediately(root):
             3,
         )
         assert not result.is_error, result.content
+        assert result.details is not None
         assert result.details["status"] == "queued"
         assert P.snapshot(root, "agent", data.target_id) == data.before
         assert not (directory / "profile-backups").exists()
@@ -286,6 +293,7 @@ def test_completed_signature_is_not_revived_by_editable_bookkeeping_rollback(roo
     # A later legitimate edit restores the original authored bytes. The model
     # can roll back/delete same-uid bookkeeping, but that must not revive the
     # already-consumed approval signature into authority for another save.
+    assert data.before is not None
     AgentRegistry(root).set_agent_system_prompt(data.target_id, data.before["instructions"])
     raw = A._load_raw(record["approval_id"], root)
     raw["state"] = A.STATE_APPROVED
@@ -642,6 +650,7 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
     queued = await (execute_agent if kind == "agent" else execute_team)(
         "same-real-call", args, None, None, context
     )
+    assert queued.details is not None
     assert queued.details["status"] == "queued"
     # The ordinary harness native persistence boundary, using the ACTUAL call/result.
     call = Message.assistant(
@@ -663,11 +672,13 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
 
             monkeypatch.setattr(seam, "_AttachableSession", lambda: resumed)
             live = await seam._serve(root, operator_cap=None)
+        assert queued.details is not None
         record = A._load_raw(queued.details["approval_id"], root)
         approve(root, record)
         # A peer-supplied hint, even for an approved but UNEXECUTED request,
         # cannot manufacture a saved result or write the profile.
         await resumed.receive_profile_save_result("f" * 64)
+        assert queued.details is not None
         await resumed.receive_profile_save_result(queued.details["receipt_id"])
         assert not any(isinstance(event, ToolExecutionEndEvent) for event in events)
         applied = P.apply(record["approval_id"], P.expected(record), root)
@@ -690,10 +701,53 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
                 )
                 == 1
             )
+        # The live carrier is not a third peer provenance kind. It invokes the
+        # real Session verifier; a forged hint cannot add a model/owner row.
+        from local_operator.session.runtime.server import RuntimeServer
+
+        carrier = object.__new__(RuntimeServer)
+        carrier._started = True
+
+        async def verify_hint(receipt_id: str) -> str:
+            await resumed.receive_profile_save_result(receipt_id)
+            return "verified hint"
+
+        async def never_peer(**fields):
+            pytest.fail("an internal signed-result hint must not become peer/model input")
+
+        monkeypatch.setattr(
+            carrier,
+            "_handle",
+            SimpleNamespace(
+                receive_profile_save_result=verify_hint, receive_peer_message=never_peer
+            ),
+            raising=False,
+        )
+        frame = {
+            "op": "peer_message",
+            "text": "internal hint",
+            "sender": {"source": "profile_save"},
+            "custom_type": "profile_save_result",
+            "mode": "mailbox",
+            "wake": False,
+            "message_id": queued.details["receipt_id"],
+        }
+        assert await carrier._dispatch("peer_message", frame) == "verified hint"
+        before_forged = len(events)
+        assert (
+            await carrier._dispatch("peer_message", frame | {"message_id": "unsigned-hint"})
+            == "verified hint"
+        )
+        assert len(events) == before_forged
+        with pytest.raises(ValueError, match="non-waking"):
+            await carrier._dispatch("peer_message", frame | {"wake": True})
         native = [event for event in events if isinstance(event, ToolExecutionEndEvent)]
         assert len(native) == 1
         assert native[0].tool_call_id == queued.tool_call_id
+        assert queued.details is not None
+        assert native[0].result.details is not None
         assert native[0].result.details["receipt_id"] == queued.details["receipt_id"]
+        assert native[0].result.details is not None
         assert native[0].result.details["profile_action"] == applied["profile_action"]
         history = Transcript(directory).build_llm_history()
         tool = [
@@ -702,6 +756,8 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
             if getattr(message, "tool_call_id", None) == queued.tool_call_id
         ]
         assert len(tool) == 1
+        assert isinstance(tool[0], Message)
+        assert tool[0].provider_payload is not None
         assert tool[0].provider_payload["details"]["status"] == "applied"
         P._publish(root, P._proposal(record), applied)
         assert await _drain_inbox_into(
@@ -712,7 +768,7 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
         import subprocess
         from pathlib import Path
 
-        evidence = Path(os.environ.get("PROFILE_CONTINUATION_EVIDENCE", root))
+        evidence = Path(os.environ.get("PROFILE_CONTINUATION_EVIDENCE", str(root)))
         git_env = dict(
             os.environ,
             GIT_CONFIG_SYSTEM="/dev/null",
@@ -765,6 +821,7 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
             after_restart = []
             restarted.subscribe(after_restart.append)
             try:
+                assert queued.details is not None
                 await restarted.receive_profile_save_result(queued.details["receipt_id"])
                 assert not any(isinstance(event, ToolExecutionEndEvent) for event in after_restart)
                 replay = Transcript(directory).build_llm_history()
@@ -820,6 +877,7 @@ def test_signed_save_split_metadata_prompt_fault_rolls_back(root, monkeypatch):
     assert P.snapshot(root, "agent", data.target_id) == data.before
     journal = json.loads((root / "profile-transactions" / f"{data.receipt_id}.json").read_text())
     assert journal["state"] == "rolled_back"
+    assert data.before is not None
     assert calls == [data.after["instructions"], data.before["instructions"]]
 
 
@@ -855,6 +913,7 @@ async def test_signed_projected_policy_publishes_native_event_and_cold_history(r
     from local_operator.session.transcript import Transcript
 
     data = proposal(root)
+    assert data.before is not None
     data = P.build(
         root,
         profile_kind="agent",
@@ -915,20 +974,24 @@ async def test_signed_projected_policy_publishes_native_event_and_cold_history(r
             if field == "combined"
             else {field}
         )
+        assert details is not None
         assert set(details["fields"]) == expected
+        assert details is not None
         assert all(
             any(line.startswith(name + ":") for line in details["diff"]) for name in expected
         )
         assert native[0].tool_call_id == data.tool_call_id
         history = Transcript(directory).build_llm_history()
         rows = [m for m in history if getattr(m, "tool_call_id", None) == data.tool_call_id]
+        assert isinstance(rows[0], Message)
+        assert rows[0].provider_payload is not None
         assert len(rows) == 1 and rows[0].provider_payload["details"] == details
         if field == "combined":
             import os
             import subprocess
             from pathlib import Path
 
-            output = Path(os.environ.get("PROFILE_R4_EVIDENCE", root))
+            output = Path(os.environ.get("PROFILE_R4_EVIDENCE", str(root)))
             output.mkdir(parents=True, exist_ok=True)
             (output / "protected-policy-native-golden.json").write_text(
                 json.dumps(

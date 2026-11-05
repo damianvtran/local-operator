@@ -3,10 +3,12 @@
 import json
 import os
 from pathlib import Path
+from typing import Any, Literal, overload
 
 import pytest
 
-from local_operator.harness.types import Message
+from local_operator.harness.types import Message, TextContent, ToolResult
+from local_operator.session.session import Session
 from local_operator.tools.agent_tool import execute_agent
 from local_operator.tools.team_tool import execute_team
 from tests.unit.session.test_account_profile_consent import (
@@ -19,6 +21,18 @@ from tests.unit.session.test_account_profile_consent import stores as consent_st
 
 stores = consent_stores
 _EVIDENCE_ROOT = os.environ.get("LOCAL_OPERATOR_SCRATCHPAD")
+
+
+@overload
+async def saved(
+    stores, kind="agent", *, receipt: Literal[True]
+) -> tuple[Session, dict[str, Any], str, ToolResult]: ...
+
+
+@overload
+async def saved(
+    stores, kind="agent", *, receipt: Literal[False] = False
+) -> tuple[Session, dict[str, Any], str]: ...
 
 
 async def saved(stores, kind="agent", *, receipt=False):
@@ -36,6 +50,7 @@ async def saved(stores, kind="agent", *, receipt=False):
         context,
     )
     assert not result.is_error, result.content
+    assert result.details is not None
     value = (session, result.details["profile_action"], result.details["backup_id"])
     return (*value, result) if receipt else value
 
@@ -64,10 +79,9 @@ async def test_real_saved_receipt_reverts_once_and_reports_cached_success(stores
             # Another executor owns the write; inspect fresh persisted briefs.
             from local_operator.teams import TeamRegistry
 
-            assert (
-                TeamRegistry(stores["teams"].config_dir).get_team_by_name("lopdev").instructions
-                == "Ship."
-            )
+            stored = TeamRegistry(stores["teams"].config_dir).get_team_by_name("lopdev")
+            assert stored is not None
+            assert stored.instructions == "Ship."
     finally:
         await session.dispose()
 
@@ -214,10 +228,12 @@ async def test_export_golden_profile_wires(stores, tmp_path, monkeypatch):
             None,
             context,
         )
+        assert queued.details is not None
         assert queued.details["status"] == "queued"
         rows = approval_rows(stores["account"].config_dir)
         from local_operator.network import approvals as A
 
+        assert queued.details is not None
         record = A._load_raw(queued.details["approval_id"], stores["account"].config_dir)
         _approve_queued(stores["account"].config_dir, record)
         signed = P.apply(record["approval_id"], P.expected(record), stores["account"].config_dir)
@@ -247,6 +263,7 @@ async def test_export_golden_profile_wires(stores, tmp_path, monkeypatch):
             None,
             context,
         )
+        assert agent.details is not None and team.details is not None
         assert agent.details.get("profile_action") and team.details.get("profile_action")
         read_agent = await execute_agent(
             "show-agent", {"op": "show", "name": "reviewer"}, None, None, context
@@ -425,9 +442,13 @@ async def test_actual_queued_receipt_has_one_canonical_diff(stores):
             None,
             _context(session, stores),
         )
+        assert result.details is not None
         assert result.details["status"] == "queued"
         card = ToolCard("queued-diff", "agent", {"op": "update", "name": "reviewer"})
-        card.mark_done("\n".join(item.text for item in result.content), details=result.details)
+        card.mark_done(
+            "\n".join(item.text for item in result.content if isinstance(item, TextContent)),
+            details=result.details,
+        )
         card._expanded = True
         body = card._build_content(110).plain
         assert body.count("+Demand tests.") == 1
