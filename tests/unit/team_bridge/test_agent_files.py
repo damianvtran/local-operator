@@ -51,6 +51,12 @@ def isolated(tmp_path, monkeypatch):
     root.mkdir()
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     monkeypatch.setattr(host, "owner_fence_refusal", lambda runtime: None)
+    # This recorder represents an approved hub; real-client origin races live
+    # in test_agent_file_origins with actual native ownership/admission.
+    monkeypatch.setattr(
+        "local_operator.team_bridge.client.org_oauth_destination_allowed",
+        lambda base: base == "https://hub.example",
+    )
     monkeypatch.setattr(host, "outbound_tool_fence", lambda runtime: None)
     monkeypatch.setattr(host, "admission_refusal", lambda runtime, *, is_read=False: None)
 

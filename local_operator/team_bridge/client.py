@@ -1979,13 +1979,19 @@ class TeamBridgeClient:
     # -- operations ---------------------------------------------------------
 
     async def status(
-        self, *, access: OAuthAccess | None = None, expected_account_id: str | None = None
+        self,
+        *,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Eligibility, optionally fenced to the owner commissioning a file send."""
 
         extra: dict[str, Any] = {}
         if expected_account_id is not None:
             extra["expected_account_id"] = expected_account_id
+        if pre_http_guard is not None:
+            extra["pre_http_guard"] = pre_http_guard
         return await self._send("GET", "/messaging/status", access=access, **extra)
 
     async def settings(self, *, tenant_id: str | None = None) -> dict[str, Any]:
@@ -4233,6 +4239,7 @@ class TeamBridgeClient:
         actor_endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Discard one STAGED upload (idempotent on the hub; bound ones stay).
 
@@ -4243,12 +4250,16 @@ class TeamBridgeClient:
 
         _require_attachment_id(attachment_id)
         params = _attachment_write_params(tenant_id, actor_endpoint_id)
+        extra: dict[str, Any] = {}
+        if pre_http_guard is not None:
+            extra["pre_http_guard"] = pre_http_guard
         response = await self._authorized(
             "DELETE",
             f"/messaging/conversations/{conversation_id}/attachments/{attachment_id}",
             params=params,
             access=access,
             expected_account_id=expected_account_id,
+            **extra,
         )
         if response.status_code >= 400:
             raise _refusal(response)

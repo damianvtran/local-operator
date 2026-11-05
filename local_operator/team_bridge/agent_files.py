@@ -87,14 +87,28 @@ class FileBatch:
                 "owner_changed", "file-send conversation changed"
             )
 
+    def check_origin(self) -> None:
+        # Cleanup remains authorized for the original staged owner after a
+        # send revoke/switch. Pin its destination independently of live send
+        # permission, synchronously after every credential/refresh await.
+        from .client import org_oauth_destination_allowed
+
+        origin = self.origin
+        if (
+            not isinstance(origin, str)
+            or getattr(self.client, "base_url", None) != origin
+            or not org_oauth_destination_allowed(origin)
+        ):
+            raise agent_attachments.AttachmentRefused("owner_changed", "file-send origin changed")
+
     def check(self) -> None:
         # Re-run at the physical HTTP seam, after OAuth/refresh waits, rather
         # than trusting the owner that happened to be present at tool entry.
         from .host import outbound_tool_fence
 
+        self.check_origin()
         if (
             self.runtime.client is not self.client
-            or getattr(self.client, "base_url", None) != self.origin
             or _owner(self.runtime) != self.owner
             or self.runtime.tenant_id != self.tenant_id
             or outbound_tool_fence(self.runtime) is not None
@@ -108,7 +122,9 @@ class FileBatch:
     ) -> tuple[PreparedFile, ...]:
         self.check()
         try:
-            payload = await self.client.status(expected_account_id=self.account_id)
+            payload = await self.client.status(
+                expected_account_id=self.account_id, pre_http_guard=self.check
+            )
         except Exception:
             payload = None
         self.check()
@@ -265,6 +281,7 @@ class FileBatch:
                         tenant_id=self.tenant_id,
                         actor_endpoint_id=self.endpoint_id,
                         expected_account_id=self.account_id,
+                        pre_http_guard=self.check_origin,
                     )
                 except Exception:
                     failures += 1

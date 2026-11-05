@@ -613,7 +613,11 @@ def _read_and_bound(path_text: str, index: int, session_id: str) -> PreparedImag
 
 
 async def prepare_attachments(
-    runtime: "BridgeRuntime", paths: Sequence[str]
+    runtime: "BridgeRuntime",
+    paths: Sequence[str],
+    *,
+    pre_http_guard: Any = None,
+    expected_account_id: str | None = None,
 ) -> tuple[PreparedImage, ...]:
     """Validate the paths and the hub capability; raise :class:`AttachmentRefused`.
 
@@ -649,7 +653,15 @@ async def prepare_attachments(
     if len(digests) != len(prepared):
         raise AttachmentRefused("attachment_invalid", "the same image is attached more than once")
 
-    capability = await _agent_upload_capability(runtime)
+    # A mixed file/image send shares one captured file authority. Keep the
+    # legacy image-only call untouched, but fence its mixed status await too.
+    extra: dict[str, Any] = {}
+    if pre_http_guard is not None:
+        extra = {
+            "pre_http_guard": pre_http_guard,
+            "expected_account_id": expected_account_id,
+        }
+    capability = await _agent_upload_capability(runtime, **extra)
     if capability is None:
         raise AttachmentRefused(
             "attachments_unavailable",
@@ -669,11 +681,22 @@ async def prepare_attachments(
     return tuple(prepared)
 
 
-async def _agent_upload_capability(runtime: "BridgeRuntime") -> dict[str, Any] | None:
+async def _agent_upload_capability(
+    runtime: "BridgeRuntime",
+    *,
+    pre_http_guard: Any = None,
+    expected_account_id: str | None = None,
+) -> dict[str, Any] | None:
     """The normalized capability block iff the hub says ``agent_upload`` is true."""
 
     try:
-        payload = await runtime.client.status()
+        extra: dict[str, Any] = {}
+        if pre_http_guard is not None:
+            extra = {
+                "pre_http_guard": pre_http_guard,
+                "expected_account_id": expected_account_id,
+            }
+        payload = await runtime.client.status(**extra)
     except Exception:  # noqa: BLE001 — cannot ask the hub => treat as off (fail closed)
         return None
     capability = attachments_capability(payload)
@@ -689,6 +712,7 @@ async def stage_attachments(
     prepared: Sequence[PreparedImage],
     *,
     pre_http_guard: Any = None,
+    cleanup_http_guard: Any = None,
 ) -> list[StagedImage]:
     """Upload each image as the agent endpoint; return ids + metadata only.
 
@@ -698,12 +722,13 @@ async def stage_attachments(
     that is not minted-shaped must never reach a send body or a URL path.
     """
 
+    client = runtime.client
     tenant_id = runtime.tenant_id
     account_id = runtime.owner.account_id
     staged: list[StagedImage] = []
     try:
         for item in prepared:
-            result = await runtime.client.upload_attachment(
+            result = await client.upload_attachment(
                 conversation_id,
                 item.payload(),
                 tenant_id=tenant_id,
@@ -735,6 +760,8 @@ async def stage_attachments(
             staged,
             tenant_id=tenant_id,
             expected_account_id=account_id,
+            pre_http_guard=cleanup_http_guard,
+            client=client,
         )
         raise
     return staged
@@ -753,6 +780,8 @@ async def discard_attachments(
     *,
     tenant_id: str | None = None,
     expected_account_id: str | None = None,
+    pre_http_guard: Any = None,
+    client: Any = None,
 ) -> None:
     """Best-effort delete of the ids THIS call staged after a send that did not land.
 
@@ -780,6 +809,7 @@ async def discard_attachments(
     if not staged:
         return
 
+    client = runtime.client if client is None else client
     tenant_id = runtime.tenant_id if tenant_id is None else tenant_id
     expected_account_id = (
         runtime.owner.account_id if expected_account_id is None else expected_account_id
@@ -788,12 +818,13 @@ async def discard_attachments(
     async def _delete_all() -> None:
         for item in staged:
             try:
-                await runtime.client.delete_attachment(
+                await client.delete_attachment(
                     conversation_id,
                     item.id,
                     tenant_id=tenant_id,
                     actor_endpoint_id=endpoint_id,
                     expected_account_id=expected_account_id,
+                    **({"pre_http_guard": pre_http_guard} if pre_http_guard is not None else {}),
                 )
             except Exception:  # noqa: BLE001 — see docstring
                 continue

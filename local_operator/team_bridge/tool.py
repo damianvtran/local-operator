@@ -1183,12 +1183,22 @@ async def _direct_message(
     prepared_files: tuple[agent_files.PreparedFile, ...] = ()
     file_batch = None
     try:
-        if params.attachments:
-            prepared_images = await agent_attachments.prepare_attachments(
-                runtime, params.attachments
-            )
         if params.files:
             file_batch = agent_files.FileBatch(runtime, endpoint_id)
+        if params.attachments:
+            prepared_images = await agent_attachments.prepare_attachments(
+                runtime,
+                params.attachments,
+                **(
+                    {
+                        "pre_http_guard": file_batch.check,
+                        "expected_account_id": file_batch.account_id,
+                    }
+                    if file_batch
+                    else {}
+                ),
+            )
+        if file_batch:
             prepared_files = await file_batch.prepare(params.files, prepared_images)
     except agent_attachments.AttachmentRefused as refused:
         return _error(refused.message, code=refused.code)
@@ -1238,7 +1248,14 @@ async def _direct_message(
                 conversation_id,
                 endpoint_id,
                 prepared_images,
-                **({"pre_http_guard": file_batch.check} if file_batch else {}),
+                **(
+                    {
+                        "pre_http_guard": file_batch.check,
+                        "cleanup_http_guard": file_batch.check_origin,
+                    }
+                    if file_batch
+                    else {}
+                ),
             )
         if file_batch:
             file_batch.images = [item.id for item in staged_images]
@@ -2314,12 +2331,22 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         staged_images: list[agent_attachments.StagedImage] = []
         file_batch = None
         try:
-            if params.attachments:
-                prepared_images = await agent_attachments.prepare_attachments(
-                    runtime, params.attachments
-                )
             if params.files:
                 file_batch = agent_files.FileBatch(runtime, endpoint_id)
+            if params.attachments:
+                prepared_images = await agent_attachments.prepare_attachments(
+                    runtime,
+                    params.attachments,
+                    **(
+                        {
+                            "pre_http_guard": file_batch.check,
+                            "expected_account_id": file_batch.account_id,
+                        }
+                        if file_batch
+                        else {}
+                    ),
+                )
+            if file_batch:
                 prepared_files = await file_batch.prepare(params.files, prepared_images)
                 file_batch.bind_conversation(channel_id)
                 file_batch.check()
@@ -2329,7 +2356,14 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
                     channel_id,
                     endpoint_id,
                     prepared_images,
-                    **({"pre_http_guard": file_batch.check} if file_batch else {}),
+                    **(
+                        {
+                            "pre_http_guard": file_batch.check,
+                            "cleanup_http_guard": file_batch.check_origin,
+                        }
+                        if file_batch
+                        else {}
+                    ),
                 )
             if file_batch:
                 file_batch.images = [item.id for item in staged_images]
