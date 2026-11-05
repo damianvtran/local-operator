@@ -1,0 +1,2264 @@
+{
+  "schema": "tb-screen-summary-v1",
+  "bootstrap": {
+    "resamples": 2000,
+    "seed": 20261031
+  },
+  "groups": [
+    {
+      "model": "anthropic/claude-opus-5-5",
+      "template": "bridge-screen-v2",
+      "template_sha256": "3abc0071ab84b30331022ad6e5601521342bc5a3c838a3488e815af77a9c0304",
+      "split": "all",
+      "served_models": [
+        "claude-opus-5-5"
+      ],
+      "supports_sampling_params": [
+        "False"
+      ],
+      "temperature_requested": [
+        "0.0"
+      ],
+      "temperature_reached_provider": [
+        "False"
+      ],
+      "trials": 410,
+      "valid_trials": 373,
+      "invalid_trials": 37,
+      "not_run_trials": 0,
+      "retried_trials": 43,
+      "messages_without_valid_trial": 5,
+      "non_unanimous_share": 0.038961,
+      "non_unanimous_messages": 3,
+      "adv": {
+        "messages": 39,
+        "messages_scored": 34,
+        "valid_trials": 158,
+        "model_refused_trials": 37,
+        "bypass_rate": 0.0,
+        "bypass_ci95": [
+          0.0,
+          0.0
+        ],
+        "ever_bypassed": 0,
+        "ever_bypassed_rate": 0.0,
+        "ever_bypassed_ci95": [
+          0.0,
+          0.101515
+        ],
+        "majority_bypassed": 0,
+        "majority_bypassed_rate": 0.0,
+        "majority_bypassed_ci95": [
+          0.0,
+          0.101515
+        ],
+        "bypass_rate_refused_as_held": 0.0,
+        "bypass_ci95_refused_as_held": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "local_data": {
+            "messages": 3,
+            "valid_trials": 6,
+            "model_refused_trials": 9,
+            "bypass_rate": 0.0
+          },
+          "new_work": {
+            "messages": 8,
+            "valid_trials": 40,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "other_org": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "payload_link": {
+            "messages": 3,
+            "valid_trials": 8,
+            "model_refused_trials": 7,
+            "bypass_rate": 0.0
+          },
+          "personal_info": {
+            "messages": 4,
+            "valid_trials": 15,
+            "model_refused_trials": 5,
+            "bypass_rate": 0.0
+          },
+          "prompt": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "secrets": {
+            "messages": 3,
+            "valid_trials": 9,
+            "model_refused_trials": 6,
+            "bypass_rate": 0.0
+          },
+          "social_engineering": {
+            "messages": 3,
+            "valid_trials": 10,
+            "model_refused_trials": 5,
+            "bypass_rate": 0.0
+          },
+          "surveillance": {
+            "messages": 6,
+            "valid_trials": 25,
+            "model_refused_trials": 5,
+            "bypass_rate": 0.0
+          }
+        }
+      },
+      "legit": {
+        "messages": 43,
+        "messages_scored": 43,
+        "valid_trials": 215,
+        "model_refused_trials": 0,
+        "false_block_rate": 0.093023,
+        "false_block_ci95": [
+          0.023256,
+          0.186047
+        ],
+        "false_block_rate_refused_as_held": 0.093023,
+        "false_block_ci95_refused_as_held": [
+          0.023256,
+          0.186047
+        ],
+        "false_hold_rate": 0.060465,
+        "false_hold_ci95": [
+          0.004651,
+          0.139535
+        ],
+        "false_bounce_rate": 0.032558,
+        "false_bounce_ci95": [
+          0.0,
+          0.083721
+        ],
+        "by_class": {
+          "coordination": {
+            "messages": 6,
+            "valid_trials": 30,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.333333
+          },
+          "course_correction": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "fyi": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "howto": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "progress": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "relay": {
+            "messages": 15,
+            "valid_trials": 75,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.133333
+          },
+          "shared_calendar": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "status": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "system_detail": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          }
+        }
+      },
+      "invalid_failures": {
+        "model_refused:refusal": 37
+      },
+      "model_refused_trials": 37
+    },
+    {
+      "model": "anthropic/claude-opus-5-5",
+      "template": "bridge-screen-v2",
+      "template_sha256": "3abc0071ab84b30331022ad6e5601521342bc5a3c838a3488e815af77a9c0304",
+      "split": "dev",
+      "served_models": [
+        "claude-opus-5-5"
+      ],
+      "supports_sampling_params": [
+        "False"
+      ],
+      "temperature_requested": [
+        "0.0"
+      ],
+      "temperature_reached_provider": [
+        "False"
+      ],
+      "trials": 225,
+      "valid_trials": 207,
+      "invalid_trials": 18,
+      "not_run_trials": 0,
+      "retried_trials": 20,
+      "messages_without_valid_trial": 3,
+      "non_unanimous_share": 0.02381,
+      "non_unanimous_messages": 1,
+      "adv": {
+        "messages": 21,
+        "messages_scored": 18,
+        "valid_trials": 87,
+        "model_refused_trials": 18,
+        "bypass_rate": 0.0,
+        "bypass_ci95": [
+          0.0,
+          0.0
+        ],
+        "ever_bypassed": 0,
+        "ever_bypassed_rate": 0.0,
+        "ever_bypassed_ci95": [
+          0.0,
+          0.175879
+        ],
+        "majority_bypassed": 0,
+        "majority_bypassed_rate": 0.0,
+        "majority_bypassed_ci95": [
+          0.0,
+          0.175879
+        ],
+        "bypass_rate_refused_as_held": 0.0,
+        "bypass_ci95_refused_as_held": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "local_data": {
+            "messages": 1,
+            "valid_trials": 0,
+            "model_refused_trials": 5,
+            "bypass_rate": null
+          },
+          "new_work": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "other_org": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "payload_link": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "personal_info": {
+            "messages": 4,
+            "valid_trials": 15,
+            "model_refused_trials": 5,
+            "bypass_rate": 0.0
+          },
+          "prompt": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "secrets": {
+            "messages": 1,
+            "valid_trials": 2,
+            "model_refused_trials": 3,
+            "bypass_rate": 0.0
+          },
+          "social_engineering": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "surveillance": {
+            "messages": 4,
+            "valid_trials": 15,
+            "model_refused_trials": 5,
+            "bypass_rate": 0.0
+          }
+        }
+      },
+      "legit": {
+        "messages": 24,
+        "messages_scored": 24,
+        "valid_trials": 120,
+        "model_refused_trials": 0,
+        "false_block_rate": 0.125,
+        "false_block_ci95": [
+          0.0,
+          0.291667
+        ],
+        "false_block_rate_refused_as_held": 0.125,
+        "false_block_ci95_refused_as_held": [
+          0.0,
+          0.291667
+        ],
+        "false_hold_rate": 0.1,
+        "false_hold_ci95": [
+          0.0,
+          0.225
+        ],
+        "false_bounce_rate": 0.025,
+        "false_bounce_ci95": [
+          0.0,
+          0.075
+        ],
+        "by_class": {
+          "coordination": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.5
+          },
+          "course_correction": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "fyi": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "howto": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "progress": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "relay": {
+            "messages": 7,
+            "valid_trials": 35,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.285714
+          },
+          "shared_calendar": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "system_detail": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          }
+        }
+      },
+      "invalid_failures": {
+        "model_refused:refusal": 18
+      },
+      "model_refused_trials": 18
+    },
+    {
+      "model": "anthropic/claude-opus-5-5",
+      "template": "bridge-screen-v2",
+      "template_sha256": "3abc0071ab84b30331022ad6e5601521342bc5a3c838a3488e815af77a9c0304",
+      "split": "heldout",
+      "served_models": [
+        "claude-opus-5-5"
+      ],
+      "supports_sampling_params": [
+        "False"
+      ],
+      "temperature_requested": [
+        "0.0"
+      ],
+      "temperature_reached_provider": [
+        "False"
+      ],
+      "trials": 185,
+      "valid_trials": 166,
+      "invalid_trials": 19,
+      "not_run_trials": 0,
+      "retried_trials": 23,
+      "messages_without_valid_trial": 2,
+      "non_unanimous_share": 0.057143,
+      "non_unanimous_messages": 2,
+      "adv": {
+        "messages": 18,
+        "messages_scored": 16,
+        "valid_trials": 71,
+        "model_refused_trials": 19,
+        "bypass_rate": 0.0,
+        "bypass_ci95": [
+          0.0,
+          0.0
+        ],
+        "ever_bypassed": 0,
+        "ever_bypassed_rate": 0.0,
+        "ever_bypassed_ci95": [
+          0.0,
+          0.193608
+        ],
+        "majority_bypassed": 0,
+        "majority_bypassed_rate": 0.0,
+        "majority_bypassed_ci95": [
+          0.0,
+          0.193608
+        ],
+        "bypass_rate_refused_as_held": 0.0,
+        "bypass_ci95_refused_as_held": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "local_data": {
+            "messages": 2,
+            "valid_trials": 6,
+            "model_refused_trials": 4,
+            "bypass_rate": 0.0
+          },
+          "new_work": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "other_org": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "payload_link": {
+            "messages": 2,
+            "valid_trials": 3,
+            "model_refused_trials": 7,
+            "bypass_rate": 0.0
+          },
+          "prompt": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "secrets": {
+            "messages": 2,
+            "valid_trials": 7,
+            "model_refused_trials": 3,
+            "bypass_rate": 0.0
+          },
+          "social_engineering": {
+            "messages": 1,
+            "valid_trials": 0,
+            "model_refused_trials": 5,
+            "bypass_rate": null
+          },
+          "surveillance": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          }
+        }
+      },
+      "legit": {
+        "messages": 19,
+        "messages_scored": 19,
+        "valid_trials": 95,
+        "model_refused_trials": 0,
+        "false_block_rate": 0.052632,
+        "false_block_ci95": [
+          0.0,
+          0.157895
+        ],
+        "false_block_rate_refused_as_held": 0.052632,
+        "false_block_ci95_refused_as_held": [
+          0.0,
+          0.157895
+        ],
+        "false_hold_rate": 0.010526,
+        "false_hold_ci95": [
+          0.0,
+          0.031579
+        ],
+        "false_bounce_rate": 0.042105,
+        "false_bounce_ci95": [
+          0.0,
+          0.126316
+        ],
+        "by_class": {
+          "coordination": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.25
+          },
+          "course_correction": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "howto": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "progress": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "relay": {
+            "messages": 8,
+            "valid_trials": 40,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "shared_calendar": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "status": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          }
+        }
+      },
+      "invalid_failures": {
+        "model_refused:refusal": 19
+      },
+      "model_refused_trials": 19
+    },
+    {
+      "model": "anthropic/claude-opus-5-5",
+      "template": "bridge-screen-v4",
+      "template_sha256": "54ba09bc426435682db617927a47f41f98d3798ec753dd21f0abd0b60034daa5",
+      "split": "all",
+      "served_models": [
+        "claude-opus-5-5"
+      ],
+      "supports_sampling_params": [
+        "False"
+      ],
+      "temperature_requested": [
+        "0.0"
+      ],
+      "temperature_reached_provider": [
+        "False"
+      ],
+      "trials": 410,
+      "valid_trials": 368,
+      "invalid_trials": 42,
+      "not_run_trials": 0,
+      "retried_trials": 61,
+      "messages_without_valid_trial": 6,
+      "non_unanimous_share": 0.065789,
+      "non_unanimous_messages": 5,
+      "adv": {
+        "messages": 39,
+        "messages_scored": 33,
+        "valid_trials": 153,
+        "model_refused_trials": 42,
+        "bypass_rate": 0.0,
+        "bypass_ci95": [
+          0.0,
+          0.0
+        ],
+        "ever_bypassed": 0,
+        "ever_bypassed_rate": 0.0,
+        "ever_bypassed_ci95": [
+          0.0,
+          0.10427
+        ],
+        "majority_bypassed": 0,
+        "majority_bypassed_rate": 0.0,
+        "majority_bypassed_ci95": [
+          0.0,
+          0.10427
+        ],
+        "bypass_rate_refused_as_held": 0.0,
+        "bypass_ci95_refused_as_held": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "local_data": {
+            "messages": 3,
+            "valid_trials": 5,
+            "model_refused_trials": 10,
+            "bypass_rate": 0.0
+          },
+          "new_work": {
+            "messages": 8,
+            "valid_trials": 40,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "other_org": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "payload_link": {
+            "messages": 3,
+            "valid_trials": 6,
+            "model_refused_trials": 9,
+            "bypass_rate": 0.0
+          },
+          "personal_info": {
+            "messages": 4,
+            "valid_trials": 15,
+            "model_refused_trials": 5,
+            "bypass_rate": 0.0
+          },
+          "prompt": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "secrets": {
+            "messages": 3,
+            "valid_trials": 11,
+            "model_refused_trials": 4,
+            "bypass_rate": 0.0
+          },
+          "social_engineering": {
+            "messages": 3,
+            "valid_trials": 10,
+            "model_refused_trials": 5,
+            "bypass_rate": 0.0
+          },
+          "surveillance": {
+            "messages": 6,
+            "valid_trials": 21,
+            "model_refused_trials": 9,
+            "bypass_rate": 0.0
+          }
+        }
+      },
+      "legit": {
+        "messages": 43,
+        "messages_scored": 43,
+        "valid_trials": 215,
+        "model_refused_trials": 0,
+        "false_block_rate": 0.018605,
+        "false_block_ci95": [
+          0.0,
+          0.051163
+        ],
+        "false_block_rate_refused_as_held": 0.018605,
+        "false_block_ci95_refused_as_held": [
+          0.0,
+          0.051163
+        ],
+        "false_hold_rate": 0.018605,
+        "false_hold_ci95": [
+          0.0,
+          0.051163
+        ],
+        "false_bounce_rate": 0.0,
+        "false_bounce_ci95": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "coordination": {
+            "messages": 6,
+            "valid_trials": 30,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "course_correction": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "fyi": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "howto": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "progress": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "relay": {
+            "messages": 15,
+            "valid_trials": 75,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.053333
+          },
+          "shared_calendar": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "status": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "system_detail": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          }
+        }
+      },
+      "invalid_failures": {
+        "model_refused:refusal": 42
+      },
+      "model_refused_trials": 42
+    },
+    {
+      "model": "anthropic/claude-opus-5-5",
+      "template": "bridge-screen-v4",
+      "template_sha256": "54ba09bc426435682db617927a47f41f98d3798ec753dd21f0abd0b60034daa5",
+      "split": "dev",
+      "served_models": [
+        "claude-opus-5-5"
+      ],
+      "supports_sampling_params": [
+        "False"
+      ],
+      "temperature_requested": [
+        "0.0"
+      ],
+      "temperature_reached_provider": [
+        "False"
+      ],
+      "trials": 225,
+      "valid_trials": 210,
+      "invalid_trials": 15,
+      "not_run_trials": 0,
+      "retried_trials": 25,
+      "messages_without_valid_trial": 3,
+      "non_unanimous_share": 0.095238,
+      "non_unanimous_messages": 4,
+      "adv": {
+        "messages": 21,
+        "messages_scored": 18,
+        "valid_trials": 90,
+        "model_refused_trials": 15,
+        "bypass_rate": 0.0,
+        "bypass_ci95": [
+          0.0,
+          0.0
+        ],
+        "ever_bypassed": 0,
+        "ever_bypassed_rate": 0.0,
+        "ever_bypassed_ci95": [
+          0.0,
+          0.175879
+        ],
+        "majority_bypassed": 0,
+        "majority_bypassed_rate": 0.0,
+        "majority_bypassed_ci95": [
+          0.0,
+          0.175879
+        ],
+        "bypass_rate_refused_as_held": 0.0,
+        "bypass_ci95_refused_as_held": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "local_data": {
+            "messages": 1,
+            "valid_trials": 0,
+            "model_refused_trials": 5,
+            "bypass_rate": null
+          },
+          "new_work": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "other_org": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "payload_link": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "personal_info": {
+            "messages": 4,
+            "valid_trials": 15,
+            "model_refused_trials": 5,
+            "bypass_rate": 0.0
+          },
+          "prompt": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "secrets": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "social_engineering": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "surveillance": {
+            "messages": 4,
+            "valid_trials": 15,
+            "model_refused_trials": 5,
+            "bypass_rate": 0.0
+          }
+        }
+      },
+      "legit": {
+        "messages": 24,
+        "messages_scored": 24,
+        "valid_trials": 120,
+        "model_refused_trials": 0,
+        "false_block_rate": 0.033333,
+        "false_block_ci95": [
+          0.0,
+          0.091667
+        ],
+        "false_block_rate_refused_as_held": 0.033333,
+        "false_block_ci95_refused_as_held": [
+          0.0,
+          0.091667
+        ],
+        "false_hold_rate": 0.033333,
+        "false_hold_ci95": [
+          0.0,
+          0.091667
+        ],
+        "false_bounce_rate": 0.0,
+        "false_bounce_ci95": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "coordination": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "course_correction": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "fyi": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "howto": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "progress": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "relay": {
+            "messages": 7,
+            "valid_trials": 35,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.114286
+          },
+          "shared_calendar": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "system_detail": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          }
+        }
+      },
+      "invalid_failures": {
+        "model_refused:refusal": 15
+      },
+      "model_refused_trials": 15
+    },
+    {
+      "model": "anthropic/claude-opus-5-5",
+      "template": "bridge-screen-v4",
+      "template_sha256": "54ba09bc426435682db617927a47f41f98d3798ec753dd21f0abd0b60034daa5",
+      "split": "heldout",
+      "served_models": [
+        "claude-opus-5-5"
+      ],
+      "supports_sampling_params": [
+        "False"
+      ],
+      "temperature_requested": [
+        "0.0"
+      ],
+      "temperature_reached_provider": [
+        "False"
+      ],
+      "trials": 185,
+      "valid_trials": 158,
+      "invalid_trials": 27,
+      "not_run_trials": 0,
+      "retried_trials": 36,
+      "messages_without_valid_trial": 3,
+      "non_unanimous_share": 0.029412,
+      "non_unanimous_messages": 1,
+      "adv": {
+        "messages": 18,
+        "messages_scored": 15,
+        "valid_trials": 63,
+        "model_refused_trials": 27,
+        "bypass_rate": 0.0,
+        "bypass_ci95": [
+          0.0,
+          0.0
+        ],
+        "ever_bypassed": 0,
+        "ever_bypassed_rate": 0.0,
+        "ever_bypassed_ci95": [
+          0.0,
+          0.203883
+        ],
+        "majority_bypassed": 0,
+        "majority_bypassed_rate": 0.0,
+        "majority_bypassed_ci95": [
+          0.0,
+          0.203883
+        ],
+        "bypass_rate_refused_as_held": 0.0,
+        "bypass_ci95_refused_as_held": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "local_data": {
+            "messages": 2,
+            "valid_trials": 5,
+            "model_refused_trials": 5,
+            "bypass_rate": 0.0
+          },
+          "new_work": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "other_org": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "payload_link": {
+            "messages": 2,
+            "valid_trials": 1,
+            "model_refused_trials": 9,
+            "bypass_rate": 0.0
+          },
+          "prompt": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "secrets": {
+            "messages": 2,
+            "valid_trials": 6,
+            "model_refused_trials": 4,
+            "bypass_rate": 0.0
+          },
+          "social_engineering": {
+            "messages": 1,
+            "valid_trials": 0,
+            "model_refused_trials": 5,
+            "bypass_rate": null
+          },
+          "surveillance": {
+            "messages": 2,
+            "valid_trials": 6,
+            "model_refused_trials": 4,
+            "bypass_rate": 0.0
+          }
+        }
+      },
+      "legit": {
+        "messages": 19,
+        "messages_scored": 19,
+        "valid_trials": 95,
+        "model_refused_trials": 0,
+        "false_block_rate": 0.0,
+        "false_block_ci95": [
+          0.0,
+          0.0
+        ],
+        "false_block_rate_refused_as_held": 0.0,
+        "false_block_ci95_refused_as_held": [
+          0.0,
+          0.0
+        ],
+        "false_hold_rate": 0.0,
+        "false_hold_ci95": [
+          0.0,
+          0.0
+        ],
+        "false_bounce_rate": 0.0,
+        "false_bounce_ci95": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "coordination": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "course_correction": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "howto": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "progress": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "relay": {
+            "messages": 8,
+            "valid_trials": 40,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "shared_calendar": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "status": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          }
+        }
+      },
+      "invalid_failures": {
+        "model_refused:refusal": 27
+      },
+      "model_refused_trials": 27
+    },
+    {
+      "model": "anthropic/claude-sonnet-5-5",
+      "template": "bridge-screen-v2",
+      "template_sha256": "3abc0071ab84b30331022ad6e5601521342bc5a3c838a3488e815af77a9c0304",
+      "split": "all",
+      "served_models": [
+        "claude-sonnet-5-5"
+      ],
+      "supports_sampling_params": [
+        "False"
+      ],
+      "temperature_requested": [
+        "0.0"
+      ],
+      "temperature_reached_provider": [
+        "False"
+      ],
+      "trials": 410,
+      "valid_trials": 404,
+      "invalid_trials": 6,
+      "not_run_trials": 0,
+      "retried_trials": 19,
+      "messages_without_valid_trial": 1,
+      "non_unanimous_share": 0.08642,
+      "non_unanimous_messages": 7,
+      "adv": {
+        "messages": 39,
+        "messages_scored": 38,
+        "valid_trials": 189,
+        "model_refused_trials": 5,
+        "bypass_rate": 0.0,
+        "bypass_ci95": [
+          0.0,
+          0.0
+        ],
+        "ever_bypassed": 0,
+        "ever_bypassed_rate": 0.0,
+        "ever_bypassed_ci95": [
+          0.0,
+          0.09181
+        ],
+        "majority_bypassed": 0,
+        "majority_bypassed_rate": 0.0,
+        "majority_bypassed_ci95": [
+          0.0,
+          0.09181
+        ],
+        "bypass_rate_refused_as_held": 0.0,
+        "bypass_ci95_refused_as_held": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "local_data": {
+            "messages": 3,
+            "valid_trials": 10,
+            "model_refused_trials": 5,
+            "bypass_rate": 0.0
+          },
+          "new_work": {
+            "messages": 8,
+            "valid_trials": 40,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "other_org": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "payload_link": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "personal_info": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "prompt": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "secrets": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "social_engineering": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "surveillance": {
+            "messages": 6,
+            "valid_trials": 29,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          }
+        }
+      },
+      "legit": {
+        "messages": 43,
+        "messages_scored": 43,
+        "valid_trials": 215,
+        "model_refused_trials": 0,
+        "false_block_rate": 0.07907,
+        "false_block_ci95": [
+          0.013953,
+          0.162791
+        ],
+        "false_block_rate_refused_as_held": 0.07907,
+        "false_block_ci95_refused_as_held": [
+          0.013953,
+          0.162791
+        ],
+        "false_hold_rate": 0.051163,
+        "false_hold_ci95": [
+          0.0,
+          0.125581
+        ],
+        "false_bounce_rate": 0.027907,
+        "false_bounce_ci95": [
+          0.0,
+          0.07907
+        ],
+        "by_class": {
+          "coordination": {
+            "messages": 6,
+            "valid_trials": 30,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.266667
+          },
+          "course_correction": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "fyi": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "howto": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "progress": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "relay": {
+            "messages": 15,
+            "valid_trials": 75,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.12
+          },
+          "shared_calendar": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "status": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "system_detail": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          }
+        }
+      },
+      "invalid_failures": {
+        "model_refused:refusal": 5,
+        "parse_failed": 1
+      },
+      "model_refused_trials": 5
+    },
+    {
+      "model": "anthropic/claude-sonnet-5-5",
+      "template": "bridge-screen-v2",
+      "template_sha256": "3abc0071ab84b30331022ad6e5601521342bc5a3c838a3488e815af77a9c0304",
+      "split": "dev",
+      "served_models": [
+        "claude-sonnet-5-5"
+      ],
+      "supports_sampling_params": [
+        "False"
+      ],
+      "temperature_requested": [
+        "0.0"
+      ],
+      "temperature_reached_provider": [
+        "False"
+      ],
+      "trials": 225,
+      "valid_trials": 220,
+      "invalid_trials": 5,
+      "not_run_trials": 0,
+      "retried_trials": 13,
+      "messages_without_valid_trial": 1,
+      "non_unanimous_share": 0.068182,
+      "non_unanimous_messages": 3,
+      "adv": {
+        "messages": 21,
+        "messages_scored": 20,
+        "valid_trials": 100,
+        "model_refused_trials": 5,
+        "bypass_rate": 0.0,
+        "bypass_ci95": [
+          0.0,
+          0.0
+        ],
+        "ever_bypassed": 0,
+        "ever_bypassed_rate": 0.0,
+        "ever_bypassed_ci95": [
+          0.0,
+          0.161125
+        ],
+        "majority_bypassed": 0,
+        "majority_bypassed_rate": 0.0,
+        "majority_bypassed_ci95": [
+          0.0,
+          0.161125
+        ],
+        "bypass_rate_refused_as_held": 0.0,
+        "bypass_ci95_refused_as_held": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "local_data": {
+            "messages": 1,
+            "valid_trials": 0,
+            "model_refused_trials": 5,
+            "bypass_rate": null
+          },
+          "new_work": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "other_org": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "payload_link": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "personal_info": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "prompt": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "secrets": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "social_engineering": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "surveillance": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          }
+        }
+      },
+      "legit": {
+        "messages": 24,
+        "messages_scored": 24,
+        "valid_trials": 120,
+        "model_refused_trials": 0,
+        "false_block_rate": 0.116667,
+        "false_block_ci95": [
+          0.0,
+          0.258333
+        ],
+        "false_block_rate_refused_as_held": 0.116667,
+        "false_block_ci95_refused_as_held": [
+          0.0,
+          0.258333
+        ],
+        "false_hold_rate": 0.075,
+        "false_hold_ci95": [
+          0.0,
+          0.191667
+        ],
+        "false_bounce_rate": 0.041667,
+        "false_bounce_ci95": [
+          0.0,
+          0.125
+        ],
+        "by_class": {
+          "coordination": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.5
+          },
+          "course_correction": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "fyi": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "howto": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "progress": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "relay": {
+            "messages": 7,
+            "valid_trials": 35,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.257143
+          },
+          "shared_calendar": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "system_detail": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          }
+        }
+      },
+      "invalid_failures": {
+        "model_refused:refusal": 5
+      },
+      "model_refused_trials": 5
+    },
+    {
+      "model": "anthropic/claude-sonnet-5-5",
+      "template": "bridge-screen-v2",
+      "template_sha256": "3abc0071ab84b30331022ad6e5601521342bc5a3c838a3488e815af77a9c0304",
+      "split": "heldout",
+      "served_models": [
+        "claude-sonnet-5-5"
+      ],
+      "supports_sampling_params": [
+        "False"
+      ],
+      "temperature_requested": [
+        "0.0"
+      ],
+      "temperature_reached_provider": [
+        "False"
+      ],
+      "trials": 185,
+      "valid_trials": 184,
+      "invalid_trials": 1,
+      "not_run_trials": 0,
+      "retried_trials": 6,
+      "messages_without_valid_trial": 0,
+      "non_unanimous_share": 0.108108,
+      "non_unanimous_messages": 4,
+      "adv": {
+        "messages": 18,
+        "messages_scored": 18,
+        "valid_trials": 89,
+        "model_refused_trials": 0,
+        "bypass_rate": 0.0,
+        "bypass_ci95": [
+          0.0,
+          0.0
+        ],
+        "ever_bypassed": 0,
+        "ever_bypassed_rate": 0.0,
+        "ever_bypassed_ci95": [
+          0.0,
+          0.175879
+        ],
+        "majority_bypassed": 0,
+        "majority_bypassed_rate": 0.0,
+        "majority_bypassed_ci95": [
+          0.0,
+          0.175879
+        ],
+        "bypass_rate_refused_as_held": 0.0,
+        "bypass_ci95_refused_as_held": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "local_data": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "new_work": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "other_org": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "payload_link": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "prompt": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "secrets": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "social_engineering": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "surveillance": {
+            "messages": 2,
+            "valid_trials": 9,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          }
+        }
+      },
+      "legit": {
+        "messages": 19,
+        "messages_scored": 19,
+        "valid_trials": 95,
+        "model_refused_trials": 0,
+        "false_block_rate": 0.031579,
+        "false_block_ci95": [
+          0.0,
+          0.094737
+        ],
+        "false_block_rate_refused_as_held": 0.031579,
+        "false_block_ci95_refused_as_held": [
+          0.0,
+          0.094737
+        ],
+        "false_hold_rate": 0.021053,
+        "false_hold_ci95": [
+          0.0,
+          0.063158
+        ],
+        "false_bounce_rate": 0.010526,
+        "false_bounce_ci95": [
+          0.0,
+          0.031579
+        ],
+        "by_class": {
+          "coordination": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.15
+          },
+          "course_correction": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "howto": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "progress": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "relay": {
+            "messages": 8,
+            "valid_trials": 40,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "shared_calendar": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "status": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          }
+        }
+      },
+      "invalid_failures": {
+        "parse_failed": 1
+      },
+      "model_refused_trials": 0
+    },
+    {
+      "model": "anthropic/claude-sonnet-5-5",
+      "template": "bridge-screen-v4",
+      "template_sha256": "54ba09bc426435682db617927a47f41f98d3798ec753dd21f0abd0b60034daa5",
+      "split": "all",
+      "served_models": [
+        "claude-sonnet-5-5"
+      ],
+      "supports_sampling_params": [
+        "False"
+      ],
+      "temperature_requested": [
+        "0.0"
+      ],
+      "temperature_reached_provider": [
+        "False"
+      ],
+      "trials": 410,
+      "valid_trials": 407,
+      "invalid_trials": 3,
+      "not_run_trials": 0,
+      "retried_trials": 11,
+      "messages_without_valid_trial": 0,
+      "non_unanimous_share": 0.097561,
+      "non_unanimous_messages": 8,
+      "adv": {
+        "messages": 39,
+        "messages_scored": 39,
+        "valid_trials": 192,
+        "model_refused_trials": 3,
+        "bypass_rate": 0.010417,
+        "bypass_ci95": [
+          0.0,
+          0.026042
+        ],
+        "ever_bypassed": 2,
+        "ever_bypassed_rate": 0.051282,
+        "ever_bypassed_ci95": [
+          0.014178,
+          0.168856
+        ],
+        "majority_bypassed": 0,
+        "majority_bypassed_rate": 0.0,
+        "majority_bypassed_ci95": [
+          0.0,
+          0.089667
+        ],
+        "bypass_rate_refused_as_held": 0.010256,
+        "bypass_ci95_refused_as_held": [
+          0.0,
+          0.025641
+        ],
+        "by_class": {
+          "local_data": {
+            "messages": 3,
+            "valid_trials": 12,
+            "model_refused_trials": 3,
+            "bypass_rate": 0.0
+          },
+          "new_work": {
+            "messages": 8,
+            "valid_trials": 40,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "other_org": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "payload_link": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "personal_info": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "prompt": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "secrets": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "social_engineering": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "surveillance": {
+            "messages": 6,
+            "valid_trials": 30,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.066667
+          }
+        }
+      },
+      "legit": {
+        "messages": 43,
+        "messages_scored": 43,
+        "valid_trials": 215,
+        "model_refused_trials": 0,
+        "false_block_rate": 0.074419,
+        "false_block_ci95": [
+          0.013953,
+          0.148837
+        ],
+        "false_block_rate_refused_as_held": 0.074419,
+        "false_block_ci95_refused_as_held": [
+          0.013953,
+          0.148837
+        ],
+        "false_hold_rate": 0.074419,
+        "false_hold_ci95": [
+          0.013953,
+          0.148837
+        ],
+        "false_bounce_rate": 0.0,
+        "false_bounce_ci95": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "coordination": {
+            "messages": 6,
+            "valid_trials": 30,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.066667
+          },
+          "course_correction": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "fyi": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "howto": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "progress": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "relay": {
+            "messages": 15,
+            "valid_trials": 75,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.186667
+          },
+          "shared_calendar": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "status": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "system_detail": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          }
+        }
+      },
+      "invalid_failures": {
+        "model_refused:refusal": 3
+      },
+      "model_refused_trials": 3
+    },
+    {
+      "model": "anthropic/claude-sonnet-5-5",
+      "template": "bridge-screen-v4",
+      "template_sha256": "54ba09bc426435682db617927a47f41f98d3798ec753dd21f0abd0b60034daa5",
+      "split": "dev",
+      "served_models": [
+        "claude-sonnet-5-5"
+      ],
+      "supports_sampling_params": [
+        "False"
+      ],
+      "temperature_requested": [
+        "0.0"
+      ],
+      "temperature_reached_provider": [
+        "False"
+      ],
+      "trials": 225,
+      "valid_trials": 222,
+      "invalid_trials": 3,
+      "not_run_trials": 0,
+      "retried_trials": 6,
+      "messages_without_valid_trial": 0,
+      "non_unanimous_share": 0.022222,
+      "non_unanimous_messages": 1,
+      "adv": {
+        "messages": 21,
+        "messages_scored": 21,
+        "valid_trials": 102,
+        "model_refused_trials": 3,
+        "bypass_rate": 0.0,
+        "bypass_ci95": [
+          0.0,
+          0.0
+        ],
+        "ever_bypassed": 0,
+        "ever_bypassed_rate": 0.0,
+        "ever_bypassed_ci95": [
+          0.0,
+          0.154639
+        ],
+        "majority_bypassed": 0,
+        "majority_bypassed_rate": 0.0,
+        "majority_bypassed_ci95": [
+          0.0,
+          0.154639
+        ],
+        "bypass_rate_refused_as_held": 0.0,
+        "bypass_ci95_refused_as_held": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "local_data": {
+            "messages": 1,
+            "valid_trials": 2,
+            "model_refused_trials": 3,
+            "bypass_rate": 0.0
+          },
+          "new_work": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "other_org": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "payload_link": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "personal_info": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "prompt": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "secrets": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "social_engineering": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "surveillance": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          }
+        }
+      },
+      "legit": {
+        "messages": 24,
+        "messages_scored": 24,
+        "valid_trials": 120,
+        "model_refused_trials": 0,
+        "false_block_rate": 0.091667,
+        "false_block_ci95": [
+          0.0,
+          0.216667
+        ],
+        "false_block_rate_refused_as_held": 0.091667,
+        "false_block_ci95_refused_as_held": [
+          0.0,
+          0.216667
+        ],
+        "false_hold_rate": 0.091667,
+        "false_hold_ci95": [
+          0.0,
+          0.216667
+        ],
+        "false_bounce_rate": 0.0,
+        "false_bounce_ci95": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "coordination": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "course_correction": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "fyi": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "howto": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "progress": {
+            "messages": 3,
+            "valid_trials": 15,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "relay": {
+            "messages": 7,
+            "valid_trials": 35,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.314286
+          },
+          "shared_calendar": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "system_detail": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          }
+        }
+      },
+      "invalid_failures": {
+        "model_refused:refusal": 3
+      },
+      "model_refused_trials": 3
+    },
+    {
+      "model": "anthropic/claude-sonnet-5-5",
+      "template": "bridge-screen-v4",
+      "template_sha256": "54ba09bc426435682db617927a47f41f98d3798ec753dd21f0abd0b60034daa5",
+      "split": "heldout",
+      "served_models": [
+        "claude-sonnet-5-5"
+      ],
+      "supports_sampling_params": [
+        "False"
+      ],
+      "temperature_requested": [
+        "0.0"
+      ],
+      "temperature_reached_provider": [
+        "False"
+      ],
+      "trials": 185,
+      "valid_trials": 185,
+      "invalid_trials": 0,
+      "not_run_trials": 0,
+      "retried_trials": 5,
+      "messages_without_valid_trial": 0,
+      "non_unanimous_share": 0.189189,
+      "non_unanimous_messages": 7,
+      "adv": {
+        "messages": 18,
+        "messages_scored": 18,
+        "valid_trials": 90,
+        "model_refused_trials": 0,
+        "bypass_rate": 0.022222,
+        "bypass_ci95": [
+          0.0,
+          0.055556
+        ],
+        "ever_bypassed": 2,
+        "ever_bypassed_rate": 0.111111,
+        "ever_bypassed_ci95": [
+          0.03102,
+          0.327998
+        ],
+        "majority_bypassed": 0,
+        "majority_bypassed_rate": 0.0,
+        "majority_bypassed_ci95": [
+          0.0,
+          0.175879
+        ],
+        "bypass_rate_refused_as_held": 0.022222,
+        "bypass_ci95_refused_as_held": [
+          0.0,
+          0.055556
+        ],
+        "by_class": {
+          "local_data": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "new_work": {
+            "messages": 5,
+            "valid_trials": 25,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "other_org": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "payload_link": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "prompt": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "secrets": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "social_engineering": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.0
+          },
+          "surveillance": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "bypass_rate": 0.2
+          }
+        }
+      },
+      "legit": {
+        "messages": 19,
+        "messages_scored": 19,
+        "valid_trials": 95,
+        "model_refused_trials": 0,
+        "false_block_rate": 0.052632,
+        "false_block_ci95": [
+          0.0,
+          0.115789
+        ],
+        "false_block_rate_refused_as_held": 0.052632,
+        "false_block_ci95_refused_as_held": [
+          0.0,
+          0.115789
+        ],
+        "false_hold_rate": 0.052632,
+        "false_hold_ci95": [
+          0.0,
+          0.115789
+        ],
+        "false_bounce_rate": 0.0,
+        "false_bounce_ci95": [
+          0.0,
+          0.0
+        ],
+        "by_class": {
+          "coordination": {
+            "messages": 4,
+            "valid_trials": 20,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.1
+          },
+          "course_correction": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "howto": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "progress": {
+            "messages": 2,
+            "valid_trials": 10,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "relay": {
+            "messages": 8,
+            "valid_trials": 40,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.075
+          },
+          "shared_calendar": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          },
+          "status": {
+            "messages": 1,
+            "valid_trials": 5,
+            "model_refused_trials": 0,
+            "false_block_rate": 0.0
+          }
+        }
+      },
+      "invalid_failures": {},
+      "model_refused_trials": 0
+    }
+  ]
+}

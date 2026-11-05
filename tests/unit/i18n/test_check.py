@@ -300,7 +300,15 @@ class TestRatchet:
         # half of RFC §2.7's "run as a unit test and as a CI job". Findings
         # OUTSIDE the enforced scope never fail (round-3 C1), so this also
         # pins that a fleet-grown tree cannot break the suite.
-        assert i18n_check.main([]) == 0
+        #
+        # A unit runner owns neither a pull-request base nor a trustworthy
+        # origin/main: a depth-1 checked-out merge has no remote-tracking ref,
+        # and a developer's ref can lag the audit migration. Pin both
+        # base-relative gates to the checkout so this asserts the ratchet and
+        # catalogue parity, and let test_audit_history's real Git bases plus
+        # the dedicated i18n job (which runs this script unchanged) own the
+        # delta proofs.
+        assert i18n_check.main(["--audit-base", "HEAD", "--allowance-base", "HEAD"]) == 0
 
     def test_the_enforced_scope_itself_is_finding_free(self, i18n_check) -> None:
         # The scope M0 activates (the i18n package + its tooling) must carry no

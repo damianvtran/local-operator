@@ -1,0 +1,16 @@
+{
+  "wire.settings.account_policy.label": "politique de choix du compte",
+  "wire.settings.account_policy.help": "Sélectionne les autres comptes admissibles chez le même fournisseur et dans la même catégorie d’identifiants. Un bail compatible et non expiré issu d’une requête réussie est prioritaire, quelle que soit la politique ; il ne garantit pas de résultat en cache. Prochaine réinitialisation privilégie le réapprovisionnement hebdomadaire le plus proche, puis celui du quota de cinq heures lorsque les échéances hebdomadaires sont à une minute près. Une politique explicite prime sur l’ancien paramètre de choix des comptes selon l’usage.",
+  "wire.settings.account_policy.reset_soonest.label": "Prochaine réinitialisation",
+  "wire.settings.account_policy.reset_soonest.description": "Privilégie la prochaine réinitialisation du quota inclus dans l’abonnement ; répartit les comptes de façon déterministe en cas d’égalité ou de données inconnues. Valeur par défaut des nouvelles configurations.",
+  "wire.settings.account_policy.headroom.label": "Quota disponible maximal",
+  "wire.settings.account_policy.headroom.description": "Privilégie le quota restant connu en cache, en répartissant les requêtes entre les comptes à dix points de pourcentage ou moins du meilleur.",
+  "wire.settings.account_policy.fair.label": "Répartition équitable",
+  "wire.settings.account_policy.fair.description": "Utilise une répartition stable fondée sur la session plutôt qu’un classement selon les réinitialisations ou le quota restant connus en cache.",
+  "wire.settings.account_policy.legacy.label": "ancien choix selon l’usage",
+  "wire.settings.account_policy.legacy.help": "Paramètre de compatibilité utilisé uniquement en l’absence de politique de sélection des comptes : true sélectionne Quota disponible maximal ; false sélectionne Répartition équitable. Une politique explicite de sélection des comptes est prioritaire. Réinitialisez la ligne de cette politique pour rétablir Prochaine réinitialisation et effacer les anciennes dérogations.",
+  "wire.settings.account_policy.error.unavailable": "Le routage des comptes est indisponible.",
+  "wire.settings.account_policy.error.invalid_shape": "Seul le champ value est attendu.",
+  "wire.settings.account_policy.error.invalid_json": "Un objet JSON est attendu.",
+  "wire.settings.account_policy.error.write_failed": "Impossible d’enregistrer ce paramètre. Vérifiez les autorisations d’accès à la configuration sur cet ordinateur, puis réessayez."
+}

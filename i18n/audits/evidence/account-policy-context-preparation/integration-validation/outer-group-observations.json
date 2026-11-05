@@ -1,0 +1,95 @@
+[
+  {
+    "gate": "generator",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--memory-mb",
+      "512",
+      "--timeout",
+      "90",
+      "--",
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/generate.py",
+      "--check"
+    ],
+    "outer_pid": 73386,
+    "outer_pgid": 73386,
+    "rc": 0,
+    "group_rows_after_exit": [],
+    "group_rows_after_supervisor": [],
+    "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"
+  },
+  {
+    "gate": "catalogues",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--memory-mb",
+      "512",
+      "--timeout",
+      "90",
+      "--",
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/i18n/check.py",
+      "--catalogues-only"
+    ],
+    "outer_pid": 73627,
+    "outer_pgid": 73627,
+    "rc": 0,
+    "group_rows_after_exit": [],
+    "group_rows_after_supervisor": [],
+    "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"
+  },
+  {
+    "gate": "affected-pytest",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--memory-mb",
+      "512",
+      "--timeout",
+      "90",
+      "--",
+      "/Users/damian/local-operator/.venv/bin/python",
+      "-m",
+      "pytest",
+      "tests/unit/i18n/test_language_manifest.py",
+      "tests/unit/i18n/test_ledger_shards.py",
+      "tests/unit/i18n/test_generate.py",
+      "tests/unit/i18n/test_eligibility.py",
+      "-q",
+      "-n0"
+    ],
+    "outer_pid": 73768,
+    "outer_pgid": 73768,
+    "rc": 0,
+    "group_rows_after_exit": [],
+    "group_rows_after_supervisor": [],
+    "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"
+  },
+  {
+    "gate": "registry-proof",
+    "command": [
+      "/Users/damian/local-operator/.venv/bin/python",
+      "scripts/run_bounded.py",
+      "--contract=command-status",
+      "--memory-mb",
+      "512",
+      "--timeout",
+      "90",
+      "--",
+      "/Users/damian/local-operator/.venv/bin/python",
+      "/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/account-policy-proof.py"
+    ],
+    "outer_pid": 75100,
+    "outer_pgid": 75100,
+    "rc": 0,
+    "group_rows_after_exit": [],
+    "group_rows_after_supervisor": [],
+    "cleanup_certification": "UNKNOWN; status-only fallback, ps observation is not a certificate"
+  }
+]

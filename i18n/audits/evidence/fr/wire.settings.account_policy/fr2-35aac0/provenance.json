@@ -1,0 +1,50 @@
+{
+  "auditor_session": "35aac0a677bc",
+  "translator_session": "7b2ba4ed501d",
+  "agent": "i18n-auditor",
+  "actual_served_model": "openai/gpt-6.1-sol",
+  "source": "Completed assistant payload.usage.provider and payload.usage.model_id in own persisted transcript",
+  "transcript_path": "/Users/damian/.local-operator/sessions/35aac0a677bc/transcript.jsonl",
+  "task_start_timestamp": 1793712752.877723,
+  "observed_served_models_during_task": [
+    "openai/gpt-6.1-sol"
+  ],
+  "evidence_entries": [
+    {
+      "entry_id": "fafdebf718194ee089e1b9f3f0c66030",
+      "timestamp": 1793712943.289133,
+      "usage": {
+        "billing_basis": "subscription_api_equivalent",
+        "input_tokens": 89916,
+        "output_tokens": 1508,
+        "cache_read_tokens": 89600,
+        "context_tokens": 89916,
+        "reasoning_tokens": 139,
+        "at_ms": 1793712942603,
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      },
+      "actions": [
+        "write"
+      ]
+    },
+    {
+      "entry_id": "fec5cd8e718d4e26bb3e04b47c9a35af",
+      "timestamp": 1793712950.783853,
+      "usage": {
+        "billing_basis": "subscription_api_equivalent",
+        "input_tokens": 91505,
+        "output_tokens": 222,
+        "cache_read_tokens": 91264,
+        "context_tokens": 91505,
+        "at_ms": 1793712949400,
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      },
+      "actions": [
+        "bash"
+      ]
+    }
+  ],
+  "fallback_disclosure": "Actual served model is openai/gpt-6.1-sol, not requested/configured Anthropic header. No claim of no fallback; usage is authoritative for this audit."
+}

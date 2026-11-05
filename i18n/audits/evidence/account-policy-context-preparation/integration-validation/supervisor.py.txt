@@ -1,0 +1,61 @@
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+scratch = Path(os.environ['LOCAL_OPERATOR_SCRATCHPAD'])
+python = str(Path.home() / 'local-operator/.venv/bin/python')
+repo = Path.home() / 'local-operator/.worktrees/account-policy-context-backfill'
+env = {'HOME': str(scratch / 'account-policy-home'),
+       'LOCAL_OPERATOR_CONFIG_DIR': str(scratch / 'account-policy-home/config'),
+       'LOCAL_OPERATOR_SCRATCHPAD': str(scratch), 'PATH': os.environ['PATH'],
+       'PYTHONPATH': str(repo), 'PYTHONDONTWRITEBYTECODE': '1',
+       'TERM': 'xterm-256color', 'LOP_LANG': 'en',
+       'GIT_CONFIG_SYSTEM': '/dev/null', 'GIT_TERMINAL_PROMPT': '0'}
+commands = [('generator', ['scripts/i18n/generate.py', '--check']),
+            ('catalogues', ['scripts/i18n/check.py', '--catalogues-only']),
+            ('affected-pytest', ['-m', 'pytest', 'tests/unit/i18n/test_language_manifest.py',
+             'tests/unit/i18n/test_ledger_shards.py', 'tests/unit/i18n/test_generate.py',
+             'tests/unit/i18n/test_eligibility.py', '-q', '-n0']),
+            ('registry-proof', [str(scratch / 'account-policy-proof.py')])]
+observations = []
+for name, args in commands:
+    cmd = [python, 'scripts/run_bounded.py', '--contract=command-status',
+           '--memory-mb', '512', '--timeout', '90', '--', python, *args]
+    logfile = scratch / f'account-policy-{name}.log'
+    with logfile.open('w') as stream:
+        proc = subprocess.Popen(cmd, cwd=repo, env=env, stdout=stream,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+        pgid = os.getpgid(proc.pid)
+        try:
+            rc = proc.wait(timeout=110)
+        except subprocess.TimeoutExpired:
+            os.killpg(pgid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(pgid, signal.SIGKILL)
+                proc.wait(timeout=5)
+            rc = 124
+    census = subprocess.check_output(['ps', '-axo', 'pid=,pgid=,stat='], text=True)
+    residual = [line.strip() for line in census.splitlines()
+                if len(line.split()) == 3 and line.split()[1] == str(pgid)]
+    # This outer supervisor owns this fresh session/group, not any live app.
+    if residual:
+        os.killpg(pgid, signal.SIGTERM)
+        time.sleep(0.2)
+    post = subprocess.check_output(['ps', '-axo', 'pid=,pgid=,stat='], text=True)
+    after = [line.strip() for line in post.splitlines()
+             if len(line.split()) == 3 and line.split()[1] == str(pgid)]
+    obs = {'gate': name, 'command': cmd, 'outer_pid': proc.pid, 'outer_pgid': pgid,
+           'rc': rc, 'group_rows_after_exit': residual, 'group_rows_after_supervisor': after,
+           'cleanup_certification': 'UNKNOWN; status-only fallback, ps observation is not a certificate'}
+    observations.append(obs)
+    (scratch / 'account-policy-status-observations.json').write_text(json.dumps(observations, indent=2) + '\n')
+    print(json.dumps(obs), flush=True)
+    print(logfile.read_text(), flush=True)
+    if rc or after:
+        sys.exit(rc or 1)

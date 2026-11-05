@@ -444,6 +444,19 @@ async def test_a_changed_message_is_a_different_cache_key(manager, install_legs)
     assert len(legs["radient"].calls) == 2
 
 
+async def test_reference_context_changes_reach_vendor_and_do_not_reuse_decision(
+    manager, install_legs
+) -> None:
+    subject, legs = service(manager, install_legs, radient={})
+    for context in ("1 reference image: portrait", "OCR annotation", "OCR annotation"):
+        await subject.recommend_resources(
+            RecommendationRequest(user_message="Make it blue", context=context, candidates=ROSTER)
+        )
+    assert len(legs["radient"].calls) == 2
+    assert legs["radient"].calls[0].state["context"] == "1 reference image: portrait"
+    await subject.aclose()
+
+
 async def test_a_changed_roster_is_a_different_cache_key(manager, install_legs) -> None:
     subject, legs = service(manager, install_legs, radient={})
     await subject.recommend_resources(request())

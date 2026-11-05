@@ -96,6 +96,9 @@ async def test_a_pasted_image_earns_a_note_on_the_wire_and_nowhere_durable(tmp_p
     store = AttachmentStore()
     assert str(store.path_for(PNG_DIGEST)) in note
     assert f"digest {PNG_DIGEST}" in note
+    assert "guide://image-generation" in note
+    assert "source_attachment/source_attachments" in note
+    assert "analysis, OCR, downloads" in note
     assert store.path_for(PNG_DIGEST).read_bytes() == PNG_BYTES
     # The copy's id is the derived one; the memo cannot confuse it either way.
     (user_message,) = [m for m in request.messages if m.role == "user"]
@@ -156,6 +159,34 @@ async def test_the_read_only_render_is_the_same_composition_as_the_turn(tmp_path
     assert [m.model_dump() for m in aside] == [m.model_dump() for m in expected]
 
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_image_guidance_and_original_reference_survive_a_text_followup(tmp_path):
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    try:
+        await session.prompt(
+            "A different lighting version", [ImageContent(data=PNG_B64, mime_type="image/png")]
+        )
+        await session.prompt("Ahora con luz azul")
+        notes = _notes(stream.requests[-1].messages)
+        assert len(notes) == 1
+        assert PNG_DIGEST in notes[0]
+        assert "guide://image-generation" in notes[0]
+        assert "generate_image if available" in notes[0]
+        # Model replacement reuses the same request renderer, not a hint tied
+        # to the original provider. No transcript row is rewritten for it.
+        session._model = MODEL.model_copy(update={"model_id": "alternate-test-model"})
+        _blocks, rendered = await session._read_only_prompt([Message.user("make it warmer")])
+        assert _notes(rendered) == notes
+    finally:
+        await session.dispose()
 
 
 @pytest.mark.asyncio

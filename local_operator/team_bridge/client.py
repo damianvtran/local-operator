@@ -3313,16 +3313,23 @@ class TeamBridgeClient:
         conversation_id: str,
         account_id: str,
         *,
+        endpoint_id: str | None = None,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
-        """Remove a human member. Owner-only; succession is the server's rule."""
+        """Remove one member; the hub owns lifecycle authority and succession.
 
+        An omitted selector keeps the legacy human-only wire. An endpoint
+        selects one account/endpoint pair, never every agent of that account.
+        """
+        params = {"tenant_id": tenant_id} if tenant_id else {}
+        if endpoint_id is not None:
+            params["endpoint_id"] = endpoint_id
         return await self._send(
             "DELETE",
             f"/messaging/conversations/{conversation_id}/members/{account_id}",
-            params={"tenant_id": tenant_id} if tenant_id else None,
+            params=params or None,
             access=access,
             expected_account_id=expected_account_id,
         )
@@ -5580,6 +5587,7 @@ class StatusDiscipline:
             credential_id=credential_id,
         )
         self._states: dict[str, _AccountState] = {}
+        self._last_observed_check: StatusCheck | None = None
         self._locks: dict[str, asyncio.Lock] = {}
         self._identity_revision = 0
         #: ``endpoint_id -> agent_name`` this process last re-sent SUCCESSFULLY.
@@ -5609,8 +5617,8 @@ class StatusDiscipline:
     def base_url(self) -> str:
         return self._client.base_url
 
-    def cached_thread_read_features(self) -> dict[str, int]:
-        """Forward the current owner's fresh hub flag without another status read.
+    def cached_conversation_features(self) -> dict[str, int]:
+        """Forward the current owner's fresh hub flags with local transport support.
 
         Capability polling is not a status boundary: calling ``check`` here
         could enroll the default-on bridge or publish identity. Only the normal
@@ -5623,6 +5631,12 @@ class StatusDiscipline:
         owner = raw.get("account_id")
         if not isinstance(owner, str) or not owner:
             return {}
+        observed = self._last_observed_check
+        # A refresh failure may retain the credential row and older success in
+        # _states. Never offer destructive H4 actions after the status boundary
+        # has learned this login is signed out/unavailable (the old S-1 gap).
+        if observed is None or observed.state != STATE_READY or observed.account_id != owner:
+            return {}
         state = self._states.get(owner)
         if (
             state is None
@@ -5633,13 +5647,23 @@ class StatusDiscipline:
             return {}
         payload = state.check.payload
         features = payload.get("features") if isinstance(payload, Mapping) else None
-        version = (
-            features.get("team_bridge_thread_reads") if isinstance(features, Mapping) else None
-        )
-        # bool is an int in Python, but is not a protocol version on the wire.
-        if type(version) is int and version >= 1:
-            return {"team_bridge_thread_reads": version}
-        return {}
+        if not isinstance(features, Mapping):
+            return {}
+        out: dict[str, int] = {}
+        # This is an explicit local-transport allowlist, not a hub feature map
+        # passthrough. H4 only understands version 1; an unknown version must
+        # not enable a destructive affordance on a changed server contract.
+        for key in (
+            "team_bridge_thread_reads",
+            "team_bridge_endpoint_member_removal",
+            "team_bridge_leave_withdraws_agent",
+        ):
+            version = features.get(key)
+            if type(version) is int and (
+                version >= 1 if key == "team_bridge_thread_reads" else version == 1
+            ):
+                out[key] = version
+        return out
 
     def _ttl(self, state: _AccountState) -> float:
         return STATUS_ERROR_TTL_S if state.check.error is not None else STATUS_CACHE_TTL_S
@@ -5710,6 +5734,7 @@ class StatusDiscipline:
     def _observe(self, check: StatusCheck) -> StatusCheck:
         """Record visibility identically for ordinary and explicit mutation reads."""
 
+        self._last_observed_check = check
         projection = surface_projection(check)
         if projection["surface_state"] is not None or check.state == STATE_SIGNED_OUT:
             # The record carries the POSTURE, not just visibility: the two

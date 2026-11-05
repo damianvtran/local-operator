@@ -310,7 +310,7 @@ def short_description(description: str, limit: int = SKILL_LISTING_MAX_CHARS) ->
     return clipped.rstrip(" ,;:—-") + "…"
 
 
-def render_block(skills: list[Skill]) -> str:
+def render_block(skills: list[Skill], *, conditional_skills: bool = False) -> str:
     """Render selected guides and skills without rendering private hints.
 
     The stable base prompt still owns the ``guide://`` protocol rule in full;
@@ -342,10 +342,18 @@ def render_block(skills: list[Skill]) -> str:
         # led models to search the filesystem for SKILL.md instead of using the
         # virtual resource protocol. This cost stays local to selected skills.
         selected_urls = ", ".join(f"`{resource_url('skill', skill.name)}`" for skill in user_skills)
+        # Multimodal routing only embeds text: a candidate is not proof of a
+        # domain match. Keep direct virtual-resource reads, not mandatory noise.
+        skill_instruction = (
+            "Read the selected skills that actually fit this request; "
+            f"ignore unrelated matches: {selected_urls}. "
+            if conditional_skills
+            else f"Read these selected skills immediately before proceeding: {selected_urls}. "
+        )
         lines = [
             (
-                "Skills provide domain-specific instructions and workflows. Read these selected "
-                f"skills immediately before proceeding: {selected_urls}. Do not search the "
+                "Skills provide domain-specific instructions and workflows. "
+                f"{skill_instruction}Do not search the "
                 "filesystem or use bash/glob to locate skills — skills are virtual resources "
                 "loaded only via `skill://`. The skill body ends with its reference files; read "
                 "those with `skill://<name>/<path>`, never a raw filesystem path."

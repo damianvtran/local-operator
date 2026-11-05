@@ -1,0 +1,46 @@
+import json, pathlib, sys, unicodedata, hashlib
+sys.path.insert(0, '/Users/damian/local-operator')
+from local_operator.i18n import runtime
+from scripts.i18n import check
+from rich.text import Text
+ROOT=pathlib.Path('/Users/damian/local-operator')
+PACKET=pathlib.Path('/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33')
+CTX=ROOT/'.worktrees/account-policy-context-backfill/local_operator/i18n/catalogues/en/wire.settings.account_policy.context.json'
+def unique(pairs):
+    result={}
+    for k,v in pairs:
+        assert k not in result, ('duplicate key',k)
+        result[k]=v
+    return result
+load=lambda p:json.loads(p.read_text(),object_pairs_hook=unique)
+en=load(PACKET/'en.json'); target=load(PACKET/'wire.settings.account_policy.json'); ctx=load(CTX)
+assert len(en)==len(target)==len(ctx)==14
+assert set(en)==set(target)==set(ctx)
+plural=json.loads((ROOT/'local_operator/i18n/data/plural_rules.json').read_text())
+problems=[]
+for key in en:
+    a=runtime.message_arguments(en[key]); b=runtime.message_arguments(target[key])
+    assert a==b==(),(key,a,b)
+    assert check.arguments_match(a,b,translated_source=target[key],locale='zh-CN',plural=plural)
+    check._check_plural_categories(problems,'zh-CN','wire.settings.account_policy',key,target[key],plural,'zh-CN')
+    assert runtime.plural_selectors(target[key])==()
+    assert runtime.render_message(target[key],{},'zh-CN')==target[key]
+    assert not any(unicodedata.category(c)=='Cf' for c in target[key])
+    assert not any(c in target[key] for c in '{}[]`')
+    budget=ctx[key].get('maxCells')
+    width=Text.from_markup(target[key]).cell_len
+    if budget is not None:assert width<=budget,(key,width,budget)
+    print('PASS',key,'args=0 plurals=0 Cf=0 rich_cells='+str(width), 'maxCells='+str(budget))
+assert not problems,problems
+for token,key in [('true','legacy.help'),('false','legacy.help'),('value','error.invalid_shape'),('JSON','error.invalid_json')]:
+    assert token in target['wire.settings.account_policy.'+key]
+    print('PASS stable literal',token)
+try:runtime.message_arguments('bad {')
+except runtime.MessageSyntaxError:print('PASS negative control: invalid ICU rejected')
+else:raise AssertionError('invalid ICU accepted')
+injected=runtime.message_arguments('新增{unexpected}')
+assert not check.arguments_match((),injected,translated_source='新增{unexpected}',locale='zh-CN',plural=plural)
+print('PASS negative control: injected argument rejected')
+assert Text.from_markup('账'*15).cell_len>29
+print('PASS width negative control: 15 CJK glyphs = 30 cells > 29')
+print('RESULT PASS 14/14; scoped real core parser/render/argument/plural helpers only; no scanner/full suite')

@@ -1,0 +1,26 @@
+{
+  "en": {
+    "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/en.json",
+    "sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25"
+  },
+  "context_translator_input": {
+    "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/context.json",
+    "sha256": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254"
+  },
+  "context_audited": {
+    "path": "/Users/damian/local-operator/.worktrees/account-policy-context-backfill/local_operator/i18n/catalogues/en/wire.settings.account_policy.context.json",
+    "sha256": "2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02"
+  },
+  "zh-CN": {
+    "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/wire.settings.account_policy.json",
+    "sha256": "d9157b646961a96dc5fb2c234ff9ccbaa2faac5d162d134d0dbff6cbbef5f5f1"
+  },
+  "style": {
+    "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/zh-CN.style.md",
+    "sha256": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c"
+  },
+  "glossary": {
+    "path": "/Users/damian/.local-operator/sessions/7fce46e29bee/scratchpad/zh-CN-account-policy-0e7cde33/glossary.md",
+    "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+  }
+}
