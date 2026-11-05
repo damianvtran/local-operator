@@ -14,8 +14,8 @@ THE WINDOW IS A RATE, NOT A DELAY. A group flushes at the end of the connector
 iteration that produced it when its conversation had no wake in the last
 ``window_s`` (so a single message on a quiet conversation is not slowed down),
 and otherwise waits until ``window_s`` after the previous wake. That gives at
-most one wake per window per (endpoint, conversation, thread) while a burst
-that lands in one feed batch still produces exactly one card.
+most one wake per window per (endpoint, conversation, thread, session) while a
+burst that lands in one feed batch still produces exactly one card.
 
 CRASH SAFETY IS WRITTEN BEFORE THE CARD CAN BE LOST, NEVER AFTER. The feed
 ref is deleted by the loop as soon as its message is handled (once-only
@@ -38,7 +38,10 @@ FLUSH, never earlier, so a reservation whose card is still buffered reads
 ``CARD_OWED`` — exactly the state a replay already knows how to finish.
 
 Threads are their own groups: a reply card must name ONE thread root to route
-an answer into it, so replies in two threads never share a card.
+an answer into it, so replies in two threads never share a card. Destination
+sessions are their own groups too (B3, S-26): a card wakes ONE session, so a
+reply routed to one session and a mention for another never share a card,
+even in one thread inside one window (see ``GroupKey``).
 """
 
 from __future__ import annotations
@@ -111,11 +114,21 @@ class _Group:
     items: list[_Pending] = field(default_factory=list)
 
 
-#: (config dir, endpoint, conversation, thread root or ""). The config dir is
-#: part of the key because it IS the connector's identity: one connector per
-#: config dir holds the singleton lock, and two config roots in one process
-#: (tests, a future multi-owner host) must never share a rate window.
-GroupKey = tuple[str, str, str, str]
+#: (config dir, endpoint, conversation, thread root or "", destination session).
+#: The config dir is part of the key because it IS the connector's identity: one
+#: connector per config dir holds the singleton lock, and two config roots in one
+#: process (tests, a future multi-owner host) must never share a rate window.
+#:
+#: The destination session is part of it because a card is delivered to ONE
+#: session (``_Group.session_id``, fixed by the group's first enqueue). Once
+#: replies are routed (B3, S-26), a reply routed to session S1 and a chief-of-
+#: staff mention in the same thread can land inside one window; keyed without
+#: the session they would merge into one card handed to whichever arrived first,
+#: so one target never sees its message and the other is woken for a message
+#: that was not routed to it. Two sessions are two wake targets, so ``_last_wake``
+#: (which shares this key) rate-limits per destination too. With routing off
+#: every card's session is the designated one, so the partition is unchanged.
+GroupKey = tuple[str, str, str, str, str]
 
 #: The scope the connector loop opens around one iteration. ``None`` (every
 #: direct caller, including the existing unit tests) delivers immediately,
@@ -166,7 +179,7 @@ DeliverFn = Callable[..., Awaitable[str]]
 
 
 class WakeCoalescer:
-    """Per-process buffer of card hand-offs, keyed by endpoint/conversation/thread."""
+    """Per-process buffer of card hand-offs, keyed by endpoint/conversation/thread/session."""
 
     def __init__(self, *, window_s: float = DEFAULT_COALESCE_WINDOW_S) -> None:
         self.window_s = max(0.0, float(window_s))
@@ -201,7 +214,7 @@ class WakeCoalescer:
         """
 
         now = time.time() if now is None else now
-        key = _group_key(config_dir, owner, metadata)
+        key = _group_key(config_dir, owner, metadata, session_id)
         group = self._groups.get(key)
         if group is None:
             last = self._last_wake.get(key)
@@ -359,12 +372,14 @@ class _Scope:
             _ACTIVE.reset(self._token)
 
 
-def _group_key(config_dir: Path, owner: Any, metadata: Any) -> GroupKey:
+def _group_key(config_dir: Path, owner: Any, metadata: Any, session_id: str) -> GroupKey:
+    # session_id last: ``flush_due`` reads ``key[2]`` as the conversation id.
     return (
         str(config_dir),
         str(getattr(owner, "endpoint_id", "") or ""),
         metadata.conversation_id,
         metadata.thread_root_id or "",
+        session_id,
     )
 
 

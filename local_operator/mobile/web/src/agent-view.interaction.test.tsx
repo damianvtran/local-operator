@@ -219,9 +219,13 @@ describe("AgentConversation", () => {
 		fireEvent.click(screen.getByRole("button", { name: "Open parent to steer" }));
 		expect(location.hash).toBe("#/s/root");
 		const composer = screen.getByPlaceholderText("Steer the agent…");
-		const steer = screen.getByRole("button", { name: "steer" });
-		expect((steer as HTMLButtonElement).disabled).toBe(true);
+		/* Streaming with an empty box: the primary slot is STOP, and there is no
+		   steer disc at all (send/steer/stop share one slot). */
+		expect(screen.getByRole("button", { name: "stop" })).toBeTruthy();
+		expect(screen.queryByRole("button", { name: "steer" })).toBeNull();
 		fireEvent.change(composer, { target: { value: "Please report back once" } });
+		const steer = screen.getByRole("button", { name: "steer" });
+		expect(screen.queryByRole("button", { name: "stop" })).toBeNull();
 		fireEvent.click(steer);
 
 		await waitFor(() => expect(sendCommand).toHaveBeenCalledOnce());

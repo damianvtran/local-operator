@@ -3202,6 +3202,25 @@
       "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the es style guide; translation \"{org} (organización)\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
     },
     {
+      "locale": "es",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
       "locale": "fr",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -6379,6 +6398,25 @@
       },
       "status": "passed",
       "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the fr style guide; translation \"{org} (organisation)\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. The round-2 fr minor (U+0020 vs U+202F before ; : and inside « » on ineligible_signed_out/unknown_org/plan_empty) is outside this delta and stays as recorded there. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
     },
     {
       "locale": "hi",
@@ -9613,6 +9651,25 @@
       },
       "status": "passed",
       "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the hi style guide; translation \"{org} (संगठन)\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
     },
     {
       "locale": "ru",
@@ -12888,6 +12945,25 @@
       "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the ru style guide; translation \"{org} (организация)\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
     },
     {
+      "locale": "ru",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
       "locale": "ur",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
@@ -15920,6 +15996,25 @@
       },
       "status": "passed",
       "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the ur style guide; translation \"{org} (تنظیم)\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
     },
     {
       "locale": "vi",
@@ -19216,6 +19311,25 @@
       "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the vi style guide; translation \"{org} (tổ chức)\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
     },
     {
+      "locale": "vi",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
       "locale": "zh-CN",
       "namespace": "cli.agents_help",
       "source_sha256": "d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3",
@@ -22174,6 +22288,25 @@
       },
       "status": "passed",
       "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the zh-CN style guide; translation \"{org}（组织）\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
     }
   ]
 }
