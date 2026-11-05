@@ -239,6 +239,16 @@ export const BUNDLED_LOCALE: Readonly<Record<string, Readonly<Record<string,
       "relay.chrome.spend.title": "D\u00e9penses et contexte",
     },
   },
+  "relay.composer": {
+    "fr": {
+      "relay.composer.action.connecting": "Connexion",
+      "relay.composer.action.send": "envoyer",
+      "relay.composer.action.steer": "orienter",
+      "relay.composer.action.stop": "arr\u00eater",
+      "relay.composer.action.stop_agent": "arr\u00eater l\u2019agent",
+      "relay.composer.action.stopping": "arr\u00eat en cours",
+    },
+  },
   "relay.health": {
     "fr": {
       "relay.health.dropped_detail": "Votre ordinateur n\u2019arrive pas \u00e0 joindre cette session pour l\u2019instant et continue d\u2019essayer. Tant qu\u2019il n\u2019y parvient pas, un envoi \u00e9choue aussit\u00f4t et votre texte reste dans la zone de saisie.",

@@ -50,6 +50,8 @@ describe("retainConfigStream", () => {
 		// relay.highlights is the supplement block's withheld-files line and
 		// its reasons (#3392); bundled like every other owned surface, so the
 		// line renders on a cold open with no catalogue fetch.
+		// relay.composer is the composer's button vocabulary (send/steer/stop/...)
+		// and the working line's Stop.
 		const ownedNamespaces = Object.keys(BUNDLED_OWNED).sort();
 		expect(ownedNamespaces).toEqual([
 			"relay.account_policy",
@@ -58,6 +60,7 @@ describe("retainConfigStream", () => {
 			"relay.ask",
 			"relay.asks",
 			"relay.chrome",
+			"relay.composer",
 			"relay.health",
 			"relay.highlights",
 			"relay.library",
