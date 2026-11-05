@@ -27,10 +27,14 @@ restriction: nothing in a rule file disables or loosens a built-in.
 ## What the built-in ranks
 
 - **CRITICAL** — the state root, `config.yml`, `secrets/`, the install layout,
-  `$HOME`, `/`, and an ancestor of those. Refused outright.
-- **HIGH** — another session's directory, a direct child of `$HOME`, a repo root,
-  `git clean` of untracked work, and **every target the resolver could not pin
-  down** (opaque substitution, empty expansion, unknown cwd). Goes to the judge.
+  `$HOME`, `/`, an ancestor of those, and a glob that can reach such a name
+  (`rm -rf ~/.local-op*`). Refused outright.
+- **HIGH** — another session's directory, any other path inside the state root,
+  a direct child of `$HOME`, a repo root, `git clean` of untracked work, and
+  **every target the resolver could not pin down** (opaque substitution, empty
+  expansion, unknown cwd) — unless the unresolved target itself lands on
+  something already critical, as an empty expansion that collapses the path to
+  `/` does. Goes to the judge.
 - **LOW** — everything else: this session's scratchpad, deep paths, `/tmp`. Runs
   unexamined.
 
@@ -51,7 +55,8 @@ A target derived from a secret is refused even with an approved override
 ## Write a rule
 
 One file per rule in `<config_dir>/rules/`. Creating the file is the whole
-registration — nothing else lists them, and nothing reloads the turn:
+registration — nothing else lists them, and no reload or restart is needed: the
+next tool call re-reads the directory:
 
 ```markdown
 ---
@@ -59,10 +64,19 @@ name: no-force-push-main
 scope: tool:bash
 condition:
   - 'git\s+push\b.*(--force|-f)\b.*\bmain\b'
+  - 'git\s+push\b.*\bmain\b.*(--force|-f)\b'
 action: block
 ---
 Never force-push main; open a PR instead.
 ```
+
+The two patterns are ONE rule: `condition` takes a list and ANY entry matching
+fires, which is what catching both flag positions takes — `git push --force
+origin main` matches only the first, `git push origin main --force` only the
+second, and a rule that catches one is protection that is not there. Neither
+catches a bare `git push --force` with an implicit branch: which branch it
+force-pushes is undecidable from the text alone, so state that limit when you
+ship the rule rather than claim coverage.
 
 | field | meaning |
 | --- | --- |
@@ -81,13 +95,23 @@ Never force-push main; open a PR instead.
   skipped. It never breaks the turn, which also means **a rule that fails to
   parse protects nothing and says nothing**.
 - Parsed rules are cached per (path, mtime, size), so an edit is re-read once.
-- A rule file cannot express a path resolver; conditions are text patterns.
+- A rule file cannot express a path resolver; conditions are text patterns. The
+  key is not merely ignored: naming `resolver:` (as the shipped
+  `dangerous-delete.md` does) makes `parse_rule` drop that rule ENTIRELY — the
+  whole file protects nothing and says nothing — so never copy that line into a
+  user rule.
 
 ## Settings
 
 `guardrails.enabled` (true), `guardrails.critical_override` (false),
 `guardrails.judge_timeout_s` (20.0, clamped 1–120), `guardrails.rules_dir` ("")
 — an extra folder, additive: the default folder always loads.
+
+`enabled` and `critical_override` are honoured only when this machine's settings
+set them in the running process (`LOOSENING_KEYS` in `check.py`); a `config.yml`
+edit — by hand, by the model, or surviving a restart — is read as the default and
+silently does nothing. Never edit the file and report an override you did not
+get: propose the setting to the operator instead.
 
 ## The ceiling — state it, do not paper over it
 
@@ -106,7 +130,10 @@ judge. Measured on this build: `rm -rf ~/.local-operator` → CRITICAL,
    and will not catch — and let the user see it before it exists.
 2. **Write it to the real rules directory**, never a scratch or sample copy. A
    rule outside `<config_dir>/rules/` (or the configured `rules_dir`) does
-   nothing.
+   nothing. Never edit or delete a rule file the user did not ask about to make
+   your own rule fire: a file cannot loosen another by format, so that edit is
+   the only way an agent can actually weaken protection — exactly what adding
+   restriction only forbids.
 3. **Verify it loads and fires** — `parse_rule` on its text, or `load_rules` on
    the directory — because a file that fails to parse is skipped silently, so an
    unverified rule looks like protection that is not there. Then say what you

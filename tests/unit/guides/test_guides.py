@@ -222,8 +222,22 @@ def test_guardrails_guide_rule_example_is_loadable(tmp_path: Path) -> None:
     assert rule.scope == "tool:bash"
     assert rule.action == "block"
     assert rule.body == "Never force-push main; open a PR instead."
-    assert rule.matches("bash", {"command": "git push --force origin main"})
+    # Both flag positions, because the rule carries one pattern per position and
+    # the list is ANY-match. Asserting only `git push --force origin main` is how
+    # an order-dependent example passed this test while silently missing the
+    # ordinary `git push origin main --force` — a copied rule protecting nothing.
+    for command in (
+        "git push --force origin main",
+        "git push origin main --force",
+        "git push -f origin main",
+        "git push origin main -f",
+        "git push --force-with-lease origin main",
+    ):
+        assert rule.matches("bash", {"command": command}), command
+    # A bare `git push --force` with an implicit branch is the documented limit,
+    # not an assertion target: nothing in the text says which branch is pushed.
     assert not rule.matches("bash", {"command": "git push origin feature"})
+    assert not rule.matches("bash", {"command": "git push origin main"})
 
 
 def test_every_guide_cross_reference_resolves() -> None:

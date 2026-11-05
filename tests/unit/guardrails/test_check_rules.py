@@ -1,4 +1,4 @@
-"""User rules at the real pre-call gate: ``check_rules`` via `check_tool_call`.
+"""User rules at the real pre-call gate: ``check_tool_call`` and what it returns.
 
 The loader's own tests (``test_rules.py``) prove parsing; this pins the OUTCOME
 a user gets when a rule file is present, through the function ``harness/loop.py``

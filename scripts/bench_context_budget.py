@@ -1844,12 +1844,19 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # ISOLATED HOME/config, because a configured ``values.subagents`` inflates the
 # local reading by 762 chars (see the entries above):
 #   base (9605fd32606)                  97,279 chars = ~34,992 billed
-#   head (this branch)                  97,456 chars = ~35,056 billed
-#   delta                                   +177 chars = ~+64
-# The +177 is exactly the one added bullet and nothing else: the prompt alone
-# re-read through ``count_text_tokens`` moves 2,872 -> 2,917 (+45) on
-# claude-sonnet-4-5, and the guide's own description never enters the start
-# context (guides are read on demand), so the other counters are byte-identical.
+#   head (this branch)                  97,477 chars = ~35,064 billed
+#   delta                                   +198 chars = ~+72
+# The +198 is the three added prompt lines and nothing else: +177 for the bullet,
+# then +21 when review round 1 rewrote its parenthetical to name the config dir's
+# default instead of spelling the default path as if it were always the live one.
+# The head clears this ceiling by 47, so the ratchet is NOT moved a second time.
+# The prompt alone re-read through ``count_text_tokens`` moves 2,872 -> 2,924
+# (+52) on claude-sonnet-4-5. The guide's own description does not move THIS
+# number — the bench renders a fixed skills block and never selects a guide — but
+# that is not the same as guide text being free: a SELECTED guide's description is
+# rendered into the ``<guides>`` block for the turn (``skills/index.py``), so it is
+# turn-level cost, not start-level. The start-context delta here is the system.md
+# bullet.
 # The base sat 25 under the old ceiling, i.e. inside the band rather than below
 # it, so the ceiling is re-derived the documented way — this tree's own
 # measurement plus the 55 band — and the next branch inherits 35,111.
@@ -2044,16 +2051,17 @@ BUDGET_BILLED_TOKENS = 35_111
 #
 # RAISED 30,964 -> 31,046 with the top arm above (the same two system.md
 # bullets): base 86,549 chars = ~31,133, head 86,776 = ~31,214, delta +227 = ~+82.
-#: RAISED (with the top arm, same trees) 31,046 -> 31,164: the child arm carries
-#: the same ``system.md`` bullet, so it moves by the same copy and nothing else —
-#:
-#:   base  86,305 chars = ~31,045   (1 token of headroom at the old ratchet)
-#:   head  86,482 chars = ~31,109
-#:   delta     +177 chars = ~+64
-#:
-#: The raise lands the ceiling at head + 55 — the band this file keeps, which
-#: also clears the known CI-vs-local offset — and the tighten band below (1,200)
-#: is not in play.
+# RAISED (with the top arm, same trees) 31,046 -> 31,164: the child arm carries
+# the same ``system.md`` bullet, so it moves by the same copy and nothing else —
+#
+#   base  86,305 chars = ~31,045   (1 token of headroom at the old ratchet)
+#   head  86,503 chars = ~31,116
+#   delta     +198 chars = ~+71
+#
+# The raise lands the ceiling at head + 55 — the band this file keeps, which
+# also clears the known CI-vs-local offset — and the tighten band below (1,200)
+# is not in play. The remediation round's +21 chars still leave 48 of headroom,
+# so the ratchet is not moved a second time.
 BUDGET_CHILD_BILLED_TOKENS = 31_164
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
