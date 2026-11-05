@@ -18,13 +18,18 @@ from lop's config directory, the same way it reads Claude Code's
   holding it, reads the current credential rows and config and builds the file. A
   slower or older publisher therefore cannot overwrite a newer logout with a
   snapshot it read earlier; the last one to run always reflects the latest
-  committed state. If the lock cannot be taken within about 5 seconds the rewrite
-  is skipped (logged, never an error for the login/logout that triggered it), and
-  the next change or lop start republishes.
-- Contains no token, key, email, organization name or raw provider id.
-- Rewritten after login, logout, a credential being disabled, and a change of the
-  configured default model (`hosting`), and at every `lop` start when missing or
-  stale. A host should read it at terminal launch and again when the file changes.
+  committed state.
+- Best-effort under contention: a publisher waits at most 5 seconds for the lock
+  and otherwise leaves the previous document in place (logged, never an error for
+  the login/logout that triggered it) until the next publish.
+- Contains no token, key, email, organization name or raw provider id. A ref is
+  not a stored identifier in cleartext and cannot be enumerated without already
+  knowing the candidate identity; it is not secret against a guess, since a
+  64-bit truncated digest of a low-entropy id (an email-shaped `sub`) can be
+  confirmed by someone who guesses that id.
+- Rewritten after login, logout, a credential being disabled, a credential block
+  being set or cleared, and a change of the configured default model (`hosting`),
+  and at every `lop` start when missing or stale. A host should read it at terminal launch and again when the file changes.
 - Absent until lop has stored a credential or been started in a config directory
   that has one. A missing file means the account is unknown.
 
@@ -37,8 +42,7 @@ from lop's config directory, the same way it reads Claude Code's
     "provider": "anthropic",
     "account_ref": "0123456789abcdef",
     "kind": "oauth",
-    "org_type": null,
-    "accounts": [{"account_ref": "0123456789abcdef", "kind": "oauth", "org_type": null}]
+    "org_type": null
   },
   "providers": {
     "anthropic": {
@@ -83,12 +87,28 @@ from lop's config directory, the same way it reads Claude Code's
   `null` when it holds several (the pick is made per session: sticky, usage-aware
   or round-robin, not by row order) and when only a plain stored key exists (an
   environment variable outranks it and this file cannot see one).
+
+  **Blocks.** They are also `null` when the sole winning row has an unexpired
+  credential block of any scope (a quota or auth backoff in
+  `auth_credential_blocks`, including a model-scoped one, which makes the answer
+  depend on the model). The cascade then serves a lower tier until the block
+  expires, and nothing is written when it does, so the serving account is
+  time-dependent; the file says `null` rather than a ref that turns wrong on
+  expiry. Setting or clearing a block republishes. After a block expires the
+  entry stays `null` until the next publish (lop start, login/logout, a block
+  change, a `hosting` change): an under-claim, never a wrong account.
+
+  **Demotions are not in the file.** A recently failing credential is demoted by
+  a per-process, in-memory reordering lasting at most 120 seconds. It is not
+  reflected here (it cannot be shared across processes), so a host may see the
+  durable winner while one process briefly prefers a sibling.
 - `accounts`: every enabled stored row of the provider as
   `{account_ref, kind, org_type}`, in cascade order (OAuth, login keys, other
   keys; then row id). An inventory of accounts lop may use, not a claim about
   which one serves. Rows without a durable ref are left out. Which account served
   an individual call is what `Usage.account_ref` records.
-- `default`: `{"provider": p, ...entry}` for the configured default model's
+- `default`: `{provider, account_ref, kind, org_type}` (the entry without
+  `accounts`) for the configured default model's
   provider (`hosting` in `config.yml`, mapped to its credential storage id), so
   `default.account_ref` is `null` exactly when that provider's account is not
   determinable. `default` itself is `null` when no default is configured or that

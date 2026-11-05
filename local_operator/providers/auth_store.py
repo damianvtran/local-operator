@@ -1776,6 +1776,29 @@ class AuthStore:
             self._store_uid = row[0]
         return self._store_uid
 
+    def active_block_ids(self, now_ms: int | None = None) -> set[int]:
+        """Credential ids with ANY unexpired block row, of any scope or provider key.
+
+        Feeds ``account.json``: a blocked credential makes the cascade serve a
+        lower tier until the block expires, and a model-scoped block makes the
+        answer depend on the model, so either leaves the account undeterminable.
+        Works on a read-only store; an unreadable or missing table yields an
+        empty set (nothing known to be blocked).
+        """
+        conn = self._ro_conn if self._read_only else self._conn
+        if conn is None:
+            return set()
+        now = self._now_ms() if now_ms is None else now_ms
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT credential_id FROM auth_credential_blocks"
+                " WHERE blocked_until_ms > ?",
+                (now,),
+            ).fetchall()
+        except sqlite3.Error:
+            return set()
+        return {int(r[0]) for r in rows}
+
     def _account_ref_for_row(self, row: StoredCredential) -> str | None:
         """The ``account_ref`` of one stored row, namespaced by this store."""
         from local_operator.providers.account_provenance import account_ref
@@ -1835,10 +1858,15 @@ class AuthStore:
                 # random id minted once, so two auth.db files never share a ref
                 # for the same SQLite row id. INSERT OR IGNORE keeps the first
                 # writer's value under concurrent startup.
-                conn.execute(
-                    "INSERT OR IGNORE INTO auth_store_meta (key, value) VALUES ('store_uid', ?)",
-                    (secrets.token_hex(16),),
-                )
+                if (
+                    conn.execute("SELECT 1 FROM auth_store_meta WHERE key = 'store_uid'").fetchone()
+                    is None
+                ):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO auth_store_meta (key, value)"
+                        " VALUES ('store_uid', ?)",
+                        (secrets.token_hex(16),),
+                    )
                 conn.commit()
                 # Local metadata, never credential payload: old rows remain unknown until
                 # a real login write attests an incarnation. Refresh cannot create one.
@@ -2493,7 +2521,7 @@ class AuthStore:
         # Identity labels in a generic write are not an interactive admission
         # receipt. Quarantine belongs after a verified exchange and the host's
         # cancellation check, never in this shared metadata-write hook.
-        self.clear_blocks(stored.id)
+        self._delete_blocks(stored.id)
         self._rearm_parked_tunnel_login(provider, stored)
         self._publish_account_file()
         return stored
@@ -2514,7 +2542,10 @@ class AuthStore:
         # resurrect a logged-out account.
         refresh_account_file(
             self._db_path.parent,
-            read_rows=lambda: self.list_credentials(include_disabled=True),
+            read_state=lambda: (
+                self.list_credentials(include_disabled=True),
+                self.active_block_ids(),
+            ),
             store_uid=self.store_uid,
         )
 
@@ -2809,6 +2840,7 @@ class AuthStore:
             (credential_id, provider_key, block_scope, until, self._now_ms()),
         )
         self._conn.commit()
+        self._publish_account_file()
 
     def is_blocked(self, credential_id: int, provider: str) -> bool:
         credential = self.get_credential(credential_id)
@@ -2901,12 +2933,18 @@ class AuthStore:
             (credential_id, provider_key, lowered, lowered),
         )
         self._conn.commit()
+        self._publish_account_file()
 
-    def clear_blocks(self, credential_id: int) -> None:
+    def _delete_blocks(self, credential_id: int) -> None:
+        """Commit the removal of every block row of one credential; publishes nothing."""
         self._conn.execute(
             "DELETE FROM auth_credential_blocks WHERE credential_id = ?", (credential_id,)
         )
         self._conn.commit()
+
+    def clear_blocks(self, credential_id: int) -> None:
+        self._delete_blocks(credential_id)
+        self._publish_account_file()
 
     def clear_block(self, credential_id: int, provider: str, block_scope: str = "") -> None:
         """Drop the primary block for ONE credential, leaving other scopes alone.
@@ -2925,6 +2963,7 @@ class AuthStore:
             (credential_id, provider_key, block_scope),
         )
         self._conn.commit()
+        self._publish_account_file()
 
     # -- OAuth refresh -----------------------------------------------------------
 

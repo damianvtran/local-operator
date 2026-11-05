@@ -234,7 +234,6 @@ def test_file_follows_login_and_has_no_secrets_or_labels(config: Path, store: Au
         "account_ref": expected,
         "kind": "oauth",
         "org_type": None,
-        "accounts": inventory,
     }
     assert document["providers"] == {
         "anthropic": {
@@ -269,7 +268,11 @@ def test_file_follows_disable(config: Path, store: AuthStore) -> None:
     # Two enabled accounts: which serves is a per-session choice, so the file says unknown.
     both = _file(config)["default"]
     assert both["account_ref"] is None
-    assert [a["account_ref"] for a in both["accounts"]] == [ref_1, ref_2]
+    assert "accounts" not in both
+    assert [a["account_ref"] for a in _providers(config)["anthropic"]["accounts"]] == [
+        ref_1,
+        ref_2,
+    ]
     store.disable_credential(first.id, "operator")
     assert _file(config)["default"]["account_ref"] == ref_2
 
@@ -285,7 +288,8 @@ def test_file_follows_a_default_model_change(config: Path, store: AuthStore) -> 
     assert document["default"]["provider"] == "openai"
     # A lone stored key without ``source="login"`` is outranked by an env var: unknown.
     assert document["default"]["kind"] is None and document["default"]["account_ref"] is None
-    assert len(document["default"]["accounts"]) == 1
+    assert "accounts" not in document["default"]
+    assert len(document["providers"]["openai"]["accounts"]) == 1
     assert set(document["providers"]) == {"anthropic", "openai"}
 
 
@@ -569,8 +573,10 @@ def test_login_key_beats_an_older_plain_key_like_the_real_cascade(
     assert default["account_ref"] is not None
     assert default["account_ref"] == access.account_ref
     # The older plain key stays in the inventory, after the serving one.
-    assert len(default["accounts"]) == 2
-    assert default["accounts"][0]["account_ref"] == access.account_ref
+    assert set(default) == {"provider", "account_ref", "kind", "org_type"}
+    accounts = _providers(config)["openai"]["accounts"]
+    assert len(accounts) == 2
+    assert accounts[0]["account_ref"] == access.account_ref
 
 
 def test_two_oauth_rows_are_undeterminable_but_both_inventoried(
@@ -617,3 +623,78 @@ def test_disabled_rows_are_excluded_from_entry_and_inventory(
         "anthropic", kind="oauth", credential_id=2, org_id="org-2"
     )
     assert len(entry["accounts"]) == 1
+
+
+# -- credential blocks make the published account undeterminable ------------
+
+
+def _oauth_plus_login_key(store: AuthStore) -> tuple[Any, Any]:
+    oauth = store.upsert_credential("openai", _oauth("acct-1"))
+    key = store.upsert_credential("openai", {"type": "api_key", "key": "sk-l", "source": "login"})
+    return oauth, key
+
+
+def test_a_blocked_winner_nulls_the_published_account_until_cleared(
+    config: Path, store: AuthStore
+) -> None:
+    import asyncio
+
+    ConfigManager(config).set_config_value("hosting", "openai")
+    oauth, _key = _oauth_plus_login_key(store)
+    access = asyncio.run(store.get_oauth_access("openai"))
+    assert access is not None and access.account_ref is not None
+    assert _file(config)["default"]["account_ref"] == access.account_ref
+
+    # No manual refresh: the block write itself publishes.
+    store.block_credential(oauth.id, "openai")
+    assert _file(config)["default"]["account_ref"] is None
+    entry = _providers(config)["openai"]
+    assert entry["account_ref"] is None and entry["kind"] is None
+    assert len(entry["accounts"]) == 2
+
+    store.clear_block(oauth.id, "openai")
+    assert _file(config)["default"]["account_ref"] == access.account_ref
+
+    store.block_credential(oauth.id, "openai")
+    assert _file(config)["default"]["account_ref"] is None
+    store.clear_blocks(oauth.id)
+    assert _file(config)["default"]["account_ref"] == access.account_ref
+
+    store.block_credential(oauth.id, "openai", block_scope="model:gpt")
+    assert _file(config)["default"]["account_ref"] is None
+    store.clear_blocks_for_model(oauth.id, "openai", "gpt-5")
+    assert _file(config)["default"]["account_ref"] == access.account_ref
+
+
+def test_an_expired_block_does_not_null_the_account(config: Path, store: AuthStore) -> None:
+    ConfigManager(config).set_config_value("hosting", "openai")
+    oauth, _key = _oauth_plus_login_key(store)
+    store.block_credential(oauth.id, "openai")
+    store._conn.execute("UPDATE auth_credential_blocks SET blocked_until_ms = 1")
+    store._conn.commit()
+    assert store.active_block_ids() == set()
+    refresh_account_file(config, only_if_changed=False)
+    assert _file(config)["default"]["account_ref"] is not None
+
+
+def test_a_model_scoped_block_on_the_sole_winner_nulls_the_account(
+    config: Path, store: AuthStore
+) -> None:
+    ConfigManager(config).set_config_value("hosting", "anthropic")
+    row = store.upsert_credential("anthropic", _oauth("org-1"))
+    assert _file(config)["default"]["account_ref"] is not None
+    store.block_credential(row.id, "anthropic", block_scope="model:fable")
+    assert store.active_block_ids() == {row.id}
+    assert _file(config)["default"]["account_ref"] is None
+
+
+def test_active_block_ids_on_a_read_only_store_without_the_table(tmp_path: Path) -> None:
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    sqlite3.connect(db).close()
+    reader = AuthStore.open_read_only(db)
+    try:
+        assert reader.active_block_ids() == set()
+    finally:
+        reader.close()

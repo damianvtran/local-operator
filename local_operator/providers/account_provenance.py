@@ -19,9 +19,12 @@ certain (see :func:`build_account_document`) and publishes ``null`` otherwise;
 it never guesses from row order.
 
 NON-SECRET BY CONSTRUCTION. The ref is a truncated SHA-256 over the provider id
-and an identity, so it is stable for one account, opaque to a reader, and not
-reversible to an email, an organization name or a raw IdP id. The file carries
-the ref, the credential kind and a coarse plan slug per account, nothing else.
+and an identity, so it is stable for one account and opaque to a reader. It is
+not a stored identifier in cleartext and cannot be enumerated without already
+knowing the candidate identity; it is not a secret against a guess, though: a
+64-bit digest of a low-entropy id (an email-shaped ``sub``) can be confirmed by
+someone who guesses that id. The file carries the ref, the credential kind and
+a coarse plan slug per account, nothing else.
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -155,7 +158,10 @@ def _tier(row: Any) -> int:
 
 
 def build_account_document(
-    rows: list[Any], hosting: str | None, store_uid: str | None = None
+    rows: list[Any],
+    hosting: str | None,
+    store_uid: str | None = None,
+    blocked_ids: Collection[int] = (),
 ) -> dict[str, Any]:
     """The ``account.json`` document for ``rows`` and the configured ``hosting``.
 
@@ -168,11 +174,20 @@ def build_account_document(
     (6), and it must hold exactly ONE row. With several rows the pick is made per
     session (sticky, usage-aware, round-robin), so the file cannot say; a tier-6
     key is outranked by an environment variable, which no file here can see. In
-    both cases the three fields are ``null``. Disabled rows never count. A
+    both cases the three fields are ``null``. Disabled rows never count.
+
+    BLOCKS. The sole winner's id must also not be in ``blocked_ids`` (credentials
+    with an unexpired ``auth_credential_blocks`` row, any scope). A blocked winner
+    means the cascade is serving a lower tier only until the block expires, and
+    nothing is written when it does, so the serving account is time-dependent:
+    the fields are ``null``, never a ref that turns wrong on expiry. Demotions
+    (``AuthStore._deprioritized``, a per-process in-memory reordering of at most
+    120 s) are not representable in a cross-process file and are not consulted. A
     credential from an environment variable, a config override or the runtime is
     not represented at all.
 
-    DEFAULT RULE. ``default`` is ``{"provider": p, **entry}`` for the provider of
+    DEFAULT RULE. ``default`` is ``{"provider", "account_ref", "kind", "org_type"}``
+    (the entry without the ``accounts`` inventory) for the provider of
     the configured default model (``hosting`` in ``config.yml`` mapped through
     ``credential_provider_id``) when that provider has an entry, else ``null``;
     its ``account_ref`` is ``null`` when the serving account is not determinable.
@@ -194,12 +209,13 @@ def build_account_document(
             continue
         by_provider.setdefault(row.provider, []).append(row)
 
+    blocked = set(blocked_ids)
     providers: dict[str, Any] = {}
     for provider, group in by_provider.items():
         ordered = sorted(group, key=lambda r: (_tier(r), r.id))
         winning = [r for r in ordered if _tier(r) == _tier(ordered[0])]
         entry: dict[str, Any] = {"account_ref": None, "kind": None, "org_type": None}
-        if _tier(ordered[0]) in (3, 4) and len(winning) == 1:
+        if _tier(ordered[0]) in (3, 4) and len(winning) == 1 and winning[0].id not in blocked:
             sole = _entry_for(winning[0], store_uid)
             if sole is not None:
                 entry = sole
@@ -211,7 +227,10 @@ def build_account_document(
         provider = credential_provider_id(str(hosting))
         chosen = providers.get(provider)
         if chosen is not None:
-            default = {"provider": provider, **chosen}
+            default = {
+                "provider": provider,
+                **{k: chosen[k] for k in ("account_ref", "kind", "org_type")},
+            }
     return {
         "version": ACCOUNT_FILE_VERSION,
         "default": default,
@@ -237,7 +256,7 @@ def refresh_account_file(
     config_dir: Path,
     *,
     only_if_changed: bool = True,
-    read_rows: Callable[[], list[Any]] | None = None,
+    read_state: Callable[[], tuple[list[Any], Collection[int]]] | None = None,
     store_uid: str | None = None,
 ) -> bool:
     """Rewrite ``<config_dir>/account.json`` from the credential store and config.
@@ -252,16 +271,17 @@ def refresh_account_file(
     replace the file after the logout's own publish and bring the signed-out
     account back. Whoever holds the lock reads the store as it is NOW, so the last
     publisher to run always reflects the latest committed rows and config. A
-    caller therefore cannot hand in rows; ``read_rows`` is a callback invoked
-    inside the lock (the store's write hooks pass their own handle's read plus its
-    ``store_uid``). By default the store is opened read-only inside the lock,
+    caller therefore cannot hand in rows; ``read_state`` is a callback invoked
+    inside the lock returning ``(rows, blocked_ids)`` (the store's write hooks
+    pass their own handle's reads plus its ``store_uid``). By default the store is
+    opened read-only inside the lock,
     which creates nothing. When there is no ``auth.db`` and no earlier file there
     is nothing to say and nothing is created, not even the lock file, so a bare
     config directory stays bare.
     """
     try:
         config_dir = Path(config_dir)
-        if read_rows is None:
+        if read_state is None:
             if (
                 not (config_dir / "auth.db").exists()
                 and not (config_dir / ACCOUNT_FILE_NAME).exists()
@@ -278,7 +298,7 @@ def refresh_account_file(
             # one another as well as other processes.
             with nonblocking_file_claim(lock_path) as acquired:
                 if acquired:
-                    return _publish_locked(config_dir, only_if_changed, read_rows, store_uid)
+                    return _publish_locked(config_dir, only_if_changed, read_state, store_uid)
             if time.monotonic() >= deadline:
                 logger.warning("timed out waiting to refresh %s", ACCOUNT_FILE_NAME)
                 return False
@@ -292,19 +312,20 @@ def refresh_account_file(
 def _publish_locked(
     config_dir: Path,
     only_if_changed: bool,
-    read_rows: Callable[[], list[Any]] | None,
+    read_state: Callable[[], tuple[list[Any], Collection[int]]] | None,
     store_uid: str | None,
 ) -> bool:
     """The read-build-write body of :func:`refresh_account_file`; lock held."""
     target = config_dir / ACCOUNT_FILE_NAME
-    if read_rows is not None:
-        rows = read_rows()
+    if read_state is not None:
+        rows, blocked_ids = read_state()
     else:
         from local_operator.providers.auth_store import AuthStore
 
         store = AuthStore.open_read_only(config_dir / "auth.db")
         try:
             rows = store.list_credentials(include_disabled=True)
+            blocked_ids = store.active_block_ids()
             store_uid = store.store_uid
         finally:
             store.close()
@@ -313,7 +334,9 @@ def _publish_locked(
     values = read_config_values(config_dir)
     hosting = values.get("hosting") if isinstance(values, dict) else None
     payload = _render(
-        build_account_document(rows, hosting if isinstance(hosting, str) else None, store_uid)
+        build_account_document(
+            rows, hosting if isinstance(hosting, str) else None, store_uid, blocked_ids
+        )
     )
     if only_if_changed:
         try:
