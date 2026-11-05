@@ -786,3 +786,177 @@ async def test_offline_signed_continuation_replaces_native_queued_result_once(
             await live.close(root)
         else:
             await resumed.dispose()
+
+
+def test_signed_save_split_metadata_prompt_fault_rolls_back(root, monkeypatch):
+    from local_operator import profile_approval as P
+
+    data = proposal(root)
+    data = P.build(
+        root,
+        profile_kind="agent",
+        operation="update",
+        target_id=data.target_id,
+        name=data.name,
+        session_id=data.session_id,
+        tool_call_id=data.tool_call_id,
+        before=data.before,
+        after=dict(data.after, description="New approved description"),
+    )
+    record = P.file_request(root, data)
+    approve(root, record)
+    original = AgentRegistry.set_agent_system_prompt
+    calls = []
+
+    def fail_once(self, identity, text):
+        calls.append(text)
+        if len(calls) == 1:
+            raise OSError("fault after metadata before prompt")
+        return original(self, identity, text)
+
+    monkeypatch.setattr(AgentRegistry, "set_agent_system_prompt", fail_once)
+    with pytest.raises(MeshRefusal, match="fault after metadata"):
+        P.apply(record["approval_id"], P.expected(record), root)
+    assert P.snapshot(root, "agent", data.target_id) == data.before
+    journal = json.loads((root / "profile-transactions" / f"{data.receipt_id}.json").read_text())
+    assert journal["state"] == "rolled_back"
+    assert calls == [data.after["instructions"], data.before["instructions"]]
+
+
+_POLICY_CASES = {
+    "tools": {"tags": ["role", "tools:read"]},
+    "effort": {"tags": ["role", "effort:hi"]},
+    "delegate": {"tags": ["role", "delegate:yes"]},
+    "saver": {"tags": ["role", "saver:on"]},
+    "class": {"tags": ["role", "class:proactive"]},
+    "model": {"model": "test/approved"},
+    "label": {"label": "Approved label"},
+    "description": {"description": "Approved description"},
+    "categories": {"categories": ["role", "approved-category"]},
+    "combined": {
+        "tags": ["role", "tools:read", "effort:hi", "delegate:yes", "saver:on", "class:proactive"],
+        "model": "test/approved",
+        "label": "Approved label",
+        "description": "Approved description",
+        "categories": ["role", "approved-category"],
+        "instructions": "Approved policy guidance.",
+    },
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", list(_POLICY_CASES))
+async def test_signed_projected_policy_publishes_native_event_and_cold_history(root, field):
+    """Exercise signed apply and its trusted consumer, not just the formatter."""
+    from local_operator import profile_approval as P
+    from local_operator.harness.types import ModelSpec, ToolExecutionEndEvent
+    from local_operator.profile_scope import scope_agent_registry
+    from local_operator.session.session import Session
+    from local_operator.session.transcript import Transcript
+
+    data = proposal(root)
+    data = P.build(
+        root,
+        profile_kind="agent",
+        operation="update",
+        target_id=data.target_id,
+        name=data.name,
+        session_id=data.session_id,
+        tool_call_id=data.tool_call_id,
+        before=data.before,
+        after=dict(data.before, **_POLICY_CASES[field]),
+    )
+    record = P.file_request(root, data)
+    assert P.snapshot(root, "agent", data.target_id) == data.before
+    approve(root, record)
+    result = P.apply(record["approval_id"], P.expected(record), root)
+    assert result["state"] == "complete"
+    assert P.snapshot(root, "agent", data.target_id) == data.after
+    directory = root / "sessions" / data.session_id
+    session = Session(
+        model=ModelSpec(provider="test", model_id="m", context_window=100000),
+        stream_fn=lambda *args: (_ for _ in ()).throw(AssertionError("NO model turn")),
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda: [],
+        agent_registry=scope_agent_registry(AgentRegistry(root, migrate=False), directory),
+        owner_prompt_consent=True,
+        yolo=True,
+    )
+    events = []
+    session.subscribe(events.append)
+    try:
+        from types import SimpleNamespace
+
+        from local_operator.session.runtime.process import _drain_inbox_into
+
+        assert (
+            await _drain_inbox_into(
+                SimpleNamespace(_session=session, receive_peer_message=session.receive_peer_message)
+            )
+            == 1
+        )
+        native = [e for e in events if isinstance(e, ToolExecutionEndEvent)]
+        assert len(native) == 1
+        details = native[0].result.details
+        expected = (
+            {
+                "tools",
+                "effort",
+                "delegate",
+                "saver",
+                "class",
+                "model",
+                "label",
+                "description",
+                "categories",
+                "instructions",
+            }
+            if field == "combined"
+            else {field}
+        )
+        assert set(details["fields"]) == expected
+        assert all(
+            any(line.startswith(name + ":") for line in details["diff"]) for name in expected
+        )
+        assert native[0].tool_call_id == data.tool_call_id
+        history = Transcript(directory).build_llm_history()
+        rows = [m for m in history if getattr(m, "tool_call_id", None) == data.tool_call_id]
+        assert len(rows) == 1 and rows[0].provider_payload["details"] == details
+        if field == "combined":
+            import os
+            import subprocess
+            from pathlib import Path
+
+            output = Path(os.environ.get("PROFILE_R4_EVIDENCE", root))
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "protected-policy-native-golden.json").write_text(
+                json.dumps(
+                    {
+                        "meta": {
+                            "source_sha": subprocess.check_output(
+                                ["git", "rev-parse", "HEAD"], text=True
+                            ).strip(),
+                            "uncommitted_source": bool(
+                                subprocess.check_output(
+                                    ["git", "status", "--porcelain"], text=True
+                                ).strip()
+                            ),
+                            "production_source_sha256": {
+                                str(path): __import__("hashlib")
+                                .sha256(path.read_bytes())
+                                .hexdigest()
+                                for path in [
+                                    Path("local_operator/definition_transaction.py"),
+                                    Path("local_operator/profile_approval.py"),
+                                ]
+                            },
+                        },
+                        "tool_execution_end_event": native[0].model_dump(mode="json"),
+                        "cold_history_message": rows[0].model_dump(mode="json"),
+                    },
+                    indent=2,
+                )
+            )
+    finally:
+        await session.dispose()

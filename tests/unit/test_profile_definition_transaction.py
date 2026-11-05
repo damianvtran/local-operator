@@ -9,6 +9,9 @@ that window without relying on timing or real operator stores.
 from __future__ import annotations
 
 import asyncio
+import json
+
+import pytest
 
 from local_operator.agents import AgentRegistry
 from local_operator.hub_sync.definition import (
@@ -526,3 +529,38 @@ def test_named_refusal_does_not_poison_the_next_independent_edit(tmp_path):
     with edit("new"):
         state["value"] = "second"
     assert state["value"] == "second"
+
+
+@pytest.mark.parametrize("outcome", ["rollback", "rollback_failure", "postcommit"])
+def test_non_one_shot_save_fault_never_completes_a_partial_image(tmp_path, outcome):
+    """Ordinary signed saves must not fall through the Revert-only handler."""
+    from local_operator.definition_transaction import prepare, transact
+
+    state = {"value": "before"}
+    calls = []
+
+    def write(value):
+        calls.append(value)
+        if value == "after":
+            state["value"] = "after" if outcome == "postcommit" else "partial"
+            raise OSError("actual forward write fault")
+        if outcome == "rollback_failure":
+            raise OSError("actual rollback fault")
+        state["value"] = value
+
+    prepare(tmp_path, transaction_id="ordinary-fault", before="before", after="after")
+    with pytest.raises(OSError):
+        transact(
+            tmp_path,
+            transaction_id="ordinary-fault",
+            before="before",
+            after="after",
+            read=lambda: state["value"],
+            write=write,
+        )
+    journal = json.loads((tmp_path / "profile-transactions/ordinary-fault.json").read_text())
+    assert journal["state"] != "complete"
+    assert state["value"] == ("partial" if outcome == "rollback_failure" else "before")
+    assert calls == ["after", "before"]
+    if outcome != "rollback_failure":
+        assert journal["state"] == "rolled_back"

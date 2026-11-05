@@ -649,14 +649,18 @@ def applied_tool_result(root: Path, receipt_id: str, session_id: str):
             values["categories"] = (before.get("categories"), p.after.get("categories"))
         fields = list(values)
     diff = []
-    for field in fields:
+    # Policy settings are projected from agent tags: display names such as
+    # tools/delegate/class are not raw image keys. Use the same value pairs for
+    # both projected agents and raw team fields so publication cannot fail after
+    # a valid signed mutation has already committed.
+    for field, (old, new) in values.items():
         if field == "instructions":
             value, _ = _instruction_diff(
-                str(before.get(field) or ""), str(p.after[field]), fromfile="before", tofile="after"
+                str(old or ""), str(new), fromfile="before", tofile="after"
             )
             diff.extend(["instructions:", *value.splitlines()])
         else:
-            diff.append(f"{field}: {before.get(field)!r} → {p.after[field]!r}")
+            diff.append(f"{field}: {old!r} → {new!r}")
     from local_operator.profile_scope import profile_diff_summary
 
     details = {

@@ -343,18 +343,20 @@ def transact(
                 _durable_json(path, record)
                 _mark_consumed(key)
                 return record
-        except Exception:
-            # Every supported writer holds the same lock, so no other writer
-            # can land between the failed write and its rollback. Failure to
-            # restore is visible and leaves a prepared journal for recovery.
-            write(before)
-            if commitment(read()) != before_token:
-                raise DefinitionTransactionConflict(
-                    "rollback did not restore its commitment; recovery required"
-                )
-            record["state"] = "rolled_back"
-            _durable_json(path, record)
-            raise
+            else:
+                # Ordinary saves retain rollback-and-raise semantics. This must
+                # share the handler above: a sibling except Exception would be
+                # unreachable and silently mark partial non-one-shot writes done.
+                # The same lock excludes competing writers during the rollback;
+                # failed recovery leaves prepared bookkeeping, never completion.
+                write(before)
+                if commitment(read()) != before_token:
+                    raise DefinitionTransactionConflict(
+                        "rollback did not restore its commitment; recovery required"
+                    )
+                record["state"] = "rolled_back"
+                _durable_json(path, record)
+                raise
         record["state"] = "complete"
         _durable_json(path, record)
         _mark_consumed(key)
