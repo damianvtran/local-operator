@@ -318,7 +318,10 @@ async def test_real_tool_to_client_wire_preserves_exact_file_and_actor(tmp_path,
         return httpx.Response(201, json={"result": {"id": "bcmsg_wire0001", "seq": 1}})
 
     client = _make_client(handler)
-    runtime = _runtime(client)
+    # The shared helper builds a FakeHub fixture; install the real wire client
+    # on its typed runtime instead of passing an unrelated type to that helper.
+    runtime = _runtime(Hub())
+    runtime.client = client
     runtime.owner = dataclasses.replace(
         runtime.owner, account_id="acc_1", canonical_base_url=client.base_url
     )

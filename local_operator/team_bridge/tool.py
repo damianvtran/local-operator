@@ -3109,7 +3109,7 @@ def build_bridge_tool(context: ToolContext) -> AgentTool | None:
             "Agent bridge: directory teammates/chiefs; dm person/agent direct/relay, "
             "not 'forward this'; channel_post rooms; send/reply bmsg_ answers only; "
             "shared_* owner-shared conversations. No approve/deny. "
-            "Reply where received; teammates use bridge. Read tool://bridge."
+            "Reply where received; teammates use bridge. read tool://bridge."
         ),
         parameters=BridgeToolParams.model_json_schema(),
         approval_tier="write",
