@@ -1,0 +1,10 @@
+{
+  "wire.console.title": "Console capacity",
+  "wire.console.description": "Live terminal admission. Completed history does not consume process slots. Changes affect future starts, never terminate running work.",
+  "wire.console.max_live.label": "Live terminal ceiling",
+  "wire.console.max_live.help": "32–256; default 128. Managed memory, terminal cells and available native resources can admit fewer terminals. This does not limit child-process memory.",
+  "wire.console.max_owner.label": "Agent terminals per conversation",
+  "wire.console.max_owner.help": "1–32; default 8. Each conversation shares the global live allowance; completed terminals do not count.",
+  "wire.console.user_reserved.label": "Slots reserved for user terminals",
+  "wire.console.user_reserved.help": "4–32; default 16, capped at one quarter of the live ceiling. Agent starts cannot consume these slots. Existing work is never stopped."
+}

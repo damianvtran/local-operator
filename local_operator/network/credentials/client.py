@@ -1081,7 +1081,74 @@ class MeshCredentialClient:
             )
         return self._detail_error(self._render(self._offline(key, label, owner=owner), key, label))
 
-    def _ask_owner_directly(self, owner: str, frame: dict[str, Any]) -> dict[str, Any] | None:
+    def fetch_catalogue_metadata(
+        self, key: str, *, provider: str = "openai", ttl: int = 60, validator: str = ""
+    ) -> dict[str, Any]:
+        """Slice B's metadata seam; no token, inference grant, or cache mutation.
+
+        Call from a worker thread. Consumers must keep scope/incarnation/lifecycle
+        and TTL together and recheck permission before using cached metadata.
+        """
+        from local_operator.network.credentials.catalogue import (
+            CAPABILITY,
+            ERROR_CODES,
+            validate_response,
+        )
+        from local_operator.network.types import MeshRefusal
+
+        if key != "openai" or provider != "openai" or type(ttl) is not int or not 1 <= ttl <= 300:
+            raise ValueError("unsupported catalogue request")
+        if not self.should_borrow(key):
+            raise MeshRefusal("not_a_holder", "catalogue metadata is not shared")
+        owner = self.owner_of(key)
+        if self._relay is None:
+            from local_operator.network import store
+            from local_operator.network.relay import control_request
+
+            record = store.find_own_relay(self.root)
+            if record is None:
+                raise MeshRefusal("owner_offline", "catalogue relay unavailable")
+            reply = control_request(
+                record,
+                "credential_catalogue",
+                timeout=self.deadline_s,
+                credential_key=key,
+                provider=provider,
+                ttl=ttl,
+                validator=validator,
+            )
+        else:
+            reply = self._ask_owner_directly(
+                owner,
+                {
+                    "op": PEER_BROKER_OP,
+                    "kind": "catalogue",
+                    "network_id": self.network_id,
+                    "from_device": self.self_device,
+                    "key": key,
+                    "provider": provider,
+                    "ttl": ttl,
+                    "validator": validator,
+                },
+                required_capability=CAPABILITY,
+            )
+        detail = reply.get("detail") if isinstance(reply, dict) else None
+        if not isinstance(detail, dict):
+            raise MeshRefusal("catalogue_unavailable", "catalogue metadata unavailable")
+        if detail.get("kind") == "error":
+            # Never forward an untrusted peer's free-form error text or auth data.
+            code = detail.get("code")
+            raise MeshRefusal(
+                code if code in ERROR_CODES else "catalogue_unavailable",
+                "catalogue metadata unavailable",
+            )
+        if not self.should_borrow(key) or self.owner_of(key) != owner:
+            raise MeshRefusal("not_a_holder", "catalogue sharing changed")
+        return validate_response(detail, network=self.network_id, owner=owner, key=key)
+
+    def _ask_owner_directly(
+        self, owner: str, frame: dict[str, Any], *, required_capability: str = ""
+    ) -> dict[str, Any] | None:
         """Run ``net_broker`` over a link to ``owner``, dialling if there is none.
 
         ``None`` means "this device could not get an answer from the owner", which
@@ -1123,6 +1190,11 @@ class MeshCredentialClient:
             }
         if link is None:
             return None
+        if required_capability and (
+            required_capability not in getattr(link, "local_capabilities", ())
+            or required_capability not in getattr(link, "capabilities", ())
+        ):
+            return {"op": "ack", "detail": {"kind": "error", "code": "catalogue_unsupported"}}
         # EVERY LEG-2 FRAME CARRIES A ``req`` MINTED FROM THE RELAY'S OWN COUNTER (QA
         # round 1, Q2). ``PeerLink.request`` registers a waiter only for a frame that
         # has one; without it the frame is SENT, the call returns ``None`` at once, and

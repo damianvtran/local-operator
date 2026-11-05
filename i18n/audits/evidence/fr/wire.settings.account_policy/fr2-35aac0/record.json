@@ -1,0 +1,208 @@
+{
+  "record_kind": "original_independent_core_namespace_audit",
+  "locale": "fr",
+  "namespace": "wire.settings.account_policy",
+  "audit_date": "2026-11-03T13:39:23.290202+00:00",
+  "key_count": 14,
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+  "target_sha256": "f998c7a608a0023275a39f4c75ff7db65d107924c78db3907c7d0a28b2d30744",
+  "status": "passed",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "35aac0a677bc",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model": "openai/gpt-6.1-sol",
+    "actual_model_source": {
+      "kind": "completed_persisted_assistant_usage",
+      "artifact": "provenance.json",
+      "entry_ids": [
+        "fafdebf718194ee089e1b9f3f0c66030",
+        "fec5cd8e718d4e26bb3e04b47c9a35af"
+      ],
+      "fields": [
+        "payload.usage.provider",
+        "payload.usage.model_id"
+      ]
+    },
+    "date": "2026-11-03",
+    "result": "passed",
+    "findings": 0,
+    "independent_from_translator_session": "7b2ba4ed501d",
+    "independent_from_coder_session": "196c3a94b346",
+    "independence_attestation": "This session authored no source/target/context changes, is distinct from translator/coder, and inspected no other independent reader report.",
+    "actual_fallback_disclosure": "Actual served model is openai/gpt-6.1-sol, not requested/configured Anthropic header. No claim of no fallback; usage is authoritative for this audit."
+  },
+  "audit_pass": "second_independent_high_visibility_reader",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7b2ba4ed501d",
+    "model": "openai/gpt-6.1-sol",
+    "model_source": "Translator packet record.json; named source, not independently asserted from its usage transcript",
+    "record_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-account-policy-0e7cde33/record.json",
+    "record_sha256": "1f5d0497cc65ed8efc9555fd7de9454e761b925a1dddd22af6907db0d816a853"
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.account_policy.json",
+      "commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+      "retained_path": "catalogues/en/wire.settings.account_policy.json",
+      "sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25"
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-account-policy-0e7cde33/wire.settings.account_policy.json",
+      "retained_path": "catalogues/fr/wire.settings.account_policy.json",
+      "sha256": "f998c7a608a0023275a39f4c75ff7db65d107924c78db3907c7d0a28b2d30744"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/account-policy-context-backfill/local_operator/i18n/catalogues/en/wire.settings.account_policy.context.json",
+      "retained_path": "catalogues/en/wire.settings.account_policy.context.json",
+      "sha256": "2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02",
+      "role": "corrected_context_actually_audited"
+    },
+    "translator_input_context": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-account-policy-0e7cde33/inputs/en.context.json",
+      "retained_path": "translator-original-context.json",
+      "sha256": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254",
+      "role": "original_context_used_by_translator_not_replaced_or_relabelled"
+    },
+    "style_guide": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-account-policy-0e7cde33/inputs/fr.md",
+      "retained_path": "style-fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226"
+    },
+    "glossary": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-account-policy-0e7cde33/inputs/glossary.md",
+      "retained_path": "glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "context_reconciliation": {
+    "only_note_fields_changed": 14,
+    "all_other_fields_unchanged": true,
+    "english_values_unchanged": true,
+    "translation_under_new_context_claimed": false,
+    "evidence": "input-verification.json"
+  },
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "findings": [],
+  "audit_report": {
+    "path": "audit-report.md",
+    "sha256": "60735a0cf6926d7bfb6f275b1718b6d1dad8b640f0a3c786e5a0532610e04a35"
+  },
+  "audit_notes_not_execution_log": {
+    "linguistic_assessment": "audit-report.md: Per-key independent linguistic assessment",
+    "execution_proof": "mechanical-clean-env.json and verify.py; source inspection is separately labelled, not runtime proof."
+  },
+  "execution": {
+    "command": "for name in ${!CMUX_@}; do unset \"$name\"; done; cd ~/local-operator; env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B \"$LOCAL_OPERATOR_SCRATCHPAD/fr-account-policy-second-0e7cde33/verify.py\"",
+    "exit_code": 0,
+    "memory_mb": 512,
+    "timeout_seconds": 60,
+    "core_validator_problems": 0,
+    "independent_negative_controls_rejected": 5,
+    "mechanical_stdout": "mechanical-clean-env.json",
+    "mechanical_stderr": "mechanical-clean-env.stderr.log",
+    "pseudo": "NOT RUN",
+    "rtl_rendering": "NOT RUN",
+    "native_app_fit": "NOT RUN",
+    "real_requests": "NOT RUN",
+    "design": "NOT RUN"
+  },
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "scope_limits": [
+    "14-key new core namespace only; no UI receipt schema",
+    "Read-only repo/target/ledger; no posts, commits, pushes or activation claim",
+    "Pseudo/RTL/native/design/runtime are separate pending gates, not inferred from Rich widths",
+    "Original scratch bundle retained for coordinator canonical tracked retention; not claimed on main"
+  ],
+  "retention": {
+    "state": "original_scratch_packet_pending_coordinator_tracking",
+    "canonical_destination_suggestion": "i18n/audits/evidence/fr/wire.settings.account_policy/fr2-35aac0/",
+    "ledger_written": false
+  },
+  "note": "Second independent fr reader: 14/14 linguistic/mechanical pass; 0 unresolved blocker/major. Corrected context and original translator context both bound; native/design/pseudo gates NOT RUN.",
+  "artifacts": [
+    {
+      "path": "audit-report.md",
+      "sha256": "60735a0cf6926d7bfb6f275b1718b6d1dad8b640f0a3c786e5a0532610e04a35",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "caller-source-proof.json",
+      "sha256": "49eb5c6f981d4ab10bfed635c774f4e1b59e1bc71f516eb7696c44f1568643d4",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "catalogues/en/wire.settings.account_policy.context.json",
+      "sha256": "2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "catalogues/en/wire.settings.account_policy.json",
+      "sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "catalogues/fr/wire.settings.account_policy.json",
+      "sha256": "f998c7a608a0023275a39f4c75ff7db65d107924c78db3907c7d0a28b2d30744",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "input-verification.json",
+      "sha256": "dd2833d4cfdc69b08c9074cb463eac0e2b0a7d15aa12f8d55ae2bb02932aef3c",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "mechanical-clean-env.json",
+      "sha256": "af9944f5638789e0c53062f7a7533c2e72d5540cacbb12679afbddf5a1aa5729",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "mechanical-clean-env.stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "mechanical.json",
+      "sha256": "af9944f5638789e0c53062f7a7533c2e72d5540cacbb12679afbddf5a1aa5729",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "mechanical.stderr.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "provenance.json",
+      "sha256": "cfe94f33c0663dc015ea56a973a2bba2a90e111bce0e1938a4e97b1aa44a4c7a",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "style-fr.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "translator-original-context.json",
+      "sha256": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254",
+      "provenance_reference": "record.json:auditor"
+    },
+    {
+      "path": "verify.py",
+      "sha256": "c958dbc39b0488df0d79891abd62eb5d1bca0aedb8359d6b7c9864c64a0ba3a1",
+      "provenance_reference": "record.json:auditor"
+    }
+  ]
+}

@@ -1,0 +1,89 @@
+[run_bounded] memory budget 512 MiB (explicit); sampled owned child group only
+local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
+FF..                                                                     [100%]
+=================================== FAILURES ===================================
+____ test_account_policy_refusals_use_backend_language_without_mutation[fr] ____
+
+language = 'fr'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1090af440>
+
+    @pytest.mark.parametrize("language", ["fr", "zh-CN", "en", "unknown"])
+    def test_account_policy_refusals_use_backend_language_without_mutation(language, monkeypatch):
+        """A translated GET must not be followed by English-only PATCH refusals.
+    
+        Use the registered app/login rather than a helper-only formatter: missing
+        locale at the daemon boundary was invisible to catalogue parity checks.
+        """
+        monkeypatch.setenv("LOP_LANG", "en")
+        root = config_dir()
+        manager = ConfigManager(root)
+        manager.set_config_value("language", language)
+        locale = resolve_language()
+        assert locale == ("en" if language == "unknown" else language)
+        api = client()
+        path = root / CONFIG_FILE_NAME
+        before = path.read_bytes()
+        anonymous = TestClient(build_app(MobileDaemon(port=0, password="synthetic-routing-password")))
+        assert anonymous.patch(URL, content="{").status_code == 401
+        denied = api.patch(URL, content="{", headers={"Origin": "https://evil.example"})
+        assert denied.status_code == 403
+        for body, key in (("{", "invalid_json"), ('{"extra": 1}', "invalid_shape")):
+            response = api.patch(URL, content=body, headers={"Content-Type": "application/json"})
+            assert response.status_code == 422
+>           assert response.json() == {
+                "code": "invalid_setting",
+                "error": messages.render(f"wire.settings.account_policy.error.{key}", {}, locale=locale),
+            }
+E           AssertionError: assert {'code': 'inv...JSON object.'} == {'code': 'inv...est attendu.'}
+E             
+E             Omitting 1 identical items, use -vv to show
+E             Differing items:
+E             {'error': 'Expected a JSON object.'} != {'error': 'Un objet JSON est attendu.'}
+E             Use -v to get more diff
+
+tests/unit/mobile/test_account_routing_routes.py:132: AssertionError
+__ test_account_policy_refusals_use_backend_language_without_mutation[zh-CN] ___
+
+language = 'zh-CN'
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x1090afb00>
+
+    @pytest.mark.parametrize("language", ["fr", "zh-CN", "en", "unknown"])
+    def test_account_policy_refusals_use_backend_language_without_mutation(language, monkeypatch):
+        """A translated GET must not be followed by English-only PATCH refusals.
+    
+        Use the registered app/login rather than a helper-only formatter: missing
+        locale at the daemon boundary was invisible to catalogue parity checks.
+        """
+        monkeypatch.setenv("LOP_LANG", "en")
+        root = config_dir()
+        manager = ConfigManager(root)
+        manager.set_config_value("language", language)
+        locale = resolve_language()
+        assert locale == ("en" if language == "unknown" else language)
+        api = client()
+        path = root / CONFIG_FILE_NAME
+        before = path.read_bytes()
+        anonymous = TestClient(build_app(MobileDaemon(port=0, password="synthetic-routing-password")))
+        assert anonymous.patch(URL, content="{").status_code == 401
+        denied = api.patch(URL, content="{", headers={"Origin": "https://evil.example"})
+        assert denied.status_code == 403
+        for body, key in (("{", "invalid_json"), ('{"extra": 1}', "invalid_shape")):
+            response = api.patch(URL, content=body, headers={"Content-Type": "application/json"})
+            assert response.status_code == 422
+>           assert response.json() == {
+                "code": "invalid_setting",
+                "error": messages.render(f"wire.settings.account_policy.error.{key}", {}, locale=locale),
+            }
+E           AssertionError: assert {'code': 'inv...JSON object.'} == {'code': 'inv...: '应为JSON对象。'}
+E             
+E             Omitting 1 identical items, use -vv to show
+E             Differing items:
+E             {'error': 'Expected a JSON object.'} != {'error': '应为JSON对象。'}
+E             Use -v to get more diff
+
+tests/unit/mobile/test_account_routing_routes.py:132: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/mobile/test_account_routing_routes.py::test_account_policy_refusals_use_backend_language_without_mutation[fr]
+FAILED tests/unit/mobile/test_account_routing_routes.py::test_account_policy_refusals_use_backend_language_without_mutation[zh-CN]
+2 failed, 2 passed in 2.47s
+[run_bounded] contract=command-status rc=1 cause=child-exit cleanup=unknown invocation_id=5bd22298e2da49fea8c958fec251dfd6 completion=/Users/damian/.local-operator/sessions/eae0961e4e78/scratchpad/account-policy-home/config/run-bounded-runs/5bd22298e2da49fea8c958fec251dfd6.completion.json

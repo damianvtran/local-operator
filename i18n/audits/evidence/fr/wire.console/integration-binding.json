@@ -1,0 +1,35 @@
+{
+  "scope": "8-key ordinary console settings metadata; catalogue completeness only",
+  "source_sha256": "1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b",
+  "context_sha256": "453aadc8095e93122719cef9b8da2ed9f8b57170449804e6af716fe684ef2dd9",
+  "target_sha256": "7f499e6ab9f8db5c9953e6782357d4da38554ac89250f6fc6616b77069d4c8b2",
+  "translator": {
+    "session": "7b2ba4ed501d",
+    "actual_model": "openai/gpt-6.1-sol",
+    "source": "retained translation write/edit tool-call usage provenance"
+  },
+  "independent_readers": [
+    {
+      "session": "c44e0f808e48",
+      "model": "openai/gpt-6.1-sol",
+      "record": "i18n/audits/evidence/fr/wire.console/first-c44e0f808e48/record.json",
+      "record_sha256": "3a9d6303d128b87485bb221c033436b4a7c620dd8ea6201251ccb6a01b23fa63",
+      "verdict": "passed",
+      "unresolved_blocker_major": 0
+    },
+    {
+      "session": "35aac0a677bc",
+      "model": "openai/gpt-6.1-sol",
+      "record": "i18n/audits/evidence/fr/wire.console/second-35aac0a677bc/record.json",
+      "record_sha256": "8dc40065bd0cc0b5de606539ef302d3743b459723a2bc92caf4ec80d259fd766",
+      "verdict": "passed",
+      "unresolved_blocker_major": 0
+    }
+  ],
+  "not_run": [
+    "native rendered fit",
+    "pseudo",
+    "RTL"
+  ],
+  "native_note": "Two native French readers approved semantics including the 70-cell team help budget; retained, not re-executed here."
+}

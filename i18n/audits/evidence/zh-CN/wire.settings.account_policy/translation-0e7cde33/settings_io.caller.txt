@@ -1,0 +1,29 @@
+Pinned ref 0e7cde33ca8008d561e74f4aed774aa5f76ff7d5
+local_operator/settings_io.py:2358:     Setting(
+local_operator/settings_io.py:2359:         key="retry.accountSelectionPolicy",
+local_operator/settings_io.py:2360:         path=("retry", "accountSelectionPolicy"),
+local_operator/settings_io.py:2361:         section="failover",
+local_operator/settings_io.py:2362:         label=_t(_ap.label()),
+local_operator/settings_io.py:2363:         kind=Kind.ENUM,
+local_operator/settings_io.py:2364:         default=DEFAULT_ACCOUNT_SELECTION_POLICY,
+local_operator/settings_io.py:2365:         help=_t(_ap.help()),
+local_operator/settings_io.py:2366:         choices=(
+local_operator/settings_io.py:2367:             Choice(
+local_operator/settings_io.py:2368:                 "reset-soonest", _t(_ap.reset_soonest_label()), _t(_ap.reset_soonest_description())
+local_operator/settings_io.py:2369:             ),
+local_operator/settings_io.py:2370:             Choice("headroom", _t(_ap.headroom_label()), _t(_ap.headroom_description())),
+local_operator/settings_io.py:2371:             Choice("fair", _t(_ap.fair_label()), _t(_ap.fair_description())),
+local_operator/settings_io.py:2372:         ),
+local_operator/settings_io.py:2373:     ),
+local_operator/settings_io.py:2374:     Setting(
+local_operator/settings_io.py:2375:         key="retry.usageAwareAccountPick",
+local_operator/settings_io.py:2376:         path=("retry", "usageAwareAccountPick"),
+local_operator/settings_io.py:2377:         section="failover",
+local_operator/settings_io.py:2378:         label=_t(_ap.legacy_label()),
+local_operator/settings_io.py:2379:         kind=Kind.BOOL,
+local_operator/settings_io.py:2380:         default=True,
+local_operator/settings_io.py:2381:         help=_t(_ap.legacy_help()),
+local_operator/settings_io.py:2382:         choices=_bool_choices(
+local_operator/settings_io.py:2383:             _t(_ws.retry_usageawareaccountpick_choice_true_description()),
+local_operator/settings_io.py:2384:             _t(_ws.retry_usageawareaccountpick_choice_false_description()),
+local_operator/settings_io.py:2385:         ),

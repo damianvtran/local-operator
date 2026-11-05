@@ -87,7 +87,14 @@ def headless_tui_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterato
 
 @pytest.fixture
 def workspace(headless_tui_env: Path) -> Path:
-    """The directory a driven turn is allowed to write into."""
-    path = headless_tui_env / "workspace"
+    """Ordinary work is separate from the harness's protected state.
+
+    Putting user output beneath config made harmless script/evidence writes
+    state-root overwrites. The real guard correctly reviews those, consuming
+    the scripted provider's next response as a judge call instead of executing
+    the workflow this fixture is meant to exercise. Use a sibling directory;
+    do not disable the guard or change the tests' execution assertions.
+    """
+    path = headless_tui_env.parent / "workspace"
     path.mkdir(parents=True, exist_ok=True)
     return path

@@ -254,6 +254,11 @@ async def test_desktop_control_surface(headless_tui_env: Path, workspace: Path, 
                 "memory",
                 "mobile",
                 "network",
+                # `/sound` (notification-sound controls, #3433) is the TUI half
+                # of the shared `notifications.sound.*` setting; the desktop
+                # edits the same keys in its own Sounds settings section, so a
+                # slash destination would be a second, adapter-less surface.
+                "sound",
                 # The completion-receipt listing, formerly `/notifications`
                 # (decision D2): still withheld, for the reason that row gave.
                 # `/notifications` itself now NAVIGATES to the Notifications page.

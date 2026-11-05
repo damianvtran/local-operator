@@ -4542,6 +4542,10 @@ class Session:
         self._context_tokens_hint: int | None = (
             self._last_usage.context_tokens if self._last_usage is not None else None
         )
+        # Which guardrail loosenings an operator authorised in this process (see
+        # ``_apply_config_change``). Empty at boot on purpose: a value already in
+        # config.yml cannot prove who wrote it.
+        self._guard_authorised_loosenings: set[str] = set()
         self._last_activity_ms: int = 0  # epoch ms; drives idle-flush pruning
         self._generation = 0  # monotonic turn counter for agent_start/end
         # Boundary-event suppression across a post-compaction continuation:
@@ -8582,7 +8586,20 @@ class Session:
         complete = getattr(self.agent_registry, "require_complete_metadata", None)
         if complete is not None:
             complete()
-        return resolve_profile_or_specialist(name, registry=self.agent_registry)
+        kind, profile, prompt, display = resolve_profile_or_specialist(
+            name, registry=self.agent_registry
+        )
+        # A stale registered engineering role attached here (``/agent`` or a
+        # team's manager) runs its old prompt in THIS session exactly like a
+        # stale child would, so it gets the same delivery pointer the child
+        # launch path adds. Both callers only stamp the brief from the
+        # profile; neither writes it back to the row, so the stored text stays
+        # the operator's (see ``with_delivery_pointer``).
+        if kind == "role" and profile is not None:
+            from local_operator.agent_profiles import with_delivery_pointer
+
+            profile = with_delivery_pointer(profile)
+        return kind, profile, prompt, display
 
     def attach_agent_profile(self, name: str) -> str | None:
         """Attach a named role/specialist's instructions to THIS session.
@@ -19729,6 +19746,11 @@ class Session:
                 # so a subagent's calls cannot contaminate this session's hint;
                 # see ``LoopConfig.get_context_tokens_hint``.
                 get_context_tokens_hint=lambda: self._context_tokens_hint,
+                # The guardrail's forked judge: one context-free errand call (see
+                # ``_guard_judge``) — deliberately not ``complete_aside``, which
+                # ships the live conversation the judge must not be primed by.
+                guard_judge=self._guard_judge,
+                guard_override_authorised=lambda: frozenset(self._guard_authorised_loosenings),
                 # The request render, not the bare one: the stored-location
                 # hints for the turn's images ride the wire from HERE and from
                 # ``_read_only_prompt`` — the same function, so the aside
@@ -26709,6 +26731,25 @@ class Session:
         spec = self._lowest_effort(self.effective_model)
         return await self._drain_errand(self._errand_request(spec, system, prompt))
 
+    async def _guard_judge(self, system: str, prompt: str) -> str:
+        """The guardrail judge's single model call (``local_operator.guardrails``).
+
+        CONTEXT-FREE by construction: one system block and one user message,
+        no tools, no transcript. Added after the 2026-11-04 state-root deletion,
+        whose command came out of a ~312k-token garbled unattended run; a judge
+        fed that transcript would inherit the confusion it is meant to catch,
+        and paying for it on every flagged call is slow. Runs on THIS
+        conversation's model (``guardrails.judge_model`` is not in v1) at the
+        lowest effort, through the errand request shape (isolated, token-capped,
+        tools-free) so a check cannot disturb the turn's routing state. Errors
+        propagate: the guardrail turns every failure into a block.
+        """
+        spec = self._lowest_effort(self.effective_model)
+        request = self._errand_request(spec, system, prompt).model_copy(
+            update={"purpose": "guardrail"}
+        )
+        return await self._drain_errand(request)
+
     def _errand_request(self, model: ModelSpec, system: str, prompt: str) -> ChatRequest:
         """The errand's request shape, in ONE place.
 
@@ -31429,6 +31470,23 @@ class Session:
         # conservative default: only the model branch below consults it, and
         # only to stay quiet about a write this process already reported.
         source = getattr(change, "source", "disk")
+        guard_keys = {k for k in changed if k.startswith("guardrails.")}
+        if guard_keys:
+            # Guardrail LOOSENINGS (the CRITICAL override, switching user rules
+            # off, repointing their folder — ``guardrails.check.LOOSENING_KEYS``)
+            # follow the approval gate's rule: honoured only for an operator write
+            # through this process's own settings facade, never for a file edit
+            # the model (or anything else) made (S5). Any other delivery of the
+            # key re-arms it. Boot-time contents are unattributable: none at boot.
+            from local_operator.guardrails.check import LOOSENING_KEYS
+            from local_operator.harness.approval import loosening_is_authorised
+
+            ok = loosening_is_authorised(source=source, gate_is_here=True)
+            for key in guard_keys & LOOSENING_KEYS:
+                if ok:
+                    self._guard_authorised_loosenings.add(key)
+                else:
+                    self._guard_authorised_loosenings.discard(key)
         if any(key.startswith("compaction.") for key in changed):
             # Same outcome as the factory's ``coerce_compaction_settings`` at
             # build (dict -> validated, invalid -> defaults, absent -> None,

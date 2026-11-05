@@ -286,6 +286,13 @@ _PATH_SHAPED = re.compile(r"^(?!\.\.?(?:/|$))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|$))
 #: the way the import list was. Every module with at least one candidate appears here, so
 #: "a module I did not think about" is itself a failing state.
 _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
+    "local_operator/guardrails/classify.py": (
+        4,
+        "_CONFIG_FILE, _SECRETS_DIRNAME, _SESSIONS_DIRNAME and _STATE_DIRNAME "
+        "name protected state-root paths used for static deletion classification, "
+        "not entries to copy within an individual session directory. In particular "
+        "sessions names the parent of session directories, not a session child.",
+    ),
     "local_operator/agent_avatar.py": (
         3,
         "``PNG_NAME``/``JPEG_NAME`` ('avatar.png', 'avatar.jpg'): an AGENT's picture, "
@@ -298,6 +305,24 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "(``.avatar.<sha12>.<size>.<ext>``), which lives beside that picture in the "
         "agent directory, never in a session directory, and is skipped by clone, "
         "export and import through the same ``.avatar.`` prefix rule",
+    ),
+    "local_operator/notifications/custom_sounds.py": (
+        1,
+        "``INDEX_FILE`` ('index.json'): the custom notification-sound index, which lives "
+        "ONLY at <config>/sounds/custom/index.json (``custom_sounds.store_root()``) beside "
+        "the user's <id>.wav files. It is never an entry of a session directory, so no "
+        "session copy carries it. It is machine-level by design: the sounds are the user's "
+        "own audio on this computer, selected by a machine-wide setting, and a moved or "
+        "forked session neither owns nor needs them.",
+    ),
+    "local_operator/notifications/sound.py": (
+        2,
+        "``THROTTLE_FILE`` ('notification-sound.last') and ``RECEIPT_FILE`` "
+        "('notification-sounds.jsonl'): the machine-wide notification-sound throttle "
+        "stamp and the NULL-backend QA receipt, both under <config>/run/ "
+        "(``sound.run_dir()``), never an entry of a session directory -- so no session "
+        "copy carries them. Both are machine-local by design: the throttle bounds sounds "
+        "on THIS computer's speakers",
     ),
     "local_operator/notifications/store.py": (
         1,
@@ -595,6 +620,23 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
     # same kind of value as a version tag. The module's real filenames
     # (``SKILL.md``, the archive name) are classified where they live, and no
     # constant here names an entry of a session directory.
+    # The org hub eligibility record and its refresh lock: install-level state
+    # under ``<config>/hub/`` (``record_path``/``_lock_path``), bound to this
+    # machine's sign-in and hub base URL, never an entry of a session directory.
+    "local_operator/hub_org/eligibility.py": (
+        2,
+        "``RECORD_NAME``/``LOCK_NAME`` ('org_catalogue.json', 'org_catalogue.lock'): the "
+        "org hub eligibility record and its refresh lock under ``<config>/hub/``, beside "
+        "``sessions/`` — install-level account state, never inside a session",
+    ),
+    # Bundle adoption's dot-prefixed aside is a sibling of a skill folder under
+    # ``<config>/skills/`` — the managed skill root, not a session directory.
+    "local_operator/hub_sync/service.py": (
+        1,
+        "``_ADOPT_ASIDE_PREFIX`` ('.adopt-'): the transient ``<config>/skills/.adopt-<alias>-"
+        "<hex>`` aside of a bundle adoption, inside the managed skill root beside "
+        "``sessions/``, never an entry of a session directory",
+    ),
     "local_operator/hub_sync/skill_bundle.py": (
         1,
         "``TREE_HASH_PREFIX``: the tree-hash domain separator, not a pathname",
@@ -982,9 +1024,11 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "session directory",
     ),
     "local_operator/tools/builtin.py": (
-        3,
+        4,
         "the ripgrep excludes file under the agent home, plus two HOST-id fragments "
-        "(``ui``/``bridge``) that name a front end inside a session id, never a filename",
+        "(``ui``/``bridge``) that name a front end inside a session id, and "
+        "``_RESERVED_NOTIFY_KEY_PREFIX`` ('team-bridge-'), an inbox-item KEY prefix the "
+        "notify tool refuses (B4b), never a filename",
     ),
     "local_operator/wakes/store.py": (1, "``wakes`` under the store root"),
     "local_operator/wakes/deliveries.py": (1, "``deliveries`` under ``wakes/``"),

@@ -389,6 +389,11 @@ _MAX_LINE_BYTES = 1 << 20
 #: busy inside a synchronous step of a turn is the case it exists for, and there
 #: the wait has no ceiling of its own — the parked hop is what measured 15.0 s.
 _ONLOOP_BIND_GRACE_S = 0.1
+# A remote viewer cannot replay the origin's disk when an off-loop bind omits
+# history. Give the owner a bounded chance to capture its negotiated window,
+# comfortably below the attach client's 15s bound; timeout uses bind_failed's
+# existing retry remedy and late-subscription cleanup, never a legacy welcome.
+_REMOTE_HISTORY_BIND_WAIT_S = 2.0
 
 
 def _frame_line_bytes(frame: dict[str, Any], *, payload: bytes | None = None) -> int:
@@ -4334,12 +4339,14 @@ class RuntimeServer:
           exception in the callback while the connection stayed registered, never
           read and never dropped. As a task it has an owner: the failure drops the
           connection and releases its subscription.
-        * **A busy owner does not hold the bind.** The on-loop bind is given
+        * **A busy local owner does not hold the bind.** The on-loop bind is given
           ``_ONLOOP_BIND_GRACE_S``; past it this task binds OFF-LOOP through
           ``subscribe_frontend_nowait`` and queues the sync without a display
           window. What that buys is the whole point of the path — measured 15.0 s
           of control attach against a blocked owner, for a bind whose register
-          half never needed that loop at all.
+          half never needed that loop at all. Negotiated remote history instead
+          keeps the owner-loop capture for a bounded wait: the windowless local
+          replay fallback is not valid on a different device's disk.
 
         ``subscribe_frontend`` arrives as a PARAMETER, resolved and
         capability-checked at the creation site: dropping a connection whose
@@ -4477,6 +4484,19 @@ class RuntimeServer:
             # a healthy owner answers in one digit of milliseconds (p50 4.7-5.0 ms
             # measured) and would never appear here at all.
             waited_ms = (time.perf_counter() - bind_started) * 1000.0
+            if subscription is None and window_requested and conn.locality == "remote":
+                # The local fast fallback intentionally has no display window.
+                # A remote viewer has no truthful durable-replay alternative:
+                # keep the original atomic snapshot/subscription, or fail this
+                # connection honestly while the owner keeps running. Shielding
+                # lets the existing failure/cancel cleanup release a late bind.
+                try:
+                    subscription = await asyncio.wait_for(
+                        asyncio.shield(bind_task), _REMOTE_HISTORY_BIND_WAIT_S
+                    )
+                except asyncio.CancelledError:
+                    self._release_when_landed(bind_task)
+                    raise
             if subscription is None:
                 bind_off_loop = getattr(self._handle, "subscribe_frontend_nowait", None)
                 if not callable(bind_off_loop):

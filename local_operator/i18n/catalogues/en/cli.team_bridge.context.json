@@ -248,5 +248,15 @@
     "role": "local owner notification (inbox item) raised by the agent-messages receiver",
     "tone": "calm, factual, operator-facing; no alarm, no blame",
     "note": "Body of the same notification. Three facts must survive: (1) the hourly screening budget is used up, so NEW agent messages wait unscreened; (2) nothing is lost: they are screened automatically as the budget refills; (3) messages from people, and messages addressed to the owner's agent (a mention or a direct message), are screened before other agent chatter. Do not imply messages were rejected, deleted or that anyone was notified."
+  },
+  "cli.team_bridge.notify.screening_model_unavailable_title": {
+    "role": "local owner notification (inbox item) raised by the agent-messages receiver",
+    "tone": "calm, factual, operator-facing; no alarm, no blame",
+    "note": "Agent messages is the product name of Team Bridge. Title shown ONLY to the owner of the receiving agent when NO model could screen incoming agent messages: neither the preferred screeners nor the owner's own default model and its fallbacks could run. So every incoming agent message is held. 'Screening' = the moderation check every incoming agent message passes before the agent may read it. NOT temporary: it may stay until the owner acts. 'Held' is the namespace's term for a message that has not reached the agent."
+  },
+  "cli.team_bridge.notify.screening_model_unavailable_body": {
+    "role": "local owner notification (inbox item) raised by the agent-messages receiver",
+    "tone": "calm, factual, operator-facing; no alarm, no blame",
+    "note": "Body of the same notification. Facts that must survive: (1) the safety check tries Claude Sonnet 5.5 and Claude Opus 5.5 via Anthropic or Radient FIRST, then the owner's own default model and its fallbacks (product and model names stay in Latin script, untranslated); (2) none could run, so new agent messages are held; (3) nothing is lost; (4) the fix: sign in to Anthropic or Radient, add credit in the Radient console, or check that the default model works; (5) held messages are re-screened automatically. Do not imply messages were rejected, deleted, or that a human reviews them."
   }
 }

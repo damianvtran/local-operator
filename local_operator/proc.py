@@ -76,6 +76,24 @@ def spawn_detached(
     labelled ``argv[0]`` is not free (see :func:`procname.spawn_identity`), so a
     caller can set it unconditionally.
     """
+    return spawn_detached_child(argv, cwd=cwd, env=env, label=label) is not None
+
+
+def spawn_detached_child(
+    argv: Sequence[str],
+    *,
+    cwd: str | None = None,
+    env: Mapping[str, str] | None = None,
+    label: str | None = None,
+) -> "subprocess.Popen[bytes] | None":
+    """:func:`spawn_detached`, handing back the started child (``None`` on failure).
+
+    For the one kind of caller that must be able to STOP what it started: a
+    notification-sound audition, where a newer preview supersedes the one
+    still playing (``notifications.sound.preview``). The child is still reaped
+    off-thread, so holding the handle never makes it a zombie; the caller may
+    only signal it. Same never-raises contract as :func:`spawn_detached`.
+    """
     launch = list(argv)
     executable: str | None = None
     if label and launch:
@@ -110,9 +128,9 @@ def spawn_detached(
         # surface as an error in a session, because the user asked for a task
         # and not for a toast (or a window).
         logger.debug("detached spawn failed: %s", list(argv)[:1], exc_info=True)
-        return False
+        return None
     _reap_in_background(child)
-    return True
+    return child
 
 
 def _reap_in_background(child: subprocess.Popen[bytes]) -> None:

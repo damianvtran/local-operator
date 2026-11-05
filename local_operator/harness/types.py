@@ -1272,7 +1272,7 @@ def _omit_unset_usage_stamp(data: dict[str, Any]) -> dict[str, Any]:
     invisibly, until the attach frame crosses its 1 MiB socket line limit again
     (review round 1, MINOR 2).
     """
-    for field in ("at_ms", "billing_basis"):
+    for field in ("at_ms", "billing_basis", "openai_service_tier"):
         if data.get(field) is None:
             data.pop(field, None)
     if not data.get("openai_long_context"):
@@ -1343,6 +1343,10 @@ class Usage(BaseModel):
     # unknown legacy/gateway receipts stay false. Omitted when false to avoid
     # adding bytes to every usage on the bounded attach frame.
     openai_long_context: bool = False
+    # Only first-party dispatches can identify this tier. None is legacy or
+    # unrelated; "unknown" means a qualifying call had no trustworthy terminal
+    # tier. Persist it per call so a fold cannot turn uncertainty into a price.
+    openai_service_tier: Literal["default", "fast", "unknown"] | None = None
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
@@ -3512,6 +3516,11 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
     #: Zero means "nothing held back" and is OMITTED on the wire like the fields
     #: above, so a beat from a turn inside the bound stays byte-identical.
     sounds_more: int = 0
+    #: The row's withheld notice (``SupplementWithheld`` dicts) and its cut, on the
+    #: same beats as ``files``: without them a live done beat restated "nothing
+    #: withheld" over the durable row and the notice vanished until a reload.
+    withheld: list[dict[str, Any]] = Field(default_factory=list)
+    withheld_more: int = 0
     model: str = ""
     model_source: str = ""
     attempts: list[str] = Field(default_factory=list)
@@ -3525,7 +3534,16 @@ class SupplementProgressEvent(AgentEvent[Literal["supplement_progress"]]):
     ) -> dict[str, Any]:
         """Old event fixtures remain byte-identical when no new facts were observed."""
         value = handler(self)
-        for key in ("model", "model_source", "attempts", "detail", "sounds", "sounds_more"):
+        for key in (
+            "model",
+            "model_source",
+            "attempts",
+            "detail",
+            "sounds",
+            "sounds_more",
+            "withheld",
+            "withheld_more",
+        ):
             if not value.get(key):
                 value.pop(key, None)
         return value
@@ -3856,6 +3874,21 @@ class LoopConfig(BaseModel):
     # SessionStreamFn reconciles admission against its conversation-owned
     # counted boundary; this scalar alone cannot authorize an input budget.
     get_context_tokens_hint: Callable[[], int | None] | None = Field(default=None, exclude=True)
+
+    # The pre-execution guardrail's forked judge (``local_operator.guardrails``):
+    # ``(system, user) -> answer`` as ONE context-free model call, no tools and
+    # no conversation. Added after the 2026-11-04 state-root deletion: calls the
+    # classifier ranks dangerous-but-plausible are reviewed here before they
+    # run. ``None`` (a host without wiring) means every such call is BLOCKED —
+    # fail closed; CRITICAL calls are refused without consulting it at all.
+    guard_judge: Callable[[str, str], Awaitable[str]] | None = Field(default=None, exclude=True)
+    # Which guardrail LOOSENINGS (``guardrails.check.LOOSENING_KEYS``) an
+    # operator — not the model — authorised in this process (``harness.approval.
+    # loosening_is_authorised``). Read per call; ``None`` means none. A bare
+    # bool is accepted as the critical-override-only spelling.
+    guard_override_authorised: Callable[[], "frozenset[str] | bool"] | None = Field(
+        default=None, exclude=True
+    )
 
     interrupt_mode: Literal["immediate", "wait"] = "wait"
     # Epoch-ms deadline for the whole run, if any.

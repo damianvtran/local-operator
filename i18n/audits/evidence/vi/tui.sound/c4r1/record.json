@@ -1,0 +1,89 @@
+{
+  "schema": 1,
+  "locale": "vi",
+  "namespace": "tui.sound",
+  "audit_id": "c4r1",
+  "source_audit_revision": "27695a49855fc4ddae0450af5e215346ce5b66b5",
+  "source_sha256": "0d23d23b34918c3bdb003afbf6ba6f2694316a7c55214142428185956e4fa578",
+  "context_sha256": "3bc8a3a4afd9c9aefd1e0293861c4b015367e36d203659f4a95cf7a6bac158ee",
+  "target_sha256": "a15e471554c3aed15ad8b6c38e5cf865430bbd443d9bd25937d9b9b71ef2066c",
+  "input_draft_sha256": "a15e471554c3aed15ad8b6c38e5cf865430bbd443d9bd25937d9b9b71ef2066c",
+  "translator": {
+    "agent": "notif-sounds-C4-tui",
+    "job": "16bed17d35eb",
+    "session": "e87ab06e319f",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-04",
+    "provenance": "Manager supplied author-draft copy and identity in this session"
+  },
+  "auditor": {
+    "agent": "C4-i18n-audit",
+    "session": "796c1db4d0d0",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-04",
+    "fallback_used": false
+  },
+  "status": "passed",
+  "unresolved_blocker_major": 0,
+  "reviewed_keys": [
+    "tui.sound.added",
+    "tui.sound.added_selected",
+    "tui.sound.default",
+    "tui.sound.disabled",
+    "tui.sound.enabled",
+    "tui.sound.id_help",
+    "tui.sound.list_title",
+    "tui.sound.list_yours",
+    "tui.sound.not_found",
+    "tui.sound.off",
+    "tui.sound.on",
+    "tui.sound.preview_failed",
+    "tui.sound.preview_muted",
+    "tui.sound.preview_playing",
+    "tui.sound.preview_silent",
+    "tui.sound.preview_ssh",
+    "tui.sound.preview_system",
+    "tui.sound.read_failed",
+    "tui.sound.removed",
+    "tui.sound.renamed",
+    "tui.sound.save_failed",
+    "tui.sound.selected",
+    "tui.sound.slash",
+    "tui.sound.status",
+    "tui.sound.usage",
+    "tui.sound.volume_range",
+    "tui.sound.volume_set"
+  ],
+  "key_count": 27,
+  "style_decisions": "Bạn where needed, generally omitted; âm thanh thông báo; cài đặt; invariant units and NFC.",
+  "corrections": {},
+  "checks": {
+    "keys": 27,
+    "runtime_rendered": 27,
+    "slash_cells": 51,
+    "placeholder_and_technical_parity": "passed",
+    "bidi_storage": "logical, no controls",
+    "nfc": "passed",
+    "plural_messages": 0
+  },
+  "evidence_files": [
+    "receipt.json",
+    "report.md",
+    "render.svg",
+    "render.png"
+  ],
+  "shared_evidence": "i18n/audits/tui-sound-c4r1/audit-evidence.json",
+  "current_bytes_match_audited_hashes": true,
+  "limitations": [
+    "Not the live terminal; no native Arabic shaping/bidi certification. Urdu raster visibly degraded as documented.",
+    "Not a /settings page interaction audit; help copied through transcript paint for this linguistic audit.",
+    "No speakers or real audio, no remote/cmux sessions. The preview call is system no-op; null backend as defence in depth.",
+    "No viewport or full application design sign-off; header animation differs between locale captures."
+  ],
+  "input_hashes": {
+    "local_operator/i18n/catalogues/en/tui.sound.json": "0d23d23b34918c3bdb003afbf6ba6f2694316a7c55214142428185956e4fa578",
+    "local_operator/i18n/catalogues/en/tui.sound.context.json": "3bc8a3a4afd9c9aefd1e0293861c4b015367e36d203659f4a95cf7a6bac158ee",
+    "i18n/glossary.md": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+    "i18n/style-guides/vi.md": "e4901497ed553e2b2ae4a2660bf776adb787b89e11d7eb0f8d08f3da4b227888"
+  }
+}

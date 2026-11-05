@@ -78,6 +78,9 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.notices",
         "wire.settings",
         "wire.settings.hub_defaults",
+        # The org Agent Hub section (Radient Team only) is its own child so its
+        # copy never moves the audited wire.settings locale hashes.
+        "wire.settings.hub_org",
         # Account-routing policy copy is an approved English-only child, not
         # an edit to the already-audited wire.settings or translated ledgers.
         "wire.settings.account_policy",
@@ -101,6 +104,10 @@ def test_shipped_wire_namespaces_exist() -> None:
         "wire.tunnel_setup",
         # Memory settings copy (LOH-25): the registry rows resolve through it.
         "wire.memory",
+        # Notification sounds (#3398): the settings section, rows, the built-in
+        # sound names and `lop sound` help, in its own namespace so the audited
+        # wire.settings hashes are untouched.
+        "wire.notification_sound",
         # The tier-1 remote-compute CLI copy is its own English-only namespace,
         # the `wire.host_speed` shape: `lop exec --remote` adds keys to `wire.exec`,
         # which fr/hi/vi CARRY, and an English edit to a carried namespace
@@ -128,6 +135,10 @@ def test_shipped_wire_namespaces_exist() -> None:
         # receipts are new copy, and adding them to a namespace fr/hi/vi CARRY
         # would invalidate those locales' ledger rows.
         "wire.sessions",
+        # The guardrail settings rows (dangerous-delete guardrail PR): their own
+        # English-only namespace, the `wire.host_speed` shape, so no audited
+        # catalogue's hash moves; the seven locales land with their audit wave.
+        "wire.guardrails",
     }
     for namespace in _PENDING_EXTRACTION:
         assert catalogues.load_catalogue("en", namespace) == {}

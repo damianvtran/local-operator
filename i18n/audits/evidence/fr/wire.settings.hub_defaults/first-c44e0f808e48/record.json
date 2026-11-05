@@ -1,0 +1,143 @@
+{
+  "locale": "fr",
+  "namespace": "wire.settings.hub_defaults",
+  "audit_date": "2026-11-03",
+  "key_count": 9,
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "c44e0f808e48",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "7b2ba4ed501d",
+    "independent_from_coder_session": "eae0961e4e78",
+    "actual_model_source": {
+      "kind": "own_completed_assistant_usage",
+      "artifact": "served-model-evidence.json",
+      "message_id": "fa8c3f7a5e8943c38c20693a0bbf019f",
+      "provider": "openai",
+      "model_id": "gpt-6.1-sol",
+      "fallback_disclosure": "Earlier run disclosed temporary quota fallback. Current served identity is derived from own completed usage, not header; no no-fallback claim."
+    }
+  },
+  "input_hashes": {
+    "en": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:local_operator/i18n/catalogues/en/wire.settings.hub_defaults.json",
+      "snapshot": "en.json",
+      "sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c"
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-hub-defaults-0e7cde33/wire.settings.hub_defaults.json",
+      "snapshot": "fr.json",
+      "sha256": "9733a2653109b4e5b30964d0bbc9fb5974fe799bb086ce8d21354517d1936940"
+    },
+    "context": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:local_operator/i18n/catalogues/en/wire.settings.hub_defaults.context.json",
+      "snapshot": "context.json",
+      "sha256": "a337e7394f3856476044f9accdb8daeb7a864a9a8ecfe0c579ec97ec646712ba"
+    },
+    "style_guide": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:i18n/style-guides/fr.md",
+      "snapshot": "fr-style.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    "translator_style_guide": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-hub-defaults-0e7cde33/inputs/fr.md",
+      "snapshot": "translator-fr-style.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226"
+    },
+    "glossary": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:i18n/glossary.md",
+      "snapshot": "glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "artifacts": [
+    {
+      "path": "audit.log",
+      "sha256": "996e95b7f18341eef5c52a92f9473c78c1a974432ba0be09d22b53d30f45df37"
+    },
+    {
+      "path": "audit.py",
+      "sha256": "b88fe9693e98ec2ed52704ed52414b602e840f44fefdb447fce1af4b64a543c5"
+    },
+    {
+      "path": "context.json",
+      "sha256": "a337e7394f3856476044f9accdb8daeb7a864a9a8ecfe0c579ec97ec646712ba"
+    },
+    {
+      "path": "en.json",
+      "sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c"
+    },
+    {
+      "path": "fr-style.md",
+      "sha256": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7"
+    },
+    {
+      "path": "fr.json",
+      "sha256": "9733a2653109b4e5b30964d0bbc9fb5974fe799bb086ce8d21354517d1936940"
+    },
+    {
+      "path": "glossary.md",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    },
+    {
+      "path": "original-packet-manifest.json",
+      "sha256": "4ecf82a9ccd8abedcf568f32c85e2571b3af24c9f7c0d70b47ef7fbd61091fa1"
+    },
+    {
+      "path": "preflight-style-mismatch.log",
+      "sha256": "b5b69b4f40186fdcc6f3d87adf8897988d054d555ee6364e4de8e38fd7e22ffb"
+    },
+    {
+      "path": "receipt.json",
+      "sha256": "8b64135367f33290938c18c51359e5359eb5ecbe52e6991faf430d9af4af5b70"
+    },
+    {
+      "path": "report.md",
+      "sha256": "0ecac78321b32141471bc5b920abbc33b5b8cd43c21975fc96fa10e02dd6473f"
+    },
+    {
+      "path": "served-model-evidence.json",
+      "sha256": "b3e30cef1f8b6ab35ca256d89793fabd4d214620f8239017871318de9feb4fae"
+    },
+    {
+      "path": "translator-fr-style.md",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226"
+    },
+    {
+      "path": "widths.json",
+      "sha256": "6e9262e8916d7475b566d373e917c03829f5c5ecf0243ecc3440b1bb2c964849"
+    }
+  ],
+  "current_report_verdict": {
+    "status": "passed",
+    "unresolved_blocker_major_count": 0,
+    "finding_ids": []
+  },
+  "severity_counts": {
+    "blocker": 0,
+    "major": 0,
+    "minor": 0,
+    "nit": 0
+  },
+  "evidence_types": {
+    "report.md": "audit_notes_not_execution_log",
+    "audit.log": "actual_execution_log",
+    "widths.json": "actual_rich_cell_len_results",
+    "served-model-evidence.json": "own_completed_usage_extract"
+  },
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "style_snapshot_difference": "Only unrelated relay.chrome recorded width exception absent in translator snapshot; both retained; no relevant normative-rule difference.",
+  "remaining_proof": [
+    "second_independent_reader",
+    "pseudo",
+    "native_rendered_fit",
+    "real_path_integration",
+    "design_UX"
+  ],
+  "original_packet_preserved": true,
+  "new_report_is_original": true,
+  "new_report_is_historical_R2_recreation": false,
+  "backdated": false,
+  "retention": "Original immutable session-scratch handoff; not on main. Coordinator owns tracked canonical retention.",
+  "no_activation_or_legacy_contract_waiver": true
+}

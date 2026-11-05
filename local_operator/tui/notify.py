@@ -126,7 +126,10 @@ import threading
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Callable, Literal, Mapping
+from typing import TYPE_CHECKING, Callable, Literal, Mapping
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; the sound module loads lazily
+    from local_operator.notifications.sound import SoundPlan
 
 from local_operator import terminals
 from local_operator.harness.rows import CLOSED_NOTICE_TEXT, RETIRED_NOTICE_TEXT
@@ -935,7 +938,20 @@ def osc99_id() -> str:
     return f"lo-{uuid.uuid4().hex[:12]}"
 
 
-def osc99_sequence(title: str, body: str, notification_id: str | None = None) -> str:
+#: kitty's ``s=`` value for "no sound must accompany the notification", base64
+#: of ``silent`` (the spec requires the sound name base64-encoded). Sent when lop
+#: plays its own notification sound, or when the user turned sound off, so the
+#: OS service's default sound does not play on top of (or instead of) lop's.
+OSC99_SILENT = "s=c2lsZW50"
+
+
+def osc99_sequence(
+    title: str,
+    body: str,
+    notification_id: str | None = None,
+    *,
+    silent: bool = False,
+) -> str:
     """A structured OSC 99 notification: one payload for title, one for body.
 
     kitty's protocol chunks a notification by id: metadata rides on the first
@@ -952,9 +968,11 @@ def osc99_sequence(title: str, body: str, notification_id: str | None = None) ->
     and plain payloads stay readable in a terminal capture.
     """
     nid = notification_id or osc99_id()
+    # `s=` is metadata, so it rides the FIRST chunk only, like `u=`.
+    meta = f"i={nid}:u=1:{OSC99_SILENT}" if silent else f"i={nid}:u=1"
     if not body:
-        return f"{OSC99_PREFIX}i={nid}:u=1;{title}{ST}"
-    return f"{OSC99_PREFIX}i={nid}:u=1:d=0;{title}{ST}" f"{OSC99_PREFIX}i={nid}:p=body;{body}{ST}"
+        return f"{OSC99_PREFIX}{meta};{title}{ST}"
+    return f"{OSC99_PREFIX}{meta}:d=0;{title}{ST}" f"{OSC99_PREFIX}i={nid}:p=body;{body}{ST}"
 
 
 def notification_sequence(
@@ -962,8 +980,14 @@ def notification_sequence(
     title: str,
     body: str,
     notification_id: str | None = None,
+    *,
+    silent: bool = False,
 ) -> str:
     """The in-band escape for one notification under ``protocol``.
+
+    ``silent`` only reaches OSC 99: OSC 9 has no sound field, and a BEL IS a
+    sound the terminal owns (it also raises tmux/Zellij pane flags), so neither
+    can be silenced from here. ``lop sound doctor`` names those cases.
 
     ``bell`` returns a bare BEL: it cannot carry text, and pretending otherwise
     by writing the words to stdout would paint them over the app's own frame.
@@ -973,7 +997,7 @@ def notification_sequence(
     if protocol == "osc99":
         # `notification_id` is injectable ONLY so a test can pin the wire; every
         # production caller leaves it None and gets a fresh id per notification.
-        return osc99_sequence(title, body, notification_id)
+        return osc99_sequence(title, body, notification_id, silent=silent)
     # OSC 9 has no title/body split — one line is all it takes. The title leads
     # because a notification centre truncates from the right, and which session
     # this is matters more than which of four fixed states it reached.
@@ -988,6 +1012,8 @@ def notification_writes(
     *,
     in_tmux: bool = False,
     in_zellij: bool = False,
+    silent: bool = False,
+    lop_plays_sound: bool = False,
 ) -> list[str]:
     """Everything that should be written to the terminal for one notification.
 
@@ -996,9 +1022,20 @@ def notification_writes(
     outer terminal may or may not receive, and the BEL that flags the pane
     regardless. Under ``bell`` the sequence IS a BEL, so no second one is added
     — a double ring for one event is a bug users report.
+
+    ``lop_plays_sound`` (lop is about to play its own notification sound)
+    DROPS the bare BEL on the ``bell`` protocol: Terminal.app, Windows Terminal
+    and unrecognised terminals. There the BEL is only an audible ping, and
+    lop's sound replaces it rather than ringing on top of it (review round 1,
+    M1; manager decision). Under tmux or Zellij the BEL is KEPT, because it is
+    the only thing that flags the pane, so the terminal's bell may still
+    sound beside lop's. ``lop sound doctor`` says so and names the fix
+    (the terminal's bell setting, or ``notifications.sound.id system``).
     """
-    sequence = notification_sequence(protocol, title, body)
+    sequence = notification_sequence(protocol, title, body, silent=silent)
     if protocol == "bell":
+        if lop_plays_sound and not (in_tmux or in_zellij):
+            return []
         return [sequence]
     if in_tmux:
         # Checked BEFORE Zellij, and correct when both are set (Zellij hosting
@@ -1195,6 +1232,84 @@ def detached_notify(
         return False
     if not desktop_belongs_to_this_process():
         return False
+    # THE SOUND RIDES THE BANNER (notification-sounds design §4.1): it plays
+    # only when a banner child was actually started, from the same call that
+    # won this process's delivery claim, so the existing one-banner-per-machine
+    # arbitration is the only arbitration. Resolved once so the notify-send
+    # hint and the sound read the same config.
+    plan = _sound_plan()
+    raised = _raise_detached_banner(title, body, session_id, subtitle, durable_click_s, plan)
+    if raised and plan is not None:
+        _play_sound(plan, "detached")
+    return raised
+
+
+def _sound_plan(env: EnvMap | None = None) -> "SoundPlan | None":
+    """The configured notification sound, or ``None`` when lop plays none here.
+
+    ``None`` means "behave exactly as before notification sounds existed": no
+    kitty ``s=silent``, no notify-send suppress hint, the BEL kept and nothing
+    played. Two cases return it.
+
+    - **Over SSH** (review round 2, R2-M1; manager decision): the player would
+      run on the REMOTE host, sounding on that machine's speakers (or nowhere,
+      if it is headless), while the BEL or OSC travels back to the user's local
+      terminal, which is their real signal. So lop plays nothing of its own on
+      any protocol, and the local terminal's notification sound applies.
+    - The plan cannot be read. Never raises: a banner path asked for a banner,
+      and a broken sound install must not take that away.
+    """
+    if terminals.is_ssh(env):
+        return None
+    try:
+        from local_operator.notifications.sound import resolve
+
+        return resolve()
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.debug("notification sound plan failed", exc_info=True)
+        return None
+
+
+def play_raised_banner_sound(leg: str, env: EnvMap | None = None) -> None:
+    """Play the configured sound for a banner a caller OUTSIDE this module raised.
+
+    The TUI's background-completion announcer spawns its own `cmux notify`
+    (``tui/app.py``, the digest and the per-session branch) rather than going
+    through :class:`Notifier` or :func:`detached_notify`, so without this those
+    two banners played cmux's default sound instead of the configured one
+    (parity addendum 2, G1). Same steps as ``Notifier._sound``: the plan (None
+    over SSH or on a broken install), the rig guard, then the player, which
+    applies ``enabled``, volume and the machine-wide throttle. Call it only
+    after the banner actually went out (rule 1). Never raises.
+    """
+    plan = _sound_plan(env)
+    if plan is None or not desktop_belongs_to_this_process():
+        return
+    _play_sound(plan, leg)
+
+
+def _play_sound(plan: "SoundPlan", leg: str) -> None:
+    try:
+        from local_operator.notifications.sound import play_for_banner
+
+        play_for_banner(leg, plan)
+    except Exception:  # noqa: BLE001 — a sound must never affect its caller
+        logger.debug("notification sound failed", exc_info=True)
+
+
+def _raise_detached_banner(
+    title: str,
+    body: str,
+    session_id: str,
+    subtitle: str,
+    durable_click_s: float | None,
+    plan: "SoundPlan | None",
+) -> bool:
+    """The platform ladder of :func:`detached_notify`; True when a child started."""
+    # macOS legs here (identity bundle, osascript) are silent already
+    # (`notifier.m` sets no `soundName`; osascript gets no `sound name`), so
+    # only notify-send needs the hint.
+    suppress = plan is not None and plan.mutes_host_sound
     try:
         if sys.platform == "darwin":
             # PREFER OUR OWN BUNDLE. macOS attributes a notification to the
@@ -1235,8 +1350,14 @@ def detached_notify(
         if session_id and _notify_send_supports_actions(
             notifier, block=durable_click_s is not None
         ):
-            return _spawn_detached_ok(_clickable_notify_command(notifier, title, body, session_id))
-        return _spawn_detached_ok(desktop_notify_command(notifier, title, body, URGENCY))
+            return _spawn_detached_ok(
+                _clickable_notify_command(
+                    notifier, title, body, session_id, suppress_sound=suppress
+                )
+            )
+        return _spawn_detached_ok(
+            desktop_notify_command(notifier, title, body, URGENCY, suppress_sound=suppress)
+        )
     except Exception:  # noqa: BLE001 — a toast must never affect its caller
         logger.debug("detached notification failed", exc_info=True)
         return False
@@ -1511,7 +1632,15 @@ def resume_click_command(session_id: str) -> list[str]:
     return [launcher, "resume-click", session_id]
 
 
-def _clickable_notify_command(notifier: str, title: str, body: str, session_id: str) -> list[str]:
+#: The freedesktop hint asking the notification server to play no sound of its
+#: own. Added when lop plays its own notification sound or sound is off (the
+#: same rule as kitty's ``s=silent``); servers that do not know it ignore it.
+SUPPRESS_SOUND_HINT = "--hint=boolean:suppress-sound:true"
+
+
+def _clickable_notify_command(
+    notifier: str, title: str, body: str, session_id: str, *, suppress_sound: bool = False
+) -> list[str]:
     """``notify-send`` argv whose default action reopens the session.
 
     ``--action=default=…`` makes the whole toast clickable (rather than
@@ -1529,6 +1658,7 @@ def _clickable_notify_command(notifier: str, title: str, body: str, session_id: 
             APP_NAME,
             f"--urgency={URGENCY}",
             "--expire-time=5000",
+            *([SUPPRESS_SOUND_HINT] if suppress_sound else []),
             "--action=default=Open session",
             "--",
             title or APP_NAME,
@@ -1541,7 +1671,12 @@ def _clickable_notify_command(notifier: str, title: str, body: str, session_id: 
 
 
 def desktop_notify_command(
-    notifier: str, title: str, body: str, urgency: str = URGENCY
+    notifier: str,
+    title: str,
+    body: str,
+    urgency: str = URGENCY,
+    *,
+    suppress_sound: bool = False,
 ) -> list[str]:
     """argv for the Linux D-Bus fallback through ``notify-send``.
 
@@ -1556,6 +1691,7 @@ def desktop_notify_command(
         APP_NAME,
         f"--urgency={urgency}",
         "--expire-time=5000",
+        *([SUPPRESS_SOUND_HINT] if suppress_sound else []),
         # `--` ends option parsing. The title is derived from a MODEL-WRITTEN
         # conversation name, and sanitisation strips control characters without
         # constraining the string's shape — so a session named `--help` or
@@ -1772,9 +1908,24 @@ class Notifier:
         house = BODIES.get(kind, BODY_COMPLETE)
         composed = body or house
 
+        # Resolved once per send, read fresh from config (LIVE scope): the OSC
+        # 99 / notify-send hints and the sound itself must agree.
+        plan = _sound_plan(self._env)
+        mute_host = plan is not None and plan.mutes_host_sound
+        # Whether lop's OWN sound will play for this banner: a file plan that
+        # clears the same rig guard `_sound` applies. Only then may the bare BEL
+        # be dropped; a refused or throttled-out play must not also lose it.
+        # The throttle is checked by the player and is deliberately not
+        # consulted here: a BEL suppressed within 1.5 s of another sound is
+        # the burst the throttle exists to stop.
+        lop_plays = plan is not None and plan.kind == "file" and desktop_belongs_to_this_process()
+
         surface = cmux_surface_id(self._env)
         if surface is not None and desktop_belongs_to_this_process():
             _spawn_detached(cmux_command(surface, title, subtitle, composed))
+            # cmux has its own `notifications.sound` setting and lop cannot set
+            # it per toast; `lop sound doctor` explains the double-sound fix.
+            self._sound(plan, "cmux")
             return True
 
         # THE OSC LEG KEEPS THE HOUSE SENTENCE, deliberately, and this is the
@@ -1794,6 +1945,8 @@ class Notifier:
             house,
             in_tmux=is_inside_tmux(self._env),
             in_zellij=is_inside_zellij(self._env),
+            silent=mute_host,
+            lop_plays_sound=lop_plays,
         ):
             self._write(chunk)
 
@@ -1812,5 +1965,23 @@ class Notifier:
         ):
             notifier = shutil.which("notify-send")
             if notifier:
-                _spawn_detached(desktop_notify_command(notifier, title, composed, URGENCY))
+                _spawn_detached(
+                    desktop_notify_command(
+                        notifier, title, composed, URGENCY, suppress_sound=mute_host
+                    )
+                )
+        self._sound(plan, "osc")
         return True
+
+    def _sound(self, plan: "SoundPlan | None", leg: str) -> None:
+        """Play the notification sound for the banner this send just raised.
+
+        Gated by the SAME live switch as the banner (``enabled``, which
+        includes ``LOCAL_OPERATOR_NO_NOTIFICATIONS``) and, for the
+        out-of-process player, by the rig guard even on the in-band leg (which
+        itself needs no guard): a redirected HOME is a run, not a person, and
+        the speakers are the user's just as the desktop is.
+        """
+        if plan is None or not desktop_belongs_to_this_process():
+            return
+        _play_sound(plan, leg)

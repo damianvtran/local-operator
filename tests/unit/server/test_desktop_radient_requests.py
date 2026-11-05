@@ -17,13 +17,14 @@ from local_operator.server.routes.desktop_radient import (
     RESEND_RATE_LIMITED,
     RadientRequest,
     _operation_params,
+    _operation_payload,
     _org_refusal_code,
     _upstream_refusal_for,
     endpoint,
 )
 
 
-def test_the_org_operations_are_exactly_the_documented_six() -> None:
+def test_the_org_operations_are_exactly_the_documented_set() -> None:
     """The dispatch set and the Literal's org entries cannot silently diverge."""
     assert ORG_OPERATIONS == frozenset(
         {
@@ -35,12 +36,19 @@ def test_the_org_operations_are_exactly_the_documented_six() -> None:
             # the same membership vocabulary as its siblings.
             "org_skills.list",
             "org_skill.get",
+            # The Team trial ops (design §9 Lane E).
+            "team_trial.eligibility",
+            "team_trial.start",
+            "team_trial.status",
         }
     )
-    assert set(_ORG_REFUSAL_MESSAGES) == {
+    assert set(_ORG_REFUSAL_MESSAGES) >= {
         "not_a_member",
         "insufficient_role",
         "team_plan_required",
+        "trial_not_eligible",
+        "terms_outdated",
+        "team_trial_ended",
     }
 
 
@@ -199,3 +207,117 @@ async def test_other_operations_keep_the_generic_429_reading() -> None:
 
     failure = await _upstream_refusal_for("agents.list", Response(), "token")
     assert _code(failure) == "radient_credential_refused"
+
+
+# --- team_trial.* (teams-trial design §3, Lane E) ------------------------------
+
+RID = "12345678-1234-1234-1234-123456789abc"
+TERMS = {"terms_version": "2026-07-29", "terms_accepted": True}
+
+
+def test_team_trial_ops_map_to_the_designed_routes() -> None:
+    assert endpoint(RadientRequest(operation="team_trial.eligibility")) == (
+        "GET",
+        "/team-trial/eligibility",
+    )
+    assert endpoint(RadientRequest(operation="team_trial.status", tenant_id="ten-1")) == (
+        "GET",
+        "/tenants/ten-1/team-trial",
+    )
+    start = RadientRequest(
+        operation="team_trial.start", tenant_id="ten-1", request_id=RID, payload=TERMS
+    )
+    assert endpoint(start) == ("POST", "/tenants/ten-1/team-trial")
+
+
+def test_team_trial_start_pins_source_lop_and_refuses_a_caller_source() -> None:
+    start = RadientRequest(
+        operation="team_trial.start",
+        tenant_id="ten-1",
+        request_id=RID,
+        payload={**TERMS, "org_name": "Acme"},
+    )
+    assert _operation_payload(start) == {**TERMS, "org_name": "Acme", "source": "lop"}
+    with pytest.raises(ValueError, match="Unsupported payload fields"):
+        RadientRequest(
+            operation="team_trial.start",
+            tenant_id="ten-1",
+            request_id=RID,
+            payload={**TERMS, "source": "site"},
+        )
+    # Every other op's payload travels verbatim.
+    other = RadientRequest(
+        operation="comments.create", agent_id="ag-1", request_id=RID, payload={"text": "x"}
+    )
+    assert _operation_payload(other) == {"text": "x"}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"terms_version": "2026-07-29"},  # no acceptance
+        {"terms_version": "2026-07-29", "terms_accepted": False},
+        # A truthy non-boolean is NOT consent.
+        {"terms_version": "2026-07-29", "terms_accepted": "true"},
+        {"terms_version": "2026-07-29", "terms_accepted": 1},
+        {"terms_accepted": True},  # no version
+        {"terms_version": "  ", "terms_accepted": True},
+        {**TERMS, "org_name": "   "},
+        {**TERMS, "org_name": "x" * 81},
+        {**TERMS, "org_name": 7},
+    ],
+)
+def test_team_trial_start_refuses_a_start_the_hub_could_only_refuse(payload) -> None:
+    with pytest.raises(ValueError):
+        RadientRequest(
+            operation="team_trial.start", tenant_id="ten-1", request_id=RID, payload=payload
+        )
+
+
+def test_team_trial_start_needs_a_request_id_and_a_tenant() -> None:
+    with pytest.raises(ValueError, match="request identifier"):
+        RadientRequest(operation="team_trial.start", tenant_id="ten-1", payload=TERMS)
+    with pytest.raises(ValueError, match="organization"):
+        RadientRequest(operation="team_trial.start", request_id=RID, payload=TERMS)
+    with pytest.raises(ValueError, match="organization"):
+        RadientRequest(operation="team_trial.status")
+    # An 80-character name (after trim) is the hub's own upper bound.
+    RadientRequest(
+        operation="team_trial.start",
+        tenant_id="ten-1",
+        request_id=RID,
+        payload={**TERMS, "org_name": " " + "x" * 80 + " "},
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "envelope", "expected"),
+    [
+        ("team_trial.start", {"code": "trial_not_eligible"}, "trial_not_eligible"),
+        ("team_trial.start", {"code": "terms_outdated"}, "terms_outdated"),
+        ("team_trial.start", {"code": "terms_required"}, "terms_required"),
+        ("team_trial.start", {"code": "rate_limited"}, "rate_limited"),
+        ("team_trial.start", {"code": "team_trial_unavailable"}, "team_trial_unavailable"),
+        ("team_trial.status", {"code": "not_a_member"}, "not_a_member"),
+        ("team_trial.status", {"code": "team_trial_ended"}, "team_trial_ended"),
+        # An org op reads the paused code too (the hub raises it at org seams)...
+        ("org_agents.list", {"code": "team_trial_ended"}, "team_trial_ended"),
+        # ...but the trial-only codes stay scoped: an existing org op's 429 keeps
+        # its old reading byte-for-byte.
+        ("org_agents.list", {"code": "rate_limited"}, None),
+        ("team_trial.start", {"code": "something_else"}, None),
+    ],
+)
+def test_team_trial_refusal_codes_are_carried(
+    operation: str, envelope: object, expected: str | None
+) -> None:
+    assert _org_refusal_code(operation, envelope) == expected
+
+
+def test_every_carried_code_has_a_desktop_sentence() -> None:
+    from local_operator.server.routes.desktop_radient import (
+        _ORG_REFUSAL_CODES,
+        _TEAM_TRIAL_REFUSAL_CODES,
+    )
+
+    assert set(_ORG_REFUSAL_MESSAGES) == _ORG_REFUSAL_CODES | _TEAM_TRIAL_REFUSAL_CODES

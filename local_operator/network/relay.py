@@ -448,6 +448,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "session_lifecycle",
         "session_receipt",
         "credential_grant",
+        "credential_catalogue",
         "credential_report",
         "credential_placement",
         "credential_revoke",
@@ -8075,6 +8076,11 @@ class RelayServer:
                     "pid": record.pid,
                     "kind": record.kind,
                     "capabilities": list(record.capabilities),
+                    # Publish the owner's runtime facts, not this relay's build.
+                    # Missing native inventory must remain unknown on old peers.
+                    "version": record.version,
+                    "source_ref": record.source_ref,
+                    "native_provider_ids": record.native_provider_ids,
                     "state": state,
                     "age_s": 0.0,
                     "placement": (

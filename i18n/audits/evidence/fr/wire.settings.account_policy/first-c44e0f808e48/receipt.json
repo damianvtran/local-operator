@@ -1,0 +1,59 @@
+{
+  "locale": "fr",
+  "namespace": "wire.settings.account_policy",
+  "audit_date": "2026-11-03",
+  "key_count": 14,
+  "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+  "target_sha256": "f998c7a608a0023275a39f4c75ff7db65d107924c78db3907c7d0a28b2d30744",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7b2ba4ed501d"
+  },
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "c44e0f808e48",
+    "instance": "c44e0f808e48",
+    "model": "openai/gpt-6.1-sol",
+    "independent_from_translator_session": "7b2ba4ed501d",
+    "independent_from_coder": true,
+    "actual_model_source": {
+      "kind": "own_completed_assistant_usage",
+      "artifact": "served-model-evidence.json",
+      "message_id": "54c636bf88db4c93870fb288aa8b4e68",
+      "provider": "openai",
+      "model_id": "gpt-6.1-sol",
+      "requested_header_not_used": true,
+      "fallback_disclosure": "Earlier run disclosed temporary quota fallback; current served model verified from completed usage, no no-fallback assertion."
+    },
+    "date": "2026-11-03",
+    "result": "passed",
+    "findings": 0
+  },
+  "status": "passed",
+  "finding_details": [],
+  "input_hashes": {
+    "en": {
+      "path": "git:0e7cde33ca8008d561e74f4aed774aa5f76ff7d5:local_operator/i18n/catalogues/en/wire.settings.account_policy.json",
+      "snapshot": "en.json",
+      "sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25"
+    },
+    "fr": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-account-policy-0e7cde33/wire.settings.account_policy.json",
+      "snapshot": "fr.json",
+      "sha256": "f998c7a608a0023275a39f4c75ff7db65d107924c78db3907c7d0a28b2d30744"
+    },
+    "context": {
+      "path": "/Users/damian/local-operator/.worktrees/account-policy-context-backfill/local_operator/i18n/catalogues/en/wire.settings.account_policy.context.json",
+      "snapshot": "audited_context.json",
+      "sha256": "2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02"
+    },
+    "translator_input_context": {
+      "path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-account-policy-0e7cde33/inputs/en.context.json",
+      "snapshot": "translator_context.json",
+      "sha256": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254"
+    }
+  },
+  "report": "report.md",
+  "record_reference": "record.json",
+  "note": "First independent linguistic/mechanical reader: 14/14 passed. Both original translator context and corrected audited context bound. Native/pseudo/RTL rendering NOT RUN; separate second-reader/integration gates remain."
+}

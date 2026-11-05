@@ -1,0 +1,22 @@
+PASS wire.settings.account_policy.label args=0 plurals=0 Cf=0 rich_cells=12 maxCells=29
+PASS wire.settings.account_policy.help args=0 plurals=0 Cf=0 rich_cells=258 maxCells=None
+PASS wire.settings.account_policy.reset_soonest.label args=0 plurals=0 Cf=0 rich_cells=8 maxCells=29
+PASS wire.settings.account_policy.reset_soonest.description args=0 plurals=0 Cf=0 rich_cells=104 maxCells=None
+PASS wire.settings.account_policy.headroom.label args=0 plurals=0 Cf=0 rich_cells=12 maxCells=29
+PASS wire.settings.account_policy.headroom.description args=0 plurals=0 Cf=0 rich_cells=88 maxCells=None
+PASS wire.settings.account_policy.fair.label args=0 plurals=0 Cf=0 rich_cells=8 maxCells=29
+PASS wire.settings.account_policy.fair.description args=0 plurals=0 Cf=0 rich_cells=64 maxCells=None
+PASS wire.settings.account_policy.legacy.label args=0 plurals=0 Cf=0 rich_cells=16 maxCells=29
+PASS wire.settings.account_policy.legacy.help args=0 plurals=0 Cf=0 rich_cells=175 maxCells=None
+PASS wire.settings.account_policy.error.unavailable args=0 plurals=0 Cf=0 rich_cells=16 maxCells=None
+PASS wire.settings.account_policy.error.invalid_shape args=0 plurals=0 Cf=0 rich_cells=19 maxCells=None
+PASS wire.settings.account_policy.error.invalid_json args=0 plurals=0 Cf=0 rich_cells=14 maxCells=None
+PASS wire.settings.account_policy.error.write_failed args=0 plurals=0 Cf=0 rich_cells=46 maxCells=None
+PASS stable literal true
+PASS stable literal false
+PASS stable literal value
+PASS stable literal JSON
+PASS negative control: invalid ICU rejected
+PASS negative control: injected argument rejected
+PASS width negative control: 15 CJK glyphs = 30 cells > 29
+RESULT PASS 14/14; scoped real core parser/render/argument/plural helpers only; no scanner/full suite

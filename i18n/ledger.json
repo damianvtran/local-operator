@@ -2973,6 +2973,358 @@
       "note": "Independent current-byte audit: i18n/audits/evidence/es/wire.tool_rows.bridge.skipped/rg6a1/record.json. 1M/0m/0n (ES-RG6-1), 0 unresolved blocker/major; 1 key(s) retranslated. Composed row+expanded checked; no native/rendered claim."
     },
     {
+      "locale": "es",
+      "namespace": "tui.update",
+      "source_sha256": "2d3f1a132c443c0894b99a3c064d7fa702a5a1334b4854953b2b09083fab12c3",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure)",
+        "session": "9615db04a717",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "340352200f28",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit, 4 new keys. No findings; 0 unresolved blocker/major. Target SHA-256 714827c5c1b2ba14506f27a26e35250f75fc8f66456eb34c5a94fba900eb4dbb. Evidence: i18n/audits/update-notice-tui-340352200f28.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.update",
+      "source_sha256": "123da7e1fce2892a4216e438f2d3470a47d7cf02d7eb890dcefa2835b949997b",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure round-1 remediation)",
+        "session": "d3534e994383",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "c6a7b830880b",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent round-2 re-audit (7 keys). 0 unresolved blocker/major. Target SHA-256 657fbdff3b123ed385813f16afc6ce23161bbb36309212ad9990cbdcada306b9. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.highlights",
+      "source_sha256": "8d1002cbbc015243fdf7709ec51b7179d40a508a042e38f7085e7bdaad5cf131",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (relay.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the es style guide. No findings. Arms one/many/other (0 is other: '0 archivos no mostrados'; 1e6 '1.000.000 de archivos no mostrados'). 'archivo' per es guide (not 'fichero'); 'vista previa' matches 32 shipped es keys; 'confidencial' idiomatic for sensitive file. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.highlights",
+      "source_sha256": "cc19a5f6e319d21b5be6230957644e6182c5e760dbda1df88e2f79fe620c36af",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the es style guide. No findings. Arms one/many/other (0 is other: '0 archivos no mostrados'; 1e6 '1.000.000 de archivos no mostrados'). 'archivo' per es guide (not 'fichero'); 'vista previa' matches 32 shipped es keys; 'confidencial' idiomatic for sensitive file. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "161fcdd703a3f56ed7bb3cce259bc7c6304a6261a574723a9111119873220a73",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org_help at source hash 161fcdd703a3, translator commit 6640a8654e6 (PR #3432): all 12 keys read against en and its .context.json, i18n/glossary.md and the es style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.hub_org",
+      "source_sha256": "6b4de92a6212ae666f2ea7eeb0780444912794f9f655ed7900a80efec0da367c",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org at source hash 6b4de92a6212, translator commit 6640a8654e6 (PR #3432): all 10 keys read against en and its .context.json, i18n/glossary.md and the es style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. Nit: plan 'por hacer pull' could read 'pendientes de pull'; acceptable. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "0bdfc33f99ab017628b83102a06a2c2b7f532d7cb8c9a3d9025dc238ca94178b",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of wire.settings.hub_org at source hash 0bdfc33f99ab, translator commit 6640a8654e6 (PR #3432): all 6 keys read against en and its .context.json, i18n/glossary.md and the es style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.hub_org",
+      "source_sha256": "43c6618cbabee696fd8aa127101e34310cd46062edfbedbe436137952ad335b3",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org at source hash 43c6618cbabe, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the es style guide: new ineligible_signed_out, unknown_org, plan_empty; unchanged keys of the 13-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "4b3beb7be13e05c6ebddc06335ca7f41b8a8936dda2aa6e782ac864b2c344a43",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org_help at source hash 4b3beb7be13e, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the es style guide: changed org_flag; unchanged keys of the 12-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "2a93ea9fa38cbd59e2532ae3bad48da76d765cda029237cff19fa0f2215d30d4",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of wire.settings.hub_org at source hash 2a93ea9fa38c, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the es style guide: changed auto_enrol.help; unchanged keys of the 6-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. auto_enrol.help condensed to \"elementos\" (68 cells): accepted — the enumeration measures 77 > maxCells 72; matches the label. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.hub_org",
+      "source_sha256": "003f6b6cfee6fccf297580f278c05ebec31ff71a90e52cdbaef1684c33a03145",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "d457d2a2880c",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "7d67f6d7d504",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the es style guide; translation \"{org} (organización)\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "es",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent complete 7-key audit against frozen English + context sidecar, glossary and es style guide: stale-baseline non-publication, safe sync/reapply/push remedies, refused-merge no-old-overwrite warning, and verified/mismatch/unavailable distinctions retain source meaning. ES-1 MINOR fixed: stale_base configured-link noun enlace -> vínculo, as mandated by es style guide Locale calls; hyperlink wording is not applicable. Runtime evidence: 7/7 exact key sets, named ICU argument/type parity, byte-identical backticked commands, NFC, no manual bidi/format controls; 8 render_message renders per locale, including empty and leading-space revision head. Opaque tokens preserved. No plurals or maxCells declared in this namespace. Logical-order Urdu storage checked; no terminal shaping, rendered-frame fit, full RTL/layout or native-speaker sign-off claimed. Auditor actually ran openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; translator and auditor are separate agents although same actual model. Target SHA-256 2c257d33a13d6c9ee68ae53921ef7f70823cc17b0b61167b5263089eea735af7."
+    },
+    {
+      "locale": "es",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
+      "translator": {
+        "agent": "coder — PR #3444 implementer",
+        "model": "unrecorded — PR #3444 body and commits do not name the actual translating model; not inferred",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, independent of PR #3444 coder)",
+        "session": "3f400bae6226",
+        "model": "anthropic/claude-sonnet-5-5 (semantic audit); openai/gpt-6.1-sol (verification/completion); quota fallback via anthropic/claude-opus-5-5 (no audit work)",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. No defects. Filtrado/filtrar and retenidos agree with namespace; tu register, respaldo/default model meaning preserved. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C1-i18n-audit-r1 / i18n-auditor / 725a399d7a94",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. ES1 minor fixed: replaced the literal handshake calque with «Saludo de señales». ES2 minor fixed: explicitly retained “default” in the system choice. Tú, neutral Spanish and infinitive actions retained. Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
+    },
+    {
+      "locale": "es",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. ES1 semantic correction applied: digest is «hash», not «resumen» (textual summary), in both source-input help strings. Neutral tú and infinitive actions preserved. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
+      "locale": "es",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/es/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/es/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
+    },
+    {
       "locale": "fr",
       "namespace": "tui.status",
       "source_sha256": "2403f9c4f37b40264f575929627b99a0bcabb0baf1bcb6a0b951c6c31ec6843a",
@@ -5921,6 +6273,377 @@
       },
       "status": "passed",
       "note": "Independent current-byte audit: i18n/audits/evidence/fr/wire.tool_rows.bridge.skipped/rg6a1/record.json. 0M/0m/1n (FR-RG6-1), 0 unresolved blocker/major. Composed row+expanded checked; no native/rendered claim."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.update",
+      "source_sha256": "2d3f1a132c443c0894b99a3c064d7fa702a5a1334b4854953b2b09083fab12c3",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure)",
+        "session": "9615db04a717",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "340352200f28",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit, 4 new keys. Auditor fixed 1 minor/nit (see record); 0 unresolved blocker/major. Target SHA-256 7b384116d3a982b8744529db3515fc1429421a1995a9f5e7287ea0bd68d1f298. Evidence: i18n/audits/update-notice-tui-340352200f28.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.update",
+      "source_sha256": "123da7e1fce2892a4216e438f2d3470a47d7cf02d7eb890dcefa2835b949997b",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure round-1 remediation)",
+        "session": "d3534e994383",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "c6a7b830880b",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent round-2 re-audit (7 keys). Auditor fixed 1 finding (see record); 0 unresolved blocker/major. Target SHA-256 dac1a47af57b181b3482d90c998e88fbd23c95c1335e2e5c8b4acfa54f07e90f. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.highlights",
+      "source_sha256": "8d1002cbbc015243fdf7709ec51b7179d40a508a042e38f7085e7bdaad5cf131",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (relay.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the fr style guide. FINDINGS fixed in these bytes: FR-H1 MINOR withheld.line used a plain U+0020 before ':' -> U+202F espace fine insécable (fr guide punctuation; corpus 499 U+202F vs 15 plain). FR-H2 MINOR reason.missing straight apostrophe -> U+2019 ('le fichier n’existe plus'; corpus 945 ’ vs 47 '). Plural arms one/many/other correct (0 is one: '0 fichier non affiché'; 1e6 '1 000 000 de fichiers non affichés'). Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.highlights",
+      "source_sha256": "cc19a5f6e319d21b5be6230957644e6182c5e760dbda1df88e2f79fe620c36af",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 2,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the fr style guide. FINDINGS fixed in these bytes: FR-H1 MINOR withheld.line used a plain U+0020 before ':' -> U+202F espace fine insécable (fr guide punctuation; corpus 499 U+202F vs 15 plain). FR-H2 MINOR reason.missing straight apostrophe -> U+2019 ('le fichier n’existe plus'; corpus 945 ’ vs 47 '). Plural arms one/many/other correct (0 is one: '0 fichier non affiché'; 1e6 '1 000 000 de fichiers non affichés'). Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "161fcdd703a3f56ed7bb3cce259bc7c6304a6261a574723a9111119873220a73",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org_help at source hash 161fcdd703a3, translator commit 6640a8654e6 (PR #3432): all 12 keys read against en and its .context.json, i18n/glossary.md and the fr style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. fr: U+202F before : ; and inside « » verified in bytes. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.hub_org",
+      "source_sha256": "6b4de92a6212ae666f2ea7eeb0780444912794f9f655ed7900a80efec0da367c",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org at source hash 6b4de92a6212, translator commit 6640a8654e6 (PR #3432): all 10 keys read against en and its .context.json, i18n/glossary.md and the fr style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. fr: U+202F before : ; and inside « » verified in bytes. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "0bdfc33f99ab017628b83102a06a2c2b7f532d7cb8c9a3d9025dc238ca94178b",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of wire.settings.hub_org at source hash 0bdfc33f99ab, translator commit 6640a8654e6 (PR #3432): all 6 keys read against en and its .context.json, i18n/glossary.md and the fr style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. fr: U+202F before : ; and inside « » verified in bytes. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.hub_org",
+      "source_sha256": "43c6618cbabee696fd8aa127101e34310cd46062edfbedbe436137952ad335b3",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org at source hash 43c6618cbabe, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the fr style guide: new ineligible_signed_out, unknown_org, plan_empty; unchanged keys of the 13-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 1 minor. 1 minor: ineligible_signed_out, unknown_org and plan_empty use U+0020 instead of the style-guide-required U+202F before ; : and inside « » (5 sites; siblings such as choose_org carry U+202F) — deferred to the translator for this wave, cosmetic, no meaning/placeholder impact. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "4b3beb7be13e05c6ebddc06335ca7f41b8a8936dda2aa6e782ac864b2c344a43",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org_help at source hash 4b3beb7be13e, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the fr style guide: changed org_flag; unchanged keys of the 12-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "2a93ea9fa38cbd59e2532ae3bad48da76d765cda029237cff19fa0f2215d30d4",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of wire.settings.hub_org at source hash 2a93ea9fa38c, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the fr style guide: changed auto_enrol.help; unchanged keys of the 6-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. auto_enrol.help condensed to \"éléments\" (65 cells): accepted — the full enumeration measures 74–82 cells > maxCells 72, and the label uses \"éléments\" too. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.hub_org",
+      "source_sha256": "003f6b6cfee6fccf297580f278c05ebec31ff71a90e52cdbaef1684c33a03145",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "d457d2a2880c",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "7d67f6d7d504",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the fr style guide; translation \"{org} (organisation)\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. The round-2 fr minor (U+0020 vs U+202F before ; : and inside « » on ineligible_signed_out/unknown_org/plan_empty) is outside this delta and stays as recorded there. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "fr",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent complete 7-key audit against frozen English + context sidecar, glossary and fr style guide: stale-baseline non-publication, safe sync/reapply/push remedies, refused-merge no-old-overwrite warning, and verified/mismatch/unavailable distinctions retain source meaning. No translation changes required; no unresolved semantic/style findings. Runtime evidence: 7/7 exact key sets, named ICU argument/type parity, byte-identical backticked commands, NFC, no manual bidi/format controls; 8 render_message renders per locale, including empty and leading-space revision head. Opaque tokens preserved. No plurals or maxCells declared in this namespace. Logical-order Urdu storage checked; no terminal shaping, rendered-frame fit, full RTL/layout or native-speaker sign-off claimed. Auditor actually ran openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; translator and auditor are separate agents although same actual model. Target SHA-256 1c9525860e5e9e62719a1e24a3b4a497ecfc3aedeedba3ba85126f8fbd11c248."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
+      "translator": {
+        "agent": "coder — PR #3444 implementer",
+        "model": "unrecorded — PR #3444 body and commits do not name the actual translating model; not inferred",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, independent of PR #3444 coder)",
+        "session": "3f400bae6226",
+        "model": "anthropic/claude-sonnet-5-5 (semantic audit); openai/gpt-6.1-sol (verification/completion); quota fallback via anthropic/claude-opus-5-5 (no audit work)",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. F1 MINOR fixed: U+202F before both new colons. Filtrer/retenus, vous register, apostrophes and fallback meaning preserved. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.settings.hub_defaults",
+      "source_sha256": "8720b5719479b638eab24b081f76f97c44ce8d8554cb1b8280f6980182b6740c",
+      "translator": {
+        "agent": "i18n-translator",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "i18n-auditor",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "9/9 initial ordinary French settings metadata; translator7b2ba4ed501d plus two independent French readers c44e0f808e48 and 35aac0a677bc, actual openai/gpt-6.1-sol from retained completed-usage provenance, each passed with zero findings. Readers bound source/context/target in i18n/audits/evidence/fr/wire.settings.hub_defaults/integration-binding.json; immutable originals retained. Native French readers approved semantics including the 72-cell hub help budget; semantics: all-agent/skill OFF pauses, ON creates new links, team creation default. No native re-execution/pseudo/RTL claim here."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C1-i18n-audit-r1 / i18n-auditor / 725a399d7a94",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. FR1 minor fixed in four strings: U+202F before prose : ; ?. Vous, typographic apostrophes and French decimal comma retained. Descriptive sound-name adaptations accepted, including «Bulle brève». Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
+    },
+    {
+      "locale": "fr",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. FR1 minor fixed: typographic apostrophes and U+202F before prose punctuation; «empreinte» correctly denotes content digest. Vous and French Mo retained. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
+      "locale": "fr",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/fr/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/fr/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
     },
     {
       "locale": "hi",
@@ -8926,6 +9649,379 @@
       },
       "status": "passed",
       "note": "Independent current-byte audit: i18n/audits/evidence/hi/wire.tool_rows.bridge.skipped/rg6a1/record.json. 1M/1m/0n (HI-RG6-1,HI-RG6-2), 0 unresolved blocker/major; 2 key(s) retranslated. Composed row+expanded checked; no native/rendered claim."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.update",
+      "source_sha256": "2d3f1a132c443c0894b99a3c064d7fa702a5a1334b4854953b2b09083fab12c3",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure)",
+        "session": "9615db04a717",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "340352200f28",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit, 4 new keys. No findings; 0 unresolved blocker/major. Target SHA-256 d59edfe5c45023eeea66526c5b5c06e4746550be36da419ee4f2242eb54b682c. Evidence: i18n/audits/update-notice-tui-340352200f28.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.update",
+      "source_sha256": "123da7e1fce2892a4216e438f2d3470a47d7cf02d7eb890dcefa2835b949997b",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure round-1 remediation)",
+        "session": "d3534e994383",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "c6a7b830880b",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent round-2 re-audit (7 keys). 0 unresolved blocker/major. Target SHA-256 b9177e5664ad868053f7b95b46ce0cd3817081d5500c53b0271d876b1bc586a7. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.highlights",
+      "source_sha256": "8d1002cbbc015243fdf7709ec51b7179d40a508a042e38f7085e7bdaad5cf131",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (relay.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the hi style guide. No findings. Arms one/other with 0 as one ('0 फ़ाइल नहीं दिखाई गई'), feminine plural agreement 'दिखाई गईं'; फ़ाइल settled loan; 'पूर्वावलोकन' matches 34 shipped hi keys. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.highlights",
+      "source_sha256": "cc19a5f6e319d21b5be6230957644e6182c5e760dbda1df88e2f79fe620c36af",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the hi style guide. No findings. Arms one/other with 0 as one ('0 फ़ाइल नहीं दिखाई गई'), feminine plural agreement 'दिखाई गईं'; फ़ाइल settled loan; 'पूर्वावलोकन' matches 34 shipped hi keys. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "161fcdd703a3f56ed7bb3cce259bc7c6304a6261a574723a9111119873220a73",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org_help at source hash 161fcdd703a3, translator commit 6640a8654e6 (PR #3432): all 12 keys read against en and its .context.json, i18n/glossary.md and the hi style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.hub_org",
+      "source_sha256": "6b4de92a6212ae666f2ea7eeb0780444912794f9f655ed7900a80efec0da367c",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org at source hash 6b4de92a6212, translator commit 6640a8654e6 (PR #3432): all 10 keys read against en and its .context.json, i18n/glossary.md and the hi style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 1 minor. Minor: adopt is rendered with जोड़ (unlinked_copies 'इन्हें जोड़ने के लिए', adopted_heading 'जोड़ी गई स्थानीय प्रतियाँ'), the same verb wire.settings.hub_org uses for 'add' — the heading can read as 'added copies'; 'लिंक की गई' / 'लिंक करने' would match the 'बिना लिंक वाली' wording beside it. Not blocking: meaning recoverable from context. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "0bdfc33f99ab017628b83102a06a2c2b7f532d7cb8c9a3d9025dc238ca94178b",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of wire.settings.hub_org at source hash 0bdfc33f99ab, translator commit 6640a8654e6 (PR #3432): all 6 keys read against en and its .context.json, i18n/glossary.md and the hi style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.hub_org",
+      "source_sha256": "43c6618cbabee696fd8aa127101e34310cd46062edfbedbe436137952ad335b3",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org at source hash 43c6618cbabe, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the hi style guide: new ineligible_signed_out, unknown_org, plan_empty plus reworded unlinked_copies/adopted_heading; unchanged keys of the 13-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "4b3beb7be13e05c6ebddc06335ca7f41b8a8936dda2aa6e782ac864b2c344a43",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org_help at source hash 4b3beb7be13e, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the hi style guide: changed org_flag; unchanged keys of the 12-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "2a93ea9fa38cbd59e2532ae3bad48da76d765cda029237cff19fa0f2215d30d4",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of wire.settings.hub_org at source hash 2a93ea9fa38c, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the hi style guide: changed auto_enrol.help; unchanged keys of the 6-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.hub_org",
+      "source_sha256": "003f6b6cfee6fccf297580f278c05ebec31ff71a90e52cdbaef1684c33a03145",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "d457d2a2880c",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "7d67f6d7d504",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the hi style guide; translation \"{org} (संगठन)\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "hi",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent complete 7-key audit against frozen English + context sidecar, glossary and hi style guide: stale-baseline non-publication, safe sync/reapply/push remedies, refused-merge no-old-overwrite warning, and verified/mismatch/unavailable distinctions retain source meaning. No translation changes required; no unresolved semantic/style findings. Runtime evidence: 7/7 exact key sets, named ICU argument/type parity, byte-identical backticked commands, NFC, no manual bidi/format controls; 8 render_message renders per locale, including empty and leading-space revision head. Opaque tokens preserved. No plurals or maxCells declared in this namespace. Logical-order Urdu storage checked; no terminal shaping, rendered-frame fit, full RTL/layout or native-speaker sign-off claimed. Auditor actually ran openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; translator and auditor are separate agents although same actual model. Target SHA-256 92638c1d8d6a6fc9ab3adf8580e27919fca27b8a2c82057e293d99524a07f2d7."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Supersedes the immediately preceding same-source cli.skills_push audit row at corrected target bytes; append-only history retained. HI-1 MINOR fixed: stale_base had {base} before {head}, violating the repository ordered-placeholder contract despite preserving named argument/type sets. Rephrased idiomatically to retain English {head} then {base} order without changing the non-publication or replaced-text warning. Full seven-key semantic/style recheck passed against English context, glossary and locale guide. Final evidence: check.py --catalogues-only: 0 problem(s); exact ORDERED ICU argument/type parity, key parity, literal command byte parity, NFC and absence of manual Cf/bidi controls all passed; runtime.render_message 8/8 (including empty/nonempty optional leading-space head). No maxCells/plurals in source. No rendered-frame, terminal shaping or full RTL/layout claim. Auditor actual model openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; separate translator agent used openai/gpt-6.1-sol per manager brief. Target SHA-256 765b4ed52c2b9ee12704e69ebf9c0c6df75010a2c59aeb5bb0013f0df17c5ca8."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
+      "translator": {
+        "agent": "coder — PR #3444 implementer",
+        "model": "unrecorded — PR #3444 body and commits do not name the actual translating model; not inferred",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, independent of PR #3444 coder)",
+        "session": "3f400bae6226",
+        "model": "anthropic/claude-sonnet-5-5 (semantic audit); openai/gpt-6.1-sol (verification/completion); quota fallback via anthropic/claude-opus-5-5 (no audit work)",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. No defects. स्क्रीनिंग, रोके गए, एजेंट, respectful आप; product/model names Latin; default and fallback stages preserved. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C1-i18n-audit-r1 / i18n-auditor / 725a399d7a94",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. HI1 minor fixed in four strings: made volume explicitly वॉल्यूम rather than the ambiguous general noun आवाज़. Polite imperatives, Hindi full stops and Latin digits retained. Descriptive sound-name adaptations accepted. Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
+    },
+    {
+      "locale": "hi",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. HI1 minor fixed: content digest clarified as हैश. HI2 minor fixed: character limit uses वर्ण, not letters-only wording. HI3 minor fixed: सहेजी for save and explicit स्टोरेज वॉल्यूम to distinguish storage from audio volume. Polite imperatives retained. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
+      "locale": "hi",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/hi/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/hi/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
     },
     {
       "locale": "ru",
@@ -11972,6 +13068,379 @@
       "note": "Independent current-byte audit: i18n/audits/evidence/ru/wire.tool_rows.bridge.skipped/rg6a1/record.json. 1M/1m/0n (RU-RG6-1,RU-RG6-2), 0 unresolved blocker/major; 2 key(s) retranslated. Composed row+expanded checked; no native/rendered claim."
     },
     {
+      "locale": "ru",
+      "namespace": "tui.update",
+      "source_sha256": "2d3f1a132c443c0894b99a3c064d7fa702a5a1334b4854953b2b09083fab12c3",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure)",
+        "session": "9615db04a717",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "340352200f28",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit, 4 new keys. No findings; 0 unresolved blocker/major. Target SHA-256 27bdd8f54291378d109f488eda899423613cf8ffa01d77512d409ed6f91fac15. Evidence: i18n/audits/update-notice-tui-340352200f28.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.update",
+      "source_sha256": "123da7e1fce2892a4216e438f2d3470a47d7cf02d7eb890dcefa2835b949997b",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure round-1 remediation)",
+        "session": "d3534e994383",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "c6a7b830880b",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent round-2 re-audit (7 keys). 0 unresolved blocker/major. Target SHA-256 b4a94ff9d16b168f90772d9cada60d25e9a06a55546b9ef4979fd3b2fbd207b1. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.highlights",
+      "source_sha256": "8d1002cbbc015243fdf7709ec51b7179d40a508a042e38f7085e7bdaad5cf131",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (relay.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the ru style guide. FINDING fixed in these bytes: RU-H1 MINOR reason.outside 'вне разрешённых расположений' is a calque of 'locations' (one prior use in the corpus, for a publication target) -> 'вне разрешённых папок' (ru guide: папка settled; matches the context note: session folder, home, scratchpad). Arms one/few/many/other correct: 0 '0 файлов не показано', 1/21 'файл не показан', 2 'файла не показаны', 5 'файлов не показано'. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.highlights",
+      "source_sha256": "cc19a5f6e319d21b5be6230957644e6182c5e760dbda1df88e2f79fe620c36af",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the ru style guide. FINDING fixed in these bytes: RU-H1 MINOR reason.outside 'вне разрешённых расположений' is a calque of 'locations' (one prior use in the corpus, for a publication target) -> 'вне разрешённых папок' (ru guide: папка settled; matches the context note: session folder, home, scratchpad). Arms one/few/many/other correct: 0 '0 файлов не показано', 1/21 'файл не показан', 2 'файла не показаны', 5 'файлов не показано'. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "161fcdd703a3f56ed7bb3cce259bc7c6304a6261a574723a9111119873220a73",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org_help at source hash 161fcdd703a3, translator commit 6640a8654e6 (PR #3432): all 12 keys read against en and its .context.json, i18n/glossary.md and the ru style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.hub_org",
+      "source_sha256": "6b4de92a6212ae666f2ea7eeb0780444912794f9f655ed7900a80efec0da367c",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org at source hash 6b4de92a6212, translator commit 6640a8654e6 (PR #3432): all 10 keys read against en and its .context.json, i18n/glossary.md and the ru style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. Nit: plan 'для pull' is stiff (kept-English pull per ru guide); acceptable. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "0bdfc33f99ab017628b83102a06a2c2b7f532d7cb8c9a3d9025dc238ca94178b",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of wire.settings.hub_org at source hash 0bdfc33f99ab, translator commit 6640a8654e6 (PR #3432): all 6 keys read against en and its .context.json, i18n/glossary.md and the ru style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.hub_org",
+      "source_sha256": "43c6618cbabee696fd8aa127101e34310cd46062edfbedbe436137952ad335b3",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org at source hash 43c6618cbabe, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the ru style guide: new ineligible_signed_out, unknown_org, plan_empty; unchanged keys of the 13-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "4b3beb7be13e05c6ebddc06335ca7f41b8a8936dda2aa6e782ac864b2c344a43",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org_help at source hash 4b3beb7be13e, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the ru style guide: changed org_flag; unchanged keys of the 12-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "2a93ea9fa38cbd59e2532ae3bad48da76d765cda029237cff19fa0f2215d30d4",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of wire.settings.hub_org at source hash 2a93ea9fa38c, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the ru style guide: changed auto_enrol.help; unchanged keys of the 6-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. auto_enrol.help 72/72 cells; nit: bare \"подписываться\" lost \"на них\", no in-budget alternative needed. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.hub_org",
+      "source_sha256": "003f6b6cfee6fccf297580f278c05ebec31ff71a90e52cdbaef1684c33a03145",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "d457d2a2880c",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "7d67f6d7d504",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the ru style guide; translation \"{org} (организация)\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "ru",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent complete 7-key audit against frozen English + context sidecar, glossary and ru style guide: stale-baseline non-publication, safe sync/reapply/push remedies, refused-merge no-old-overwrite warning, and verified/mismatch/unavailable distinctions retain source meaning. No translation changes required; no unresolved semantic/style findings. Runtime evidence: 7/7 exact key sets, named ICU argument/type parity, byte-identical backticked commands, NFC, no manual bidi/format controls; 8 render_message renders per locale, including empty and leading-space revision head. Opaque tokens preserved. No plurals or maxCells declared in this namespace. Logical-order Urdu storage checked; no terminal shaping, rendered-frame fit, full RTL/layout or native-speaker sign-off claimed. Auditor actually ran openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; translator and auditor are separate agents although same actual model. Target SHA-256 5eb590271032e34c145db12ffc1a49b7345245493e23a88eb3dd91e26ec92bbb."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Supersedes the immediately preceding same-source cli.skills_push audit row at corrected target bytes; append-only history retained. RU-1 MINOR fixed: stale_base had {base} before {head}, violating the repository ordered-placeholder contract despite preserving named argument/type sets. Rephrased idiomatically to retain English {head} then {base} order without changing the non-publication or replaced-text warning. Full seven-key semantic/style recheck passed against English context, glossary and locale guide. Final evidence: check.py --catalogues-only: 0 problem(s); exact ORDERED ICU argument/type parity, key parity, literal command byte parity, NFC and absence of manual Cf/bidi controls all passed; runtime.render_message 8/8 (including empty/nonempty optional leading-space head). No maxCells/plurals in source. No rendered-frame, terminal shaping or full RTL/layout claim. Auditor actual model openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; separate translator agent used openai/gpt-6.1-sol per manager brief. Target SHA-256 c80f4bb3dcb8d438130177a24ec6b1c5171b734e91819ef58a1f3724e418fccd."
+    },
+    {
+      "locale": "ru",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
+      "translator": {
+        "agent": "coder — PR #3444 implementer",
+        "model": "unrecorded — PR #3444 body and commits do not name the actual translating model; not inferred",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, independent of PR #3444 coder)",
+        "session": "3f400bae6226",
+        "model": "anthropic/claude-sonnet-5-5 (semantic audit); openai/gpt-6.1-sol (verification/completion); quota fallback via anthropic/claude-opus-5-5 (no audit work)",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. R1 MINOR fixed: title проверить -> выполнить фильтрацию, preserving namespace screening term instead of ambiguous generic check. задержаны and polite register preserved. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C1-i18n-audit-r1 / i18n-auditor / 725a399d7a94",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. RU1 minor fixed: replaced the literal “handshake of signals” calque with «Обмен сигналами». Impersonal/infinitive voice and notification/system distinctions retained. Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
+    },
+    {
+      "locale": "ru",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. RU1 minor fixed: content digest clarified as хеш rather than the summary-associated дайджест. Infinitive actions and impersonal errors retained. 50 звуков and 40 символов match actual fixed limits. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
+      "locale": "ru",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/ru/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/ru/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
+    },
+    {
       "locale": "ur",
       "namespace": "cli.exec_remote_help",
       "source_sha256": "c555648c19dd25af507951dc828f3fffbedc44feb579192c9c3fa7c6952e365e",
@@ -14775,6 +16244,379 @@
       },
       "status": "passed",
       "note": "Independent current-byte audit: i18n/audits/evidence/ur/wire.tool_rows.bridge.skipped/rg6a1/record.json. 1M/1m/0n (UR-RG6-1,UR-RG6-2), 0 unresolved blocker/major; 2 key(s) retranslated. Composed row+expanded checked; no native/rendered claim."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.update",
+      "source_sha256": "2d3f1a132c443c0894b99a3c064d7fa702a5a1334b4854953b2b09083fab12c3",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure)",
+        "session": "9615db04a717",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "340352200f28",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit, 4 new keys. No findings; 0 unresolved blocker/major. Target SHA-256 1752e97f3ba79662cd4f2c50666bb6bcad8c3f14cf74994dabe134380e89c9c8. Evidence: i18n/audits/update-notice-tui-340352200f28.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.update",
+      "source_sha256": "123da7e1fce2892a4216e438f2d3470a47d7cf02d7eb890dcefa2835b949997b",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure round-1 remediation)",
+        "session": "d3534e994383",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "c6a7b830880b",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent round-2 re-audit (7 keys). 0 unresolved blocker/major. Target SHA-256 bbdaa802ca45802ccbcec85f8cb221db033742f4bc38362b7fb00e8a710abd90. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.highlights",
+      "source_sha256": "8d1002cbbc015243fdf7709ec51b7179d40a508a042e38f7085e7bdaad5cf131",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (relay.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the ur style guide. No findings. Arms one/other ('# فائل نہیں دکھائی گئی' / '# فائلیں نہیں دکھائی گئیں', feminine agreement correct); فائل settled loan; 'پیش نظارہ' matches shipped ur keys; no Cf/bidi controls (isolation is the render layer's job per ur guide). Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.highlights",
+      "source_sha256": "cc19a5f6e319d21b5be6230957644e6182c5e760dbda1df88e2f79fe620c36af",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the ur style guide. No findings. Arms one/other ('# فائل نہیں دکھائی گئی' / '# فائلیں نہیں دکھائی گئیں', feminine agreement correct); فائل settled loan; 'پیش نظارہ' matches shipped ur keys; no Cf/bidi controls (isolation is the render layer's job per ur guide). Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "161fcdd703a3f56ed7bb3cce259bc7c6304a6261a574723a9111119873220a73",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org_help at source hash 161fcdd703a3, translator commit 6640a8654e6 (PR #3432): all 12 keys read against en and its .context.json, i18n/glossary.md and the ur style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. ur: no manual bidi controls (render layer isolates); Latin runs kept as LTR islands; Urdu ، ؛ ۔ punctuation. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.hub_org",
+      "source_sha256": "6b4de92a6212ae666f2ea7eeb0780444912794f9f655ed7900a80efec0da367c",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org at source hash 6b4de92a6212, translator commit 6640a8654e6 (PR #3432): all 10 keys read against en and its .context.json, i18n/glossary.md and the ur style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. ur: no manual bidi controls (render layer isolates); Latin runs kept as LTR islands; Urdu ، ؛ ۔ punctuation. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "0bdfc33f99ab017628b83102a06a2c2b7f532d7cb8c9a3d9025dc238ca94178b",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of wire.settings.hub_org at source hash 0bdfc33f99ab, translator commit 6640a8654e6 (PR #3432): all 6 keys read against en and its .context.json, i18n/glossary.md and the ur style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. ur: no manual bidi controls (render layer isolates); Latin runs kept as LTR islands; Urdu ، ؛ ۔ punctuation. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.hub_org",
+      "source_sha256": "43c6618cbabee696fd8aa127101e34310cd46062edfbedbe436137952ad335b3",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org at source hash 43c6618cbabe, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the ur style guide: new ineligible_signed_out, unknown_org, plan_empty; unchanged keys of the 13-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "4b3beb7be13e05c6ebddc06335ca7f41b8a8936dda2aa6e782ac864b2c344a43",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org_help at source hash 4b3beb7be13e, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the ur style guide: changed org_flag; unchanged keys of the 12-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "2a93ea9fa38cbd59e2532ae3bad48da76d765cda029237cff19fa0f2215d30d4",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of wire.settings.hub_org at source hash 2a93ea9fa38c, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the ur style guide: changed auto_enrol.help; unchanged keys of the 6-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.hub_org",
+      "source_sha256": "003f6b6cfee6fccf297580f278c05ebec31ff71a90e52cdbaef1684c33a03145",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "d457d2a2880c",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "7d67f6d7d504",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the ur style guide; translation \"{org} (تنظیم)\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "ur",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent complete 7-key audit against frozen English + context sidecar, glossary and ur style guide: stale-baseline non-publication, safe sync/reapply/push remedies, refused-merge no-old-overwrite warning, and verified/mismatch/unavailable distinctions retain source meaning. No translation changes required; no unresolved semantic/style findings. Runtime evidence: 7/7 exact key sets, named ICU argument/type parity, byte-identical backticked commands, NFC, no manual bidi/format controls; 8 render_message renders per locale, including empty and leading-space revision head. Opaque tokens preserved. No plurals or maxCells declared in this namespace. Logical-order Urdu storage checked; no terminal shaping, rendered-frame fit, full RTL/layout or native-speaker sign-off claimed. Auditor actually ran openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; translator and auditor are separate agents although same actual model. Target SHA-256 4b54bd7e13ad821987098e30b0787e416f5fce2113a9e612ad0438d279d89e23."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Supersedes the immediately preceding same-source cli.skills_push audit row at corrected target bytes; append-only history retained. UR-1 MINOR fixed: stale_base had {base} before {head}, violating the repository ordered-placeholder contract despite preserving named argument/type sets. Rephrased idiomatically to retain English {head} then {base} order without changing the non-publication or replaced-text warning. Full seven-key semantic/style recheck passed against English context, glossary and locale guide. Final evidence: check.py --catalogues-only: 0 problem(s); exact ORDERED ICU argument/type parity, key parity, literal command byte parity, NFC and absence of manual Cf/bidi controls all passed; runtime.render_message 8/8 (including empty/nonempty optional leading-space head). No maxCells/plurals in source. No rendered-frame, terminal shaping or full RTL/layout claim. Auditor actual model openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; separate translator agent used openai/gpt-6.1-sol per manager brief. Target SHA-256 30c041dbea945934f091c424d6186162300f3ea190b59f453dc8ed5eafb94536."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
+      "translator": {
+        "agent": "coder — PR #3444 implementer",
+        "model": "unrecorded — PR #3444 body and commits do not name the actual translating model; not inferred",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, independent of PR #3444 coder)",
+        "session": "3f400bae6226",
+        "model": "anthropic/claude-sonnet-5-5 (semantic audit); openai/gpt-6.1-sol (verification/completion); quota fallback via anthropic/claude-opus-5-5 (no audit work)",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. No locale defects. اسکریننگ, روکے گئے, آپ; logical storage has no manual bidi controls. tr_record + isolated_status_text yields balanced RLI/PDI; browser copy fixture at 900px/360px viewed: shaping, RTL reading order and Latin model/provider names retained, wrapping visible. Not a production inbox/TUI shaping or full RTL completion claim. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C1-i18n-audit-r1 / i18n-auditor / 725a399d7a94",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. UR1 minor fixed: changed the bare-noun calque to «اشاروں کا تبادلہ». Respectful imperatives, logical storage order, Urdu punctuation and Latin digits retained. No manual bidi controls. TUI RTL/shaping not certified. Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
+    },
+    {
+      "locale": "ur",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. UR1 minor fixed: content digest clarified as ہیش. UR2 minor fixed: character limit uses کریکٹر, not letters-only حروف. UR3 minor fixed: explicit اسٹوریج والیوم distinguishes storage from loudness. Respectful imperative and Urdu punctuation retained; no manual bidi controls. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
+      "locale": "ur",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/ur/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/ur/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
     },
     {
       "locale": "vi",
@@ -17842,6 +19684,358 @@
       "note": "Independent current-byte audit: i18n/audits/evidence/vi/wire.tool_rows.bridge.skipped/rg6a1/record.json. 0M/0m/0n (none), 0 unresolved blocker/major. Composed row+expanded checked; no native/rendered claim."
     },
     {
+      "locale": "vi",
+      "namespace": "tui.update",
+      "source_sha256": "2d3f1a132c443c0894b99a3c064d7fa702a5a1334b4854953b2b09083fab12c3",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure)",
+        "session": "9615db04a717",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "340352200f28",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit, 4 new keys. Auditor fixed 1 minor/nit (see record); 0 unresolved blocker/major. Target SHA-256 1005d04c04e7d7ab296adadd9e84e5d289c149801fe583bd21a94101da78f5f1. Evidence: i18n/audits/update-notice-tui-340352200f28.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.update",
+      "source_sha256": "123da7e1fce2892a4216e438f2d3470a47d7cf02d7eb890dcefa2835b949997b",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure round-1 remediation)",
+        "session": "d3534e994383",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "c6a7b830880b",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent round-2 re-audit (7 keys). Auditor fixed 1 finding (see record); 0 unresolved blocker/major. Target SHA-256 ef5df2ec85967727273dc28df98681cbbac7162c432e712b412caac6dabc9314. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.highlights",
+      "source_sha256": "8d1002cbbc015243fdf7709ec51b7179d40a508a042e38f7085e7bdaad5cf131",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (relay.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the vi style guide. No findings. Arm other only ('# tệp không được hiển thị'); 'tệp' per vi guide; 'xem trước' matches 37 shipped vi keys; no space before ':'. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.highlights",
+      "source_sha256": "cc19a5f6e319d21b5be6230957644e6182c5e760dbda1df88e2f79fe620c36af",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the vi style guide. No findings. Arm other only ('# tệp không được hiển thị'); 'tệp' per vi guide; 'xem trước' matches 37 shipped vi keys; no space before ':'. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "161fcdd703a3f56ed7bb3cce259bc7c6304a6261a574723a9111119873220a73",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org_help at source hash 161fcdd703a3, translator commit 6640a8654e6 (PR #3432): all 12 keys read against en and its .context.json, i18n/glossary.md and the vi style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.hub_org",
+      "source_sha256": "6b4de92a6212ae666f2ea7eeb0780444912794f9f655ed7900a80efec0da367c",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org at source hash 6b4de92a6212, translator commit 6640a8654e6 (PR #3432): all 10 keys read against en and its .context.json, i18n/glossary.md and the vi style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "0bdfc33f99ab017628b83102a06a2c2b7f532d7cb8c9a3d9025dc238ca94178b",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of wire.settings.hub_org at source hash 0bdfc33f99ab, translator commit 6640a8654e6 (PR #3432): all 6 keys read against en and its .context.json, i18n/glossary.md and the vi style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.hub_org",
+      "source_sha256": "43c6618cbabee696fd8aa127101e34310cd46062edfbedbe436137952ad335b3",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org at source hash 43c6618cbabe, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the vi style guide: new ineligible_signed_out, unknown_org, plan_empty; unchanged keys of the 13-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "4b3beb7be13e05c6ebddc06335ca7f41b8a8936dda2aa6e782ac864b2c344a43",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org_help at source hash 4b3beb7be13e, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the vi style guide: changed org_flag; unchanged keys of the 12-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "2a93ea9fa38cbd59e2532ae3bad48da76d765cda029237cff19fa0f2215d30d4",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of wire.settings.hub_org at source hash 2a93ea9fa38c, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the vi style guide: changed auto_enrol.help; unchanged keys of the 6-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.hub_org",
+      "source_sha256": "003f6b6cfee6fccf297580f278c05ebec31ff71a90e52cdbaef1684c33a03145",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "d457d2a2880c",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "7d67f6d7d504",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the vi style guide; translation \"{org} (tổ chức)\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "vi",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent complete 7-key audit against frozen English + context sidecar, glossary and vi style guide: stale-baseline non-publication, safe sync/reapply/push remedies, refused-merge no-old-overwrite warning, and verified/mismatch/unavailable distinctions retain source meaning. No translation changes required; no unresolved semantic/style findings. Runtime evidence: 7/7 exact key sets, named ICU argument/type parity, byte-identical backticked commands, NFC, no manual bidi/format controls; 8 render_message renders per locale, including empty and leading-space revision head. Opaque tokens preserved. No plurals or maxCells declared in this namespace. Logical-order Urdu storage checked; no terminal shaping, rendered-frame fit, full RTL/layout or native-speaker sign-off claimed. Auditor actually ran openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; translator and auditor are separate agents although same actual model. Target SHA-256 ac05e4ee230572f9cf6cf4622b14f136ff8db62c509bc38937d0bbd9ea6fd8b2."
+    },
+    {
+      "locale": "vi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
+      "translator": {
+        "agent": "coder — PR #3444 implementer",
+        "model": "unrecorded — PR #3444 body and commits do not name the actual translating model; not inferred",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, independent of PR #3444 coder)",
+        "session": "3f400bae6226",
+        "model": "anthropic/claude-sonnet-5-5 (semantic audit); openai/gpt-6.1-sol (verification/completion); quota fallback via anthropic/claude-opus-5-5 (no audit work)",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. No defects. tác nhân, sàng lọc, bị giữ, bạn; NFC, default/fallback ordering and nạp tín dụng meaning preserved. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C1-i18n-audit-r1 / i18n-auditor / 725a399d7a94",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. VI1 minor fixed in three strings: «dải thông báo» for a UI notification banner instead of the generic slogan/banner word «biểu ngữ». VI2 minor fixed: «Marimba êm» for the softened instrument image. VI3 minor fixed: idiomatic gradual hum «Tiếng ngân tăng dần». All NFC; config token `system` retained. Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. No linguistic changes needed. Mã băm correctly identifies content hash; có sẵn/tùy chỉnh distinguish built-in/custom; NFC and approved orthography retained. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/vi/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/vi/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
+    },
+    {
       "locale": "zh-CN",
       "namespace": "cli.agents_help",
       "source_sha256": "d8118ece7b59b99295fde3496bd3c9ff3184455d75ed31dcee50e5e515fd3bf3",
@@ -20571,6 +22765,379 @@
       },
       "status": "passed",
       "note": "Independent current-byte audit: i18n/audits/evidence/zh-CN/wire.tool_rows.bridge.skipped/rg6a1/record.json. 0M/0m/0n (none), 0 unresolved blocker/major. Composed row+expanded checked; no native/rendered claim."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.update",
+      "source_sha256": "2d3f1a132c443c0894b99a3c064d7fa702a5a1334b4854953b2b09083fab12c3",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure)",
+        "session": "9615db04a717",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "340352200f28",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit, 4 new keys. Auditor fixed 2 minor/nit (see record); 0 unresolved blocker/major. Target SHA-256 74d8ef2a00e182a49e03f76c737082475e3104a4036dc9f5286a579bd8ade91c. Evidence: i18n/audits/update-notice-tui-340352200f28.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.update",
+      "source_sha256": "123da7e1fce2892a4216e438f2d3470a47d7cf02d7eb890dcefa2835b949997b",
+      "translator": {
+        "agent": "coder (team lopdev, update-notice-reassure round-1 remediation)",
+        "session": "d3534e994383",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "reviewer / independent i18n auditor (team lopdev)",
+        "session": "c6a7b830880b",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent round-2 re-audit (7 keys). 0 unresolved blocker/major. Target SHA-256 5804d76d69b59ab3913dba9b179f26a2b3df40134bddc127eda79a5ea181d96c. Evidence: i18n/audits/update-notice-tui-r2-c6a7b830880b.json. No rendered fit/RTL claim."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.highlights",
+      "source_sha256": "8d1002cbbc015243fdf7709ec51b7179d40a508a042e38f7085e7bdaad5cf131",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (relay.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the zh-CN style guide. FINDING fixed in these bytes: ZH-H1 MINOR reason.too_large '文件过大，无法预览' carried a full-width comma inside a fragment that is itself joined into a reason list, so two joined reasons read as three -> '文件过大无法预览'. Arm other only, '# 个文件未显示' with full-width '：'. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.highlights",
+      "source_sha256": "cc19a5f6e319d21b5be6230957644e6182c5e760dbda1df88e2f79fe620c36af",
+      "translator": {
+        "agent": "coder (lopdev implementer of feat/highlights-deliverables, PR #3392, commit 293b04e007a)",
+        "model": "not recorded in commit 293b04e007a (lopdev coder role; effort tier hi -> anthropic/claude-opus-5-5 assumed, not verified)",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "coder (independent i18n auditor, lopdev task backend-i18n-audit for manager session 686f9f6871fe) — separate session and context; did not author the original copy, only the fixes recorded here",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "PR #3392 Highlights withheld line (tui.highlights, 5 keys) audited at head 293b04e007a against en + context sidecar, glossary and the zh-CN style guide. FINDING fixed in these bytes: ZH-H1 MINOR reason.too_large '文件过大，无法预览' carried a full-width comma inside a fragment that is itself joined into a reason list, so two joined reasons read as three -> '文件过大无法预览'. Arm other only, '# 个文件未显示' with full-width '：'. Mechanical, re-derived: key parity 5/5 vs en and relay/tui value parity; ICU argument parity ({count} plural, {reasons}); rendered through local_operator.i18n.runtime.render_message at 0/1/2/5/21/1e6 with the locale's CLDR rules, 0 lost/extra args; NFC, no BOM, no Cf/bidi controls. Glossary §3 plural categories respected. Not catalogue-scoped (reported on the PR, not gating this row): the TUI joins reasons with a Latin ', ' in every locale. Unresolved blocker/major: 0."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "161fcdd703a3f56ed7bb3cce259bc7c6304a6261a574723a9111119873220a73",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org_help at source hash 161fcdd703a3, translator commit 6640a8654e6 (PR #3432): all 12 keys read against en and its .context.json, i18n/glossary.md and the zh-CN style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 0 minor. Clean. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_org",
+      "source_sha256": "6b4de92a6212ae666f2ea7eeb0780444912794f9f655ed7900a80efec0da367c",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of cli.hub_org at source hash 6b4de92a6212, translator commit 6640a8654e6 (PR #3432): all 10 keys read against en and its .context.json, i18n/glossary.md and the zh-CN style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 1 minor. Minor: plan reads '待pull：N项，M个未链接的本地副本' — the colon puts the unlinked copies under 'to pull', where en has two parallel clauses; e.g. '{count}项待pull，{conflicts}个未链接的本地副本'. Not blocking. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "0bdfc33f99ab017628b83102a06a2c2b7f532d7cb8c9a3d9025dc238ca94178b",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "cae7478f4a42",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "5106aa7838b3",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1
+      },
+      "status": "passed",
+      "note": "Independent audit (not the translator) of wire.settings.hub_org at source hash 0bdfc33f99ab, translator commit 6640a8654e6 (PR #3432): all 6 keys read against en and its .context.json, i18n/glossary.md and the zh-CN style guide. Key-set and placeholder parity verified by script and by reading; ICU plural selectors are exactly the locale's CLDR categories with # in every branch; `lop hub org pull`, --org/--yes, adopt-link/adopt/reconcile/skip, Radient Team and Agent Hub byte-identical; maxCells measured with rich.cells.cell_len, all within budget; glossary agent/team/skill/model consistent with existing hub catalogues. 0 blocker / 0 major / 1 minor. Minor: 'item' is 内容 here (label/on.description/description) but 项 in cli.hub_org; natural in settings prose, recorded as drift. Not blocking. Translator provenance note found at sessions/cae7478f4a42/scratchpad/i18n-hub-org-translator.md (the brief named deb2f77d8afe, which holds no such file). Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_org",
+      "source_sha256": "43c6618cbabee696fd8aa127101e34310cd46062edfbedbe436137952ad335b3",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org at source hash 43c6618cbabe, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the zh-CN style guide: new ineligible_signed_out, unknown_org, plan_empty plus reordered plan; unchanged keys of the 13-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. nit: \"你尚未登录\" could drop 你 per the style guide (sibling wire.radient_saver uses 未登录). Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_org_help",
+      "source_sha256": "4b3beb7be13e05c6ebddc06335ca7f41b8a8936dda2aa6e782ac864b2c344a43",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of cli.hub_org_help at source hash 4b3beb7be13e, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the zh-CN style guide: changed org_flag; unchanged keys of the 12-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.settings.hub_org",
+      "source_sha256": "2a93ea9fa38cbd59e2532ae3bad48da76d765cda029237cff19fa0f2215d30d4",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "6137f1c13922",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "dd16bc4ebfca",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-2 independent audit (not the translator) of wire.settings.hub_org at source hash 2a93ea9fa38c, translator commits 5e8587aa4ce + d45748e933c on head 206f86e1cce (PR #3432). Delta read against en and its .context.json, i18n/glossary.md and the zh-CN style guide: changed auto_enrol.help; unchanged keys of the 6-key namespace retained from the round-1 audit (session 5106aa7838b3) with siblings re-read for consistency. Placeholders {ref}/{count}/{conflicts}, --org/--yes, `lop hub org pull`, lop login radient and Radient Team verified byte-[redacted]; maxCells measured with rich.cells.cell_len, all within budget. 0 blocker / 0 major / 0 minor. Clean. Translator provenance: sessions/6137f1c13922/scratchpad/i18n-hub-org-translator-r2.md. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.hub_org",
+      "source_sha256": "003f6b6cfee6fccf297580f278c05ebec31ff71a90e52cdbaef1684c33a03145",
+      "translator": {
+        "agent": "translator (lopdev team)",
+        "session": "d457d2a2880c",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "translation-auditor (lopdev team)",
+        "session": "7d67f6d7d504",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Round-3 independent audit (not the translator) of cli.hub_org at source hash 003f6b6cfee6, translator commit ee89c5e23f0 on PR #3432. Delta: new key team_block_heading (en \"{org} (organization)\", box-drawn block title in `lop teams search`, render site cli.py _print_org_team_rows) read against en, its .context.json and the zh-CN style guide; translation \"{org}（组织）\". {org} verified byte-identical as the sole placeholder, NFC, no bidi controls; the term matches this locale's existing cli.hub_org/cli.hub_org_help/cli.teams_help rendering of 'organization' (no drift). Copy width excluding {org} measured with rich.cells.cell_len, within the en width of 15 cells. Other 13 keys are unchanged from round 2 (session dd16bc4ebfca) and were kept on that audit. 0 blocker / 0 major / 0 minor. Single independent audit pass; no cross-model second audit; no rendered-frame evidence in this round."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "relay.composer",
+      "source_sha256": "7612a48e9902b9b7fc07b367ee558813a4885eb4cd09f4bba9a1518629e159fb",
+      "translator": {
+        "agent": "coder (lopdev mobile-composer-slots session 986cb3764a42)",
+        "model": "anthropic/claude-sonnet-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "codex (independent i18n audit via the codex MCP; separate agent/model and context from the translator)",
+        "model": "gpt-5.6-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Composer primary-button vocabulary (6 keys: send, steer, stop, stopping, connecting, stop_agent) for the phone web composer and the working-line Stop. Independent audit via the codex MCP (separate agent/model and context from the translator; read-only, no checkout access). Round 1 passed fr, es, zh-CN, hi, ur, vi and failed ru on relay.composer.action.stopping (the first draft, 'останавливается', reads as the agent stopping itself); the string was changed to 'останавливаем' and re-audited: passed. Verbs follow the shipped placeholder 'Steer the agent…' for steer and the glossary's agent row; stop_agent contains the same verb as stop in every locale."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent complete 7-key audit against frozen English + context sidecar, glossary and zh-CN style guide: stale-baseline non-publication, safe sync/reapply/push remedies, refused-merge no-old-overwrite warning, and verified/mismatch/unavailable distinctions retain source meaning. No translation changes required; no unresolved semantic/style findings. Runtime evidence: 7/7 exact key sets, named ICU argument/type parity, byte-identical backticked commands, NFC, no manual bidi/format controls; 8 render_message renders per locale, including empty and leading-space revision head. Opaque tokens preserved. No plurals or maxCells declared in this namespace. Logical-order Urdu storage checked; no terminal shaping, rendered-frame fit, full RTL/layout or native-speaker sign-off claimed. Auditor actually ran openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; translator and auditor are separate agents although same actual model. Target SHA-256 6bb8e99a3857c81e1bf76ca7cf462e9f50f204a3d691e78afc17bf939ebbdc65."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.skills_push",
+      "source_sha256": "79febb9354532b9874c971e53f882425db6b8eaa6fe1c82eb4a3ecf1e2f2d9c4",
+      "translator": {
+        "agent": "Separate LLM translator agent delegated by lopdev manager for hub-push-stale-baseline (identity/model supplied in audit brief)",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "task / independent localization auditor (lopdev), session 8d789d7f8ad4; did not author original translations",
+        "session": "8d789d7f8ad4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Supersedes the immediately preceding same-source cli.skills_push audit row at corrected target bytes; append-only history retained. ZH-CN-1 MINOR fixed: stale_base had {base} before {head}, violating the repository ordered-placeholder contract despite preserving named argument/type sets. Rephrased idiomatically to retain English {head} then {base} order without changing the non-publication or replaced-text warning. Full seven-key semantic/style recheck passed against English context, glossary and locale guide. Final evidence: check.py --catalogues-only: 0 problem(s); exact ORDERED ICU argument/type parity, key parity, literal command byte parity, NFC and absence of manual Cf/bidi controls all passed; runtime.render_message 8/8 (including empty/nonempty optional leading-space head). No maxCells/plurals in source. No rendered-frame, terminal shaping or full RTL/layout claim. Auditor actual model openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; separate translator agent used openai/gpt-6.1-sol per manager brief. Target SHA-256 16757d2069cf0ce4693a0ccea0133e0e3d3a76b4ca61777b2a06081390d87732."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
+      "translator": {
+        "agent": "coder — PR #3444 implementer",
+        "model": "unrecorded — PR #3444 body and commits do not name the actual translating model; not inferred",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, independent of PR #3444 coder)",
+        "session": "3f400bae6226",
+        "model": "anthropic/claude-sonnet-5-5 (semantic audit); openai/gpt-6.1-sol (verification/completion); quota fallback via anthropic/claude-opus-5-5 (no audit work)",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. Z1 MINOR fixed: remove spaces at Chinese/Latin run boundaries per zh-CN guide; retain spaces inside Claude Sonnet 5.5 / Claude Opus 5.5 names. 智能体/筛查/暂扣, 你, full-width prose punctuation agree. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C1-i18n-audit-r1 / i18n-auditor / 725a399d7a94",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. No linguistic changes. Modern terse voice, localized descriptive sound names, full-width prose punctuation and unchanged technical tokens accepted. Current 2026-10-24 hold-lift supersedes the older historical held table; no policy change performed. Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. ZH1 minor fixed: explicit 哈希值 for content digest, removed added 请 absent from source, removed Chinese/Latin boundary spaces per guide. Modern terse voice, full-width punctuation and technical tokens retained. Existing hold-lift policy unchanged. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/zh-CN/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/zh-CN/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
     }
   ]
 }

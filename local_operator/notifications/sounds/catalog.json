@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "default": "soft-pulse",
+  "sounds": [
+    {
+      "id": "soft-pulse",
+      "label": "wire.notification_sound.sound.soft_pulse",
+      "file": "soft-pulse.flac",
+      "sha256": "78325beb9e6b8adb18e4d5a53cd3281f10053d542baa9441b02bf5792526167d",
+      "duration_s": 0.83,
+      "channels": 2
+    },
+    {
+      "id": "two-note-chime",
+      "label": "wire.notification_sound.sound.two_note_chime",
+      "file": "two-note-chime.flac",
+      "sha256": "89de6aec38ffeb31ca205f5d23c9fee1a475b5fbc2c7cb67ba019f758de2de3c",
+      "duration_s": 0.87,
+      "channels": 1
+    },
+    {
+      "id": "felt-marimba",
+      "label": "wire.notification_sound.sound.felt_marimba",
+      "file": "felt-marimba.flac",
+      "sha256": "68b7d8dbd6db5d7add7c6892c1d427906872c0da0d6119b2d642ee83118dc14e",
+      "duration_s": 1.07,
+      "channels": 2
+    },
+    {
+      "id": "hum-swell",
+      "label": "wire.notification_sound.sound.hum_swell",
+      "file": "hum-swell.flac",
+      "sha256": "462481e00cace80418c5a4731b28db11ba943ae6781490a76c9e978539ec161c",
+      "duration_s": 1.46,
+      "channels": 1
+    },
+    {
+      "id": "task-complete",
+      "label": "wire.notification_sound.sound.task_complete",
+      "file": "task-complete.flac",
+      "sha256": "936709d5020d5a4eb3fbbc768481d76ef204437287253da0d0157c8ad6fe50e4",
+      "duration_s": 1.48,
+      "channels": 1
+    },
+    {
+      "id": "signal-handshake",
+      "label": "wire.notification_sound.sound.signal_handshake",
+      "file": "signal-handshake.flac",
+      "sha256": "e5c75d33fe896d3789f8c09147472c50c208baa4f57356403c3faf72bcf48b9f",
+      "duration_s": 0.505,
+      "channels": 1
+    },
+    {
+      "id": "tape-warble",
+      "label": "wire.notification_sound.sound.tape_warble",
+      "file": "tape-warble.flac",
+      "sha256": "2fca7757e46cc4e1281951aacb623727f54e7442a215d6a277f4b6e42b193640",
+      "duration_s": 0.795,
+      "channels": 1
+    },
+    {
+      "id": "bubble-chord",
+      "label": "wire.notification_sound.sound.bubble_chord",
+      "file": "bubble-chord.flac",
+      "sha256": "b51c4a518c749270053d2a40a32c59a6d87302f79ea141a01291b8c33d56b19c",
+      "duration_s": 0.69,
+      "channels": 1
+    },
+    {
+      "id": "airy-whistle",
+      "label": "wire.notification_sound.sound.airy_whistle",
+      "file": "airy-whistle.flac",
+      "sha256": "f80002aba3a7b9060933127b2809c8e908c5a98566fe68385b33f1a9f2e6d711",
+      "duration_s": 0.545,
+      "channels": 1
+    },
+    {
+      "id": "bubble-pulse",
+      "label": "wire.notification_sound.sound.bubble_pulse",
+      "file": "bubble-pulse.flac",
+      "sha256": "dd3ed66a29762e763471e244fd29d71768747ab1f1ea5a44dd7ff5c5bb6004ec",
+      "duration_s": 0.295,
+      "channels": 1
+    }
+  ]
+}

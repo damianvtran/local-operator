@@ -1237,6 +1237,25 @@ def files_capability(payload: Any) -> dict[str, Any] | None:
     return out
 
 
+def agent_files_capability(payload: Any) -> dict[str, Any] | None:
+    """Agent file ingress is a separate, strict-v1 grant, never a human fallback.
+
+    An enabled human file lane or image-agent grant does not authorize publishing
+    arbitrary bytes as an endpoint. Unknown versions and truthy non-booleans stay
+    dark; recipient read authority is deliberately not implied by this grant.
+    """
+    capability = files_capability(payload)
+    block = payload.get("files") if isinstance(payload, Mapping) else None
+    if (
+        capability is None
+        or not isinstance(block, Mapping)
+        or type(block.get("version")) is not int
+        or block.get("agent_upload") is not True
+    ):
+        return None
+    return {**capability, "agent_upload": True}
+
+
 #: An EDGE refusal: the request never reached agent-server (2026-11-04). The
 #: AWS WAF in front of ``api.radienthq.com`` (radient-infra
 #: ``pulumi/radient_infra/waf.py``, managed rule ``GenericLFI_Body``) answers a
@@ -1959,10 +1978,21 @@ class TeamBridgeClient:
 
     # -- operations ---------------------------------------------------------
 
-    async def status(self, *, access: OAuthAccess | None = None) -> dict[str, Any]:
-        """The one cheap eligibility read (§5.1). Callers go through the discipline."""
+    async def status(
+        self,
+        *,
+        access: OAuthAccess | None = None,
+        expected_account_id: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        """Eligibility, optionally fenced to the owner commissioning a file send."""
 
-        return await self._send("GET", "/messaging/status", access=access)
+        extra: dict[str, Any] = {}
+        if expected_account_id is not None:
+            extra["expected_account_id"] = expected_account_id
+        if pre_http_guard is not None:
+            extra["pre_http_guard"] = pre_http_guard
+        return await self._send("GET", "/messaging/status", access=access, **extra)
 
     async def settings(self, *, tenant_id: str | None = None) -> dict[str, Any]:
         """The caller's endpoint + consent record + policies (§6.1)."""
@@ -3283,16 +3313,23 @@ class TeamBridgeClient:
         conversation_id: str,
         account_id: str,
         *,
+        endpoint_id: str | None = None,
         tenant_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
     ) -> dict[str, Any]:
-        """Remove a human member. Owner-only; succession is the server's rule."""
+        """Remove one member; the hub owns lifecycle authority and succession.
 
+        An omitted selector keeps the legacy human-only wire. An endpoint
+        selects one account/endpoint pair, never every agent of that account.
+        """
+        params = {"tenant_id": tenant_id} if tenant_id else {}
+        if endpoint_id is not None:
+            params["endpoint_id"] = endpoint_id
         return await self._send(
             "DELETE",
             f"/messaging/conversations/{conversation_id}/members/{account_id}",
-            params={"tenant_id": tenant_id} if tenant_id else None,
+            params=params or None,
             access=access,
             expected_account_id=expected_account_id,
         )
@@ -4069,13 +4106,14 @@ class TeamBridgeClient:
         expected_account_id: str | None = None,
         mode: Literal["image", "file"] = "image",
         name: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
-        """Stage one image for a later send: ``{attachment: {id, mime, ...}}``.
+        """Stage an image or exact-byte generic file for a later bind.
 
-        ``actor_endpoint_id`` stages the image AS that agent endpoint (the hub
-        refuses it unless it advertises ``attachments.agent_upload``, and binds
-        the staged row to that exact endpoint). The query key is omitted when
-        unset so a human upload stays byte-identical to the pre-agent wire.
+        ``actor_endpoint_id`` stages AS that exact endpoint. Callers negotiate
+        ``attachments.agent_upload`` for images, strict ``files.agent_upload``
+        for files; neither grant implies receiving-agent original-byte access.
+        Omit the actor only for a human upload, whose wire stays unchanged.
 
         The size bound refuses before any I/O. Type is deliberately NOT checked
         here: the hub sniffs the bytes and answers ``415``/``422`` itself, and a
@@ -4087,18 +4125,24 @@ class TeamBridgeClient:
         # image upload below stays byte-identical, and ``name`` is a file-only
         # field: an image never carries one.
         if mode == "file":
-            # Agents may not stage files (the hub refuses ``agent_actor``, and
-            # no screening path exists), and ``_upload_file`` has no actor
-            # query: an agent-addressed file call must fail loudly rather than
-            # stage the bytes as the HUMAN (review F1). Spelled like #3335's
-            # agent-image parameter so the two signatures merge as one.
-            if actor_endpoint_id is not None:
-                raise ValueError("an agent endpoint cannot upload files")
+            # An explicitly supplied but empty/malformed actor must not become
+            # the absent selector (the human lane) in the shared query builder.
+            if actor_endpoint_id is not None and (
+                not isinstance(actor_endpoint_id, str)
+                or not actor_endpoint_id
+                or actor_endpoint_id != actor_endpoint_id.strip()
+            ):
+                raise ValueError("an agent file actor must be a non-empty unpadded endpoint id")
+            # The separate strict-v1 agent grant is checked by the tool before
+            # reading/staging. Preserve its endpoint on this existing transport:
+            # dropping it would silently publish the bytes as the human owner.
             return await self._upload_file(
                 conversation_id,
                 data,
                 name=name,
                 tenant_id=tenant_id,
+                actor_endpoint_id=actor_endpoint_id,
+                pre_http_guard=pre_http_guard,
                 access=access,
                 expected_account_id=expected_account_id,
             )
@@ -4117,6 +4161,9 @@ class TeamBridgeClient:
                 http_status=413,
             )
         params = _attachment_write_params(tenant_id, actor_endpoint_id)
+        extra: dict[str, Any] = {}
+        if pre_http_guard is not None:
+            extra["pre_http_guard"] = pre_http_guard
         return await self._send(
             "POST",
             f"/messaging/conversations/{conversation_id}/attachments",
@@ -4124,6 +4171,7 @@ class TeamBridgeClient:
             content=bytes(data),
             access=access,
             expected_account_id=expected_account_id,
+            **extra,
         )
 
     async def _upload_file(
@@ -4133,6 +4181,8 @@ class TeamBridgeClient:
         *,
         name: str | None,
         tenant_id: str | None,
+        actor_endpoint_id: str | None,
+        pre_http_guard: Callable[[], None] | None,
         access: OAuthAccess | None,
         expected_account_id: str | None,
     ) -> dict[str, Any]:
@@ -4172,13 +4222,14 @@ class TeamBridgeClient:
         # An empty name is "no name", exactly as the hub reads an absent header.
         if name:
             headers["X-Bridge-File-Name"] = encode_file_name(name)
-        params = {"tenant_id": tenant_id} if tenant_id else None
+        params = _attachment_write_params(tenant_id, actor_endpoint_id)
         response = await self._authorized(
             "POST",
             f"/messaging/conversations/{conversation_id}/attachments",
             params=params,
             content=bytes(data),
             extra_headers=headers,
+            pre_http_guard=pre_http_guard,
             access=access,
             expected_account_id=expected_account_id,
         )
@@ -4195,6 +4246,7 @@ class TeamBridgeClient:
         actor_endpoint_id: str | None = None,
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
+        pre_http_guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Discard one STAGED upload (idempotent on the hub; bound ones stay).
 
@@ -4205,12 +4257,16 @@ class TeamBridgeClient:
 
         _require_attachment_id(attachment_id)
         params = _attachment_write_params(tenant_id, actor_endpoint_id)
+        extra: dict[str, Any] = {}
+        if pre_http_guard is not None:
+            extra["pre_http_guard"] = pre_http_guard
         response = await self._authorized(
             "DELETE",
             f"/messaging/conversations/{conversation_id}/attachments/{attachment_id}",
             params=params,
             access=access,
             expected_account_id=expected_account_id,
+            **extra,
         )
         if response.status_code >= 400:
             raise _refusal(response)
@@ -4946,6 +5002,30 @@ class TeamBridgeClient:
             expected_account_id=expected_account_id,
         )
 
+    async def conversation_thread_read(
+        self,
+        conversation_id: str,
+        message_id: str,
+        *,
+        seq: int,
+        tenant_id: str,
+        expected_account_id: str,
+        access: OAuthAccess | None = None,
+    ) -> dict[str, Any]:
+        """Advance only the thread cursor, never the conversation cursor.
+
+        Keep the hub's four-key post-state intact: its thread unread count is
+        not the channel total. The captured owner is checked by ``_send`` and
+        stays local, just as on the other guarded thread mutations.
+        """
+        return await self._send(
+            "POST",
+            f"/messaging/conversations/{conversation_id}/messages/{message_id}/read",
+            body={"seq": seq, "tenant_id": tenant_id},
+            access=access,
+            expected_account_id=expected_account_id,
+        )
+
     async def conversation_notify(
         self,
         conversation_id: str,
@@ -5353,6 +5433,47 @@ def selected_tenant_id(payload: Any) -> str | None:
     return tenant_id if isinstance(tenant_id, str) and tenant_id else None
 
 
+def trial_ended_tenant(payload: Any) -> dict[str, str] | None:
+    """The organization whose no-card Team trial ENDED, when nothing is eligible.
+
+    Why this exists (teams-trial QA round 1, Q5): after a trial ends the hub
+    answers the org's row with ``eligible:false`` and, for an owner or a member
+    the end disabled, no endpoint — so :func:`select_tenant` selects nothing,
+    the surface reads A with ``tenant_id: null``, and the renderer could not
+    reach its paused band (it fell through to the trial on-ramp instead). The
+    hub now marks such a row POSITIVELY with ``trial_ended_at`` (agent-server
+    #296), which is exactly the positive evidence R9 asked for before any
+    surface may speak of an ended plan; ``eligible:false`` alone still proves
+    nothing and still reads nothing here.
+
+    Constraints: this NEVER changes the §3.2 selection or the A–G letter (those
+    stay the backend-policy reading every consumer shares); it is a separate,
+    additive marker. It answers only when no row is eligible — an eligible
+    organization is this machine's subject and an older ended trial elsewhere
+    is not news. When a row IS selected (state F, a retained endpoint) the
+    answer is that row's marker or nothing — never another org's, because
+    ``tenant_id`` already names the selected org and the status contract is
+    shared by consumers that would otherwise read two different organizations
+    off one payload (agent review round 2, R2-1). Only when nothing is selected
+    does it fall through to the first marked row in the server's own order. An older hub
+    without the field yields ``None`` and the surface keeps today's reading.
+    """
+
+    if not isinstance(payload, Mapping):
+        return None
+    tenants = [t for t in (payload.get("tenants") or []) if isinstance(t, Mapping)]
+    if any(bool(t.get("eligible")) for t in tenants):
+        return None
+    selected = select_tenant(payload)
+    ordered = [selected] if selected is not None else tenants
+    for tenant in ordered:
+        tenant_id = tenant.get("tenant_id")
+        ended_at = tenant.get("trial_ended_at")
+        if isinstance(tenant_id, str) and tenant_id and isinstance(ended_at, str) and ended_at:
+            return {"tenant_id": tenant_id, "trial_ended_at": ended_at}
+    return None
+
+
 def _surface_state(check: StatusCheck) -> str | None:
     if check.state == STATE_READY:
         selected = select_tenant(check.payload)
@@ -5466,6 +5587,7 @@ class StatusDiscipline:
             credential_id=credential_id,
         )
         self._states: dict[str, _AccountState] = {}
+        self._last_observed_check: StatusCheck | None = None
         self._locks: dict[str, asyncio.Lock] = {}
         self._identity_revision = 0
         #: ``endpoint_id -> agent_name`` this process last re-sent SUCCESSFULLY.
@@ -5494,6 +5616,54 @@ class StatusDiscipline:
     @property
     def base_url(self) -> str:
         return self._client.base_url
+
+    def cached_conversation_features(self) -> dict[str, int]:
+        """Forward the current owner's fresh hub flags with local transport support.
+
+        Capability polling is not a status boundary: calling ``check`` here
+        could enroll the default-on bridge or publish identity. Only the normal
+        status reader may populate this receipt. A cold/expired/failed cache or
+        changed login withholds it until that reader proves support again.
+        """
+        self._client._require_destination()
+        row = self._client._pinned_row()
+        raw = row.data if row is not None and isinstance(row.data, Mapping) else {}
+        owner = raw.get("account_id")
+        if not isinstance(owner, str) or not owner:
+            return {}
+        observed = self._last_observed_check
+        # A refresh failure may retain the credential row and older success in
+        # _states. Never offer destructive H4 actions after the status boundary
+        # has learned this login is signed out/unavailable (the old S-1 gap).
+        if observed is None or observed.state != STATE_READY or observed.account_id != owner:
+            return {}
+        state = self._states.get(owner)
+        if (
+            state is None
+            or state.check.error is not None
+            or state.check.state != STATE_READY
+            or time.monotonic() - state.last_attempt >= self._ttl(state)
+        ):
+            return {}
+        payload = state.check.payload
+        features = payload.get("features") if isinstance(payload, Mapping) else None
+        if not isinstance(features, Mapping):
+            return {}
+        out: dict[str, int] = {}
+        # This is an explicit local-transport allowlist, not a hub feature map
+        # passthrough. H4 only understands version 1; an unknown version must
+        # not enable a destructive affordance on a changed server contract.
+        for key in (
+            "team_bridge_thread_reads",
+            "team_bridge_endpoint_member_removal",
+            "team_bridge_leave_withdraws_agent",
+        ):
+            version = features.get(key)
+            if type(version) is int and (
+                version >= 1 if key == "team_bridge_thread_reads" else version == 1
+            ):
+                out[key] = version
+        return out
 
     def _ttl(self, state: _AccountState) -> float:
         return STATUS_ERROR_TTL_S if state.check.error is not None else STATUS_CACHE_TTL_S
@@ -5564,6 +5734,7 @@ class StatusDiscipline:
     def _observe(self, check: StatusCheck) -> StatusCheck:
         """Record visibility identically for ordinary and explicit mutation reads."""
 
+        self._last_observed_check = check
         projection = surface_projection(check)
         if projection["surface_state"] is not None or check.state == STATE_SIGNED_OUT:
             # The record carries the POSTURE, not just visibility: the two

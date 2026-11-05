@@ -60,6 +60,12 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.agent_profiles import AUTO_UPDATE_SEEDS_DEFAULT
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.cross_session import DEFAULT_HIDE_CROSS_SESSION
+    from local_operator.guardrails.check import (
+        GUARDRAILS_CRITICAL_OVERRIDE_DEFAULT,
+        GUARDRAILS_ENABLED_DEFAULT,
+        GUARDRAILS_RULES_DIR_DEFAULT,
+    )
+    from local_operator.guardrails.judge import GUARDRAILS_JUDGE_TIMEOUT_DEFAULT
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
     from local_operator.harness.subagent import (
         DEFAULT_MAX_TEAM_DEPTH,
@@ -71,6 +77,7 @@ def _consumer_defaults() -> dict[str, object]:
         FORWARD_CODEX_DEFAULT,
         NATIVE_DEFAULT,
     )
+    from local_operator.hub_org.settings import DEFAULT_ORG_AUTO_ENROL
     from local_operator.hub_sync.settings import (
         DEFAULT_AUTO_UPDATE_AGENTS,
         DEFAULT_AUTO_UPDATE_TEAMS,
@@ -122,6 +129,7 @@ def _consumer_defaults() -> dict[str, object]:
     # The mesh sync cadence, from the module whose watcher reads it
     # (``SyncSettings.from_config`` falls back to exactly these).
     from local_operator.network.sync import SYNC_DEBOUNCE_S, SYNC_TICK_S
+    from local_operator.notifications import sound as notification_sound
     from local_operator.providers.failover import (
         CONNECTIVITY_BACKOFF_CAP_MS,
         CONNECTIVITY_MAX_RETRIES,
@@ -209,6 +217,10 @@ def _consumer_defaults() -> dict[str, object]:
         # path); THIS entry is what turns a drift between the two into a red
         # test rather than a page advertising a default nothing honours.
         "language": DEFAULT_LANGUAGE,
+        # Read by `notifications/sound.py:resolve` on every notification.
+        "notifications.sound.enabled": notification_sound.DEFAULT_ENABLED,
+        "notifications.sound.id": notification_sound.DEFAULT_SOUND_ID,
+        "notifications.sound.volume": notification_sound.DEFAULT_VOLUME,
         # The opt-in hider's own constant, beside the predicate that reads it
         # (`local_operator.cross_session`), so a registry default that drifts
         # from the code's is a red test rather than a page that lies.
@@ -248,6 +260,12 @@ def _consumer_defaults() -> dict[str, object]:
         "tools.defer": DEFAULT_TOOL_DEFERRAL,
         "tools.search_interception.block": SEARCH_INTERCEPTION_BLOCK_DEFAULT,
         "tools.search_interception.rg_excludes": SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT,
+        # The guardrail keys; consumer constants live beside the reader in
+        # guardrails/check.py and guardrails/judge.py.
+        "guardrails.enabled": GUARDRAILS_ENABLED_DEFAULT,
+        "guardrails.critical_override": GUARDRAILS_CRITICAL_OVERRIDE_DEFAULT,
+        "guardrails.judge_timeout_s": GUARDRAILS_JUDGE_TIMEOUT_DEFAULT,
+        "guardrails.rules_dir": GUARDRAILS_RULES_DIR_DEFAULT,
         # The three query_budget keys, whose consumer constants live in
         # tools/query_budget.py beside the predicates that read them — the same
         # arrangement, and for the same reason: a registry default that disagrees
@@ -269,6 +287,7 @@ def _consumer_defaults() -> dict[str, object]:
         "hub.auto_update.agents": DEFAULT_AUTO_UPDATE_AGENTS,
         "hub.auto_update.teams": DEFAULT_AUTO_UPDATE_TEAMS,
         "hub.check_interval_min": DEFAULT_CHECK_INTERVAL_MIN,
+        "hub.org.auto_enrol": DEFAULT_ORG_AUTO_ENROL,
         "agents.auto_update.seeds": AUTO_UPDATE_SEEDS_DEFAULT,
         "session.cleanup.enabled": DEFAULT_ENABLED,
         "session.cleanup.max_sessions": DEFAULT_MAX_SESSIONS,
@@ -1134,6 +1153,36 @@ def test_bash_shell_row_shares_the_consumer_path(manager: ConfigManager) -> None
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
         assert _configured_bash_shell() == "/opt/x/bash"
+
+
+def test_guardrails_rows_share_the_consumer_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``guardrails.*`` rows write exactly where ``guardrails.check`` reads,
+    and stored values round-trip through the real reader (with the critical
+    override honoured only when the host says the write was authorised)."""
+    from local_operator.guardrails import check
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    manager = ConfigManager(tmp_path)
+    assert settings_io.BY_KEY["guardrails.enabled"].path == check.GUARDRAILS_ENABLED_PATH
+    assert (
+        settings_io.BY_KEY["guardrails.critical_override"].path
+        == check.GUARDRAILS_CRITICAL_OVERRIDE_PATH
+    )
+    assert (
+        settings_io.BY_KEY["guardrails.judge_timeout_s"].path == check.GUARDRAILS_JUDGE_TIMEOUT_PATH
+    )
+    assert settings_io.BY_KEY["guardrails.rules_dir"].path == check.GUARDRAILS_RULES_DIR_PATH
+    settings_io.write_setting(manager, settings_io.BY_KEY["guardrails.enabled"], False)
+    settings_io.write_setting(manager, settings_io.BY_KEY["guardrails.critical_override"], True)
+    settings_io.write_setting(manager, settings_io.BY_KEY["guardrails.judge_timeout_s"], 7.5)
+    unauthorised = check.read_settings()
+    # Loosenings without an operator's proof read as their safe defaults (S5).
+    assert unauthorised.enabled is True and unauthorised.judge_timeout_s == 7.5
+    assert unauthorised.critical_override is False
+    authorised = check.read_settings(authorised=check.LOOSENING_KEYS)
+    assert authorised.critical_override is True and authorised.enabled is False
 
 
 def test_search_interception_rows_share_the_consumer_paths(manager: ConfigManager) -> None:

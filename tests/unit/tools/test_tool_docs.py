@@ -307,7 +307,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # costs +5, measured by this test's print on both LOP_ASK_NONBLOCKING arms.
     "ask": 1083,
     "ask_withdraw": 452,
-    "bash": 295,
+    # 295 -> 308 (highlights deliverables, #3392): the new ``deliver`` parameter
+    # ("Files to show.") -- re-measured via this test's own print; bash is the only
+    # entry that moved. eval carries no pin (context budget; see supplements.pins).
+    "bash": 308,
     # NEW (H5d, Team Bridge): the ``bridge`` doc — take-up's hash rule, the
     # claim lifecycle, and why "decide" is not an op. First measured at 572
     # tokens DELIBERATELY in the canonical (hermetic, tiktoken-exact) arm; every
@@ -391,7 +394,10 @@ MEASURED_TOKENS: dict[str, int] = {
     # The long form (the `attachments_unavailable` detail) lives in the refusal
     # itself, not in this opt-in note. 1947 was the pre-merge figure and is not
     # carried across.
-    "bridge": 1978,
+    # 1978 -> 1977: canonical isolated renderer re-measured after the explicit
+    # generic-file schema and compact description (including lowercase `read`).
+    # This records actual doc cost; the 8 KiB soft cap is deliberately unchanged.
+    "bridge": 1977,
     # Re-measured with this test's canonical isolated renderer: the read-only
     # inspect_ownership operation adds 19 opt-in tokens, not wire prompt cost.
     # 1327 -> 1424 (2026-10-16): the browser `type` secret_ref convention adds

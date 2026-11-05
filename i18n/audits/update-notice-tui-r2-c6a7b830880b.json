@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "record_kind": "independent_translation_audit",
+  "date": "2026-11-04",
+  "namespace": "tui.update",
+  "keys": [
+    "tui.update.checking",
+    "tui.update.updating",
+    "tui.update.updating_in_place",
+    "tui.update.restarting",
+    "tui.update.restarting_in_place",
+    "tui.update.relaunch_when_idle",
+    "tui.update.relaunch_when_idle_in_place"
+  ],
+  "locales": [
+    "fr",
+    "es",
+    "zh-CN",
+    "ru",
+    "vi",
+    "ur",
+    "hi"
+  ],
+  "source_sha256": "123da7e1fce2892a4216e438f2d3470a47d7cf02d7eb890dcefa2835b949997b",
+  "context_sha256": "20093b61a907fc4bca179120fbf5a5fbe25c8158c12d39dcf18b2828c1d19795",
+  "glossary_sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+  "style_guide_sha256": {
+    "fr": "5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7",
+    "es": "4a6f6270f028e5f5fbca7156a8f5099077f92585db94c14653482e9b188248a6",
+    "zh-CN": "8f95d89debbd0af848e72e4805e256ef9566632e520a5c6d9b37928cd617142c",
+    "ru": "f20e1cafaf70578c17ce072c71725628808d228e4be5604329f8da30386f1fb5",
+    "vi": "e4901497ed553e2b2ae4a2660bf776adb787b89e11d7eb0f8d08f3da4b227888",
+    "ur": "c0eecf7f7b5e89956b7de9ab7a9eb647ff1a7ef701ccf2a7f0264d5eea15ca60",
+    "hi": "82292dc8d13fcc93dc752457719264aed3cc20bb65ecfaba0f0e5a31f4cb40d5"
+  },
+  "target_sha256": {
+    "fr": "dac1a47af57b181b3482d90c998e88fbd23c95c1335e2e5c8b4acfa54f07e90f",
+    "es": "657fbdff3b123ed385813f16afc6ce23161bbb36309212ad9990cbdcada306b9",
+    "zh-CN": "5804d76d69b59ab3913dba9b179f26a2b3df40134bddc127eda79a5ea181d96c",
+    "ru": "b4a94ff9d16b168f90772d9cada60d25e9a06a55546b9ef4979fd3b2fbd207b1",
+    "vi": "ef5df2ec85967727273dc28df98681cbbac7162c432e712b412caac6dabc9314",
+    "ur": "bbdaa802ca45802ccbcec85f8cb221db033742f4bc38362b7fb00e8a710abd90",
+    "hi": "b9177e5664ad868053f7b95b46ce0cd3817081d5500c53b0271d876b1bc586a7"
+  },
+  "auditor": {
+    "agent": "reviewer / independent i18n auditor (team lopdev)",
+    "session": "c6a7b830880b",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-04",
+    "result": "passed",
+    "findings": 0
+  },
+  "translator": {
+    "agent": "coder (team lopdev, update-notice-reassure round-1 remediation)",
+    "session": "d3534e994383",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-03"
+  },
+  "independence": "Auditor session c6a7b830880b differs from translator session d3534e994383 and authored no English copy or code in PR #3401; it only corrected the translations listed under findings_resolved and wrote this record plus ledger rows. Same model (anthropic/claude-opus-5-5) as translator; disclosed, separate agent instance.",
+  "scope": "Round-2 delta audit of tui.update after review M1/D2/D4 remediation: changed checking, restarting, relaunch_when_idle; new updating_in_place, restarting_in_place, relaunch_when_idle_in_place; unchanged updating re-read in context. Whole namespace (7 keys x 7 locales) read against English source, context sidecar, glossary and each locale style guide. Checks: key and {version} placeholder parity, no em/en dashes, fr U+202F before ';', zh-CN '……' and no CJK/Latin space, register per style guide, meaning matches source (generation-layout arms reassure; in-place arms caution or stay silent; checking is neutral).",
+  "findings_resolved": {
+    "fr": [
+      "I8 MINOR: updating_in_place 'sur place' reads as 'on site / on the spot', not 'in place (over the existing install)'; changed to 'sur l’installation actuelle', matching es/ru/hi/ur. Fixed by auditor."
+    ],
+    "vi": [
+      "I9 NIT: updating_in_place 'lên v{version} ghi đè bản cài hiện tại' ran two verb phrases together; changed to 'bằng cách ghi đè bản cài hiện tại' (by overwriting the current install). Fixed by auditor."
+    ]
+  },
+  "unresolved_blocker_major": 0,
+  "not_claimed": "No rendered TUI fit, native RTL or second safety audit.",
+  "ledger_rows": "Appended one passed row per locale shard at the current English bytes. The implementer's 7 placeholder rows (status pending, auditor 'pending', added in 9c22b7079fc and never on main) were replaced rather than kept: tests/unit/i18n/test_hold_split.py requires every zh-CN row to be passed, so a pending placeholder fails CI, and a placeholder for an audit not yet done is not history. The round-1 passed rows at the superseded hash 2d3f1a13... are kept. Aggregate i18n/ledger.json re-rendered by generate.py."
+}

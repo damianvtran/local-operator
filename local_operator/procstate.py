@@ -544,6 +544,14 @@ class ProcessSample:
     #: DOUBT, never death: see :func:`same_birth`.
     birth: str | None
 
+    #: Linux only: ``num_threads`` (``/proc/<pid>/stat`` field 20) from the SAME
+    #: read as ``zombie``. ``None`` where the platform reports no thread count.
+    #: Why it exists: on Linux a thread-group leader whose MAIN thread exited while
+    #: other threads still run reads state ``Z`` (fs/proc/array.c reports the
+    #: leader's state) yet its live threads can still fork, so a ``Z`` row alone
+    #: does not mean "exited" -- see ``owned_process_group._exited``.
+    threads: int | None = None
+
     def is_birth(self, scheme: str | None, token: str | None) -> bool | None:
         """Whether THIS sample's process is the one that produced ``token``.
 
@@ -674,9 +682,18 @@ def _proc_samples(
             note(pid, "short-stat-row", None)
             continue
         starttime = tail[19]
+        # ``num_threads`` (field 20) is tail[17]. An unparseable count OMITS the
+        # row rather than recording ``threads=None``: on this reader ``None`` would
+        # read as single-threaded, letting a threaded "zombie" pass as exited --
+        # the false-cleanup direction. An omitted row is an unresolved member,
+        # which every caller already refuses.
+        if not tail[17].isdigit():
+            note(pid, "short-stat-row", None)
+            continue
         samples[pid] = ProcessSample(
             zombie=_is_zombie_state(tail[0]),
             birth=starttime if starttime.isdigit() else None,
+            threads=int(tail[17]),
         )
     return samples
 

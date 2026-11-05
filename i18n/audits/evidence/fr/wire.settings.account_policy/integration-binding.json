@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "locale": "fr",
+  "namespace": "wire.settings.account_policy",
+  "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+  "context_sha256": "2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02",
+  "original_translator_context_sha256": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254",
+  "target_sha256": "f998c7a608a0023275a39f4c75ff7db65d107924c78db3907c7d0a28b2d30744",
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7b2ba4ed501d",
+    "actual_model": "openai/gpt-6.1-sol",
+    "source": "immutable translator packet completed-message usage provenance"
+  },
+  "independent_readers": [
+    {
+      "session": "c44e0f808e48",
+      "model": "openai/gpt-6.1-sol",
+      "record": "i18n/audits/evidence/fr/wire.settings.account_policy/first-c44e0f808e48/record.json",
+      "record_sha256": "cf0b5d96fafd7034ace8cb03e76ec6a8894b09086f5a885914f7959887e79650",
+      "verdict": "passed",
+      "findings": 0
+    },
+    {
+      "session": "35aac0a677bc",
+      "model": "openai/gpt-6.1-sol",
+      "record": "i18n/audits/evidence/fr/wire.settings.account_policy/fr2-35aac0/record.json",
+      "record_sha256": "3e96e57801ef86e713d98b016c3c8f9613ceba145c4db76d7fc5525f80e0b140",
+      "verdict": "passed",
+      "findings": 0
+    }
+  ],
+  "fr_second_reader_coder_identity_correction": "fr2-35aac0/provenance-addendum.json",
+  "scope": "Initial cohesive contribution; note-only context correction, keys/ICU/role/tone/maxCells unchanged; no SDK policy change. Native/pseudo/RTL fit not executed by implementer."
+}

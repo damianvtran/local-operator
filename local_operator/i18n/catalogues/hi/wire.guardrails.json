@@ -1,0 +1,12 @@
+{
+  "wire.guardrails.critical_override.help": "डिफ़ॉल्ट रूप से बंद। चालू होने पर अहम चीज़ें हटाने वाली कॉल (स्टेट फ़ोल्डर, कॉन्फ़िग, सीक्रेट, होम फ़ोल्डर) अस्वीकार होने के बजाय सुरक्षा जाँच को भेजी जाती हैं। केवल इसी मशीन की सेटिंग्स से सेट करने पर लागू, फ़ाइल संपादन से कभी नहीं।",
+  "wire.guardrails.critical_override.label": "अहम चीज़ें हटाने की समीक्षा",
+  "wire.guardrails.enabled.help": "टूल कॉल चलने से पहले उन पर आपकी सुरक्षा नियम फ़ाइलें लागू करता है। अंतर्निहित dangerous-delete जाँच हर हाल में चालू रहती है।",
+  "wire.guardrails.enabled.label": "सुरक्षा नियम",
+  "wire.guardrails.judge_timeout_s.help": "कॉल रोके जाने से पहले सुरक्षा जाँच कितना समय ले सकती है। जो जाँच उत्तर न दे सके, वह हमेशा रोकती है।",
+  "wire.guardrails.judge_timeout_s.label": "सुरक्षा जाँच टाइमआउट (s)",
+  "wire.guardrails.rules_dir.help": "सुरक्षा नियम फ़ाइलों (*.md) का एक अतिरिक्त फ़ोल्डर, जो कॉन्फ़िग डायरेक्टरी के rules फ़ोल्डर के अलावा भी लोड होता है।",
+  "wire.guardrails.rules_dir.label": "नियम फ़ोल्डर",
+  "wire.guardrails.section.description": "टूल कॉल से पहले चलने वाली जाँचें, जो खतरनाक कॉल अस्वीकार कर सकती हैं।",
+  "wire.guardrails.section.title": "सुरक्षा उपाय"
+}

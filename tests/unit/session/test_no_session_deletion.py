@@ -487,6 +487,16 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "list.remove on the in-memory _listeners callback registry; no filesystem path",
     ),
     (
+        # `/sound remove <id>` (C4): `custom_sounds.remove` is the custom-sound
+        # store's own entry point, already classified above. It takes an id the
+        # store validates by regex and resolves to a FILE under
+        # <config>/sounds/custom (resolved containment), never a session path.
+        "local_operator/tui/app.py::OperatorApp._sound_store_op",
+        "<path>.remove",
+        "custom_sounds.remove(sound_id): the sound store's id-validated FILE delete under "
+        "<config>/sounds/custom; no session path, no caller path",
+    ),
+    (
         "local_operator/tui/app.py::OperatorApp._release_sidebar_preparation",
         "<path>.remove",
         "Textual TranscriptView.remove unmounts a widget; no filesystem path",
@@ -747,6 +757,82 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "Only the sibling mkstemp temp FILE this call created in <config_dir>; "
         "never a session, transcript or directory",
+    ),
+    # The custom notification-sound store (`notifications/custom_sounds.py`,
+    # notification-sounds design §3). Every path it touches is built by
+    # `store_root()` = <config>/sounds/custom or `render_root()` =
+    # <config>/sounds/rendered (both from `config_dir()`, never a session id or
+    # a transcript), joined with a basename that is either a fixed name
+    # (`index.json`), an id that matched `^custom-[a-z0-9-]{1,40}$` and passed
+    # resolved containment (`_contained`), or a `.<name>.<hex>.tmp` this same
+    # call minted. Every replace target and every unlink target is a regular FILE
+    # (or a symlink planted in a sound's slot, unlinked as the link itself); no
+    # call names a directory, and none can resolve under `sessions/`.
+    (
+        "local_operator/notifications/custom_sounds.py::_write_index",
+        "os.replace",
+        "Atomic replace of <config>/sounds/custom/index.json from a sibling tmp FILE; "
+        "never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::_write_index",
+        "<path>.unlink",
+        "Only the sibling .index.json.<hex>.tmp FILE this call created",
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::add",
+        "os.replace",
+        "Atomic replace of <config>/sounds/custom/<custom-id>.wav from a sibling tmp FILE",
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::add",
+        "<path>.unlink",
+        "The sibling tmp FILE this call created, or (index write failed) the <id>.wav "
+        "it just wrote; both under <config>/sounds/custom/",
+        2,
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::remove",
+        "<path>.unlink",
+        "The removed sound's <config>/sounds/custom/<custom-id>.wav FILE, or a symlink "
+        "planted in that slot (the link itself, never its target)",
+        2,
+    ),
+    # notification-sounds C5: the phone's built-in WAV is decoded through a
+    # private temp file (miniaudio writes WAV only to a path), read, then removed.
+    (
+        "local_operator/notifications/catalog_view.py::_builtin_wav",
+        "os.unlink",
+        "The tempfile.mkstemp(suffix='.wav') FILE this call created in the system temp "
+        "dir; never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::_drop_renders",
+        "<path>.unlink",
+        "Rendered-cache FILES <config>/sounds/rendered/<custom-id>-*.wav (symlinks skipped)",
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::_prune_renders",
+        "<path>.unlink",
+        "Oldest rendered-cache FILES under <config>/sounds/rendered/ (symlinks skipped)",
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::render",
+        "os.replace",
+        "Atomic replace of a <config>/sounds/rendered/<id>-<sha8>-<vol>.wav FILE",
+    ),
+    (
+        "local_operator/notifications/custom_sounds.py::render",
+        "<path>.unlink",
+        "Only the sibling tmp FILE this call created in <config>/sounds/rendered/",
+    ),
+    # `lop sound remove`: `custom_sounds.remove(...)` is a module function call
+    # whose name happens to be `remove`; it is the store mutation argued above,
+    # not a filesystem call on a path.
+    (
+        "local_operator/sound_cli.py::remove_command",
+        "<path>.remove",
+        "custom_sounds.remove(sound_id): the store API above, not a path removal",
     ),
     (
         "local_operator/session/session_tags.py::_write",
@@ -3720,6 +3806,58 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/hub_sync/service.py::_materialize_published_skill",
         "shutil.rmtree",
         "Removes this publish's own <config_dir>/hub/downloads/<token_hex> archive directory",
+    ),
+    # -- bundle adoption aside (org hub auto-enrol / install over a local skill) --
+    # ``install_skill`` moves the operator's occupying skill folder
+    # ``<config>/skills/<alias>`` to the dot-prefixed sibling
+    # ``<config>/skills/.adopt-<alias>-<hex12>`` (alias is ``validate_name``'d, so
+    # it cannot carry a separator or ``..``), restores it on a refused install,
+    # and drops it once the hub tree commits (the durable backup is in
+    # ``hub/backups/``). ``recover_bundle_adoption_asides`` settles the same
+    # asides after a crash, scanning ONLY direct children of ``<config>/skills``
+    # that match the prefix and are real directories (symlinks skipped). Every
+    # path is ``<config>/skills/...``, a sibling of sessions/; no session id or
+    # caller-named path reaches any of these calls.
+    (
+        "local_operator/hub_sync/service.py::install_skill",
+        "os.replace",
+        "Moves <config>/skills/<alias> to/from its own .adopt-<alias>-<hex> sibling only",
+        2,
+    ),
+    (
+        "local_operator/hub_sync/service.py::install_skill",
+        "shutil.rmtree",
+        "Drops this adoption's own <config>/skills/.adopt-<alias>-<hex> aside after commit",
+    ),
+    (
+        "local_operator/hub_sync/service.py::recover_bundle_adoption_asides",
+        "os.replace",
+        "Restores a crashed <config>/skills/.adopt-<alias>-<hex> aside to <config>/skills/<alias>",
+    ),
+    (
+        "local_operator/hub_sync/service.py::recover_bundle_adoption_asides",
+        "shutil.rmtree",
+        "Drops a <config>/skills/.adopt-* aside whose alias a hub link already owns",
+    ),
+    # -- org hub eligibility record ------------------------------------------
+    # ``hub_org/eligibility.py`` keeps ONE file, ``<config>/hub/org_catalogue.json``
+    # (``record_path``: a fixed name under the fixed hub dir). ``_atomic_write``
+    # replaces it from a mkstemp sibling temp and unlinks that temp on error;
+    # ``clear`` (sign-out) unlinks the record. No session path reaches either.
+    (
+        "local_operator/hub_org/eligibility.py::_atomic_write",
+        "os.replace",
+        "Atomic replace of <config>/hub/org_catalogue.json from its own sibling temp",
+    ),
+    (
+        "local_operator/hub_org/eligibility.py::_atomic_write",
+        "os.unlink",
+        "Clears this call's own same-directory temp on the error path only",
+    ),
+    (
+        "local_operator/hub_org/eligibility.py::clear",
+        "<path>.unlink",
+        "Removes the fixed <config>/hub/org_catalogue.json record on sign-out",
     ),
     (
         "local_operator/hub_sync/skill_bundle.py::extract_archive",

@@ -86,6 +86,7 @@ from local_operator.session.history_window import DisplayHistoryWindow
 from local_operator.session.runtime.types import RUNNING_SUBAGENT_STATUSES
 from local_operator.session.spend import (
     SessionSpend,
+    has_reported_tokens,
     serving_identity,
     usage_prices_known,
 )
@@ -716,8 +717,8 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
         _usage_field,
     )
 
-    folded: dict[tuple[str, str, str, str | None, bool], Any] = {}
-    order: list[tuple[str, str, str, str | None, bool]] = []
+    folded: dict[tuple[str, str, str, str | None, bool, str | None], Any] = {}
+    order: list[tuple[str, str, str, str | None, bool, str | None]] = []
     passthrough: list[Any] = []
     for raw_component in components:
         provider = str(getattr(raw_component, "provider", "") or "")
@@ -783,6 +784,7 @@ def _folded_components(components: Sequence[Any]) -> list[Any]:
             mode,
             getattr(component, "billing_basis", None),
             component.openai_long_context,
+            component.openai_service_tier,
         )
         existing = folded.get(key)
         if existing is None:
@@ -1310,6 +1312,11 @@ _FRONTEND_LOCAL_SLASHES = {
     # dispatches it. A runtime-side `/network` would act on another machine's
     # mesh, which is why it is not there.
     "network",
+    # The notification sound is THIS machine's: `config.yml`'s
+    # `notifications.sound.*`, the custom store under `config_dir()/sounds`,
+    # and the speakers a preview plays on. Routed to a runtime it would audition
+    # a sound on another computer and edit another machine's selection.
+    "sound",
     # The projects page and its store are THIS machine's: `config_dir()/projects`
     # is the row store, `config_dir()/sessions/` is what the page's linked
     # sessions resolve against, and the run records its runtime state reads are
@@ -8485,10 +8492,15 @@ class FrontendStateStore:
             "context_tokens": usage.context_tokens or usage.input_tokens or state.context_tokens,
             "context_is_estimate": False,
         }
-        if cost is not None or usage.input_tokens or usage.output_tokens:
+        if cost is not None or has_reported_tokens(usage):
             spend = self._accrue_call(session, usage, cost)
             changes.update(
-                cumulative_parent_cost=spend.usd,
+                # Off-record calls must publish the SAME nullable reading as
+                # refresh/restoration: raw zero hides an entirely unpriceable
+                # receipt. The shared predicate also retains cache-only and
+                # stamped all-zero receipts without inventing spend for an
+                # unused host. Known zero and mixed lower bounds stay numeric.
+                cumulative_parent_cost=spend.published_usd(),
                 cost_knowledge=spend.knowledge(),
                 usage_components=_capped_components(
                     list(state.usage_components) + list(usage.cost_components or [usage])

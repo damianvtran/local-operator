@@ -665,6 +665,7 @@ async def status(
         get_status_discipline,
         selected_tenant_id,
         surface_projection,
+        trial_ended_tenant,
     )
 
     # The read family's availability receipt lives with the read family, and the
@@ -729,6 +730,12 @@ async def status(
         # 1, R2): the first eligible tenant in the server's own order, else
         # the retained endpoint's row — never "several rows, so none".
         "tenant_id": selected_tenant_id(check.payload),
+        #: The org whose Team trial ENDED, ``{tenant_id, trial_ended_at}``, when
+        #: no org is eligible and the hub marked a row positively (teams-trial
+        #: QA round 1, Q5): with ``tenant_id`` null in state A this is the only
+        #: way the renderer can reach the paused band for the right org instead
+        #: of offering a new trial. ``None`` otherwise, and on an older hub.
+        "trial_ended": trial_ended_tenant(check.payload),
         "surface_state": projection["surface_state"],
         #: §5.6 F's sentence when this answer PROVES F — the neutral
         #: "Agent messages are turned off" in v1 (review round 2, R9) — else
@@ -1752,6 +1759,27 @@ class ConversationReadIn(ConversationOwnerIn):
         return self
 
 
+class ConversationThreadReadIn(_Strict):
+    """A thread acknowledgement always names its captured owner and tenant.
+
+    Unlike the legacy conversation cursor, this new wire has no receipt-less
+    callers to preserve. Do not accept mute/notify here: a thread read must
+    never become a conversation-policy or conversation-cursor mutation.
+    """
+
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(min_length=1, max_length=128)
+    seq: int = Field(ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def _receipt_grammar(self) -> "ConversationThreadReadIn":
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        if not self.tenant_id.strip():
+            raise ValueError("a guarded mutation needs an explicit tenant_id")
+        return self
+
+
 class ConversationConsentIn(ConversationOwnerIn):
     """The owner's decision about their own agent (agent-server #227).
 
@@ -2204,16 +2232,36 @@ async def remove_conversation_member(
     request: Request,
     config_manager: ConfigManager = Depends(get_config_manager),
 ) -> CRUDResponse[Any]:
-    """Remove a human member (owner only; the server owns succession)."""
+    """Remove one human or one account/endpoint pair; authority stays on the hub.
+
+    Endpoint selection must never degrade to human removal. Unlike the legacy
+    human wire, this new mutation requires the captured owner and explicit
+    tenant, so a stale roster action cannot run under a changed login.
+    """
     _require_conversation_id(conversation_id)
     _require_account_id(account_id)
-    _refuse_write_scope(request)
+    accepted = frozenset({"expected_account_id", "tenant_id", "endpoint_id"})
+    if set(request.query_params) - accepted:
+        _raise_read("invalid_request")
+    for key in request.query_params:
+        values = request.query_params.getlist(key)
+        if len(values) != 1 or not values[0].strip():
+            _raise_read("invalid_request")
+    endpoint_id = request.query_params.get("endpoint_id")
+    selector: dict[str, Any] = {}
+    if endpoint_id is not None:
+        if _ENDPOINT_ID.fullmatch(endpoint_id) is None:
+            _raise_read("invalid_request")
+        owner = _required_owner_query(request, accepted)
+        selector["endpoint_id"] = endpoint_id
+    else:
+        owner = _conversation_owner_query(request)
 
     client = _conversation_client(config_manager)
     return reply(
         await _conversation_reply(
             client.conversation_remove_member(
-                conversation_id, account_id, **_conversation_owner_query(request).model_dump()
+                conversation_id, account_id, **owner.model_dump(), **selector
             )
         )
     )
@@ -3521,6 +3569,39 @@ async def conversation_read(
     )
 
 
+@router.post(
+    "/v1/desktop/team-bridge/conversations/{conversation_id}/messages/{message_id}/read",
+    response_model=CRUDResponse[Any],
+)
+async def conversation_thread_read(
+    conversation_id: str,
+    message_id: str,
+    request: Request,
+    body: ConversationThreadReadIn,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Acknowledge a root's replies without advancing the channel cursor.
+
+    The hub owns membership, root binding and cursor clamping. Keep its exact
+    post-state rather than aliasing the thread count to the channel count.
+    """
+    _require_conversation_id(conversation_id)
+    _require_message_id(message_id)
+    if request.query_params:
+        _raise_read("invalid_request")
+    return reply(
+        await _conversation_reply(
+            _conversation_client(config_manager).conversation_thread_read(
+                conversation_id,
+                message_id,
+                seq=body.seq,
+                tenant_id=body.tenant_id,
+                expected_account_id=body.expected_account_id,
+            )
+        )
+    )
+
+
 @router.get("/v1/desktop/team-bridge/unread", response_model=CRUDResponse[Any])
 async def conversation_unread(
     request: Request,
@@ -3881,3 +3962,165 @@ async def owner_audit_attachment(
         if mime == _OWNER_AUDIT_FILE_MIME:
             headers["Content-Disposition"] = 'attachment; filename="attachment.bin"'
         return Response(content=data, media_type=mime, headers=headers)
+
+
+# -- B4b held messages (HUMAN-ONLY decision) ----------------------------------
+#
+# Operator decision a-3f46 (B4b DESIGN §3, §7.1; DECISIONS Amendment 1). The
+# receiving person sees which conversation messages this machine is holding,
+# and may Deliver or Discard the ONE releasable kind: a screening decision
+# naming exactly ``new_work_request``, made by an allowlisted screener. The
+# writes sign a write-once local record and NEVER call the hub; the connector
+# consumes the record on its next pass (``server/utils/desktop_team_bridge_holds``).
+#
+# GATES. The router's desktop bearer (the chief of staff's ``bash`` has none);
+# the captured-owner receipt ``expected_account_id`` on every call, checked
+# against the SIGNED-IN account and the committed owner by the read slice's
+# resolver; the operator key's signature; and ``team_bridge.hold_release``
+# (off by default: the list answers ``enabled: false`` and writes refuse with
+# ``hold_release_off``). Every answer is ``private, no-store``.
+
+#: Machine codes → status for the hold routes. A code not listed is a bug here.
+_HOLD_REFUSALS: dict[str, tuple[int, str]] = {
+    "hold_release_off": (409, "releasing held messages is turned off on this machine"),
+    "hold_not_releasable": (409, "this message can't be delivered or discarded from here"),
+    "snapshot_stale": (409, "this message changed since you saw it; reload and try again"),
+    "already_decided": (409, "this message was already delivered or discarded"),
+    "deliver_expired": (409, "this message is too old to deliver; you can still discard it"),
+    "release_signing_unavailable": (
+        409,
+        "the operator key didn't sign; set up operator authority or try again",
+    ),
+    "state_unavailable": (409, STATE_UNREADABLE),
+    "invalid_request": (422, "the request is malformed"),
+}
+
+HOLDS_QUERY_PARAMS = frozenset({"expected_account_id"})
+
+
+class TeamBridgeHoldDecision(_Strict):
+    """Deliver/Discard body. ``body_sha256`` is the hash of the body the card showed."""
+
+    expected_account_id: str = Field(min_length=1, max_length=128)
+    conversation_id: str = Field(min_length=1, max_length=128)
+    body_sha256: str = Field(min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def _grammar(self) -> "TeamBridgeHoldDecision":
+        if not is_account_id(self.expected_account_id):
+            raise ValueError("expected_account_id is outside the accepted grammar")
+        if not re.fullmatch(CONVERSATION_ID_PATTERN, self.conversation_id):
+            raise ValueError("conversation_id is outside the accepted grammar")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.body_sha256):
+            raise ValueError("body_sha256 must be a lowercase sha256 hex")
+        return self
+
+
+def _raise_hold(code: str) -> NoReturn:
+    status, message = _HOLD_REFUSALS.get(code, (409, "the held-message request was refused"))
+    raise HTTPException(status, {"code": code, "message": message})
+
+
+async def _hold_owner(config_manager: ConfigManager, expected_account_id: str) -> Any:
+    """The committed owner the captured account names, or the read slice's refusal."""
+
+    from local_operator.team_bridge.client import BridgeRefusal, BridgeSignInRequired
+    from local_operator.team_bridge.read_context import (
+        ReadRefused,
+        resolve_read_context,
+    )
+
+    try:
+        context = await resolve_read_context(
+            config_manager.config_dir, expected_account_id=expected_account_id
+        )
+    except BridgeSignInRequired as exc:
+        _raise_sign_in(exc)
+    except BridgeRefusal as exc:
+        _raise_bridge(exc)
+    except ReadRefused as exc:
+        _raise_read(exc.code)
+    return context.owner
+
+
+@router.get("/v1/desktop/team-bridge/holds", response_model=CRUDResponse[Any])
+async def list_holds(
+    request: Request,
+    response: Response,
+    expected_account_id: str | None = Query(default=None),
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """This machine's held conversation messages: ids, times, kind, ``releasable``.
+
+    No body, label, category or reason: the renderer joins the owner-audit page
+    for sender and body (DESIGN §7.1).
+    """
+
+    response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
+    if set(request.query_params) - HOLDS_QUERY_PARAMS or not is_account_id(
+        expected_account_id or ""
+    ):
+        _raise_read("invalid_request")
+    owner = await _hold_owner(config_manager, str(expected_account_id))
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+
+    payload = await asyncio.to_thread(holds.list_holds, config_manager.config_dir, owner)
+    return reply(payload)
+
+
+async def _decide_hold(
+    request: Request,
+    response: Response,
+    message_id: str,
+    body: TeamBridgeHoldDecision,
+    config_manager: ConfigManager,
+    word: str,
+) -> CRUDResponse[Any]:
+    response.headers["Cache-Control"] = OWNER_AUDIT_CACHE_CONTROL
+    _refuse_write_scope(request)
+    if request.query_params or not re.fullmatch(_CONVERSATION_MESSAGE_ID, message_id):
+        _raise_hold("invalid_request")
+    owner = await _hold_owner(config_manager, body.expected_account_id)
+    from local_operator.server.utils import desktop_team_bridge_holds as holds
+
+    try:
+        # Off the loop: the signer may wait for a presence gesture.
+        payload = await asyncio.to_thread(
+            holds.decide,
+            config_manager.config_dir,
+            owner,
+            message_id=message_id,
+            conversation_id=body.conversation_id,
+            body_sha256=body.body_sha256,
+            word=word,
+            account_id=body.expected_account_id,
+        )
+    except holds.HoldRefused as refusal:
+        _raise_hold(refusal.code)
+    return reply(payload)
+
+
+@router.post("/v1/desktop/team-bridge/holds/{message_id}/deliver", response_model=CRUDResponse[Any])
+async def deliver_hold(
+    request: Request,
+    response: Response,
+    message_id: str,
+    body: TeamBridgeHoldDecision,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Sign the person's Deliver: their agent may read this held message (only read it)."""
+
+    return await _decide_hold(request, response, message_id, body, config_manager, "deliver")
+
+
+@router.post("/v1/desktop/team-bridge/holds/{message_id}/discard", response_model=CRUDResponse[Any])
+async def discard_hold(
+    request: Request,
+    response: Response,
+    message_id: str,
+    body: TeamBridgeHoldDecision,
+    config_manager: ConfigManager = Depends(get_config_manager),
+) -> CRUDResponse[Any]:
+    """Sign the person's Discard: the sender is told it was not delivered."""
+
+    return await _decide_hold(request, response, message_id, body, config_manager, "discard")

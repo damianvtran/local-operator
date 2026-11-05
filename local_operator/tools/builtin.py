@@ -105,6 +105,7 @@ from local_operator.harness.subagent import (
     describe_effort_tiers,
     effort_tier_rejection,
     is_inherit_tier_sentinel,
+    missing_worktree_notice,
     model_may_choose_tier,
 )
 from local_operator.harness.types import (
@@ -193,6 +194,7 @@ from local_operator.scratchpad import (
     scratchpad_refusal,
     scratchpad_size_text,
 )
+from local_operator.supplements.pins import DELIVER_DESCRIPTION, with_deliver_notice
 from local_operator.text_bounds import OUTPUT_TRUNCATION_MARKER, clip_head_tail
 from local_operator.tools import (
     group_reaper,
@@ -714,6 +716,41 @@ def may_delegate_env_injection(context: object | None) -> dict[str, str]:
     if MAY_DELEGATE_ENV in os.environ:
         # Clear what this child would otherwise inherit — and only that.
         return {MAY_DELEGATE_ENV: ""}
+    return {}
+
+
+def session_id_env_injection(session_id: object) -> dict[str, str]:
+    """The three-arm ``LOCAL_OPERATOR_SESSION_ID`` write for a tool child's env.
+
+    WHAT IT IS FOR: attribution only. A ``lop`` command the model runs from a
+    tool (``lop network approvals request``, ``lop secret get``) records which
+    session filed it, and without this every such record said ``session_id: ""``
+    — the operator could not tell which conversation asked. The name and its
+    contract are ``secrets.access.SESSION_ID_ENV``: read for AUDIT ONLY, never
+    trusted for authorization, because a same-uid process can set any variable
+    it likes. The broker authenticates by process ancestry, and nothing that
+    reads this value may grant, sign or widen anything on its word.
+
+    THREE ARMS, the shape :func:`may_delegate_env_injection` and the scratchpad
+    export already use, for the same reasons: SET from the tool context's own
+    ``session_id`` (the nested context wins, because it is the one running the
+    command); CLEARED when this process inherited the name and the context has
+    none, so a child never files under its PARENT's session; otherwise not
+    written. Pure: no store, keychain or broker is read to build an env.
+
+    The id is a PARAMETER, like ``scratchpad_env_injection``'s root: the caller
+    knows which session it spawns for, and one process hosts several. Callers
+    pass ``ToolContext.session_id`` itself, never a derived registry key (the
+    eval kernel's ``ctx-<id>`` fallback is not a session id and must not be
+    exported as one).
+    """
+    from local_operator.secrets.access import SESSION_ID_ENV
+
+    value = session_id.strip() if isinstance(session_id, str) else ""
+    if value:
+        return {SESSION_ID_ENV: value}
+    if SESSION_ID_ENV in os.environ:
+        return {SESSION_ID_ENV: ""}
     return {}
 
 
@@ -2700,6 +2737,9 @@ class BashParams(BaseModel):
             "bash.memory.enabled=true. Exceeding the limit kills the group."
         ),
     )
+    # Highlights pin (``supplements.pins``): files to show under the final answer. Read by
+    # the supplement prefilter from the call's arguments, never by the command itself.
+    deliver: list[str] = Field(default_factory=list, description=DELIVER_DESCRIPTION)
 
 
 #: What the live card shows while the pipe is holding an unterminated line.
@@ -4045,6 +4085,49 @@ async def _github_git_injections(context: ToolContext | None) -> dict[str, str]:
     return env
 
 
+def _bash_env_policy(confinement: Any, shell_write: Any) -> Any:
+    """The shell-environment policy a bash child runs under.
+
+    A confined session runs STRICT (see ``shell_env.policy_for_confinement``):
+    the model's own command must not read ambient credentials out of its
+    environment. A write-confined shell runs STRICT for the same reason (the
+    provider key in lop's own environment is a credential too). Ordinary
+    sessions keep the process's configured policy. Shared with
+    :func:`bash_guard_environment` so the guardrail resolves ``$VAR`` against
+    the same environment the child will actually see.
+    """
+    if shell_write is not None:
+        return shell_env.CONFINED_SHELL_POLICY
+    return shell_env.policy_for_confinement(None if confinement is None else confinement.root)
+
+
+def bash_guard_environment(context: ToolContext | None) -> tuple[dict[str, str], str | None]:
+    """``(env, scratchpad)`` for the pre-execution guardrail's path resolution.
+
+    The guardrail (``local_operator.guardrails``) expands ``$VAR`` in a command
+    WITHOUT running it, so it must expand against what the bash child would
+    receive — a variable the child sees as unset is exactly the empty-expansion
+    shape behind the 2026-11-04 state-root deletion. Built from the same policy
+    and the same scratchpad export ``execute_bash`` uses; credential and GitHub
+    injections are deliberately left out (they never name paths, and resolving
+    them would mean a broker round trip per classified call).
+    """
+    confinement = confinement_of(context)
+    shell_write = None if confinement is not None else shell_write_confinement_of(context)
+    scratch_root = scratchpad_dir_of(context)
+    injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
+    injections.update(scratchpad_env_injection(scratch_root))
+    # R5-3: the same session-id arm ``execute_bash`` applies, so an inherited
+    # parent id the child will NOT see is not resolved as set here either.
+    injections.update(session_id_env_injection(getattr(context, "session_id", None)))
+    if (temp_owner := confinement if confinement is not None else shell_write) is not None:
+        injections["TMPDIR"] = str(temp_owner.temp_dir())
+    env = shell_env.child_environment(
+        _bash_env_policy(confinement, shell_write), injections=injections
+    )
+    return env, scratch_root
+
+
 @_guard("bash")
 async def execute_bash(
     tool_call_id: str,
@@ -4247,6 +4330,11 @@ async def execute_bash(
     # the session's own answer — does it hold ``task`` — has to travel with the
     # command, and a name that was never exported cannot be used as one.
     injections.update(may_delegate_env_injection(context))
+    # Which session filed what a child `lop` records (approval requests, secret
+    # audit rows): audit attribution only, same three arms (see the helper).
+    injections.update(
+        session_id_env_injection(getattr(context, "session_id", None) if context else None)
+    )
     # The session's scratchpad root rides the SAME three arms, from one helper, so
     # the two writers of an inherited-shaped variable cannot drift apart: set to
     # this session's root, cleared when the name is inherited and this session has
@@ -4303,16 +4391,7 @@ async def execute_bash(
         injections["TMPDIR"] = str(temp)
         injections["TMP"] = str(temp)
     env = shell_env.child_environment(
-        # A confined session runs STRICT (see ``shell_env.policy_for_confinement``):
-        # the model's own command must not read ambient credentials out of its
-        # environment. A write-confined shell runs STRICT for the same reason
-        # (the provider key in lop's own environment is a credential too).
-        # Ordinary sessions keep the process's configured policy.
-        (
-            shell_env.CONFINED_SHELL_POLICY
-            if shell_write is not None
-            else shell_env.policy_for_confinement(None if confinement is None else confinement.root)
-        ),
+        _bash_env_policy(confinement, shell_write),
         injections=injections,
     )
 
@@ -5652,7 +5731,7 @@ def build_bash_tool(context: ToolContext | None = None) -> AgentTool:
         # #1546). The execute-time check below stays as the backstop for the
         # direct ``execute`` callers no hook reaches.
         refuse_args=_long_foreground_sleep_refusal,
-        execute=execute_bash,
+        execute=with_deliver_notice(execute_bash, "bash"),
     )
 
 
@@ -32254,6 +32333,10 @@ async def execute_task(
                 # ``_not_applied_note``).
                 "effort": item.effort,
                 "model_pick": item.model,
+                # Parent-only advisory (never refuses, never reaches the
+                # child); see ``missing_worktree_notice``. Reads the FULL
+                # prompt so a field line in the shared ``context`` counts.
+                "brief_notice": missing_worktree_notice(item.agent, _full_prompt(item)),
             }
         )
     if not launched:
@@ -32267,6 +32350,7 @@ async def execute_task(
             else ""
         )
         + _not_applied_note(entry)
+        + (f"\n  {entry['brief_notice']}" if entry.get("brief_notice") else "")
         for entry in launched
     ]
     body = (
@@ -35368,6 +35452,10 @@ _NOTIFY_DESCRIPTION = (
 )
 
 
+#: Inbox keys only the Team Bridge connector writes (B4b DESIGN §6).
+_RESERVED_NOTIFY_KEY_PREFIX = "team-bridge-"
+
+
 def build_notify_tool(context: ToolContext) -> AgentTool | None:
     """CreateIf builder: present only where the session bound its inbox door.
 
@@ -35407,6 +35495,17 @@ async def execute_notify(
         params = NotifyParams(**args)
     except ValidationError as exc:
         return _validation_error(tool_call_id, "notify", exc)
+    if params.key.strip().startswith(_RESERVED_NOTIFY_KEY_PREFIX):
+        # B4b DESIGN §6: agent-message items (a held message waiting for its
+        # owner, the long-hold count) are keyed ``team-bridge-…`` and raised by
+        # the connector. A model must not be able to update one in place or
+        # mint a lookalike ("Deliver this message?") in its own session.
+        return _error(
+            tool_call_id,
+            "notify",
+            f"refused: keys starting with `{_RESERVED_NOTIFY_KEY_PREFIX}` are reserved for "
+            "agent-message notices; nothing was posted. Use a different key.",
+        )
     door = getattr(context, "notify_inbox", None) if context is not None else None
     if door is None:
         return _error(

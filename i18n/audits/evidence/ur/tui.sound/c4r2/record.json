@@ -1,0 +1,165 @@
+{
+  "schema": 1,
+  "audit_id": "c4r2",
+  "locale": "ur",
+  "namespace": "tui.sound",
+  "source_audit_revision": "bd9ad6f041ca863a892f963177d0b17741d14266",
+  "scope": "27695a49855f..bd9ad6f041ca",
+  "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+  "context_sha256": "900c1a700da76e20651b1d976ac9c1cc6add638d5b61ce10fffae08869924fad",
+  "target_sha256": "08d1f414493da40a17a5458d68179080dd6572c786ff625022f4923df1d87cf4",
+  "translator": {
+    "agent": "i18n-translator-r2",
+    "session": "1d36d618f249",
+    "job": "1ddc1da8273c",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-04",
+    "fallback_used": false
+  },
+  "auditor": {
+    "agent": "C4-i18n-delta / independent i18n-auditor",
+    "session": "304e031dccf4",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-04",
+    "result": "passed",
+    "findings": 0,
+    "fallback_used": false
+  },
+  "changed_added_keys": [
+    "tui.sound.id_help",
+    "tui.sound.list_hint",
+    "tui.sound.list_title",
+    "tui.sound.list_yours",
+    "tui.sound.list_yours_hint",
+    "tui.sound.section_description",
+    "tui.sound.usage"
+  ],
+  "carried_keys": [
+    "tui.sound.added",
+    "tui.sound.added_selected",
+    "tui.sound.disabled",
+    "tui.sound.enabled",
+    "tui.sound.not_found",
+    "tui.sound.off",
+    "tui.sound.on",
+    "tui.sound.preview_failed",
+    "tui.sound.preview_muted",
+    "tui.sound.preview_playing",
+    "tui.sound.preview_silent",
+    "tui.sound.preview_ssh",
+    "tui.sound.preview_system",
+    "tui.sound.read_failed",
+    "tui.sound.removed",
+    "tui.sound.renamed",
+    "tui.sound.save_failed",
+    "tui.sound.selected",
+    "tui.sound.slash",
+    "tui.sound.status",
+    "tui.sound.volume_range",
+    "tui.sound.volume_set"
+  ],
+  "deleted_keys": [
+    "tui.sound.default"
+  ],
+  "carried_values_byte_identical": true,
+  "prior_evidence": "i18n/audits/evidence/ur/tui.sound/c4r1/record.json",
+  "prior_translator": {
+    "agent": "notif-sounds-C4-tui",
+    "job": "16bed17d35eb",
+    "session": "e87ab06e319f",
+    "model": "anthropic/claude-opus-5-5",
+    "date": "2026-11-04",
+    "provenance": "Manager supplied author-draft copy and identity in this session"
+  },
+  "prior_auditor": {
+    "agent": "C4-i18n-audit",
+    "session": "796c1db4d0d0",
+    "model": "openai/gpt-6.1-sol",
+    "date": "2026-11-04",
+    "fallback_used": false
+  },
+  "status": "passed",
+  "unresolved_blocker_major": 0,
+  "corrections": {},
+  "shared_evidence": "i18n/audits/tui-sound-c4r2/audit-evidence.json",
+  "limitations": [
+    "Synthetic OperatorApp capture is not a live terminal or native shaping certification",
+    "Urdu TUI keeps the documented degraded LTR layout",
+    "No actual audio or native-speaker certification"
+  ],
+  "checks": {
+    "keys": 29,
+    "bounded_cells": {
+      "tui.sound.list_title": 15,
+      "tui.sound.list_yours": 5,
+      "tui.sound.list_hint": 47,
+      "tui.sound.list_yours_hint": 46
+    },
+    "id_help_cells": 186,
+    "carried_values_byte_identical": 22,
+    "runtime_rendered": 29,
+    "slash_cells": 50,
+    "placeholder_and_technical_parity": "passed",
+    "bidi_storage": "logical, no controls",
+    "nfc": "passed",
+    "plural_messages": 0
+  },
+  "input_hashes": {
+    "local_operator/i18n/catalogues/en/tui.sound.json": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+    "local_operator/i18n/catalogues/en/tui.sound.context.json": "900c1a700da76e20651b1d976ac9c1cc6add638d5b61ce10fffae08869924fad",
+    "i18n/glossary.md": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8",
+    "i18n/style-guides/ur.md": "c0eecf7f7b5e89956b7de9ab7a9eb647ff1a7ef701ccf2a7f0264d5eea15ca60"
+  },
+  "render": {
+    "all_text_rows_stable": true,
+    "grid": [
+      60,
+      80
+    ],
+    "native_pixels": [
+      480.0,
+      1360.0
+    ],
+    "screen": {
+      "class": "TranscriptScreen",
+      "size": [
+        58,
+        78
+      ],
+      "virtual_size": [
+        58,
+        78
+      ],
+      "region": [
+        0,
+        0,
+        60,
+        80
+      ],
+      "scrollbar": [
+        false,
+        false
+      ]
+    },
+    "css_path": [
+      "local_operator.tcss"
+    ],
+    "custom_hint_rows": [
+      "/sound rename <id> <name> · /sound remove <id>\n"
+    ]
+  },
+  "evidence_files": [
+    "inputs/en.context.json",
+    "inputs/en.source.json",
+    "inputs/translator-delta.json",
+    "inputs/translator-receipt.md",
+    "receipt.json",
+    "render-first.geometry.json",
+    "render-first.svg",
+    "render-settled.geometry.json",
+    "render-settled.png",
+    "render-settled.svg",
+    "render.log",
+    "report.md"
+  ]
+}

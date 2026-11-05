@@ -483,8 +483,11 @@ def load_all_mcp_configs(
     Enable/disable resolution uses lists from the local-operator files
     (project first, then user): ``disabledServers`` wins over
     ``enabledServers``, which wins over a config's own ``enabled: false``.
-    Suppressed (disabled) servers are dropped from the result entirely — they
-    must not shadow lower-priority sources.
+    A suppressed Local Operator-owned declaration keeps ownership of its name:
+    it blocks lower-priority declarations, rather than reconnecting an imported
+    copy the operator meant to disable. Suppressed foreign imports are skipped
+    so they retain their existing fallback behavior. Higher-priority project
+    declarations still win before a user-level disabled declaration is reached.
 
     ``boundary`` is the world boundary a bounded caller validated (the
     benchmark's SDK world — see ``SessionSpec.world_root``). When set, EVERY
@@ -589,17 +592,24 @@ def load_all_mcp_configs(
                 continue  # unparsable entry; validation flags it if referenced
             per_name.setdefault(name, []).append((cfg, str(path)))
 
-    # Resolution: denylist beats allowlist beats ``enabled: false``; the first
-    # NON-suppressed candidate in priority order wins the name.
+    # Resolution: denylist beats allowlist beats ``enabled: false``. An owned
+    # disabled entry is a name-level tombstone, not an invitation to reconnect
+    # the same name from another tool. Apply it only when reached in priority
+    # order: a user tombstone must not veto an earlier project declaration.
+    # Foreign imports retain skip-and-fallback semantics for compatibility.
+    owned_sources = {str(project_path), str(project_dot_path), str(user_path)}
     configs: dict[str, MCPServerConfig] = {}
     sources: dict[str, str] = {}
     for name, entries in per_name.items():
         for cfg, source in entries:
             suppressed = name in disabled or (cfg.enabled is False and name not in enabled)
-            if not suppressed:
-                configs[name] = cfg
-                sources[name] = source
-                break
+            if suppressed:
+                if source in owned_sources:
+                    break
+                continue
+            configs[name] = cfg
+            sources[name] = source
+            break
 
     return configs, sources
 

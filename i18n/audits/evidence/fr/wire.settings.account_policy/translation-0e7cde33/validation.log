@@ -1,0 +1,5 @@
+PASS: valid JSON; 14/14 exact keys in English source order; nonempty French values; zero ICU arguments in source and target; no bidi controls; true/false/value/JSON preserved.
+PASS: 3 negative controls rejected (missing key, unexpected ICU argument, translated value token).
+INFO: no plural/select messages exist; CLDR category validation is not applicable.
+INFO: 5 bounded labels require independent cell-width verification.
+NOT RUN: full catalogue validator, scanner, native app/build, pseudo-localization, RTL rendering, rendered frames, independent semantic audits.

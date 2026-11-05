@@ -955,6 +955,17 @@ class AgentRegistry:
         if not self.agents_dir.exists():
             return agents, incomplete
 
+        # ``agent.yml`` lives in a directory the agent itself can write, and this
+        # scan runs on every registry refresh -- including the HTTP request path
+        # (``get_agent`` -> ``_refresh_if_needed``). A FIFO planted there made the
+        # old ``Path.open("r")`` block in ``open(2)`` forever, holding the request
+        # and, through the registry, wedging the whole core (``/health`` too).
+        # The shared reader opens non-blocking and refuses a non-regular file with
+        # ``OSError``, which lands in the ``incomplete`` bucket below like any other
+        # unreadable definition; symlinked ``agent.yml`` is still followed exactly
+        # as before. Imported lazily to match the module's other agent_avatar uses.
+        from local_operator.agent_avatar import _read_manifest_text
+
         for agent_dir in self.agents_dir.iterdir():
             if not agent_dir.is_dir():
                 continue
@@ -972,8 +983,7 @@ class AgentRegistry:
                 continue
 
             try:
-                with agent_config_file.open("r", encoding="utf-8") as f:
-                    agent_data = yaml.safe_load(f)
+                agent_data = yaml.safe_load(_read_manifest_text(agent_config_file))
 
                 agent = AgentData.model_validate(agent_data)
                 agents[agent.id] = agent

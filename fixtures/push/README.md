@@ -76,6 +76,12 @@ there is one digest pin to follow.)
   with an alert also file `alert_count_one`: the same alert at a count of one,
   where the count term is singular (`1 conversation needs you`), so no reader of
   this tree only ever sees the plural.
+- **`custom_payload` / `custom_body`** (completion and digest) are the literal
+  for a **custom** sound selection: `sound_custom` (`c_<sha256[:16]>`) beside the
+  `soft-pulse` fallback in `sound`, and `sound_custom_ready` on every live
+  device's report row (ADR 0006's 2026-11-04 amendment; sent from
+  notification-sounds C5). `payload` / `body` stay the built-in case, which
+  carries neither field.
 - **`same_as`** means *this file does not restate the shape* — it names the file
   whose `required`/`optional`/`forbidden` blocks govern it too. `registry-register-
   rotation.json` uses it for the register response, so there is one home for that

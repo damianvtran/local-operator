@@ -1,0 +1,38 @@
+{
+  "relay.composer.action.send": {
+    "role": "composer primary button, accessible name",
+    "tone": "One lowercase verb, no punctuation; a button label.",
+    "maxCells": 16,
+    "note": "Owned relay SPA copy (docs/design/mobile-relay-guidelines.md, Composer). Accessible name of the round arrow button at the right end of the phone's message composer when the agent is idle: it sends the typed message. Same verb as the ordinary 'send'. Kept lowercase like the other composer button names."
+  },
+  "relay.composer.action.steer": {
+    "role": "composer primary button, accessible name",
+    "tone": "One lowercase verb, no punctuation; a button label.",
+    "maxCells": 16,
+    "note": "Same button as relay.composer.action.send, while the agent is WORKING on a turn: the message redirects (steers) the running turn instead of starting a new one. Reuse the verb of relay.chrome.composer.placeholder.steer ('Steer the agent…') in imperative singular/neutral form."
+  },
+  "relay.composer.action.stop": {
+    "role": "stop button, accessible name and visible text",
+    "tone": "One lowercase verb, no punctuation.",
+    "maxCells": 16,
+    "note": "Stops the agent's running turn. Used as the accessible name of the composer's primary button while the agent works and the box is empty, AND as the visible text of the small Stop action on the working line above the composer (44 px wide at most, so keep it one short word)."
+  },
+  "relay.composer.action.stopping": {
+    "role": "stop button pressed state, accessible name",
+    "tone": "Present-progressive participle, lowercase, no punctuation, no ellipsis.",
+    "maxCells": 20,
+    "note": "The same button after the user pressed Stop and before the turn has ended: it says the stop was accepted and is in progress."
+  },
+  "relay.composer.action.connecting": {
+    "role": "send button in-flight state, accessible name",
+    "tone": "Short progressive state, sentence case, no punctuation.",
+    "maxCells": 20,
+    "note": "The primary button while a message is being delivered to the session (the connection is being made or the request is in flight). Sibling of relay.chrome.session.* connecting copy."
+  },
+  "relay.composer.action.stop_agent": {
+    "role": "working-line stop button, accessible name",
+    "tone": "Imperative verb phrase, lowercase, no punctuation.",
+    "maxCells": 28,
+    "note": "Accessible name of the Stop action on the working line (the row that says what the agent is doing and for how long). Longer than the visible word 'stop' and must CONTAIN the same verb as relay.composer.action.stop so a screen-reader user hears the visible text. 'The agent' is the glossary's agent."
+  }
+}

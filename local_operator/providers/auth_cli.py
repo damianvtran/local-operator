@@ -329,6 +329,11 @@ def _cancelled_message(definition: ProviderDefinition) -> str:
     return f"\nLogin cancelled. {stopped}retry with: local-operator login {definition.id}"
 
 
+#: Bound on the post-login org-hub gate wait: one memberships GET. Past it the
+#: login still succeeds and the next boundary refreshes the gate.
+_ORG_HUB_GATE_WAIT_S = 8.0
+
+
 def run_login(
     provider_id: str | None,
     _config_dir: "Path | None",
@@ -484,6 +489,17 @@ def run_login(
             return 130
         print(f"Login failed: {exc}")
         return 1
+    if storage_provider == "radient":
+        # This process exits right after sign-in, which would kill the org Agent
+        # Hub gate refresh started by ``complete_radient_login``. Wait a short,
+        # bounded time for that memberships read (never the catalogue enrol)
+        # so `lop hub org` is available as soon as this command returns.
+        wait = getattr(auth_store, "wait_org_hub_gate", None)
+        if callable(wait):
+            try:
+                wait(_ORG_HUB_GATE_WAIT_S)
+            except Exception:  # noqa: BLE001 - a login never fails over the org hub
+                pass
     if storage_provider == "radient" and row.disabled_cause is not None:
         # Design round 2, D2: "unavailable" is reserved for the unverified
         # retained block; a preserved disablement says exactly that. The CLI is

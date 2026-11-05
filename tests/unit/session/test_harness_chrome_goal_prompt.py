@@ -164,3 +164,43 @@ def test_the_count_loops_prompt_keeps_its_exact_match_leg():
     """The sibling that never interpolates anything stays a fixed member."""
     assert LOOP_PROMPT in harness_chrome_prompts()
     assert is_harness_chrome(LOOP_PROMPT)
+
+
+def test_continuation_opens_with_the_automated_marker():
+    """The row says it is automated and that a user's stop still holds.
+
+    After the 2026-11-04 state-root deletion the agent read two continuations as a
+    person telling it to keep going after it had been told to stop.
+    """
+    from local_operator.session.goal_judge import GOAL_CONTINUATION_MARKER
+
+    prompt = goal_continuation_prompt("Ship it")
+    assert prompt.startswith(GOAL_CONTINUATION_MARKER)
+    assert "not a message from the user" in GOAL_CONTINUATION_MARKER
+    assert "stop or hold" in GOAL_CONTINUATION_MARKER
+
+
+def test_a_legacy_continuation_row_is_still_recognised():
+    """Rows persisted before the marker must never repaint as the operator's words."""
+    from local_operator.session.goal_judge import LEGACY_GOAL_CONTINUATION_HEAD
+
+    legacy = LEGACY_GOAL_CONTINUATION_HEAD + "Ship it" + GOAL_CONTINUATION_TAIL
+    assert is_goal_continuation_instruction(legacy)
+    assert is_harness_chrome(legacy)
+    assert not is_goal_continuation_instruction(LEGACY_GOAL_CONTINUATION_HEAD + "my own words")
+
+
+def test_loop_goal_prompt_carries_the_marker_and_legacy_rows_still_recognised():
+    """R11: the goal-mode loop's own turn is the same kind of automated row."""
+    from local_operator.session.goal_loop import (
+        LOOP_GOAL_MARKER,
+        LOOP_GOAL_PROMPT,
+        is_loop_goal_instruction,
+    )
+
+    fresh = LOOP_GOAL_PROMPT.format(goal="Ship it")
+    assert fresh.startswith(LOOP_GOAL_MARKER)
+    assert is_loop_goal_instruction(fresh)
+    legacy = fresh[len(LOOP_GOAL_MARKER) :]
+    assert is_loop_goal_instruction(legacy)
+    assert not is_loop_goal_instruction(legacy.split("\n\n", 1)[0] + "\n\nmy own words")

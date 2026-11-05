@@ -1,0 +1,8 @@
+{
+  "relay.composer.action.send": "send",
+  "relay.composer.action.steer": "steer",
+  "relay.composer.action.stop": "stop",
+  "relay.composer.action.stopping": "stopping",
+  "relay.composer.action.connecting": "Connecting",
+  "relay.composer.action.stop_agent": "stop the agent"
+}

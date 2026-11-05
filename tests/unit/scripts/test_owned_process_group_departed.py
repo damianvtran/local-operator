@@ -152,7 +152,13 @@ def test_bbed_shape_with_a_live_member_is_verified_without_the_departed():
 
 
 def test_bbed_corpse_only_shape_is_observed_empty(monkeypatch):
-    world = bbed(monkeypatch, first=[LEADER, 20, 21], second=[LEADER], live=())
+    world = bbed(
+        monkeypatch,
+        first=[LEADER, 20, 21],
+        second=[LEADER],
+        live=(),
+        script=[[LEADER, 20, 21], [LEADER], [LEADER]],
+    )
     verdict = world.refresh(terminal=True)
     assert verdict.status == "OBSERVED_EMPTY", verdict
     assert verdict.members == (LEADER,)
@@ -315,7 +321,13 @@ def test_injected_samples_path_never_qualifies_by_default(monkeypatch):
     ids=["reaped", "unreadable"],
 )
 def test_witness_lost_after_the_sample_still_refuses(monkeypatch, after, status, refusal):
-    world = bbed(monkeypatch, first=[LEADER, 20, 21], second=[LEADER], live=())
+    world = bbed(
+        monkeypatch,
+        first=[LEADER, 20, 21],
+        second=[LEADER],
+        live=(),
+        script=[[LEADER, 20, 21], [LEADER], [LEADER]],
+    )
     world.leader_after = after
     verdict = world.refresh(terminal=True)
     assert verdict.status == status
@@ -376,6 +388,24 @@ def test_witness_reread_before_the_decision_does_not_change_it(monkeypatch):
 def test_departed_evidence_reaches_the_run_record(request, monkeypatch, tmp_path):
     runner = request.getfixturevalue("wrapper")
     world = bbed(monkeypatch, first=[LEADER, 20, 21], second=[LEADER], live=())
+    # Per refresh: census 1 still lists the departing 20/21, census 2 and the
+    # post-sample census 3 do not. Reset per refresh so the wrapper's several
+    # refreshes each see the measured shape (parity no longer fits 3 censuses).
+    proof = world.cap.refresh
+    views = iter(())
+
+    def per_refresh(**kw):
+        nonlocal views
+        views = iter([[LEADER, 20, 21]])
+        return proof(**kw)
+
+    def census(pgid, deadline):
+        world.calls += 1
+        view = next(views, [LEADER])
+        return owned.AuthoritativeCensus(tuple(view), True, LEADER in view)
+
+    world.cap.refresh = per_refresh
+    world.cap.census = census
     _install(runner, monkeypatch, world.cap)
     output = io.StringIO()
     with monkeypatch.context() as scoped:
