@@ -6373,9 +6373,7 @@ class MockClient:
                 }
             )
             yield StreamToolCallDelta(index=0, id="call_mock_ask", name="ask")
-            yield StreamToolCallDelta(
-                index=0, argument_delta=json.dumps({"questions": [question]})
-            )
+            yield StreamToolCallDelta(index=0, argument_delta=json.dumps({"questions": [question]}))
             yield StreamUsageEvent(usage=Usage(input_tokens=10, output_tokens=5))
             yield StreamEndEvent(
                 stop_reason="toolUse", usage=Usage(input_tokens=10, output_tokens=5)
