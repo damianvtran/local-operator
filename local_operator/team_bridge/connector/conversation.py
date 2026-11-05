@@ -926,6 +926,18 @@ async def _screen_images(
     return images
 
 
+def _FILE_ID_OK(file_id: str) -> bool:
+    """Whether the transport would accept this file id (the ONE shared rule).
+
+    Read from the same constant the client validates with, so the screen path cannot
+    disagree with the fetch gate it is about to call.
+    """
+
+    from ..agent_file_reads import FILE_ID_PATTERN
+
+    return isinstance(file_id, str) and FILE_ID_PATTERN.fullmatch(file_id) is not None
+
+
 async def _fetch_file(
     client: Any,
     ref: ConversationFeedRef,
@@ -1011,6 +1023,14 @@ async def _screen_files(
     if sum(min(d.size, FILE_READ_MAX_BYTES_PER_FILE) for d in wanted) > FILE_READ_MAX_BYTES_TOTAL:
         return None, "too_large"
 
+    # An id the transport refuses is refused HERE, before a fetch: a descriptor whose id
+    # the client will not put in a URL is a set this runtime cannot prove, and returning a
+    # withhold keeps the message (and its text) deliverable. Letting the client's own
+    # ValueError out of this function would escape into the delivery turn as
+    # ``conversation_failed`` — a malformed FILE would suppress the whole MESSAGE.
+    if any(not _FILE_ID_OK(d.id) for d in wanted):
+        return None, "unverified"
+
     texts: dict[str, FileText] = {}
     for descriptor in wanted:
         try:
@@ -1024,7 +1044,14 @@ async def _screen_files(
             if not _is_not_found(failure):
                 raise
             # The screen is closed for this endpoint, or the row is gone. Either way
-            # these are not the bytes the hub committed, so no file grant may be sent.
+            # these are not the bytes the hub hashed, so no file grant can be written.
+            return None, "unverified"
+        except ValueError:
+            # Defence in depth for the same class as the guard above: ANY local refusal
+            # (a shape the client refuses, a bad purpose) withholds the file set rather
+            # than aborting a delivery. Deliberately narrower than ``Exception``: a
+            # transport or store failure must still propagate to the caller's own
+            # bounded hold, never be disguised as "this file was not read".
             return None, "unverified"
     return screening_files(expected, screen_listing(descriptors, texts)), None
 
@@ -1681,33 +1708,61 @@ async def handle_conversation_available(
             # between dispatch and here lost the binding. Never admit pixels
             # on it — hold and re-screen.
             return await held("attachments_unbound")
+        admitted_files_hash: str | None = None
+        if screened_files is not None:
+            if getattr(result, "files_hash", None) == screened_files.files_hash:
+                admitted_files_hash = screened_files.files_hash
+        if screened_files is not None and admitted_files_hash is None:
+            # The file sibling of ``attachments_unbound``: a verdict that lost the set
+            # it screened can never grant bytes it did not judge.
+            return await held("files_unbound")
         if _owner_released(receipt):
             metadata = replace(metadata, owner_released=True)
-        await client.conversation_admit(
-            ref.conversation_id,
-            message_id,
-            verdict="allow",
-            body_hash=body_hash,
-            tenant_id=owner.tenant_id,
-            endpoint_id=owner.endpoint_id,
-            # The hub requires the v3 hash with an image allow: it is the only
-            # template whose wrapper presented these images to the screener.
-            attachments_hash=admitted_hash,
-            template_sha256=(
-                SCREENING_TEMPLATE_V4_SHA256
-                if admitted_hash and screened_files is not None
-                else SCREENING_TEMPLATE_V3_SHA256
-                if admitted_hash
-                else None
-            ),
-            # The file grant rides ONLY a screen that actually rendered this file set
-            # under v4 (the carrier exists only then), and it binds the name-free
-            # commitment recomputed from the descriptors the hub showed. A mixed message
-            # sends both grants under the ONE v4 template it rendered under, which is
-            # the only admission shape the hub accepts for a message carrying files.
-            files_hash=screened_files.files_hash if screened_files is not None else None,
-            access=access,
+
+        async def _admit(*, files_hash: str | None, template: str | None) -> None:
+            await client.conversation_admit(
+                ref.conversation_id,
+                message_id,
+                verdict="allow",
+                body_hash=body_hash,
+                tenant_id=owner.tenant_id,
+                endpoint_id=owner.endpoint_id,
+                # ONE template whichever grants ride it: v4 when any FILE was screened
+                # (v4 keeps the image slot, so a mixed message is still one admission
+                # row), v3 when only images were, none when nothing was granted.
+                attachments_hash=admitted_hash,
+                template_sha256=template,
+                # The file grant rides ONLY a screen that rendered this exact set under
+                # v4, and it binds the name-free commitment recomputed from the
+                # descriptors the hub showed.
+                files_hash=files_hash,
+                access=access,
+            )
+
+        admit_template = (
+            SCREENING_TEMPLATE_V4_SHA256
+            if admitted_files_hash is not None
+            else SCREENING_TEMPLATE_V3_SHA256
+            if admitted_hash
+            else None
         )
+        try:
+            await _admit(files_hash=admitted_files_hash, template=admit_template)
+        except BridgeRefusal as refusal:
+            if admitted_files_hash is None or refusal.http_status not in (400, 409):
+                raise
+            # A hub that will not take the file grant — an older one that does not know
+            # the field, or one whose stored ``files_hash`` disagrees with the set this
+            # endpoint screened — must not cost the member the MESSAGE. The text was
+            # screened and allowed on its own evidence, so admit ONCE more carrying only
+            # what that hub already understands: the image grant if this screen produced
+            # one, nothing otherwise. Bounded on purpose (one retry, a closed status set)
+            # and never a loop: a 409 also means a verdict may already exist, so a second
+            # refusal is the hub's real answer and the caller's hold stands.
+            await _admit(
+                files_hash=None,
+                template=SCREENING_TEMPLATE_V4_SHA256 if admitted_hash else None,
+            )
         # THE ADMISSION POINT (seam design, Revision 5): the hub has accepted
         # this message for this endpoint/member/consent tuple, so one
         # designated session now owes it a body. Recorded BEFORE the card —

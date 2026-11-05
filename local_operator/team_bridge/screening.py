@@ -289,6 +289,11 @@ class ScreenResult:
     #: sends it as ``attachments_hash`` with the v3 template hash); every
     #: text-only verdict leaves it ``None``, so the images stay withheld.
     attachments_hash: str | None = None
+    #: The generic-file set this verdict SAW, or ``None`` when no file reached the
+    #: screener. The file sibling of ``attachments_hash``: the connector admits files
+    #: ONLY when the deliver carries the set it screened, so a verdict that lost its
+    #: binding can never grant bytes it did not judge.
+    files_hash: str | None = None
     #: The template that ACTUALLY rendered this screen (review R1-07). The
     #: stored receipt keeps the served policy's template because every store
     #: fence compares receipt == policy; for an image envelope the render is
@@ -1445,8 +1450,10 @@ def _screen_prepare(
                 receipt=receipt,
                 screened_bytes=len(envelope.private_body().encode("utf-8")),
                 # The cache key includes the envelope digest, which binds the
-                # image set: a hit here IS a prior screen of these images.
+                # attachment SETS: a hit here IS a prior screen of these files and
+                # images.
                 attachments_hash=envelope.attachments_hash,
+                files_hash=envelope.files_hash,
             )
 
     # 6b. ANSWER cache: a re-screen of this exact tuple must re-read a MODEL
@@ -2174,6 +2181,7 @@ def _conclude_parsed(
         receipt=receipt,
         screened_bytes=screened_bytes,
         attachments_hash=envelope.attachments_hash,
+        files_hash=envelope.files_hash,
         rendered_version=rendered_version,
         rendered_template_sha256=rendered_template_sha256,
     ).set_private_reason(reason)

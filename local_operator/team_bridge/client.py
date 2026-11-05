@@ -5037,7 +5037,6 @@ class TeamBridgeClient:
         access: OAuthAccess | None = None,
         expected_account_id: str | None = None,
         served_types: tuple[str, ...] | None = None,
-        opaque_id: bool = False,
     ) -> tuple[bytes, str]:
         """One bound attachment's bytes and served type: ``(data, mime)``.
 
@@ -5058,16 +5057,7 @@ class TeamBridgeClient:
         (which would skip the png/jpeg sniff the image lane depends on).
         """
 
-        if opaque_id:
-            # A generic file id is opaque (the hub promises neither prefix nor case), so
-            # the minted-batt_ check would refuse every real file. The shape check that
-            # replaces it is the hub's own wire bound, and it still forbids anything that
-            # could reshape the URL segment.
-            from local_operator.team_bridge.agent_file_reads import require_file_id
-
-            require_file_id(attachment_id)
-        else:
-            _require_attachment_id(attachment_id)
+        _require_attachment_id(attachment_id)
         if purpose is not None and purpose not in ATTACHMENT_FETCH_PURPOSES:
             raise ValueError("purpose must be 'screen' or 'context'")
         if purpose is not None and not endpoint_id:

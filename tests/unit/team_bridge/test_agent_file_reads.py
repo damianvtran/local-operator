@@ -58,7 +58,7 @@ from tests.unit.team_bridge.test_client import _make_client, _ok
 
 CID = "bcv_abcdefgh"
 MID = "bcmsg_abcdef01"
-FID = "bfile_0f8fad5b"
+FID = "batt_0f8fad5b-d9cb-469f-a165-70867728950e"
 
 
 @pytest.fixture(autouse=True)
@@ -140,7 +140,7 @@ def test_the_commitment_is_go_json_not_python_json() -> None:
 def test_every_committed_field_moves_the_digest() -> None:
     base = _descriptor(data=b"hello")
     variants = [
-        _descriptor(file_id="bfile_other", data=b"hello"),
+        _descriptor(file_id="batt_other0001", data=b"hello"),
         _descriptor(file_class="pdf", data=b"hello"),
         _descriptor(data=b"hello!"),
         FileDescriptor(id=base.id, file_class="text", size=base.size, sha256="c" * 64),
@@ -234,12 +234,17 @@ def test_digest_refuses_non_text_bytes_and_nul() -> None:
 
 
 def test_fetch_plan_takes_three_files_in_send_order_and_reports_the_rest() -> None:
-    texts = [_descriptor(file_id=f"bfile_{i}") for i in range(5)]
-    pdf = _descriptor(file_id="bfile_pdf", file_class="pdf")
-    expired = _descriptor(file_id="bfile_gone", state="expired")
+    texts = [_descriptor(file_id=f"batt_{i:08d}") for i in range(5)]
+    pdf = _descriptor(file_id="batt_pdf00001", file_class="pdf")
+    expired = _descriptor(file_id="batt_gone0001", state="expired")
     wanted, rest = fetch_plan((*texts, pdf, expired))
-    assert [d.id for d in wanted] == [f"bfile_{i}" for i in range(FILE_READ_MAX_FILES)]
-    assert [d.id for d in rest] == ["bfile_3", "bfile_4", "bfile_pdf", "bfile_gone"]
+    assert [d.id for d in wanted] == [f"batt_{i:08d}" for i in range(FILE_READ_MAX_FILES)]
+    assert [d.id for d in rest] == [
+        "batt_00000003",
+        "batt_00000004",
+        "batt_pdf00001",
+        "batt_gone0001",
+    ]
 
 
 def test_the_read_total_is_the_brief_cap() -> None:
@@ -256,7 +261,7 @@ def test_the_read_total_is_the_brief_cap() -> None:
 def test_screen_listing_states_each_coverage_and_never_reads_a_non_text_row() -> None:
     data = b"col_a,count\nx,1\n"
     text = digest_file(_descriptor(data=data), data)
-    pdf = _descriptor(file_id="bfile_pdf", file_class="pdf", data=b"%PDF")
+    pdf = _descriptor(file_id="batt_pdf00001", file_class="pdf", data=b"%PDF")
     listing = screen_listing((text.descriptor, pdf), {text.descriptor.id: text})
     assert listing.splitlines()[0] == (
         f"Files: 2 (1: text {len(data)} bytes; 2: pdf 4 bytes)"
@@ -275,9 +280,11 @@ def test_screen_listing_states_a_cut_file_rather_than_implying_a_whole_one() -> 
 def test_the_context_caption_names_the_class_and_the_unread_reasons() -> None:
     data = b"hello"
     text = digest_file(_descriptor(data=data), data)
-    pdf = _descriptor(file_id="bfile_pdf", file_class="pdf", data=b"%PDF")
-    expired = _descriptor(file_id="bfile_gone", state="expired")
-    caption = context_caption([text], [pdf, expired], source="files for message m1:")
+    pdf = _descriptor(file_id="batt_pdf00001", file_class="pdf", data=b"%PDF")
+    expired = _descriptor(file_id="batt_gone0001", state="expired")
+    caption = context_caption(
+        [text], [(pdf, "class"), (expired, "expired")], source="files for message m1:"
+    )
     lines = caption.splitlines()
     assert lines[0] == "files for message m1:"
     assert f"file {text.descriptor.id} (text, 5 bytes) — all 5 bytes" in lines[1]
@@ -465,7 +472,6 @@ async def test_a_context_file_read_names_its_purpose_and_accepts_octet_stream() 
         endpoint_id="bep_1",
         purpose="context",
         served_types=(FILE_SERVED_MIME,),
-        opaque_id=True,
     )
     assert (data, mime) == (b"hello", FILE_SERVED_MIME)
     request = requests[0]
@@ -586,7 +592,7 @@ def _ref() -> Any:
 async def test_screening_fetches_text_only_and_builds_the_matching_commitment() -> None:
     text = b"col_a,count\nx,1\n"
     text_descriptor = _descriptor(data=text)
-    pdf_descriptor = _descriptor(file_id="bfile_pdf", file_class="pdf", data=b"%PDF")
+    pdf_descriptor = _descriptor(file_id="batt_pdf00001", file_class="pdf", data=b"%PDF")
     descriptors = (text_descriptor, pdf_descriptor)
     client = _ScreenClient({text_descriptor.id: text})
     carrier, withheld = await _screen_files(
@@ -659,7 +665,7 @@ async def test_a_set_too_large_for_one_screen_is_not_granted_at_all() -> None:
 
     big = b"x" * FILE_READ_MAX_BYTES_PER_FILE
     descriptors = tuple(
-        _descriptor(file_id=f"bfile_{i}", data=big) for i in range(3)
+        _descriptor(file_id=f"batt_{i:08d}", data=big) for i in range(3)
     )  # 3 x 64 KiB > 128 KiB total
     client = _ScreenClient({d.id: big for d in descriptors})
     carrier, withheld = await _screen_files(
@@ -692,6 +698,15 @@ def _runtime(client: _HistoryClient) -> Any:
 
 
 def _page(descriptors: tuple[FileDescriptor, ...], **message: Any) -> dict[str, Any]:
+    """A page shaped like the HUB's history view.
+
+    WHY NO ``files_hash`` BY DEFAULT. The hub's message view carries ``files[]`` and
+    ``file_count``; the set hash exists only on the BODY fetch. A fixture that always
+    served it made this read look verified against a field the hub never sends — the
+    defect this helper now guards against. Tests wanting the future-projection case pass
+    ``files_hash=`` explicitly.
+    """
+
     return {
         "messages": [
             {
@@ -699,7 +714,7 @@ def _page(descriptors: tuple[FileDescriptor, ...], **message: Any) -> dict[str, 
                 "seq": 4,
                 "sender": {"display_label": "peer", "kind": "agent"},
                 "files": [_row(d) for d in descriptors],
-                "files_hash": files_admission_hash(descriptors),
+                "file_count": len(descriptors),
                 **message,
             }
         ]
@@ -708,28 +723,114 @@ def _page(descriptors: tuple[FileDescriptor, ...], **message: Any) -> dict[str, 
 
 @pytest.mark.asyncio
 async def test_the_context_read_caps_at_three_files_and_states_the_rest() -> None:
-    payloads = {f"bfile_{i}": f"body-{i}".encode() for i in range(5)}
+    payloads = {f"batt_{i:08d}": f"body-{i}".encode() for i in range(5)}
     descriptors = tuple(
-        _descriptor(file_id=f"bfile_{i}", data=payloads[f"bfile_{i}"]) for i in range(5)
+        _descriptor(file_id=f"batt_{i:08d}", data=payloads[f"batt_{i:08d}"]) for i in range(5)
     )
     client = _HistoryClient(payloads)
     blocks = await _history_files(_runtime(client), CID, _page(descriptors), "bep_1")
     assert len(blocks) == 1
     block = blocks[0]
     assert block.startswith(BRIDGE_UNTRUSTED_CLAUSE), "the clause leads the block"
-    assert [call["id"] for call in client.calls] == ["bfile_0", "bfile_1", "bfile_2"]
+    assert [call["id"] for call in client.calls] == [
+        "batt_00000000",
+        "batt_00000001",
+        "batt_00000002",
+    ]
     assert all(
         call["purpose"] == "context" and call["endpoint_id"] == "bep_1"
         for call in client.calls
     )
     assert "body-0" in block and "body-3" not in block
-    assert "over this read's 3-file budget" in block
+    # The two past the file budget name THAT cause, not a byte limit.
+    assert block.count("over this read's 3-file budget") == 2
+    assert "128 KiB" not in block
+
+
+@pytest.mark.asyncio
+async def test_a_hub_shaped_page_without_a_files_hash_still_fetches() -> None:
+    """B1: the hub's history view carries files[] + file_count and NO files_hash."""
+
+    data = b"region,count\nemea,3\n"
+    descriptor = _descriptor(data=data)
+    client = _HistoryClient({descriptor.id: data})
+    page = _page((descriptor,))
+    assert "files_hash" not in page["messages"][0]
+    assert page["messages"][0]["file_count"] == 1
+    block = (await _history_files(_runtime(client), CID, page, "bep_1"))[0]
+    assert [call["id"] for call in client.calls] == [descriptor.id]
+    assert "emea,3" in block
+    assert "all 20 bytes" in block
+
+
+@pytest.mark.asyncio
+async def test_a_non_minted_file_id_is_withheld_and_the_message_still_reads() -> None:
+    """Q-1: an id the transport would refuse is refused at parse, never fetched."""
+
+    data = b"hello"
+    descriptor = _descriptor(data=data)
+    page = _page((descriptor,))
+    page["messages"][0]["files"][0]["id"] = "bfile_1"  # the hub's own golden-vector shape
+    client = _HistoryClient({descriptor.id: data})
+    block = (await _history_files(_runtime(client), CID, page, "bep_1"))[0]
+    assert client.calls == [], "nothing is fetched for an id the transport refuses"
+    assert "withheld: the descriptors could not be verified" in block
+    assert block.startswith(BRIDGE_UNTRUSTED_CLAUSE)
+
+
+@pytest.mark.asyncio
+async def test_the_screen_path_cannot_hold_a_conversation_on_a_bad_id() -> None:
+    """Q-1: a malformed id withholds the file set; it must never raise out of screen."""
+
+    good = _descriptor(data=b"hello")
+    malformed = FileDescriptor(
+        id="../../admin", file_class="text", size=5, sha256=good.sha256
+    )
+    client = _ScreenClient({good.id: b"hello"})
+    carrier, withheld = await _screen_files(
+        client, _ref(), _owner(), None, (malformed,), files_admission_hash((malformed,))
+    )
+    assert (carrier, withheld) == (None, "unverified")
+    assert client.calls == [], "the refusal is local: no request leaves the machine"
+
+
+@pytest.mark.asyncio
+async def test_the_commitment_is_shape_agnostic_while_the_fetch_gate_is_not() -> None:
+    """The hub hashes ``bfile_1``-shaped ids; this runtime still refuses to fetch them.
+
+    The two facts are deliberate neighbours: the commitment must reproduce whatever the
+    hub hashed (its own golden vectors use ids this runtime will not put in a URL), while
+    only a minted id may become a request.
+    """
+
+    one = FileDescriptor(id="bfile_1", file_class="text", size=5, sha256="a" * 64)
+    two = FileDescriptor(id="bfile_2", file_class="pdf", size=7, sha256="b" * 64)
+    assert files_admission_hash((one, two)) == (
+        "6221f26625572241b49dfe30907279afc672e0f27dd974dceb4bf9f62b2fd7cd"
+    )
+    assert parse_file_descriptors([_row(one), _row(two)]) is None
+
+
+@pytest.mark.asyncio
+async def test_the_context_caption_reports_a_refusal_and_a_mismatch_as_themselves() -> None:
+    """Q-2: a 404 is not a budget, and a tampered body is not a budget."""
+
+    refused = _descriptor(file_id="batt_refused01", data=b"hello")
+    tampered = _descriptor(file_id="batt_tamper001", data=b"hello")
+    client = _HistoryClient({refused.id: b"hello", tampered.id: b"tampered"})
+    client.refuse.add(refused.id)
+    block = (
+        await _history_files(_runtime(client), CID, _page((refused, tampered)), "bep_1")
+    )[0]
+    assert "the hub did not serve them (revoked, expired or not admitted)" in block
+    assert "they did not match the descriptor's size and sha256" in block
+    assert "budget" not in block
 
 
 @pytest.mark.asyncio
 async def test_the_context_read_never_fetches_a_non_text_row() -> None:
-    text = _descriptor(file_id="bfile_text", data=b"hello")
-    pdf = _descriptor(file_id="bfile_pdf", file_class="pdf", data=b"%PDF")
+    text = _descriptor(file_id="batt_text0001", data=b"hello")
+    pdf = _descriptor(file_id="batt_pdf00001", file_class="pdf", data=b"%PDF")
     client = _HistoryClient({text.id: b"hello", pdf.id: b"%PDF"})
     block = (await _history_files(_runtime(client), CID, _page((text, pdf)), "bep_1"))[0]
     assert [call["id"] for call in client.calls] == [text.id]
@@ -752,8 +853,8 @@ async def test_an_unverified_set_is_listed_and_never_fetched() -> None:
     client = _HistoryClient({descriptor.id: b"hello"})
     page = _page((descriptor,), files_hash="0" * 64)
     block = (await _history_files(_runtime(client), CID, page, "bep_1"))[0]
-    assert client.calls == []
-    assert "NOT verified against the hub's commitment" in block
+    assert client.calls == [], "a page whose hash disagrees fetches nothing"
+    assert "does not match the hub's commitment" in block
     assert f"file {descriptor.id}" in block
 
 
@@ -790,13 +891,13 @@ async def test_the_context_read_total_is_bounded_across_files() -> None:
 
     chunk = b"z" * FILE_READ_MAX_BYTES_PER_FILE
     descriptors = tuple(
-        _descriptor(file_id=f"bfile_{i}", data=chunk + bytes([i])) for i in range(3)
+        _descriptor(file_id=f"batt_{i:08d}", data=chunk + bytes([i])) for i in range(3)
     )
     payloads = {d.id: chunk + bytes([i]) for i, d in enumerate(descriptors)}
     client = _HistoryClient(payloads)
     block = (await _history_files(_runtime(client), CID, _page(descriptors), "bep_1"))[0]
     assert len(client.calls) == 2
-    assert "over this read's 3-file budget" in block
+    assert "over this read's 128 KiB total" in block
 
 
 def test_the_screening_files_carrier_keeps_its_listing_private() -> None:

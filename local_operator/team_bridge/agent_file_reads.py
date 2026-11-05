@@ -43,9 +43,12 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
+from local_operator.team_bridge.types import ATTACHMENT_ID_PATTERN
+
 
 __all__ = [
     "FILE_CLASSES",
+    "FILE_ID_PATTERN",
     "FILE_MAX_BYTES",
     "FILE_READ_MAX_BYTES_PER_FILE",
     "FILE_READ_MAX_BYTES_TOTAL",
@@ -102,14 +105,19 @@ FILE_READ_MAX_BYTES_TOTAL = 128 * 1024
 FILES_HASH_DOMAIN = b"bridge-files-admission-v1\n"
 
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
-#: A generic file id is OPAQUE, not ``batt_``-shaped: the hub promises nothing about its
-#: spelling ("File IDs are opaque, exact UTF-8, with no prefix or case claims") and mints
-#: ``batt_``+UUID in practice. So the shape is NOT a prefix check — but it is not a
-#: free-for-all either: the id becomes a URL path segment, so this refuses every
-#: character that could reshape the path (``/``, ``?``, ``#``, ``%``), every control or
-#: whitespace byte, and anything past the hub's own 64-byte commitment bound. An id
-#: outside it is reported as unreadable rather than interpolated into a request.
-_FILE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+#: The SAME minted rule the transport enforces (``types.ATTACHMENT_ID_PATTERN``, used by
+#: ``client.fetch_attachment``). A file id and an image id travel the same message-scoped
+#: route and are minted by the same upload service, so the two halves of this runtime must
+#: not disagree about what an id is: a parser that accepted a wider shape would hand the
+#: fetch gate an id it refuses, which is a refusal discovered at the far end of a turn
+#: (the screen path used to turn it into an exception and hold the whole message). The
+#: hub's prose calls ids opaque — meaning "do not parse meaning into them", not "any
+#: bytes are an id" — and its own commitment boundary refuses an untrimmed or over-long
+#: id. One constant, one rule, checked before anything is fetched. The public name is
+#: what the connector asks with; the private alias keeps this module's own call sites
+#: short.
+FILE_ID_PATTERN = re.compile(ATTACHMENT_ID_PATTERN)
+_FILE_ID = FILE_ID_PATTERN
 
 
 class FileRejected(ValueError):
@@ -219,16 +227,6 @@ def parse_file_descriptors(raw: Any) -> tuple[FileDescriptor, ...] | None:
     if len({d.id for d in out}) != len(out):
         return None
     return tuple(out)
-
-
-def require_file_id(file_id: object) -> None:
-    """Refuse a file id that could reshape the upstream path or exceed the wire bound.
-
-    An id is opaque, so this is a bounded-shape check rather than a minted-prefix one —
-    but it is NOT a weaker check than the image lane's: nothing may carry a ``/``, a
-    ``?`` or a path-reshaping byte into a URL segment, and the hub's 64-byte bound is the
-    same one its commitment enforces.
-    """
 
 
 def _go_json_string(value: str) -> str:
@@ -424,15 +422,23 @@ def screen_listing(
 
 
 def context_caption(
-    files: Iterable[FileText], unread: Iterable[FileDescriptor], *, source: str
+    files: Iterable[FileText],
+    unread: Iterable[tuple[FileDescriptor, str]],
+    *,
+    source: str,
 ) -> str:
-    """The descriptor lines that head a context read — never the bytes themselves.
+    """The per-file receipt lines for a context read — never the bytes themselves.
 
     Kept apart from :func:`screen_listing` because the two consumers owe the model
     different things: the screener must SEE the bytes to judge them, while the agent's
     context gets provenance (which file, which class, how much of it) around content
-    rendered by the caller. A non-text class is stated as explicitly not read: the
-    agent asked, and "the hub refused this class to agents" is the fact, not a gap.
+    the caller renders.
+
+    ``unread`` pairs each file that produced no content with the CLOSED reason it did
+    not, because the causes are not interchangeable: a text file skipped for the read's
+    budget is a different fact from one the hub refused, one whose bytes failed their
+    hash, and one whose class an agent may never read. Reporting every case as "over
+    the budget" stated a true-shaped sentence about the wrong cause.
     """
 
     lines = [source]
@@ -446,21 +452,25 @@ def context_caption(
             f"{index}. file {item.descriptor.id} "
             f"({item.descriptor.file_class}, {item.descriptor.size} bytes) — {coverage}"
         )
-    for descriptor in unread:
-        if not descriptor.readable:
+    for descriptor, reason in unread:
+        head = f"- file {descriptor.id} ({descriptor.file_class}, {descriptor.size} bytes) — "
+        if reason == "class":
+            lines.append(head + "bytes not read: only text-class files are readable by an agent")
+        elif reason == "expired":
+            lines.append(head + f"bytes unavailable: {descriptor.state}")
+        elif reason == "budget_files":
+            lines.append(head + "bytes not read: over this read's 3-file budget")
+        elif reason == "budget_bytes":
+            lines.append(head + "bytes not read: over this read's 128 KiB total")
+        elif reason == "refused":
             lines.append(
-                f"- file {descriptor.id} ({descriptor.file_class}, {descriptor.size} bytes) "
-                f"— bytes not read: only text-class files are readable by an agent"
+                head
+                + "bytes not read: the hub did not serve them "
+                "(revoked, expired or not admitted)"
             )
-        elif not descriptor.fetchable:
+        else:  # unverified
             lines.append(
-                f"- file {descriptor.id} ({descriptor.file_class}, {descriptor.size} bytes) "
-                f"— bytes unavailable: {descriptor.state}"
-            )
-        else:
-            lines.append(
-                f"- file {descriptor.id} ({descriptor.file_class}, {descriptor.size} bytes) "
-                f"— bytes not read: over this read's 3-file budget"
+                head + "bytes not read: they did not match the descriptor's size and sha256"
             )
     return "\n".join(lines)
 

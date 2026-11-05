@@ -2982,6 +2982,18 @@ async def _history_files(
     never cached in the team-bridge store, sqlite, disk or a log, and never reused from
     the connector's screening fetch (a different, private carrier).
 
+    WHY NO SERVED ``files_hash`` IS REQUIRED HERE. The hub publishes ``files_hash`` on the
+    BODY fetch only; its history and thread views carry ``files[]`` + ``file_count`` and
+    no set hash (agent-server ``BridgeConversationMessageView``). That is the same shape
+    the image lane has always worked under — ``_history_images`` never recomputes a set
+    hash the hub does not serve — so this read binds the way images do: the descriptors
+    are present only for an endpoint the hub has already granted, and each file's bytes
+    are verified against its OWN descriptor (exact size and sha256). The commitment is
+    still computed from those descriptors, and sent by the connector on the grant; the
+    comparison is the SERVER's to make, because the server is the only side holding the
+    stored value. A page that DOES carry a hash (a future projection) is checked too, and
+    a disagreement there withholds the set.
+
     WHAT REACHES THE MODEL. TEXT-class files only, at most
     :data:`FILE_READ_MAX_FILES` files per read, 64 KiB per file and 128 KiB in total,
     each under its descriptor (id, class, size) and its exact coverage. A non-text class
@@ -3016,11 +3028,17 @@ async def _history_files(
         count = message.get("file_count")
         count = count if isinstance(count, int) and not isinstance(count, bool) else 0
         if descriptors is None:
+            # A malformed descriptor set (or an id the transport would refuse): the
+            # message still reads, the files are stated as unreadable. Never a raise —
+            # a bad FILE must not cost the agent the MESSAGE.
             blocks.append(
                 _file_provenance(
                     channel_id,
                     message,
-                    [f"[{count or 'some'} file(s) withheld: could not be verified]"],
+                    [
+                        f"[{count or 'some'} file(s) withheld: the descriptors could not "
+                        "be verified]"
+                    ],
                     [],
                 )
             )
@@ -3036,59 +3054,65 @@ async def _history_files(
                     )
                 )
             continue
-        # The hub's own commitment, recomputed from the descriptors it just showed. A
-        # mismatch means these are not the rows the message committed to, so nothing is
-        # fetched and the agent is told exactly that (fail closed: descriptors only).
         served = message.get("files_hash")
-        verified = False
         if isinstance(served, str) and served:
             try:
-                verified = files_admission_hash(descriptors) == served
+                recomputed = files_admission_hash(descriptors)
             except FileRejected:
-                verified = False
-        if not verified:
-            blocks.append(
-                _file_provenance(
-                    channel_id,
-                    message,
-                    context_caption(
+                recomputed = None
+            if recomputed != served:
+                # Only possible on a projection that serves the hash; when it does, a
+                # disagreement is final and nothing is fetched.
+                blocks.append(
+                    _file_provenance(
+                        channel_id,
+                        message,
+                        context_caption(
+                            [],
+                            [(d, "unverified") for d in descriptors],
+                            source=(
+                                "the file set does not match the hub's commitment: "
+                                "no bytes were read"
+                            ),
+                        ).splitlines(),
                         [],
-                        descriptors,
-                        source=(
-                            "file set NOT verified against the hub's commitment: "
-                            "no bytes were read"
-                        ),
-                    ).splitlines(),
-                    [],
+                    )
                 )
-            )
-            continue
+                continue
         wanted, rest = fetch_plan(descriptors, max_files=remaining)
-        texts = []
-        unread = list(rest)
+        texts: list[Any] = []
+        unread: list[tuple[Any, str]] = []
+        for descriptor in rest:
+            if not descriptor.readable:
+                unread.append((descriptor, "class"))
+            elif not descriptor.fetchable:
+                unread.append((descriptor, "expired"))
+            else:
+                # Readable, live, and simply past this read's file budget.
+                unread.append((descriptor, "budget_files"))
         for descriptor in wanted:
             if min(descriptor.size, FILE_READ_MAX_BYTES_PER_FILE) > budget:
                 # Bound every buffer BEFORE the request: the read's total is a hard
                 # ceiling, and a file that would cross it is stated as unread rather than
-                # fetched and then shortened (which would spend hub traffic and a model's
+                # fetched and shortened (which would spend hub traffic and a model's
                 # context on bytes nothing will show).
-                unread.append(descriptor)
+                unread.append((descriptor, "budget_bytes"))
                 continue
             try:
                 data = await _fetch_context_file(
                     runtime, channel_id, message, endpoint_id, descriptor
                 )
+            except Exception:  # noqa: BLE001 — a refusal is a line, never a crash
+                # A 404/revocation/unreachable read names its own cause, never the
+                # budget: the budget is not why this file is missing.
+                unread.append((descriptor, "refused"))
+                continue
+            try:
                 item = digest_file(descriptor, data)
             except FileRejected:
-                unread.append(descriptor)
-                continue
-            except Exception:  # noqa: BLE001 — a refusal is a line, never a crash
-                unread.append(descriptor)
-                continue
-            if item.shown_bytes > budget:
-                # Bound every buffer: the read's total is a hard ceiling, and a file that
-                # would cross it is stated as unread rather than silently shortened.
-                unread.append(descriptor)
+                # Bytes that do not hash to the descriptor are a tamper signal, not a
+                # size limit; saying "over the budget" here would be a false cause.
+                unread.append((descriptor, "unverified"))
                 continue
             budget -= item.shown_bytes
             remaining -= 1
