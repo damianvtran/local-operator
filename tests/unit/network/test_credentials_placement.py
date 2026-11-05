@@ -533,11 +533,18 @@ def test_build_auth_store_returns_the_mesh_store_when_borrowing(
 
 
 def _bridge_before_placement(root: Path, device: str) -> None:
-    """Model a securely admitted peer before its first provider login arrives."""
+    """Model a securely admitted peer before its first provider login arrives.
+
+    The device is a MEMBER of its own network, which is what a real admission leaves on
+    disk. The adopt path reads that record (``client._self_membership_active``) before it
+    accepts any grant, so a root carrying only a placement copy describes a client
+    ``for_this_device`` cannot build and every borrow is refused ``not_a_holder``.
+    """
     from local_operator.network import store
     from local_operator.network.types import MemberRecord, NetworkRecord
 
     record = NetworkRecord(network_id=NETWORK, name="synthetic-bridge", self_device_id=device)
+    record.members.append(MemberRecord(device_id=device, name="synthetic-self"))
     record.members.append(MemberRecord(device_id=OWNER, name="synthetic-owner"))
     store.save(record, root)
 
