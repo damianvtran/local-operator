@@ -229,7 +229,12 @@ def owner_catalogue(broker: Any, link: Any, frame: dict[str, Any]) -> dict[str, 
         by, rows = _approved_rows(broker, link, frame)
         return broker._loop.submit(_fetch(broker, link, frame, rows, ttl), timeout=20)
     except MeshRefusal as exc:
-        return BrokerError(code=exc.code, message=str(exc), key="openai").to_detail()
+        # Native/consent refusal prose can name an account. This protocol returns
+        # only a bounded known code, never auth-adjacent exception text.
+        code = exc.code if exc.code in ERROR_CODES else "catalogue_unavailable"
+        return BrokerError(
+            code=code, message="owner catalogue metadata refused", key="openai"
+        ).to_detail()
     except Exception:
         # Provider/transport exceptions may embed auth material: never echo them.
         return BrokerError(

@@ -446,3 +446,18 @@ def test_owner_rejects_provider_echo_of_authentication_identity(catalogue_mesh, 
     with pytest.raises(MeshRefusal):
         client.fetch_catalogue_metadata("openai")
     assert state["gets"] == len(mesh.idp.posts) == 1
+
+
+def test_owner_refusal_does_not_echo_native_identity(monkeypatch):
+    from types import SimpleNamespace
+
+    def refuse(*args):
+        raise MeshRefusal("not_a_holder", "native fixture-account identity refused")
+
+    monkeypatch.setattr(catalogue, "_approved_rows", refuse)
+    link = SimpleNamespace(
+        local_capabilities=(catalogue.CAPABILITY,), capabilities=(catalogue.CAPABILITY,)
+    )
+    result = catalogue.owner_catalogue(None, link, {"key": "openai", "provider": "openai"})
+    assert result["kind"] == "error" and result["code"] == "not_a_holder"
+    assert "fixture-account" not in json.dumps(result)
