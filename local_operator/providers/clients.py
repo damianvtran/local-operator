@@ -6345,9 +6345,7 @@ class MockClient:
         # production path. Scoped to the newest USER message for the same reason
         # as ``[bash:N]``: the marker remains in history, and after the tool
         # result the newest message is the tool row, so the follow-up completes.
-        askable = (
-            last_user is not None and bool(messages) and messages[-1] is last_user
-        )
+        askable = last_user is not None and bool(messages) and messages[-1] is last_user
         ask_kind = _mock_ask_kind(last_user.text) if askable and last_user is not None else None
         if ask_kind is not None:
             question: dict[str, Any] = (
