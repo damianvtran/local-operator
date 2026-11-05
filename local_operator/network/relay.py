@@ -448,6 +448,7 @@ SLICE_LOCAL_OPS: frozenset[str] = frozenset(
         "session_lifecycle",
         "session_receipt",
         "credential_grant",
+        "credential_catalogue",
         "credential_report",
         "credential_placement",
         "credential_revoke",
