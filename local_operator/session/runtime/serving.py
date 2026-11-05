@@ -113,10 +113,7 @@ from local_operator.session.approval_policy import (
 # one window and start one toward the literal goal `--stop` in another.
 from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
 from local_operator.session.runtime.inbox import SOURCE_PEER, SOURCE_USER
-from local_operator.session.runtime.server import (
-    AckDetail,
-    SessionHandle,
-)
+from local_operator.session.runtime.server import AckDetail, SessionHandle
 from local_operator.session.runtime.server import audio_blocks as _audio_blocks
 from local_operator.session.runtime.server import document_blocks as _document_blocks
 from local_operator.session.runtime.server import (
@@ -5948,7 +5945,10 @@ class ServingSessionHandle(SessionHandle):
         async with _model_resolution_window(resolution_deadline):
             from local_operator.providers.shared_catalogue import prepare_selection
 
-            await prepare_selection(provider, deadline=resolution_deadline)
+            # The SESSION's config root, never the ambient one: a session resumed
+            # under an explicit root carries its own native login/overrides, and
+            # reading the ambient store would miss them and reach the owner.
+            await prepare_selection(provider, self._config_dir, deadline=resolution_deadline)
             warm_info = warm_model_info(provider, model_id)
             if warm_info is not None:
                 spec = build_model_spec(provider, model_id, info=warm_info)

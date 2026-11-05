@@ -594,3 +594,106 @@ async def test_wrapped_controller_virtual_rows_do_not_turn_into_bearer_catalogue
     assert {row.model_id for row in rows if row.provider == "openai"} == {"gpt-fixture-sol"}
     assert statuses["openai"] == "ok" and state["gets"] == 1
     assert plain.list_credentials("openai") == []
+
+
+@pytest.mark.asyncio
+async def test_pending_lifecycle_baseline_hides_a_positive_receipt(borrower):
+    """An unresolved baseline outranks a receipt that predates it."""
+    mesh, plain, controller, state = borrower
+    assert await controller.shared_catalogue("openai") is not None
+    from local_operator.model.discovery import offered_model_ids
+    from local_operator.network.credentials import lifecycle
+    from local_operator.providers import shared_catalogue
+
+    assert "gpt-fixture-sol" in (offered_model_ids("openai") or set())
+    marker = lifecycle.LifecycleStore(mesh.network_id, mesh.b.root).path.with_name(
+        lifecycle.LIFECYCLE_OVERFLOW_FILENAME
+    )
+    marker.write_bytes(b"")
+    try:
+        # Presence-only latch: the identities it could not persist cannot be
+        # reconstructed, so no receipt issued before it may be offered.
+        assert shared_catalogue.cached(mesh.b.root) is None
+        assert "gpt-fixture-sol" not in (offered_model_ids("openai") or set())
+        assert shared_catalogue.refresh(mesh.b.root, fresh=True) is None
+    finally:
+        marker.unlink()
+
+
+@pytest.mark.asyncio
+async def test_preparation_reads_the_explicit_session_root(borrower, tmp_path, monkeypatch):
+    """A session resumed under its own root must not consult the ambient one."""
+    mesh, plain, controller, state = borrower
+    from local_operator.providers import shared_catalogue
+
+    ambient = tmp_path / "ambient-empty"
+    ambient.mkdir()
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(ambient))
+    # The ambient realm holds no approved share, so an ambient read cannot fetch.
+    shared_catalogue.prepare_selection_sync("openai")
+    assert state["gets"] == 0
+    # The session root is the realm that carries the approved share.
+    shared_catalogue.prepare_selection_sync("openai", mesh.b.root)
+    assert state["gets"] == 1
+
+
+@pytest.mark.asyncio
+async def test_peer_selection_prepares_owner_metadata_before_validating(borrower):
+    """The peer entrypoint keeps its refusal, but no longer refuses cold."""
+    import asyncio
+
+    from local_operator.mobile.peer_model import validate_peer_selection
+    from local_operator.model.configure import ModelSelectionRefused
+    from local_operator.model.discovery import offered_model_ids
+
+    mesh, plain, controller, state = borrower
+    assert offered_model_ids("openai") is not None
+    assert "gpt-fixture-sol" not in offered_model_ids("openai")
+    with pytest.raises(ModelSelectionRefused) as refused:
+        await asyncio.to_thread(validate_peer_selection, "openai", "gpt-fixture-sol")
+    # Its own validation is unchanged: a target with no local credential still
+    # refuses. Preparation now precedes it, so the cold catalogue is not the
+    # reason and the owner-native id is enumerable afterwards.
+    assert refused.value.code == "provider_unusable"
+    assert state["gets"] == 1
+    assert "gpt-fixture-sol" in (offered_model_ids("openai") or set())
+
+
+@pytest.mark.asyncio
+async def test_desktop_usable_scope_offers_the_approved_owner_model(
+    borrower, tmp_path, monkeypatch
+):
+    """``scope=usable`` must not filter out a model the authoring path offers."""
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.server.routes import desktop_catalogues
+
+    mesh, plain, controller, state = borrower
+    assert await controller.shared_catalogue("openai") is not None
+    from local_operator.model.discovery import offered_model_ids
+
+    assert "gpt-fixture-sol" in (offered_model_ids("openai") or set())
+
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "XAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    token = "shared-catalogue-consumer-test-token"
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", token)
+    monkeypatch.setenv("HOME", str(mesh.b.root))
+    from local_operator.config import ConfigManager
+
+    app = FastAPI()
+    app.include_router(desktop_catalogues.router)
+    app.state.config_manager = ConfigManager(mesh.b.root)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://localhost",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as client:
+        response = await client.get("/v1/desktop/models?scope=usable")
+    assert response.status_code == 200, response.text
+    models = response.json()["result"]["models"]
+    offered = {(row["provider"], row["model_id"]) for row in models}
+    assert ("openai", "gpt-fixture-sol") in offered
+    # The owner row is offered as metadata, never as a local bearer.
+    assert plain.list_credentials("openai") == []

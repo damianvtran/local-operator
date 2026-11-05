@@ -50,6 +50,12 @@ def source(
         client = MeshCredentialClient.for_this_device(root)
         if client is None or not client.should_borrow("openai"):
             return None
+        # A pending or overflowed lifecycle baseline means this device cannot
+        # prove the share still reflects current permission. Discovery must not
+        # advertise stale positive authority from a receipt that predates it.
+        state = lifecycle.LifecycleStore(client.network_id, root)
+        if state.restriction_pending() or state.load().needs_baseline:
+            return None
         from local_operator.network.credentials.sync import MARK_LOCAL_ONLY, SyncState
 
         if SyncState.load(client.network_id, root).mark_for("openai") == MARK_LOCAL_ONLY:
@@ -95,7 +101,13 @@ def _path(client: MeshCredentialClient, root: Path | None, cache_dir: Path | Non
 
 def _current(document: dict[str, Any], client: MeshCredentialClient, root: Path | None) -> bool:
     """Apply any newer owner lifecycle/withdrawal observation before offering IDs."""
-    observed = lifecycle.LifecycleStore(client.network_id, root).load()
+    state = lifecycle.LifecycleStore(client.network_id, root)
+    # The baseline/overflow latch is the canonical "cannot prove permission"
+    # signal; per-document revisions cannot see it, so a stale positive receipt
+    # would otherwise survive every observation that could not be persisted.
+    if state.restriction_pending():
+        return False
+    observed = state.load()
     if observed.needs_baseline:
         return False
     for (owner, key, scope), revisions in observed.high_water.items():

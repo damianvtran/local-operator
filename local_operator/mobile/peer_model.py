@@ -81,6 +81,16 @@ def validate_peer_selection(provider: str, model_id: str) -> "ModelSpec":
                 f"could not read that session's credential store ({type(error).__name__})",
             ) from error
 
+    # Preparation runs FIRST and in THIS realm: validation consults the
+    # catalogue's offered ids, so a cold peer would otherwise reject an
+    # owner-native id before the approved owner was ever asked. The preparation
+    # is metadata-only (no bearer, no grant) and a no-op when a local credential
+    # or non-catalogue provider wins. The peer entrypoint's own validation below
+    # is unchanged.
+    from local_operator.paths import config_dir
+    from local_operator.providers.shared_catalogue import prepare_selection_sync
+
+    prepare_selection_sync(provider, config_dir())
     return validate_model_selection(provider, model_id, usable=usable)
 
 

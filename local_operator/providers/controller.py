@@ -3348,6 +3348,19 @@ class ProviderController:
         # decision with the authoring HTTP catalogue below.
         return await self.listing_credential(provider)
 
+    def shared_catalogue_provider(self) -> str | None:
+        """The provider whose CURRENT approved machine share supplies rows.
+
+        Mirrors :meth:`initial_catalogue`'s eligibility (a validated receipt for
+        this config root) so the desktop ``scope=usable`` filter and the
+        authoring catalogue cannot disagree about an owner-approved model. Local
+        credentials are deliberately not consulted: their ids are already in
+        :meth:`usable_providers`, and a local login always outranks the share.
+        """
+        from local_operator.providers import shared_catalogue
+
+        return "openai" if shared_catalogue.cached(self.config_dir) is not None else None
+
     async def shared_catalogue(
         self, provider: str, *, fresh: bool = False, _local_connected: bool | None = None
     ) -> tuple[list[DiscoveredModel], str] | None:
