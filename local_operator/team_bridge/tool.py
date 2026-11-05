@@ -2665,9 +2665,7 @@ async def execute_bridge(runtime: BridgeRuntime, args: dict[str, Any]) -> dict[s
         images = await _history_images(
             runtime, channel_id, {"messages": thread_rows}, endpoint_id, restored
         )
-        files = await _history_files(
-            runtime, channel_id, {"messages": thread_rows}, endpoint_id
-        )
+        files = await _history_files(runtime, channel_id, {"messages": thread_rows}, endpoint_id)
         return {
             "ok": True,
             "state": "ok",

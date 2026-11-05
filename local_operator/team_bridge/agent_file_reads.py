@@ -45,7 +45,6 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from local_operator.team_bridge.types import ATTACHMENT_ID_PATTERN
 
-
 __all__ = [
     "FILE_CLASSES",
     "FILE_ID_PATTERN",
@@ -376,9 +375,7 @@ def fetch_plan(
     return tuple(to_fetch), tuple(rest)
 
 
-def screen_listing(
-    descriptors: Sequence[FileDescriptor], texts: Mapping[str, "FileText"]
-) -> str:
+def screen_listing(descriptors: Sequence[FileDescriptor], texts: Mapping[str, "FileText"]) -> str:
     """The v4 ``{{files}}`` slot: one listing line, then the text that follows as data.
 
     The hub's placeholder contract (``bridge.ScreenFiles``) is "one line per file as
@@ -407,9 +404,7 @@ def screen_listing(
             continue
         item = texts.get(descriptor.id)
         if item is None:
-            lines.append(
-                f"File {index} (text, {descriptor.size} bytes): contents not read."
-            )
+            lines.append(f"File {index} (text, {descriptor.size} bytes): contents not read.")
             continue
         coverage = (
             f"first {item.shown_bytes} of {descriptor.size} bytes"
@@ -466,8 +461,7 @@ def context_caption(
             lines.append(head + "bytes not read: the file SET does not match the hub's commitment")
         elif reason == "refused":
             lines.append(
-                head
-                + "bytes not read: the hub did not serve them "
+                head + "bytes not read: the hub did not serve them "
                 "(revoked, expired or not admitted)"
             )
         else:  # unverified

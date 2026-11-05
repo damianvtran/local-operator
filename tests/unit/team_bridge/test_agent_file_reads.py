@@ -22,6 +22,7 @@ import httpx
 import pytest
 
 from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
+from local_operator.harness.types import TextContent
 from local_operator.team_bridge import agent_file_reads as afr
 from local_operator.team_bridge import client as tb_client
 from local_operator.team_bridge import screening
@@ -263,9 +264,7 @@ def test_screen_listing_states_each_coverage_and_never_reads_a_non_text_row() ->
     text = digest_file(_descriptor(data=data), data)
     pdf = _descriptor(file_id="batt_pdf00001", file_class="pdf", data=b"%PDF")
     listing = screen_listing((text.descriptor, pdf), {text.descriptor.id: text})
-    assert listing.splitlines()[0] == (
-        f"Files: 2 (1: text {len(data)} bytes; 2: pdf 4 bytes)"
-    )
+    assert listing.splitlines()[0] == (f"Files: 2 (1: text {len(data)} bytes; 2: pdf 4 bytes)")
     assert f"all {len(data)} bytes" in listing and "col_a,count" in listing
     assert "File 2 (pdf, 4 bytes): contents not read." in listing
 
@@ -615,9 +614,7 @@ async def test_screening_fetches_text_only_and_builds_the_matching_commitment() 
 async def test_a_descriptor_set_that_does_not_recompute_withholds_every_file() -> None:
     descriptor = _descriptor()
     client = _ScreenClient({descriptor.id: b"hello"})
-    carrier, withheld = await _screen_files(
-        client, _ref(), _owner(), None, (descriptor,), "0" * 64
-    )
+    carrier, withheld = await _screen_files(client, _ref(), _owner(), None, (descriptor,), "0" * 64)
     assert (carrier, withheld) == (None, "unverified")
     assert client.calls == [], "no byte is fetched from an unproven set"
 
@@ -738,8 +735,7 @@ async def test_the_context_read_caps_at_three_files_and_states_the_rest() -> Non
         "batt_00000002",
     ]
     assert all(
-        call["purpose"] == "context" and call["endpoint_id"] == "bep_1"
-        for call in client.calls
+        call["purpose"] == "context" and call["endpoint_id"] == "bep_1" for call in client.calls
     )
     assert "body-0" in block and "body-3" not in block
     # The two past the file budget name THAT cause, not a byte limit.
@@ -783,9 +779,7 @@ async def test_the_screen_path_cannot_hold_a_conversation_on_a_bad_id() -> None:
     """Q-1: a malformed id withholds the file set; it must never raise out of screen."""
 
     good = _descriptor(data=b"hello")
-    malformed = FileDescriptor(
-        id="../../admin", file_class="text", size=5, sha256=good.sha256
-    )
+    malformed = FileDescriptor(id="../../admin", file_class="text", size=5, sha256=good.sha256)
     client = _ScreenClient({good.id: b"hello"})
     carrier, withheld = await _screen_files(
         client, _ref(), _owner(), None, (malformed,), files_admission_hash((malformed,))
@@ -819,9 +813,7 @@ async def test_the_context_caption_reports_a_refusal_and_a_mismatch_as_themselve
     tampered = _descriptor(file_id="batt_tamper001", data=b"hello")
     client = _HistoryClient({refused.id: b"hello", tampered.id: b"tampered"})
     client.refuse.add(refused.id)
-    block = (
-        await _history_files(_runtime(client), CID, _page((refused, tampered)), "bep_1")
-    )[0]
+    block = (await _history_files(_runtime(client), CID, _page((refused, tampered)), "bep_1"))[0]
     assert "the hub did not serve them (revoked, expired or not admitted)" in block
     assert "they did not match the descriptor's size and sha256" in block
     assert "budget" not in block
@@ -974,7 +966,11 @@ async def test_channel_history_returns_the_file_block_behind_the_untrusted_claus
     result = await tool.execute(
         "call_1", {"op": "channel_history", "channel_id": CID}, None, None, ToolContext()
     )
-    text = result.content[0].text
+    # The tool result's content is a union of content blocks; this op renders ONE
+    # text block, and naming the type is what proves the file block is text at all.
+    first = result.content[0]
+    assert isinstance(first, TextContent), type(first).__name__
+    text = first.text
     assert BRIDGE_UNTRUSTED_CLAUSE in text
     assert "emea,3" in text
     assert "--- file 1:" in text
@@ -1040,16 +1036,15 @@ class _FileWire:
         return {"ok": True}
 
 
-def _file_rig(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, wire: _FileWire, *, released: bool
-):
+def _file_rig(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, wire: _FileWire, *, released: bool):
     """The connector's delivery turn, with only the screening dispatch scripted."""
 
     from local_operator.team_bridge import hold_release as hr
     from local_operator.team_bridge.screening import ScreenResult
     from local_operator.team_bridge.types import ConversationFeedRef, ScreeningReceipt
     from tests.unit.team_bridge.test_attachments import _persist_receipt
-    from tests.unit.team_bridge.test_conversation_delivery import _enroll, _owner as conv_owner
+    from tests.unit.team_bridge.test_conversation_delivery import _enroll
+    from tests.unit.team_bridge.test_conversation_delivery import _owner as conv_owner
 
     owner = conv_owner("a", 1)
     _enroll(tmp_path, owner, "sess_a")

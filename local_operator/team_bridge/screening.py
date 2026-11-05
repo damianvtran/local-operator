@@ -174,9 +174,7 @@ _REASON_LINE = re.compile(r"^REASON: (\S.*)$")
 #: the text that follows it). The names are listed literally, not matched generically, so
 #: an unknown placeholder in a future template stays literal text — which the screener
 #: would read as content someone controls. The renderer asserts none survives.
-_PLACEHOLDER = re.compile(
-    r"\{\{(nonce|body|sender|organization|type|attachments|files)\}\}"
-)
+_PLACEHOLDER = re.compile(r"\{\{(nonce|body|sender|organization|type|attachments|files)\}\}")
 #: Any other ``{{name}}`` in a template is a slot nothing fills.
 _UNKNOWN_PLACEHOLDER = re.compile(
     r"\{\{(?!(?:nonce|body|sender|organization|type|attachments|files)\}\})[a-z_]+\}\}"
@@ -1770,9 +1768,7 @@ async def _screen_spend(
                 version=(
                     SCREENING_VERSION_V4
                     if files is not None
-                    else SCREENING_VERSION_V3
-                    if images is not None
-                    else snapshot.screening_version
+                    else SCREENING_VERSION_V3 if images is not None else snapshot.screening_version
                 ),
                 attachments=(
                     images.listing()
@@ -1781,9 +1777,7 @@ async def _screen_spend(
                     # renders ONE prompt under ONE template (one admission row); with no
                     # images the slot still has to be filled, or the template's own
                     # "line one lists the files and images" would be a false statement.
-                    else ""
-                    if files is not None
-                    else None
+                    else "" if files is not None else None
                 ),
                 files=files.private_listing() if files is not None else None,
             )
@@ -1975,9 +1969,7 @@ async def _screen_spend(
         rendered_version=(
             SCREENING_VERSION_V4
             if files is not None
-            else SCREENING_VERSION_V3
-            if images is not None
-            else snapshot.screening_version
+            else SCREENING_VERSION_V3 if images is not None else snapshot.screening_version
         ),
         rendered_template_sha256=rendered.template_sha256,
         prompt_template_sha256=rendered.template_sha256,

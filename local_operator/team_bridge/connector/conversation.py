@@ -41,14 +41,6 @@ from typing import Any, Mapping
 
 from local_operator.harness.message_types import BRIDGE_UNTRUSTED_CLAUSE
 
-from ..attachments import (
-    AttachmentDescriptor,
-    AttachmentRejected,
-    attachments_hash,
-    parse_descriptors,
-    verify_and_bound,
-    withheld_marker,
-)
 from ..agent_file_reads import (
     FILE_READ_MAX_BYTES_PER_FILE,
     FILE_READ_MAX_BYTES_TOTAL,
@@ -60,7 +52,15 @@ from ..agent_file_reads import (
     files_admission_hash,
     parse_file_descriptors,
     screen_listing,
-    withheld_marker as file_withheld_marker,
+)
+from ..agent_file_reads import withheld_marker as file_withheld_marker
+from ..attachments import (
+    AttachmentDescriptor,
+    AttachmentRejected,
+    attachments_hash,
+    parse_descriptors,
+    verify_and_bound,
+    withheld_marker,
 )
 from ..client import (
     SCREENING_TEMPLATE_V3_SHA256,
@@ -1751,9 +1751,7 @@ async def handle_conversation_available(
         admit_template = (
             SCREENING_TEMPLATE_V4_SHA256
             if admitted_files_hash is not None
-            else SCREENING_TEMPLATE_V3_SHA256
-            if admitted_hash
-            else None
+            else SCREENING_TEMPLATE_V3_SHA256 if admitted_hash else None
         )
         try:
             await _admit(files_hash=admitted_files_hash, template=admit_template)
