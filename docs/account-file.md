@@ -13,6 +13,14 @@ from lop's config directory, the same way it reads Claude Code's
 
 - Mode `0600`, replaced atomically (same-directory temp file + rename), so a
   reader never sees a torn document.
+- Publication is serialized: every rewrite takes an exclusive lock on
+  `<config dir>/.account-file.lock` (across processes and threads) and, while
+  holding it, reads the current credential rows and config and builds the file. A
+  slower or older publisher therefore cannot overwrite a newer logout with a
+  snapshot it read earlier; the last one to run always reflects the latest
+  committed state. If the lock cannot be taken within about 5 seconds the rewrite
+  is skipped (logged, never an error for the login/logout that triggered it), and
+  the next change or lop start republishes.
 - Contains no token, key, email, organization name or raw provider id.
 - Rewritten after login, logout, a credential being disabled, and a change of the
   configured default model (`hosting`), and at every `lop` start when missing or

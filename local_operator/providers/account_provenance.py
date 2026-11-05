@@ -27,6 +27,8 @@ import hashlib
 import json
 import logging
 import re
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -188,11 +190,21 @@ def _render(document: Mapping[str, Any]) -> bytes:
     return (json.dumps(document, indent=2, sort_keys=True) + "\n").encode()
 
 
+#: Lock file beside ``account.json``. Not part of the host contract.
+_LOCK_FILE_NAME = ".account-file.lock"
+
+#: How long a publisher waits for another to finish. A publish is a SQLite read,
+#: a config read and one small write, so a holder is normally done in
+#: milliseconds; the bound only keeps a wedged holder from wedging a login.
+_LOCK_WAIT_S = 5.0
+_LOCK_POLL_S = 0.01
+
+
 def refresh_account_file(
     config_dir: Path,
-    rows: list[Any] | None = None,
     *,
     only_if_changed: bool = True,
+    read_rows: Callable[[], list[Any]] | None = None,
     store_uid: str | None = None,
 ) -> bool:
     """Rewrite ``<config_dir>/account.json`` from the credential store and config.
@@ -200,46 +212,85 @@ def refresh_account_file(
     Returns True when the file was written. Never raises: the file is a
     convenience for hosts, and no login, logout or config write may fail over it.
 
-    ``rows`` are the store's rows when the caller already holds them (the store's
-    own write hooks); otherwise the store is opened read-only, which creates
-    nothing. When there is no ``auth.db`` and no earlier file there is nothing to
-    say and nothing is created, so a bare config directory stays bare.
+    SERIALIZED, REBUILT FROM CURRENT STATE. Reading the rows, reading the config,
+    building, comparing and replacing all happen under one exclusive lock
+    (``<config_dir>/.account-file.lock``, across processes and threads). Without
+    it two publishers were unordered: one that read the rows before a logout could
+    replace the file after the logout's own publish and bring the signed-out
+    account back. Whoever holds the lock reads the store as it is NOW, so the last
+    publisher to run always reflects the latest committed rows and config. A
+    caller therefore cannot hand in rows; ``read_rows`` is a callback invoked
+    inside the lock (the store's write hooks pass their own handle's read plus its
+    ``store_uid``). By default the store is opened read-only inside the lock,
+    which creates nothing. When there is no ``auth.db`` and no earlier file there
+    is nothing to say and nothing is created, not even the lock file, so a bare
+    config directory stays bare.
     """
     try:
         config_dir = Path(config_dir)
-        target = config_dir / ACCOUNT_FILE_NAME
-        if rows is None:
-            db_path = config_dir / "auth.db"
-            if not db_path.exists() and not target.exists():
+        if read_rows is None:
+            if (
+                not (config_dir / "auth.db").exists()
+                and not (config_dir / ACCOUNT_FILE_NAME).exists()
+            ):
                 return False
-            from local_operator.providers.auth_store import AuthStore
+        from local_operator.config_writer import nonblocking_file_claim
 
-            store = AuthStore.open_read_only(db_path)
-            try:
-                rows = store.list_credentials(include_disabled=True)
-                store_uid = store.store_uid
-            finally:
-                store.close()
-        from local_operator.config import read_config_values
-
-        values = read_config_values(config_dir)
-        hosting = values.get("hosting") if isinstance(values, dict) else None
-        payload = _render(
-            build_account_document(rows, hosting if isinstance(hosting, str) else None, store_uid)
-        )
-        if only_if_changed:
-            try:
-                if target.read_bytes() == payload and (target.stat().st_mode & 0o777) == 0o600:
-                    return False
-            except OSError:
-                pass
-        # Same-directory temp + ``os.replace`` at 0600: a host polling the file
-        # must never read a torn document.
-        from local_operator.owned_process import _atomic_write_bytes
-
-        _atomic_write_bytes(target, payload, mode=0o600)
-        return True
+        # Resolved only for the lock path: the claim refuses a symlinked parent,
+        # and a config directory reached through a link is a legitimate layout.
+        lock_path = config_dir.resolve() / _LOCK_FILE_NAME
+        deadline = time.monotonic() + _LOCK_WAIT_S
+        while True:
+            # A fresh descriptor per attempt, so threads of this process exclude
+            # one another as well as other processes.
+            with nonblocking_file_claim(lock_path) as acquired:
+                if acquired:
+                    return _publish_locked(config_dir, only_if_changed, read_rows, store_uid)
+            if time.monotonic() >= deadline:
+                logger.warning("timed out waiting to refresh %s", ACCOUNT_FILE_NAME)
+                return False
+            time.sleep(_LOCK_POLL_S)
     except Exception:  # noqa: BLE001 — never fail a login/logout/config write over this
         # No exception text: a SQL or payload error could echo identity fields.
         logger.warning("could not refresh %s", ACCOUNT_FILE_NAME)
         return False
+
+
+def _publish_locked(
+    config_dir: Path,
+    only_if_changed: bool,
+    read_rows: Callable[[], list[Any]] | None,
+    store_uid: str | None,
+) -> bool:
+    """The read-build-write body of :func:`refresh_account_file`; lock held."""
+    target = config_dir / ACCOUNT_FILE_NAME
+    if read_rows is not None:
+        rows = read_rows()
+    else:
+        from local_operator.providers.auth_store import AuthStore
+
+        store = AuthStore.open_read_only(config_dir / "auth.db")
+        try:
+            rows = store.list_credentials(include_disabled=True)
+            store_uid = store.store_uid
+        finally:
+            store.close()
+    from local_operator.config import read_config_values
+
+    values = read_config_values(config_dir)
+    hosting = values.get("hosting") if isinstance(values, dict) else None
+    payload = _render(
+        build_account_document(rows, hosting if isinstance(hosting, str) else None, store_uid)
+    )
+    if only_if_changed:
+        try:
+            if target.read_bytes() == payload and (target.stat().st_mode & 0o777) == 0o600:
+                return False
+        except OSError:
+            pass
+    # Same-directory temp + ``os.replace`` at 0600: a host polling the file
+    # must never read a torn document.
+    from local_operator.owned_process import _atomic_write_bytes
+
+    _atomic_write_bytes(target, payload, mode=0o600)
+    return True

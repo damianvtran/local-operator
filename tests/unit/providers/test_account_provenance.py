@@ -393,3 +393,144 @@ def test_oauth_access_carries_the_stores_ref(config: Path, store: AuthStore) -> 
     access = asyncio.run(store.get_oauth_access("openai"))
     assert access is not None and access.account_ref == _row_ref(store, row.id)
     assert access.account_ref is not None
+
+
+# -- serialized publication -----------------------------------------------
+
+
+def test_a_stale_publisher_cannot_resurrect_a_logged_out_account(
+    config: Path, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    import local_operator.config as config_module
+
+    ConfigManager(config).set_config_value("hosting", "anthropic")
+    store.upsert_credential("anthropic", _oauth())
+    assert _file(config)["default"] is not None
+
+    real_read = config_module.read_config_values
+    rows_read = threading.Event()
+    release = threading.Event()
+
+    def gated(config_dir: Path) -> Any:
+        if threading.current_thread().name == "stale-writer":
+            # The stale publisher has already read the (still signed-in) rows.
+            rows_read.set()
+            assert release.wait(10)
+        return real_read(config_dir)
+
+    monkeypatch.setattr(config_module, "read_config_values", gated)
+    (config / ACCOUNT_FILE_NAME).unlink()
+
+    stale = threading.Thread(
+        target=lambda: refresh_account_file(config), name="stale-writer", daemon=True
+    )
+    stale.start()
+    assert rows_read.wait(10)
+
+    logout_done = threading.Event()
+
+    def logout() -> None:
+        store.delete_credentials_for_provider("anthropic")
+        logout_done.set()
+
+    logout_thread = threading.Thread(target=logout, name="logout", daemon=True)
+    logout_thread.start()
+    # The logout's own publish queues behind the paused publisher's lock.
+    assert not logout_done.wait(0.5)
+    release.set()
+    stale.join(10)
+    logout_thread.join(10)
+    assert not stale.is_alive() and not logout_thread.is_alive()
+    document = _file(config)
+    assert document["providers"] == {} and document["default"] is None
+
+
+def test_deleting_one_credential_is_also_serialized_behind_a_stale_publisher(
+    config: Path, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    import local_operator.config as config_module
+
+    ConfigManager(config).set_config_value("hosting", "openai")
+    row = store.upsert_credential("openai", {"type": "api_key", "key": SECRETS[2]})
+    real_read = config_module.read_config_values
+    rows_read, release = threading.Event(), threading.Event()
+
+    def gated(config_dir: Path) -> Any:
+        if threading.current_thread().name == "stale-writer":
+            rows_read.set()
+            assert release.wait(10)
+        return real_read(config_dir)
+
+    monkeypatch.setattr(config_module, "read_config_values", gated)
+    (config / ACCOUNT_FILE_NAME).unlink()
+    stale = threading.Thread(
+        target=lambda: refresh_account_file(config), name="stale-writer", daemon=True
+    )
+    stale.start()
+    assert rows_read.wait(10)
+    done = threading.Event()
+
+    def delete() -> None:
+        store.delete_credential(row.id)
+        done.set()
+
+    deleter = threading.Thread(target=delete, daemon=True)
+    deleter.start()
+    assert not done.wait(0.5)
+    release.set()
+    stale.join(10)
+    deleter.join(10)
+    document = _file(config)
+    assert document["providers"] == {} and document["default"] is None
+
+
+def test_the_publisher_takes_no_caller_supplied_rows(config: Path, store: AuthStore) -> None:
+    import inspect
+
+    assert "rows" not in inspect.signature(refresh_account_file).parameters
+    with pytest.raises(TypeError):
+        refresh_account_file(config, [])  # type: ignore[call-arg, misc]
+
+
+def test_publication_leaves_a_private_lock_beside_the_file(config: Path, store: AuthStore) -> None:
+    store.upsert_credential("anthropic", _oauth())
+    lock = config / ".account-file.lock"
+    assert lock.is_file() and stat.S_IMODE(os.stat(lock).st_mode) == 0o600
+
+
+def test_a_symlinked_lock_is_refused_and_nothing_is_written(config: Path, store: AuthStore) -> None:
+    store.upsert_credential("anthropic", _oauth())
+    (config / ACCOUNT_FILE_NAME).unlink()
+    (config / ".account-file.lock").unlink()
+    elsewhere = config / "elsewhere"
+    elsewhere.write_text("")
+    (config / ".account-file.lock").symlink_to(elsewhere)
+    assert refresh_account_file(config) is False
+    assert not (config / ACCOUNT_FILE_NAME).exists()
+
+
+def test_a_held_lock_times_out_without_raising(
+    config: Path, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.config_writer import nonblocking_file_claim
+    from local_operator.providers import account_provenance
+
+    monkeypatch.setattr(account_provenance, "_LOCK_WAIT_S", 0.05)
+    store.upsert_credential("anthropic", _oauth())
+    (config / ACCOUNT_FILE_NAME).unlink()
+    with nonblocking_file_claim(config / ".account-file.lock") as held:
+        assert held
+        assert refresh_account_file(config) is False
+    assert not (config / ACCOUNT_FILE_NAME).exists()
+    assert refresh_account_file(config) is True
+
+
+def test_a_bare_config_dir_gets_no_lock_file(tmp_path: Path) -> None:
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    assert refresh_account_file(bare) is False
+    assert list(bare.iterdir()) == []

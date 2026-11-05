@@ -2509,11 +2509,14 @@ class AuthStore:
             return
         from local_operator.providers.account_provenance import refresh_account_file
 
-        try:
-            rows = self.list_credentials(include_disabled=True)
-        except Exception:  # noqa: BLE001 — a login must not fail over a host convenience file
-            return
-        refresh_account_file(self._db_path.parent, rows, store_uid=self.store_uid)
+        # The rows are read INSIDE the publisher's lock, never before it: a
+        # snapshot taken outside could be older than another publisher's and
+        # resurrect a logged-out account.
+        refresh_account_file(
+            self._db_path.parent,
+            read_rows=lambda: self.list_credentials(include_disabled=True),
+            store_uid=self.store_uid,
+        )
 
     def _rearm_parked_tunnel_login(self, provider: str, stored: StoredCredential) -> None:
         """Let a login that fixed a dead grant bring the tunnel connector back.
