@@ -114,14 +114,22 @@ Contract frozen before implementation (architect decisions D1–D6, in the PR):
   fails validation is voided as a whole, with a warning, and never partly applied.
 - **Mutation:** operator only, through a dev CLI:
   `python -m local_operator.session.rules <session_dir> list | add <text> | edit <id> <text> | rm <id>`
-  with JSON output. There is no model tool, slash command or TUI in the POC.
+  with JSON output — **plus** an in-app `/rules` slash command on the same code path
+  (`/rules`, `add`, `edit`, `rm`). There is no model-facing tool and no TUI panel: the model
+  must not be able to make a rule binding on itself without the operator.
 - **Rendering:** `<rules>` sits after `<goal>` in the tail (`prompts_api.py`). It is registered
   in `_TAIL_SECTION_MARKERS` and `STATE_SECTION_HEADINGS["rules"] = "Rules"`, and it is not
   advisory. With the flag on, block 0's "Session state updates" paragraph gains one sentence,
   present even with zero rules, so the first `add` never moves the cached head.
-- **Per step:** the provider re-reads `rules.json`, keyed by (mtime, size). A changed render
-  reaches the model as a `[session-state]` delta on the very next provider step. A read failure
-  of any kind renders no section and never breaks the turn.
+- **Per step:** the provider re-reads `rules.json`, keyed by (mtime, size). The rendered section
+  is spliced into the **outgoing system blocks on every provider call** (`prompts_api
+  .LIVE_TAIL_SECTIONS` + `with_live_tail_sections`, `Session._outbound_system_blocks`), not
+  frozen into the prefix and not sent as a `[session-state]` message. This was measured, not
+  assumed: an earlier design shipped the rule as a one-off user-role state message, and a
+  controlled replay of real failures showed it did not beat custom instructions
+  (merge case: 3/5 broken with rules vs 1/5 with custom). It is cheap because the last two
+  blocks carry no cache marker, so an edit costs one uncached tail and nothing in history.
+  A read failure of any kind renders no section and never breaks the turn.
 - **Copy sets:** `rules.json` is added to `fork.COPIED_SIDECARS` and `network/sync.COPY_SET_NAMES`.
   It is inert when the file is absent.
 
@@ -235,8 +243,9 @@ in the transcript state trail.
 ## 9. Graduation checklist (not in this PR)
 
 - Replace the flag with a `session.rules.enabled` `Setting` (8-locale copy).
-- Add a `/rules` slash command and a TUI panel, following the todo/wake panel pattern, plus
-  mobile and desktop state projection.
+- Finish the in-app surface: `/rules` exists (this branch), but it needs the 8-locale
+  translations and its allowance entry paid off, a TUI panel following the todo/wake pattern,
+  and mobile/desktop state projection.
 - Add a capture path: on standing phrasing, the model proposes a rule and the operator confirms
   it.
 - Decide §8.1 and encode it in the rendered text.
@@ -250,3 +259,33 @@ in the transcript state trail.
   `## Rules` delta. It round-trips byte-for-byte, and no shipped guide or skill contains one,
   but it is the one flag-off-visible change. `<goal>` sets the precedent.
 - Optionally, add deterministic pre-dispatch checks for rules that a machine can check.
+
+## 10. Where this stands (2026-11-05)
+
+Verified, with the evidence path named:
+
+- **Delivery arrives every call.** A probe on a copy of real session `1cfce255afc3` (182 MB,
+  40,570 records) rendered the rule into block 3 on every `_prepare_system_blocks` call, while
+  the rule text appeared **0 times** in the journal. It survives an OS-process restart for the
+  same reason. Procedural note: that is why the old "ship it once as a state message" design was
+  replaced at `bb6c09642`.
+- **Lifecycle on real data, 9 of 9 checks:** render, restart, `fork_session` copying `rules.json`
+  byte-identically, no leak into another session, and complete inertness with the flag off.
+- **Cost, measured statically:** block 0 +30 tokens once, independent of rule count; the tail
+  +78 / +156 / +420 tokens for 1 / 5 / 20 rules; an edit costs **0** in history (the old design
+  wrote the whole section into the conversation on every edit).
+- **Unit tests:** 93 pass on this branch (acceptance 60, hardening 16, live-tail 9, `/rules` 8).
+
+**Not proven, stated plainly:**
+
+1. **That rules beat custom instructions.** On deepseek-flash, 15 draws per arm on real replayed
+   failures, `bare_sharpen` broke 19/25 with no rule, 2/20 with custom instructions and 0/15
+   with rules — rules **match** custom instructions, they do not beat them. `merge_authority`
+   improved in no arm (16/25, 10/20, 7/15; Fisher p=0.23). The dilution experiment, which is the
+   only remaining hypothesis that could show an advantage, stopped at 15 of 60 cells after the
+   DeepSeek account ran out of credit. It proves nothing yet.
+2. **A real compaction pass keeping a rule.** The probe had compaction records in the transcript,
+   not a summarisation pass; a pass costs a model call.
+3. **Generalisation.** The violation rate is model-specific: the same scenario broke 19/25 on
+   deepseek-flash, 5/10 on gpt-4o-mini, 3/10 on gemini-2.5-flash and 0/10 on gemini for
+   `merge_authority`. Any compliance number here is a number about one model.
