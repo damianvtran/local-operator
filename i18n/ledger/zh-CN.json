@@ -3046,24 +3046,65 @@
     },
     {
       "locale": "zh-CN",
-      "namespace": "cli.team_bridge_hold",
-      "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
       "translator": {
-        "agent": "i18n-translator (coder subagent)",
-        "session": "2c6111e02b16-lane",
+        "agent": "coder (i18n-translator)",
         "model": "anthropic/claude-opus-5-5",
-        "date": "2026-11-04"
+        "date": "2026-11-03"
       },
       "auditor": {
-        "agent": "i18n-auditor (i18n-audit-3443, task subagent)",
-        "session": "621890ec619d",
-        "model": "anthropic/claude-sonnet-5-5",
-        "date": "2026-11-04",
+        "agent": "C1-i18n-audit-r1 / i18n-auditor / 725a399d7a94",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
         "result": "passed",
-        "findings": 1
+        "findings": 0
       },
       "status": "passed",
-      "note": "Independent audit (not the translator) of cli.team_bridge_hold at source hash acc428129160: 8/8 keys present in en order, ICU placeholder/plural structure parity with en ({count} only), required CLDR arms for the locale rendered at counts 1/2/5/21/22 with the repo formatter, NFC, no stray/bidi/zero-width controls, no ASCII apostrophe. Safety meaning checked against the en .context.json: held.* says the message was HELD (not delivered/approved/safe) and names no sender/place/body; delivered.body says only that the agent may READ it (no 'approved'/'accepted'); discarded.body says discarded and the sender was told it was NOT delivered (no 'deleted'/'blocked'); 'Agent messages' product name, 'held' term and the address register match cli.team_bridge_alert / cli.team_bridge in this locale. Pronoun 你 (guide); '智能体消息', '暂扣' and '送达' (deliver) match the alert/receiver precedent; classifier 条; full-width punctuation; no space between CJK and digits; only the 'other' arm is required and present. FINDING 1 (minor, FIXED): the translator rendered Discard as 舍弃 (held.body, discarded.title, discarded.body), a fourth word for one concept — the zh-CN catalogue's term for discarding messages is 丢弃 (tui.notices.kept_going_stopped '待处理消息已丢弃', cli.hub_shared_help.sync_replace), 放弃 is used for abandoning an edit/attempt. Replaced 舍弃→丢弃 in those three strings; no other wording touched and the audit covers the post-fix bytes. Remaining 0 blocker / 0 major. Dispositions: 0 blocker / 0 major unresolved. Single independent audit pass; no cross-model second audit; no native-speaker or rendered-frame certification."
+      "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. No linguistic changes. Modern terse voice, localized descriptive sound names, full-width prose punctuation and unchanged technical tokens accepted. Current 2026-10-24 hold-lift supersedes the older historical held table; no policy change performed. Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. ZH1 minor fixed: explicit 哈希值 for content digest, removed added 请 absent from source, removed Chinese/Latin boundary spaces per guide. Modern terse voice, full-width punctuation and technical tokens retained. Existing hold-lift policy unchanged. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/zh-CN/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/zh-CN/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
     }
   ]
 }

@@ -1,0 +1,84 @@
+{
+  "locales": {
+    "es": {
+      "keys": 27,
+      "runtime_rendered": 27,
+      "slash_cells": 49,
+      "placeholder_and_technical_parity": "passed",
+      "bidi_storage": "logical, no controls",
+      "nfc": "passed",
+      "plural_messages": 0
+    },
+    "fr": {
+      "keys": 27,
+      "runtime_rendered": 27,
+      "slash_cells": 52,
+      "placeholder_and_technical_parity": "passed",
+      "bidi_storage": "logical, no controls",
+      "nfc": "passed",
+      "plural_messages": 0
+    },
+    "hi": {
+      "keys": 27,
+      "runtime_rendered": 27,
+      "slash_cells": 30,
+      "placeholder_and_technical_parity": "passed",
+      "bidi_storage": "logical, no controls",
+      "nfc": "passed",
+      "plural_messages": 0
+    },
+    "ru": {
+      "keys": 27,
+      "runtime_rendered": 27,
+      "slash_cells": 53,
+      "placeholder_and_technical_parity": "passed",
+      "bidi_storage": "logical, no controls",
+      "nfc": "passed",
+      "plural_messages": 0
+    },
+    "ur": {
+      "keys": 27,
+      "runtime_rendered": 27,
+      "slash_cells": 50,
+      "placeholder_and_technical_parity": "passed",
+      "bidi_storage": "logical, no controls",
+      "nfc": "passed",
+      "plural_messages": 0
+    },
+    "vi": {
+      "keys": 27,
+      "runtime_rendered": 27,
+      "slash_cells": 51,
+      "placeholder_and_technical_parity": "passed",
+      "bidi_storage": "logical, no controls",
+      "nfc": "passed",
+      "plural_messages": 0
+    },
+    "zh-CN": {
+      "keys": 27,
+      "runtime_rendered": 27,
+      "slash_cells": 42,
+      "placeholder_and_technical_parity": "passed",
+      "bidi_storage": "logical, no controls",
+      "nfc": "passed",
+      "plural_messages": 0
+    }
+  },
+  "negative_control": {
+    "missing_placeholder": "rejected",
+    "actual_errors": [
+      "fr/tui.sound: tui.sound.selected: arguments () != en's (('name', 'simple'),): en has 1 argument(s), translation has 0"
+    ]
+  },
+  "restored_control": "passed",
+  "fallback": "Nothing played: the volume is 0.",
+  "render_samples": {
+    "name": "QA chime",
+    "id": "qa-chime",
+    "seconds": "1.25",
+    "volume": "70",
+    "state": "on",
+    "file": "/synthetic/qa.wav",
+    "reason": "synthetic error"
+  }
+}

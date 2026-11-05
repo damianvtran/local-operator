@@ -85,6 +85,13 @@ from typing import Any
 #: reach into the block's producer to name the block's key, and this module's tests
 #: assert the imported value against the filed fixtures' literal.
 from local_operator.mobile.push_credentials import REPORT_DEVICES_FIELD
+from local_operator.notifications.catalog_view import PUSH_STEM_RE
+from local_operator.notifications.sound import (
+    DEFAULT_SOUND_ID,
+    SYSTEM_SOUND_ID,
+    builtin,
+    configured,
+)
 from local_operator.tui.notify import APP_NAME, BODIES, BODY_COMPLETE, digest_subtitle
 
 #: The alert object: the user-visible text the machine composes and the cloud
@@ -124,6 +131,33 @@ EMIT_ROUTE = "/v1/tunnels/{tunnel_id}/push/events"
 #: on that route. Named here so the emitter and its tests cannot diverge on the
 #: casing of a header the cloud dedupes by.
 IDEMPOTENCY_HEADER = "Idempotency-Key"
+
+#: The sound the phone plays with a VISIBLE push (notification-sounds design
+#: §3.6, ADR 0006 amendment): a built-in id, :data:`SOUND_DEFAULT` or
+#: :data:`SOUND_NONE`. The cloud MAPS it (iOS ``aps.sound = "<id with - → _>.wav"``,
+#: the bundled file name, since Android ``res/raw`` names allow no hyphen;
+#: ``android.channel_id = "sound.<id>"``) and never composes from it, so P2
+#: holds. ADR 0006 (amendment 2026-11-04) adds the optional
+#: :data:`SOUND_CUSTOM_FIELD` beside it and a per-device ``sound_custom_ready``
+#: in the report block (``push_credentials.with_sound_readiness``); both are
+#: sent from notification-sounds C5, when a custom sound is selected.
+#: It rides completion and digest only: the attention form is a silent
+#: wake, so a sound on it would have nothing to accompany (design §6 C3:
+#: "``sound`` absent on attention, which is silent by definition").
+SOUND_FIELD = "sound"
+#: The computer's CUSTOM sound, by content: ``"c_" + sha256(stored_wav)[:16]``
+#: (``catalog_view.push_stem``). Optional, on completion and digest only, and
+#: present only when sound is on and a custom sound is selected; ``sound`` still
+#: carries the ``soft-pulse`` fallback beside it, which is what the cloud maps for
+#: every device whose ``sound_custom_ready`` is not true (ADR 0006 §3.2's
+#: ``sound_custom`` row). The name is a hash, never the user's sound name, so P2
+#: holds; the underscore makes it the phone's file stem (``c_<sha16>.wav``).
+SOUND_CUSTOM_FIELD = "sound_custom"
+#: The computer's ``system`` choice: "play the platform's own sound", which on
+#: the phone is the OS default notification sound.
+SOUND_DEFAULT = "default"
+#: Sounds turned off on the computer: the phone posts the banner silently.
+SOUND_NONE = "none"
 
 #: The prefix that keeps the two key spaces disjoint by SHAPE. A completion key
 #: is 64 lowercase hex characters, so ``attention-<n>`` can never be mistaken for
@@ -243,6 +277,65 @@ def digest_alert(kinds: Sequence[str], count: int) -> dict[str, str]:
     return {ALERT_TITLE_FIELD: APP_NAME, ALERT_BODY_FIELD: body}
 
 
+def push_sound(values: Mapping[str, Any] | None) -> str:
+    """The ``data.sound`` value for the computer's sound settings ``values``.
+
+    ``values`` is the ``config.yml`` values mapping (``read_config_values``);
+    ``None`` (no file yet) means every default, so the phone plays Soft pulse.
+
+    Read from the SETTINGS rather than from ``sound.resolve()``'s plan on purpose.
+    The plan answers "what does THIS machine play", and two of its silent
+    reasons are not the user's phone preference: ``LOCAL_OPERATOR_NO_SOUND`` is a
+    rig/CI mute for local speakers, and volume 0 is the computer's slider, which
+    design §3.6 says does not apply on the phone (the phone plays at its own
+    notification volume). Only ``enabled: false`` turns the phone silent.
+
+    Any id that is not a built-in — a custom sound (C2), or a hand-edited typo —
+    sends :data:`~local_operator.notifications.sound.DEFAULT_SOUND_ID`: a phone
+    may not hold a custom file (:data:`SOUND_CUSTOM_FIELD` names it for a
+    device that does), and it has no file to play for any other
+    name. ``data.sound`` is the value every not-ready device plays.
+    ``system`` maps to :data:`SOUND_DEFAULT`.
+    """
+    # ``configured`` is the computer's own reader of the three keys (the one
+    # ``resolve`` and ``lop sound`` use), so the phone and the computer can never
+    # disagree about whether sound is on or which id is stored.
+    stored = configured(values or {})
+    if not stored.enabled:
+        return SOUND_NONE
+    if stored.sound_id == SYSTEM_SOUND_ID:
+        return SOUND_DEFAULT
+    if builtin(stored.sound_id) is not None:
+        return stored.sound_id
+    return DEFAULT_SOUND_ID
+
+
+def _checked_sound(sound: str) -> str:
+    """``sound`` if the phone can play it, else ``ValueError``.
+
+    Validated for the reason ``kind`` is: the cloud maps the value straight to a
+    bundled file and a channel id, so an unknown one is a push the phone has no
+    sound (or, on Android, no channel) for.
+    """
+    if sound in (SOUND_DEFAULT, SOUND_NONE) or builtin(sound) is not None:
+        return sound
+    raise ValueError(f"unknown push sound: {sound!r}")
+
+
+def _checked_sound_custom(sound_custom: str, sound: str) -> str:
+    """``sound_custom`` if it is the frozen ``c_<sha16>`` form, else ``ValueError``.
+
+    Refused beside ``sound == "none"`` as well: a custom name is only meaningful
+    when sound is on, and a body carrying both would ask the cloud to play a file
+    for a banner the user silenced.
+    """
+    if not isinstance(sound_custom, str) or PUSH_STEM_RE.fullmatch(sound_custom) is None:
+        raise ValueError(f"unknown custom push sound: {sound_custom!r}")
+    if sound == SOUND_NONE:
+        raise ValueError("a custom push sound cannot ride a silenced banner")
+    return sound_custom
+
+
 def completion_payload(
     *,
     computer: str,
@@ -251,6 +344,8 @@ def completion_payload(
     kind: str,
     emit_id: str,
     count: int,
+    sound: str,
+    sound_custom: str | None = None,
 ) -> dict[str, Any]:
     """One completion emit's payload — the ``data`` object of ADR §3.2 #2.
 
@@ -265,10 +360,17 @@ def completion_payload(
     through: the composer's set is missing ``closed``, so an unvalidated
     pass-through would let a caller emit an outcome the app cannot render — and
     the failure would be a notification that silently says nothing.
+
+    ``sound`` is :func:`push_sound`'s answer, required rather than defaulted so a
+    caller cannot forget the user's setting and silently send Soft pulse.
+    ``sound_custom`` (:data:`SOUND_CUSTOM_FIELD`) is OMITTED when ``None`` — the
+    repo's absence rule, so a built-in selection's body is byte-for-byte the
+    pre-C5 shape.
     """
     if kind not in PUSH_KINDS:
         raise ValueError(f"unknown completion kind: {kind!r}")
-    return {
+    sound = _checked_sound(sound)
+    payload: dict[str, Any] = {
         "v": PAYLOAD_VERSION,
         "type": TYPE_COMPLETION,
         "computer": computer,
@@ -278,7 +380,11 @@ def completion_payload(
         "emit_id": emit_id,
         "count": count,
         ALERT_FIELD: completion_alert(kind, count),
+        SOUND_FIELD: sound,
     }
+    if sound_custom is not None:
+        payload[SOUND_CUSTOM_FIELD] = _checked_sound_custom(sound_custom, sound)
+    return payload
 
 
 def attention_payload(
@@ -292,7 +398,8 @@ def attention_payload(
 
     No ``conversation``, no ``completion_token`` and no ``kind``: the type exists
     precisely so a tap goes nowhere, and a field the app must not read is a field
-    that should not be sent.
+    that should not be sent. No ``sound`` either: the form is a silent wake with
+    no banner for a sound to ride (design §6 C3).
 
     ``exclude`` is the devices that must NOT be woken by this correction — the
     device that just acknowledged, on the nudge path — and it is OMITTED when the
@@ -318,7 +425,9 @@ def digest_payload(
     count: int,
     emit_id: str,
     kinds: Sequence[str],
+    sound: str,
     exclude: Sequence[str] | None = None,
+    sound_custom: str | None = None,
 ) -> dict[str, Any]:
     """One digest emit's payload — the coalesced catch-up of ADR §2.1's burst rule.
 
@@ -338,6 +447,10 @@ def digest_payload(
     triggered by it. So this builder treats the field as optional in both
     directions — the tick-detected path has no device to exclude and omits it,
     which is the one spelling of "exclude nobody".
+
+    ``sound`` is :func:`push_sound`'s answer, as on the completion form: the
+    digest is the other VISIBLE type, so its banner plays the user's sound, and
+    ``sound_custom`` rides it on the same terms.
     """
     payload: dict[str, Any] = {
         "v": PAYLOAD_VERSION,
@@ -346,7 +459,10 @@ def digest_payload(
         "count": count,
         "emit_id": emit_id,
         ALERT_FIELD: digest_alert(kinds, count),
+        SOUND_FIELD: _checked_sound(sound),
     }
+    if sound_custom is not None:
+        payload[SOUND_CUSTOM_FIELD] = _checked_sound_custom(sound_custom, payload[SOUND_FIELD])
     if exclude is not None:
         payload["exclude"] = list(exclude)
     return payload

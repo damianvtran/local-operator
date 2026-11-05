@@ -68,6 +68,7 @@ from local_operator.i18n.keys import wire_aida_cadence as _ac
 from local_operator.i18n.keys import wire_console as _cs
 from local_operator.i18n.keys import wire_host_speed as _hs
 from local_operator.i18n.keys import wire_memory as _mm
+from local_operator.i18n.keys import wire_notification_sound as _ns
 from local_operator.i18n.keys import wire_radient_saver as _rsv
 from local_operator.i18n.keys import wire_settings as _ws
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
@@ -127,6 +128,7 @@ _CHILD_SETTINGS_NAMESPACES = (
     "wire.console",
     "wire.memory",
     "wire.radient_saver",
+    "wire.notification_sound",
 )
 
 
@@ -369,11 +371,15 @@ class Setting:
     #: Opt-IN rather than inferred from the kind, because previewing is not a
     #: property of having choices — it is a claim that the value has a live
     #: apply path AND a reliable revert, and every target is another revert
-    #: route that has to be correct on every exit from the expansion. Only
+    #: route that has to be correct on every exit from the expansion.
     #: ``tui.theme`` sets it: it already repaints live through
     #: ``OperatorApp._apply_theme``, and the page captures the applied value on
-    #: open and restores it on every cancel route. ``display.*`` is the other
-    #: candidate and is deliberately left off until that revert is earned.
+    #: open and restores it on every cancel route. ``notifications.sound.id``
+    #: sets it too, and is the one target with NOTHING to revert: its preview
+    #: plays the highlighted sound once (debounced in the app) and changes no
+    #: state, so the page captures and restores nothing for it.
+    #: ``display.*`` is the other candidate and is deliberately left off until
+    #: that revert is earned.
     #:
     #: Consumed by the settings page only. Nothing in this module previews
     #: anything — a preview must never reach a writer, which is exactly why the
@@ -528,6 +534,18 @@ SECTIONS: tuple[Section, ...] = (
         _t(_ws.appearance_title()),
         Scope.LIVE,
         _t(_ws.appearance_description()),
+    ),
+    # Notification sounds (notification-sounds design §1.2). Its own section,
+    # not three rows under ``appearance``: that section is about theme and
+    # terminal features, and this one's description is where the page says
+    # how the sound behaves (rides the banner, 1.5 s throttle, how to preview).
+    # LIVE because ``notifications.sound.resolve`` re-reads config.yml on every
+    # notification, so an edit applies to the very next banner.
+    Section(
+        "notification_sound",
+        _t(_ns.title()),
+        Scope.LIVE,
+        _t(_ns.description()),
     ),
     # Its own section rather than a pair of rows under ``appearance``. Scope
     # does not force the split — ``appearance`` is LIVE too — but the section
@@ -1392,6 +1410,68 @@ def _theme_choices() -> tuple[Choice, ...]:
         # one line and the pane truncates — to restate what the name beside it
         # already says ("monokai" -> "Monokai").
         choices.append(Choice(name, name, spec.description))
+    return tuple(choices)
+
+
+#: Display names of the built-in notification sounds, keyed by catalog id.
+#: The values are the key FUNCTIONS, called inside ``_t(...)`` where the name
+#: is rendered: ``wire.notification_sound`` is a deferred namespace, and the
+#: census (``scripts/i18n/deferred_watch.py``) requires every deferred key call
+#: to sit inside a render wrapper.
+#: A literal table rather than a lookup through the catalog's ``label`` key:
+#: the typed key functions are what the i18n ratchet and pyright check, and
+#: ``test_sound_assets.py`` pins this table to ``sounds/catalog.json`` so the two
+#: cannot drift.
+_NOTIFICATION_SOUND_LABELS: dict[str, Callable[[], _Msg]] = {
+    "soft-pulse": _ns.sound_soft_pulse,
+    "two-note-chime": _ns.sound_two_note_chime,
+    "felt-marimba": _ns.sound_felt_marimba,
+    "hum-swell": _ns.sound_hum_swell,
+    "task-complete": _ns.sound_task_complete,
+    "signal-handshake": _ns.sound_signal_handshake,
+    "tape-warble": _ns.sound_tape_warble,
+    "bubble-chord": _ns.sound_bubble_chord,
+    "airy-whistle": _ns.sound_airy_whistle,
+    "bubble-pulse": _ns.sound_bubble_pulse,
+}
+
+
+def _notification_sound_choices() -> tuple[Choice, ...]:
+    """``notifications.sound.id``'s value space: the shipped catalog plus ``system``.
+
+    Read from ``notifications/sounds/catalog.json`` at CALL time
+    (``choices_source``), not listed here, so the catalog stays the one place
+    that says which sounds ship. C2 (custom sounds) widens this same function
+    with the user's own ids. ``label`` is the id, the token ``lop config edit``
+    accepts and ``validate`` lists back on a rejection (the ``_theme_choices``
+    rule); the localized display name rides the description.
+
+    The import is function-local and cheap: ``notifications.sound`` is
+    stdlib-only and imports nothing at module level beyond the stdlib.
+    """
+    from local_operator.notifications.sound import SYSTEM_SOUND_ID, builtin_sounds
+
+    choices = [
+        Choice(
+            sound.id,
+            sound.id,
+            (
+                _t(_NOTIFICATION_SOUND_LABELS[sound.id]())
+                if sound.id in _NOTIFICATION_SOUND_LABELS
+                else sound.id
+            ),
+        )
+        for sound in builtin_sounds()
+    ]
+    choices.append(Choice(SYSTEM_SOUND_ID, SYSTEM_SOUND_ID, _t(_ns.id_choice_system_description())))
+    # The user's own sounds (`lop sound add`, the desktop's Add sound). Read at
+    # call time like the catalog, so `lop config edit` and the `setting` tool
+    # accept a sound the moment it is added, and refuse it once it is removed.
+    # The description is the user's own name for it: user content, never
+    # translated (design §1.2).
+    from local_operator.notifications import custom_sounds
+
+    choices.extend(Choice(row.id, row.id, row.name) for row in custom_sounds.list_sounds())
     return tuple(choices)
 
 
@@ -2732,6 +2812,66 @@ SETTINGS: tuple[Setting, ...] = (
                 _t(_ws.display_time_format_choice_24h_description()),
             ),
         ),
+    ),
+    # -- notification sound (notification-sounds design §1.2) ------------------
+    # Genuinely NESTED paths (``values.notifications.sound.*``), unlike the
+    # flat ``display.*`` keys above: the consumer is
+    # ``notifications/sound.py:resolve``, which walks the nested mapping. The
+    # defaults are literals here (this module must not import the consumer at
+    # import time); ``_consumer_defaults`` in tests/unit/test_settings_io.py
+    # pins them to ``notifications.sound.DEFAULT_*``.
+    Setting(
+        key="notifications.sound.enabled",
+        path=("notifications", "sound", "enabled"),
+        section="notification_sound",
+        label=_t(_ns.enabled_label()),
+        kind=Kind.BOOL,
+        default=True,
+        help=_t(_ns.enabled_help()),
+        choices=_bool_choices(
+            _t(_ns.enabled_choice_true_description()),
+            _t(_ns.enabled_choice_false_description()),
+        ),
+        # NOT `gated_by="display.notifications"`, though a sound only rides a
+        # banner: `gated_by` is a same-section relation (the page dims a row
+        # whose master sits beside it, and test_every_gated_setting_names_a_bool_master
+        # pins that), and the banner switch lives in `appearance`. The runtime
+        # needs no gate here (no banner, no sound), and `lop sound doctor` leads
+        # with "banners are off" when they are.
+        synonyms=("chime", "audio", "mute"),
+    ),
+    Setting(
+        key="notifications.sound.id",
+        path=("notifications", "sound", "id"),
+        section="notification_sound",
+        label=_t(_ns.id_label()),
+        kind=Kind.ENUM,
+        default="soft-pulse",
+        help=_t(_ns.id_help()),
+        choices_source=_notification_sound_choices,
+        gated_by="notifications.sound.enabled",
+        synonyms=("ringtone", "tone", "alert"),
+        # Arrowing through the choices auditions each one (TUI audit U2). Safe
+        # without a revert because a sound is an event, not a state; the app
+        # debounces it (`OperatorApp._schedule_sound_preview`) so a held arrow
+        # plays only the row the cursor settles on.
+        preview=True,
+    ),
+    Setting(
+        key="notifications.sound.volume",
+        path=("notifications", "sound", "volume"),
+        section="notification_sound",
+        label=_t(_ns.volume_label()),
+        kind=Kind.INT,
+        # 70 -> (0.7)^2 = 0.49 amplitude, about -26 LUFS: between macOS's Tink
+        # and Pop (design §1.2). The squared curve lives in `sound.gain`.
+        default=70,
+        help=_t(_ns.volume_help()),
+        minimum=0,
+        maximum=100,
+        unit="percent",
+        gated_by="notifications.sound.enabled",
+        synonyms=("loudness", "quiet"),
     ),
     Setting(
         key="language",

@@ -52,6 +52,8 @@ ECHO_POLICY = {
     # family's output goes to a block (a multi-line receipt) or a notice (one
     # sentence), never into a prompt.
     "network": False,
+    # The notification-sound controls answer with their own notice receipt.
+    "sound": False,
     "exit": False,
     "clear": False,
     # Opens a picker, and nothing here reaches the model. The receipt is
@@ -222,6 +224,8 @@ PROMPT_POLICY = {
     # it is never consumed as this terminal's own prompt, so engaging `/new`
     # mid-draft must not reassemble the draft into it.
     "network": False,
+    # A verb plus an id/value; nothing is a prompt.
+    "sound": False,
     "help": False,
     # The listing/painting IS the receipt; the argument (none exists — the
     # handler refuses one) never becomes a prompt.

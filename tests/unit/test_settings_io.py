@@ -123,6 +123,7 @@ def _consumer_defaults() -> dict[str, object]:
     # The mesh sync cadence, from the module whose watcher reads it
     # (``SyncSettings.from_config`` falls back to exactly these).
     from local_operator.network.sync import SYNC_DEBOUNCE_S, SYNC_TICK_S
+    from local_operator.notifications import sound as notification_sound
     from local_operator.providers.failover import (
         CONNECTIVITY_BACKOFF_CAP_MS,
         CONNECTIVITY_MAX_RETRIES,
@@ -210,6 +211,10 @@ def _consumer_defaults() -> dict[str, object]:
         # path); THIS entry is what turns a drift between the two into a red
         # test rather than a page advertising a default nothing honours.
         "language": DEFAULT_LANGUAGE,
+        # Read by `notifications/sound.py:resolve` on every notification.
+        "notifications.sound.enabled": notification_sound.DEFAULT_ENABLED,
+        "notifications.sound.id": notification_sound.DEFAULT_SOUND_ID,
+        "notifications.sound.volume": notification_sound.DEFAULT_VOLUME,
         # The opt-in hider's own constant, beside the predicate that reads it
         # (`local_operator.cross_session`), so a registry default that drifts
         # from the code's is a red test rather than a page that lies.
