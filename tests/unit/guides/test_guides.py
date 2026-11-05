@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import pytest
 
+from local_operator.guardrails.rules import load_rules
 from local_operator.guides import discover_guides, make_guide_resolver
 from local_operator.projects import DESCRIPTION_MAX
 from local_operator.prompts_api import render_template
@@ -37,6 +38,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "delivery",
         "extensions",
         "failover",
+        "guardrails",
         "harness-import",
         "highlights",
         "i18n",
@@ -152,6 +154,13 @@ def test_guide_listing_never_contains_guide_body() -> None:
             "how do skills work and how do I add one for a user",
             "skills",
         ),
+        # The guardrails row is the shape this router can see: a prohibition the
+        # user wants enforced ("never", "force-push", "delete") shares vocabulary
+        # with the guide's description. The routing claim is deliberately narrow —
+        # `test_an_unrelated_task_does_not_route_to_guardrails` below is its
+        # negative control, because a guide that matches everything routes nothing.
+        ("never let me force-push main", "guardrails"),
+        ("warn me before deleting data", "guardrails"),
     ],
 )
 async def test_each_guide_routes_from_representative_task(
@@ -166,6 +175,69 @@ async def test_each_guide_routes_from_representative_task(
     selected = await index.select(query)
 
     assert expected in {guide.name for guide in selected}
+
+
+@pytest.mark.asyncio
+async def test_an_unrelated_task_does_not_route_to_guardrails(tmp_path: Path) -> None:
+    """The negative control for the guardrails routing row.
+
+    A description that shares vocabulary with everything ("rules", "tool",
+    "call") would pass the positive rows and be recommended for every request,
+    spending prompt space on every turn. The guide has to earn its slot, so a
+    plain data task must not surface it.
+    """
+    guides = discover_guides()
+    index = SkillIndex(cast(Any, guides), LocalEmbedder(), cache_dir=tmp_path / "cache")
+    await index.build()
+
+    selected = await index.select("summarise this spreadsheet into a table")
+
+    assert "guardrails" not in {g.name for g in selected}
+
+
+def test_guardrails_guide_rule_example_is_loadable(tmp_path: Path) -> None:
+    """The guide's rule example must stay executable, not merely legible.
+
+    A reader copies that block verbatim into ``<config_dir>/rules/``. If the
+    loader renames a field or drops an action, the guide would keep telling
+    models to write files the loader silently skips — and a skipped rule file is
+    invisible at runtime (logged once, then ignored), so the docs would promise
+    protection that is not there. Extracting the fence from the guide's own
+    markdown and running it through the real ``load_rules`` keeps the two in
+    lockstep without a second copy of the format to drift.
+    """
+    guide = next(g for g in discover_guides() if g.name == "guardrails")
+    text = guide.file_path.read_text(encoding="utf-8")
+    examples = re.findall(r"^```markdown\n(.*?)^```$", text, flags=re.S | re.M)
+    assert len(examples) == 1, "the guide must carry exactly one rule example"
+
+    rules_dir = tmp_path / "rules"
+    rules_dir.mkdir()
+    (rules_dir / "no-force-push-main.md").write_text(examples[0], encoding="utf-8")
+
+    rules = load_rules(rules_dir)
+
+    assert [rule.name for rule in rules.user] == ["no-force-push-main"]
+    rule = rules.user[0]
+    assert rule.scope == "tool:bash"
+    assert rule.action == "block"
+    assert rule.body == "Never force-push main; open a PR instead."
+    # Both flag positions, because the rule carries one pattern per position and
+    # the list is ANY-match. Asserting only `git push --force origin main` is how
+    # an order-dependent example passed this test while silently missing the
+    # ordinary `git push origin main --force` — a copied rule protecting nothing.
+    for command in (
+        "git push --force origin main",
+        "git push origin main --force",
+        "git push -f origin main",
+        "git push origin main -f",
+        "git push --force-with-lease origin main",
+    ):
+        assert rule.matches("bash", {"command": command}), command
+    # A bare `git push --force` with an implicit branch is the documented limit,
+    # not an assertion target: nothing in the text says which branch is pushed.
+    assert not rule.matches("bash", {"command": "git push origin feature"})
+    assert not rule.matches("bash", {"command": "git push origin main"})
 
 
 def test_every_guide_cross_reference_resolves() -> None:
