@@ -50,6 +50,16 @@ import {
 	skillToken,
 } from "../lib/skill-token";
 import { messageRuntime, useCapabilities, useDraft } from "../store";
+import {
+	browserCanRecord,
+	micSlot,
+	pressIsReflex,
+	primaryRole,
+	trackArrival,
+	type Arrival,
+	type PrimaryRole,
+} from "../lib/composer-slots";
+import { stopTurn, useTurnStopping } from "../lib/turn-stop";
 import type { PromptImage, SessionProjection, SkillEntry, SlashCommand } from "../types";
 
 /** One attached image, kept as the wire form plus a local object URL for the
@@ -480,15 +490,22 @@ function composerPlaceholder(streaming: boolean): string {
 const COMPOSER_SHELL =
 	"lo-composer mx-2 mb-[max(env(safe-area-inset-bottom),0.5rem)] flex flex-col rounded-frame bg-elevated px-2 pt-2 pb-0.5";
 /* THE RIGHT-SIDE CONTROL CLUSTER, one shared constant for the real composer and
-   the first-paint frame (operator finding A). The stop and send discs are 44 px
-   `shrink-0` controls and the row carried no gap: the two circles touched, and
-   the send disc sat flush against the shell's foot, reading as one clipped blob
-   instead of two controls. 2 px is the measured separation required (>= 1-2 px)
-   and it is a `gap`, so it cannot double with any other spacing. `ms-auto` holds
-   the cluster at the inline end of its line now that the meta facts have a line
-   of their own. The shell's `pb-2` gives the controls the same clearance below
-   as `px-2` gives at the sides; neither value shrinks a 44 px target. */
-const COMPOSER_ACTION_CLUSTER = "ms-auto flex shrink-0 items-center gap-0.5";
+   the first-paint frame. It is TWO FIXED 44 px SLOTS, [A: mic][B: primary], and
+   nothing in it ever reflows: slot B holds exactly one of send / steer / stop
+   (`primaryRole`), so stop is never drawn beside send, and slot A keeps its box
+   while the daemon's capability answer is unknown. A tap aimed at the mic can
+   therefore never land on another control because a turn started or ended
+   under the finger (operator report: the dictation button sat left of stop and
+   slid left every time one appeared).
+
+   8 px BETWEEN THE SLOTS, in every state. It was 2 px (operator finding A) when
+   stop and send were the pair; the slots now hold different kinds of action
+   (dictate / send), a reflex tap on one is the hazard the cluster exists to
+   remove, and 8 px is the gutter the model/effort chips below already use as
+   their own grid step. Cluster = 44 + 8 + 44 = 96 px with the mic, 44 px
+   without it. `ms-auto` holds the cluster at the inline end of its line now
+   that the meta facts have a line of their own. */
+const COMPOSER_ACTION_CLUSTER = "ms-auto flex shrink-0 items-center gap-2";
 /* A fixed 44 px glyph slot. It was `flex-1 min-w-0`, which let the meta line
    squeeze it to 2 px at 320 while the 44 px chip inside kept its width — the
    chip then painted over the model button (measured, review round 1b). */
@@ -582,16 +599,93 @@ export function ComposerFrame() {
 	   included). A frame that matches the live field for the common case is
 	   the no-pop contract `session-view.first-frame.test.tsx` pins. */
 	const placeholder = composerPlaceholder(false);
+	const frameMic = micSlot(browserCanRecord(), useCapabilities());
 	return <div className={COMPOSER_SHELL} aria-hidden>
 		<div className={COMPOSER_INPUT_ROW}>
 			<div className={COMPOSER_FIELD_BOX}><textarea disabled aria-hidden rows={1} tabIndex={-1} placeholder={placeholder} dir={textDirection(placeholder)} className={COMPOSER_FIELD} /></div>
 			<span className={cn(COMPOSER_ROUND, COMPOSER_LEADING, "text-ink-disabled")}><PaperclipGlyph /></span>
 			<div className={COMPOSER_CHIP_ROW}><span className={COMPOSER_CHIP} /></div>
 			<div className={COMPOSER_ACTION_CLUSTER}>
+				{/* The mic's box is held whenever the live composer will hold or draw it
+				    (`micSlot`, the same rule): a browser or daemon that cannot dictate
+				    gets no void, so the settle moves nothing. */}
+				{frameMic !== "none" ? <span aria-hidden data-mic-reserve className="size-11 shrink-0" /> : null}
 				<span className={cn(COMPOSER_ROUND, "bg-sunken text-ink-disabled")}>↑</span>
 			</div>
 		</div>
 	</div>;
+}
+
+/* SLOT B: the primary disc. ONE component per role, keyed by the caller, so each
+   role is its own DOM button (see `primaryRole`). Stop is the destructive role
+   and takes the 500 ms arrival guard (`pressIsReflex`): a pointer press in the
+   first half second after the disc BECAME Stop is a reflex from the tap that
+   just sent, not a decision to kill the turn. The swallowed press does not
+   disable the button, so focus and the pressed look are unchanged. */
+function PrimaryButton({
+	role,
+	arrivedAt,
+	canSend,
+	onSend,
+	onStop,
+	onFocusChange,
+}: {
+	role: PrimaryRole;
+	/** A getter: the arrival is stamped in a layout effect AFTER this render, so a
+	    value captured at render would be the previous role's. */
+	arrivedAt: () => number;
+	canSend: boolean;
+	onSend: () => void;
+	onStop: () => void;
+	onFocusChange: (focused: boolean) => void;
+}) {
+	const focus = {
+		onFocus: () => onFocusChange(true),
+		onBlur: () => onFocusChange(false),
+	};
+	if (role === "stop" || role === "stopping") {
+		const busy = role === "stopping";
+		return (
+			<button
+				type="button"
+				data-role={role}
+				aria-label={messageRuntime.t(busy ? "relay.composer.action.stopping" : "relay.composer.action.stop")}
+				aria-busy={busy || undefined}
+				onClick={(event) => {
+					if (busy) return;
+					if (pressIsReflex(arrivedAt(), performance.now(), event.detail)) return;
+					onStop();
+				}}
+				{...focus}
+				className={cn(
+					COMPOSER_ROUND,
+					"bg-danger-wash text-danger active:bg-danger-wash",
+					busy ? "opacity-60" : "",
+				)}
+			>
+				<span aria-hidden>{busy ? "…" : "■"}</span>
+			</button>
+		);
+	}
+	const connecting = role === "connecting";
+	return (
+		<button
+			type="button"
+			data-role={role}
+			onClick={onSend}
+			disabled={!canSend || connecting}
+			aria-label={messageRuntime.t(
+				connecting ? "relay.composer.action.connecting" : role === "steer" ? "relay.composer.action.steer" : "relay.composer.action.send",
+			)}
+			{...focus}
+			className={cn(
+				COMPOSER_ROUND,
+				"bg-accent text-on-accent active:bg-accent-active disabled:bg-sunken disabled:text-ink-disabled",
+			)}
+		>
+			<span aria-hidden>{connecting ? "…" : "↑"}</span>
+		</button>
+	);
 }
 
 /* The dictation outcome lines (U2/U3/D2), rendered in the same polite status
@@ -729,6 +823,31 @@ export function Composer({
 	imagesRef.current = images;
 	const [dragOver, setDragOver] = useState(false);
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	/* THE PRIMARY SLOT'S ROLE (slot B of the action cluster). One occupant, so
+	   send / steer / stop are never drawn together; see `primaryRole`. */
+	const stopping = useTurnStopping(pid, projection.streaming);
+	const role = primaryRole({
+		alive: projection.streaming,
+		stopping,
+		sending,
+		hasPayload: text.trim() !== "" || images.length > 0,
+	});
+	/* When the role last ARRIVED in the slot, for the Stop guard. A ref written in a
+	   layout effect: it is read only from a click handler, never during render. */
+	const arrivalRef = useRef<Arrival | null>(null);
+	const slotFocusedRef = useRef(false);
+	useLayoutEffect(() => {
+		const before = arrivalRef.current?.role;
+		arrivalRef.current = trackArrival(arrivalRef.current, role, performance.now());
+		/* A focused button that unmounted on the role flip drops focus to <body>,
+		   which closes a hardware keyboard's place in the form. Hand it to the
+		   field instead. A finger tap never focuses a button on iOS, so this does
+		   not raise the soft keyboard for touch users. */
+		if (before && before !== role && slotFocusedRef.current && document.activeElement === document.body) {
+			textareaRef.current?.focus();
+			slotFocusedRef.current = false;
+		}
+	}, [role]);
 	const fileInputRef = useRef<HTMLInputElement>(null);
 	/* The composer's own wrapper, which holds the tray AND the card: the arrow
 	   keys are routed here so the tray stays a pure list (see `trayRows`). */
@@ -778,23 +897,19 @@ export function Composer({
 	   plain-HTTP case is deliberately excluded — a mic that appears and fails is
 	   worse than one that never does. */
 	const capabilities = useCapabilities();
-	const micAvailable =
-		capabilities?.stt?.available === true &&
-		typeof window !== "undefined" &&
-		window.isSecureContext === true &&
-		typeof navigator !== "undefined" &&
-		!!navigator.mediaDevices?.getUserMedia &&
-		typeof MediaRecorder !== "undefined";
+	const micSlotState = micSlot(browserCanRecord(), capabilities);
+	const micAvailable = micSlotState === "mic";
 	/* EVERY INPUT THAT MOVES THE FACTS ROW'S GEOMETRY WITHOUT RESIZING THE ROW
 	   (QA Q2 = review R3-6): the model label, the reading's own rendered text
 	   (it spans spend, subagent spend and context, not just `usage`), and the
-	   mic, which takes 46 px from the line. Missing one let a cold load commit a
+	   mic slot, which takes 52 px from the line (44 + the 8 px gutter) whether it
+	   is drawn or only reserved. Missing one let a cold load commit a
 	   stale level until the row's observer happened to fire. The count is passed
 	   on its own because the hook must know it even when it is not in the row. */
 	const queuedLabel = projection.queued_count > 0
 		? messageRuntime.t("relay.transcript.composer.queued", { count: projection.queued_count })
 		: "";
-	const readingKey = [projection.model_label, projection.effort, meterFacts(projection).label, micAvailable ? "mic" : ""].join("|");
+	const readingKey = [projection.model_label, projection.effort, meterFacts(projection).label, micSlotState].join("|");
 	const foot = useFootFit(short, readingKey, queuedLabel);
 	useEffect(() => { onFitLevel?.(foot.level); }, [foot.level, onFitLevel]);
 
@@ -1535,12 +1650,12 @@ export function Composer({
 		}
 	};
 
+	/* The stop goes through the shared per-session latch (`lib/turn-stop`), so this
+	   disc and the working line's Stop show the pressed state together and a
+	   second tap is not a second abort. */
 	const abort = async () => {
-		try {
-			await sendCommand(pid, { op: "abort" });
-		} catch (e) {
-			setError(String((e as Error).message ?? e));
-		}
+		const failure = await stopTurn(pid);
+		if (failure !== null) setError(failure);
 	};
 
 	const onChange = (value: string, caretAt: number | null) => {
@@ -1660,6 +1775,45 @@ export function Composer({
 	   component stays one element in its parent's flex column, and re-indenting
 	   the whole card behind a fragment would bury every future diff. The wrapper
 	   itself paints nothing and has no layout box. */
+	/* SLOT A: the voice mic, the same 44 px round control as every other disc. Drawn
+	   iff the daemon advertised a path that can run AND this browser can record
+	   (`micSlot`); `sending`/`retryPending` do NOT disable it, the draft stays
+	   editable while a send is in flight. It is never guarded: dictation is never
+	   refused or greyed (a mic that is held back is a mic that reads as broken). */
+	const micButton = micAvailable ? (
+	<button
+		type="button"
+		onClick={() => {
+			if (dictationRef.current === "recording") stopDictation();
+			else if (dictationRef.current === "idle") void startDictation();
+		}}
+		disabled={dictation === "transcribing"}
+		aria-label={
+			dictation === "recording"
+				? "stop and transcribe"
+				: dictation === "transcribing"
+					? "transcribing"
+					: "start voice input"
+		}
+		className={cn(
+			"flex size-11 shrink-0 items-center justify-center rounded-full active:bg-elevated disabled:opacity-50",
+			dictation === "recording"
+				? "bg-danger-wash text-danger"
+				: "text-ink-muted",
+		)}
+	>
+		{dictation === "transcribing" ? (
+			<span aria-hidden className="text-meta">…</span>
+		) : (
+			<svg width="18" height="18" viewBox="0 0 24 24" fill={dictation === "recording" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+				<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+				<path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+				<line x1="12" y1="19" x2="12" y2="22" />
+			</svg>
+		)}
+	</button>
+				) : null;
+
 	return (
 		<div className="contents" ref={trayRootRef} onKeyDown={onTrayKeyDown}>
 			{/* The `$skill` list, in the above-composer region with the slot's own
@@ -1853,43 +2007,6 @@ export function Composer({
 				>
 					<PaperclipGlyph />
 				</button>
-				{/* The voice mic: same 44px round control as attach/send/stop, left
-				    cluster beside attach. Visible iff the daemon advertised an available
-				    path AND this browser can record one; `sending`/`retryPending` do NOT
-				    disable it — the draft stays editable while a send is in flight. */}
-				{micAvailable ? (
-					<button
-						type="button"
-						onClick={() => {
-							if (dictationRef.current === "recording") stopDictation();
-							else if (dictationRef.current === "idle") void startDictation();
-						}}
-						disabled={dictation === "transcribing"}
-						aria-label={
-							dictation === "recording"
-								? "stop and transcribe"
-								: dictation === "transcribing"
-									? "transcribing"
-									: "start voice input"
-						}
-						className={cn(
-							"flex size-11 shrink-0 items-center justify-center rounded-full active:bg-elevated disabled:opacity-50",
-							dictation === "recording"
-								? "bg-danger-wash text-danger"
-								: "text-ink-muted",
-						)}
-					>
-						{dictation === "transcribing" ? (
-							<span aria-hidden className="text-meta">…</span>
-						) : (
-							<svg width="18" height="18" viewBox="0 0 24 24" fill={dictation === "recording" ? "currentColor" : "none"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-								<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-								<path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-								<line x1="12" y1="19" x2="12" y2="22" />
-							</svg>
-						)}
-					</button>
-				) : null}
 				<div
 					className={cn(
 						COMPOSER_FIELD_BOX,
@@ -2032,27 +2149,28 @@ export function Composer({
 					<SessionStatus projection={projection} compact short={short} mode={foot.level >= 2 ? "hidden" : foot.level === 1 ? "short" : "full"} />
 				</div>
 
-				<div className={COMPOSER_ACTION_CLUSTER}>
-					{projection.streaming ? (
-						<button
-							type="button"
-							onClick={abort}
-							aria-label="stop"
-							className="flex size-11 shrink-0 items-center justify-center rounded-full bg-danger-wash text-danger active:bg-danger-wash"
-						>
-							■
-						</button>
+				{/* THE ACTION CLUSTER: two fixed 44 px slots, [A: mic][B: primary]. Slot B
+				    holds ONE of send / steer / stop / connecting (`primaryRole`), each a
+				    separately KEYED button: a press that began on one role can never
+				    complete as a click on another, because the old element unmounts
+				    when the role flips. Nothing in the row changes width with the turn,
+				    so a tap aimed at the mic cannot land on stop. */}
+				<div className={COMPOSER_ACTION_CLUSTER} data-testid="composer-actions">
+					{micSlotState === "reserved" ? (
+						/* The daemon has not said whether dictation exists yet. The box is
+						   held, empty and inert, so the answer arriving moves nothing. */
+						<span aria-hidden data-mic-reserve className="size-11 shrink-0" />
 					) : null}
-
-					<button
-						type="button"
-						onClick={() => void send(text)}
-						disabled={retryPending || (!text.trim() && images.length === 0) || sending || disabled}
-						aria-label={sending ? "Connecting" : projection.streaming ? "steer" : "send"}
-						className="flex size-11 shrink-0 items-center justify-center rounded-full bg-accent text-on-accent active:bg-accent-active disabled:bg-sunken disabled:text-ink-disabled"
-					>
-						<span aria-hidden>{sending ? "…" : "↑"}</span>
-					</button>
+					{micButton}
+					<PrimaryButton
+						key={role}
+						role={role}
+						arrivedAt={() => arrivalRef.current?.arrivedAt ?? 0}
+						canSend={!retryPending && (text.trim() !== "" || images.length > 0) && !disabled}
+						onSend={() => void send(text)}
+						onStop={() => void abort()}
+						onFocusChange={(focused) => { slotFocusedRef.current = focused; }}
+					/>
 				</div>
 			</div>
 

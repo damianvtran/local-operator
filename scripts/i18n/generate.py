@@ -249,6 +249,11 @@ OWNED_SPA_NAMESPACES = (
     # locations"). Its own namespace for the frozen-bytes reason above: the
     # supplement block's other copy is not keyed yet and must not stale a ledger.
     "relay.highlights",
+    # The composer's primary-button vocabulary (send / steer / stop / stopping /
+    # connecting) and the working line's Stop. Its own namespace for the
+    # frozen-bytes reason above: relay.chrome carries the composer chrome and
+    # must not stale.
+    "relay.composer",
 )
 
 GENERATED_HEADER = (
