@@ -717,6 +717,12 @@ class WebFetchService:
     cheap per-call views of settings; the session-owned ``io`` retains bounded
     per-origin pools. Embedders without an owner use a temporary pool that is
     closed before returning, so no event-loop or connection lifetime is leaked.
+
+    ``trust_env`` is the one transport knob that is NOT a detail: httpx inherits
+    ``HTTP(S)_PROXY`` and honours ``NO_PROXY`` when it is on, so a caller that
+    must decide for itself where a request goes (the link-preview resolver, whose
+    targets arrive from other people's messages) pins it off. It defaults ON to
+    preserve what every existing caller already does.
     """
 
     def __init__(
@@ -725,10 +731,12 @@ class WebFetchService:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         io: WebReadIO | None = None,
+        trust_env: bool = True,
     ) -> None:
         self.settings = settings
         self.transport = transport
         self.io = io
+        self.trust_env = trust_env
 
     async def fetch(
         self,
@@ -1178,11 +1186,17 @@ class WebFetchService:
                 origin.port,
                 budget.total,
                 id(self.transport),
+                # Part of the pool key, not just of the client: two services can
+                # share one owner and disagree about whether the environment may
+                # redirect their traffic, and a pooled client built under one
+                # answer must never serve the other.
+                self.trust_env,
             ),
             transport=self.transport,
             follow_redirects=False,
             timeout=budget.total,
             headers={"User-Agent": USER_AGENT},
+            trust_env=self.trust_env,
         ) as client:
             extra = BROWSER_PROFILE_HEADERS if profile == "browser" else None
             return await self._stream_once(

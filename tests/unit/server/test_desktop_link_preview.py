@@ -10,7 +10,9 @@ the renderer talks to.
 
 from __future__ import annotations
 
+import asyncio
 import time
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -20,7 +22,16 @@ import pytest
 from local_operator.config import ConfigManager
 from local_operator.server import desktop
 from local_operator.server.app import app
-from local_operator.team_bridge.link_preview import extract, service as preview_service
+from local_operator.server.routes import desktop_link_preview
+from local_operator.team_bridge.link_preview import cache as link_preview_cache
+from local_operator.team_bridge.link_preview import extract
+from local_operator.team_bridge.link_preview import service as preview_service
+from local_operator.team_bridge.link_preview.cache import (
+    NEGATIVE_TTL_S,
+    POSITIVE_TTL_S,
+    PreviewCache,
+    PreviewScope,
+)
 from local_operator.team_bridge.link_preview.store import (
     InvalidArtifactId,
     PreviewStore,
@@ -28,11 +39,14 @@ from local_operator.team_bridge.link_preview.store import (
 from local_operator.web_fetch import service as fetch_service
 from local_operator.web_fetch.models import WebFetchSettings
 from local_operator.web_fetch.service import PolicyRefusal, WebFetchService
+from local_operator.web_search.io import WebReadIO
 
 TOKEN = "desktop-preview-test-bearer"
 ACCOUNT = "acc_0123456789abcdef"
+OTHER_ACCOUNT = "acc_fedcba9876543210"
 
 RESOLVE = "/v1/desktop/team-bridge/link-preview/resolve"
+ARTIFACT = "/v1/desktop/team-bridge/link-preview/artifact"
 
 #: A 2x2 PNG. Real bytes, because the store hashes what it is given and the
 #: artifact route re-sniffs it: a fake "image" would test nothing that matters.
@@ -76,6 +90,36 @@ def _pinned_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fetch_service, "_resolve_host_ips", _resolve)
 
 
+class _Clock:
+    """A monotonic clock a test can move, so a six-hour TTL costs no seconds."""
+
+    def __init__(self) -> None:
+        self.now = 1_000_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture
+def _clock() -> _Clock:
+    return _Clock()
+
+
+@pytest.fixture(autouse=True)
+def preview_cache_for_test(_clock: _Clock, monkeypatch: pytest.MonkeyPatch) -> PreviewCache:
+    """A fresh cache per test, behind the seam the route reads.
+
+    The production cache is process-wide on purpose, which would make one test's
+    page answer another test's request and hide the very fetch a test is counting.
+    """
+    cache = PreviewCache(clock=_clock)
+    monkeypatch.setattr(link_preview_cache, "get_preview_cache", lambda: cache)
+    return cache
+
+
 def _account_wire(account_id: str = ACCOUNT) -> Callable[..., Any]:
     """A stand-in for ``wire_for``: the signed-in identity, and nothing else."""
 
@@ -108,11 +152,16 @@ def _route_transport(
         seen.append(request.url.path)
         return handler(request)
 
-    transport = httpx.MockTransport(_record)
+    origin = httpx.MockTransport(_record)
     monkeypatch.setattr(
         preview_service,
         "WebFetchService",
-        lambda settings: WebFetchService(settings, transport=transport),
+        # The REAL service with the fixture origin behind it: only the transport is
+        # replaced, and every other argument the preview passes (``trust_env``
+        # included) still reaches the production constructor.
+        lambda settings, *, transport=None, trust_env=True: WebFetchService(
+            settings, transport=transport or origin, trust_env=trust_env
+        ),
     )
     return seen
 
@@ -140,7 +189,10 @@ def _drip_origin() -> tuple[Any, str]:
             except OSError:
                 return
 
-        def log_message(self, *args: Any) -> None:
+        # The base signature names its first parameter ``format`` (it is
+        # interpolated with ``args``); an override that took only ``*args``
+        # would be position-only there and pyright refuses the mismatch.
+        def log_message(self, format: str, *args: Any) -> None:
             return
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
@@ -164,6 +216,11 @@ def _client(transport: httpx.MockTransport | None = None) -> httpx.AsyncClient:
         base_url="http://127.0.0.1",
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
+
+
+def _artifact_path(artifact_id: str, account_id: str = ACCOUNT) -> str:
+    """The artifact route's URL, with the required receipt the route now demands."""
+    return f"{ARTIFACT}/{artifact_id}?expected_account_id={account_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -215,17 +272,13 @@ async def test_a_page_resolves_into_a_card_and_the_artifact_route_serves_its_byt
         # The artifact route hands back the stored bytes under the SNIFFED mime,
         # never the label the origin claimed (that favicon said image/png and is
         # a GIF on the wire).
-        favicon = await client.get(
-            f"/v1/desktop/team-bridge/link-preview/artifact/{preview['favicon']['id']}"
-        )
+        favicon = await client.get(_artifact_path(preview["favicon"]["id"]))
         assert favicon.status_code == 200
         assert favicon.headers["content-type"] == "image/gif"
         assert favicon.headers["x-content-type-options"] == "nosniff"
         assert favicon.content == GIF
 
-        image = await client.get(
-            f"/v1/desktop/team-bridge/link-preview/artifact/{preview['image']['id']}"
-        )
+        image = await client.get(_artifact_path(preview["image"]["id"]))
         assert image.status_code == 200
         assert image.content == PNG
         assert image.headers["content-type"] == "image/png"
@@ -319,9 +372,7 @@ async def test_a_non_http_scheme_is_absent_without_a_request(
     seen = _route_transport(monkeypatch, lambda request: httpx.Response(200, content=b""))
     async with _client() as client:
         for url in ("file:///etc/passwd", "javascript:alert(1)", "ftp://preview.test/x"):
-            response = await _post(
-                client, {"url": url, "index": 0, "expected_account_id": ACCOUNT}
-            )
+            response = await _post(client, {"url": url, "index": 0, "expected_account_id": ACCOUNT})
             assert response.status_code == 200
             assert response.json()["result"] == {"kind": "absent", "reason": "unsupported-scheme"}
     assert seen == []
@@ -463,8 +514,7 @@ async def test_an_oversize_image_is_dropped_not_truncated(
     monkeypatch: pytest.MonkeyPatch, signed_in: None
 ) -> None:
     page = _html(
-        '<title>Big</title>'
-        '<meta property="og:image" content="http://preview.test/big.png">'
+        "<title>Big</title>" '<meta property="og:image" content="http://preview.test/big.png">'
     )
     huge = PNG + b"\x00" * (preview_service.IMAGE_MAX_BYTES + 1)
 
@@ -498,15 +548,21 @@ async def test_the_total_deadline_answers_instead_of_hanging(
     try:
         monkeypatch.setattr(preview_service, "TOTAL_DEADLINE_S", 0.6)
         monkeypatch.setattr(preview_service, "PAGE_DEADLINE_S", 0.5)
-        settings = WebFetchSettings(
-            enrich=False, allow_private=True, timeout_seconds=10.0, max_attempts=1
-        )
+        # THE ADDRESS POLICY IS PROVEN ELSEWHERE and it stays in force on the
+        # preview path (that is the whole point of forcing allow_private off);
+        # this test measures the DEADLINE, so the one thing it patches away is
+        # the refusal of its own fixture address. Everything else — real socket,
+        # real drip, real transport — is untouched.
+        monkeypatch.setattr(fetch_service, "validate_public_url", lambda url, **_kw: None)
+        settings = WebFetchSettings(enrich=False, timeout_seconds=10.0, max_attempts=1)
         started = time.monotonic()
         resolution = await preview_service.resolve_preview(
             url=f"{base}/drip",
             index=0,
+            scope=PreviewScope(account_id=ACCOUNT),
             settings=settings,
             store=PreviewStore(tmp_path / "artifacts"),
+            cache=PreviewCache(),
         )
         elapsed = time.monotonic() - started
     finally:
@@ -634,15 +690,15 @@ async def test_an_extra_body_field_is_refused(signed_in: None) -> None:
 @pytest.mark.asyncio
 async def test_a_malformed_artifact_id_never_reaches_the_filesystem(signed_in: None) -> None:
     async with _client() as client:
-        for bad in ("not-a-hash", "..%2F..%2Fetc%2Fpasswd", "A" * 64, "0" * 63, "0" * 65, "0" * 32):
-            response = await client.get(f"/v1/desktop/team-bridge/link-preview/artifact/{bad}")
+        for bad in ("not-a-hash", "..%2F..%2Fetc%2Fpasswd", "A" * 32, "0" * 31, "0" * 33, "0" * 64):
+            response = await client.get(_artifact_path(bad))
             assert response.status_code in (404, 422), (bad, response.status_code)
 
 
 @pytest.mark.asyncio
 async def test_an_unknown_artifact_id_is_a_404(signed_in: None) -> None:
     async with _client() as client:
-        response = await client.get(f"/v1/desktop/team-bridge/link-preview/artifact/{'a' * 64}")
+        response = await client.get(_artifact_path("a" * 32))
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "artifact_not_found"
 
@@ -710,15 +766,25 @@ def test_sniffing_rejects_a_document_even_when_it_is_labelled_an_image() -> None
         (GIF, "image/gif", (3, 7)),
         (
             # VP8X extended: 24-bit canvas dimensions minus one.
-            b"RIFF" + (30).to_bytes(4, "little") + b"WEBP" + b"VP8X" + b"\x00" * 8
-            + (99).to_bytes(3, "little") + (49).to_bytes(3, "little"),
+            b"RIFF"
+            + (30).to_bytes(4, "little")
+            + b"WEBP"
+            + b"VP8X"
+            + b"\x00" * 8
+            + (99).to_bytes(3, "little")
+            + (49).to_bytes(3, "little"),
             "image/webp",
             (100, 50),
         ),
         (
             # VP8X at 1x1: the minimum a real file carries.
-            b"RIFF" + (30).to_bytes(4, "little") + b"WEBP" + b"VP8X" + b"\x00" * 8
-            + b"\x00\x00\x00" + b"\x00\x00\x00",
+            b"RIFF"
+            + (30).to_bytes(4, "little")
+            + b"WEBP"
+            + b"VP8X"
+            + b"\x00" * 8
+            + b"\x00\x00\x00"
+            + b"\x00\x00\x00",
             "image/webp",
             (1, 1),
         ),
@@ -765,16 +831,22 @@ def test_a_relative_icon_resolves_against_the_served_url() -> None:
     assert metadata.icon_url == "https://example.com/a/icon.png"
 
 
-def test_the_store_is_content_addressed_and_rejects_a_foreign_id(tmp_path) -> None:
+def test_the_store_is_scope_addressed_and_rejects_a_foreign_id(tmp_path) -> None:
     store = PreviewStore(tmp_path / "artifacts")
-    first = store.put(PNG)
-    second = store.put(PNG)
-    assert first == second
+    first = store.put(PNG, artifact_id="a" * 32)
+    assert first == "a" * 32
     assert store.get(first) == PNG
+    assert store.size_of(first) == len(PNG)
+    # The id names a SLOT (this scope, this page, this kind), not a body: a card
+    # refetched after its TTL must show the bytes just fetched, not the old ones.
+    store.put(GIF, artifact_id="a" * 32)
+    assert store.get(first) == GIF
     with pytest.raises(InvalidArtifactId):
         store.get("../../etc/passwd")
     with pytest.raises(InvalidArtifactId):
-        store.get("A" * 64)
+        store.get("A" * 32)
+    with pytest.raises(InvalidArtifactId):
+        store.put(PNG, artifact_id="../../etc/passwd")
 
 
 def test_the_store_sweeps_least_recently_used_first(tmp_path) -> None:
@@ -782,7 +854,7 @@ def test_the_store_sweeps_least_recently_used_first(tmp_path) -> None:
     ids = []
     for index in range(4):
         body = PNG + bytes([index])
-        ids.append(store.put(body))
+        ids.append(store.put(body, artifact_id=f"{index:032x}"))
         # Age each blob deliberately: mtime is the LRU key, and the filesystem's
         # own resolution would otherwise make them all look simultaneous.
         target = store.root / ids[-1]
@@ -792,7 +864,7 @@ def test_the_store_sweeps_least_recently_used_first(tmp_path) -> None:
         os.utime(target, (stamp, stamp))
     # Touch the oldest so it is no longer the coldest.
     store.get(ids[0])
-    store.put(PNG + b"fresh")
+    store.put(PNG + b"fresh", artifact_id="f" * 32)
     survivors = {path.name for path in store.root.iterdir()}
     assert len(survivors) <= 4
     assert ids[0] in survivors, "the recently-read blob was evicted"
@@ -833,3 +905,237 @@ async def test_fetch_bytes_returns_the_body_undecoded() -> None:
     assert fetched.body == payload
     assert fetched.headers["content-type"] == "text/html; charset=iso-8859-1"
     assert fetched.complete is True
+
+
+# ---------------------------------------------------------------------------
+# The cache: scoped to an account, TTL'd, shared in flight, bounded
+# ---------------------------------------------------------------------------
+
+CARD_HEAD = (
+    "<title>Fallback title</title>"
+    '<meta property="og:title" content="A card">'
+    '<link rel="icon" href="/favicon.png">'
+)
+
+
+def _card_handler(page: bytes) -> Callable[[httpx.Request], httpx.Response]:
+    """A page with a favicon, and nothing else on the origin."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/favicon.png":
+            return httpx.Response(200, content=PNG, headers={"content-type": "image/png"})
+        return httpx.Response(200, content=page, headers={"content-type": "text/html"})
+
+    return handler
+
+
+def _resolve_body(
+    url: str = "http://preview.test/page", account_id: str = ACCOUNT
+) -> dict[str, Any]:
+    return {"url": url, "index": 0, "expected_account_id": account_id}
+
+
+@pytest.mark.asyncio
+async def test_the_cache_reports_the_bytes_it_holds(
+    monkeypatch: pytest.MonkeyPatch,
+    signed_in: None,
+    preview_cache_for_test: PreviewCache,
+) -> None:
+    """The "resident size reported" requirement, asserted rather than asserted-about."""
+
+    _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        first = await _post(client, _resolve_body())
+        assert first.json()["result"]["kind"] == "ready", first.text
+        stats = preview_cache_for_test.stats()
+        assert stats.entries == 1
+        assert stats.resolutions == 1
+        assert stats.resident_bytes == len(PNG)
+
+        # A second resolve is a HIT: no new resolution, no new bytes.
+        second = await _post(client, _resolve_body())
+        assert second.json()["result"] == first.json()["result"]
+        stats = preview_cache_for_test.stats()
+        assert stats.hits == 1
+        assert stats.resolutions == 1
+        assert stats.resident_bytes == len(PNG)
+
+
+@pytest.mark.asyncio
+async def test_one_accounts_card_is_never_served_into_anothers_session(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """Scope isolation, end to end: a second account re-fetches and cannot read A's id."""
+
+    from local_operator.team_bridge import read_context
+
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        as_a = await _post(client, _resolve_body())
+        assert as_a.json()["result"]["kind"] == "ready", as_a.text
+        a_favicon = as_a.json()["result"]["preview"]["favicon"]["id"]
+        assert seen.count("/page") == 1
+
+        # The install is now signed in as B, and B asks for the SAME url.
+        monkeypatch.setattr(read_context, "wire_for", _account_wire(OTHER_ACCOUNT))
+        as_b = await _post(client, _resolve_body(account_id=OTHER_ACCOUNT))
+        assert as_b.json()["result"]["kind"] == "ready", as_b.text
+        b_favicon = as_b.json()["result"]["preview"]["favicon"]["id"]
+
+        # A second origin fetch, not A's cached card...
+        assert seen.count("/page") == 2
+        # ...and a different id, because the id IS the scope's claim on the slot.
+        assert b_favicon != a_favicon
+
+        # B asking for A's id gets a 404 — not the bytes, and not a 403 that would
+        # confirm the id exists somewhere.
+        denied = await client.get(_artifact_path(a_favicon, OTHER_ACCOUNT))
+        assert denied.status_code == 404, denied.text
+        assert denied.json()["detail"]["code"] == "artifact_not_found"
+
+        # B's own id serves, and it is the same public bytes B's own fetch stored.
+        allowed = await client.get(_artifact_path(b_favicon, OTHER_ACCOUNT))
+        assert allowed.status_code == 200, allowed.text
+        assert allowed.content == PNG
+
+        # The receipt is still checked before ownership: A's id under A's receipt
+        # is refused on the identity, not answered with bytes.
+        mismatch = await client.get(_artifact_path(a_favicon, ACCOUNT))
+        assert mismatch.status_code == 409
+        assert mismatch.json()["detail"]["code"] == "account_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_a_repeat_inside_the_ttl_is_free_and_expires_after_it(
+    monkeypatch: pytest.MonkeyPatch,
+    signed_in: None,
+    _clock: _Clock,
+) -> None:
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        await _post(client, _resolve_body())
+        await _post(client, _resolve_body())
+        assert seen.count("/page") == 1, "a fresh card was fetched twice"
+
+        _clock.advance(POSITIVE_TTL_S + 1)
+        await _post(client, _resolve_body())
+        assert seen.count("/page") == 2, "an expired card was served from the cache"
+
+
+@pytest.mark.asyncio
+async def test_an_absent_answer_is_reused_but_expires_sooner_than_a_card(
+    monkeypatch: pytest.MonkeyPatch,
+    signed_in: None,
+    _clock: _Clock,
+) -> None:
+    """A page with nothing to draw is a NEGATIVE answer with its own shorter TTL."""
+
+    seen = _route_transport(
+        monkeypatch,
+        lambda request: httpx.Response(
+            200, content=_html(""), headers={"content-type": "text/html"}
+        ),
+    )
+    async with _client() as client:
+        first = await _post(client, _resolve_body())
+        assert first.json()["result"] == {"kind": "absent", "reason": "no-metadata"}
+        again = await _post(client, _resolve_body())
+        assert again.json()["result"] == first.json()["result"]
+        assert seen.count("/page") == 1
+
+        # Shorter than the positive TTL, which is the property that matters: the
+        # judgement "nothing here" is made from markup that changes weekly.
+        assert NEGATIVE_TTL_S < POSITIVE_TTL_S
+        _clock.advance(NEGATIVE_TTL_S + 1)
+        await _post(client, _resolve_body())
+        assert seen.count("/page") == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_resolves_of_one_url_hit_the_origin_exactly_once(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        responses = await asyncio.gather(*[_post(client, _resolve_body()) for _ in range(6)])
+    assert [response.json()["result"]["kind"] for response in responses] == ["ready"] * 6
+    assert seen.count("/page") == 1, f"the origin was fetched {seen.count('/page')} times"
+
+
+# ---------------------------------------------------------------------------
+# The two settings a preview refuses to honour
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_private_target_is_refused_even_when_the_user_allows_private_fetches(
+    monkeypatch: pytest.MonkeyPatch, signed_in: None
+) -> None:
+    """``web_fetch.allow_private`` is the tool's escape hatch; a pasted link is not.
+
+    The setting exists so a user can ask for their own local dev server. A preview
+    fetches whatever a correspondent pasted, so honouring it here would let a
+    stranger's link reach the loopback or the cloud metadata service from a
+    session that holds credentials.
+    """
+
+    monkeypatch.setattr(
+        desktop_link_preview,
+        "load_fetch_settings",
+        lambda manager: WebFetchSettings(allow_private=True),
+    )
+    seen = _route_transport(monkeypatch, _card_handler(_html(CARD_HEAD)))
+    async with _client() as client:
+        for url in (
+            "http://127.0.0.1:9/x",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/",
+            "http://10.0.0.7/",
+        ):
+            response = await _post(client, _resolve_body(url))
+            assert response.json()["result"] == {
+                "kind": "absent",
+                "reason": "local-or-private",
+            }, (url, response.text)
+    assert seen == [], "a private target reached the transport"
+
+
+def test_the_preview_fetcher_forces_the_guard_on_without_mutating_the_settings() -> None:
+    settings = WebFetchSettings(allow_private=True)
+    service = preview_service.preview_fetcher(settings)
+    assert service.settings.allow_private is False
+    assert service.trust_env is False
+    # The caller's own settings object is not rewritten: the tool keeps the escape
+    # hatch it was configured with.
+    assert settings.allow_private is True
+
+
+@pytest.mark.asyncio
+async def test_the_previews_client_is_built_without_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``HTTP(S)_PROXY`` in the environment must not decide where a preview goes."""
+
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:3128")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:3128")
+    monkeypatch.setenv("NO_PROXY", "preview.test")
+
+    captured: list[dict[str, Any]] = []
+    pooled = WebReadIO.client
+
+    @asynccontextmanager
+    async def _capture(self, key, **kwargs):
+        captured.append(dict(kwargs))
+        async with pooled(self, key, **kwargs) as client:
+            yield client
+
+    monkeypatch.setattr(WebReadIO, "client", _capture)
+
+    transport = httpx.MockTransport(_card_handler(_html(CARD_HEAD)))
+    service = preview_service.preview_fetcher(WebFetchSettings(enrich=False), transport=transport)
+    fetched = await service.fetch_bytes(
+        "http://preview.test/page", max_bytes=4096, timeout_seconds=5.0
+    )
+    assert fetched.status == 200
+    assert captured, "the fetch never built a pooled client"
+    assert captured[0]["trust_env"] is False

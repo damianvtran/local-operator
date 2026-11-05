@@ -12,7 +12,16 @@ THE FETCHER IS NOT OURS. Every request goes through
 hardened fetcher, with its per-hop ``validate_public_url`` re-validation and its
 address pinning. Nothing here re-implements transport, and nothing here can
 bypass the address check; the only thing this module does with a refusal is name
-it.
+it. TWO OF THAT FETCHER'S OPTIONS ARE FORCED OFF HERE (:func:`preview_fetcher`):
+``allow_private``, because a pasted link is not a link the reader chose to fetch,
+and ``trust_env``, because an inherited ``HTTP_PROXY`` would route a stranger's
+URL somewhere this process does not control.
+
+WHAT ONE RESOLUTION REMEMBERS, AND FOR WHOM. The answer is cached under
+``(account, tenant, canonical URL)`` and the artifact ids inside it are derived
+from that same triple, so two accounts previewing one link hold two entries and
+two files. Resolving is a cache read when it can be, one shared origin pass when
+several renderers ask at once, and the bounded fetch below only on a miss.
 
 NOTHING LOGGED CAN IDENTIFY WHAT WAS READ. A log line carrying the URL would put
 a correspondent's links (and their query strings, which routinely carry tokens)
@@ -31,9 +40,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Final
+from typing import TYPE_CHECKING, Final
 from urllib.parse import urlsplit
 
+from local_operator.team_bridge.link_preview.cache import PreviewCache, PreviewScope
+from local_operator.team_bridge.link_preview.cache import artifact_id as artifact_id_for
+from local_operator.team_bridge.link_preview.cache import key_for
 from local_operator.team_bridge.link_preview.extract import (
     Raster,
     decode_markup,
@@ -52,6 +64,11 @@ from local_operator.team_bridge.link_preview.models import (
 from local_operator.team_bridge.link_preview.store import PreviewStore
 from local_operator.web_fetch.models import FetchBytes, WebFetchSettings
 from local_operator.web_fetch.service import FetchError, PolicyRefusal, WebFetchService
+
+if TYPE_CHECKING:
+    # Annotation only: this module rides ``server.app``'s import path, and the
+    # transport it names is already imported by ``web_fetch.service``.
+    import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -103,27 +120,76 @@ async def resolve_preview(
     *,
     url: str,
     index: int,
+    scope: PreviewScope,
     settings: WebFetchSettings,
     store: PreviewStore,
+    cache: PreviewCache,
     fetcher: WebFetchService | None = None,
 ) -> LinkPreviewResolution:
-    """Resolve ``url`` into a card, or say in one code why there is none.
+    """Resolve ``url`` into a card for ``scope``, or say in one code why there is none.
 
-    ``fetcher`` exists for tests that must drive a fixture origin without a real
-    socket; production passes ``None`` and the settings' own service is built.
-    Either way the transport is :class:`WebFetchService`.
+    THE CACHE IS CONSULTED BEFORE ANYTHING COSTS A REQUEST. A fresh entry answers
+    from memory; concurrent callers of one key share ONE origin pass
+    (:meth:`~local_operator.team_bridge.link_preview.cache.PreviewCache.singleflight);
+    and only a miss reaches :func:`_resolve_origin`, the deadline-bounded resolver
+    every hop of which runs under.
+
+    ``scope`` is load-bearing, never decoration: the cached answer, the artifact
+    ids inside it and the blob behind each id are all keyed by it, so the same URL
+    for two accounts is two entries and two files. ``fetcher`` exists for tests
+    that must drive a fixture origin without a real socket; production passes
+    ``None`` and :func:`preview_fetcher` builds one.
     """
-    # The cap is checked FIRST and returns before any parse, any DNS and any
-    # request: an over-cap index must cost nothing at all.
+    # The cap is checked FIRST and returns before any parse, any DNS, any cache
+    # read and any request: an over-cap index must cost nothing at all.
     if index < 0 or index >= PER_MESSAGE_CAP:
         return _absent("cap")
 
+    # The URL that is FETCHED and RETURNED stays the caller's; only the key is
+    # normalised (see the cache module). A bare host keeps its scheme-less form
+    # here and is absolutised by the fetcher, which is why the card reports the
+    # URL that actually answered rather than the string it was handed.
     target = url.strip()
     scheme_refusal = _scheme_refusal(target)
     if scheme_refusal is not None:
         return _absent(scheme_refusal)
 
-    service = fetcher or WebFetchService(settings)
+    key = key_for(scope, target)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    async def _resolve_and_remember() -> LinkPreviewResolution:
+        resolution = await _resolve_origin(
+            target=target,
+            settings=settings,
+            store=store,
+            scope=scope,
+            canonical=key.canonical_url,
+            fetcher=fetcher,
+        )
+        cache.put(key, resolution, _retained_bytes(store, resolution))
+        return resolution
+
+    return await cache.singleflight(key, _resolve_and_remember)
+
+
+async def _resolve_origin(
+    *,
+    target: str,
+    settings: WebFetchSettings,
+    store: PreviewStore,
+    scope: PreviewScope,
+    canonical: str,
+    fetcher: WebFetchService | None,
+) -> LinkPreviewResolution:
+    """One pass at the origin: page, then favicon, then image, under one deadline.
+
+    This is what a cache miss costs. ``canonical`` never reaches the network — it
+    only names the artifact slots the fetcher's bytes are stored under, so a
+    refetched card overwrites its own blobs instead of piling up new ones.
+    """
+    service = fetcher or preview_fetcher(settings)
     deadline = time.monotonic() + TOTAL_DEADLINE_S
 
     try:
@@ -161,12 +227,26 @@ async def resolve_preview(
         return _absent("not-html")
 
     markup = decode_markup(page.body, content_type)
+    # Relative hrefs resolve against the URL that ANSWERED; using the caller's
+    # spelling would resolve an icon against a <base> the origin never served.
     metadata = extract_metadata(markup, base_url=page.final_url)
     if metadata.is_empty:
         return _absent("no-metadata")
 
-    favicon = await _favicon(service, metadata.icon_url, deadline=deadline, store=store)
-    image = await _image(service, metadata.image_url, deadline=deadline, store=store)
+    favicon = await _favicon(
+        service,
+        metadata.icon_url,
+        deadline=deadline,
+        store=store,
+        artifact_id=artifact_id_for(scope, canonical, "favicon"),
+    )
+    image = await _image(
+        service,
+        metadata.image_url,
+        deadline=deadline,
+        store=store,
+        artifact_id=artifact_id_for(scope, canonical, "image"),
+    )
 
     logger.debug(
         "link preview resolved: title=%s description=%s favicon=%s image=%s",
@@ -186,6 +266,55 @@ async def resolve_preview(
             image=image,
         ),
     )
+
+
+def preview_fetcher(
+    settings: WebFetchSettings, *, transport: httpx.AsyncBaseTransport | None = None
+) -> WebFetchService:
+    """The preview's ONE fetcher: public targets only, and no proxy from the environment.
+
+    TWO OPTIONS ARE REFUSED RATHER THAN HONOURED, for the same reason: a preview is
+    driven by whatever a correspondent pasted into a message, so it is the one
+    fetch in this process whose target the READER never chose.
+
+    * ``allow_private`` is the tool's escape hatch for a local dev server. Here it
+      would let a stranger's link reach 127.0.0.1 or 169.254.169.254 from a
+      session that holds credentials, so the preview pins the guard's strict mode
+      whatever the setting says and whatever the user previously allowed.
+    * ``trust_env`` defaults ON in httpx, which means ``HTTP(S)_PROXY`` and
+      ``NO_PROXY`` decide where the request goes. Inheriting that on this path
+      hands the routing of an attacker-chosen URL to whatever the surrounding
+      shell exported — including a proxy named in ``NO_PROXY``, which is how a
+      private target would slip past the guard's judgement entirely.
+
+    ``transport`` is the test seam (an httpx ``MockTransport``); production leaves
+    it ``None`` and httpx opens real connections.
+    """
+    return WebFetchService(_public_only(settings), transport=transport, trust_env=False)
+
+
+def _public_only(settings: WebFetchSettings) -> WebFetchSettings:
+    """``settings`` with ``allow_private`` forced off (see :func:`preview_fetcher`)."""
+    if not settings.allow_private:
+        return settings
+    return settings.model_copy(update={"allow_private": False})
+
+
+def _retained_bytes(store: PreviewStore, resolution: LinkPreviewResolution) -> dict[str, int]:
+    """The bytes each artifact of ``resolution`` costs the cache while it holds it.
+
+    Measured from the store rather than from the response: the cache's resident
+    accounting must describe what is actually on disk behind the id, and an
+    artifact that failed to write is then counted as the zero bytes it is.
+    """
+    preview = resolution.preview
+    if preview is None:
+        return {}
+    sizes: dict[str, int] = {}
+    for artifact in (preview.favicon, preview.image):
+        if artifact is not None:
+            sizes[artifact.id] = store.size_of(artifact.id)
+    return sizes
 
 
 async def _fetch(
@@ -222,31 +351,51 @@ async def _fetch(
 
 
 async def _favicon(
-    service: WebFetchService, url: str | None, *, deadline: float, store: PreviewStore
+    service: WebFetchService,
+    url: str | None,
+    *,
+    deadline: float,
+    store: PreviewStore,
+    artifact_id: str,
 ) -> FaviconArtifact | None:
     if not url:
         return None
     stored = await _store_artifact(
-        service, url, ceiling=FAVICON_MAX_BYTES, deadline=deadline, store=store
+        service,
+        url,
+        ceiling=FAVICON_MAX_BYTES,
+        deadline=deadline,
+        store=store,
+        artifact_id=artifact_id,
     )
     if stored is None:
         return None
-    artifact_id, raster = stored
-    return FaviconArtifact(id=artifact_id, mime=raster.mime)
+    stored_id, raster = stored
+    return FaviconArtifact(id=stored_id, mime=raster.mime)
 
 
 async def _image(
-    service: WebFetchService, url: str | None, *, deadline: float, store: PreviewStore
+    service: WebFetchService,
+    url: str | None,
+    *,
+    deadline: float,
+    store: PreviewStore,
+    artifact_id: str,
 ) -> ImageArtifact | None:
     if not url:
         return None
     stored = await _store_artifact(
-        service, url, ceiling=IMAGE_MAX_BYTES, deadline=deadline, store=store
+        service,
+        url,
+        ceiling=IMAGE_MAX_BYTES,
+        deadline=deadline,
+        store=store,
+        artifact_id=artifact_id,
     )
     if stored is None:
         return None
-    artifact_id, raster = stored
-    return ImageArtifact(id=artifact_id, mime=raster.mime, width=raster.width, height=raster.height)
+    stored_id, raster = stored
+    return ImageArtifact(id=stored_id, mime=raster.mime, width=raster.width, height=raster.height)
 
 
 async def _store_artifact(
@@ -256,6 +405,7 @@ async def _store_artifact(
     ceiling: int,
     deadline: float,
     store: PreviewStore,
+    artifact_id: str,
 ) -> tuple[str, Raster] | None:
     """Fetch one image and store it, or ``None`` — an optional artifact never fails a card.
 
@@ -280,7 +430,7 @@ async def _store_artifact(
     raster = sniff_raster(fetched.body)
     if raster is None:
         return None
-    return store.put(fetched.body), raster
+    return store.put(fetched.body, artifact_id=artifact_id), raster
 
 
 def _scheme_refusal(target: str) -> AbsentReason | None:
