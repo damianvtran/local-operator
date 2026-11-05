@@ -97,10 +97,9 @@ def validate_peer_selection(provider: str, model_id: str) -> "ModelSpec":
     # is metadata-only (no bearer, no grant) and a no-op when a local credential
     # or non-catalogue provider wins. The peer entrypoint's own validation below
     # is unchanged.
+    from local_operator.network.types import MeshRefusal
     from local_operator.paths import config_dir
     from local_operator.providers.shared_catalogue import prepare_selection_sync
-
-    from local_operator.network.types import MeshRefusal
 
     try:
         prepare_selection_sync(provider, config_dir())
