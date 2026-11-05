@@ -147,6 +147,12 @@ HOLD_CODES = (
     # only with ``team_bridge.hold_release`` on; a model answer, so it is
     # answer-cached (S-4) and re-screened alone.
     "work_scope_hold",
+    # NOTHING could screen: every preferred screener and the owner's own
+    # default/fallback cascade failed on route errors (no credential, rate
+    # limit, out of quota or credit), or nothing is configured. An infra hold,
+    # never a verdict: never answer-cached, never releasable, re-screened on
+    # the retry pass, which re-resolves the chain.
+    "screening_model_unavailable",
 )
 
 #: Per-type RAW utf8 caps on the fetched body (§8.3 screening inputs).
@@ -280,6 +286,18 @@ class ScreenResult:
     #: cache hit, which rendered nothing.
     rendered_version: str | None = None
     rendered_template_sha256: str | None = None
+
+    @property
+    def screener_preferred(self) -> bool:
+        """Whether a PREFERRED screener produced this verdict (``False`` for a hold).
+
+        Read from the receipt, the one record of who answered, so the result
+        and the stored proof can never disagree. A non-preferred allow is
+        delivered normally; it is excluded only from receipt reuse and from
+        B4b release (operator directive 2026-11-04).
+        """
+
+        return bool(self.receipt is not None and self.receipt.screener_preferred)
 
     def __post_init__(self) -> None:
         self._private_reason: str | None = None
@@ -1179,6 +1197,9 @@ def _screen_prepare(
     #    row exists, the caller must EQUAL it, so a stale retained caller
     #    can neither screen against it nor rewind it (H3-Q3).
     try:
+        # Same-message retries must not keep an UNSENT fallback allow in the
+        # write-once slot: a new preferred verdict needs its own receipt.
+        store.retire_unsent_fallback_allow(owner, message_id, body_sha256=envelope.body_sha256)
         current = store.current_screening_policy(owner)
         if current is None:
             try:
@@ -1307,6 +1328,7 @@ def _screen_prepare(
                 template_sha256=cached["template_sha256"],
                 body_sha256=cached["body_sha256"],
                 categories=tuple(cached["categories"]),
+                screener_preferred=bool(cached.get("screener_preferred")),
             )
             disposition = "deliver" if cached["verdict"] == "allow" else "bounce"
             return ScreenResult(
@@ -1397,9 +1419,13 @@ def _screen_prepare(
     # so the registered input proof pins the same value the job will carry.
     _canonical_provider = getattr(snapshot, "provider", None) or ""
     if not _canonical_provider:
-        from local_operator.team_bridge.model_boundary import resolve_default_selection
+        from local_operator.team_bridge.model_boundary import (
+            resolve_screening_selection,
+        )
 
-        _resolved = resolve_default_selection(config_dir)
+        # The screening model, never the bare configured default: the two
+        # differ whenever the default is not an evaluated screener.
+        _resolved = resolve_screening_selection(config_dir)
         _canonical_provider = _resolved.provider if _resolved is not None else ""
 
     # 8b. IMMUTABLE INPUT PROOF (R8/Q3): every canonical field of this
@@ -1744,7 +1770,11 @@ async def _screen_spend(
 
         failure_class = screening_failure_class(failure)
         retry_at = _record_failure(store, owner, failure_class=failure_class)
+        # A 402 is its own owner-visible reason (an empty balance only a
+        # top-up clears), still a route failure for the breaker.
+        from local_operator.team_bridge.model_boundary import provider_hold_code
 
+        route_code = provider_hold_code(failure)
         _commit_hold(
             store,
             owner,
@@ -1752,10 +1782,10 @@ async def _screen_spend(
             attempt_id,
             fingerprint,
             epoch,
-            "provider_error",
+            route_code,
             failure_class=failure_class,
         )
-        return ScreenResult("hold", hold_code="provider_error", retry_at=retry_at)
+        return ScreenResult("hold", hold_code=route_code, retry_at=retry_at)
 
     # 11b. A provider RESPONSE — even a valid model HOLD — is a provider
     #      SUCCESS: it resets consecutive failures (A5). Only the exception
@@ -1814,7 +1844,25 @@ async def _screen_spend(
         prompt_template_sha256=rendered.template_sha256,
         served_provider=_served_provider(runner, actual_model, prepared),
         served_hop=_served_hop(runner, actual_model, prepared),
+        screener_preferred=_answered_preferred(runner, actual_model),
     )
+
+
+def _answered_preferred(runner: Any, actual_model: str | None) -> bool:
+    """Whether the screener that answered is a PREFERRED one.
+
+    Only the trusted chain's answering-hop provenance qualifies. A bare runner
+    cannot manufacture preferred status with a model name or a boolean field.
+    Missing/legacy provenance is False; ordinary cascade hops stay False even
+    if their model names resemble an evaluated screener.
+    """
+
+    from local_operator.team_bridge.model_boundary import ScreenChainRunner
+
+    if not isinstance(runner, ScreenChainRunner):
+        return False
+    hop = runner.answered_hop
+    return bool(hop is not None and hop.model_id == actual_model and hop.preferred)
 
 
 def _conclude_parsed(
@@ -1834,6 +1882,7 @@ def _conclude_parsed(
     prompt_template_sha256: str | None = None,
     served_provider: str = "",
     served_hop: int | None = None,
+    screener_preferred: bool = False,
 ) -> ScreenResult:
     """Step 14 for ONE message: a parsed verdict -> its write-once outcome.
 
@@ -1862,6 +1911,7 @@ def _conclude_parsed(
         actual_model=actual_model,
         served_provider=served_provider,
         served_hop=served_hop,
+        screener_preferred=screener_preferred,
     ):
         # B4b scope update (2026-11-04, operator + Aida): under v2 the B4 relay
         # (rel-l01) is a HOLD naming new_work_request, not a bounce — measured on
@@ -1879,6 +1929,7 @@ def _conclude_parsed(
             actual_model=actual_model,
             served_provider=served_provider,
             served_hop=served_hop,
+            screener_preferred=screener_preferred,
             screener_verdict="hold",
         ).set_private_reason(reason)
     if disposition == "hold":
@@ -1924,6 +1975,7 @@ def _conclude_parsed(
             actual_model=actual_model,
             served_provider=served_provider,
             served_hop=served_hop,
+            screener_preferred=screener_preferred,
         ):
             return _commit_work_scope_hold(
                 store,
@@ -1935,6 +1987,7 @@ def _conclude_parsed(
                 actual_model=actual_model,
                 served_provider=served_provider,
                 served_hop=served_hop,
+                screener_preferred=screener_preferred,
                 screener_verdict="bounce",
             ).set_private_reason(reason)
     # 12b. Final admission fence (R6/Q15): the receipt may only be admitted
@@ -1958,6 +2011,10 @@ def _conclude_parsed(
         template_sha256=snapshot.template_sha256,
         body_sha256=envelope.body_sha256,
         categories=categories,
+        # Which screener answered: a fallback (non-preferred) verdict is
+        # delivered like any other, but is never reused from the receipt
+        # cache and never feeds a B4b release (operator directive 2026-11-04).
+        screener_preferred=screener_preferred,
     )
     try:
         store.finish_screening(
@@ -2314,6 +2371,7 @@ def _work_scope_conversion(
     actual_model: str,
     served_provider: str,
     served_hop: int | None,
+    screener_preferred: bool,
 ) -> bool:
     """Whether THIS bounce is recorded as a releasable ``work_scope_hold`` instead.
 
@@ -2321,8 +2379,8 @@ def _work_scope_conversion(
     ``new_work_request``; ``out_of_scope_work`` and ``personal_info_request``
     are disclosure-class and stay terminal bounces under every template (S-1).
     Amendment 2 adds two gates, both of which only ever keep the pre-B4b
-    terminal reject: the answer currently must come from an allowlisted FIRST
-    hop (a TEMPORARY restriction until #3444 supplies preferred provenance), and the
+    terminal reject: the answer must carry trusted PREFERRED-stage provenance
+    from #3444 (including later preferred hops, never the ordinary cascade), and the
     REASON must pass the release-only check (``hold_release.strict_release_reason``:
     no prose-named second category, no negation, no format characters). A
     non-preferred answer is therefore a bounce, not an ineligible hold (code
@@ -2337,7 +2395,7 @@ def _work_scope_conversion(
         return False
     if not hold_release.converts(tuple(categories)):
         return False
-    if not hold_release.preferred_answer(served_provider, actual_model, served_hop):
+    if not hold_release.preferred_answer(served_provider, actual_model, screener_preferred):
         return False
     if not hold_release.strict_release_reason(reason):
         return False
@@ -2368,13 +2426,13 @@ def _work_scope_hold_conversion(
     actual_model: str,
     served_provider: str,
     served_hop: int | None,
+    screener_preferred: bool,
 ) -> bool:
     """Whether a v2 HOLD is recorded as a releasable ``work_scope_hold`` instead.
 
     B4b Amendment 2 (operator + Aida, 2026-11-04): under v2 the B4 relay is a
-    doubt hold naming ``new_work_request``. It converts ONLY from an allowlisted
-    FIRST hop (temporarily; #3444 must allow later explicitly preferred hops),
-    only when the reason's
+    doubt hold naming ``new_work_request``. It converts ONLY with trusted
+    PREFERRED-stage answering-hop provenance (#3444), only when the reason's
     exact category tokens are ``new_work_request`` alone, and only when the
     reason passes the release-only check (no second category in prose, no
     negation, no format characters; security review #3443 S-2). Anything else
@@ -2386,7 +2444,7 @@ def _work_scope_hold_conversion(
 
     if snapshot.screening_version != SCREENING_VERSION_V2:
         return False
-    if not hold_release.preferred_answer(served_provider, actual_model, served_hop):
+    if not hold_release.preferred_answer(served_provider, actual_model, screener_preferred):
         return False
     if not hold_release.converts(_reason_categories(reason)):
         return False
@@ -2396,40 +2454,27 @@ def _work_scope_hold_conversion(
 
 
 def _served_provider(runner: Any, actual_model: str | None, prepared: "_Prepared") -> str:
-    """The provider of the hop that ACTUALLY answered (B4b D4), or ``""``.
+    """The trusted answering hop's provider, never a bare runner's claim (D4/D7)."""
 
-    A fallback chain records the answering hop on itself
-    (``ScreenChainRunner.served_provider``). A bare runner has one hop: its
-    provider is the captured canonical one, and only when the answer came
-    under the published default. Anything else is ``""``, which no allowlist
-    entry matches, so an unevidenced identity is never release-eligible.
-    """
+    from local_operator.team_bridge.model_boundary import ScreenChainRunner
 
-    recorded = getattr(runner, "served_provider", None)
-    if isinstance(recorded, str) and recorded:
-        return recorded
-    if actual_model is not None and actual_model == prepared.snapshot.default_model:
-        return prepared.provider
-    return ""
+    if not isinstance(runner, ScreenChainRunner):
+        return ""
+    hop = runner.answered_hop
+    return hop.provider if hop is not None and hop.model_id == actual_model else ""
 
 
 def _served_hop(runner: Any, actual_model: str | None, prepared: "_Prepared") -> int | None:
-    """The chain position of the hop that answered, or ``None`` when unevidenced.
+    """Answering chain index for the signed audit, NOT an eligibility gate."""
 
-    A chain records it (``ScreenChainRunner.served_hop_index``). A bare runner
-    has one hop, so its answer is hop 0 — but only under the published default,
-    the same evidence rule as :func:`_served_provider`.
-    """
+    from local_operator.team_bridge.model_boundary import ScreenChainRunner
 
-    recorded = getattr(runner, "served_hop_index", None)
-    if isinstance(recorded, int) and not isinstance(recorded, bool):
-        return recorded
-    if getattr(runner, "served_provider", None) is not None:
-        # A chain that never recorded a hop answered nothing we can evidence.
+    if not isinstance(runner, ScreenChainRunner):
         return None
-    if actual_model is not None and actual_model == prepared.snapshot.default_model:
-        return 0
-    return None
+    hop = runner.answered_hop
+    if hop is None or hop.model_id != actual_model:
+        return None
+    return runner.served_hop_index
 
 
 def _commit_work_scope_hold(
@@ -2443,6 +2488,7 @@ def _commit_work_scope_hold(
     actual_model: str,
     served_provider: str,
     served_hop: int | None,
+    screener_preferred: bool,
     screener_verdict: str,
 ) -> ScreenResult:
     """Record the converted hold, its answer-cache row and its decision row.
@@ -2487,7 +2533,7 @@ def _commit_work_scope_hold(
             screener_verdict=screener_verdict,
             screener_hop=-1 if served_hop is None else int(served_hop),
             screener_preferred=hold_release.preferred_answer(
-                served_provider, actual_model, served_hop
+                served_provider, actual_model, screener_preferred
             ),
         )
     except StoreRefused:
@@ -3211,8 +3257,10 @@ async def _screen_batch_core(
                 pass
             _commit_each(HOLD_BATCH_UNRESOLVED, failure_class=failure_class)
             return _finish()
+        from local_operator.team_bridge.model_boundary import provider_hold_code
+
         _record_failure(store, owner, failure_class=failure_class)
-        _commit_each("provider_error", failure_class=failure_class)
+        _commit_each(provider_hold_code(failure), failure_class=failure_class)
         return _finish()
 
     try:
@@ -3275,6 +3323,7 @@ async def _screen_batch_core(
             prompt_template_sha256=SCREENING_BATCH_TEMPLATE_SHA256,
             served_provider=_served_provider(runner, actual_model, prepared),
             served_hop=_served_hop(runner, actual_model, prepared),
+            screener_preferred=_answered_preferred(runner, actual_model),
         )
     return _finish()
 

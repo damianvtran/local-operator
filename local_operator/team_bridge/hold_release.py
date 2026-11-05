@@ -16,7 +16,8 @@ WHAT IS RELEASABLE, AND WHY IT IS SO NARROW (DECISIONS Amendment 1, D2/D4):
   are NEVER releasable under any template: every single-category
   ``out_of_scope_work`` bounce in the committed v2 trials was adversarial data
   extraction (security review S-1). Any multi-category decision is closed too.
-* ONLY when the hop that ACTUALLY answered is on :data:`RELEASE_ELIGIBLE_SCREENERS`,
+* ONLY when the trusted answering hop is PREFERRED and its identity is on
+  :data:`RELEASE_ELIGIBLE_SCREENERS`,
   a closed in-code allowlist of concrete ``(provider, model)`` pairs (S-3). A
   config value could be edited by an injected agent's ``bash``; a code constant
   changes only by a reviewed PR. Server-routed aliases (``radient/auto``) are
@@ -70,6 +71,8 @@ import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from local_operator.team_bridge.model_boundary import SCREENING_EVALUATED_MODELS
+
 logger = logging.getLogger(__name__)
 
 #: The ONE hold code a person may release. A closed set of one: a hold code
@@ -80,17 +83,11 @@ RELEASABLE_HOLD_CODES = frozenset({WORK_SCOPE_HOLD})
 #: The ONLY category tuple that may become a releasable hold (Amendment 1, D2).
 RELEASABLE_CATEGORIES = ("new_work_request",)
 
-#: Concrete screener identities whose single-category work-scope decision may
-#: be released (D4). ``(provider, model id)`` exactly as the answering hop
-#: reports them; on 2026-11-04 the only measured identities are Sonnet 5.5 and
-#: Opus 5.5 on the direct Anthropic route. B5's three-model results may extend
-#: this, by a reviewed code change only. ``radient/auto`` is absent by design.
-RELEASE_ELIGIBLE_SCREENERS = frozenset(
-    {
-        ("anthropic", "claude-sonnet-5-5"),
-        ("anthropic", "claude-opus-5-5"),
-    }
-)
+#: Identity compatibility export; preference itself must come from the trusted
+#: answering hop. The reviewed producer's table is the single source (DESIGN §3,
+#: corrected Amendment 2 / #3444), including concrete Radient transport IDs.
+
+RELEASE_ELIGIBLE_SCREENERS = frozenset(SCREENING_EVALUATED_MODELS)
 
 #: Per-sender work-scope budget (S-6): beyond it a work-scope hold is written
 #: ineligible (no buttons, no per-message notice, counted by the 60-minute alert).
@@ -128,25 +125,24 @@ SCREENER_VERDICTS = ("hold", "bounce")
 def eligible_screener(provider: str | None, model: str | None) -> bool:
     """Whether the hop that answered may make a releasable decision (D4)."""
 
-    return (str(provider or ""), str(model or "")) in RELEASE_ELIGIBLE_SCREENERS
+    from local_operator.team_bridge.model_boundary import is_evaluated_screening_model
+
+    return is_evaluated_screening_model(str(provider or ""), str(model or ""))
 
 
-def preferred_answer(provider: str | None, model: str | None, hop: int | None) -> bool:
-    """Temporary fail-closed release gate until #3444 supplies trusted provenance.
+def preferred_answer(provider: str | None, model: str | None, preferred: bool) -> bool:
+    """A trusted preferred-stage answer, bound to its answering identity (a-3f46).
 
-    The corrected requirement distinguishes explicitly PREFERRED screening hops
-    from the receiver's ordinary DEFAULT/FALLBACK cascade. Preferred Opus after
-    Sonnet exhaustion MAY release; a default/fallback Opus answer MAY NOT. Model
-    names and hop positions alone cannot express that distinction.
-
-    TODO(#3444): consume the derived ``answered_preferred`` flag together with
-    the answering identity, and allow later explicitly preferred hops. Until
-    that dependency lands we temporarily require an allowlisted hop 0. This is
-    a conservative restriction, NOT an operator requirement or an equivalent
-    implementation of #3444's provenance contract (manager correction to S-1).
+    DESIGN §3 / corrected Amendment 2: preferred Opus after Sonnet exhaustion
+    qualifies. The receiver's ordinary default/fallback Opus does not. The caller
+    must obtain ``preferred`` from the trusted chain's answering hop, never from
+    a model name, a bare-runner attribute or the hop index. Missing provenance
+    stays False. Reuse #3444's evaluated-pair table instead of a second allowlist.
     """
 
-    return hop == 0 and eligible_screener(provider, model)
+    from local_operator.team_bridge.model_boundary import is_evaluated_screening_model
+
+    return preferred is True and is_evaluated_screening_model(str(provider or ""), str(model or ""))
 
 
 # -- the release-only category check (Amendment 2; security review #3443 S-2) --

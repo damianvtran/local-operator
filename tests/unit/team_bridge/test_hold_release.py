@@ -132,7 +132,39 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return tmp_path, store, owner
 
 
+def _trusted_runner(runner, policy):
+    """Positive fixtures use the real chain and resolver-created preferred selection.
+
+    A bare runner can no longer claim preference. Keep it as the scripted model
+    callback, not the provenance producer; negative controls call the pipeline
+    directly with an unwrapped bare runner.
+    """
+
+    from local_operator.model.configure import build_model_spec
+    from local_operator.team_bridge.model_boundary import (
+        DefaultSelection,
+        ScreenChainRunner,
+        _selection_for,
+    )
+
+    if type(runner) is not Runner:
+        return runner
+    hop = _selection_for(policy.provider, runner.model)
+    if hop is None:
+        hop = DefaultSelection(
+            policy.provider, runner.model, build_model_spec(policy.provider, runner.model)
+        )
+
+    class Scripted:
+        async def acall(self, prompt, *, default_model, **_kw):
+            return runner(prompt, default_model=default_model)
+
+    return ScreenChainRunner([hop], lambda _hop: Scripted())
+
+
 def _screen(config_dir, owner, runner, *, item=None, policy=None):
+    policy = policy or Policy()
+    runner = _trusted_runner(runner, policy)
     return screening.screen_message(
         owner, item or _item(), config_dir=config_dir, policy=policy or Policy(), runner=runner
     )
@@ -566,6 +598,8 @@ def test_the_notify_tool_cannot_write_a_bridge_key() -> None:
 
 def _spine(monkeypatch, config_dir, owner, runner, *, body=BODY):
     from local_operator.team_bridge.connector import conversation as conv
+
+    runner = _trusted_runner(runner, Policy())
     from local_operator.team_bridge.types import ConversationFeedRef
     from tests.unit.team_bridge import test_conversation_delivery as tcd
 
@@ -798,7 +832,7 @@ def test_routes_with_the_setting_off(api) -> None:
     assert out.status_code == 409 and out.json()["detail"]["code"] == "hold_release_off"
 
 
-# --- Amendment 2: preferred FIRST hop only (security review round 1, S-1) ----
+# --- Amendment 2: trusted preferred-stage provenance (#3444 integration) ----
 
 
 class _Hop:
@@ -820,10 +854,12 @@ def _chain(primary, fallback, reply, *, fail_primary):
     from local_operator.team_bridge.model_boundary import (
         DefaultSelection,
         ScreenChainRunner,
+        _selection_for,
     )
 
     hops = [
-        DefaultSelection(primary[0], primary[1], build_model_spec(*primary)),
+        _selection_for(*primary)
+        or DefaultSelection(primary[0], primary[1], build_model_spec(*primary)),
         DefaultSelection(fallback[0], fallback[1], build_model_spec(*fallback)),
     ]
 
@@ -850,7 +886,7 @@ class _ChainPolicy(Policy):
     ids=["auto->opus", "sonnet->opus"],
 )
 def test_a_fallback_hops_answer_is_never_releasable(rig, primary, fallback, reply) -> None:
-    """Temporary hop-0 restriction until #3444 distinguishes preferred-chain provenance."""
+    """Ordinary cascade Opus is not preferred, even after a preferred Sonnet hop."""
 
     config_dir, store, owner = rig
     runner = _chain(primary, fallback, reply, fail_primary=True)
@@ -1030,3 +1066,141 @@ def test_the_connector_renders_notices_in_the_operator_language(tmp_path) -> Non
         assert active_locale() == "fr"
     finally:
         set_active_locale("en")
+
+
+@pytest.mark.parametrize("reply", [NEW_WORK, REL_L01_HOLD], ids=["bounce", "hold"])
+def test_wire_sonnet_429_then_preferred_opus_can_release(rig, monkeypatch, reply) -> None:
+    """Real resolver -> scheduler -> wire guard -> chain -> signed owner decision."""
+
+    from tests.unit.team_bridge.test_screening_chain import _install_wire, _Wire
+
+    config_dir, store, owner = rig
+    monkeypatch.setattr(
+        "local_operator.providers.model_access.credentialed_chat_providers_here",
+        lambda **_kw: {"anthropic"},
+    )
+    wire = _Wire({"claude-sonnet-5-5": ("fail", 429), "claude-opus-5-5": ("reply", reply)})
+    _install_wire(monkeypatch, wire)
+    out = _scheduler_screen(config_dir, owner)
+    assert out.hold_code == hr.WORK_SCOPE_HOLD
+    assert [(r["provider"], r["model"]) for r in wire.sends] == [SONNET, OPUS]
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["eligible"] == 1
+    assert (
+        decision["screener_model"],
+        decision["screener_hop"],
+        decision["screener_preferred"],
+    ) == (OPUS[1], 1, 1)
+    assert _decide(config_dir, owner, "deliver")["state"] == "released"
+    release = store.owner_release(owner, MESSAGE_ID)
+    assert hr.verify_row(release, hr.anchor_spki(config_dir)[0])
+    assert release["screener_hop"] == 1 and release["screener_preferred"] == 1
+    # Decision-time finality: after source preference changes there is no redraw.
+    before = len(wire.sends)
+    again = _scheduler_screen(config_dir, owner)
+    assert again.disposition == "deliver" and len(wire.sends) == before
+
+
+def _scheduler_screen(config_dir, owner):
+    """Run the shipped cycle with a stubbed hub status and the real vendor wire seam."""
+
+    from local_operator.team_bridge import scheduler
+    from tests.unit.team_bridge.test_screening_chain import _consent_status
+
+    raw = _consent_status(owner, {"version": "bridge_consent_v1", "text": "v1 consent"})
+    from local_operator.team_bridge.client import SCREENING_TEMPLATE_V2
+
+    raw["screening"] = {"version": SCREENING_VERSION_V2, "template": SCREENING_TEMPLATE_V2}
+    verified = scheduler.VerifiedStatus(scheduler._VERIFIED_TOKEN, raw)
+
+    async def fetch():
+        return verified
+
+    return asyncio.run(
+        scheduler.run_screening_cycle(
+            config_dir=config_dir,
+            owner=owner,
+            items=[_item()],
+            auth_store=None,
+            status_fetcher=fetch,
+        )
+    )
+
+
+@pytest.mark.parametrize("reply", [NEW_WORK, REL_L01_HOLD], ids=["bounce", "hold"])
+def test_preferred_stage_exhausted_then_ordinary_opus_is_not_releasable(rig, monkeypatch, reply):
+    """Both Radient preferred hops exhaust; direct Opus in stage 2 remains ordinary."""
+
+    from tests.unit.team_bridge.test_screening_chain import _install_wire, _Wire
+
+    config_dir, store, owner = rig
+    values = json.loads((config_dir / "config.yml").read_text())
+    values["values"]["hosting"] = "anthropic"
+    values["values"]["model_name"] = OPUS[1]
+    (config_dir / "config.yml").write_text(json.dumps(values))
+    monkeypatch.setattr(
+        "local_operator.providers.model_access.credentialed_chat_providers_here",
+        lambda **_kw: {"radient"},
+    )
+    wire = _Wire(
+        {
+            "anthropic/claude-sonnet-5.5": ("fail", 429),
+            "anthropic/claude-opus-5.5": ("fail", 429),
+            "claude-opus-5-5": ("reply", reply),
+        }
+    )
+    _install_wire(monkeypatch, wire)
+    out = _scheduler_screen(config_dir, owner)
+    assert [(r["provider"], r["model"]) for r in wire.sends] == [
+        ("radient", "anthropic/claude-sonnet-5.5"),
+        ("radient", "anthropic/claude-opus-5.5"),
+        OPUS,
+    ]
+    assert out.hold_code != hr.WORK_SCOPE_HOLD
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+    assert not out.screener_preferred
+    with pytest.raises(HoldRefused) as failure:
+        _decide(config_dir, owner, "deliver")
+    assert failure.value.code == "hold_not_releasable"
+
+
+@pytest.mark.parametrize("reply", [NEW_WORK, REL_L01_HOLD], ids=["bounce", "hold"])
+@pytest.mark.parametrize("claim", [None, True], ids=["legacy-missing", "spoofed-flag"])
+def test_a_bare_runner_cannot_spoof_release_provenance(rig, reply, claim):
+    config_dir, store, owner = rig
+
+    class Spoof:
+        answered_preferred = claim
+        screener_preferred = claim
+        served_provider = "anthropic"
+        served_hop_index = 0
+        answered_hop = SimpleNamespace(provider="anthropic", model_id=SONNET[1], preferred=True)
+
+        def __call__(self, prompt, *, default_model):
+            return reply, SONNET[1]
+
+    out = screening.screen_message(
+        owner, _item(), config_dir=config_dir, policy=Policy(), runner=Spoof()
+    )
+    assert out.hold_code != hr.WORK_SCOPE_HOLD
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("screener_preferred", 0),
+        ("screener_hop", 8),
+        ("screener_model", "auto"),
+    ],
+)
+def test_tampered_signed_provenance_is_refused(rig, field, value):
+    config_dir, store, owner = rig
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    _decide(config_dir, owner, "deliver")
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute(f"UPDATE owner_releases SET {field} = ?", (value,))
+    again = Runner(DELIVER)
+    out = _screen(config_dir, owner, again)
+    assert out.hold_code == hr.WORK_SCOPE_HOLD and again.calls == 0
+    assert store.owner_release(owner, MESSAGE_ID)["outcome"] == "refused:release_unverified"

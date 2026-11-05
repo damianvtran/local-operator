@@ -3243,6 +3243,27 @@
     },
     {
       "locale": "es",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
+      "translator": {
+        "agent": "coder — PR #3444 implementer",
+        "model": "unrecorded — PR #3444 body and commits do not name the actual translating model; not inferred",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, independent of PR #3444 coder)",
+        "session": "3f400bae6226",
+        "model": "anthropic/claude-sonnet-5-5 (semantic audit); openai/gpt-6.1-sol (verification/completion); quota fallback via anthropic/claude-opus-5-5 (no audit work)",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. No defects. Filtrado/filtrar and retenidos agree with namespace; tu register, respaldo/default model meaning preserved. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
+    },
+    {
+      "locale": "es",
       "namespace": "cli.team_bridge_hold",
       "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
       "translator": {
@@ -6480,6 +6501,27 @@
       },
       "status": "passed",
       "note": "Independent complete 7-key audit against frozen English + context sidecar, glossary and fr style guide: stale-baseline non-publication, safe sync/reapply/push remedies, refused-merge no-old-overwrite warning, and verified/mismatch/unavailable distinctions retain source meaning. No translation changes required; no unresolved semantic/style findings. Runtime evidence: 7/7 exact key sets, named ICU argument/type parity, byte-identical backticked commands, NFC, no manual bidi/format controls; 8 render_message renders per locale, including empty and leading-space revision head. Opaque tokens preserved. No plurals or maxCells declared in this namespace. Logical-order Urdu storage checked; no terminal shaping, rendered-frame fit, full RTL/layout or native-speaker sign-off claimed. Auditor actually ran openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; translator and auditor are separate agents although same actual model. Target SHA-256 1c9525860e5e9e62719a1e24a3b4a497ecfc3aedeedba3ba85126f8fbd11c248."
+    },
+    {
+      "locale": "fr",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
+      "translator": {
+        "agent": "coder — PR #3444 implementer",
+        "model": "unrecorded — PR #3444 body and commits do not name the actual translating model; not inferred",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, independent of PR #3444 coder)",
+        "session": "3f400bae6226",
+        "model": "anthropic/claude-sonnet-5-5 (semantic audit); openai/gpt-6.1-sol (verification/completion); quota fallback via anthropic/claude-opus-5-5 (no audit work)",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. F1 MINOR fixed: U+202F before both new colons. Filtrer/retenus, vous register, apostrophes and fallback meaning preserved. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
     },
     {
       "locale": "fr",
@@ -9796,6 +9838,27 @@
       },
       "status": "passed",
       "note": "Supersedes the immediately preceding same-source cli.skills_push audit row at corrected target bytes; append-only history retained. HI-1 MINOR fixed: stale_base had {base} before {head}, violating the repository ordered-placeholder contract despite preserving named argument/type sets. Rephrased idiomatically to retain English {head} then {base} order without changing the non-publication or replaced-text warning. Full seven-key semantic/style recheck passed against English context, glossary and locale guide. Final evidence: check.py --catalogues-only: 0 problem(s); exact ORDERED ICU argument/type parity, key parity, literal command byte parity, NFC and absence of manual Cf/bidi controls all passed; runtime.render_message 8/8 (including empty/nonempty optional leading-space head). No maxCells/plurals in source. No rendered-frame, terminal shaping or full RTL/layout claim. Auditor actual model openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; separate translator agent used openai/gpt-6.1-sol per manager brief. Target SHA-256 765b4ed52c2b9ee12704e69ebf9c0c6df75010a2c59aeb5bb0013f0df17c5ca8."
+    },
+    {
+      "locale": "hi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
+      "translator": {
+        "agent": "coder — PR #3444 implementer",
+        "model": "unrecorded — PR #3444 body and commits do not name the actual translating model; not inferred",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, independent of PR #3444 coder)",
+        "session": "3f400bae6226",
+        "model": "anthropic/claude-sonnet-5-5 (semantic audit); openai/gpt-6.1-sol (verification/completion); quota fallback via anthropic/claude-opus-5-5 (no audit work)",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. No defects. स्क्रीनिंग, रोके गए, एजेंट, respectful आप; product/model names Latin; default and fallback stages preserved. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
     },
     {
       "locale": "hi",
@@ -13154,6 +13217,27 @@
     },
     {
       "locale": "ru",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
+      "translator": {
+        "agent": "coder — PR #3444 implementer",
+        "model": "unrecorded — PR #3444 body and commits do not name the actual translating model; not inferred",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, independent of PR #3444 coder)",
+        "session": "3f400bae6226",
+        "model": "anthropic/claude-sonnet-5-5 (semantic audit); openai/gpt-6.1-sol (verification/completion); quota fallback via anthropic/claude-opus-5-5 (no audit work)",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. R1 MINOR fixed: title проверить -> выполнить фильтрацию, preserving namespace screening term instead of ambiguous generic check. задержаны and polite register preserved. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
+    },
+    {
+      "locale": "ru",
       "namespace": "cli.team_bridge_hold",
       "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
       "translator": {
@@ -16267,6 +16351,27 @@
       },
       "status": "passed",
       "note": "Supersedes the immediately preceding same-source cli.skills_push audit row at corrected target bytes; append-only history retained. UR-1 MINOR fixed: stale_base had {base} before {head}, violating the repository ordered-placeholder contract despite preserving named argument/type sets. Rephrased idiomatically to retain English {head} then {base} order without changing the non-publication or replaced-text warning. Full seven-key semantic/style recheck passed against English context, glossary and locale guide. Final evidence: check.py --catalogues-only: 0 problem(s); exact ORDERED ICU argument/type parity, key parity, literal command byte parity, NFC and absence of manual Cf/bidi controls all passed; runtime.render_message 8/8 (including empty/nonempty optional leading-space head). No maxCells/plurals in source. No rendered-frame, terminal shaping or full RTL/layout claim. Auditor actual model openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; separate translator agent used openai/gpt-6.1-sol per manager brief. Target SHA-256 30c041dbea945934f091c424d6186162300f3ea190b59f453dc8ed5eafb94536."
+    },
+    {
+      "locale": "ur",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
+      "translator": {
+        "agent": "coder — PR #3444 implementer",
+        "model": "unrecorded — PR #3444 body and commits do not name the actual translating model; not inferred",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, independent of PR #3444 coder)",
+        "session": "3f400bae6226",
+        "model": "anthropic/claude-sonnet-5-5 (semantic audit); openai/gpt-6.1-sol (verification/completion); quota fallback via anthropic/claude-opus-5-5 (no audit work)",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. No locale defects. اسکریننگ, روکے گئے, آپ; logical storage has no manual bidi controls. tr_record + isolated_status_text yields balanced RLI/PDI; browser copy fixture at 900px/360px viewed: shaping, RTL reading order and Latin model/provider names retained, wrapping visible. Not a production inbox/TUI shaping or full RTL completion claim. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
     },
     {
       "locale": "ur",
@@ -19625,6 +19730,27 @@
     },
     {
       "locale": "vi",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
+      "translator": {
+        "agent": "coder — PR #3444 implementer",
+        "model": "unrecorded — PR #3444 body and commits do not name the actual translating model; not inferred",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, independent of PR #3444 coder)",
+        "session": "3f400bae6226",
+        "model": "anthropic/claude-sonnet-5-5 (semantic audit); openai/gpt-6.1-sol (verification/completion); quota fallback via anthropic/claude-opus-5-5 (no audit work)",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. No defects. tác nhân, sàng lọc, bị giữ, bạn; NFC, default/fallback ordering and nạp tín dụng meaning preserved. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
+    },
+    {
+      "locale": "vi",
       "namespace": "cli.team_bridge_hold",
       "source_sha256": "acc428129160efa45c96a3d965f9454bd70ca6b709594986d36e02e999ceb02b",
       "translator": {
@@ -22664,6 +22790,27 @@
       },
       "status": "passed",
       "note": "Supersedes the immediately preceding same-source cli.skills_push audit row at corrected target bytes; append-only history retained. ZH-CN-1 MINOR fixed: stale_base had {base} before {head}, violating the repository ordered-placeholder contract despite preserving named argument/type sets. Rephrased idiomatically to retain English {head} then {base} order without changing the non-publication or replaced-text warning. Full seven-key semantic/style recheck passed against English context, glossary and locale guide. Final evidence: check.py --catalogues-only: 0 problem(s); exact ORDERED ICU argument/type parity, key parity, literal command byte parity, NFC and absence of manual Cf/bidi controls all passed; runtime.render_message 8/8 (including empty/nonempty optional leading-space head). No maxCells/plurals in source. No rendered-frame, terminal shaping or full RTL/layout claim. Auditor actual model openai/gpt-6.1-sol after anthropic/claude-opus-5-5 quota fallback; separate translator agent used openai/gpt-6.1-sol per manager brief. Target SHA-256 16757d2069cf0ce4693a0ccea0133e0e3d3a76b4ca61777b2a06081390d87732."
+    },
+    {
+      "locale": "zh-CN",
+      "namespace": "cli.team_bridge",
+      "source_sha256": "6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378",
+      "translator": {
+        "agent": "coder — PR #3444 implementer",
+        "model": "unrecorded — PR #3444 body and commits do not name the actual translating model; not inferred",
+        "date": "2026-11-04"
+      },
+      "auditor": {
+        "agent": "i18n-auditor (radientdev, independent of PR #3444 coder)",
+        "session": "3f400bae6226",
+        "model": "anthropic/claude-sonnet-5-5 (semantic audit); openai/gpt-6.1-sol (verification/completion); quota fallback via anthropic/claude-opus-5-5 (no audit work)",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 1,
+        "unresolved_blocker_major": 0
+      },
+      "status": "passed",
+      "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. Z1 MINOR fixed: remove spaces at Chinese/Latin run boundaries per zh-CN guide; retain spaces inside Claude Sonnet 5.5 / Claude Opus 5.5 names. 智能体/筛查/暂扣, 你, full-width prose punctuation agree. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
     },
     {
       "locale": "zh-CN",

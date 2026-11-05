@@ -1459,6 +1459,10 @@ _HOLD_CLASS_SCREENING_UNAVAILABLE = frozenset(
         # PR #3400: a batch that could not conclude the message; it is
         # re-screened alone at once, so screening is only briefly pending.
         "batch_unresolved",
+        # Nothing could screen (every preferred and fallback screener failed):
+        # nothing judged the message, so the sender is told screening is
+        # unavailable -- never that a human is reviewing it.
+        "screening_model_unavailable",
     }
 )
 
@@ -3167,6 +3171,13 @@ class Store:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(screening_receipts)")}
         if "rendered_template_sha256" not in columns:
             conn.execute("ALTER TABLE screening_receipts ADD COLUMN rendered_template_sha256 TEXT")
+        # ``screener_preferred`` (operator directive 2026-11-04): whether the
+        # model that answered is on ``SCREENING_EVALUATED_MODELS``. Same
+        # additive, nullable, no-stamp rule; NULL (a pre-upgrade row) reads as
+        # NOT preferred, so an old allow is never reused from the cache. Local
+        # provenance only: the hub tuple is unchanged.
+        if "screener_preferred" not in columns:
+            conn.execute("ALTER TABLE screening_receipts ADD COLUMN screener_preferred INTEGER")
 
     @staticmethod
     def _ensure_policy_serving_column(conn: sqlite3.Connection) -> None:
@@ -5200,8 +5211,8 @@ class Store:
                     "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
                     "template_sha256, prompt_version, model, verdict, categories, "
                     "envelope_digest, admission_revision, policy_epoch, creator_generation, "
-                    "created_at, rendered_template_sha256) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "created_at, rendered_template_sha256, screener_preferred) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         key,
                         str(message_id),
@@ -5219,13 +5230,21 @@ class Store:
                         # The prompt that produced the verdict is the SOURCE's:
                         # this message was never rendered to a model (m4).
                         source["rendered_template_sha256"],
+                        # So is the screener: a copy is exactly as preferred
+                        # as the verdict it copies (the consumer only ever
+                        # hands a preferred one here).
+                        source["screener_preferred"],
                     ),
                 )
             conn.execute(
                 "DELETE FROM screening_holds WHERE owner_key = ? AND message_id = ?",
                 (key, str(message_id)),
             )
-            return dict(decoded, rendered_template_sha256=source["rendered_template_sha256"])
+            return dict(
+                decoded,
+                rendered_template_sha256=source["rendered_template_sha256"],
+                screener_preferred=source["screener_preferred"] == 1,
+            )
 
     def find_screening_receipt(
         self,
@@ -5282,6 +5301,37 @@ class Store:
             # under normal accounting); it can never silently certify.
             return None
 
+    def retire_unsent_fallback_allow(
+        self, owner: OwnerSnapshot, message_id: str, *, body_sha256: str
+    ) -> bool:
+        """Retire ONLY a provisional fallback allow that never crossed a handoff.
+
+        Operator directive 2026-11-04: a weaker screener's allow cannot buy a
+        later retry a free pass. A local receipt with no ACK intent and no body
+        reservation is still UNSENT, so it may be re-screened. Once either
+        durable handoff exists, its write-once tuple must survive (the hub may
+        already have committed it even if its response was lost). Check and
+        retire in ONE transaction, fenced to the live owner; failure never
+        authorizes a cached delivery. NULL legacy provenance is not preferred.
+        """
+
+        with self._connect() as conn:
+            self._init(conn)
+            self._begin_write(conn)
+            self._require_live(conn, owner)
+            self._ensure_receipt_rendered_template_column(conn)
+            key = _owner_key(owner)
+            removed = conn.execute(
+                "DELETE FROM screening_receipts WHERE owner_key = ? AND message_id = ? "
+                "AND body_sha256 = ? "
+                "AND verdict = 'allow' AND COALESCE(screener_preferred, 0) != 1 "
+                "AND NOT EXISTS (SELECT 1 FROM ack_intents WHERE owner_key = ? AND message_id = ?) "
+                "AND NOT EXISTS (SELECT 1 FROM body_reservations "
+                "WHERE owner_key = ? AND message_id = ?)",
+                (key, message_id, body_sha256, key, message_id, key, message_id),
+            ).rowcount
+            return removed == 1
+
     def receipt_for_message(self, owner: OwnerSnapshot, message_id: str) -> dict[str, Any] | None:
         """THE trusted record for one screened message, by message id (H5 F3).
 
@@ -5320,6 +5370,11 @@ class Store:
                     "envelope_digest": row["envelope_digest"],
                     "admission_revision": row["admission_revision"],
                     "created_at": row["created_at"],
+                    # Who answered (operator directive 2026-11-04): B4b's
+                    # release check reads it; NULL on an old row is False.
+                    "screener_preferred": (
+                        "screener_preferred" in row.keys() and row["screener_preferred"] == 1
+                    ),
                 }
         except (sqlite3.Error, json.JSONDecodeError):
             return None
@@ -6007,10 +6062,12 @@ class Store:
                 # :meth:`adopt_cached_receipt` then copied a DIFFERENT row. The
                 # first current row in this order is the hit, and its
                 # ``message_id`` is returned so the copy is that exact row.
+                self._ensure_receipt_rendered_template_column(conn)
                 rows = conn.execute(
                     "SELECT message_id, verdict, model, prompt_version, template_sha256, "
                     "body_sha256, categories, envelope_digest, admission_revision, "
-                    "policy_epoch, creator_generation FROM screening_receipts "
+                    "policy_epoch, creator_generation, screener_preferred "
+                    "FROM screening_receipts "
                     "WHERE owner_key = ? AND body_sha256 = ? AND template_sha256 = ? "
                     "AND model = ? AND admission_revision = ? AND envelope_digest = ? "
                     "ORDER BY created_at, message_id",
@@ -6039,8 +6096,24 @@ class Store:
                             "proof_corrupt",
                             note or "the stored receipt failed its authority checks",
                         )
+                    # NON-PREFERRED ALLOWS ARE NEVER REUSED (Aida's ruling and
+                    # the operator directive, 2026-11-04): an allow from a
+                    # fallback screener (``screener_preferred`` 0, or NULL on a
+                    # row that predates the column) is skipped, so the message
+                    # is screened again rather than admitted on a weaker
+                    # model's word. Skipped AFTER the authority check above, so
+                    # a damaged row still refuses whatever its screener. A
+                    # reject is reused whichever model gave it: replaying a
+                    # refusal can only keep a message out, never let one in.
+                    preferred = row["screener_preferred"] == 1
+                    if decoded is not None and decoded["verdict"] == "allow" and not preferred:
+                        continue
                     if decoded is not None and hit is None:
-                        hit = dict(decoded, source_message_id=row["message_id"])
+                        hit = dict(
+                            decoded,
+                            source_message_id=row["message_id"],
+                            screener_preferred=preferred,
+                        )
                 return hit
         except sqlite3.Error as error:
             # An interleaved writer that could not take the lock (or any
@@ -6487,8 +6560,9 @@ class Store:
                         "INSERT INTO screening_receipts (owner_key, message_id, body_sha256, "
                         "template_sha256, prompt_version, model, verdict, categories, "
                         "envelope_digest, admission_revision, policy_epoch, "
-                        "creator_generation, created_at, rendered_template_sha256) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "creator_generation, created_at, rendered_template_sha256, "
+                        "screener_preferred) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             key,
                             message_id,
@@ -6515,6 +6589,7 @@ class Store:
                                 and _HEX64.fullmatch(rendered_template_sha256)
                                 else None
                             ),
+                            1 if receipt.screener_preferred is True else 0,
                         ),
                     )
                 conn.execute(
@@ -7494,7 +7569,8 @@ class Store:
                 return dict(existing)
             reason: str | None = None
             if not screener_preferred:
-                # Amendment 2: only an allowlisted FIRST-hop answer is releasable.
+                # Amendment 2: only trusted PREFERRED-stage provenance is releasable;
+                # a later preferred Opus qualifies, an ordinary cascade Opus does not.
                 reason = hr.INELIGIBLE_SCREENER
             else:
                 spent = conn.execute(

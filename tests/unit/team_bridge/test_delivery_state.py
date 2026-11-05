@@ -95,6 +95,8 @@ _SCREENING_UNAVAILABLE = {
     "model_refused",
     "reply_truncated",
     "batch_unresolved",
+    # No evaluated screening model is reachable: nothing judged the message.
+    "screening_model_unavailable",
 }
 _DELIVERY_PENDING = {"delivery_failed", "bridge_off", "phase_refused"}
 
