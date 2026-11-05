@@ -5313,7 +5313,18 @@ class Store:
         already have committed it even if its response was lost). Check and
         retire in ONE transaction, fenced to the live owner; failure never
         authorizes a cached delivery. NULL legacy provenance is not preferred.
+
+        B4b DESIGN §3 / decision a-3f46 (S-11/Q4): an owner-release receipt
+        intentionally carries no preferred-MODEL evidence. Its exact template
+        domain identifies a different proof class, authenticated by the signed
+        release on consume/replay. Preserve that proof even before ACK or body
+        reservation; do not delete the person's decision or relabel it as a
+        preferred model answer. This exemption grants no authority itself:
+        receipt_authority and release replay still verify the signed record.
+        Other NULL-provenance/legacy fallback receipts remain provisional.
         """
+
+        from local_operator.team_bridge.hold_release import OWNER_RELEASE_SHA256
 
         with self._connect() as conn:
             self._init(conn)
@@ -5325,10 +5336,20 @@ class Store:
                 "DELETE FROM screening_receipts WHERE owner_key = ? AND message_id = ? "
                 "AND body_sha256 = ? "
                 "AND verdict = 'allow' AND COALESCE(screener_preferred, 0) != 1 "
+                "AND template_sha256 != ? "
                 "AND NOT EXISTS (SELECT 1 FROM ack_intents WHERE owner_key = ? AND message_id = ?) "
                 "AND NOT EXISTS (SELECT 1 FROM body_reservations "
                 "WHERE owner_key = ? AND message_id = ?)",
-                (key, message_id, body_sha256, key, message_id, key, message_id),
+                (
+                    key,
+                    message_id,
+                    body_sha256,
+                    OWNER_RELEASE_SHA256,
+                    key,
+                    message_id,
+                    key,
+                    message_id,
+                ),
             ).rowcount
             return removed == 1
 

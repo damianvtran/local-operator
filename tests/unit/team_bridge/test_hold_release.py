@@ -1204,3 +1204,55 @@ def test_tampered_signed_provenance_is_refused(rig, field, value):
     out = _screen(config_dir, owner, again)
     assert out.hold_code == hr.WORK_SCOPE_HOLD and again.calls == 0
     assert store.owner_release(owner, MESSAGE_ID)["outcome"] == "refused:release_unverified"
+
+
+@pytest.mark.parametrize("reply", [NEW_WORK, REL_L01_HOLD], ids=["bounce", "hold"])
+def test_consumed_owner_release_survives_retry_before_ack_or_reservation(rig, monkeypatch, reply):
+    """S-11/Q4: proof commit -> crash before handoff -> same signed decision replay.
+
+    Owner release is a separate proof class, not a model allow. Its NULL model
+    preference must neither retire its proof nor become forged preferred-model
+    evidence. Keep policy/body untouched and assert no ACK or reservation can
+    accidentally protect the proof in this regression.
+    """
+
+    from tests.unit.team_bridge.test_screening_chain import _install_wire, _Wire
+
+    config_dir, store, owner = rig
+    monkeypatch.setattr(
+        "local_operator.providers.model_access.credentialed_chat_providers_here",
+        lambda **_kw: {"anthropic"},
+    )
+    wire = _Wire({SONNET[1]: ("fail", 429), OPUS[1]: ("reply", reply)})
+    _install_wire(monkeypatch, wire)
+    assert _scheduler_screen(config_dir, owner).hold_code == hr.WORK_SCOPE_HOLD
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision is not None and decision["screener_hop"] == 1
+    assert _decide(config_dir, owner, "deliver")["state"] == "released"
+    signed = store.owner_release(owner, MESSAGE_ID)
+    assert signed is not None and hr.verify_row(signed, hr.anchor_spki(config_dir)[0])
+    signed_payload = hr.payload_for_row(signed)
+    assert _scheduler_screen(config_dir, owner).disposition == "deliver"
+    receipt = store.receipt_for_message(owner, MESSAGE_ID)
+    assert receipt is not None and receipt["template_sha256"] == hr.OWNER_RELEASE_SHA256
+    assert not receipt["screener_preferred"]  # never relabel owner proof as model evidence
+    committed = store.owner_release(owner, MESSAGE_ID)
+    policy = store.current_screening_policy(owner)
+    sends = len(wire.sends)
+    assert sends == 2  # preferred Sonnet 429, preferred Opus reply
+    for _ in range(2):
+        assert _count(config_dir, "ack_intents") == 0
+        assert _count(config_dir, "body_reservations") == 0
+        retry = _scheduler_screen(config_dir, owner)
+        assert retry.disposition == "deliver" and retry.receipt is not None
+        assert retry.receipt.template_sha256 == hr.OWNER_RELEASE_SHA256
+        assert not retry.screener_preferred
+        assert len(wire.sends) == sends
+        assert store.current_screening_policy(owner) == policy
+        assert store.receipt_for_message(owner, MESSAGE_ID) == receipt
+        assert store.work_scope_decision(owner, MESSAGE_ID) == decision
+        replayed = store.owner_release(owner, MESSAGE_ID)
+        assert replayed == committed
+        assert hr.payload_for_row(replayed) == signed_payload
+        assert replayed["signature"] == signed["signature"]
+        assert hr.verify_row(replayed, hr.anchor_spki(config_dir)[0])
