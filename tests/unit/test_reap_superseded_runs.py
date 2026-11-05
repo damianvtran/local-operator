@@ -805,8 +805,6 @@ def _sweep_with_jobs(monkeypatch, pages):
                     for index, job in enumerate(response["jobs"])
                 ]
             return response
-        if "/jobs?" in path:
-            return {"total_count": 0, "jobs": []}
         return {"status": "queued"} if method == "GET" else None
 
     monkeypatch.setattr(reaper, "gh_api", fake)
@@ -883,3 +881,70 @@ def test_a_tag_listing_at_the_page_cap_raises_instead_of_returning_a_partial_set
     monkeypatch.setattr(reaper, "gh_api", lambda path, *, method="GET": page)
     with pytest.raises(reaper.ApiError, match="partial"):
         reaper.tag_targets("o/r")
+
+
+def test_dry_run_predicts_the_real_sweep_for_a_started_run(monkeypatch, capsys):
+    """`--dry-run` must not claim it would cancel what a real sweep keeps.
+
+    The dry-run early-continue sits ABOVE the job-inventory guard, so the
+    preview printed WOULD for a run whose jobs had already started while the
+    real path KEEPs it. That is the mode an operator uses to see what the
+    schedule will do, so a preview that disagrees with the sweep is worse than
+    no preview at all.
+    """
+    started = {
+        "total_count": 1,
+        "jobs": [{"id": 1, "name": "lint", "status": "in_progress", "runner_id": 7, "steps": []}],
+    }
+    calls = []
+    monkeypatch.setattr(reaper, "queued_runs", lambda repo: [_run()])
+    monkeypatch.setattr(reaper, "branch_tip", lambda repo, branch: "b" * 40)
+    monkeypatch.setattr(reaper.sys, "argv", ["reaper", "--repo", "synthetic/account", "--dry-run"])
+
+    def fake(path, *, method="GET"):
+        calls.append((method, path))
+        if "/jobs?" in path:
+            return started
+        return {"status": "queued"} if method == "GET" else None
+
+    monkeypatch.setattr(reaper, "gh_api", fake)
+    assert reaper.main() == 0
+    out = capsys.readouterr().out
+    assert "WOULD" not in out, out
+    assert "KEEP" in out, out
+    assert not any(method == "POST" for method, _ in calls), calls
+
+
+def test_a_job_parked_on_a_concurrency_group_is_unstarted_not_unreadable(monkeypatch, capsys):
+    """`waiting`/`requested`/`pending` are unstarted states, not unknown ones.
+
+    A job held on a concurrency group or a pending environment approval reports
+    `waiting`. Treating that as an unreadable inventory keeps the run forever:
+    the guard returns "job execution state unreadable", so an abandoned run
+    parked that way can never be reaped at any age -- the opposite of the
+    abandonment rule's purpose.
+
+    Exercised on the REAL path, because the dry-run exit above the guard means
+    a dry-run version of this test would pass without touching the allowlist.
+    """
+    for state in ("waiting", "pending", "requested"):
+        parked = {
+            "total_count": 1,
+            "jobs": [{"id": 1, "name": "deploy", "status": state, "steps": []}],
+        }
+        calls = []
+
+        def fake(path, *, method="GET", _parked=parked):
+            calls.append((method, path))
+            if "/jobs?" in path:
+                return _parked
+            return {"status": "queued"} if method == "GET" else None
+
+        monkeypatch.setattr(reaper, "queued_runs", lambda repo: [_run()])
+        monkeypatch.setattr(reaper, "branch_tip", lambda repo, branch: "b" * 40)
+        monkeypatch.setattr(reaper.sys, "argv", ["reaper", "--repo", "synthetic/account"])
+        monkeypatch.setattr(reaper, "gh_api", fake)
+        assert reaper.main() == 0
+        out = capsys.readouterr().out
+        assert "unreadable" not in out, (state, out)
+        assert "CANCEL" in out, (state, out)
