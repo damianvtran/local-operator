@@ -1,0 +1,9 @@
+{
+  "cli.skills_push.stale_base": "The hub moved to {head} after this link's push baseline {base}, so nothing was published: merging against an older baseline could republish text the hub has since replaced.",
+  "cli.skills_push.stale_base_next": "Safe next step: the push baseline now points at the hub head {head}. Review the hub's changes with `lop skills sync --name {name} --check`, then run `lop skills push {name}` again; your local edits are re-applied on top of the hub's current document.",
+  "cli.skills_push.stale_base_bundle_next": "Safe next step: bring the hub's tree into your copy with `lop skills sync --name {name}`, re-apply your change, then run `lop skills push {name}` again.",
+  "cli.skills_push.merge_refused_next": "Safe next step: the push baseline now points at the hub head{head}. Run `lop skills sync --name {name}` to bring the hub's changes into your copy (resolve any conflict it reports), re-apply your edit if it was lost, then run `lop skills push {name}`. Do not copy an older version over the hub's text.",
+  "cli.skills_push.verified": "Verified: the hub head {revision} holds exactly the document this push sent.",
+  "cli.skills_push.verify_mismatch": "Warning: the hub head {revision} does NOT match the document this push sent; the hub may now hold different content. Inspect it with `lop skills sync --name {name} --check` before pushing again.",
+  "cli.skills_push.verify_unavailable": "Not verified: the hub could not be re-read after the push ({reason}). Check it with `lop skills sync --name {name} --check`."
+}
