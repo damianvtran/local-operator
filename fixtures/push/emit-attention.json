@@ -26,7 +26,9 @@
     "exclude": "list[str]"
   },
   "absent_fields": [
-    "alert"
+    "alert",
+    "sound",
+    "sound_custom"
   ],
   "payload_version": 1,
   "report_block_required": {
@@ -35,7 +37,8 @@
   },
   "report_block_optional": {
     "credential_expires_at": "int",
-    "last_authenticated_at": "int"
+    "last_authenticated_at": "int",
+    "sound_custom_ready": "bool"
   },
   "payload": {
     "v": 1,
@@ -77,6 +80,8 @@
     "NO alert, and the absence is the rule rather than an omission: the attention push is a silent, best-effort wake (§3.2), so it has no title and no body to show — a badge correction that raised a banner would interrupt a user to tell them nothing they asked for. alert is present on completion and digest and must not appear here (absent_fields).",
     "exclude names the device that just acted, so the self-correcting push skips it. It is OPTIONAL and absent means 'exclude nobody', which is what a tick-detected change sends because it never knows who acknowledged — see exclude_absent_payload, which is a whole valid payload and not an empty list.",
     "An attention emit is keyed on the machine's emit SEQUENCE, never on a completion key (emit-idempotency-keys.json): an ack is not a heal.",
-    "On a phone this arrives as a silent, best-effort wake; the type is what stops the tap asking for a conversation that the payload never named."
+    "On a phone this arrives as a silent, best-effort wake; the type is what stops the tap asking for a conversation that the payload never named.",
+    "NO sound either, for the same reason as no alert: the attention form is a silent wake with no banner for a sound to ride (notification-sounds design §6 C3: \"sound absent on attention, which is silent by definition\"). absent_fields declares it.",
+    "devices[].sound_custom_ready is declared in this block too (ADR 0006 amendment 2026-11-04): the report block is ONE block that rides every emit, so its allow-list is the same here; the machine sets it only on an emit that carries sound_custom, which the attention form never does (absent_fields), for the reason sound is not: a silent wake has no banner for a sound to ride."
   ]
 }

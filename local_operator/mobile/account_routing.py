@@ -13,6 +13,7 @@ from typing import Any
 from local_operator import settings_io
 from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.i18n.keys import wire_settings_account_policy as _ap
+from local_operator.i18n.resolve import resolve_language
 
 POLICY_KEY = "retry.accountSelectionPolicy"
 CAPABILITY = "account-routing-v1"
@@ -27,10 +28,15 @@ class AccountRoutingError(Exception):
 
 def policy_payload(root: Path, patch: Any = None, *, write: bool = False) -> dict[str, Any]:
     """Read or patch the one non-security setting through the existing facade."""
+    # Resolve from the backend config owner on each request, like relay metadata;
+    # envelope() defaults to English and the TUI's ambient locale is not a
+    # request-scoped authority. Do not introduce a client language override.
     setting = settings_io.resolve_key(POLICY_KEY)
     if setting is None:
         raise AccountRoutingError(
-            "account_routing_unavailable", _ap.error_unavailable().envelope()["text"], 404
+            "account_routing_unavailable",
+            _ap.error_unavailable().envelope(locale=resolve_language())["text"],
+            404,
         )
     try:
         settings_io.require_readable_config_path(root / CONFIG_FILE_NAME)
@@ -39,7 +45,9 @@ def policy_payload(root: Path, patch: Any = None, *, write: bool = False) -> dic
         if write:
             if not isinstance(patch, dict) or set(patch) != {"value"}:
                 raise AccountRoutingError(
-                    "invalid_setting", _ap.error_invalid_shape().envelope()["text"], 422
+                    "invalid_setting",
+                    _ap.error_invalid_shape().envelope(locale=resolve_language())["text"],
+                    422,
                 )
             # Interactive authenticated user action: retain the same attribution
             # as TUI/desktop HTTP, not the agent-only settings_control seam.
@@ -51,7 +59,9 @@ def policy_payload(root: Path, patch: Any = None, *, write: bool = False) -> dic
         raise AccountRoutingError("invalid_setting", str(exc), 422) from exc
     except OSError as exc:
         raise AccountRoutingError(
-            "setting_write_failed", _ap.error_write_failed().envelope()["text"], 503
+            "setting_write_failed",
+            _ap.error_write_failed().envelope(locale=resolve_language())["text"],
+            503,
         ) from exc
     return {
         "capability": CAPABILITY,

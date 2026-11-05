@@ -4,23 +4,6 @@
   "pairs": [
     {
       "locale": "fr",
-      "namespace": "wire.console",
-      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md).",
-      "owner": "i18n-translator lane",
-      "payoff": "2026-12-31",
-      "missing": [
-        "wire.console.description",
-        "wire.console.max_live.help",
-        "wire.console.max_live.label",
-        "wire.console.max_owner.help",
-        "wire.console.max_owner.label",
-        "wire.console.title",
-        "wire.console.user_reserved.help",
-        "wire.console.user_reserved.label"
-      ]
-    },
-    {
-      "locale": "fr",
       "namespace": "wire.errors.sdk_spec",
       "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md).",
       "owner": "i18n-translator lane",
@@ -60,29 +43,6 @@
         "wire.errors.sdk_startup.attach_runtime_missing",
         "wire.errors.sdk_startup.profile_attach_failed",
         "wire.errors.sdk_startup.tool_inventory_mismatch"
-      ]
-    },
-    {
-      "locale": "fr",
-      "namespace": "wire.settings.account_policy",
-      "reason": "No audited French catalogue yet; English source fallback is in effect (docs/I18N.md).",
-      "owner": "i18n-translator lane",
-      "payoff": "2026-12-31",
-      "missing": [
-        "wire.settings.account_policy.error.invalid_json",
-        "wire.settings.account_policy.error.invalid_shape",
-        "wire.settings.account_policy.error.unavailable",
-        "wire.settings.account_policy.error.write_failed",
-        "wire.settings.account_policy.fair.description",
-        "wire.settings.account_policy.fair.label",
-        "wire.settings.account_policy.headroom.description",
-        "wire.settings.account_policy.headroom.label",
-        "wire.settings.account_policy.help",
-        "wire.settings.account_policy.label",
-        "wire.settings.account_policy.legacy.help",
-        "wire.settings.account_policy.legacy.label",
-        "wire.settings.account_policy.reset_soonest.description",
-        "wire.settings.account_policy.reset_soonest.label"
       ]
     },
     {
@@ -139,29 +99,6 @@
         "wire.errors.sdk_startup.attach_runtime_missing",
         "wire.errors.sdk_startup.profile_attach_failed",
         "wire.errors.sdk_startup.tool_inventory_mismatch"
-      ]
-    },
-    {
-      "locale": "zh-CN",
-      "namespace": "wire.settings.account_policy",
-      "reason": "English-only namespace: zh-CN does not carry it; renders the English child fallback.",
-      "owner": "i18n-translator lane",
-      "payoff": "2027-02-28",
-      "missing": [
-        "wire.settings.account_policy.error.invalid_json",
-        "wire.settings.account_policy.error.invalid_shape",
-        "wire.settings.account_policy.error.unavailable",
-        "wire.settings.account_policy.error.write_failed",
-        "wire.settings.account_policy.fair.description",
-        "wire.settings.account_policy.fair.label",
-        "wire.settings.account_policy.headroom.description",
-        "wire.settings.account_policy.headroom.label",
-        "wire.settings.account_policy.help",
-        "wire.settings.account_policy.label",
-        "wire.settings.account_policy.legacy.help",
-        "wire.settings.account_policy.legacy.label",
-        "wire.settings.account_policy.reset_soonest.description",
-        "wire.settings.account_policy.reset_soonest.label"
       ]
     }
   ]

@@ -1,0 +1,57 @@
+{
+  "wire.guardrails.critical_override.help": {
+    "role": "Settings row help for the guardrails section in the TUI and connected settings UI",
+    "tone": "concise, neutral, safety-relevant",
+    "note": "Explains a safety override. Must keep both facts: OFF refuses critical deletions outright; ON sends them to an automatic safety check (never lets them through unchecked). 'From this machine's settings' = the settings page or CLI in the same process; a file edit (including by the agent) does not count. No ICU arguments."
+  },
+  "wire.guardrails.critical_override.label": {
+    "role": "Settings row label",
+    "tone": "concise",
+    "note": "Label fits the 29-cell label budget. No ICU arguments.",
+    "maxCells": 29
+  },
+  "wire.guardrails.enabled.help": {
+    "role": "Settings row help",
+    "tone": "concise, neutral",
+    "note": "User guardrail rules are markdown files the user writes; the built-in dangerous-delete check is not switchable. 'dangerous-delete' is a rule identifier and stays untranslated. No ICU arguments."
+  },
+  "wire.guardrails.enabled.label": {
+    "role": "Settings row label",
+    "tone": "concise",
+    "note": "Label fits the 29-cell label budget. No ICU arguments.",
+    "maxCells": 29
+  },
+  "wire.guardrails.judge_timeout_s.help": {
+    "role": "Settings row help",
+    "tone": "concise, neutral",
+    "note": "The safety check is an automatic model review of a risky tool call. Fail-closed: no answer means blocked. No ICU arguments."
+  },
+  "wire.guardrails.judge_timeout_s.label": {
+    "role": "Settings row label",
+    "tone": "concise",
+    "note": "Label fits the 29-cell label budget; '(s)' is seconds. No ICU arguments.",
+    "maxCells": 29
+  },
+  "wire.guardrails.rules_dir.help": {
+    "role": "Settings row help",
+    "tone": "concise, neutral",
+    "note": "'*.md' is a literal file pattern and stays untranslated. No ICU arguments."
+  },
+  "wire.guardrails.rules_dir.label": {
+    "role": "Settings row label",
+    "tone": "concise",
+    "note": "Label fits the 29-cell label budget. No ICU arguments.",
+    "maxCells": 29
+  },
+  "wire.guardrails.section.description": {
+    "role": "Settings section description",
+    "tone": "concise, neutral",
+    "note": "One line under the section heading. 'Dangerous' means destructive, e.g. deleting important files. No ICU arguments."
+  },
+  "wire.guardrails.section.title": {
+    "role": "Settings section title",
+    "tone": "concise",
+    "note": "Section heading on the settings page. No ICU arguments.",
+    "maxCells": 29
+  }
+}

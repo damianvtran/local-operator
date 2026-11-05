@@ -1826,7 +1826,18 @@ CHARS_PER_BILLED_TOKEN = 2.78
 # inside the band rather than below it, so the ceiling is re-derived the
 # documented way — this tree's own measurement plus the 55 band — and the next
 # branch inherits 34,880, not 34,805.
-BUDGET_BILLED_TOKENS = 34_935
+#
+# RAISED 34,935 -> 35,017 for the dangerous-delete guardrail's two Safety-rule
+# bullets in ``system.md`` (incident 2026-11-04: an unattended session deleted the
+# state root through an empty command substitution). Base re-measured by
+# stashing the branch on this machine:
+#   base (origin/main 5c704e80478)      97,523 chars = ~35,080 billed
+#   head (this branch)                  97,750 chars = ~35,162 billed
+#   delta                                   +227 chars = ~+82
+# The +82 is exactly the two bullets. The base already overshot the old ceiling
+# here by 145 (pre-existing drift from main, not this branch), so the ceiling is
+# raised by the branch's own delta only, leaving CI's relative position unchanged.
+BUDGET_BILLED_TOKENS = 35_017
 
 #: The SUBAGENT ceiling (``--kind child``), in billed tokens. Same ratchet rules
 #: as ``BUDGET_BILLED_TOKENS`` above. It is a separate number because a child's
@@ -2014,7 +2025,10 @@ BUDGET_BILLED_TOKENS = 34_935
 # check that nothing child-only moved. main-now's own overshoot (30,823 against
 # its committed 30,669) is main's drift, stated in the top arm's entry.
 # Ceiling = measured head + the 55-token band (30,909 + 55).
-BUDGET_CHILD_BILLED_TOKENS = 30_964
+#
+# RAISED 30,964 -> 31,046 with the top arm above (the same two system.md
+# bullets): base 86,549 chars = ~31,133, head 86,776 = ~31,214, delta +227 = ~+82.
+BUDGET_CHILD_BILLED_TOKENS = 31_046
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

@@ -1,0 +1,106 @@
+{
+  "hashes": {
+    "en": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+    "fr": "f998c7a608a0023275a39f4c75ff7db65d107924c78db3907c7d0a28b2d30744",
+    "translator_original_context": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254",
+    "audited_context": "2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02"
+  },
+  "context_changed_fields": {
+    "wire.settings.account_policy.label": [
+      "note"
+    ],
+    "wire.settings.account_policy.help": [
+      "note"
+    ],
+    "wire.settings.account_policy.reset_soonest.label": [
+      "note"
+    ],
+    "wire.settings.account_policy.reset_soonest.description": [
+      "note"
+    ],
+    "wire.settings.account_policy.headroom.label": [
+      "note"
+    ],
+    "wire.settings.account_policy.headroom.description": [
+      "note"
+    ],
+    "wire.settings.account_policy.fair.label": [
+      "note"
+    ],
+    "wire.settings.account_policy.fair.description": [
+      "note"
+    ],
+    "wire.settings.account_policy.legacy.label": [
+      "note"
+    ],
+    "wire.settings.account_policy.legacy.help": [
+      "note"
+    ],
+    "wire.settings.account_policy.error.unavailable": [
+      "note"
+    ],
+    "wire.settings.account_policy.error.invalid_shape": [
+      "note"
+    ],
+    "wire.settings.account_policy.error.invalid_json": [
+      "note"
+    ],
+    "wire.settings.account_policy.error.write_failed": [
+      "note"
+    ]
+  },
+  "packet_manifest_integrity": [
+    {
+      "path": "README.md",
+      "ok": true
+    },
+    {
+      "path": "caller-proof.json",
+      "ok": true
+    },
+    {
+      "path": "inputs/en.context.json",
+      "ok": true
+    },
+    {
+      "path": "inputs/en.json",
+      "ok": true
+    },
+    {
+      "path": "inputs/fr.md",
+      "ok": true
+    },
+    {
+      "path": "inputs/glossary.md",
+      "ok": true
+    },
+    {
+      "path": "provenance.json",
+      "ok": true
+    },
+    {
+      "path": "record.json",
+      "ok": true
+    },
+    {
+      "path": "validate.mjs",
+      "ok": true
+    },
+    {
+      "path": "validation.log",
+      "ok": true
+    },
+    {
+      "path": "widths.json",
+      "ok": true
+    },
+    {
+      "path": "widths.log",
+      "ok": true
+    },
+    {
+      "path": "wire.settings.account_policy.json",
+      "ok": true
+    }
+  ]
+}

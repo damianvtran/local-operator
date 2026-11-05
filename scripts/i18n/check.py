@@ -886,18 +886,67 @@ def _git(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _ci_base() -> tuple[str | None, str | None]:
-    """The pull request base SHA and branch GitHub exposes, when this is a PR."""
+    """A GHA PR merge's verified first parent, never its queued event's old base.
+
+    The event and merge ref can advance independently while a run is queued.
+    Raw commit headers retain parents even at a shallow boundary; rev-list does
+    not. Platform identity + second-parent linkage bind the first parent to THIS
+    checkout. merge_commit_sha has the same stale race and is not required.
+    """
     if os.environ.get("GITHUB_EVENT_NAME") != "pull_request":
         return None, None
-    event_path = os.environ.get("GITHUB_EVENT_PATH")
-    if not event_path:
-        return None, None
+    github = os.environ.get("GITHUB_ACTIONS") == "true"
     try:
+        event_path = os.environ.get("GITHUB_EVENT_PATH")
+        if not event_path:
+            raise ValueError("missing_event")
         event = json.loads(Path(event_path).read_text(encoding="utf-8"))
-        base = event["pull_request"]["base"]
-        return base["sha"], base["ref"]
-    except (OSError, ValueError, KeyError, TypeError):
+        request = event["pull_request"]
+        base = request["base"]
+        if not github:
+            return base["sha"], base["ref"]
+        number = event["number"]
+        feature = request["head"]["sha"]
+        branch = base["ref"]
+        if (
+            type(number) is not int
+            or number <= 0
+            or not isinstance(feature, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", feature)
+            or not isinstance(branch, str)
+            or not branch
+        ):
+            raise ValueError("invalid_event")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        if github:
+            raise ValueError("pr_checkout_provenance:invalid_event") from exc
         return None, None
+    if os.environ.get("GITHUB_REF") != f"refs/pull/{number}/merge":
+        raise ValueError("pr_checkout_provenance:merge_ref_mismatch")
+    expected = os.environ.get("GITHUB_SHA", "")
+    head = _git("rev-parse", "--verify", "HEAD^{commit}")
+    if (
+        not re.fullmatch(r"[0-9a-f]{40}", expected)
+        or head.returncode != 0
+        or head.stdout.strip() != expected
+    ):
+        raise ValueError("pr_checkout_provenance:head_mismatch")
+    raw = _git("cat-file", "-p", expected)
+    if raw.returncode != 0:
+        raise ValueError("pr_checkout_provenance:commit_unreadable")
+    parents = [
+        line[7:]
+        for line in raw.stdout.split("\n\n", 1)[0].splitlines()
+        if line.startswith("parent ")
+    ]
+    if len(parents) != 2 or any(not re.fullmatch(r"[0-9a-f]{40}", p) for p in parents):
+        raise ValueError("pr_checkout_provenance:exact_two_parents_required")
+    if parents[1] != feature:
+        raise ValueError("pr_checkout_provenance:head_parent_mismatch")
+    actual = _git("rev-parse", "--verify", f"{parents[0]}^{{commit}}")
+    if actual.returncode != 0 or actual.stdout.strip() != parents[0]:
+        raise ValueError("pr_checkout_provenance:first_parent_unavailable")
+    return parents[0], branch
 
 
 def _resolve_allowance_base(base: str | None) -> str | None:
@@ -910,7 +959,21 @@ def _resolve_allowance_base(base: str | None) -> str | None:
     """
     if _git("rev-parse", "--is-inside-work-tree").returncode != 0:
         return None
-    ci_sha, ci_branch = _ci_base() if base is None else (None, None)
+    github_pr = (
+        os.environ.get("GITHUB_ACTIONS") == "true"
+        and os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
+    )
+    ci_sha, ci_branch = _ci_base() if base is None or github_pr else (None, None)
+    if github_pr:
+        # _ci_base already proved a readable commit. Never replace a failed PR
+        # proof with an event base, branch tip, fetch result or caller override.
+        if ci_sha is None:
+            raise ValueError("pr_checkout_provenance:base_unavailable")
+        if base is not None:
+            supplied = _git("rev-parse", "--verify", f"{base}^{{commit}}")
+            if supplied.returncode != 0 or supplied.stdout.strip() != ci_sha:
+                raise ValueError("pr_checkout_provenance:base_override_mismatch")
+        return ci_sha
     ref = base or ci_sha or "origin/main"
     if _git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").returncode == 0:
         return ref
@@ -925,6 +988,42 @@ def _resolve_allowance_base(base: str | None) -> str | None:
         if fetched.returncode == 0:
             return "FETCH_HEAD"
     return None
+
+
+def check_audit_history(base: str | None = None, *, structural_only: bool = False) -> list[str]:
+    """Normal gate: structure plus actual-base append-only proof, fail closed in CI."""
+    from scripts.i18n import ledger
+
+    try:
+        ledger.load_entries(REPO)
+        if structural_only:
+            if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+                raise ValueError("structural-only audit validation is forbidden in CI")
+            return []
+        # Repo-less checker fixtures with no audit storage exercise other gates.
+        if not (REPO / "i18n/ledger.json").exists() and not (REPO / "i18n/ledger").exists():
+            if _git("rev-parse", "--is-inside-work-tree").returncode != 0 and not os.environ.get(
+                "CI"
+            ):
+                return []
+        ci_sha, _ = _ci_base()
+        if os.environ.get("GITHUB_EVENT_NAME") == "pull_request" and not ci_sha:
+            raise ValueError("actual PR audit base is unavailable")
+        ref = _resolve_allowance_base(ci_sha or base or "origin/main")
+        if ref is None:
+            raise ValueError(
+                "readable audit base required; use --audit-base REF "
+                "(isolated fixtures: --audit-structural-only)"
+            )
+        if ci_sha and base:
+            override = _git("rev-parse", "--verify", f"{base}^{{commit}}")
+            actual = _git("rev-parse", "--verify", f"{ref}^{{commit}}")
+            if override.returncode != 0 or override.stdout != actual.stdout:
+                raise ValueError("--audit-base must name the actual PR base in CI")
+        ledger.validate_base(REPO, ref)
+    except (ValueError, OSError) as exc:
+        return [f"audit history: {exc}"]
+    return []
 
 
 def _english_keys_at_ref(ref: str) -> set[str] | None:
@@ -1051,7 +1150,10 @@ def check_allowance_growth(base: str | None = None) -> list[str]:
     when a translation was removed, when the key is new English in an active
     locale, or when the base cannot be read well enough to tell.
     """
-    ref = _resolve_allowance_base(base)
+    try:
+        ref = _resolve_allowance_base(base)
+    except ValueError as exc:
+        return [str(exc)]
     # A supplied ref is operator input, not a best-effort default: inside git,
     # a typo must fail rather than silently disable the growth comparison.
     # Repo-less fixtures still skip because no ref can resolve there.
@@ -1148,6 +1250,18 @@ def main(argv: list[str] | None = None) -> int:
         help="fail when i18n/coverage-allowance.json adds entries relative to REF; "
         "defaults to the pull request base in CI, then origin/main locally",
     )
+    parser.add_argument(
+        "--audit-base",
+        metavar="REF",
+        # i18n: ignore developer-only CLI help; i18n tooling owns this while checkout-only
+        help="actual base for append-only audit history validation",
+    )
+    parser.add_argument(
+        "--audit-structural-only",
+        action="store_true",
+        # i18n: ignore developer-only CLI help; i18n tooling owns this while checkout-only
+        help="isolated local fixture validation only; forbidden in CI",
+    )
     args = parser.parse_args(argv)
 
     if args.catalogues_only:
@@ -1222,7 +1336,12 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(line)
         else:
             advisories.append(f"advisory: {line}")
-    problems = check_catalogues() + check_login(REPO) + check_allowance_growth(args.allowance_base)
+    problems = (
+        check_catalogues()
+        + check_login(REPO)
+        + check_allowance_growth(args.allowance_base)
+        + check_audit_history(args.audit_base, structural_only=args.audit_structural_only)
+    )
     for line in advisories + failures + problems:
         print(line)
     if failures or problems:

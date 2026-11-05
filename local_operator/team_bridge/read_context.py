@@ -300,7 +300,9 @@ def admit_read_content(
     intent = proof.get("intent")
     if not isinstance(policy, Mapping) or not isinstance(receipt, Mapping):
         return ContentAdmission(False, "proof_missing")
-    authority, damage, _note = receipt_authority(context.owner, policy, receipt)
+    authority, damage, _note = receipt_authority(
+        context.owner, policy, receipt, release=proof.get("release")
+    )
     if authority is None:
         # ``_note`` is the write-side diagnostic (R-8) and is deliberately not
         # this side's business: nothing here renders a reason for a human, so the

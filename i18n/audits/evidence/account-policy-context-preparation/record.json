@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "scope": "wire.settings.account_policy context-only policy clarification and immutable packet retention; not activation/audit",
+  "source_revision": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "decision_source": "Manager delegation: supersede stale English-only extraction notes for this namespace only; human-facing copy localizable, machine IDs/errors/true/false/value/JSON unchanged; no SDK policy change",
+  "source_english_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+  "old_context_sha256": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254",
+  "new_context_sha256": "2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02",
+  "caller_proof": [
+    "local_operator/settings_io.py:2358-2382: labels/help/choice descriptions through _t; enum IDs separate",
+    "local_operator/mobile/account_routing.py:25-77: human error text separate from code/status; key/value separate from labels/help/choices",
+    "local_operator/mobile/daemon.py:6403-6429: invalid_setting code/status remain separate from error text"
+  ],
+  "existing_locale_compatibility": [
+    {
+      "locale": "es",
+      "keys": 14,
+      "different_from_en": 14,
+      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "status": "passed",
+      "target_sha256": "f5824ce686fde85dea395fbca9d91d7354bea0cd8a4a4bbe545dc9b1ed24d04c"
+    },
+    {
+      "locale": "hi",
+      "keys": 14,
+      "different_from_en": 14,
+      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "status": "passed",
+      "target_sha256": "ac1e8d8fa83f3f45b66f08d230d47818f18c4e991956cf96fe9e8f1a21afdddd"
+    },
+    {
+      "locale": "ru",
+      "keys": 14,
+      "different_from_en": 14,
+      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "status": "passed",
+      "target_sha256": "34aceb2f57251c4e31f259637916a24a32f978240466ef030cec10466e84bc73"
+    },
+    {
+      "locale": "ur",
+      "keys": 14,
+      "different_from_en": 14,
+      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "status": "passed",
+      "target_sha256": "c2a839112c8b9300348a311aa063179f2f37546fe7157a2a94f43bda19096f4c"
+    },
+    {
+      "locale": "vi",
+      "keys": 14,
+      "different_from_en": 14,
+      "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+      "status": "passed",
+      "target_sha256": "ff0656198ad2e8b7eafbc4249307f28f84416e9028aae8995996536cd713ee96"
+    }
+  ],
+  "binding_mechanism": "catalogues.py:193 catalogue_sha256 hashes raw namespace JSON bytes only; generate.py:477 compares source_sha256 against current EN catalogue hash, not context hash. check.py:740-757 validates context structure, unknown keys, maxCells types, not note language. Context note-only edit does not stale five existing locale rows mechanically. Preserve original linguistic audits: no changed EN/target/role/tone/maxCells/ICU. This record binds old/new context hashes and decision; do not rewrite immutable audits. New FR/zh-CN independent auditors must use corrected context hash and explicitly resolve original packet context caveat before any integration.",
+  "gaps": [
+    "No target catalogue integrated; FR/zh-CN missing until independent audits complete (including required second pass for high-visibility/safety copy).",
+    "No native/rendered/fallback/negative-control execution or caller locale propagation proof. Account-routing error envelopes shown use default locale; this preparation does not assert localized end-to-end responses.",
+    "No generation, scanners, tests, ledger or allowance change; no locale activation."
+  ]
+}

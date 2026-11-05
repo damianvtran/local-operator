@@ -6179,6 +6179,11 @@ def build_app(daemon: MobileDaemon):
                 # never sends a flag an older relay would silently drop — which
                 # on the wire looks exactly like a skill that did not fire.
                 "skill_invocation": {"available": True},
+                # The paired phone's notification-sound routes (C5): the list,
+                # the sha-checked audio and the per-device cache report. A
+                # RELAY capability like ``session_tags``: an older daemon lacks
+                # the key, and the phone then stays on its bundled built-ins.
+                "notification_sounds": {"available": True},
                 # Authenticated build support, not a claim that receipt storage
                 # is writable right now. Typed refusals preserve the same key.
                 "session_start": dict(START_CAPABILITY),
@@ -6516,7 +6521,11 @@ def build_app(daemon: MobileDaemon):
                 return JSONResponse(
                     {
                         "code": "invalid_setting",
-                        "error": _ap.error_invalid_json().envelope()["text"],
+                        # Match this relay's config-resolved metadata language,
+                        # not envelope()'s English default or ambient TUI state.
+                        "error": _ap.error_invalid_json().envelope(locale=resolve_language())[
+                            "text"
+                        ],
                     },
                     status_code=422,
                 )
@@ -10170,6 +10179,110 @@ def build_app(daemon: MobileDaemon):
             str(request.path_params["device_id"]),
         )
 
+    # -- notification sounds for the paired phone (notification-sounds C5) ------
+    #
+    # WHY HERE AND NOT C2's ROUTER (addendum 2 §2.3): ``/v1/notification-sounds*``
+    # is ``require_desktop`` — the desktop bearer, which a phone never holds. The
+    # phone reaches this daemon (directly, or through the tunnel gateway), whose
+    # one auth model is the paired cookie, so every route below sits behind
+    # ``gate``. The rows come from ``notifications.catalog_view``, the builder the
+    # desktop list also uses, so the two surfaces cannot disagree about which
+    # sounds exist.
+
+    async def api_notification_sounds(request: Request) -> Response:
+        """Every sound the phone may fetch, plus the computer's selection.
+
+        ``no-store``: the list changes whenever a sound is added, renamed or
+        selected (on any surface), and a cached list would make the phone
+        prefetch yesterday's selection.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.notifications import catalog_view
+
+        payload = await asyncio.to_thread(catalog_view.phone_listing)
+        return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    async def api_notification_sound_audio(request: Request) -> Response:
+        """One sound's WAV bytes, by id, IF ``?sha=`` names exactly those bytes.
+
+        The phone caches by sha and names the file after it (``c_<sha16>.wav``),
+        so it asks for the sha it expects. A sha that does not match the bytes
+        the id holds right now is a 404, never the current bytes: a stale
+        prefetch (the sound was replaced since the list was read) must not cache
+        new bytes under an old name. That match is also what makes the reply
+        content-addressed, so it is ``immutable`` for a year with ``ETag`` = sha,
+        exactly the policy ``api_session_sound`` uses for its digests.
+
+        Unity gain (the stored/decoded file), never the computer's volume: the
+        phone plays at its own notification volume (design §3.6). ``{id}`` is
+        looked up in the catalog or the custom index and never reaches a path.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return _sound_response(denied)
+        sound_id = str(request.path_params["sound_id"])
+        expected = request.query_params.get("sha", "")
+        if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+            return _sound_response(
+                JSONResponse(
+                    {"error": "bad sha"}, status_code=400, headers={"Cache-Control": "no-store"}
+                )
+            )
+        from local_operator.notifications import catalog_view
+
+        try:
+            found = await asyncio.to_thread(catalog_view.phone_audio, sound_id)
+        except OSError:
+            logger.warning("notification sound %s could not be read", sound_id, exc_info=True)
+            found = None
+        if found is None or found[1] != expected:
+            return _sound_response(
+                JSONResponse(
+                    {"error": "no such sound"},
+                    status_code=404,
+                    headers={"Cache-Control": "no-store"},
+                )
+            )
+        data, sha = found
+        etag = f'"{sha}"'
+        headers = {"Cache-Control": "public, max-age=31536000, immutable", "ETag": etag}
+        inm = request.headers.get("if-none-match", "")
+        if any(tag.strip().removeprefix("W/") == etag for tag in inm.split(",")):
+            return _sound_response(Response(status_code=304, headers=headers))
+        return _sound_response(_ranged_media_response(request, data, "audio/wav", headers))
+
+    async def api_notification_sounds_cached(request: Request) -> Response:
+        """``PUT {shas: ["c_<sha16>", …]}``: the custom sounds THIS phone holds.
+
+        The cookie proves the caller is paired; ``X-Lop-Device`` +
+        ``X-Lop-Device-Key`` prove WHICH device it is, which is what the
+        per-device ``sound_custom_ready`` bit needs (``push_devices.
+        note_sound_cache`` carries the reasoning). Same-origin is enforced by
+        ``gate`` for this mutation, like every other.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        try:
+            body: object = await request.json()
+        except (ValueError, UnicodeDecodeError):
+            body = None
+        if not isinstance(body, dict) or set(body) != {"shas"}:
+            return JSONResponse({"error": 'body must be {"shas": [...]}'}, status_code=422)
+        from local_operator.paths import config_dir
+
+        config = config_dir()
+        await _note_device_credential(request, config)
+        return await _push_call(
+            mobile_push_devices.note_sound_cache,
+            config,
+            install_id=request.headers.get(mobile_push_devices.DEVICE_HEADER),
+            device_key=request.headers.get(mobile_push_devices.DEVICE_KEY_HEADER),
+            stems=body["shas"],
+        )
+
     # -- library --------------------------------------------------------------
     #
     # Transport only: every handler below calls ``local_operator.mobile.library``
@@ -10658,6 +10771,15 @@ def build_app(daemon: MobileDaemon):
         Route("/api/library/assets/{asset_id:str}/content", api_library_bytes),
         Route("/api/library/assets/{asset_id:str}/thumbnail", api_library_thumb),
         Route("/api/library/assets/{asset_id:str}/waveform", api_library_waveform),
+        Route("/api/notification-sounds", api_notification_sounds),
+        # Before ``{sound_id}/audio`` only for reading order: the two paths
+        # cannot collide (``cached`` has no ``/audio`` suffix).
+        Route(
+            "/api/notification-sounds/cached",
+            api_notification_sounds_cached,
+            methods=["PUT"],
+        ),
+        Route("/api/notification-sounds/{sound_id:str}/audio", api_notification_sound_audio),
         Route("/api/push/register", api_push_register, methods=["POST"]),
         Route("/api/push/devices", api_push_devices),
         Route("/api/push/devices/{device_id:str}", api_push_device_delete, methods=["DELETE"]),

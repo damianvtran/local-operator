@@ -1,0 +1,74 @@
+{
+  "es": {
+    "tui.sound.slash": {
+      "before": "Sonidos de notificaciones: lista, prueba, elige, añade",
+      "after": "Sonidos de avisos: listar, probar, elegir, añadir"
+    }
+  },
+  "fr": {
+    "tui.sound.id_help": {
+      "before": "Un son intégré, l’un des vôtres (ajoutez-les avec /sound add), ou `system` pour garder le son propre à votre terminal ou à votre système. Chaque son est joué quand les flèches s’y arrêtent. Vous entendez deux sons ? Lancez /sound doctor.",
+      "after": "Un son intégré, l’un des vôtres (ajoutez-les avec /sound add), ou `system` pour garder le son propre à votre terminal ou à votre système. Chaque son est joué quand vous passez dessus avec les touches fléchées. Vous entendez deux sons ? Lancez /sound doctor."
+    },
+    "tui.sound.preview_muted": {
+      "before": "Rien n’a été joué : LOCAL_OPERATOR_NO_SOUND est défini.",
+      "after": "Rien n’a été joué : LOCAL_OPERATOR_NO_SOUND est défini."
+    },
+    "tui.sound.preview_silent": {
+      "before": "Rien n’a été joué : le volume est à 0.",
+      "after": "Rien n’a été joué : le volume est à 0."
+    },
+    "tui.sound.preview_ssh": {
+      "before": "Rien n’a été joué : c’est une session SSH, le son sortirait sur les haut-parleurs de l’ordinateur distant.",
+      "after": "Rien n’a été joué : c’est une session SSH, le son sortirait sur les haut-parleurs de l’ordinateur distant."
+    },
+    "tui.sound.read_failed": {
+      "before": "Impossible de lire {file} : {reason}",
+      "after": "Impossible de lire {file} : {reason}"
+    },
+    "tui.sound.save_failed": {
+      "before": "Le réglage n’a pas été enregistré : {reason}",
+      "after": "Le réglage n’a pas été enregistré : {reason}"
+    },
+    "tui.sound.selected": {
+      "before": "Son des notifications : {name}.",
+      "after": "Son des notifications : {name}."
+    },
+    "tui.sound.slash": {
+      "before": "Sons des notifications : liste, écoute, choix, ajout",
+      "after": "Sons des notifications : liste, écoute, choix, ajout"
+    },
+    "tui.sound.status": {
+      "before": "Son des notifications : {name} · volume {volume} · {state}",
+      "after": "Son des notifications : {name} · volume {volume} · {state}"
+    },
+    "tui.sound.volume_set": {
+      "before": "Volume du son des notifications : {volume}.",
+      "after": "Volume du son des notifications : {volume}."
+    }
+  },
+  "hi": {
+    "tui.sound.volume_range": {
+      "before": "वॉल्यूम 0 से 100 तक की पूर्ण संख्या होनी चाहिए।",
+      "after": "वॉल्यूम 0 से 100 तक का पूर्णांक होना चाहिए।"
+    }
+  },
+  "ru": {
+    "tui.sound.id_help": {
+      "before": "Встроенный звук, один из ваших (добавляются через /sound add) или `system`, чтобы оставить собственный звук терминала или системы. Каждый звук играет, когда на нём останавливается курсор. Слышите два звука? Выполните /sound doctor.",
+      "after": "Встроенный звук, один из ваших (добавляются через /sound add) или `system`, чтобы оставить собственный звук терминала или системы. Каждый звук играет при переходе к нему клавишами со стрелками. Слышите два звука? Выполните /sound doctor."
+    }
+  },
+  "ur": {
+    "tui.sound.save_failed": {
+      "before": "سیٹنگ محفوظ نہیں ہوئی: {reason}",
+      "after": "ترتیب محفوظ نہیں ہوئی: {reason}"
+    },
+    "tui.sound.slash": {
+      "before": "اطلاع کی آوازیں: فہرست، سنیں، منتخب کریں، اپنی شامل کریں",
+      "after": "اطلاع کی آوازیں: فہرست، سنیں، چنیں، اپنی شامل کریں"
+    }
+  },
+  "vi": {},
+  "zh-CN": {}
+}

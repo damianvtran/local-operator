@@ -1,0 +1,50 @@
+{
+  "record": {
+    "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-account-policy-second-6433b7a5b3e9/record.json",
+    "sha256": "18150618e5bf45727e65b6b848bd75393d34b5caa78bb0dc09dbca1e9967383f"
+  },
+  "locale": "zh-CN",
+  "namespace": "wire.settings.account_policy",
+  "status": "passed",
+  "auditor": {
+    "agent": "i18n-auditor",
+    "session": "6433b7a5b3e9",
+    "model": "openai/gpt-6.1-sol",
+    "actual_model_source": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/transcript.jsonl",
+      "entry_id": "4692b65a628c4da4aba13b3975cdad1e",
+      "ts": 1793712970.736598,
+      "usage": {
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol",
+        "at_ms": 1793712970172
+      }
+    },
+    "fallback": "Served openai/gpt-6.1-sol differs from initial anthropic/claude-sonnet-5-5 header; actual completed usage is authoritative. No no-fallback claim.",
+    "independent_from_translator_session": true,
+    "translator_session": "7fce46e29bee",
+    "independent_from_coder": true,
+    "second_independent_reader": true,
+    "other_reader_report_read": false
+  },
+  "key_count": 14,
+  "source_sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25",
+  "target_sha256": "d9157b646961a96dc5fb2c234ff9ccbaa2faac5d162d134d0dbff6cbbef5f5f1",
+  "translator_input_context_sha256": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254",
+  "audited_context_sha256": "2c23cc38b8eb9fb354eda0e1dd476d53b1064ffe88c2e821b9e1b723b8508c02",
+  "findings": [],
+  "artifacts": {
+    "report.md": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-account-policy-second-6433b7a5b3e9/report.md",
+      "sha256": "64a4a5872187dd001bb6ca84439c4f448b9065adea0095c76c07c4ad6fb76841"
+    },
+    "mechanical.json": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-account-policy-second-6433b7a5b3e9/mechanical.json",
+      "sha256": "e33283ac2ed0b216acc5f90f18420b0bf9f9f7450e53eca504a1b4294c5ee6c0"
+    },
+    "audit.log": {
+      "path": "/Users/damian/.local-operator/sessions/6433b7a5b3e9/scratchpad/zh-CN-account-policy-second-6433b7a5b3e9/audit.log",
+      "sha256": "f8071e4fb450b81fa478bab369276ffd3e0dd31f8c9b2b98b4cfa6e06b992d53"
+    }
+  }
+}

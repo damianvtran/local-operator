@@ -501,6 +501,12 @@ def static_feature_flags() -> dict[str, Any]:
         # the section over one conversation (#3022 R1-N2). A hub that predates
         # #221 is detected on the LIST route only (its 404 there).
         "team_bridge_owner_audit": 1,
+        # B4b held messages (operator decision a-3f46): `GET
+        # /v1/desktop/team-bridge/holds` and `POST …/holds/{id}/deliver|discard`.
+        # The key says the ROUTES exist, never that the feature is on: the list
+        # answers `enabled` from `team_bridge.hold_release` (default off), and a
+        # UI without this key shows nothing new. 1 is the route-contract version.
+        "team_bridge_hold_release": 1,
         # The chief-of-staff read grant (agent-server §17): `PUT`/`DELETE
         # /v1/desktop/team-bridge/conversations/{id}/cos-read`, both guarded
         # (tenant_id + expected_account_id required). The renderer shows
@@ -1176,6 +1182,15 @@ def static_feature_flags() -> dict[str, Any]:
         # mid-turn adopt control only when this key is present, so an older
         # backend keeps today's disabled state.
         "aside_adopt_queue": 1,
+        # NOTIFICATION SOUNDS (notification-sounds design §3.4):
+        # `/v1/notification-sounds*`, the list of built-in and custom sounds,
+        # the audio rendered at a volume, and add/rename/remove of the user's
+        # own sounds. ADDITIVE, so it gates nothing for an older renderer;
+        # absent, the desktop keeps today's behaviour (no sound picker, the
+        # selection still editable through `settings.list`). Selection, volume
+        # and on/off are NOT on these routes: they stay on `PATCH
+        # /v1/settings/{key}`, the one write funnel.
+        "notification_sounds": 1,
         # REMOTE COMPUTE (preview): the affordance that offers to run work on
         # Radient-hosted compute. CONDITIONAL, because unlike every build fact
         # above this one must not be advertised while it is switched off: the

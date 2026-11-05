@@ -1,0 +1,21 @@
+INPUT en.json 1a591fbc1f6a939651cfe9bc5c4ff619a5a4ade2099cc9cfb348534d09a0011b
+INPUT context.json 453aadc8095e93122719cef9b8da2ed9f8b57170449804e6af716fe684ef2dd9
+INPUT fr.json 7f499e6ab9f8db5c9953e6782357d4da38554ac89250f6fc6616b77069d4c8b2
+STYLE SNAPSHOT DIFFERENCE: pinned guide retains unrelated relay.chrome width-exception paragraph; normative rules identical; both retained
+INPUT fr-style.md 5315e1ac10c2ce57aac631ba653d08de680ee70c9a022ed3a8345ce2f9902ee7
+INPUT glossary.md 0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8
+CORE CHECKER PASS isolated namespace fixture wire.console 8
+NEGATIVE REJECTED unexpected argument fr/wire.console: wire.console.title: arguments (('unexpected_parameter', 'simple'),) != en's (): en has 0 argument(s), translation has 1
+NEGATIVE REJECTED missing key fr/wire.console: missing key 'wire.console.title'
+NEGATIVE REJECTED bad ICU fr/wire.console: wire.console.title: expected ',' or '}' after argument name 'unclosed' (at offset 9 of '{unclosed')
+KEY PASS wire.console.title argument_types=() Cf=0 opaque_values_literal=true
+KEY PASS wire.console.description argument_types=() Cf=0 opaque_values_literal=true
+KEY PASS wire.console.max_live.label argument_types=() Cf=0 opaque_values_literal=true
+KEY PASS wire.console.max_live.help argument_types=() Cf=0 opaque_values_literal=true
+KEY PASS wire.console.max_owner.label argument_types=() Cf=0 opaque_values_literal=true
+KEY PASS wire.console.max_owner.help argument_types=() Cf=0 opaque_values_literal=true
+KEY PASS wire.console.user_reserved.label argument_types=() Cf=0 opaque_values_literal=true
+KEY PASS wire.console.user_reserved.help argument_types=() Cf=0 opaque_values_literal=true
+WIDTHS []
+SERVED MODEL {"message_id": "fa8c3f7a5e8943c38c20693a0bbf019f", "ts": 1793720089.815171, "provider": "openai", "model_id": "gpt-6.1-sol", "input_tokens": 107196, "output_tokens": 256}
+PASS mechanical; pseudo/native RTL/native fit/real-path/design NOT RUN; no ledger/repo edits

@@ -1,0 +1,188 @@
+{
+  "record_kind": "translator_staging_packet_not_audit",
+  "locale": "fr",
+  "namespace": "wire.settings.account_policy",
+  "created_at": "2026-11-03T13:29:14.320383+00:00",
+  "status": "translated_staged_not_audited",
+  "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+  "key_count": 14,
+  "translator": {
+    "agent": "i18n-translator",
+    "session": "7b2ba4ed501d",
+    "actual_model": "openai/gpt-6.1-sol",
+    "actual_model_source": "Persisted assistant translation-writing and label-remediation tool-call usage.provider and usage.model_id, not the system model header",
+    "transcript_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/transcript.jsonl",
+    "translation_writing_usage": {
+      "entry_id": "b2aa25b6c8b443dc91bbf52ceb567528",
+      "timestamp": 1793712425.650454,
+      "usage": {
+        "billing_basis": "subscription_api_equivalent",
+        "input_tokens": 77620,
+        "output_tokens": 633,
+        "cache_read_tokens": 76672,
+        "context_tokens": 77620,
+        "reasoning_tokens": 28,
+        "at_ms": 1793712423008,
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      },
+      "action_names": [
+        "write"
+      ]
+    },
+    "label_remediation_usage": {
+      "entry_id": "55a908ca38bd47d98ffc43fd9bde6101",
+      "timestamp": 1793712465.983051,
+      "usage": {
+        "billing_basis": "subscription_api_equivalent",
+        "input_tokens": 79411,
+        "output_tokens": 353,
+        "cache_read_tokens": 79104,
+        "context_tokens": 79411,
+        "reasoning_tokens": 270,
+        "at_ms": 1793712465476,
+        "provider": "openai",
+        "model_id": "gpt-6.1-sol"
+      },
+      "action_names": [
+        "edit"
+      ]
+    },
+    "fallback_routes": [
+      {
+        "entry_id": "b890d01d056149efa86ce524b5919819",
+        "primary": "anthropic/claude-sonnet-5-5",
+        "active": {
+          "selector": "anthropic/claude-opus-5-5",
+          "effort": "medium"
+        },
+        "reason": "provider failure: quota"
+      },
+      {
+        "entry_id": "9db45f79733b4e59a7181e007150d99f",
+        "primary": "anthropic/claude-sonnet-5-5",
+        "active": {
+          "selector": "openai/gpt-6.1-sol",
+          "effort": "medium"
+        },
+        "reason": "provider failure: quota"
+      }
+    ],
+    "translation_method": "Direct LLM reasoning; no MT API/SDK/service/site used."
+  },
+  "input_hashes": {
+    "en": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.account_policy.json",
+      "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+      "sha256": "1ad13f8198e28cb19fe0ecb2a6ef9b2a6990bc0d047566b71f5dd5322f594b25"
+    },
+    "context": {
+      "path": "local_operator/i18n/catalogues/en/wire.settings.account_policy.context.json",
+      "source_commit": "0e7cde33ca8008d561e74f4aed774aa5f76ff7d5",
+      "sha256": "ccee657198d84a0bef6d20ae0343c9a864567e5a622a1b9736b1974ca296a254"
+    },
+    "fr.md": {
+      "path": "i18n/style-guides/fr.md",
+      "source": "Working checkout read at translation time; exact snapshot retained in inputs/",
+      "sha256": "ae1519ab7617d19aa826918d607de1d018595094166edbc18aa58f6a8f0a4226"
+    },
+    "glossary.md": {
+      "path": "i18n/glossary.md",
+      "source": "Working checkout read at translation time; exact snapshot retained in inputs/",
+      "sha256": "0eb34437a8c3d6f564f278ef957a603b1d9f51bb07d5ddae5ea8f37deba962f8"
+    }
+  },
+  "target": {
+    "intended_path": "local_operator/i18n/catalogues/fr/wire.settings.account_policy.json",
+    "staged_path": "/Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-account-policy-0e7cde33/wire.settings.account_policy.json",
+    "sha256": "f998c7a608a0023275a39f4c75ff7db65d107924c78db3907c7d0a28b2d30744"
+  },
+  "gap_counts": {
+    "missing_at_immutable_source_commit": 14,
+    "missing_in_staged_packet": 0,
+    "repository_gap_not_resolved_by_this_scratch_packet": 14
+  },
+  "context_caveat": {
+    "actual_input": "Original immutable sidecar contains English-only extraction notes; snapshot and hash are retained, not silently corrected.",
+    "authorization": "Manager task quotes operator: switching to fr must leave NO English anywhere...same every supported language. Human display copy is in scope; identifiers and config values are not.",
+    "manager_report_not_independently_verified": "Manager verified existing es/hi/ru/ur/vi targets have 14 localized keys; coder session 196c3a94b346 preparing context-note-only correction.",
+    "handoff": "Independent auditors must read corrected final context, verify role/tone/width/ICU/source meaning unchanged, and hash their actual inputs. No corrected-context hash is claimed here."
+  },
+  "validation": {
+    "command": "node --max-old-space-size=256 /Users/damian/.local-operator/sessions/7b2ba4ed501d/scratchpad/fr-account-policy-0e7cde33/validate.mjs",
+    "exit_code": 0,
+    "json_key_order_icu_tokens": "PASS",
+    "negative_controls_rejected": 3,
+    "plural_categories": "not applicable: zero ICU arguments/select/plural forms",
+    "width_command": "/Users/damian/local-operator/.venv/bin/python using rich.cells.cell_len on five maxCells labels",
+    "width_exit_code": 0,
+    "widths": [
+      {
+        "key": "wire.settings.account_policy.label",
+        "text": "politique de choix du compte",
+        "cells": 28,
+        "maxCells": 29
+      },
+      {
+        "key": "wire.settings.account_policy.reset_soonest.label",
+        "text": "Prochaine réinitialisation",
+        "cells": 26,
+        "maxCells": 29
+      },
+      {
+        "key": "wire.settings.account_policy.headroom.label",
+        "text": "Quota disponible maximal",
+        "cells": 24,
+        "maxCells": 29
+      },
+      {
+        "key": "wire.settings.account_policy.fair.label",
+        "text": "Répartition équitable",
+        "cells": 21,
+        "maxCells": 29
+      },
+      {
+        "key": "wire.settings.account_policy.legacy.label",
+        "text": "ancien choix selon l’usage",
+        "cells": 26,
+        "maxCells": 29
+      }
+    ],
+    "full_catalogue_validator": "NOT RUN as instructed",
+    "scanner_build_native_fullsuite": "NOT RUN as instructed",
+    "pseudo": "NOT RUN",
+    "RTL": "NOT RUN",
+    "rendered": "NOT RUN",
+    "runtime_requests": "NOT RUN; caller-proof.json is source inspection only"
+  },
+  "native_glossary_decisions": {
+    "policy": "politique; compact main label politique de choix du compte preserves policy + account-selection meaning at 28/29 cells",
+    "credential tier": "catégorie d’identifiants; provider and credential-category eligibility remain conjunctive, not a new authorization rule",
+    "lease": "bail; compatible and unexpired successful-request lease takes priority for every policy, without cache-hit guarantee",
+    "Reset soonest": "Prochaine réinitialisation; identical choice label referenced in help; weekly priority then five-hour tie-break within a minute retained",
+    "Most headroom": "Quota disponible maximal; ten points de pourcentage, not ten percent, retained in description",
+    "Fair spread": "Répartition équitable; stable session-based spread retained",
+    "legacy": "ancien / anciennes dérogations; explicit policy precedence and reset clearing old overrides both retained",
+    "preserved_tokens": [
+      "true",
+      "false",
+      "value",
+      "JSON"
+    ],
+    "unchanged_caller_identifiers": [
+      "reset-soonest",
+      "headroom",
+      "fair",
+      "retry.accountSelectionPolicy",
+      "retry.usageAwareAccountPick",
+      "setting_write_failed"
+    ]
+  },
+  "audit": {
+    "self_audit": false,
+    "first_independent_pass": "REQUIRED; NOT RUN",
+    "second_independent_pass": "REQUIRED; NOT RUN",
+    "activation_release": "NOT AUTHORIZED by this staging packet"
+  },
+  "scope": "Scratch packet only. No repository edits, PR, commit, push, ledger, receipt, generated keys or baseline edits. Previous five UI keys and completed wire.errors.files not revisited."
+}

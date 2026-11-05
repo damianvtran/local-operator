@@ -551,3 +551,54 @@ def block_devices(block: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(rows, list):
         return []
     return [row for row in rows if isinstance(row, dict)]
+
+
+#: The per-device readiness bit for the emit's custom sound (ADR 0006 §3.2's
+#: report block, amendment 2026-11-04). Deliberately NOT in
+#: :data:`REPORT_DEVICE_FIELDS`: that tuple is the CREDENTIAL report, coalesced
+#: and throttled, while readiness is a fact about one emit's ``sound_custom``
+#: and is stated on every emit that carries one (:func:`with_sound_readiness`).
+REPORT_SOUND_READY_FIELD = "sound_custom_ready"
+
+
+def with_sound_readiness(
+    rows: Sequence[Mapping[str, Any]],
+    facts: Sequence[Mapping[str, Any]],
+    sound_custom: str,
+    *,
+    now: float,
+) -> list[dict[str, Any]]:
+    """The emit's ``devices`` block with ``sound_custom_ready`` on every live device.
+
+    WHY EVERY LIVE DEVICE, not only the rows the coalescer chose to report: the
+    cloud picks the custom file per device and plays the ``sound`` fallback for a
+    device whose bit is absent (ADR 0006's ``sound_custom`` row). Readiness is
+    about THIS emit's sha, which changes when the selection does, so a bit
+    remembered from an earlier emit could name a different sound. A device the
+    coalescer did not pick still gets a row, built from its registry facts the
+    way the coalescer builds one (:meth:`CredentialFact.wire`, ``credential_live``
+    derived at ``now``) — a real, current credential fact, never an invented one,
+    and re-stating an unchanged credential is idempotent for the cloud.
+
+    ``facts`` is ``push_devices.credential_facts``' output; a device is ready
+    when ``sound_custom`` is in the ``sound_cached`` list it reported through
+    ``PUT /api/notification-sounds/cached``. Marked or non-live devices get no
+    added row: nothing is delivered to them, so there is nothing to pick.
+    """
+    by_id = {str(row["device_id"]): dict(row) for row in rows}
+    cached: dict[str, bool] = {}
+    for fact in facts:
+        device_id = str(fact["device_id"])
+        held = fact.get("sound_cached")
+        cached[device_id] = isinstance(held, list) and sound_custom in held
+        if device_id in by_id:
+            continue
+        if fact.get("state") != mobile_push_devices.STATE_LIVE:
+            continue
+        credential = CredentialFact.from_facts(fact)
+        if not credential.live_at(now):
+            continue
+        by_id[device_id] = credential.wire(now)
+    for device_id, row in by_id.items():
+        row[REPORT_SOUND_READY_FIELD] = cached.get(device_id, False)
+    return list(by_id.values())

@@ -161,6 +161,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Audit receipts are append-only against the event commit's real
+          # parent. A depth-one release checkout has no origin/main and cannot
+          # validate history; fetch the parent, not a mutable branch fallback.
+          fetch-depth: 2
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -203,7 +208,7 @@ jobs:
           # the whole of PEP 440 rather than a private subset of it.
           python -c "import tomllib,pathlib,packaging.version as pv; v=tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']; pv.Version(v); print('declared version:', v)"
           python scripts/i18n/generate.py --check
-          python scripts/i18n/check.py
+          python scripts/i18n/check.py --audit-base HEAD^
 
   # The artifact itself. Two slots, and the two jobs above run CONCURRENTLY
   # with this one rather than in sequence, so the gate's wall time is the

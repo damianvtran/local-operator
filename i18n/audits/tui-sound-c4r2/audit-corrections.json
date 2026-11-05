@@ -1,0 +1,35 @@
+{
+  "ru": {
+    "tui.sound.list_hint": {
+      "before": "/sound use <id> выбор · /sound preview <id> звук",
+      "after": "/sound use <id> выбор · /sound preview <id> играет",
+      "reason": "The playback hint explicitly says plays, rather than merely sound, within 54 cells."
+    },
+    "tui.sound.section_description": {
+      "before": "Звук при уведомлении на рабочем столе, не чаще одного раза в 1.5 секунды. Переходите по списку стрелками, чтобы прослушать каждый звук, или используйте /sound.",
+      "after": "Звук при уведомлении на рабочем столе, не чаще одного раза в 1,5 секунды. Переходите по списку стрелками, чтобы прослушать каждый звук, или используйте /sound.",
+      "reason": "Locale decimal comma in prose; literal duration remains one and a half seconds. Sidecar preserves /sound verbatim, not the decimal separator."
+    }
+  },
+  "es": {
+    "tui.sound.section_description": {
+      "before": "El sonido que acompaña a una notificación de escritorio, como máximo una vez cada 1.5 segundos. Recorre la lista con las flechas para oír cada uno o usa /sound.",
+      "after": "El sonido que acompaña a una notificación de escritorio, como máximo una vez cada 1,5 segundos. Recorre la lista con las flechas para oír cada uno o usa /sound.",
+      "reason": "Locale decimal comma in prose; literal duration remains one and a half seconds. Sidecar preserves /sound verbatim, not the decimal separator."
+    }
+  },
+  "fr": {
+    "tui.sound.section_description": {
+      "before": "Le son joué avec une notification de bureau, au plus une fois toutes les 1.5 secondes. Parcourez la liste avec les flèches pour écouter chaque son, ou utilisez /sound.",
+      "after": "Le son joué avec une notification de bureau, au plus une fois toutes les 1,5 secondes. Parcourez la liste avec les flèches pour écouter chaque son, ou utilisez /sound.",
+      "reason": "Locale decimal comma in prose; literal duration remains one and a half seconds. Sidecar preserves /sound verbatim, not the decimal separator."
+    }
+  },
+  "vi": {
+    "tui.sound.section_description": {
+      "before": "Âm thanh phát cùng thông báo trên màn hình, tối đa một lần mỗi 1.5 giây. Dùng phím mũi tên duyệt danh sách để nghe từng âm thanh, hoặc dùng /sound.",
+      "after": "Âm thanh phát cùng thông báo trên màn hình, tối đa một lần mỗi 1,5 giây. Dùng phím mũi tên duyệt danh sách để nghe từng âm thanh, hoặc dùng /sound.",
+      "reason": "Locale decimal comma in prose; literal duration remains one and a half seconds. Sidecar preserves /sound verbatim, not the decimal separator."
+    }
+  }
+}

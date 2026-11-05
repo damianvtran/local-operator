@@ -1,0 +1,140 @@
+{
+  "locales": {
+    "es": {
+      "keys": 29,
+      "bounded_cells": {
+        "tui.sound.list_title": 25,
+        "tui.sound.list_yours": 5,
+        "tui.sound.list_hint": 49,
+        "tui.sound.list_yours_hint": 46
+      },
+      "id_help_cells": 149,
+      "carried_values_byte_identical": 22,
+      "runtime_rendered": 29,
+      "slash_cells": 49,
+      "placeholder_and_technical_parity": "passed",
+      "bidi_storage": "logical, no controls",
+      "nfc": "passed",
+      "plural_messages": 0
+    },
+    "fr": {
+      "keys": 29,
+      "bounded_cells": {
+        "tui.sound.list_title": 22,
+        "tui.sound.list_yours": 10,
+        "tui.sound.list_hint": 50,
+        "tui.sound.list_yours_hint": 46
+      },
+      "id_help_cells": 165,
+      "carried_values_byte_identical": 22,
+      "runtime_rendered": 29,
+      "slash_cells": 52,
+      "placeholder_and_technical_parity": "passed",
+      "bidi_storage": "logical, no controls",
+      "nfc": "passed",
+      "plural_messages": 0
+    },
+    "hi": {
+      "keys": 29,
+      "bounded_cells": {
+        "tui.sound.list_title": 10,
+        "tui.sound.list_yours": 3,
+        "tui.sound.list_hint": 43,
+        "tui.sound.list_yours_hint": 46
+      },
+      "id_help_cells": 132,
+      "carried_values_byte_identical": 22,
+      "runtime_rendered": 29,
+      "slash_cells": 30,
+      "placeholder_and_technical_parity": "passed",
+      "bidi_storage": "logical, no controls",
+      "nfc": "passed",
+      "plural_messages": 0
+    },
+    "ru": {
+      "keys": 29,
+      "bounded_cells": {
+        "tui.sound.list_title": 17,
+        "tui.sound.list_yours": 4,
+        "tui.sound.list_hint": 50,
+        "tui.sound.list_yours_hint": 46
+      },
+      "id_help_cells": 155,
+      "carried_values_byte_identical": 22,
+      "runtime_rendered": 29,
+      "slash_cells": 53,
+      "placeholder_and_technical_parity": "passed",
+      "bidi_storage": "logical, no controls",
+      "nfc": "passed",
+      "plural_messages": 0
+    },
+    "ur": {
+      "keys": 29,
+      "bounded_cells": {
+        "tui.sound.list_title": 15,
+        "tui.sound.list_yours": 5,
+        "tui.sound.list_hint": 47,
+        "tui.sound.list_yours_hint": 46
+      },
+      "id_help_cells": 186,
+      "carried_values_byte_identical": 22,
+      "runtime_rendered": 29,
+      "slash_cells": 50,
+      "placeholder_and_technical_parity": "passed",
+      "bidi_storage": "logical, no controls",
+      "nfc": "passed",
+      "plural_messages": 0
+    },
+    "vi": {
+      "keys": 29,
+      "bounded_cells": {
+        "tui.sound.list_title": 18,
+        "tui.sound.list_yours": 7,
+        "tui.sound.list_hint": 47,
+        "tui.sound.list_yours_hint": 46
+      },
+      "id_help_cells": 170,
+      "carried_values_byte_identical": 22,
+      "runtime_rendered": 29,
+      "slash_cells": 51,
+      "placeholder_and_technical_parity": "passed",
+      "bidi_storage": "logical, no controls",
+      "nfc": "passed",
+      "plural_messages": 0
+    },
+    "zh-CN": {
+      "keys": 29,
+      "bounded_cells": {
+        "tui.sound.list_title": 10,
+        "tui.sound.list_yours": 8,
+        "tui.sound.list_hint": 45,
+        "tui.sound.list_yours_hint": 46
+      },
+      "id_help_cells": 119,
+      "carried_values_byte_identical": 22,
+      "runtime_rendered": 29,
+      "slash_cells": 42,
+      "placeholder_and_technical_parity": "passed",
+      "bidi_storage": "logical, no controls",
+      "nfc": "passed",
+      "plural_messages": 0
+    }
+  },
+  "negative_control": {
+    "missing_placeholder": "rejected",
+    "actual_errors": [
+      "fr/tui.sound: tui.sound.selected: arguments () != en's (('name', 'simple'),): en has 1 argument(s), translation has 0"
+    ]
+  },
+  "restored_control": "passed",
+  "fallback": "Nothing played: the volume is 0.",
+  "render_samples": {
+    "name": "QA chime",
+    "id": "qa-chime",
+    "seconds": "1.25",
+    "volume": "70",
+    "state": "on",
+    "file": "/synthetic/qa.wav",
+    "reason": "synthetic error"
+  }
+}

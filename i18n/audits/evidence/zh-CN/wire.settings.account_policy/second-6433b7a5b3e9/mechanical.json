@@ -1,0 +1,144 @@
+{
+  "status": "passed",
+  "key_count": 14,
+  "validator": "scripts.i18n.check.check_catalogues against ONLY scratch fixture",
+  "validator_problems": [],
+  "negative_control": {
+    "target_only_mutation": "add {unexpected} to label",
+    "actual_problems": [
+      "zh-CN/wire.settings.account_policy: wire.settings.account_policy.label: arguments (('unexpected', 'simple'),) != en's (): en has 0 argument(s), translation has 1"
+    ],
+    "restored_control": "passed",
+    "setup_correction": "Initial probe wrongly used Unicode word boundaries on true选择/false选择 and stopped at assertion before final artifacts. Corrected to ASCII identifier boundaries; test-harness correction only."
+  },
+  "context_delta": "all 14 notes changed; every non-note member byte-value identical",
+  "argument_count": 0,
+  "plural_count": 0,
+  "Cf_count": 0,
+  "label_widths": {
+    "wire.settings.account_policy.label": 12,
+    "wire.settings.account_policy.reset_soonest.label": 8,
+    "wire.settings.account_policy.headroom.label": 12,
+    "wire.settings.account_policy.fair.label": 8,
+    "wire.settings.account_policy.legacy.label": 16
+  },
+  "rows": [
+    {
+      "key": "wire.settings.account_policy.label",
+      "source": "account selection policy",
+      "target": "账户选择策略",
+      "rich_cells": 12,
+      "maxCells": 29,
+      "linguistic_status": "passed"
+    },
+    {
+      "key": "wire.settings.account_policy.help",
+      "source": "Chooses eligible sibling accounts within the same provider and credential tier. A compatible, unexpired lease from a successful request takes priority for every policy; it does not guarantee a cache hit. Reset soonest prefers the nearest weekly refill, then the five-hour refill within one-minute ties. An explicit policy overrides the legacy usage-aware account pick setting.",
+      "target": "在同一提供商、同一凭据层级内选择符合条件的账户。对于所有策略，成功请求留下的兼容且未过期的租约均优先；这并不保证缓存命中。“最早重置”优先选择每周额度最早补充的账户，时间相差不超过一分钟时，再比较五小时额度的补充时间。显式指定的策略优先于旧版按用量选账户设置。",
+      "rich_cells": 258,
+      "maxCells": null,
+      "linguistic_status": "passed"
+    },
+    {
+      "key": "wire.settings.account_policy.reset_soonest.label",
+      "source": "Reset soonest",
+      "target": "最早重置",
+      "rich_cells": 8,
+      "maxCells": 29,
+      "linguistic_status": "passed"
+    },
+    {
+      "key": "wire.settings.account_policy.reset_soonest.description",
+      "source": "Prefer the nearest included-plan reset; spread ties and unknown reports deterministically. Default for new configurations.",
+      "target": "优先选择套餐内额度最早重置的账户；时间相同或用量报告未知时，按确定性规则分散选择。新配置默认采用此策略。",
+      "rich_cells": 104,
+      "maxCells": null,
+      "linguistic_status": "passed"
+    },
+    {
+      "key": "wire.settings.account_policy.headroom.label",
+      "source": "Most headroom",
+      "target": "剩余额度最多",
+      "rich_cells": 12,
+      "maxCells": 29,
+      "linguistic_status": "passed"
+    },
+    {
+      "key": "wire.settings.account_policy.headroom.description",
+      "source": "Prefer cached remaining quota, spreading accounts within ten percentage points of the best.",
+      "target": "优先依据缓存的剩余额度选择账户，并在与最高剩余额度相差不超过十个百分点的账户间分散选择。",
+      "rich_cells": 88,
+      "maxCells": null,
+      "linguistic_status": "passed"
+    },
+    {
+      "key": "wire.settings.account_policy.fair.label",
+      "source": "Fair spread",
+      "target": "均衡分配",
+      "rich_cells": 8,
+      "maxCells": 29,
+      "linguistic_status": "passed"
+    },
+    {
+      "key": "wire.settings.account_policy.fair.description",
+      "source": "Use a stable session-based spread instead of ranking cached resets or remaining quota.",
+      "target": "按会话稳定地分散选择账户，而非依据缓存的重置时间或剩余额度排序。",
+      "rich_cells": 64,
+      "maxCells": null,
+      "linguistic_status": "passed"
+    },
+    {
+      "key": "wire.settings.account_policy.legacy.label",
+      "source": "legacy usage-aware pick",
+      "target": "旧版按用量选账户",
+      "rich_cells": 16,
+      "maxCells": 29,
+      "linguistic_status": "passed"
+    },
+    {
+      "key": "wire.settings.account_policy.legacy.help",
+      "source": "Compatibility setting, used only when account selection policy is absent: true selects Most headroom; false selects Fair spread. An explicit account selection policy takes precedence. Reset the account selection policy row to restore Reset soonest and clear legacy overrides.",
+      "target": "兼容性设置，仅在未设置账户选择策略时使用：true选择“剩余额度最多”，false选择“均衡分配”。显式指定的账户选择策略优先。重置账户选择策略这一项，可恢复“最早重置”并清除旧版覆盖设置。",
+      "rich_cells": 175,
+      "maxCells": null,
+      "linguistic_status": "passed"
+    },
+    {
+      "key": "wire.settings.account_policy.error.unavailable",
+      "source": "Account routing is unavailable.",
+      "target": "账户路由不可用。",
+      "rich_cells": 16,
+      "maxCells": null,
+      "linguistic_status": "passed"
+    },
+    {
+      "key": "wire.settings.account_policy.error.invalid_shape",
+      "source": "Expected only a value field.",
+      "target": "仅应包含value字段。",
+      "rich_cells": 19,
+      "maxCells": null,
+      "linguistic_status": "passed"
+    },
+    {
+      "key": "wire.settings.account_policy.error.invalid_json",
+      "source": "Expected a JSON object.",
+      "target": "应为JSON对象。",
+      "rich_cells": 14,
+      "maxCells": null,
+      "linguistic_status": "passed"
+    },
+    {
+      "key": "wire.settings.account_policy.error.write_failed",
+      "source": "The setting could not be saved. Check configuration permissions on this computer and try again.",
+      "target": "无法保存此设置。检查此电脑上的配置权限后重试。",
+      "rich_cells": 46,
+      "maxCells": null,
+      "linguistic_status": "passed"
+    }
+  ],
+  "tool_hashes": {
+    "scripts/i18n/check.py": "98dee7f1112848163c7a3365c39668118caa4bfe13e3afee4b137478d0bf39fb",
+    "local_operator/i18n/runtime.py": "50b11f4266c77f0eb74b65c9feb308530e15b06152564a865f84abbb58c757d5",
+    "local_operator/i18n/catalogues.py": "437179854ac210daeaf01bbecf8d89bfb9c1a901b63c55cbb623d4e4985d351e"
+  }
+}
