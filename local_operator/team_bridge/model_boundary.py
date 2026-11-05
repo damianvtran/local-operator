@@ -1262,6 +1262,13 @@ class ScreenChainRunner:
         self._built: list[Any] = []
         #: Set by :meth:`acall` to the hop that answered (B4b D4); ``""`` until then.
         self.served_provider = ""
+        #: That hop's position in the chain, ``None`` until one answered. B4b
+        #: (security review round 1, S-1; operator ruling 2026-11-04): only a
+        #: hop-0 answer may feed a release — a fallback verdict never does,
+        #: even when the fallback is itself an allowlisted model.
+        # TODO(#3444): read ``answered_hop.preferred`` / ``answered_preferred``
+        # once the pin lane lands; this index is the local equivalent.
+        self.served_hop_index: int | None = None
         self._job: AdmissionJob | None = None
 
     @property
@@ -1330,7 +1337,7 @@ class ScreenChainRunner:
         last_failure: BaseException | None = None
         attempts = 0
         unevidenced: tuple[str, str | None] = ("", None)
-        for hop in self._hops:
+        for index, hop in enumerate(self._hops):
             runner = self._build(hop)
             if runner is None:
                 continue
@@ -1389,6 +1396,7 @@ class ScreenChainRunner:
                 # tell the direct Anthropic route from a re-seller serving the
                 # same id, and eligibility is keyed on the (provider, model) pair.
                 self.served_provider = hop.provider
+                self.served_hop_index = index
                 return reply, actual
             unevidenced = (reply, actual)
         if last_failure is None:

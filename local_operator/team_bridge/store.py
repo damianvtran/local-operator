@@ -7431,10 +7431,26 @@ class Store:
         "PRIMARY KEY (owner_key, message_id))",
     )
 
+    #: Amendment 2 columns (S-1, m3), added by ``ALTER`` so a table an earlier
+    #: build of this PR created keeps working. A row written before them reads
+    #: ``screener_preferred = 0``: it can never be released (fail closed).
+    _WORK_SCOPE_ADDED = (
+        ("work_scope_decisions", "screener_verdict", "TEXT NOT NULL DEFAULT ''"),
+        ("work_scope_decisions", "screener_hop", "INTEGER NOT NULL DEFAULT -1"),
+        ("work_scope_decisions", "screener_preferred", "INTEGER NOT NULL DEFAULT 0"),
+        ("owner_releases", "screener_verdict", "TEXT NOT NULL DEFAULT ''"),
+        ("owner_releases", "screener_hop", "INTEGER NOT NULL DEFAULT -1"),
+        ("owner_releases", "screener_preferred", "INTEGER NOT NULL DEFAULT 0"),
+    )
+
     @classmethod
     def _ensure_work_scope_tables(cls, conn: sqlite3.Connection) -> None:
         for statement in cls._WORK_SCOPE_DDL:
             conn.execute(statement)
+        for table, column, decl in cls._WORK_SCOPE_ADDED:
+            present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            if column not in present:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     def record_work_scope_decision(
         self,
@@ -7452,6 +7468,9 @@ class Store:
         policy_epoch: int,
         sender_digest: str,
         now: float,
+        screener_verdict: str = "",
+        screener_hop: int = -1,
+        screener_preferred: bool = False,
     ) -> dict[str, Any]:
         """Write the decision row ONCE; a re-drive keeps the first (eligibility is fixed).
 
@@ -7474,7 +7493,8 @@ class Store:
             if existing is not None:
                 return dict(existing)
             reason: str | None = None
-            if not hr.eligible_screener(screener_provider, screener_model):
+            if not screener_preferred:
+                # Amendment 2: only an allowlisted FIRST-hop answer is releasable.
                 reason = hr.INELIGIBLE_SCREENER
             else:
                 spent = conn.execute(
@@ -7489,8 +7509,9 @@ class Store:
                 "body_sha256, "
                 "envelope_digest, hold_code, screener_provider, screener_model, "
                 "template_sha256, prompt_version, categories, policy_epoch, "
-                "creator_generation, sender_digest, eligible, ineligible_reason, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "creator_generation, sender_digest, eligible, ineligible_reason, created_at, "
+                "screener_verdict, screener_hop, screener_preferred) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     key,
                     message_id,
@@ -7509,6 +7530,9 @@ class Store:
                     0 if reason else 1,
                     reason,
                     float(now),
+                    screener_verdict,
+                    int(screener_hop),
+                    1 if screener_preferred else 0,
                 ),
             )
             row = conn.execute(
@@ -7533,6 +7557,23 @@ class Store:
             "SELECT * FROM work_scope_decisions WHERE owner_key = ? AND message_id = ? "
             "AND creator_generation = ?",
             (_owner_key(owner), message_id, owner.enrollment_generation),
+        )
+        return rows[0] if rows else None
+
+    def work_scope_decision_for_content(
+        self, owner: OwnerSnapshot, *, body_sha256: str, envelope_digest: str
+    ) -> dict[str, Any] | None:
+        """The OLDEST decision for this exact body + envelope under the live generation.
+
+        The source an identical re-send copies its own row from (code review
+        #3443 M2): the oldest, so a chain of copies always describes the screener
+        that actually answered, never another copy.
+        """
+
+        rows = self._work_scope_rows(
+            "SELECT * FROM work_scope_decisions WHERE owner_key = ? AND creator_generation = ? "
+            "AND body_sha256 = ? AND envelope_digest = ? ORDER BY created_at LIMIT 1",
+            (_owner_key(owner), owner.enrollment_generation, body_sha256, envelope_digest),
         )
         return rows[0] if rows else None
 
@@ -7655,7 +7696,7 @@ class Store:
                 "message_id", "conversation_id", "body_sha256", "envelope_digest",
                 "hold_code", "screener_provider", "screener_model", "template_sha256",
                 "categories", "word", "decided_at", "account_id", "key_id", "signature",
-                "surface",
+                "surface", "screener_verdict", "screener_hop", "screener_preferred",
             )  # fmt: skip
             conn.execute(
                 "INSERT INTO owner_releases (owner_key, creator_generation, outcome, "

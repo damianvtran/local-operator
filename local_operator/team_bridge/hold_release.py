@@ -54,8 +54,10 @@ no release op and the routes need the desktop bearer.
 A RELEASE IS NEVER A CACHED ALLOW (DESIGN §5). The release receipt carries
 :data:`OWNER_RELEASE_SHA256` as its template hash, which no screening cache
 lookup ever asks for, and the model's cached ``work_scope_hold`` answer stays
-put: an identical later message is held again and is the person's decision
-again.
+put: an identical later message (same body and envelope digest) is held again
+with no model call, and gets its OWN decision row copied from the first and
+charged to the sender budget (``screening._copy_work_scope_decision``), so it
+is the person's decision again — with buttons and a notice, budget permitting.
 """
 
 from __future__ import annotations
@@ -117,11 +119,126 @@ WORDS = ("deliver", "discard")
 INELIGIBLE_SCREENER = "screener_not_allowlisted"
 INELIGIBLE_BUDGET = "sender_budget"
 
+#: The screener verdict a decision row records (code review #3443 m3): a
+#: Discard and a setting-off settlement must reproduce what the screener
+#: actually said, and only these two verdicts are ever converted.
+SCREENER_VERDICTS = ("hold", "bounce")
+
 
 def eligible_screener(provider: str | None, model: str | None) -> bool:
     """Whether the hop that answered may make a releasable decision (D4)."""
 
     return (str(provider or ""), str(model or "")) in RELEASE_ELIGIBLE_SCREENERS
+
+
+def preferred_answer(provider: str | None, model: str | None, hop: int | None) -> bool:
+    """Whether THIS answer may feed a release: an allowlisted FIRST hop (Amendment 2).
+
+    Operator ruling 2026-11-04 (security review #3443 S-1): a verdict a fallback
+    hop gave never feeds a release, even when that fallback is itself Sonnet or
+    Opus. The chain falls back when the preferred route failed, and a release
+    must rest on the screener the receiver configured first, not on whichever
+    route happened to answer.
+
+    TODO(#3444): once the pin lane lands, this is ``answered_hop.preferred`` on
+    hop 0 (``SCREENING_EVALUATED_MODELS``); until then the D4 allowlist plus the
+    hop index is the local equivalent.
+    """
+
+    return hop == 0 and eligible_screener(provider, model)
+
+
+# -- the release-only category check (Amendment 2; security review #3443 S-2) --
+#
+# ``parse_verdict``'s exact-token rule stays the screening rule (setting-off
+# bytes depend on it). A RELEASE needs more: the REASON is model prose, and in a
+# v2 hold a category token is incidental, so a second category named in words
+# ("…or social engineering"), a hyphenated or capitalised spelling, a negated
+# mention or a hidden format character would all pass the token rule. This
+# check only ever REFUSES; it never makes something releasable that the token
+# rule did not already name.
+
+#: Prose stems that name another screening category or an injection/extraction
+#: class. Matched as substrings of the NORMALISED reason (casefolded, runs of
+#: whitespace/dashes as ``_``), so ``Prompt-Injection`` and ``prompt injection``
+#: both hit ``prompt_inject``. Closed; an addition is a reviewed change.
+_OTHER_CLASS_STEMS = (
+    "prompt_inject",
+    "inject",
+    "social_engineer",
+    "phish",
+    "impersonat",
+    "malicious",
+    "malware",
+    "credential",
+    "password",
+    "secret",
+    "token",
+    "api_key",
+    "confidential",
+    "personal_info",
+    "private_data",
+    "surveil",
+    "exfiltrat",
+    "harass",
+    "spam",
+    "scam",
+    "fraud",
+    "manipulat",
+    "pressure_tactic",
+    "out_of_scope",
+    "jailbreak",
+)
+
+#: Words that negate the category when they precede it closely.
+_NEGATORS = frozenset(
+    {"not", "no", "isnt", "arent", "wasnt", "never", "nor", "neither", "without", "non"}
+)
+_NEGATION_WINDOW = 3
+
+
+def _normalised_reason(reason: str) -> str:
+    import re
+    import unicodedata
+
+    text = unicodedata.normalize("NFKC", reason).casefold()
+    text = text.replace("\u2019", "").replace("'", "")
+    return re.sub(r"[\s\-\u2010-\u2015]+", "_", text)
+
+
+def strict_release_reason(reason: str) -> bool:
+    """Whether a converted decision's REASON passes the release-only check.
+
+    Refuses (``False``) when the reason carries any Unicode format character
+    (zero-width and bidi controls never appear in an honest verdict), when it
+    names any other screening category or a prose synonym of one, when the
+    ``new_work_request`` mention is negated within three words, or when it does
+    not name ``new_work_request`` at all once normalised.
+    """
+
+    import re
+    import unicodedata
+
+    from local_operator.team_bridge.types import SCREENING_CATEGORIES
+
+    if not isinstance(reason, str) or not reason:
+        return False
+    if any(unicodedata.category(char) == "Cf" for char in reason):
+        return False
+    text = _normalised_reason(reason)
+    target = RELEASABLE_CATEGORIES[0]
+    if target not in text:
+        return False
+    if any(category in text for category in SCREENING_CATEGORIES if category != target):
+        return False
+    remainder = text.replace(target, "_")
+    if any(stem in remainder for stem in _OTHER_CLASS_STEMS):
+        return False
+    for match in re.finditer(re.escape(target), text):
+        before = [word for word in re.split(r"[^a-z0-9]+", text[: match.start()]) if word]
+        if _NEGATORS.intersection(before[-_NEGATION_WINDOW:]):
+            return False
+    return True
 
 
 def converts(categories: Sequence[str]) -> bool:
@@ -168,6 +285,9 @@ def release_payload(
     screener_model: str,
     template_sha256: str,
     categories: Sequence[str],
+    screener_verdict: str,
+    screener_hop: int,
+    screener_preferred: bool,
     word: str,
     decided_at: float,
 ) -> bytes:
@@ -193,9 +313,25 @@ def release_payload(
         + _lp(screener_model)
         + _lp(template_sha256)
         + _lp(json.dumps(sorted(categories), separators=(",", ":")))
+        # Amendment 2 (S-1, m3): what the screener said and which hop said it,
+        # so the record can never be presented for a fallback or a re-labelled
+        # verdict.
+        + _lp(screener_verdict)
+        + _lp(str(int(screener_hop)))
+        + _lp("1" if screener_preferred else "0")
         + _lp(word)
         + _lp(f"{float(decided_at):.6f}")
     )
+
+
+def _int_or(value: Any, default: int) -> int:
+    """``value`` as an int, ``default`` only when ABSENT (code review n1: ``0`` is a value)."""
+
+    return default if value is None else int(value)
+
+
+def _float_or(value: Any, default: float) -> float:
+    return default if value is None else float(value)
 
 
 def payload_for_row(row: Mapping[str, Any]) -> bytes:
@@ -211,7 +347,7 @@ def payload_for_row(row: Mapping[str, Any]) -> bytes:
         categories = ["<damaged>"]
     return release_payload(
         owner_key=str(row.get("owner_key") or ""),
-        generation=int(row.get("creator_generation") or -1),
+        generation=_int_or(row.get("creator_generation"), -1),
         conversation_id=str(row.get("conversation_id") or ""),
         message_id=str(row.get("message_id") or ""),
         body_sha256=str(row.get("body_sha256") or ""),
@@ -221,8 +357,11 @@ def payload_for_row(row: Mapping[str, Any]) -> bytes:
         screener_model=str(row.get("screener_model") or ""),
         template_sha256=str(row.get("template_sha256") or ""),
         categories=[str(c) for c in categories],
+        screener_verdict=str(row.get("screener_verdict") or ""),
+        screener_hop=_int_or(row.get("screener_hop"), -1),
+        screener_preferred=bool(row.get("screener_preferred")),
         word=str(row.get("word") or ""),
-        decided_at=float(row.get("decided_at") or 0.0),
+        decided_at=_float_or(row.get("decided_at"), 0.0),
     )
 
 
@@ -330,6 +469,9 @@ _BOUND_FIELDS = (
     "screener_provider",
     "screener_model",
     "template_sha256",
+    "screener_verdict",
+    "screener_hop",
+    "screener_preferred",
 )
 
 
@@ -339,6 +481,8 @@ def release_matches_decision(release: Mapping[str, Any], decision: Mapping[str, 
     if any(str(release.get(f) or "") != str(decision.get(f) or "") for f in _BOUND_FIELDS):
         return False
     if decoded_categories(release) != decoded_categories(decision):
+        return False
+    if not bool(decision.get("screener_preferred")):
         return False
     return str(decision.get("hold_code") or "") in RELEASABLE_HOLD_CODES
 

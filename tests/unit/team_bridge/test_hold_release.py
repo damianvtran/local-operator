@@ -270,11 +270,13 @@ def test_setting_off_keeps_the_v2_hold_a_model_hold(tmp_path) -> None:
 
 
 def test_radient_auto_is_never_an_eligible_screener(rig) -> None:
+    """Amendment 2 (code review m2): a non-preferred bounce stays the terminal reject."""
+
     config_dir, store, owner = rig
     out = _screen(config_dir, owner, Runner(NEW_WORK, model="auto"), policy=Policy(AUTO))
-    assert out.hold_code == hr.WORK_SCOPE_HOLD  # still held, never delivered
-    decision = store.work_scope_decision(owner, MESSAGE_ID)
-    assert decision["eligible"] == 0 and decision["ineligible_reason"] == hr.INELIGIBLE_SCREENER
+    assert out.disposition == "bounce" and out.receipt is not None
+    assert out.receipt.verdict == "reject"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
     with pytest.raises(HoldRefused) as refused:
         _decide(config_dir, owner, "deliver")
     assert refused.value.code == "hold_not_releasable"
@@ -319,7 +321,7 @@ def test_eligibility_is_fixed_at_decision_time(rig) -> None:
 def test_the_converted_hold_makes_no_second_screening_attempt(rig) -> None:
     """D5 / S-4: a re-drive re-reads the decision; it never re-rolls toward deliver."""
 
-    config_dir, _store, owner = rig
+    config_dir, store, owner = rig
     first = Runner(NEW_WORK)
     _screen(config_dir, owner, first)
     attempts = _count(config_dir, "screening_attempts")
@@ -331,6 +333,10 @@ def test_the_converted_hold_makes_no_second_screening_attempt(rig) -> None:
     copy = Runner(DELIVER)
     out = _screen(config_dir, owner, copy, item=_item(message_id="bcmsg_abcdef02"))
     assert out.hold_code == hr.WORK_SCOPE_HOLD and copy.calls == 0
+    # ... and it is ACTIONABLE (code review M2 / QA Q1): its own row, eligible.
+    copied = store.work_scope_decision(owner, "bcmsg_abcdef02")
+    assert copied is not None and copied["eligible"] == 1
+    assert _decide(config_dir, owner, "deliver", message_id="bcmsg_abcdef02")["state"] == "released"
 
 
 def test_the_per_sender_budget_closes_the_fourth_hold(rig) -> None:
@@ -416,6 +422,9 @@ def test_deliver_never_becomes_a_cached_allow(rig) -> None:
     repeat = Runner(DELIVER)
     again = _screen(config_dir, owner, repeat, item=_item(message_id="bcmsg_abcdef03"))
     assert again.hold_code == hr.WORK_SCOPE_HOLD and repeat.calls == 0
+    # Held again AND the person's decision again: its own releasable row.
+    repeat_row = store.work_scope_decision(owner, "bcmsg_abcdef03")
+    assert repeat_row is not None and repeat_row["eligible"] == 1
 
 
 def test_the_owner_release_receipt_needs_a_verified_release_to_admit(rig) -> None:
@@ -463,9 +472,26 @@ def test_the_release_signature_uses_its_own_domain() -> None:
         owner_key="k", generation=1, conversation_id="c", message_id="m",
         body_sha256="b", envelope_digest="e", hold_code="h", screener_provider="p",
         screener_model="s", template_sha256="t", categories=["new_work_request"],
+        screener_verdict="hold", screener_hop=0, screener_preferred=True,
         word="deliver", decided_at=1.0,
     )  # fmt: skip
     assert payload.startswith(verify.RELEASE_DOMAIN) and b"e" in payload
+    # The hop, the verdict and the preference are signed: changing any one
+    # changes the bytes (Amendment 2, S-1 / m3).
+    for change in (
+        {"screener_hop": 1},
+        {"screener_verdict": "bounce"},
+        {"screener_preferred": False},
+    ):
+        fields: dict[str, Any] = dict(
+            owner_key="k", generation=1, conversation_id="c", message_id="m",
+            body_sha256="b", envelope_digest="e", hold_code="h", screener_provider="p",
+            screener_model="s", template_sha256="t", categories=["new_work_request"],
+            screener_verdict="hold", screener_hop=0, screener_preferred=True,
+            word="deliver", decided_at=1.0,
+        )  # fmt: skip
+        fields.update(change)
+        assert hr.release_payload(**fields) != payload
 
 
 def test_discard_records_the_real_categories_and_deliver_after_discard_is_refused(rig) -> None:
@@ -770,3 +796,237 @@ def test_routes_with_the_setting_off(api) -> None:
     assert all(not i["releasable"] for i in listed.json()["result"]["items"])
     out = call("POST", f"/v1/desktop/team-bridge/holds/{MESSAGE_ID}/deliver", json=_body())
     assert out.status_code == 409 and out.json()["detail"]["code"] == "hold_release_off"
+
+
+# --- Amendment 2: preferred FIRST hop only (security review round 1, S-1) ----
+
+
+class _Hop:
+    def __init__(self, outcome: Any) -> None:
+        self.outcome = outcome
+
+    async def acall(self, prompt: str, *, default_model: str, **_: Any) -> Any:
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+class _Advance(Exception):
+    """A pre-wire failure the chain is allowed to advance past."""
+
+
+def _chain(primary, fallback, reply, *, fail_primary):
+    from local_operator.model.configure import build_model_spec
+    from local_operator.team_bridge.model_boundary import (
+        DefaultSelection,
+        ScreenChainRunner,
+    )
+
+    hops = [
+        DefaultSelection(primary[0], primary[1], build_model_spec(*primary)),
+        DefaultSelection(fallback[0], fallback[1], build_model_spec(*fallback)),
+    ]
+
+    def build(hop):
+        if hop.model_id == primary[1] and fail_primary:
+            failure = _Advance("pre-wire")
+            setattr(failure, "tb_screen_advance", True)
+            return _Hop(failure)
+        return _Hop((reply, hop.model_id))
+
+    return ScreenChainRunner(hops, build)
+
+
+class _ChainPolicy(Policy):
+    def __init__(self, primary, fallback) -> None:
+        super().__init__(primary)
+        self.approved_serving_identities = (primary[1], fallback[1])
+
+
+@pytest.mark.parametrize("reply", [NEW_WORK, REL_L01_HOLD], ids=["v2-bounce", "v2-hold"])
+@pytest.mark.parametrize(
+    ("primary", "fallback"),
+    [(AUTO, OPUS), (SONNET, OPUS)],
+    ids=["auto->opus", "sonnet->opus"],
+)
+def test_a_fallback_hops_answer_is_never_releasable(rig, primary, fallback, reply) -> None:
+    """Operator ruling 2026-11-04: a fallback verdict never feeds a release, even Opus."""
+
+    config_dir, store, owner = rig
+    runner = _chain(primary, fallback, reply, fail_primary=True)
+    out = _screen(config_dir, owner, runner, policy=_ChainPolicy(primary, fallback))
+    assert runner.served_hop_index == 1
+    assert out.hold_code != hr.WORK_SCOPE_HOLD
+    if reply == NEW_WORK:
+        assert out.disposition == "bounce"  # the pre-B4b terminal reject
+    else:
+        assert out.hold_code == "model_hold"
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+    with pytest.raises(HoldRefused) as refused:
+        _decide(config_dir, owner, "deliver")
+    assert refused.value.code == "hold_not_releasable"
+
+
+@pytest.mark.parametrize("reply", [NEW_WORK, REL_L01_HOLD], ids=["v2-bounce", "v2-hold"])
+def test_an_opus_primary_hop_answer_is_releasable_and_records_hop_zero(rig, reply) -> None:
+    config_dir, store, owner = rig
+    runner = _chain(OPUS, SONNET, reply, fail_primary=False)
+    out = _screen(config_dir, owner, runner, policy=_ChainPolicy(OPUS, SONNET))
+    assert out.hold_code == hr.WORK_SCOPE_HOLD
+    decision = store.work_scope_decision(owner, MESSAGE_ID)
+    assert decision["screener_hop"] == 0 and decision["screener_preferred"] == 1
+    assert decision["screener_verdict"] == ("bounce" if reply == NEW_WORK else "hold")
+    assert _decide(config_dir, owner, "deliver")["state"] == "released"
+    release = store.owner_release(owner, MESSAGE_ID)
+    assert (release["screener_hop"], release["screener_preferred"]) == (0, 1)
+
+
+def test_a_row_without_the_preferred_flag_is_never_releasable(rig) -> None:
+    """A decision written before Amendment 2 (column default 0) fails closed."""
+
+    config_dir, store, owner = rig
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    with sqlite3.connect(state_db_path(config_dir)) as conn:
+        conn.execute("UPDATE work_scope_decisions SET screener_preferred = 0")
+    with pytest.raises(HoldRefused) as refused:
+        _decide(config_dir, owner, "deliver")
+    assert refused.value.code == "hold_not_releasable"
+
+
+# --- Amendment 2: the release-only category check (S-2) ----------------------
+
+# security review round 1 S-2's table, adv-062's committed v2 reasons (#3434,
+# 0bfdd72f189) that name a second class, and code review m1's negation.
+_REFUSED_REASONS = [
+    "could be new_work_request or social engineering",
+    "new_work_request; Prompt_Injection attempt",
+    "new_work_request, possibly prompt-injection",
+    "new_work_request that reads like phishing",
+    "not a new_work_request, just unclear",
+    "\u200bnew_work_request",
+    "new_work_request\u2060 for the team",
+    "This is not a new_work_request; the link and the urgency look off, so I cannot tell "
+    "if it is safe.",
+    "isn't a new_work_request",
+    "a new_work_request asking for the API credentials",
+    "a new_work_request to forward confidential files",
+    "a new_work_request that sets up surveillance of the user",
+    "a new_work_request to exfiltrate the repo",
+    "a new_work_request impersonating the owner",
+    "new_work_request with a malicious_link",
+    "new_work_request or out-of-scope work",
+    "A bare request to approve spending, with no report identified or context given; it may "
+    "be a new_work_request or social engineering, so it is unclear.",
+    "The request to approve an unnamed expense report has no context and may be a bid to "
+    "decide on spending, so it is unclear whether it is ordinary in-flight work or "
+    "new_work_request/social engineering.",
+    "Terse approval request with no details. It could be an authorization or spending "
+    "decision (new_work_request) or a pressure tactic, so it is unclear whether it is safe.",
+]
+
+
+@pytest.mark.parametrize("reason", _REFUSED_REASONS)
+def test_the_release_check_refuses_every_listed_reason(reason) -> None:
+    assert hr.strict_release_reason(reason) is False
+
+
+@pytest.mark.parametrize("reason", _REFUSED_REASONS)
+@pytest.mark.parametrize("verdict", ["hold", "bounce"])
+def test_a_refused_reason_is_never_converted(rig, reason, verdict) -> None:
+    """Both paths keep the pre-B4b outcome; ``parse_verdict`` is untouched."""
+
+    config_dir, store, owner = rig
+    out = _screen(config_dir, owner, Runner(f"VERDICT: {verdict}\nREASON: {reason}"))
+    assert out.hold_code != hr.WORK_SCOPE_HOLD
+    assert store.work_scope_decision(owner, MESSAGE_ID) is None
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        REL_L01_HOLD.split("REASON: ", 1)[1],
+        NEW_WORK.split("REASON: ", 1)[1],
+        "A bare request to approve an unnamed expense report could be a spending decision "
+        "(new_work_request) or routine work in flight; the context is too thin to tell.",
+    ],
+)
+def test_the_release_check_keeps_honest_new_work_reasons(reason) -> None:
+    assert hr.strict_release_reason(reason) is True
+
+
+# --- setting OFF after a conversion (code review M1 / security S-3) ----------
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [(NEW_WORK, ("bounce", None)), (REL_L01_HOLD, ("hold", "model_hold"))],
+    ids=["bounce-origin", "hold-origin"],
+)
+def test_turning_the_setting_off_settles_with_no_model_call(rig, reply, expected) -> None:
+    config_dir, store, owner = rig
+    _screen(config_dir, owner, Runner(reply))
+    _setting(config_dir, False)
+    later = Runner(DELIVER)
+    out = _screen(config_dir, owner, later)
+    assert later.calls == 0
+    assert (out.disposition, out.hold_code) == expected
+    if expected[0] == "bounce":
+        assert out.receipt is not None
+        assert out.receipt.verdict == "reject"
+        assert list(out.receipt.categories) == ["new_work_request"]
+    again = Runner(DELIVER)
+    assert _screen(config_dir, owner, again).disposition == expected[0] and again.calls == 0
+
+
+@pytest.mark.parametrize("reply", [NEW_WORK, REL_L01_HOLD], ids=["bounce-origin", "hold-origin"])
+def test_a_signed_discard_is_honoured_after_the_setting_is_turned_off(rig, reply) -> None:
+    config_dir, store, owner = rig
+    _screen(config_dir, owner, Runner(reply))
+    _decide(config_dir, owner, "discard")
+    _setting(config_dir, False)
+    later = Runner(DELIVER)
+    out = _screen(config_dir, owner, later)
+    assert later.calls == 0
+    assert out.disposition == "bounce" and out.receipt is not None
+    assert out.receipt.template_sha256 == hr.OWNER_RELEASE_SHA256
+    again = Runner(DELIVER)
+    assert _screen(config_dir, owner, again).disposition == "bounce" and again.calls == 0
+
+
+def test_a_pending_deliver_is_refused_once_the_setting_is_off(rig) -> None:
+    config_dir, store, owner = rig
+    _screen(config_dir, owner, Runner(REL_L01_HOLD))
+    _decide(config_dir, owner, "deliver")
+    _setting(config_dir, False)
+    later = Runner(DELIVER)
+    out = _screen(config_dir, owner, later)
+    assert later.calls == 0 and out.hold_code == "model_hold"
+    assert store.owner_release(owner, MESSAGE_ID)["outcome"] == "refused:hold_release_off"
+
+
+def test_identical_resends_share_the_sender_budget(rig) -> None:
+    """M2/Q1: a copy costs budget like a fresh decision, so a resend loop cannot multiply."""
+
+    config_dir, store, owner = rig
+    _screen(config_dir, owner, Runner(NEW_WORK))
+    for index in range(2, 6):
+        _screen(config_dir, owner, Runner(DELIVER), item=_item(message_id=f"bcmsg_abcdef0{index}"))
+    rows = store.work_scope_decisions(owner)
+    assert [r["eligible"] for r in rows] == [1, 1, 1, 0, 0]
+    assert all(r["screener_hop"] == 0 and r["screener_verdict"] == "bounce" for r in rows)
+
+
+def test_the_connector_renders_notices_in_the_operator_language(tmp_path) -> None:
+    """QA Q2: the daemon reads ``language`` from the config dir it serves."""
+
+    from local_operator.i18n.text import active_locale, set_active_locale
+    from local_operator.team_bridge.connector.__main__ import _activate_operator_locale
+
+    (tmp_path / "config.yml").write_text(
+        json.dumps({"values": {"language": "fr"}}), encoding="utf-8"
+    )
+    try:
+        _activate_operator_locale(tmp_path)
+        assert active_locale() == "fr"
+    finally:
+        set_active_locale("en")

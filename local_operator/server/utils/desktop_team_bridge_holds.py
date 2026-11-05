@@ -130,6 +130,7 @@ def list_holds(config_dir: Path, owner: Any, *, now: float | None = None) -> dic
             and code in hr.RELEASABLE_HOLD_CODES
             and decision is not None
             and decision.get("eligible")
+            and decision.get("screener_preferred")
         )
         held_at = float(decision["created_at"]) if decision is not None else row["created_at"]
         deliver_until = held_at + hr.DELIVER_WINDOW_S if eligible else None
@@ -212,6 +213,7 @@ def decide(
         or held["hold_code"] not in hr.RELEASABLE_HOLD_CODES
         or decision is None
         or not decision.get("eligible")
+        or not decision.get("screener_preferred")
     ):
         # One code for "no hold", "not this kind" and "not eligible": the
         # renderer offers buttons only on ``releasable``, so a forced call gets
@@ -238,6 +240,9 @@ def decide(
         screener_model=str(decision["screener_model"]),
         template_sha256=str(decision["template_sha256"]),
         categories=hr.decoded_categories(decision),
+        screener_verdict=str(decision.get("screener_verdict") or ""),
+        screener_hop=-1 if decision.get("screener_hop") is None else int(decision["screener_hop"]),
+        screener_preferred=bool(decision.get("screener_preferred")),
         word=word,
         decided_at=now,
     )
@@ -264,6 +269,11 @@ def decide(
                 "key_id": key_id,
                 "signature": signature,
                 "surface": "desktop",
+                "screener_verdict": str(decision.get("screener_verdict") or ""),
+                "screener_hop": (
+                    -1 if decision.get("screener_hop") is None else int(decision["screener_hop"])
+                ),
+                "screener_preferred": 1 if decision.get("screener_preferred") else 0,
             },
         )
     except StoreRefused as failure:
