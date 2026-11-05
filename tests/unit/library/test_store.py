@@ -928,9 +928,7 @@ def test_a_transient_io_error_is_retried_once_and_never_recovered(
         assert connection.execute("SELECT 1").fetchone()[0] == 1
     assert attempts == [1, 1], "one failure plus exactly one fresh handle"
     assert [
-        record
-        for record in caplog.records
-        if record.name == "local_operator.library.store"
+        record for record in caplog.records if record.name == "local_operator.library.store"
     ] == []
 
     recovery_calls: list[int] = []
@@ -1009,9 +1007,7 @@ def test_a_transient_pragma_error_closes_the_poisoned_handle_and_retries(
                 setattr(self._real, name, value)
 
         def execute(self, sql, *args, **kwargs):
-            if not state["failed"] and str(sql).lstrip().upper().startswith(
-                "PRAGMA BUSY_TIMEOUT"
-            ):
+            if not state["failed"] and str(sql).lstrip().upper().startswith("PRAGMA BUSY_TIMEOUT"):
                 state["failed"] = True
                 error = sqlite3.OperationalError("disk I/O error")
                 error.sqlite_errorcode = 10
