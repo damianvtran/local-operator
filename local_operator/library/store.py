@@ -117,8 +117,15 @@ class IndexUnavailable(RuntimeError):
 #: deliberately absent: they say "try again", not "this file is damaged".
 _CORRUPT_CODES: Final = frozenset({11, 26})
 
+#: The two primary codes that mean "try again": ``SQLITE_BUSY`` and
+#: ``SQLITE_IOERR``. Only these license the one bounded reconnect in
+#: :meth:`LibraryStore._connect`; a corrupt file, a constraint failure or any
+#: other sqlite error surfaces unchanged. Extended codes are compared by their
+#: low byte for the same reason as ``_CORRUPT_CODES``.
+_TRANSIENT_CODES: Final = frozenset({5, 10})
 
-def _is_corruption(error: sqlite3.DatabaseError) -> bool:
+
+def _is_corruption(error: sqlite3.Error) -> bool:
     code = getattr(error, "sqlite_errorcode", None)
     if code is not None:
         # CPython exposes EXTENDED codes (a constraint failure is 2067, not
@@ -128,6 +135,18 @@ def _is_corruption(error: sqlite3.DatabaseError) -> bool:
     # only signal left, and only these two phrases mean damage.
     text = str(error).lower()
     return "malformed" in text or "not a database" in text
+
+
+def _is_transient(error: sqlite3.Error) -> bool:
+    """Whether this error is the retry class, never a damage claim.
+
+    A missing code is not transient: older SQLite builds cannot distinguish a
+    busy/IOERR condition from any other database failure here, and guessing from
+    the message would make the retry predicate a second, substring-based copy of
+    SQLite's own classification.
+    """
+    code = getattr(error, "sqlite_errorcode", None)
+    return code is not None and (code & 0xFF) in _TRANSIENT_CODES
 
 
 class ListingQuery(Protocol):
@@ -614,29 +633,64 @@ class LibraryStore:
             raise IndexUnavailable(str(error), corrupt=_is_corruption(error)) from error
         return version is not None and version.isdigit() and int(version) == SCHEMA_VERSION
 
+    def _open_connection(self) -> sqlite3.Connection:
+        """Open and configure one handle, closing it if setup fails.
+
+        The close on the setup failure is what makes the one retry in
+        :meth:`_connect` a genuinely fresh handle rather than a second use of a
+        connection whose pragma already failed.
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(self.path, timeout=5.0)
+        try:
+            connection.row_factory = sqlite3.Row
+            # journal_mode is a DATABASE property, not a connection one: it is
+            # persisted in the file, so switching it on every connect only
+            # buys a write lock another connection may already hold (observed
+            # as ``database is locked`` under the librarian's concurrent
+            # reads). ``_ensure_schema`` sets it once, at bootstrap.
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("PRAGMA synchronous=NORMAL")
+            return connection
+        except BaseException:
+            try:
+                connection.close()
+            except sqlite3.Error:
+                pass
+            raise
+
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         if self._key in self._failed_paths:
             raise IndexUnavailable("library index is unreadable", corrupt=True)
         if self._key not in self._ready_paths:
             self._recover_if_flagged()
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            connection = sqlite3.connect(self.path, timeout=5.0)
-        except (OSError, sqlite3.Error) as error:
-            raise IndexUnavailable(str(error)) from error
-        try:
-            connection.row_factory = sqlite3.Row
+        connection: sqlite3.Connection | None = None
+        for attempt in range(2):
             try:
-                # journal_mode is a DATABASE property, not a connection one: it is
-                # persisted in the file, so switching it on every connect only
-                # buys a write lock another connection may already hold (observed
-                # as ``database is locked`` under the librarian's concurrent
-                # reads). ``_ensure_schema`` sets it once, at bootstrap.
-                connection.execute("PRAGMA busy_timeout=5000")
-                connection.execute("PRAGMA synchronous=NORMAL")
-            except sqlite3.DatabaseError as error:
-                raise IndexUnavailable(str(error)) from error
+                connection = self._open_connection()
+                break
+            except (OSError, sqlite3.Error) as error:
+                # A busy lock or a transient I/O error gets exactly one fresh
+                # connection. The retry is deliberately not applied to any other
+                # error: a corrupt database must surface, and a non-SQLite OSError
+                # has no SQLite code with which to prove it is retryable.
+                if (
+                    attempt == 0
+                    and isinstance(error, sqlite3.DatabaseError)
+                    and not isinstance(error, sqlite3.ProgrammingError)
+                    and _is_transient(error)
+                ):
+                    continue
+                corrupt = (
+                    _is_corruption(error) if isinstance(error, sqlite3.DatabaseError) else False
+                )
+                raise IndexUnavailable(str(error), corrupt=corrupt) from error
+        if connection is None:
+            # Unreachable after the loop above (it either breaks with a handle or
+            # raises), but kept as a real branch so ``-O`` cannot erase the guard.
+            raise IndexUnavailable("library index connection was not established", corrupt=False)
+        try:
             if not self._schema_present(connection):
                 # The verdict this process stored was about a file, and this
                 # handle names the file that is about to be read. Discard and
@@ -743,7 +797,7 @@ class LibraryStore:
                 raise
             except sqlite3.Error as error:
                 logger.warning("library index schema failure", exc_info=True)
-                raise IndexUnavailable(str(error)) from error
+                raise IndexUnavailable(str(error), corrupt=_is_corruption(error)) from error
 
     @staticmethod
     def _drop_derived_statements() -> list[str]:
