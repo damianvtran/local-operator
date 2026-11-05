@@ -1536,16 +1536,26 @@ def write_profile(
         # cannot become a second write and a dead attempt cannot be replayed as
         # a fresh grant. It is derived from the host's authorization string,
         # which is per-grant and never anything a model can choose.
-        save_identity = hashlib.sha256(
-            f"save|{authorized_by or ''}|{name}|{target}".encode("utf-8")
-        ).hexdigest()[:32]
+        # HTTP editors/session-local writes have no tool grant; independent
+        # edits must not all collide on the empty string. A real tool grant is
+        # also bound to the exact proposal and base, not just a name mention.
+        save_identity = (
+            hashlib.sha256(
+                (
+                    f"save|{authorized_by}|{name}|{target}|{expected_definition_revision}|"
+                    + params.model_dump_json(exclude_unset=True)
+                ).encode("utf-8")
+            ).hexdigest()[:32]
+            if authorized_by
+            else None
+        )
         with atomic_edit(
             Path(store.config_dir),
             owner=store,
             read=lambda: agent_image(store, name),
             restore=lambda image: restore_agent_image(store, name, image),
             backup=(lambda image: before_write()) if before_write is not None else None,
-            transaction_id="save-" + save_identity,
+            transaction_id="save-" + save_identity if save_identity else None,
         ):
             return _write_profile_locked(
                 registry,
@@ -1569,6 +1579,7 @@ def _write_profile_locked(
     expected_definition_revision: str | None = None,
     context: ToolContext | None = None,
     consent_checked: bool = False,
+    preview: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[str, str, str]:
     """Shared tool/HTTP mutation; preserve omitted policy fields and provenance.
 
@@ -1911,6 +1922,28 @@ def _write_profile_locked(
         )
         raise ValueError(durable_write_refusal(intent))
 
+    if preview is not None:
+        from local_operator.display_labels import default_label, normalize_label
+
+        preview(
+            {
+                "id": str(existing.id) if existing is not None else "pending",
+                "name": name,
+                "label": (
+                    (normalize_label(params.label) or default_label(name))
+                    if params.label is not None
+                    else (str(existing.label) if existing is not None else default_label(name))
+                ),
+                "description": profile.description,
+                "tags": tags,
+                "categories": categories,
+                "model": existing.model if existing is not None else "",
+                "instructions": instructions
+                or (registry.get_agent_system_prompt(existing.id) if existing is not None else ""),
+            }
+        )
+        return name, kind, action_class
+
     if existing is None:
         agent = scope_store(registry, scope).create_agent(
             _fields(
@@ -1980,6 +2013,57 @@ class _AccountSave:
     base_revision: str | None
     before: dict[str, Any]
     backup_id: str | None = None
+
+
+def _queued_profile_receipt(tool_call_id: str, tool_name: str, queued: Any) -> ToolResult:
+    return _text(
+        tool_call_id,
+        tool_name,
+        f"Queued {queued.profile_kind} {queued.profile_name!r} for durable approval "
+        f"({queued.approval_id}). No profile or backup was changed. "
+        "The signed approval continuation applies it; do not retry this tool call."
+        + ("\n" + "\n".join(queued.diff) if queued.diff else ""),
+        details={
+            "status": "queued",
+            "fields": list(queued.changes),
+            "diff": list(queued.diff),
+            "approval_id": queued.approval_id,
+            "request_digest": queued.request_digest,
+            "expires_at": queued.expires_at,
+            "receipt_id": queued.receipt_id,
+            "profile_kind": queued.profile_kind,
+            "profile_name": queued.profile_name,
+            "scope": "global",
+        },
+    )
+
+
+def _agent_proposal(
+    registry: Any, params: AgentParams, creating: bool, scope: Any
+) -> dict[str, Any]:
+    import uuid
+
+    from local_operator.profile_approval import AgentImage
+
+    before_row = registry.get_agent_by_name(str(params.name))
+    before = None
+    if before_row is not None:
+        raw = before_row.model_dump(mode="json")
+        before = {key: raw[key] for key in AgentImage.model_fields if key != "instructions"}
+        before["instructions"] = registry.get_agent_system_prompt(before_row.id)
+    images = []
+    _write_profile_locked(registry, params, creating=creating, scope=scope, preview=images.append)
+    after = images[0]
+    if before is None:
+        after["id"] = str(uuid.uuid4())
+    return {
+        "profile_kind": "agent",
+        "operation": "create" if creating else "update",
+        "target_id": after["id"],
+        "name": after["name"],
+        "before": before,
+        "after": after,
+    }
 
 
 def _plan_account_save(registry: Any, existing: Any, params: AgentParams) -> _AccountSave:
@@ -2215,6 +2299,16 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
                 f"{profile_field_label(key)}: {_format_field(fields.get(key))} -> "
                 f"{_format_field(before.get(key))}"
             )
+    from local_operator.profile_approval import AgentImage
+
+    before_image = {
+        key: registry.get_agent(agent_id).model_dump(mode="json")[key]
+        for key in AgentImage.model_fields
+        if key != "instructions"
+    }
+    before_image["instructions"] = registry.get_agent_system_prompt(agent_id)
+    after_image = {key: row[key] for key in AgentImage.model_fields if key != "instructions"}
+    after_image["instructions"] = str(record.get("instructions") or "")
     intent = DurableWriteIntent(
         kind="agent",
         operation="revert",
@@ -2222,8 +2316,19 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
         changes=changes,
         summary="\n".join(summary_lines),
         base_revision=str(saved),
+        proposal={
+            "profile_kind": "agent",
+            "operation": "revert",
+            "target_id": agent_id,
+            "name": name,
+            "before": before_image,
+            "after": after_image,
+        },
+        tool_call_id=tool_call_id,
     )
     authorized_by, reason = await durable_write_decision(context, intent)
+    if reason == "queued":
+        return _queued_profile_receipt(tool_call_id, "agent", authorized_by)
     if authorized_by is None:
         return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
 
@@ -2355,8 +2460,12 @@ async def _op_write(
             changes=account_save.changes,
             summary=account_save.summary,
             base_revision=account_save.base_revision,
+            proposal=_agent_proposal(registry, params, creating, scope),
+            tool_call_id=tool_call_id,
         )
         authorized_by, reason = await durable_write_decision(context, intent)
+        if reason == "queued":
+            return _queued_profile_receipt(tool_call_id, "agent", authorized_by)
         if authorized_by is None:
             return _error(tool_call_id, "agent", durable_write_refusal(intent, reason))
     try:

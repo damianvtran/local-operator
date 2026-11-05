@@ -1984,6 +1984,20 @@ AskUserFn = Callable[[list[AskQuestion]], Awaitable[dict[str, list[str]] | None]
 
 
 @dataclass(frozen=True)
+class QueuedProfileWrite:
+    """Host-filed durable request, explicitly NOT a grant or a denial."""
+
+    approval_id: str
+    request_digest: str
+    expires_at: float
+    receipt_id: str
+    profile_kind: str
+    profile_name: str
+    changes: tuple[str, ...] = ()
+    diff: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class DurableWriteIntent:
     """One TOOL-proposed write that would change the user's ACCOUNT store.
 
@@ -2032,6 +2046,10 @@ class DurableWriteIntent:
     #: create). The tool re-checks it under the registry's write lock, so an
     #: approval of this card can never land on a row that moved meanwhile.
     base_revision: str | None = None
+    #: Internal executable values, never a tool-wire authority flag. The host
+    #: binds session/anchor/expiry when filing the signed operation request.
+    proposal: dict[str, Any] | None = None
+    tool_call_id: str = ""
 
 
 class ToolContext(BaseModel):
@@ -2259,9 +2277,9 @@ class ToolContext(BaseModel):
     #
     # Off the tool wire, like every other host-owned presence field here: a
     # callback is a capability, never payload a provider may see.
-    authorize_durable_write: Callable[[DurableWriteIntent], Awaitable[str | None]] | None = Field(
-        default=None, exclude=True, repr=False
-    )
+    authorize_durable_write: (
+        Callable[[DurableWriteIntent], Awaitable[str | QueuedProfileWrite | None]] | None
+    ) = Field(default=None, exclude=True, repr=False)
     # Session-named variables behind the list_variables / read_variable tools.
     # Values are never baked into the prompt; the model lists names and reads
     # single values on demand. ``None`` degrades those tools to the process

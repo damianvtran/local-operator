@@ -241,9 +241,7 @@ def shadow_in_other_store(registry: Any, scope: Scope, name: str, *, kind: str) 
     return None
 
 
-async def durable_write_decision(
-    context: Any, intent: "DurableWriteIntent"
-) -> tuple[str | None, str]:
+async def durable_write_decision(context: Any, intent: "DurableWriteIntent") -> tuple[Any, str]:
     """Ask the HOST to approve a write into the account's shared store.
 
     THE ONE CONSENT SEAM (LOH-9 S2). The decision is the host's: a model must not
@@ -275,6 +273,10 @@ async def durable_write_decision(
     except Exception:  # noqa: BLE001 — an unavailable consent seam is a refusal
         logger.warning("durable-write consent seam failed; refusing", exc_info=True)
         return None, "error"
+    from local_operator.harness.types import QueuedProfileWrite
+
+    if isinstance(origin, QueuedProfileWrite):
+        return origin, "queued"
     return (str(origin), "granted") if origin else (None, "declined")
 
 

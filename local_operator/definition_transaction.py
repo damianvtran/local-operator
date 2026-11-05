@@ -189,6 +189,7 @@ def prepare(
     before: Any,
     after: Any,
     read: Callable[[], Any] | None = None,
+    binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write (or confirm) the UNCONSUMED record a later apply is checked against.
 
@@ -214,12 +215,15 @@ def prepare(
                 "before": before_token,
                 "after": after_token,
                 "state": "prepared",
+                "binding": binding,
             }
             _durable_json(path, record)
             return record
         previous = json.loads(path.read_text(encoding="utf-8"))
         if previous.get("before") != before_token or previous.get("after") != after_token:
             raise DefinitionTransactionConflict("transaction identity has different images")
+        if previous.get("binding") != binding:
+            raise DefinitionTransactionConflict("transaction belongs to a different approval")
         if previous.get("state") == "prepared":
             return previous
         if previous.get("state") == "complete":
@@ -252,6 +256,7 @@ def transact(
     read: Callable[[], Any],
     write: Callable[[Any], None],
     backup: Callable[[Any], None] | None = None,
+    binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """CAS, backup, journal and mutation under ONE definition boundary.
 
@@ -279,6 +284,8 @@ def transact(
         previous = json.loads(path.read_text(encoding="utf-8"))
         if previous.get("before") != before_token or previous.get("after") != after_token:
             raise DefinitionTransactionConflict("transaction identity has different images")
+        if previous.get("binding") != binding:
+            raise DefinitionTransactionConflict("transaction belongs to a different approval")
         current = commitment(read())
         if previous.get("state") == "complete":
             # A later edit may deliberately restore the original bytes. That
@@ -374,7 +381,6 @@ def atomic_edit(
             active = _LOCAL.owners = {}
         if key in active:
             raise DefinitionTransactionConflict("nested definition transaction is not supported")
-        active[key] = owner
         edit_id = transaction_id or ("edit-" + uuid.uuid4().hex)
         _validate_identity(edit_id)
         consume_key = _consumed_key(root, edit_id)
@@ -404,6 +410,9 @@ def atomic_edit(
             "before_image": before,
             "after": None,
         }
+        # Install ownership only once preflight can no longer refuse: otherwise
+        # a consumed/conflicting edit leaves a phantom nested transaction behind.
+        active[key] = owner
         try:
             _durable_json(path, record)
             if backup is not None:

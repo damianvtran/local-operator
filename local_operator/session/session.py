@@ -3352,9 +3352,7 @@ class Session:
         #: conversation-only retry. Declared here so a host that CAN show an
         #: intent-specific, non-rememberable confirmation has one place to
         #: install it.
-        authorize_durable_write: (
-            Callable[["DurableWriteIntent"], Awaitable[str | None]] | None
-        ) = None,
+        authorize_durable_write: Callable[["DurableWriteIntent"], Awaitable[Any]] | None = None,
         #: Install the session-owned account-profile consent
         #: (:meth:`_authorize_account_profile_write`) when no explicit seam was
         #: passed. Off by default so an SDK/embedding host keeps today's
@@ -14389,7 +14387,7 @@ class Session:
         resolver = self._fallback_tool_resolver
         return resolver(name) if resolver is not None else None
 
-    async def _authorize_account_profile_write(self, intent: "DurableWriteIntent") -> str | None:
+    async def _authorize_account_profile_write(self, intent: "DurableWriteIntent") -> Any:
         """The session-owned consent seam for tool-issued ACCOUNT profile writes.
 
         Users ask their agents to edit agent and team profiles; before this seam
@@ -14439,6 +14437,36 @@ class Session:
             ):
                 run_ms = int(self._run_started_at * 1000)
                 return f"owner-prompt:{self._session_id or 'session'}@{run_ms}"
+        # No parked turn, and no model retry: the typed signed provider is the
+        # continuation. Filing itself confers no mutation/signing authority.
+        #
+        # OPS WITHOUT A BOUNDED PROPOSAL keep the pre-existing card path: a seed
+        # reset, a sync, a promote or an install names a packaged artefact rather
+        # than authored values, so there is nothing to state exactly in a signed
+        # payload. They are unchanged here on purpose (falls through below).
+        if intent.proposal is not None:
+            from local_operator import profile_approval
+            from local_operator.harness.types import QueuedProfileWrite
+
+            registry = self.agent_registry if intent.kind == "agent" else self.team_registry
+            root = Path(registry.config_dir)
+            data = profile_approval.build(
+                root,
+                session_id=self._session_id,
+                tool_call_id=intent.tool_call_id,
+                **intent.proposal,
+            )
+            record = profile_approval.file_request(root, data)
+            return QueuedProfileWrite(
+                approval_id=record["approval_id"],
+                request_digest=record["request_digest"],
+                expires_at=record["expires_at"],
+                receipt_id=data.receipt_id,
+                profile_kind=data.profile_kind,
+                profile_name=data.name,
+                changes=intent.changes,
+                diff=tuple(intent.summary.splitlines()),
+            )
         gate = self._request_approval
         if gate is None:
             from local_operator.harness.approval import ApprovalUnavailableError

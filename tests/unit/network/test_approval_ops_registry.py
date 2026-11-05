@@ -32,6 +32,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from local_operator import profile_approval
 from local_operator.config import ConfigManager
 from local_operator.network import approval_ops
 from local_operator.network import approvals as A
@@ -217,17 +218,26 @@ def test_golden_credential_digests(
 
 
 def test_file_only_signing_is_derived_from_the_registry_with_the_pair_op() -> None:
+    # ``profile_save`` is a MACHINE-subject account write, so a file-only
+    # operator key may not sign it from the desktop: the operator's posture is
+    # that these saves take a presence-backed gesture. The row is part of the
+    # table now that the op is registered in production.
     assert desktop_approval.FILE_ONLY_SIGNING == {
         finite_share.OP: True,
         inheritance.OP: False,
         pair_op.OP: True,
+        profile_approval.OP: False,
     }
     assert dict(desktop_approval.FILE_ONLY_SIGNING) == approval_ops.file_only_signing()
     # Every registered op carries an explicit decision, and only registered ops are listed.
     assert {op.op for op in approval_ops.registered()} == set(desktop_approval.FILE_ONLY_SIGNING)
     for op in approval_ops.registered():
         assert isinstance(op, approval_ops.ApprovalOp)
-        assert op.kind in {A.KIND_DEVICE_ONBOARD, A.KIND_OPERATOR_DEVICE_PAIR}
+        assert op.kind in {
+            A.KIND_DEVICE_ONBOARD,
+            A.KIND_OPERATOR_DEVICE_PAIR,
+            A.KIND_PROFILE_SAVE,
+        }
 
 
 def test_registering_a_second_op_under_the_same_name_is_refused() -> None:

@@ -544,39 +544,6 @@ async def _op_write(
     backup_id: str | None = None
     changes: tuple[str, ...] = ()
     summary = ""
-    if context is not None and target == "global" and needs_durable_consent(registry, params.scope):
-        changes, summary = _team_changes(existing, params)
-        base_revision = team_revision(existing) if existing is not None else None
-        intent = DurableWriteIntent(
-            kind="team",
-            operation="update" if not creating else "create",
-            name=name,
-            changes=changes,
-            summary=summary,
-            base_revision=base_revision,
-        )
-        authorized_by, reason = await durable_write_decision(context, intent)
-        if authorized_by is None:
-            return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
-        if existing is not None:
-            # The backup is the row at the APPROVED revision; a row that moved
-            # since the card refuses here, and one that moves after refuses at
-            # the CAS-bound write below.
-            current = registry.get_team(existing.id)
-            if team_revision(current) != base_revision:
-                return _error(tool_call_id, "team", _moved_refusal(name))
-            backup_id = save_profile_backup(
-                getattr(context, "session_dir", None),
-                {
-                    "kind": "team",
-                    "name": current.name,
-                    "id": str(current.id),
-                    "scope": "global",
-                    "row": current.model_dump(mode="json"),
-                    "base_revision": base_revision,
-                    "authorized_by": authorized_by,
-                },
-            )
     if not creating and existing is None:
         return _error(
             tool_call_id,
@@ -627,6 +594,45 @@ async def _op_write(
         instructions=instructions,
         project=project,
     )
+    if context is not None and target == "global" and needs_durable_consent(registry, params.scope):
+        changes, summary = _team_changes(existing, params)
+        base_revision = team_revision(existing) if existing is not None else None
+        intent = DurableWriteIntent(
+            kind="team",
+            operation="update" if not creating else "create",
+            name=name,
+            changes=changes,
+            summary=summary,
+            base_revision=base_revision,
+            proposal=_team_proposal(existing, fields, creating, name),
+            tool_call_id=tool_call_id,
+        )
+        authorized_by, reason = await durable_write_decision(context, intent)
+        if reason == "queued":
+            from local_operator.tools.agent_tool import _queued_profile_receipt
+
+            return _queued_profile_receipt(tool_call_id, "team", authorized_by)
+        if authorized_by is None:
+            return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
+        if existing is not None:
+            # The backup is the row at the APPROVED revision; a row that moved
+            # since the card refuses here, and one that moves after refuses at
+            # the CAS-bound write below.
+            current = registry.get_team(existing.id)
+            if team_revision(current) != base_revision:
+                return _error(tool_call_id, "team", _moved_refusal(name))
+            backup_id = save_profile_backup(
+                getattr(context, "session_dir", None),
+                {
+                    "kind": "team",
+                    "name": current.name,
+                    "id": str(current.id),
+                    "scope": "global",
+                    "row": current.model_dump(mode="json"),
+                    "base_revision": base_revision,
+                    "authorized_by": authorized_by,
+                },
+            )
     try:
         if creating:
             if not (params.manager or "").strip():
@@ -703,6 +709,47 @@ _TEAM_SAVE_FIELDS = (
     "instructions",
     "project",
 )
+
+
+def _team_proposal(
+    existing: Any, fields: TeamEditFields, creating: bool, name: str
+) -> dict[str, Any]:
+    import uuid
+
+    from local_operator.display_labels import default_label
+    from local_operator.profile_approval import TeamImage
+
+    before = (
+        None
+        if existing is None
+        else {key: existing.model_dump(mode="json")[key] for key in TeamImage.model_fields}
+    )
+    after = (
+        dict(before)
+        if before is not None
+        else {
+            "id": str(uuid.uuid4()),
+            "name": name,
+            "label": default_label(name),
+            "description": "",
+            "manager": "manager",
+            "members": [],
+            "aliases": [],
+            "instructions": "",
+            "project": "",
+        }
+    )
+    after.update(fields.model_dump(mode="json", exclude_none=True))
+    if not after["label"]:
+        after["label"] = default_label(name)
+    return {
+        "profile_kind": "team",
+        "operation": "create" if creating else "update",
+        "target_id": after["id"],
+        "name": name,
+        "before": before,
+        "after": after,
+    }
 
 
 def _team_changes(existing: Any, params: TeamParams) -> tuple[tuple[str, ...], str]:
@@ -826,6 +873,8 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
     if "members" in changed:
         changes = (*changes, "members")
         summary += "\nmembers (roster and model/effort pins): restored from backup"
+    from local_operator.profile_approval import TeamImage
+
     intent = DurableWriteIntent(
         kind="team",
         operation="revert",
@@ -833,8 +882,21 @@ async def _op_revert(context: ToolContext | None, tool_call_id: str, backup_id: 
         changes=changes,
         summary=summary,
         base_revision=str(saved),
+        proposal={
+            "profile_kind": "team",
+            "operation": "revert",
+            "target_id": str(current.id),
+            "name": name,
+            "before": {key: current.model_dump(mode="json")[key] for key in TeamImage.model_fields},
+            "after": {key: row.model_dump(mode="json")[key] for key in TeamImage.model_fields},
+        },
+        tool_call_id=tool_call_id,
     )
     authorized_by, reason = await durable_write_decision(context, intent)
+    if reason == "queued":
+        from local_operator.tools.agent_tool import _queued_profile_receipt
+
+        return _queued_profile_receipt(tool_call_id, "team", authorized_by)
     if authorized_by is None:
         return _error(tool_call_id, "team", durable_write_refusal(intent, reason))
     try:

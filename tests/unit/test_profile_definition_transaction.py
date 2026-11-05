@@ -481,3 +481,48 @@ def test_the_interrupted_save_surface_asks_the_person_again(tmp_path):
 
 async def _granted(intent):  # pragma: no cover — the write never reaches the seam
     return "owner-prompt:surface-test"
+
+
+def test_independent_http_edits_do_not_share_an_empty_grant_identity(tmp_path):
+    """User editors have no tool grant string; their later edits are independent."""
+    from local_operator.tools.agent_tool import AgentParams, write_profile
+
+    account = AgentRegistry(tmp_path / "account")
+    row = account.create_agent(_edit_fields(name="reviewer", tags=["role"], categories=["role"]))
+    for description in ("First edit", "Second edit"):
+        write_profile(
+            account,
+            AgentParams(op="update", name="reviewer", description=description),
+            creating=False,
+            scope="global",
+        )
+    assert account.get_agent(row.id).description == "Second edit"
+
+
+def test_named_refusal_does_not_poison_the_next_independent_edit(tmp_path):
+    import pytest
+
+    from local_operator.definition_transaction import (
+        DefinitionTransactionConflict,
+        atomic_edit,
+    )
+
+    state = {"value": "before"}
+
+    def edit(identity):
+        return atomic_edit(
+            tmp_path,
+            owner=state,
+            read=lambda: state["value"],
+            restore=lambda value: state.update(value=value),
+            transaction_id=identity,
+        )
+
+    with edit("used"):
+        state["value"] = "first"
+    with pytest.raises(DefinitionTransactionConflict):
+        with edit("used"):
+            raise AssertionError("must not run")
+    with edit("new"):
+        state["value"] = "second"
+    assert state["value"] == "second"

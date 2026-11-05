@@ -95,7 +95,7 @@ class Gate:
 
 
 @pytest.fixture()
-def stores(tmp_path: Path) -> dict[str, Any]:
+def stores(tmp_path: Path, monkeypatch) -> dict[str, Any]:
     account = AgentRegistry(tmp_path / "account")
     seeded = account.create_agent(
         AgentEditFields(
@@ -129,6 +129,26 @@ def stores(tmp_path: Path) -> dict[str, Any]:
         )
     )
     teams = scope_team_registry(team_account, session_dir)
+    # Queueing replaces the old live gate. Use only synthetic file keys; host
+    # presence is a test stand-in and no production OS signer is ever invoked.
+    from local_operator.network.credentials import desktop_approval
+    from local_operator.operator import trust
+    from tests.unit.network.test_approvals_store import _make_key
+
+    monkeypatch.setattr(
+        trust,
+        "load_anchor",
+        lambda uid=None: trust.AnchorLoad(
+            anchor=None,
+            path=tmp_path / "absent-anchor",
+            root_owned=False,
+            reason="synthetic consent test",
+            exists=False,
+        ),
+    )
+    for root in (account.config_dir, team_account.config_dir):
+        _make_key(root)
+    monkeypatch.setattr(desktop_approval, "assurance", lambda: ("presence", "synthetic-presence"))
     return {"agents": agents, "teams": teams, "account": account, "session_dir": session_dir}
 
 
@@ -168,6 +188,37 @@ def _start_run(session: Session, *inputs: Any) -> None:
 
 async def _agent(context, **args):
     return await execute_agent("tc", args, None, None, context)
+
+
+def _assert_queued(result, gate):
+    assert not result.is_error, _text(result)
+    assert result.details["status"] == "queued"
+    assert result.details["approval_id"]
+    if gate is not None:
+        assert gate.cards == []
+
+
+def _queued_record(stores, result):
+    from local_operator.network import approvals as A
+
+    return A._load_raw(result.details["approval_id"], stores["account"].config_dir)
+
+
+def _approve_queued(root, record):
+    import time
+
+    from local_operator.network import approvals as A
+    from tests.unit.network.test_approvals_store import _sign_decision
+
+    moment = time.time()
+    signature = _sign_decision(root, record, "approve", moment)
+    A._record_decision(
+        record["approval_id"],
+        decision="approve",
+        decided_at=moment,
+        signature_hex=signature,
+        root=root,
+    )
 
 
 def _snapshot(stores) -> str:
@@ -291,17 +342,22 @@ async def test_owner_message_not_naming_the_profile_asks_and_deny_writes_nothing
         result = await _agent(
             _context(session, stores), op="update", name="reviewer", instructions="Other."
         )
-        assert result.is_error
-        assert "declined" in _text(result)
-        assert len(gate.cards) == 1
-        title, card = gate.cards[0]
-        assert title == ACCOUNT_PROFILE_GATE
-        assert (
-            "'reviewer'" in card
-            and "instructions" in card
-            and "replaced; new text" in card
-            and "Other." in card
-        )
+        # No live yes/no callback is consulted: the queued signed operation
+        # survives this turn and only its authenticated continuation can save.
+        _assert_queued(result, gate)
+        from local_operator import profile_approval as P
+
+        record = _queued_record(stores, result)
+        facts = P.disclosure(record)
+        assert facts["profile_name"] == "reviewer"
+        assert facts["changed_fields"] == ["instructions"]
+        assert facts["after"]["instructions"] == "Other."
+        from local_operator.network import approvals as A
+        from local_operator.network.types import MeshRefusal
+
+        A.deny(record["approval_id"], root=stores["account"].config_dir)
+        with pytest.raises(MeshRefusal, match="denied"):
+            P.apply(record["approval_id"], P.expected(record), stores["account"].config_dir)
         assert _snapshot(stores) == before
     finally:
         await session.dispose()
@@ -339,8 +395,7 @@ async def test_non_owner_inputs_never_take_path_a(stores, label) -> None:
         result = await _agent(
             _context(session, stores), op="update", name="reviewer", instructions="Forged."
         )
-        assert result.is_error
-        assert len(gate.cards) == 1  # routed to the card, never path A
+        _assert_queued(result, gate)  # durable card, never direct path A
         assert _snapshot(stores) == before
     finally:
         await session.dispose()
@@ -356,8 +411,24 @@ async def test_agent_initiated_edit_saves_on_approve(stores) -> None:
             _context(session, stores), op="update", name="reviewer", description="Sharper"
         )
         assert not result.is_error, _text(result)
-        assert result.details["authorized_by"].startswith("approval:")
-        assert stores["account"].get_agent_by_name("reviewer").description == "Sharper"
+        # A legacy gate returning True cannot approve the new signed operation.
+        _assert_queued(result, gate)
+        assert stores["account"].get_agent_by_name("reviewer").description == "Reviews code"
+        record = _queued_record(stores, result)
+        _approve_queued(stores["account"].config_dir, record)
+        from local_operator import profile_approval as P
+
+        assert P.disclosure(record)["after"]["description"] == "Sharper"
+        applied = P.apply(record["approval_id"], P.expected(record), stores["account"].config_dir)
+        assert applied["state"] == "complete"
+        # The executor may be another process; inspect persisted metadata rather
+        # than this Session's interval-cached pre-approval registry object.
+        assert (
+            AgentRegistry(stores["account"].config_dir, migrate=False)
+            .get_agent_by_name("reviewer")
+            .description
+            == "Sharper"
+        )
     finally:
         await session.dispose()
 
@@ -378,8 +449,17 @@ async def test_row_moved_while_card_was_open_is_refused(stores) -> None:
         result = await _agent(
             _context(session, stores), op="update", name="reviewer", instructions="Mine."
         )
-        assert result.is_error
-        assert "changed after this save was approved" in _text(result)
+        # The tool no longer parks inside Gate.on_ask. Move the row AFTER filing
+        # and sign the original proposal; only the apply continuation sees CAS.
+        _assert_queued(result, gate)
+        concurrent_edit()
+        record = _queued_record(stores, result)
+        _approve_queued(account.config_dir, record)
+        from local_operator import profile_approval as P
+        from local_operator.network.types import MeshRefusal
+
+        with pytest.raises(MeshRefusal, match="changed"):
+            P.apply(record["approval_id"], P.expected(record), account.config_dir)
         assert account.get_agent_system_prompt(row.id) == "Edited elsewhere."
     finally:
         await session.dispose()
@@ -405,9 +485,14 @@ async def test_no_gate_attached_refuses_with_the_owner_prompt_remedy(stores) -> 
         result = await _agent(
             _context(session, stores), op="update", name="reviewer", instructions="X."
         )
-        assert result.is_error
-        assert "naming 'reviewer'" in _text(result)
-        assert "No durable queued approval" in _text(result)
+        # An absent live surface is now the key durable-queue acceptance case.
+        _assert_queued(result, None)
+        assert (
+            stores["account"].get_agent_system_prompt(
+                stores["account"].get_agent_by_name("reviewer").id
+            )
+            == SEED_INSTRUCTIONS
+        )
     finally:
         await session.dispose()
 
@@ -464,7 +549,8 @@ async def test_team_update_follows_the_same_paths_and_reverts(stores) -> None:
             None,
             _context(session, stores),
         )
-        assert denied.is_error and len(gate.cards) == 1
+        # The old deny callback is not an answer to a durable signed proposal.
+        _assert_queued(denied, gate)
         assert teams.get_team_by_name("lopdev").instructions == "Ship carefully."
 
         # A later edit makes the old backup unrevertable (never clobbered).
@@ -550,8 +636,8 @@ async def test_remote_prompt_naming_profile_never_authorizes(stores):
         result = await _agent(
             _context(session, stores), op="update", name="reviewer", instructions="Remote edit."
         )
-        assert result.is_error and len(gate.cards) == 1
-        assert "Do not retry" in _text(result)
+        _assert_queued(result, gate)
+        assert "do not retry" in _text(result)
         assert "TUI" not in _text(result)
     finally:
         await session.dispose()
@@ -708,7 +794,7 @@ async def test_profile_mentions_are_not_definition_edit_consent(stores, owner_te
             name="reviewer",
             instructions="Must not land on mention alone.",
         )
-        assert result.is_error and len(gate.cards) == 1
+        _assert_queued(result, gate)
         assert _snapshot(stores) == before
     finally:
         await session.dispose()
