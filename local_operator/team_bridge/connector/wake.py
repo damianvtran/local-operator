@@ -881,10 +881,11 @@ async def deliver_wake(
         # discard the feed ref, permanently losing the message on replay.
         # Mailbox/unconfirmed outcomes may already have landed: keep their
         # existing handoff semantics rather than risking a duplicate resend.
-        # Read the state defensively: a double or a pre-typed caller that
-        # carries no state has not reported a failure, so it keeps the
-        # historical delivered semantics instead of raising.
-        if getattr(outcome, "state", None) == DELIVERY_FAILED:
+        # The read is STRICT on purpose: an outcome shape that cannot report
+        # its state is drift, and in a delivery path unknown must never read as
+        # delivered — the AttributeError lands in the handler's hold arm, so
+        # the card stays owed instead of being settled unproven.
+        if outcome.state == DELIVERY_FAILED:
             raise DeliveryFailed(outcome.detail)
         return str(outcome.detail)
     # Cold with NO durable history: exactly the designated-CoS engagement

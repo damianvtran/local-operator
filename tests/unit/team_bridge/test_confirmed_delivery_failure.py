@@ -66,24 +66,41 @@ def _setup(tmp_path, monkeypatch, outcomes):
     return owner, config_dir, attempts, accepted, handle
 
 
-def test_only_the_canonical_typed_failure_raises(tmp_path, monkeypatch):
-    """An outcome with no ``state`` is not a confirmed failure and must not raise.
+def test_unknown_outcome_shape_fails_closed_and_typed_failure_raises(tmp_path, monkeypatch):
+    """Unknown is never delivered: only a typed result may settle the card.
 
-    Doubles and pre-typed callers report only ``detail``; reading the state
-    strictly would turn a delivered handoff into a retry and re-send a card the
-    recipient already holds. The canonical failed state still raises.
+    An outcome object carrying ``detail`` but no ``state`` is contract drift, not
+    a success report. The strict read raises, the handler's existing hold arm
+    keeps the card owed, and no posted marker is written — so a future refactor
+    cannot silently consume the message. The canonical failed state still raises.
     """
     monkeypatch.setattr(peer_send, "session_has_durable_history", lambda *_a, **_k: True)
-    owner = SimpleNamespace(account_id="account")
+    sess_owner = SimpleNamespace(account_id="account")
+    calls = []
 
-    async def detail_only(*args, **kwargs):
-        return SimpleNamespace(detail="delivered")
+    async def malformed(*args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(detail="delivered")  # no state: not a real outcome
 
-    monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", detail_only)
-    detail = asyncio.run(
-        wake.deliver_wake(owner, "synthetic card", session_id="sess_a", config_dir=tmp_path)
+    monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", malformed)
+    with pytest.raises(AttributeError):
+        asyncio.run(
+            wake.deliver_wake(
+                sess_owner, "synthetic card", session_id="sess_a", config_dir=tmp_path
+            )
+        )
+    assert len(calls) == 1, "the drift arises AFTER the primitive returned"
+
+    # Through the real handler that same drift is a retryable hold, not a card.
+    owner, config_dir, _attempts, accepted, handle = _setup(
+        tmp_path, monkeypatch, [peer_send.DELIVERY_DELIVERED]
     )
-    assert detail == "delivered"
+    monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", malformed)
+    outcome = handle()
+    assert outcome["action"] == "hold" and outcome["code"] == "conversation_failed"
+    row = rig._reservation_rows(config_dir)[0]
+    assert row["state"] == "pending" and row["card_posted_at"] is None
+    assert len(calls) == 2 and not accepted
 
     async def typed_failure(*args, **kwargs):
         return peer_send.DeliveryOutcome(
@@ -100,14 +117,15 @@ def test_only_the_canonical_typed_failure_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(peer_send, "deliver_peer_message_outcome", typed_failure)
     with pytest.raises(peer_send.DeliveryFailed):
         asyncio.run(
-            wake.deliver_wake(owner, "synthetic card", session_id="sess_a", config_dir=tmp_path)
+            wake.deliver_wake(
+                sess_owner, "synthetic card", session_id="sess_a", config_dir=tmp_path
+            )
         )
 
 
 @pytest.mark.parametrize("failure", ["typed", "exception", "cancel"])
 def test_failed_handoff_remains_owed_and_retries_once(tmp_path, monkeypatch, caplog, failure):
     """The old adapter returned a failed outcome's prose as success and lost this card."""
-
     first = {
         "typed": peer_send.DELIVERY_FAILED,
         "exception": OSError("PRIVATE-TRANSPORT-DETAIL"),
