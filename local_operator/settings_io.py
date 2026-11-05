@@ -6174,22 +6174,12 @@ SETTINGS: tuple[Setting, ...] = (
         maximum=100_000,
         unit="screenings",
     ),
-    Setting(
-        key="team_bridge.screening.ambient_budget_per_hour",
-        path=("team_bridge", "screening", "ambient_budget_per_hour"),
-        section="team_bridge",
-        label=_t(_ws.team_bridge_screening_ambient_budget_per_hour_label()),
-        kind=Kind.INT,
-        # Three quarters of the account ceiling, the shipped relationship. The
-        # receiver refuses a write that puts it above ``unaddressed`` and ignores
-        # a hand-edited set that does, so an edit here can never widen the
-        # account's hour.
-        default=300,
-        help=_t(_ws.team_bridge_screening_ambient_budget_per_hour_help()),
-        minimum=1,
-        maximum=100_000,
-        unit="screenings",
-    ),
+    # The four ceilings are registered in CONTAINMENT order — the account total,
+    # then the tier carved out of it, then the tier carved out of THAT, then one
+    # sender's share — because the value column is read top to bottom, and a
+    # column that rises again on the third row makes the reader re-derive which
+    # number bounds which (design round 1, D4). The order is load-bearing for
+    # `_reset_screening_budget`, which deletes in the same sequence.
     Setting(
         key="team_bridge.screening.unaddressed_budget_per_hour",
         path=("team_bridge", "screening", "unaddressed_budget_per_hour"),
@@ -6200,6 +6190,24 @@ SETTINGS: tuple[Setting, ...] = (
         # the person reserve, reachable only by a DM or mention from a person.
         default=350,
         help=_t(_ws.team_bridge_screening_unaddressed_budget_per_hour_help()),
+        minimum=1,
+        maximum=100_000,
+        unit="screenings",
+    ),
+    Setting(
+        key="team_bridge.screening.ambient_budget_per_hour",
+        path=("team_bridge", "screening", "ambient_budget_per_hour"),
+        section="team_bridge",
+        label=_t(_ws.team_bridge_screening_ambient_budget_per_hour_label()),
+        kind=Kind.INT,
+        # Three quarters of the account ceiling, the shipped relationship, and a
+        # carve-out of the UNADDRESSED ceiling — never of the account total, and
+        # the help says so because that is the ceiling whose rule will refuse the
+        # write. The receiver refuses a write that puts it above ``unaddressed``
+        # and clamps a hand-edited set that does down to it, so an edit here can
+        # never widen the account's hour.
+        default=300,
+        help=_t(_ws.team_bridge_screening_ambient_budget_per_hour_help()),
         minimum=1,
         maximum=100_000,
         unit="screenings",
@@ -6551,13 +6559,19 @@ def coerce(setting: Setting, text: str) -> Any:
 #: team-bridge block below) and the invariant itself is small enough to state
 #: twice honestly instead of building a framework around it.
 _SCREENING_BUDGET_KEY_FIELD: dict[str, str] = {
+    # CONTAINMENT order (account → the tier carved out of it → the tier carved
+    # out of THAT → one sender's share), which is the order the registry paints
+    # the rows in and the order ``_reset_screening_budget`` deletes them.
     "team_bridge.screening.budget_per_hour": "account",
-    "team_bridge.screening.ambient_budget_per_hour": "ambient",
     "team_bridge.screening.unaddressed_budget_per_hour": "unaddressed",
+    "team_bridge.screening.ambient_budget_per_hour": "ambient",
     "team_bridge.screening.sender_budget_per_hour": "sender",
 }
 
-#: ``(field, ceiling it is carved out of, the rule in a user's words)``.
+#: ``(field, ceiling it is carved out of, the rule in a user's words)``, in
+#: CONTAINMENT order: the order of a nesting is also the order in which one tier
+#: has to come down before another can, and ``_reset_screening_budget`` deletes
+#: in it.
 _SCREENING_BUDGET_RULES: tuple[tuple[str, str, str], ...] = (
     ("unaddressed", "account", "the unaddressed ceiling cannot be above the screening ceiling"),
     ("ambient", "unaddressed", "the agent chatter ceiling cannot be above the unaddressed ceiling"),
@@ -6883,7 +6897,9 @@ def reset_setting(manager: "ConfigManager", setting: Setting, *, notify: bool = 
     """
     if setting.kind is Kind.READONLY:
         raise ValueError("this setting is retired and cannot be changed")
-    if setting.key == "retry.accountSelectionPolicy":
+    if setting.key in _SCREENING_BUDGET_KEY_FIELD:
+        _reset_screening_budget(manager)
+    elif setting.key == "retry.accountSelectionPolicy":
         _reset_account_policy(manager)
     else:
         _delete(manager, setting.path)
@@ -6892,6 +6908,39 @@ def reset_setting(manager: "ConfigManager", setting: Setting, *, notify: bool = 
         _notify_watcher(manager)
     _publish_trigger_settings(manager, setting)
     _sync_aida_hold_marker(manager, setting)
+
+
+def _reset_screening_budget(manager: "ConfigManager") -> None:
+    """Delete the WHOLE ``team_bridge.screening`` ceiling set, not one leaf.
+
+    WHY ONE LEAF CANNOT BE RESET ALONE (review round 1, R-2). ``validate`` is the
+    only place the four ceilings are checked against each other, and
+    ``write_setting`` is its only caller — so a reset that touches one key
+    bypasses the cross-field rules by construction. Resetting the account
+    ceiling to its default while a hand-edited 900/800 stayed on disk therefore
+    wrote a contradicted set, which the receiver then refuses: the page shows
+    900/800 while the receiver runs the shipped 400/350/300/200 — the same
+    page-and-receiver disagreement the READ path's clamp exists to prevent, this
+    time produced by our own button.
+
+    Restoring all four is the one answer that cannot describe a set the receiver
+    will not run: the shipped four satisfy every rule, so this path needs no
+    validation of its own, and "reset" already means "back to the shipped
+    value" on every other row. Deleting rather than writing the defaults is
+    ``_delete``'s reason (a config carrying only what a person chose), and the
+    four leaves are deleted in containment order so a partially-applied write
+    can never leave a child above its parent.
+    """
+
+    rows = {row.key: row for row in SETTINGS}
+    # ``_SCREENING_BUDGET_KEY_FIELD`` is in CONTAINMENT order (account, then the
+    # tiers carved out of it), which is the order the deletes below run in and
+    # the order the registry paints; a row that left the registry is skipped
+    # rather than blocking the rest.
+    for key in _SCREENING_BUDGET_KEY_FIELD:
+        row = rows.get(key)
+        if row is not None:
+            _delete(manager, row.path)
 
 
 def _reload_before_write(manager: "ConfigManager") -> None:

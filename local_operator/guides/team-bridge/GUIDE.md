@@ -222,23 +222,45 @@ Change them by editing the four keys:
 lop config edit team_bridge.screening.budget_per_hour 800
 ```
 
-The receiver re-reads them without a restart. Two rules apply:
+The receiver re-reads them without a restart. Four rules apply:
 
 - A write that would leave a ceiling above the one it is carved from is
   **refused**, with the rule named: lower the inner ceiling first, then the
-  outer one.
-- If the file is hand-edited into a contradiction, the receiver uses ALL FOUR
-  shipped defaults (one warning names the key to fix) instead of honouring part
-  of the set. A single value that is missing, not a whole number, or below 1
-  reads its own default.
+  outer one. Raising a carve-out never raises the account total — the account
+  key is the only number that admits more spend, and a carve-out is always a
+  slice of it.
+- If the file is hand-edited into a contradiction, the receiver **holds the
+  inner ceiling down** to the one it is carved from and runs the rest of the set
+  as written, with one log line naming each number held and the value in force.
+  Lowering the account key to 10 without touching its siblings gives an hour of
+  10, not the shipped 400. A single value that is missing, not a whole number,
+  or below 1 reads its own default; a value above 100000 reads as 100000, the
+  largest the settings page can edit back.
+- A per-sender ceiling **equal to** the account ceiling deliberately disables
+  the one-sender share (the default is half of it). That is a supported choice,
+  not a defect: it is what you write when one sender may use the whole hour.
+- Resetting ANY one of the four rows — the settings page's reset, `PATCH
+  /v1/settings/{key}/reset`, or the agent's settings reset — restores all four
+  to the shipped defaults, because one ceiling cannot be reset to a default that
+  contradicts the three it is nested in.
+
+On the settings page each row's help sits in the band under the list: two rows
+when the sentence wraps, and one row cut with a visible `…` when it cannot. Copy
+with no spaces to break at (a space-free script, such as Chinese) always takes
+the cut rather than the wrap.
 
 **Why the numbers moved** (2026-11-05). They were 40/30/35/20 — a tenth of
 these — and measured use against the live ledger showed the account ceiling was
-being reached exactly: peak logical units in one hour was 40, at the old
-ceiling, in four separate hours (2026-10-31 05Z, 07Z, 10Z and 2026-11-05 18Z),
-and the last 24 hours spent 248 logical units. A ceiling that ordinary traffic
-touches exactly, repeatedly, is refusing real work; the owner's own DM then
-waited for a refill.
+being reached exactly. Both figures are worth stating, because they are the same
+ledger in two different units: in the busiest hour the ledger recorded **83
+screening attempt rows**, and **505 rows** over the last 24 hours; counted in the
+cap's OWN unit — the chargeable logical unit — that is **40 units in the peak
+hour and 248 units in 24 hours**. One screen writes two rows (a logical attempt
+plus its HTTP attempt), so a row count is larger than the spend these four keys
+bound; the numbers to compare against the ceilings above are the logical units.
+Peak 40/hour was reached in four separate hours (2026-10-31 05Z, 07Z, 10Z and
+2026-11-05 18Z). A ceiling that ordinary traffic touches exactly, repeatedly, is
+refusing real work; the owner's own DM then waited for a refill.
 
 Honestly: part of that spend was repeat screening rather than unique demand —
 416 distinct messages produced 1,044 logical units (2.5 screenings per message),

@@ -4,7 +4,8 @@ ONE inbound ``message_available`` event for the OWN endpoint moves through
 this exact order, and the order is the safety property (contract §13.4):
 
 1. **Screen before ANY wake** — the H3 pipeline (fresh single-turn tool-less
-   one-shot; ``deliver|hold|bounce``; 40/h budget; HOLD on exhaustion).
+   one-shot; ``deliver|hold|bounce``; the hourly screening budget
+   (``team_bridge.screening.*``); HOLD on exhaustion).
    Nothing reaches an agent session unscreened (§13.9.1).
 2. ``deliver`` → **ack ``read`` with the verdict attached** (the receipt binds
    ``body_sha256``), then wake **from the same bytes that were screened** —

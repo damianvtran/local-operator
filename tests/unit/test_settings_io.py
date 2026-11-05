@@ -799,6 +799,34 @@ def test_the_team_depth_maximum_matches_max_org_depth() -> None:
     assert setting.maximum == MAX_ORG_DEPTH
 
 
+def test_the_screening_read_maximum_matches_the_registry_rows() -> None:
+    """``SCREENING_BUDGET_MAX_READ`` is the read path's own upper bound.
+
+    The four rows carry ``maximum=100_000`` as literals because ``settings_io``
+    stays off ``team_bridge.settings``'s import path, and the receiver's config
+    read clamps a hand edit above it (review round 1, S-5): the read may only
+    run a ceiling some surface can still show and edit back down. A moved
+    maximum with a stale literal here would either refuse a value the receiver
+    runs or run one the page cannot reach — the same drift pair, and the same
+    guard shape, as the team-depth maximum above.
+    """
+    from local_operator.team_bridge.settings import SCREENING_BUDGET_MAX_READ
+
+    rows = [
+        setting
+        for setting in settings_io.SETTINGS
+        if setting.key.startswith("team_bridge.screening.")
+    ]
+    assert [row.key for row in rows] == [
+        "team_bridge.screening.budget_per_hour",
+        "team_bridge.screening.unaddressed_budget_per_hour",
+        "team_bridge.screening.ambient_budget_per_hour",
+        "team_bridge.screening.sender_budget_per_hour",
+    ]
+    for row in rows:
+        assert row.maximum == SCREENING_BUDGET_MAX_READ, row.key
+
+
 def test_supplements_registry_bounds_are_honoured_by_the_reader() -> None:
     """Every value the settings page ACCEPTS must come back AS STORED from the reader.
 

@@ -5012,7 +5012,24 @@ class SettingsView(Vertical):
                     [help_alone_part],
                 ]
             elif bridge_row:
-                base_rungs = [[help_part, key_part], None]
+                # WRAP, THEN CUT (design round 1, D1). The wrap rung must not be
+                # the LAST rung: `_wrap_cells` returns None for copy it cannot
+                # split into two rows (a greedy wrap that needs three, or any
+                # space-free script), and a rung ladder that ends there paints
+                # an EMPTY band — at 80x24 that was 21 of 32 locale x row
+                # combinations, i.e. the help vanished with no mark at all.
+                # `help_alone_part` behind it is the truncating floor every
+                # other row already falls through to, so a sentence that cannot
+                # wrap is CUT with a visible `…` instead of disappearing.
+                #
+                # KNOWN LIMIT, not a bug to fix here (design round 1, D2):
+                # `_wrap_cells` splits on the ASCII space only, so space-free
+                # copy (zh-CN among the shipped locales) can never wrap and
+                # always takes the cutting rung. Teaching the wrapper CJK line
+                # breaking is a product-wide typography change, out of this
+                # page's blast radius; the guide says the band truncates rather
+                # than wraps for space-free scripts.
+                base_rungs = [[help_part, key_part], None, [help_alone_part]]
             else:
                 base_rungs = [[help_part, key_part], [help_alone_part]]
             warning = row.setting.warning

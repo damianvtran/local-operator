@@ -255,6 +255,14 @@ SCREENING_BUDGET_LEAF = "budget_per_hour"
 SCREENING_AMBIENT_BUDGET_LEAF = "ambient_budget_per_hour"
 SCREENING_UNADDRESSED_BUDGET_LEAF = "unaddressed_budget_per_hour"
 SCREENING_SENDER_BUDGET_LEAF = "sender_budget_per_hour"
+#: The largest ceiling the READ path will adopt. It mirrors the ``maximum`` of
+#: the four ``/settings`` rows, which this module cannot import (the registry
+#: stays off this package's import path — see the module docstring), so
+#: ``tests/unit/test_settings_io.py::_consumer_defaults`` pins the two together.
+#: The read path clamps DOWN only: an above-maximum hand edit reads as the
+#: maximum with a warning rather than as a number no surface could show, edit
+#: back or refund.
+SCREENING_BUDGET_MAX_READ = 100_000
 
 
 #: Distinguishes "the key is absent" (the shipped default) from "the key is
@@ -319,6 +327,23 @@ def _screening_ceiling(value: Any, default: int) -> int:
     return value if value >= 1 else default
 
 
+def _walk_subtree(values: Any, path: tuple[str, ...]) -> Any:
+    """``values``' node at ``path``, or :data:`_MISSING` when a step is absent.
+
+    The whole-document twin of ``ConfigManager.get_nested_value``: the reader
+    that starts from ``config.read_config_values`` has no manager to ask, and a
+    step that is not a mapping (a hand-edited ``team_bridge: off``) is an absent
+    subtree rather than an error.
+    """
+
+    node = values
+    for step in path:
+        if not isinstance(node, Mapping) or step not in node:
+            return _MISSING
+        node = node[step]
+    return node
+
+
 def _hold_alert_after_minutes(value: Any) -> int:
     """Whole minutes in 0..10080, else the default.
 
@@ -335,6 +360,28 @@ def _hold_alert_after_minutes(value: Any) -> int:
 
 
 @dataclass(frozen=True)
+class ScreeningClamp:
+    """One configured ceiling the read path held down, and what it reads as.
+
+    The pair is what makes the read's clamp defensible to a person staring at
+    the file: the warning says which key, what it said, what is in force, and
+    the rule that made the difference — never just "ignored".
+    """
+
+    leaf: str
+    configured: int
+    in_force: int
+    rule: str
+
+    def describe(self) -> str:
+        """One clause for the read path's single warning line."""
+
+        return (
+            f"{self.leaf}: {self.configured} configured, " f"{self.in_force} in force ({self.rule})"
+        )
+
+
+@dataclass(frozen=True)
 class ScreeningBudget:
     """The four rolling-hour screening ceilings, as configured or as shipped.
 
@@ -344,21 +391,25 @@ class ScreeningBudget:
     reachable only by the owner's — or another person's — DM or mention.
     ``sender`` bounds ONE verified sender inside the account's window.
 
-    THE INVARIANT is a NESTING, and it is checked, never clamped: an unaddressed
-    ceiling above the account ceiling, a chatter ceiling above the unaddressed
-    one, or a per-sender ceiling above the account one is a CONTRADICTION
-    between two numbers a person wrote, and silently reshaping one of them would
-    leave the file saying something the receiver is not doing. So:
+    THE INVARIANT IS A NESTING, and the two boundaries answer a contradiction in
+    OPPOSITE directions — deliberately, because their duties are opposite:
 
-    * :meth:`from_values` reads each field with its own rule (below) and
-      :meth:`violations` reports the cross-field contradictions;
-    * the WRITE path refuses a write that would create one (``settings_io
-      .validate``), naming the rule while the user is still looking at the
-      command that caused it;
-    * the READ path (a hand-edited YAML, an older config) adopts the budget
-      only when the WHOLE set is valid — one violated rule falls back to all
-      four shipped defaults with one warning — so half a configured set is never
-      honoured (``store.screening_budget_from_config``).
+    * the WRITE path REFUSES a write that would create one (``settings_io
+      .validate`` / ``_SCREENING_BUDGET_RULES``), naming the rule while the user
+      is still looking at the command that caused it — so "lower the total" is
+      answered with which sibling has to come down first, in the same breath;
+    * the READ path (a hand-edited YAML, an older config, a file written before
+      a rule existed) CLAMPS DOWN, never up: :meth:`clamped` holds each tier to
+      the ceiling it is carved out of and adopts the rest of the set exactly as
+      written.
+
+    WHY THE READ CLAMPS RATHER THAN DISCARDING THE SET (review round 1, S-2 /
+    Q-1). The first version dropped all four to the shipped defaults on any
+    contradiction, so the single most likely tightening edit —
+    ``budget_per_hour: 10`` written above its siblings — made the receiver spend
+    10x what the page showed. Clamping down spends LESS than the file states at
+    worst and never more, and :meth:`clamped` returns what it held so the one
+    warning can name each key and the value actually in force.
 
     PER-FIELD RULE (the module's ordinary convention for a present-but-unusable
     value): a value that is missing, not an ``int``, or below 1 reads the SHIPPED
@@ -366,8 +417,11 @@ class ScreeningBudget:
     to Python, so ``true`` would otherwise read as the tightest possible ceiling
     (1) from a value nobody meant as a number.
 
-    NO UPPER CLAMP anywhere: the registry bounds an EDIT at 100_000; a hand edit
-    above it is the operator's own spend decision.
+    THE READ'S UPPER BOUND is :data:`SCREENING_BUDGET_MAX_READ`, the registry's
+    own maximum for these rows, and it is the only clamp that is not about the
+    nesting: the settings page can show and edit 1..100_000, so a hand edit
+    above it would otherwise put the receiver somewhere no surface in the product
+    can reach to lower again.
     """
 
     account: int = DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR
@@ -379,9 +433,10 @@ class ScreeningBudget:
         # The per-field rule applies to EVERY construction path, not only
         # ``from_values``: a caller that builds one from arithmetic must not be
         # able to hand the store a non-int. The CROSS-field rules are NOT
-        # enforced here — they are reported by ``violations()`` so the two
-        # boundaries can refuse (write) or fall back wholesale (read) with a
-        # message instead of quietly rewriting a number.
+        # enforced here: the WRITE boundary refuses on them (``settings_io
+        # .validate``) and the READ boundary holds them down (``clamped``), so
+        # neither has to accept a constructor that rewrites a number nobody
+        # asked it to rewrite.
         object.__setattr__(
             self,
             "account",
@@ -405,32 +460,90 @@ class ScreeningBudget:
             _screening_ceiling(self.sender, DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR),
         )
 
-    def violations(self) -> tuple[tuple[str, str], ...]:
-        """``(leaf, rule)`` per contradicted cross-field rule; empty when valid.
+    def clamped(self) -> "tuple[ScreeningBudget, tuple[ScreeningClamp, ...]]":
+        """This set held to its nesting — DOWNWARD only — and what was held.
 
-        The leaf is the key a person has to change, so the read path's one
-        warning and the write path's refusal can both name it.
+        In containment order (account → unaddressed → ambient, with sender a
+        share of the account), and each step compares against the value its
+        parent has ALREADY been held to, so a chain of over-large hand edits
+        lands on the ceiling the file can actually mean rather than on an
+        intermediate its own parent would still refuse.
         """
 
-        found: list[tuple[str, str]] = []
-        if self.unaddressed > self.account:
-            found.append((SCREENING_UNADDRESSED_BUDGET_LEAF, "unaddressed <= account"))
-        if self.ambient > self.unaddressed:
-            found.append((SCREENING_AMBIENT_BUDGET_LEAF, "ambient <= unaddressed"))
-        if self.sender > self.account:
-            found.append((SCREENING_SENDER_BUDGET_LEAF, "sender <= account"))
-        return tuple(found)
+        held: list[ScreeningClamp] = []
+        account = self.account
+        if account > SCREENING_BUDGET_MAX_READ:
+            held.append(
+                ScreeningClamp(
+                    SCREENING_BUDGET_LEAF,
+                    account,
+                    SCREENING_BUDGET_MAX_READ,
+                    f"account <= {SCREENING_BUDGET_MAX_READ}",
+                )
+            )
+            account = SCREENING_BUDGET_MAX_READ
+        unaddressed = self.unaddressed
+        if unaddressed > account:
+            held.append(
+                ScreeningClamp(
+                    SCREENING_UNADDRESSED_BUDGET_LEAF,
+                    unaddressed,
+                    account,
+                    "unaddressed <= account",
+                )
+            )
+            unaddressed = account
+        ambient = self.ambient
+        if ambient > unaddressed:
+            held.append(
+                ScreeningClamp(
+                    SCREENING_AMBIENT_BUDGET_LEAF,
+                    ambient,
+                    unaddressed,
+                    "ambient <= unaddressed",
+                )
+            )
+            ambient = unaddressed
+        sender = self.sender
+        if sender > account:
+            held.append(
+                ScreeningClamp(SCREENING_SENDER_BUDGET_LEAF, sender, account, "sender <= account")
+            )
+            sender = account
+        if not held:
+            return self, ()
+        return (
+            ScreeningBudget(
+                account=account, ambient=ambient, unaddressed=unaddressed, sender=sender
+            ),
+            tuple(held),
+        )
+
+    @classmethod
+    def read_from_document(
+        cls, values: Any
+    ) -> "tuple[ScreeningBudget, tuple[ScreeningClamp, ...]]":
+        """The ceilings IN FORCE for a whole ``config.yml`` ``values`` mapping.
+
+        The read path's one entry point: it locates :data:`SCREENING_SUBTREE`
+        itself (no reader re-spells where screening lives), applies the
+        per-field rule and then :meth:`clamped`, so a caller cannot adopt a
+        configured set the receiver would refuse to run.
+        """
+
+        node = _walk_subtree(values, SCREENING_SUBTREE)
+        return cls.from_values({} if node is _MISSING else node).clamped()
 
     @classmethod
     def from_values(cls, values: Any) -> "ScreeningBudget":
         """The ``team_bridge.screening`` subtree, per-field defaulted.
 
-        Takes the SUBTREE — what
-        ``ConfigManager.get_nested_value(SCREENING_SUBTREE, {})`` returns — not
-        the whole document, so a caller cannot pass a shape this reader never
-        sees and silently get the shipped ceilings. Anything that is not a
-        mapping (a hand-edited ``screening: off``) reads as the shipped ones.
-        CROSS-FIELD validity is the caller's to check: :meth:`violations`.
+        Takes the SUBTREE — what ``SCREENING_SUBTREE`` names — not the whole
+        document, so a caller cannot pass a shape this reader never sees and
+        silently get the shipped ceilings. Anything that is not a mapping (a
+        hand-edited ``screening: off``) reads as the shipped ones. The
+        CROSS-FIELD action belongs to :meth:`clamped`; a reader that wants the
+        set it may run asks :meth:`read_from_document`.
         """
 
         node = values if isinstance(values, Mapping) else {}

@@ -6,9 +6,15 @@ What these pin (the 10x raise, 2026-11-05, operator decision on measured demand)
 * the shipped set is 400/300/350/200 and the ``Store`` class attributes ARE the
   settings module's constants — one source of truth, no second literal;
 * a value that is present but unusable reads its OWN shipped default, and a set
-  that contradicts the tier nesting is refused at the WRITE boundary and ignored
-  WHOLESALE at the READ boundary: never honoured half, never silently clamped,
-  and never an exception out of a receiver;
+  that contradicts the tier nesting is refused at the WRITE boundary while the
+  READ boundary CLAMPS DOWN, never up: a hand edit that lowers the account total
+  spends less than the file says at worst, warns once naming each held key, and
+  never raises out of a receiver (review round 1, S-2/Q-1 replaced an earlier
+  all-four-defaults fallback that turned a tightening edit into a 10x raise);
+* the READ path never mutates the operator's config file, however malformed it
+  is (review round 1, S-1/Q-2: ``ConfigManager`` renames what it cannot parse);
+* resetting ANY one of the four rows restores all four, so the shipped Reset
+  button cannot write a set the receiver refuses (review round 1, R-2);
 * an edited set takes effect through the real writer and the real receiver, with
   no code change and no restart;
 * the tier ordering, the per-sender share and the refill instant are all read
@@ -146,40 +152,88 @@ def test_a_subtree_that_is_not_a_mapping_reads_the_shipped_set(values: Any) -> N
     assert ScreeningBudget.from_values(values) == ScreeningBudget()
 
 
-def test_a_contradicted_set_names_every_rule_it_breaks() -> None:
-    """The three rules, and the KEY a person has to change, not just a number."""
+@pytest.mark.parametrize(
+    "configured,expected",
+    [
+        # THE OPERATOR'S OWN TIGHTENING EDIT. Lowering the account total and
+        # leaving its slices alone is the single most likely correction a person
+        # makes, and it is the case that used to run the SHIPPED 400 an hour
+        # behind a settings page still showing 10 (review round 1, S-2 / Q-1).
+        ((10, 300, 350, 200), (10, 10, 10, 10)),
+        # One tier above the ceiling it is carved out of: held down to its
+        # parent, every other number untouched.
+        ((400, 500, 350, 200), (400, 350, 350, 200)),
+        ((400, 300, 900, 200), (400, 300, 400, 200)),
+        ((400, 300, 350, 900), (400, 300, 350, 400)),
+        # A VALID hand-edited set is adopted exactly, including the equality the
+        # nesting allows and numbers far above the shipped four.
+        ((1200, 900, 1000, 600), (1200, 900, 1000, 600)),
+    ],
+)
+def test_a_contradicted_set_is_clamped_down_to_its_parent(
+    configured: tuple[int, int, int, int], expected: tuple[int, int, int, int]
+) -> None:
+    """(account, ambient, unaddressed, sender) in, what the receiver runs out.
 
-    assert ScreeningBudget(account=400, sender=900).violations() == (
-        ("sender_budget_per_hour", "sender <= account"),
-    )
-    assert ScreeningBudget(account=400, ambient=351).violations() == (
-        ("ambient_budget_per_hour", "ambient <= unaddressed"),
-    )
-    assert ScreeningBudget(account=400, unaddressed=401).violations() == (
-        ("unaddressed_budget_per_hour", "unaddressed <= account"),
-    )
-    # A set can break more than one rule at once; both are named. ``unaddressed``
-    # is set explicitly here so it is not itself a third violation (its default,
-    # 350, would be above this 10-unit account).
-    both = ScreeningBudget(account=10, ambient=20, unaddressed=10, sender=30)
-    assert [leaf for leaf, _ in both.violations()] == [
-        "ambient_budget_per_hour",
-        "sender_budget_per_hour",
-    ]
-    # And a valid nesting is silent — including the equality the tiers allow.
-    assert ScreeningBudget(account=8, ambient=8, unaddressed=8, sender=8).violations() == ()
+    CLAMP DOWN, NEVER UP. A read that spends less than the file states is honest
+    about it in one warning; a read that spends MORE is the defect this replaced.
+    """
+
+    account, ambient, unaddressed, sender = configured
+    budget, held = ScreeningBudget(
+        account=account, ambient=ambient, unaddressed=unaddressed, sender=sender
+    ).clamped()
+    assert (budget.account, budget.ambient, budget.unaddressed, budget.sender) == expected
+    # Every difference between the file and the receiver is NAMED, with the value
+    # in force — a clamp nobody can see is the same defect in quieter clothing.
+    named = {entry.leaf for entry in held}
+    assert named == {
+        leaf
+        for leaf, was, now in (
+            ("unaddressed_budget_per_hour", unaddressed, budget.unaddressed),
+            ("ambient_budget_per_hour", ambient, budget.ambient),
+            ("sender_budget_per_hour", sender, budget.sender),
+        )
+        if was != now
+    }
+    for entry in held:
+        assert entry.in_force < entry.configured
+        assert str(entry.in_force) in entry.describe()
 
 
-def test_a_hand_edited_contradiction_reads_the_whole_shipped_set_and_warns(
+def test_a_valid_nesting_needs_no_correction() -> None:
+    """The equality the tiers allow, and the shipped set itself, are untouched."""
+
+    assert ScreeningBudget(account=8, ambient=8, unaddressed=8, sender=8).clamped() == (
+        ScreeningBudget(account=8, ambient=8, unaddressed=8, sender=8),
+        (),
+    )
+    assert ScreeningBudget().clamped() == (ScreeningBudget(), ())
+
+
+def test_an_account_ceiling_above_the_editable_maximum_reads_as_the_maximum() -> None:
+    """The one clamp that is not about the nesting: the page's own maximum.
+
+    A number above it cannot be shown or edited back by any surface, so the read
+    runs the largest value the product can still lower.
+    """
+
+    budget, held = ScreeningBudget(account=10**9).clamped()
+    assert budget.account == tb_settings.SCREENING_BUDGET_MAX_READ == 100_000
+    assert [entry.leaf for entry in held] == ["budget_per_hour"]
+
+
+def test_a_hand_edited_tightening_edit_is_honoured_and_warns_once(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """HALF A CONFIG IS NEVER HONOURED, at the READ boundary.
+    """A TIGHTENED hand edit runs TIGHT, through the real receiver read.
 
-    The writer refuses this combination (below), so the only way it reaches disk
-    is a hand edit or an older config. Honouring the three good numbers would put
-    the receiver in a state no line of the file describes — the operator's own
-    account ceiling silently fenced by a stale sibling — so the whole set falls
-    back, once, with the key to change named.
+    The writer refuses a contradicted set (below), but a hand edit can lower the
+    account total without touching its slices, and that edit is the one a person
+    most plausibly makes. It used to be discarded for the shipped — larger — set,
+    so the receiver spent 10x the number the page showed (round 1, S-2/Q-2). Now
+    the slices come down with it and one warning names each held key and the
+    value in force.
     """
 
     (tmp_path / "config.yml").write_text(
@@ -188,10 +242,10 @@ def test_a_hand_edited_contradiction_reads_the_whole_shipped_set_and_warns(
                 "values": {
                     "team_bridge": {
                         "screening": {
-                            "budget_per_hour": 40,
-                            "ambient_budget_per_hour": 30,
-                            "unaddressed_budget_per_hour": 35,
-                            "sender_budget_per_hour": 900,
+                            "budget_per_hour": 10,
+                            "ambient_budget_per_hour": 300,
+                            "unaddressed_budget_per_hour": 350,
+                            "sender_budget_per_hour": 200,
                         }
                     }
                 }
@@ -201,11 +255,124 @@ def test_a_hand_edited_contradiction_reads_the_whole_shipped_set_and_warns(
     )
     with caplog.at_level(logging.WARNING, logger="local_operator.team_bridge.store"):
         budget = Store(tmp_path).screening_budget
-    assert budget == ScreeningBudget()
+    assert (budget.account, budget.ambient, budget.unaddressed, budget.sender) == (
+        10,
+        10,
+        10,
+        10,
+    )
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert "sender_budget_per_hour" in caplog.text
-    assert "sender <= account" in caplog.text
+    assert len(warnings) == 1, caplog.text
+    for leaf in (
+        "unaddressed_budget_per_hour",
+        "ambient_budget_per_hour",
+        "sender_budget_per_hour",
+    ):
+        assert leaf in caplog.text
+    assert "10 in force" in caplog.text
+    assert "in force: 10/10/10/10" in caplog.text
+    # ONE line per distinct correction: a second construction of the same file,
+    # and a Store built from the same directory by another caller, stay silent.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="local_operator.team_bridge.store"):
+        assert screening_budget_from_config(tmp_path) == budget
+        assert Store(tmp_path).screening_budget == budget
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+def test_a_config_read_never_moves_a_malformed_config_aside(tmp_path: Path) -> None:
+    """THE READ PATH DOES NOT MUTATE THE OPERATOR'S FILE (round 1, S-1 / Q-2).
+
+    ``ConfigManager``'s constructor renames a config it cannot parse to
+    ``config.yml.bad.<stamp>`` and prints to stderr. Right at startup; wrong from
+    a receiver poll that can catch an editor's non-atomic save mid-write, where it
+    would move the live config — every setting with it — aside from background
+    work. ``config.read_config_values`` is the reader that does not, so this test
+    pins four things: the shipped ceilings, the file still there byte-identical,
+    no ``.bad`` sibling, and that a VALID file is still read (the safe reader is
+    not a silent no-op).
+    """
+
+    path = tmp_path / "config.yml"
+    torn = "values: [unclosed\n"
+    path.write_text(torn, encoding="utf-8")
+    assert Store(tmp_path).screening_budget == ScreeningBudget()
+    assert path.exists() and path.read_text(encoding="utf-8") == torn
+    assert not list(tmp_path.glob("config.yml.bad*"))
+
+    # A document that parses but is not a mapping takes the same path.
+    path.write_text("- just\n- a list\n", encoding="utf-8")
+    assert Store(tmp_path).screening_budget == ScreeningBudget()
+    assert path.exists() and not list(tmp_path.glob("config.yml.bad*"))
+
+    # The control: the safe reader still ANSWERS a readable file.
+    path.write_text(
+        json.dumps(
+            {
+                "values": {
+                    "team_bridge": {
+                        "screening": {
+                            "budget_per_hour": 12,
+                            "ambient_budget_per_hour": 9,
+                            "unaddressed_budget_per_hour": 10,
+                            "sender_budget_per_hour": 6,
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert Store(tmp_path).screening_budget == ScreeningBudget(
+        account=12, ambient=9, unaddressed=10, sender=6
+    )
+
+
+@pytest.mark.parametrize(
+    "reset_key",
+    [
+        "team_bridge.screening.budget_per_hour",
+        "team_bridge.screening.unaddressed_budget_per_hour",
+        "team_bridge.screening.ambient_budget_per_hour",
+        "team_bridge.screening.sender_budget_per_hour",
+    ],
+)
+def test_resetting_any_screening_row_restores_the_whole_set(tmp_path: Path, reset_key: str) -> None:
+    """Reset ANY of the four and ALL FOUR return to the shipped defaults.
+
+    ``reset_setting`` never runs ``validate`` (there is nothing to validate when
+    a value is deleted), so resetting one ceiling to its default used to leave a
+    contradicted set behind: the page showed 900/800 while the receiver ran the
+    shipped four (round 1, R-2). The four are one nested set, so the reset is one
+    action too.
+    """
+
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+
+    manager = ConfigManager(tmp_path)
+    rows = {setting.key: setting for setting in settings_io.SETTINGS}
+    # A VALID set far above the defaults, so each of the four has something to
+    # reset and the assertion cannot pass on "the key was already absent".
+    # Outer-first, because each write is judged against the set stored so far.
+    for key, value in (
+        ("team_bridge.screening.budget_per_hour", 1000),
+        ("team_bridge.screening.unaddressed_budget_per_hour", 900),
+        ("team_bridge.screening.ambient_budget_per_hour", 800),
+        ("team_bridge.screening.sender_budget_per_hour", 200),
+    ):
+        settings_io.write_setting(manager, rows[key], value)
+    assert Store(tmp_path).screening_budget == ScreeningBudget(
+        account=1000, ambient=800, unaddressed=900, sender=200
+    )
+
+    settings_io.reset_setting(manager, rows[reset_key])
+
+    # The whole subtree is gone, not just the row that was reset...
+    stored = ConfigManager(tmp_path).get_nested_value(("team_bridge", "screening"), {})
+    assert stored == {}, stored
+    # ... so the receiver and the page agree on the shipped set again.
+    assert Store(tmp_path).screening_budget == ScreeningBudget()
 
 
 def test_a_hand_edited_valid_set_is_adopted_wholesale(tmp_path: Path) -> None:
@@ -376,6 +543,50 @@ def test_one_sender_cannot_spend_more_than_its_share_while_others_still_can(
     # Other senders, and a call of unknown provenance, still reserve.
     _reserve(store, owner, "bmsg_quiet", sender="acc_quiet")
     _reserve(store, owner, "bmsg_unknown")
+
+
+def test_a_re_delivered_message_stops_at_its_senders_ceiling_with_no_owner_notice(
+    tmp_path: Path,
+) -> None:
+    """ONE sender re-delivering ONE message: the SENDER share stops it first.
+
+    The repeat-screening finding in the round-1 review (a real message was
+    screened 155 times over 54 hours) makes this the shape that actually spends
+    an hour: not many messages, but one message arriving again and again from the
+    same sender. Two properties have to hold, so this pins both.
+
+    1. The PER-SENDER ceiling refuses it — 200 of the shipped 400 — and not the
+       account's, so one looping correspondent can never eat the hour that other
+       people, and the owner's own messages, need.
+    2. NO OWNER NOTIFICATION follows. Sender exhaustion is that sender's problem
+       by design: the account still has half its hour, nothing is wrong that the
+       owner could act on, and a notice per looping correspondent would train
+       them to ignore the one that matters. The notify path belongs to the
+       ACCOUNT ceiling (`claim_budget_notification` is the gate every caller
+       raises it through, so a ``None`` here IS the assertion that nothing is
+       raised).
+
+    The shipped set is deliberate rather than a small explicit one: the numbers
+    are the assertion — the refusal lands at exactly half the account ceiling.
+    """
+
+    store, owner = _store_with(tmp_path, ScreeningBudget())
+    for _ in range(Store.SCREENING_SENDER_BUDGET_PER_HOUR):
+        _reserve(store, owner, "bmsg_one_message", sender="acc_loud")
+
+    with pytest.raises(StoreRefused) as refused:
+        _reserve(store, owner, "bmsg_one_message", sender="acc_loud")
+    assert refused.value.code == "sender_exhausted"
+
+    # The account is HALF spent, so the account ceiling is not what refused it:
+    # a different sender, and an unidentified call, both still reserve.
+    assert Store.SCREENING_SENDER_BUDGET_PER_HOUR * 2 == Store.SCREENING_BUDGET_PER_HOUR
+    _reserve(store, owner, "bmsg_one_message", sender="acc_quiet")
+    _reserve(store, owner, "bmsg_one_message")
+
+    # Nothing to tell the owner, and no episode opened for them to be told about.
+    assert store.claim_budget_notification(owner) is None
+    assert store.screening_breaker_state(owner) is None
 
 
 # ----------------------------- (e) refill timing -----------------------------

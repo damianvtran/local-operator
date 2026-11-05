@@ -43,7 +43,6 @@ from local_operator.team_bridge.settings import (
     DEFAULT_TEAM_BRIDGE_SCREENING_BUDGET_PER_HOUR,
     DEFAULT_TEAM_BRIDGE_SCREENING_SENDER_BUDGET_PER_HOUR,
     DEFAULT_TEAM_BRIDGE_SCREENING_UNADDRESSED_BUDGET_PER_HOUR,
-    SCREENING_SUBTREE,
     ScreeningBudget,
 )
 from local_operator.team_bridge.types import (
@@ -306,7 +305,9 @@ CREATE TABLE IF NOT EXISTS claims (
 _SCREENING_SCHEMA = """
 -- -- H3 screening: budget ledger, receipts, holds, policy epoch, breaker ----
 -- The attempts ledger counts TWO independent buckets per account ('logical'
--- screenings and actual 'http' inference dispatches, 40/hour each): the
+-- screenings and actual 'http' inference dispatches, one ceiling each — the
+-- live value is ``team_bridge.screening.*``, see
+-- ``local_operator.team_bridge.settings.ScreeningBudget``): the
 -- conservative physical counter exists because one logical screening can
 -- reach up to three wire attempts (auth re-resolve + fast resend), and both
 -- must be reserved durably BEFORE their I/O.
@@ -1773,20 +1774,29 @@ BODY_TERMINAL_CODES = (
 
 
 #: Resolved ``team_bridge.screening.*`` ceilings, keyed by the config file's
-#: ``(path, mtime_ns, size)`` — the guardrail rule cache's pattern
-#: (``guardrails/rules.py``), for the same reason: the connector constructs a
-#: ``Store`` many times in one turn (~15 sites), and a YAML load per construction
-#: would put config parsing on the receiver's hot path to answer a question whose
+#: IDENTITY (:func:`local_operator.config.config_file_key` — inode, device, size,
+#: ``mtime_ns``, ``ctime_ns``) rather than a hand-rolled ``(path, mtime, size)``.
+#: That is the key the config parser's own memo already uses, and it is strictly
+#: stronger: every writer here replaces the file atomically, so a new inode
+#: alone invalidates the entry, and an in-place rewrite that keeps the length
+#: still moves ``ctime_ns`` (review round 1, R-3). Cached for the reason the
+#: guardrail rule cache is (``guardrails/rules.py``): the connector constructs a
+#: ``Store`` many times in one turn (~15 sites), and a parse per construction
+#: would put config reading on the screening path to answer a question whose
 #: answer changes only when the file does.
 #:
 #: AN EDIT NEEDS NO RESTART AND NO CODE CHANGE: the next construction stats the
 #: file, the key changes and the ceilings are re-read, which is exactly what
-#: ``/settings`` and ``lop config edit`` promise. The stat key cannot see an edit
-#: that leaves BOTH size and ``mtime_ns`` identical (a same-length rewrite inside
-#: the filesystem's timestamp granularity); that edit is honoured at the next
-#: write to the file, and the settings writer moves both.
-_SCREENING_BUDGET_CACHE: dict[tuple[str, int, int], ScreeningBudget] = {}
-_SCREENING_BUDGET_CACHE_MAX = 32
+#: ``/settings`` and ``lop config edit`` promise.
+_SCREENING_BUDGET_CACHE: dict[tuple[int, ...], ScreeningBudget] = {}
+_SCREENING_BUDGET_CACHE_MAX = 64
+
+#: The clamp sets already warned about, so the line is emitted once per DISTINCT
+#: correction rather than once per config-file version: a touch, a rewrite that
+#: changes an unrelated key, or a process restart must not turn one real problem
+#: into a warning per turn. Bounded like the cache above — a config can hold only
+#: a handful of distinct corrections.
+_SCREENING_BUDGET_CLAMPS_WARNED: set[tuple[tuple[str, int, int], ...]] = set()
 
 
 def screening_budget_from_config(config_dir: Path) -> ScreeningBudget:
@@ -1794,78 +1804,80 @@ def screening_budget_from_config(config_dir: Path) -> ScreeningBudget:
 
     WHY THE READ LIVES HERE and the parsing in ``team_bridge.settings``: that
     module is stdlib-only BY CONTRACT (the ``/settings`` registry stays off its
-    import path, so tests import it cheaply) and ``ConfigManager`` is not stdlib.
-    The per-field rules stay in one place (:meth:`ScreeningBudget.from_values`);
-    this function decides where the subtree is read from and whether the set may
-    be adopted at all.
+    import path, so tests import it cheaply) and the config reader is not. The
+    per-field and per-nesting rules stay in one place (:class:`ScreeningBudget`);
+    this function decides where the subtree is read from and what the read may
+    log.
 
-    A READ OF A SETTING DOES NOT CREATE THE STORE IT READS — the rule
-    ``network.store.read_config`` already records for this shape of read:
-    ``ConfigManager.__init__`` mkdirs the config root and creates ``config.yml``
-    when it is absent (right for a WRITER, wrong for reading one subtree), so the
-    short-circuit below returns the shipped ceilings instead. It is not an
-    approximation: a document with no ``team_bridge.screening`` block answers the
-    same ceilings, so the answer is identical and nothing is materialised.
+    THE READ MUST NOT MUTATE THE FILE (review round 1, S-1 / Q-2). The first
+    version built a ``ConfigManager`` here, and its CONSTRUCTOR renames an
+    unparseable ``config.yml`` to ``config.yml.bad.<stamp>`` and prints to
+    stderr. That is right at startup and wrong from a receiver poll that can
+    catch an editor's non-atomic save mid-write: the live config — and with it
+    every setting, not just these four — would move aside from background work.
+    The tree already ruled on this shape (:func:`local_operator.config
+    .read_config_values`, ``cos_name``, ``client``), so the read goes through
+    that reader: same parse, same memo, never writes, moves or reports.
 
-    ALL FOUR OR NONE (operator decision, this change). A budget is adopted only
-    when the WHOLE set is valid; one contradicted cross-field rule falls back to
-    ALL FOUR shipped defaults and logs ONE warning naming the key to change.
-    Honouring half a configured set would put the receiver in a state no line of
-    the config describes — the operator's own account ceiling silently fenced by
-    a stale sibling — and clamping would be worse still: it would leave the file
-    saying something the receiver is not doing, so the next reader would trust a
-    number that is not in force.
+    CLAMPED DOWN, NEVER UP, with one warning naming what is in force (review
+    round 1, S-2 / Q-1). A hand edit that puts a tier above its parent is
+    applied with that tier held down to the parent; the alternative — discarding
+    the whole set and running the SHIPPED, larger one — turned the most likely
+    tightening edit into a 10x RAISE behind a settings page still showing the
+    tighter number. :meth:`ScreeningBudget.clamped` states the rule and returns
+    what was held; the warning below names each key and its value in force.
 
     NEVER RAISES — a receiver that stopped on a mistyped number would stop
     screening altogether, strictly worse than screening at the shipped budget.
-    An unreadable document therefore degrades to the shipped ceilings too.
+    An unreadable document therefore degrades to the shipped ceilings too, and
+    the guard covers a non-``Path`` argument as well: the normalisation is
+    INSIDE it (review round 1, S-7).
     """
 
-    from local_operator.config import CONFIG_FILE_NAME, ConfigManager
+    from local_operator.config import (
+        CONFIG_FILE_NAME,
+        config_file_key,
+        read_config_values,
+    )
 
-    # Normalised ONCE, here: ``Store`` is typed ``Path`` but takes whatever the
-    # caller passes, and ``ConfigManager`` refuses anything that is not a Path —
-    # its TypeError would otherwise land in the ``except`` below and silently
-    # answer the shipped ceilings from a config that says otherwise.
-    directory = Path(config_dir)
-    path = directory / CONFIG_FILE_NAME
     try:
-        info = path.stat()
-    except OSError:
-        # No config file at all (a first run, an isolated test folder): the
-        # shipped ceilings. Deliberately NOT cached — the stat is cheap and the
-        # file may appear on the very next call.
-        return ScreeningBudget()
-    key = (str(path), info.st_mtime_ns, info.st_size)
-    cached = _SCREENING_BUDGET_CACHE.get(key)
-    if cached is not None:
-        return cached
-    try:
-        # The SUBTREE, not the document: a caller cannot hand this reader a
-        # shape it never sees and silently get defaults.
-        raw = ConfigManager(directory).get_nested_value(SCREENING_SUBTREE, {})
-        budget = ScreeningBudget.from_values(raw)
+        directory = Path(config_dir)
+        key = config_file_key(directory / CONFIG_FILE_NAME)
+        if key is None:
+            # No config file at all (a first run, an isolated profile directory):
+            # the shipped ceilings. Deliberately NOT cached — a file appearing on
+            # the very next call must be seen.
+            return ScreeningBudget()
+        cached = _SCREENING_BUDGET_CACHE.get(key)
+        if cached is not None:
+            return cached
+        values = read_config_values(directory)
+        budget, clamped = (
+            # Unreadable or torn right now: the shipped ceilings, which is what
+            # an empty document answers too, so a mid-write read costs nothing.
+            (ScreeningBudget(), ())
+            if values is None
+            else ScreeningBudget.read_from_document(values)
+        )
     except Exception:  # noqa: BLE001 - the contract above is "never raises"
-        budget = ScreeningBudget()
-    else:
-        violated = budget.violations()
-        if violated:
-            # ONE line, naming the key(s) to change and the rule each breaks: the
-            # receiver keeps running at the shipped ceilings, and the operator has
-            # the file and the reason in one place. Cached with the key, so the
-            # warning is logged once per VERSION of the file rather than on every
-            # one of the many constructions in a turn.
-            shipped = ScreeningBudget()
+        return ScreeningBudget()
+    if clamped:
+        # ONE line per distinct correction: which key, what the file said, what
+        # the receiver is doing instead, and the rule that forced the difference.
+        signature = tuple((entry.leaf, entry.configured, entry.in_force) for entry in clamped)
+        if signature not in _SCREENING_BUDGET_CLAMPS_WARNED:
+            if len(_SCREENING_BUDGET_CLAMPS_WARNED) >= _SCREENING_BUDGET_CACHE_MAX:
+                _SCREENING_BUDGET_CLAMPS_WARNED.clear()
+            _SCREENING_BUDGET_CLAMPS_WARNED.add(signature)
             logger.warning(
-                "team_bridge.screening: ignoring the configured screening ceilings "
-                "(%s); using the shipped %d/%d/%d/%d until it is fixed",
-                "; ".join(f"{leaf}: needs {rule}" for leaf, rule in violated),
-                shipped.account,
-                shipped.ambient,
-                shipped.unaddressed,
-                shipped.sender,
+                "team_bridge.screening: held the configured ceilings down to the "
+                "ceilings they are carved out of (%s); in force: %d/%d/%d/%d",
+                "; ".join(entry.describe() for entry in clamped),
+                budget.account,
+                budget.ambient,
+                budget.unaddressed,
+                budget.sender,
             )
-            budget = shipped
     if len(_SCREENING_BUDGET_CACHE) >= _SCREENING_BUDGET_CACHE_MAX:
         _SCREENING_BUDGET_CACHE.clear()
     _SCREENING_BUDGET_CACHE[key] = budget
@@ -4955,7 +4967,8 @@ class Store:
         timestamp, so a clock rollback cannot erase reservations (a
         rolled-back clock makes the window MORE inclusive, which fails
         closed). Missing/corrupt schema or contention surfaces as a refusal
-        — never a reset to 40.
+        -- never a reset to the shipped ceiling
+        (``team_bridge.screening.*``; ``ScreeningBudget`` states it).
         """
 
         return self._reserve_units(

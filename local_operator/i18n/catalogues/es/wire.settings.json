@@ -733,7 +733,7 @@
   "wire.settings.team_bridge_screening_sender_budget_per_hour.help": "La parte del tope de la cuenta que corresponde a un solo remitente; por defecto, la mitad. Ningún remitente puede superar el propio tope de la cuenta.",
   "wire.settings.team_bridge_screening_sender_budget_per_hour.label": "Tope por remitente por hora",
   "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.help": "Sale del tope de la cuenta, nunca se suma a él: todo lo que no sea un mensaje de una persona dirigido a tu agente puede usar como máximo esta parte. El resto queda para las personas.",
-  "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": "Tope de no dirigidos por hora",
+  "wire.settings.team_bridge_screening_unaddressed_budget_per_hour.label": "Tope de no dirigidos / hora",
   "wire.settings.team_bridge_session.help": "Sesión que puede despertarse al recibir mensajes nuevos; vacío = solo un indicador.",
   "wire.settings.team_bridge_session.label": "Sesión de CoS",
   "wire.settings.tool_approval_mode.choice.ask.description": "preguntar antes de las herramientas de escritura/ejecución",

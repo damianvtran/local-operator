@@ -118,8 +118,10 @@ def test_no_setting_can_disable_the_admission_gate():
     ]
     assert [setting.key for setting in screening_rows] == [
         "team_bridge.screening.budget_per_hour",
-        "team_bridge.screening.ambient_budget_per_hour",
+        # Registry order is CONTAINMENT order (design round 1, D4), so the list
+        # below is the nesting as a person reads it, not alphabetical.
         "team_bridge.screening.unaddressed_budget_per_hour",
+        "team_bridge.screening.ambient_budget_per_hour",
         "team_bridge.screening.sender_budget_per_hour",
     ]
     for setting in screening_rows:
