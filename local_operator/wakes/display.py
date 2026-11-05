@@ -27,6 +27,46 @@ def format_age(seconds: float) -> str:
     return f"{hours // 24}d"
 
 
+def format_wake_instant(epoch_ms: int) -> str:
+    """The due instant as ISO-8601 WITH its offset, e.g. '2026-11-05T23:45:00-05:00'.
+
+    Convert at the due instant (not today's tzinfo), so a wake across a DST
+    boundary prints the offset it will actually fire under. A clock reading
+    alone cannot say which day it belongs to (a bare HH:MM resolves to the NEXT
+    occurrence, often tomorrow) and a zone abbreviation alone cannot say which
+    offset was used; this form says both.
+    """
+    return (
+        datetime.fromtimestamp(epoch_ms / 1000, tz=UTC).astimezone().isoformat(timespec="seconds")
+    )
+
+
+def format_wake_at_echo(next_due_at: int, at_text: str | None, now_ms: int) -> str:
+    """``<ISO instant> (from '<input>', read as LOCAL time on this machine)``.
+
+    Empty string for anything that already read as itself (``+30m``, an ISO
+    timestamp with an offset) or when the re-resolution does not reproduce
+    ``next_due_at`` (never quote an instant this text did not produce).
+
+    Exists because a clock reading and the instant it names are two different
+    statements: a caller that wrote ``18:45`` meaning 18:45Z got the device's
+    next 18:45, and nothing in the reply disagreed with what they thought they
+    had asked for. The echo is the one place the resolved instant is put beside
+    the text that produced it.
+    """
+    from local_operator.harness.wake import resolve_wake_at
+
+    if not isinstance(at_text, str) or not at_text.strip():
+        return ""
+    moment = resolve_wake_at(at_text, now_ms)
+    if moment is None or moment.kind != "local" or moment.epoch_ms != next_due_at:
+        return ""
+    return (
+        f"{format_wake_instant(next_due_at)} (from {at_text.strip()!r}, "
+        "read as LOCAL time on this machine)"
+    )
+
+
 def format_wake_time(epoch_ms: int, *, now: datetime | None = None) -> str:
     """Render in the OS local zone at the due instant, including its DST offset.
 

@@ -8415,7 +8415,7 @@ def _wake_create(args: argparse.Namespace) -> int:
             )
         )
         return 0
-    from local_operator.wakes.display import format_wake_time
+    from local_operator.wakes.display import format_wake_at_echo, format_wake_time
 
     # The row as PERSISTED (the message the validator stripped), not the flag
     # as typed: what the listing will show must be what was printed here.
@@ -8426,6 +8426,15 @@ def _wake_create(args: argparse.Namespace) -> int:
         f"({_format_due((outcome.next_due_at - now_ms) / 1000.0)})  "
         f"{row.message if row else request['message']}"
     )
+    # A LOCAL clock reading has just been rendered back in the reader's OWN
+    # clock, which is exactly the clock they typed in — so the row above cannot
+    # show them the difference between what they wrote and the instant that was
+    # stored. Print that instant with its offset, beside the input, for the one
+    # form where the two disagree. An absolute form already said its own
+    # instant, so the echo is empty and nothing is added.
+    echo = format_wake_at_echo(outcome.next_due_at, request.get("at"), now_ms)
+    if echo:
+        print(f"  resolved: {echo}")
     if outcome.supervisor:
         print(f"supervisor: {outcome.supervisor}")
     return 0
