@@ -45,7 +45,9 @@ from local_operator.tools.search_guard import (
     _WRAPPER_LONG_VALUE_FLAGS,
     _WRAPPER_VALUE_FLAGS,
     WRAPPER_WORDS,
+    _comment_end,
     _split,
+    _strip_heredocs,
     _unquote,
 )
 
@@ -910,6 +912,63 @@ _FIND_SELECTING = frozenset(
 _HEREDOC_OPEN_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 
+def _unterminated(command: str) -> bool:
+    """The command ends inside a quote, ``$(``, backtick or heredoc (R7-1).
+
+    A shell would reject or keep reading such text, so the splitter's segments
+    for it are not what would run. Comments are skipped exactly as ``_split``
+    skips them; heredoc bodies are data and are not scanned.
+    """
+    text = _strip_heredocs(command)
+    # The stripped text keeps every opener but blanks terminated bodies; an
+    # opener is unterminated when the ORIGINAL text has no delimiter line
+    # after it.
+    for m in _HEREDOC_OPEN_RE.finditer(command):
+        rest = command[m.end() :].split("\n")[1:]
+        if rest and not any(line.strip() == m.group(2) for line in rest):
+            return True
+    quote: str | None = None
+    depth = 0
+    backtick = False
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if quote == '"':
+            if ch == '"':
+                quote = None
+            elif ch == "$" and text[i + 1 : i + 2] == "(":
+                depth += 1
+                i += 2
+                continue
+            elif ch == "`":
+                backtick = not backtick
+            i += 1
+            continue
+        if (end := _comment_end(text, i)) is not None:
+            i = end
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch == "$" and text[i + 1 : i + 2] == "(":
+            depth += 1
+            i += 2
+            continue
+        elif ch == ")" and depth:
+            depth -= 1
+        elif ch == "`":
+            backtick = not backtick
+        i += 1
+    return quote is not None or depth > 0 or backtick
+
+
 def _heredoc_bodies(command: str) -> list[str]:
     """The bodies of every heredoc in ``command`` (R2: walked when a shell reads one).
 
@@ -1152,6 +1211,9 @@ def _strip_quoted(text: str) -> str:
     return re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", " ", text)
 
 
+#: R7-2: an interpreter body that itself shells out (``os.system`` in a
+#: ``python3 -`` heredoc) is sunk by design — interpreter-executed shell is out
+#: of scope for the heredoc fallback (see the PR's "Not addressed").
 #: R6-3: programs that CONSUME a heredoc as data (commit/PR text, a config,
 #: an interpreter script that is not a shell). A body fed to one of these and
 #: not piped onward is sunk. Deliberately excluded: shells, ``exec``,
@@ -1249,6 +1311,14 @@ class _Walker:
         # bodies are dealt out to segments by counting the openers in each.
         pending_bodies = list(_heredoc_bodies(command))
         pieces = _fd_redirect_merge(_split(command))
+        # R7-1, structural: if the text ends inside a construct the splitter
+        # tracks (quote, ``$(``, backtick, heredoc), its segments are a guess.
+        # A delete word anywhere then fails toward scrutiny, which also covers
+        # the next tokenizer gap of this kind rather than one spelling.
+        if _DELETE_WORD_RE.search(command) and _unterminated(command):
+            self.result.opaque_reasons.append(
+                "command ends inside an unterminated quote, substitution or heredoc"
+            )
         # R3-1: what each pipeline stage writes to its stdout is the NEXT
         # stage's stdin. A heredoc/herestring bound to an upstream stage
         # (``cat <<EOF | bash``) is therefore the script a pipe-fed shell runs.

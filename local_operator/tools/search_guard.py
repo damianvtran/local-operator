@@ -224,6 +224,23 @@ _STORE_STR_RE = re.compile(r"^(?:~|\$HOME|\$\{HOME\})/\.local-operator")
 _HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 
+def _comment_end(command: str, i: int) -> int | None:
+    """End of an unquoted ``#`` comment starting at ``i``, else None.
+
+    A ``#`` starts a comment only at the start of a word (start of input, or
+    after whitespace, ``;``, ``&``, ``|``, ``(``) — ``a#b``, ``${#x}`` and
+    ``$#`` are not comments — and the comment runs to the next newline, which
+    is kept. Without this, an apostrophe in a comment (``# it's stale``) opens
+    a quote that swallows every later line, so a delete on the next line is
+    never seen as its own segment (guardrail review R7-1). Mirrors
+    ``builtin._strip_heredoc_bodies``.
+    """
+    if command[i] != "#" or (i > 0 and command[i - 1] not in " \t\n;&|("):
+        return None
+    nl = command.find("\n", i)
+    return len(command) if nl == -1 else nl
+
+
 def _strip_heredocs(command: str) -> str:
     """Blank out heredoc BODIES so their text is never read as commands.
 
@@ -253,6 +270,10 @@ def _strip_heredocs(command: str) -> str:
             if ch == quote:
                 quote = None
             i += 1
+            continue
+        if (end := _comment_end(command, i)) is not None:
+            out.append(command[i:end])
+            i = end
             continue
         if ch in ("'", '"'):
             quote = ch
@@ -341,6 +362,9 @@ def _split(command: str) -> list[tuple[str, bool, str]]:
                 i += 2
                 continue
             i += 1
+            continue
+        if (end := _comment_end(command, i)) is not None:
+            i = end
             continue
         if ch in ("'", '"'):
             quote = ch

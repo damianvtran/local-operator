@@ -828,3 +828,63 @@ def test_r6_2_stderr_log_is_not_sunk(home: Path, command: str) -> None:
 )
 def test_r6_3_body_consumed_by_non_shell_is_sunk(home: Path, command: str) -> None:
     assert _classify(home, command, cwd=home / "repo").risk is Risk.LOW
+
+
+# -- Round 7 review repros (R7-*) ---------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        f"# clear old ds* results, they're stale\n{_INCIDENT_BODY} 2>/dev/null",
+        "# don't keep it\nrm -rf ~/.local-operator",
+        "# remove stale state, it's corrupt\nrm -rf ~",
+        "cd /tmp # it's fine\nrm -rf ~/.local-operator",
+        '# say "hi\nrm -rf ~/.local-operator',
+        "# remove it\nrm -rf ~/.local-operator",
+        "true; # it's fine\nrm -rf ~/.local-operator",
+        "bash <<'EOF'\n# it's stale\nrm -rf ~/.local-operator\nEOF",
+        "cat <<'EOF' | bash\n# it's stale\nrm -rf ~/.local-operator\nEOF",
+        "exec 3<<'EOF'; cat <&3 | bash\n# it's stale\nrm -rf ~/.local-operator\nEOF",
+    ],
+)
+def test_r7_1_comment_with_quote_does_not_hide_later_lines(home: Path, command: str) -> None:
+    assert _classify(home, command).risk is Risk.CRITICAL
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo 'unterminated && rm -rf ~/.local-operator",
+        'echo "unterminated; rm -rf build',
+        "echo $(unterminated; rm -rf build",
+        "echo `unterminated; rm -rf build",
+    ],
+)
+def test_r7_1_unterminated_construct_with_delete_word_is_at_least_high(
+    home: Path, command: str
+) -> None:
+    assert _classify(home, command, cwd=home / "repo").risk >= Risk.HIGH
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo "it\'s # not a comment" && rm -rf build',
+        "echo 'a#b' && rm -rf build",
+        "echo a#b; rm -rf build",
+        "git log --format='%h # %s' | head",
+        "echo ${#PATH}; ls",
+        "echo unterminated 'quote here",
+    ],
+)
+def test_r7_1_hash_that_is_not_a_comment(home: Path, command: str) -> None:
+    assert _classify(home, command, cwd=home / "repo").risk is Risk.LOW
+
+
+def test_r7_1_split_ends_comment_at_newline() -> None:
+    from local_operator.tools.search_guard import _split
+
+    texts = [t for t, _p, _o in _split("# it's stale\nrm -rf x")]
+    assert texts[-1] == "rm -rf x"
+    assert [t for t, _p, _o in _split('echo "it\'s # x"; ls')] == ['echo "it\'s # x"', "ls"]
