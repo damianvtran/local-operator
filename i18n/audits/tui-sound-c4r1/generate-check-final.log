@@ -1,0 +1,3 @@
+[run_bounded] memory budget 1500 MiB (explicit, capped by inherited); sampled owned child group and escaped descendants
+generate.py --check: 127 artifact(s) byte-identical
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=7065893be37c4ae0b03d97f0a239354b completion=/Users/damian/.local-operator/sessions/796c1db4d0d0/scratchpad/run-bounded-runs/7065893be37c4ae0b03d97f0a239354b.completion.json

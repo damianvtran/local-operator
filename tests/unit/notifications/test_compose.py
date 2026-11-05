@@ -355,9 +355,11 @@ def test_the_contract_version_is_the_one_the_wire_advertises() -> None:
     """
     import asyncio
 
+    from starlette.requests import Request
+
     from local_operator.server.routes.capabilities import capabilities
 
-    result = asyncio.run(capabilities()).result
+    result = asyncio.run(capabilities(Request({"type": "http", "headers": []}))).result
     # `CRUDResponse.result` is a permissive union, so the shape is asserted
     # before it is indexed — which is also what makes a failure here say
     # "capabilities stopped returning a mapping" rather than a TypeError.

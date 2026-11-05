@@ -3356,6 +3356,68 @@
       },
       "status": "passed",
       "note": "Independent PR #3444 round-1 audit at 7aaf064e9be23af750545af93b5f957e596ccb2d, en source 6563c33968e12cd621bd08cd59d03e143fdb6d8148c50ef52e14aa5c62c3c378. Scope: 2 added notify.screening_model_unavailable title/body keys versus origin/main; 57 existing keys byte-identical to reviewed baseline, previous passed rows preserved. Read en context, glossary and locale guide. All preserve: preferred Sonnet/Opus via Anthropic/Radient FIRST, then own default/fallback cascade; none could run; NEW messages HELD before agent sees them; nothing lost; sign in/top up/check default; automatic re-screening. No delivered/safe/rejected/deleted/human-review implication. Exact namespace key parity 59/59; new keys have no placeholders, ICU selectors or plurals (same as en), so no plural arms added; existing CLDR forms unchanged. Product/model names preserved, NFC and no Cf controls in new copy. Single independent semantic audit, not a separate high-visibility second-audit/design sign-off. No defects. tác nhân, sàng lọc, bị giữ, bạn; NFC, default/fallback ordering and nạp tín dụng meaning preserved. 0 unresolved blocker/major; all identified defects fixed by this audit commit. Provenance: Sonnet 5.5 performed semantic reads across all seven locales and selected fixes; quota HTTP 429 triggered Opus 5.5 switch notice followed by GPT-6.1 Sol, with no audit work performed under Opus; GPT-6.1 Sol re-checked semantics/fixes, viewed Urdu fixture, completed ledger and validation. Translator model is unrecorded: neither PR body nor commits name actual serving model; not inferred from launch model (precedent PR #3400). "
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "8b0869de5ef6ddb2fae104890ae7f9a9ce1f44448464b947c24f232f5b82f4bf",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C1-i18n-audit-r1 / i18n-auditor / 725a399d7a94",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of all 27 keys at PR #3398 head 530aa6d50f6c65e9c089d84d0d5c1ef5cc96a6af. Applies to the audited scratch artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. VI1 minor fixed in three strings: «dải thông báo» for a UI notification banner instead of the generic slogan/banner word «biểu ngữ». VI2 minor fixed: «Marimba êm» for the softened instrument image. VI3 minor fixed: idiomatic gradual hum «Tiếng ngân tăng dần». All NFC; config token `system` retained. Exact keys, code literals and placeholders preserved; no ICU plural/select messages; all 14 sidecar-bounded labels fit. No rendered-layout/native-terminal proof in this audit. Translator attribution supplied by delegation brief; actual auditor model openai/gpt-6.1-sol, no fallback used."
+    },
+    {
+      "locale": "vi",
+      "namespace": "wire.notification_sound",
+      "source_sha256": "026a4b22e63d2c2b3694c7cc240a9df67b6dcc196c80caf3580066d3e0759bee",
+      "translator": {
+        "agent": "coder (i18n-translator)",
+        "model": "anthropic/claude-opus-5-5",
+        "date": "2026-11-03"
+      },
+      "auditor": {
+        "agent": "C2-i18n-audit-r1 / independent i18n-auditor / 59f6db02601e",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-03",
+        "result": "passed",
+        "findings": 0
+      },
+      "status": "passed",
+      "note": "Independent linguistic audit of 24 new keys plus changed id.help at PR #3403 head c6eef0674d3c22272092fb4d580eb4d65e543311; full 51-key artifact carries 26 unchanged C1 audited values from prior audit session 725a399d7a94. Applies only after incorporating the full audited artifact, not uncorrected drafts. Unresolved blocker/major: 0/0. No linguistic changes needed. Mã băm correctly identifies content hash; có sẵn/tùy chỉnh distinguish built-in/custom; NFC and approved orthography retained. All keys, placeholder sequences and backticked literals match English; no ICU plural/select messages; 14 bounded carried labels fit. Actual caps verified in implementation: 50 custom sounds, 40 name characters, 10 seconds. No new rendered-layout/audio/native-RTL certification; not a second safety audit. Translator identity supplied by manager; actual auditor model openai/gpt-6.1-sol, no fallback."
+    },
+    {
+      "locale": "vi",
+      "namespace": "tui.sound",
+      "source_sha256": "ba467980099545040c0860e47d673d50b5f2f60cd261426538ccf64c3a13e888",
+      "translator": {
+        "agent": "i18n-translator-r2",
+        "session": "1d36d618f249",
+        "job": "1ddc1da8273c",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "fallback_used": false
+      },
+      "auditor": {
+        "agent": "C4-i18n-delta / independent i18n-auditor",
+        "session": "304e031dccf4",
+        "model": "openai/gpt-6.1-sol",
+        "date": "2026-11-04",
+        "result": "passed",
+        "findings": 0,
+        "fallback_used": false
+      },
+      "status": "passed",
+      "note": "Round 2 delta: 7 changed/added keys independently audited; 22 unchanged round-1 values retained byte-identically; default removed. Supersedes c4r1 for the new English source hash, preserving prior ledger history. Original translator/auditor provenance for carried values: i18n/audits/evidence/vi/tui.sound/c4r1/record.json. Round-2 proof: i18n/audits/evidence/vi/tui.sound/c4r2/record.json. 0 unresolved blocker/major. No fallback; no native-terminal shaping or speaker proof."
     }
   ]
 }

@@ -299,6 +299,24 @@ _DERIVED_DECLARATIONS: dict[str, tuple[int, str]] = {
         "agent directory, never in a session directory, and is skipped by clone, "
         "export and import through the same ``.avatar.`` prefix rule",
     ),
+    "local_operator/notifications/custom_sounds.py": (
+        1,
+        "``INDEX_FILE`` ('index.json'): the custom notification-sound index, which lives "
+        "ONLY at <config>/sounds/custom/index.json (``custom_sounds.store_root()``) beside "
+        "the user's <id>.wav files. It is never an entry of a session directory, so no "
+        "session copy carries it. It is machine-level by design: the sounds are the user's "
+        "own audio on this computer, selected by a machine-wide setting, and a moved or "
+        "forked session neither owns nor needs them.",
+    ),
+    "local_operator/notifications/sound.py": (
+        2,
+        "``THROTTLE_FILE`` ('notification-sound.last') and ``RECEIPT_FILE`` "
+        "('notification-sounds.jsonl'): the machine-wide notification-sound throttle "
+        "stamp and the NULL-backend QA receipt, both under <config>/run/ "
+        "(``sound.run_dir()``), never an entry of a session directory -- so no session "
+        "copy carries them. Both are machine-local by design: the throttle bounds sounds "
+        "on THIS computer's speakers",
+    ),
     "local_operator/notifications/store.py": (
         1,
         "notifications.db is the machine-wide config-root inbox, not a session "

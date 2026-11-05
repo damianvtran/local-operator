@@ -175,6 +175,30 @@ class _LocalOps:
             self._client = client_mod.MeshCredentialClient.for_relay(self._server)
         return self._client
 
+    def catalogue(self, frame: dict[str, Any]) -> dict[str, Any]:
+        from local_operator.network.credentials.catalogue import ERROR_CODES
+        from local_operator.network.types import MeshRefusal
+
+        if set(frame) - {"op", "req", "credential_key", "provider", "ttl", "validator"}:
+            return {"kind": "error", "code": "catalogue_invalid"}
+        client = self._source()
+        if client is None:
+            return {"kind": "error", "code": "not_a_holder"}
+        try:
+            return client.fetch_catalogue_metadata(
+                str(frame.get("credential_key") or ""),
+                provider=str(frame.get("provider") or ""),
+                ttl=frame.get("ttl", 60),
+                validator=frame.get("validator", ""),
+            )
+        except MeshRefusal as exc:
+            return {
+                "kind": "error",
+                "code": exc.code if exc.code in ERROR_CODES else "catalogue_unavailable",
+            }
+        except Exception:
+            return {"kind": "error", "code": "catalogue_unavailable"}
+
     def grant(self, frame: dict[str, Any]) -> dict[str, Any]:
         from local_operator.network.credentials.types import (
             peer_affinity,
@@ -346,6 +370,7 @@ def install(server: RelayServer) -> None:
         {"net_broker": handler},
         local_handlers={
             "credential_grant": ops.grant,
+            "credential_catalogue": ops.catalogue,
             "credential_report": ops.report,
             "credential_placement": ops.placement,
             "credential_revoke": ops.revoke,

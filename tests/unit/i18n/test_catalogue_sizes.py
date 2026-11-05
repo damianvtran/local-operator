@@ -88,6 +88,7 @@ def test_the_deferred_set_is_exactly_the_reviewed_one() -> None:
         "wire.host_speed",
         "wire.radient_saver",
         "wire.aida_cadence",
+        "wire.notification_sound",
         "wire.exec",
         "wire.remote_compute",
         "wire.slash",

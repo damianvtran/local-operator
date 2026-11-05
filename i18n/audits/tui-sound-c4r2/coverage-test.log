@@ -1,0 +1,16 @@
+[run_bounded] memory budget 1500 MiB (explicit); sampled owned child group and escaped descendants
+local stall report: ON (900s of no completed test), reporting only. Silence the report with LOCAL_OPERATOR_LOCAL_STALL_SECONDS=0 (a per-test bound survives that).
+/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/lib/python3.14/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+/Users/damian/local-operator/.worktrees/c4-i18n-r2/.venv/lib/python3.14/site-packages/pytest_asyncio/plugin.py:300: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the "fixture" caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to "function" scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+bringing up nodes...
+bringing up nodes...
+
+...................................                                      [100%]
+35 passed in 9.02s
+[run_bounded] contract=command-status rc=0 cause=child-exit cleanup=unknown invocation_id=ca744d9e25ff41a6a1781985c56b9eab completion=/Users/damian/.local-operator/sessions/304e031dccf4/scratchpad/c4-i18n-audit-r2/homes/validators/config/run-bounded-runs/ca744d9e25ff41a6a1781985c56b9eab.completion.json
