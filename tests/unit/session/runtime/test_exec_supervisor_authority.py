@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+import socket
 import time
 from pathlib import Path
 
@@ -32,12 +34,47 @@ import pytest
 from local_operator.config import ConfigManager
 from local_operator.harness.approval import (
     OPERATOR_CAP_BYTES,
+    SupervisorCapChannel,
     deliver_operator_cap_to,
     mint_operator_cap,
     open_supervisor_cap_channel,
     reset_operator_caps_for_tests,
 )
 from local_operator.session.runtime import registry
+
+
+def _runtime_cap_fd(channel: SupervisorCapChannel) -> int:
+    # A real spawn gives the runtime its own descriptor table. In-process rigs
+    # must instead duplicate: delivery consumes its fd, while the channel still
+    # owns the socket object behind pass_fds and closes it when reading finishes.
+    return os.dup(int(channel.argv[1]))
+
+
+def test_channel_cleanup_preserves_a_recycled_runtime_descriptor() -> None:
+    """Force reuse, rather than hoping a background thread opens the next fd."""
+    channel = open_supervisor_cap_channel()
+    source, peer = socket.socketpair()
+    peer.settimeout(1.0)
+    runtime_fd = _runtime_cap_fd(channel)
+    cap = mint_operator_cap()
+    try:
+        assert deliver_operator_cap_to(runtime_fd, cap) is True
+        # Preallocated sockets cannot accidentally take the consumed slot. Only
+        # dup2 reuses it, so this detects stale ownership without sleeps or load.
+        os.dup2(source.fileno(), runtime_fd)
+        os.fstat(runtime_fd)
+        assert channel.read(timeout_s=1.0) == cap
+        os.fstat(runtime_fd)
+        assert os.write(runtime_fd, b"replacement") == len(b"replacement")
+        assert peer.recv(len(b"replacement")) == b"replacement"
+    finally:
+        channel.close()
+        # Restore our synthetic slot even on the negative-control failure path;
+        # cleanup must not mask EBADF from the assertion or close an unrelated fd.
+        os.dup2(source.fileno(), runtime_fd)
+        os.close(runtime_fd)
+        source.close()
+        peer.close()
 
 
 @pytest.mark.asyncio
@@ -55,8 +92,8 @@ async def test_the_channel_carries_the_capability_upward_and_closes_both_ends() 
     channel = open_supervisor_cap_channel()
     assert channel.argv[0] == "--supervisor-fd"
     assert channel.pass_fds == (channel.pass_fds[0],), "the descriptor pair is not a pair"
-    child_fd = int(channel.argv[1])
-    assert child_fd in channel.pass_fds
+    assert int(channel.argv[1]) in channel.pass_fds
+    child_fd = _runtime_cap_fd(channel)
 
     cap = mint_operator_cap()
     assert deliver_operator_cap_to(child_fd, cap) is True
@@ -86,10 +123,11 @@ async def test_a_supervisor_that_never_reads_gets_nothing_and_leaks_nothing() ->
     # A SHORT read is refused rather than padded: a capability this side invented
     # is one the run never held.
     partial = open_supervisor_cap_channel()
-    import os
-
-    os.write(int(partial.argv[1]), b"short")
-    os.close(int(partial.argv[1]))
+    partial_fd = _runtime_cap_fd(partial)
+    try:
+        os.write(partial_fd, b"short")
+    finally:
+        os.close(partial_fd)
     assert partial.read(timeout_s=1.0) is None
     assert partial.closed is True
 
@@ -282,7 +320,7 @@ async def test_the_supervisor_approves_a_card_through_the_upward_handoff(
         session,
         cwd=str(tmp_path),
         supervised=True,
-        supervisor_fd=int(channel.argv[1]),
+        supervisor_fd=_runtime_cap_fd(channel),
     )
     try:
         # THE ENDPOINT LINE IS WHAT NAMES THE PID the supervisor keys the credential
@@ -346,7 +384,7 @@ async def test_the_runs_own_tool_child_cannot_answer_its_own_card(
     session = _AttachableSession()
     channel = open_supervisor_cap_channel()
     control = await start_exec_control(
-        session, cwd=str(tmp_path), supervised=True, supervisor_fd=int(channel.argv[1])
+        session, cwd=str(tmp_path), supervised=True, supervisor_fd=_runtime_cap_fd(channel)
     )
     try:
         assert channel.read(timeout_s=5.0) is not None
