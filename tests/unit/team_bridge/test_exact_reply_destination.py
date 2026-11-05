@@ -251,13 +251,15 @@ async def test_reply_a_cannot_be_sent_to_authorized_conversation_b(bound_runtime
 async def test_each_delivery_and_multiple_replies_bind_independently(bound_runtime, deliveries):
     runtime, client, _ = bound_runtime
     runtime.bridge_input_presented = True
-    for conversation, message in (*deliveries, deliveries[0]):
+    # Distinct bodies: the third post returns to the first conversation, and an
+    # identical body there would be refused as a duplicate by the reply guard.
+    for index, (conversation, message) in enumerate((*deliveries, deliveries[0])):
         out = await execute_bridge(
             runtime,
             {
                 "op": "channel_post",
                 "channel_id": conversation,
-                "body": "correct reply",
+                "body": f"correct reply {index}",
                 "in_reply_to_message_id": message,
             },
         )

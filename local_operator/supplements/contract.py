@@ -84,6 +84,9 @@ MAX_COMPONENTS: Final = 3
 #: a row that does hit the bound discloses the cut with ``sounds_more`` (the
 #: ``files_more`` precedent) instead of dropping the tail silently.
 SOUNDS_MAX: Final = 200
+#: Withheld names per row: a notice, not an inventory -- the count past it is
+#: ``withheld_more``.
+WITHHELD_MAX: Final = 10
 #: ``supplement_steer`` text bound, in characters (memo §2.7 ops table).
 STEER_TEXT_MAX_CHARS: Final = 500
 
@@ -111,6 +114,8 @@ class SupplementFile(TypedDict):
     #: The answer's own prose links this path. Additive and optional: a reader that does not
     #: know it paints the callout as before (older builds read rows by key).
     linked_in_answer: NotRequired[bool]
+    #: The agent pinned it (``deliver`` on bash/eval). Omitted when False.
+    pinned: NotRequired[bool]
 
 
 class SupplementComponent(TypedDict):
@@ -132,6 +137,25 @@ class SupplementSound(TypedDict):
     mime: str
     title: str
     duration_s: float
+    #: ``"file"`` for audio the turn WROTE to disk (an mp3 under the scratchpad), stored
+    #: into the AttachmentStore so every existing player plays it. ABSENT for generated
+    #: sounds, so a generated row stays byte-identical. ``path`` is the display path
+    #: (cwd- or ``~``-relative, never absolute) and ``pinned`` mirrors the file entry.
+    origin: NotRequired[str]
+    path: NotRequired[str]
+    pinned: NotRequired[bool]
+
+
+class SupplementWithheld(TypedDict):
+    """A deliverable the agent pinned or the answer named that the gates refused.
+
+    NAME ONLY, never a path (the row replicates to peers). ``reason`` is one of
+    ``outside`` | ``sensitive`` | ``missing`` | ``too-large``; a surface renders
+    "N files not shown: <reason>" so a refusal is never silent.
+    """
+
+    name: str
+    reason: str
 
 
 class SupplementImage(TypedDict):
@@ -184,6 +208,10 @@ class SupplementDetails(TypedDict):
     more: NotRequired[list[str]]
     images: NotRequired[list[SupplementImage]]
     sounds: NotRequired[list[SupplementSound]]
+    #: Refused pinned/answer-named deliverables (<= ``WITHHELD_MAX``), and how many more
+    #: were cut. A row holding ONLY these is still written and still renders.
+    withheld: NotRequired[list[SupplementWithheld]]
+    withheld_more: NotRequired[int]
     decision: NotRequired[SupplementDecision]
     instruction: NotRequired[str]
     model: NotRequired[str]
@@ -275,7 +303,15 @@ def reader_disposition(row: Mapping[str, Any], *, job_live: bool) -> ReaderDispo
         # (the block never draws a header — memo §2.8, 2026-10-10 amendment).
         return (
             "block"
-            if (row.get("files") or row.get("components") or row.get("images") or row.get("sounds"))
+            if (
+                row.get("files")
+                or row.get("components")
+                or row.get("images")
+                or row.get("sounds")
+                # A withheld-only row is content: "1 file not shown" is the whole point of
+                # it, and rendering nothing would make the refusal silent again.
+                or row.get("withheld")
+            )
             else "nothing"
         )
     if state == "failed":
@@ -286,7 +322,11 @@ def reader_disposition(row: Mapping[str, Any], *, job_live: bool) -> ReaderDispo
         line = "preparing" if job_live else "cancelled_retry"
     else:
         return "nothing"
-    return _WITH_FILES[line] if (row.get("files") or row.get("sounds")) else line
+    return (
+        _WITH_FILES[line]
+        if (row.get("files") or row.get("sounds") or row.get("withheld"))
+        else line
+    )
 
 
 def newest_per_anchor(rows: Iterable[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:

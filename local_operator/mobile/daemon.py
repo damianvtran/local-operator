@@ -40,6 +40,7 @@ import re
 import secrets
 import sqlite3
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -76,6 +77,7 @@ from local_operator.i18n.frames import config_frame_payload
 from local_operator.i18n.keys import relay_login
 from local_operator.i18n.messages import Msg, render
 from local_operator.i18n.resolve import resolve_language
+from local_operator.macos_disclaim import spawn_disclaimed
 from local_operator.mobile import mesh as mobile_mesh
 from local_operator.mobile import projects as mobile_projects
 from local_operator.mobile import push_devices as mobile_push_devices
@@ -107,7 +109,6 @@ from local_operator.mobile.types import (
     SubagentRow,
 )
 from local_operator.network.types import MeshRefusal
-from local_operator.procstate import detached_popen_kwargs
 from local_operator.session.creation import session_created_at
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import ENGAGED_ENV, reported_subagent_count
@@ -3771,6 +3772,49 @@ def _mirror_dial_health(entry: SessionEntry) -> None:
         entry.projection.degraded = bool(entry.degraded)
 
 
+def _spawn_watched_runtime(
+    loop: asyncio.AbstractEventLoop,
+    exited: asyncio.Future[int],
+    argv: list[str],
+    **kwargs: Any,
+) -> Any:
+    """Spawn a phone-started runtime disclaimed, and park ONE thread on its exit.
+
+    WHY A THREAD: ``spawn_disclaimed`` returns a ``Popen`` or ``DisclaimedProcess``
+    with a blocking ``wait``. ``create_subprocess_exec`` used to give two things for
+    free: an awaitable exit, which ``_spawn_session`` races against readiness, and a
+    reap through asyncio's child watcher. Without a waiter, a detached child that
+    exits after the relay stopped watching (a timed-out start the relay must not
+    signal, or a runtime's normal idle exit) stays ``<defunct>`` under a relay that
+    lives for weeks. That is the leak ``launch._harvest_on_exit`` was written for.
+    One daemon thread parked on ``wait()`` covers both: it reaps the child whatever
+    the outcome of the start, and it resolves ``exited`` for the race. Not
+    ``SIGCHLD``/``waitpid(-1)``, which are process-wide and could steal another
+    child's status (same reasoning as ``_harvest_on_exit``).
+
+    The thread starts INSIDE this function, which runs under ``asyncio.to_thread``,
+    so a caller cancelled while the spawn is in flight still leaves its child
+    reaped. The future is resolved through ``call_soon_threadsafe``, and only if it
+    is still pending, so a finished start's cancelled future, or a closed loop,
+    cannot make the reaper raise.
+    """
+    process = spawn_disclaimed(argv, **kwargs)
+
+    def resolve(code: int) -> None:
+        if not exited.done():
+            exited.set_result(code)
+
+    def reap() -> None:
+        code = process.wait()
+        try:
+            loop.call_soon_threadsafe(resolve, code)
+        except RuntimeError:  # loop closed: nobody is racing the exit any more
+            pass
+
+    threading.Thread(target=reap, name=f"reap-phone-{process.pid}", daemon=True).start()
+    return process
+
+
 # ---------------------------------------------------------------------------
 # The daemon
 # ---------------------------------------------------------------------------
@@ -5416,9 +5460,10 @@ class MobileDaemon:
         # The claim is set in a WARM child's environment, so a daemon started
         # from inside a session inherits it and — without this line — hands every
         # session it starts a record claiming an engage that never happened, i.e.
-        # the 300 s keep-alive window bought by the wrong fact. This is the one
-        # runtime spawn outside ``launch._spawn_runtime``, so it does not get
-        # that function's scrub (review round 1, M1).
+        # the 300 s keep-alive window bought by the wrong fact. This spawn builds
+        # its environment by hand rather than through ``launch._spawn_runtime``, so
+        # it does not get that function's scrub (review round 1, M1). It DOES share
+        # that function's spawn primitive (``spawn_disclaimed``, below).
         env.pop(ENGAGED_ENV, None)
         # A daemon started from a wake-owned runtime is not that supervisor.
         # Match the viewer spawn's ownership boundary: only the actual minting
@@ -5452,7 +5497,31 @@ class MobileDaemon:
         argv0, executable = procname.spawn_identity(
             procname.LABEL_SESSION_ANON, id=str(session_id)[:8]
         )
-        process = await asyncio.create_subprocess_exec(
+        # A SURFACE DYING IS A DISPLAY EVENT, NOT A LIFECYCLE EVENT (operator,
+        # 2026-11): closing or force-quitting any surface -- the app, the TUI, this
+        # relay -- must never terminate a runtime. ``setsid`` alone does not buy
+        # that on macOS. On 2026-10-09 an Activity Monitor force-quit SIGTERMed
+        # nine detached runtimes within 17 ms because they still sat in the app's
+        # macOS RESPONSIBILITY scope, which survives ``setsid`` and reparenting
+        # (see ``local_operator.macos_disclaim``). Every other runtime spawn
+        # (``launch._spawn_runtime``, standby warms, ``lop exec``) already goes
+        # through ``spawn_disclaimed``. This one used ``create_subprocess_exec`` +
+        # ``detached_popen_kwargs`` and so stayed in whatever responsibility chain
+        # the relay sat in, e.g. a relay started from inside the app's tree.
+        #
+        # Constraints kept: the helper's fallback (non-macOS, missing symbols, a
+        # refused attribute) is exactly the old ``Popen`` +
+        # ``detached_popen_kwargs()`` -- Windows keeps its console detachment --
+        # and it logs why it fell back, never silently. It is SYNCHRONOUS
+        # (posix_spawn/Popen), so it runs off the loop. It returns a
+        # ``Popen``/``DisclaimedProcess``, not an asyncio ``Process``: see
+        # ``_spawn_watched_runtime`` for how exit and reaping are observed.
+        loop = asyncio.get_running_loop()
+        exited: asyncio.Future[int] = loop.create_future()
+        process = await asyncio.to_thread(
+            _spawn_watched_runtime,
+            loop,
+            exited,
             # ``python_argv``'s shape with the label in element 0: the label
             # replaces only argv[0], and ``SAFE_PATH_FLAG`` stays at index 1
             # because interpreter options are recognised only before ``-m``.
@@ -5463,13 +5532,15 @@ class MobileDaemon:
             # ``session/runtime/launch.py``, and harder to notice here because
             # nobody is watching a phone daemon's version. See
             # :mod:`local_operator.interpreter`.
-            argv0,
-            SAFE_PATH_FLAG,
-            "-m",
-            # THE SPAWN CONTRACT, from its one home: the residency sweep's census
-            # matches this module by this exact argv word, so a literal here could
-            # drift from ``session/runtime/launch.py``'s without anything failing.
-            RUNTIME_MODULE,
+            [
+                argv0,
+                SAFE_PATH_FLAG,
+                "-m",
+                # THE SPAWN CONTRACT, from its one home: the residency sweep's census
+                # matches this module by this exact argv word, so a literal here could
+                # drift from ``session/runtime/launch.py``'s without anything failing.
+                RUNTIME_MODULE,
+            ],
             executable=executable,
             env=env,
             # Detached stdio: the child speaks through its record and socket;
@@ -5478,14 +5549,6 @@ class MobileDaemon:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            # REAL detachment, per platform. ``start_new_session=True`` is
-            # documented "(POSIX only)" and the Windows ``_execute_child``
-            # parameter is literally ``unused_start_new_session``: a child
-            # spawned for a phone session would silently stay on this daemon's
-            # console, where a console close takes it down — the one thing this
-            # spawn exists to survive. The helper also keeps POSIX on
-            # ``setsid`` (byte-identical behaviour there).
-            **detached_popen_kwargs(),
         )
 
         async def ready() -> None:
@@ -5502,7 +5565,6 @@ class MobileDaemon:
                 await asyncio.sleep(0.05)
 
         readiness = asyncio.create_task(ready())
-        exited = asyncio.create_task(process.wait())
         try:
             async with asyncio.timeout(SESSION_START_TIMEOUT_S):
                 done, _ = await asyncio.wait(
@@ -5515,7 +5577,18 @@ class MobileDaemon:
                 return process.pid
         except BaseException:
             self.release_phone_view(session_id)
-            if process.returncode is None:
+            # ``poll`` rather than ``returncode``: a sync process object only
+            # learns its status when someone asks, and the watcher thread may not
+            # have run yet. It is best-effort, not authoritative: on the ``Popen``
+            # fallback (Linux, Windows) a ``poll`` racing the reaper thread's
+            # blocking ``wait`` can still read ``None`` for a child that has just
+            # exited (only ``DisclaimedProcess`` serialises the two on one lock).
+            # That misread is harmless: the branch below only asks a published,
+            # pid-matched owner to retire itself. ``find_runtime_record`` resolves
+            # only a LIVE owner, so a dead child matches nothing, and a stale match
+            # fails at connect, which the bounded wait below swallows. Either way
+            # nothing is signalled.
+            if process.poll() is None:
                 # A known resume route can receive work from another surface
                 # before this HTTP request finishes. Even a missing welcome is
                 # not proof of an idle constructor: inbox/wake work starts
@@ -5745,6 +5818,11 @@ _SUPPLEMENT_FILE_TYPES: dict[str, str] = {
     ".heic": "image/heic",
     ".heif": "image/heif",
     ".avif": "image/avif",
+    # Video for the written-video preview tile. Inert media types (the player decodes;
+    # nothing executes), still under the 10 MB cap and ``nosniff`` like every entry.
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
 }
 
 #: The read family's response policy (file-serving RFC D5; memo §2.7): the pair rides
@@ -7953,13 +8031,29 @@ def build_app(daemon: MobileDaemon):
                     return "no-cwd"
                 expanded = os.path.join(cwd, expanded)
             resolved_path = Path(os.path.realpath(expanded))
-            allowed_roots = [Path(os.path.realpath(root)) for root in (cwd, home) if root]
+            # The row's own session scratchpad is a root beside cwd/home (a relocated config
+            # dir may sit outside ``~``), mirroring the prefilter that admitted the path.
+            from local_operator.scratchpad import scratchpad_root
+
+            own_pad = scratchpad_root(directory)
+            allowed_roots = [
+                Path(os.path.realpath(root))
+                for root in (cwd, home, str(own_pad) if own_pad is not None else "")
+                if root
+            ]
             if not any(
                 resolved_path == root or resolved_path.is_relative_to(root)
                 for root in allowed_roots
             ):
                 return "missing"
-            if denylist.is_sensitive(str(resolved_path), cwd=cwd or home):
+            # The row's own session scratchpad is servable (the prefilter admitted it under
+            # the same carve-out); every credential rule and every OTHER session's store
+            # stay refused. Derived from the requested session's directory, never the env.
+            if denylist.is_sensitive_for_supplements(
+                str(resolved_path),
+                cwd=cwd or home,
+                session_scratchpad=str(own_pad) if own_pad is not None else None,
+            ):
                 logger.info("supplement file refused by the denylist for %s", session_id)
                 return "missing"
             try:

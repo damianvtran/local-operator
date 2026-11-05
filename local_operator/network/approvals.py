@@ -293,6 +293,20 @@ def new_approval_id() -> str:
     return f"ap_{crockford(token_bytes(8))}"
 
 
+#: A filing session id as typed factories stamp it into a digest-bound ``requested_by``:
+#: 12 lowercase hex (``projects.is_session_id``'s shape) or nothing. Pinned because
+#: those cards bind ``requested_by`` without displaying it field by field, so it may
+#: carry no free bytes; anything else files as the legacy ``""``. Attribution only.
+_FILING_SESSION_CHARS = frozenset("0123456789abcdef")
+
+
+def filing_session(value: object) -> str:
+    """``value`` if it is shaped like a session id, else ``""`` (unattributed)."""
+    if isinstance(value, str) and len(value) == 12 and set(value) <= _FILING_SESSION_CHARS:
+        return value
+    return ""
+
+
 def new_request_id() -> str:
     """``req_<crockford(8 bytes)>`` — minted by the REQUESTING surface (§2.2)."""
     return f"req_{crockford(token_bytes(8))}"

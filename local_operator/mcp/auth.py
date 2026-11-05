@@ -438,6 +438,20 @@ REFRESH_DRAIN_TIMEOUT_S = 2.5
 #: until the rotations still in flight have landed.
 _DETACHED_REFRESH_EXCHANGES: set["asyncio.Task[RefreshOutcome]"] = set()
 
+#: For each detached exchange: the server it is rotating and the loop time by
+#: which it has persisted or given up (its lock-retention bound,
+#: ``REFRESH_HTTP_TIMEOUT_S + REFRESH_LATE_RESPONSE_GRACE_S`` from the start).
+#: Read by the 401 recovery (see :func:`_await_detached_persist`), whose own
+#: ``LOCK_ACQUIRE_TIMEOUT_S`` is SHORTER than that bound: against an issuer that
+#: revokes the old access token at rotation, a request sent with the old token
+#: after the early budget gets its 401 while this exchange still holds the lock,
+#: and the ordinary lock wait expiring first turned a healthy, still-landing
+#: rotation into an authorization prompt (#3337). Weak keys, so the registry
+#: set above stays the one place an entry's lifetime is managed.
+_DETACHED_REFRESH_PERSIST: (
+    "weakref.WeakKeyDictionary[asyncio.Task[RefreshOutcome], tuple[str, float]]"
+) = weakref.WeakKeyDictionary()
+
 #: How long a "presented but unacknowledged" send marker stays live (see
 #: :data:`GRANT_UNCONFIRMED_SEND_KEY`).
 #:
@@ -4520,6 +4534,11 @@ async def _refresh_oauth_token_locked(
     # needs it too, and only a value passed to both can describe the same
     # request.
     send_state = RefreshSendState()
+    # The exchange's own lock-retention bound, fixed at its START: a 401 that
+    # waits for this exchange waits no longer than the exchange itself may run.
+    persist_deadline = (
+        asyncio.get_running_loop().time() + REFRESH_HTTP_TIMEOUT_S + REFRESH_LATE_RESPONSE_GRACE_S
+    )
     exchange: asyncio.Task[RefreshOutcome] = asyncio.ensure_future(
         _perform_refresh_exchange(
             server_url,
@@ -4551,7 +4570,9 @@ async def _refresh_oauth_token_locked(
             server_url,
             REFRESH_HTTP_TIMEOUT_S,
         )
-        _detach_refresh_exchange(exchange, server_url, send_state)
+        _detach_refresh_exchange(
+            exchange, server_url, send_state, persist_deadline=persist_deadline
+        )
         return "overran"
     except asyncio.CancelledError:
         # Routine teardown: every sidebar switch disposes a manager and cancels
@@ -4564,7 +4585,9 @@ async def _refresh_oauth_token_locked(
         # outlived the remainder); the ownership transfer replaces it, and
         # teardown is now immediate instead of blocked for up to
         # ``REFRESH_HTTP_TIMEOUT_S``.
-        _detach_refresh_exchange(exchange, server_url, send_state)
+        _detach_refresh_exchange(
+            exchange, server_url, send_state, persist_deadline=persist_deadline
+        )
         raise
 
 
@@ -4572,6 +4595,8 @@ def _detach_refresh_exchange(
     exchange: "asyncio.Task[RefreshOutcome]",
     server_url: str,
     send_state: RefreshSendState | None = None,
+    *,
+    persist_deadline: float | None = None,
 ) -> None:
     """Make a refresh exchange that outlived its connect safe to leave running.
 
@@ -4600,6 +4625,8 @@ def _detach_refresh_exchange(
     """
 
     _DETACHED_REFRESH_EXCHANGES.add(exchange)
+    if persist_deadline is not None:
+        _DETACHED_REFRESH_PERSIST[exchange] = (server_url, persist_deadline)
 
     def _settle(finished: "asyncio.Task[RefreshOutcome]") -> None:
         _DETACHED_REFRESH_EXCHANGES.discard(finished)
@@ -4698,6 +4725,54 @@ def _waitable_detached_exchanges(
             continue
         waitable.append(task)
     return waitable
+
+
+async def _await_detached_persist(server_url: str) -> None:
+    """Wait for THIS server's detached exchanges, within their persist deadline.
+
+    The 401 recovery calls this before it takes the refresh lock. A detached
+    exchange owns that lock until it has persisted, for up to its own bound
+    (``REFRESH_HTTP_TIMEOUT_S + REFRESH_LATE_RESPONSE_GRACE_S``), and the
+    recovery's lock wait (``LOCK_ACQUIRE_TIMEOUT_S``) is shorter: against an
+    issuer that revokes the old access token at rotation, the lock wait expired
+    while the rotation was still landing and the 401 reached the SDK's
+    authorization branch on a healthy grant (#3337).
+
+    The wait stops ``LOCK_ACQUIRE_TIMEOUT_S`` short of the exchange's deadline,
+    and the caller's ordinary lock acquire covers the rest. That keeps the
+    recovery's TOTAL wait at ``max(persist deadline, now + LOCK_ACQUIRE_TIMEOUT_S)``
+    — never the sum — and leaves every outcome to the code that already decides
+    it: an exchange that lands in time releases the lock and the locked re-read
+    adopts its rotation (or reads its tombstone or armed marker); one that
+    outlives its deadline still holds the lock, so the acquire fails and the
+    contended refusal follows exactly as before. Only exchanges THIS loop can see
+    are waited for; another process's exchange is bounded by the lock wait alone.
+
+    Nothing is cancelled here: ``asyncio.wait`` leaves the exchange running when
+    this waiter is cancelled, and the exchange keeps its lock until it persists.
+    """
+    loop = asyncio.get_running_loop()
+    pending: list["asyncio.Task[RefreshOutcome]"] = []
+    deadline = 0.0
+    for task in _waitable_detached_exchanges(loop):
+        entry = _DETACHED_REFRESH_PERSIST.get(task)
+        if entry is None or entry[0] != server_url:
+            continue
+        pending.append(task)
+        deadline = max(deadline, entry[1])
+    if not pending:
+        return
+    wait_s = deadline - LOCK_ACQUIRE_TIMEOUT_S - loop.time()
+    logger.info(
+        "MCP 401 for %s: waiting up to %.1fs for its detached token refresh to "
+        "persist, then up to %.0fs for the refresh lock, before re-reading the "
+        "store [writer: 401 recovery]",
+        server_url,
+        max(wait_s, 0.0),
+        LOCK_ACQUIRE_TIMEOUT_S,
+    )
+    if wait_s > 0:
+        await asyncio.wait(pending, timeout=wait_s)
 
 
 async def drain_refresh_exchanges(timeout_s: float | None = None) -> bool:
@@ -5946,9 +6021,9 @@ def _make_refresh_coordinating_provider(
                         # the moment a sibling rotates the grant. Other live
                         # sessions then hold a locally-VALID, server-side-REVOKED
                         # token: coordination is skipped, the corpse is sent,
-                        # and this 401 is what comes back. The SDK's answer to a 401 is the FULL
-                        # browser authorization (non-interactive connects turn
-                        # that into McpAuthRequiredError and suspend
+                        # and this 401 is what comes back. The SDK's answer to a
+                        # 401 is the FULL browser authorization (non-interactive
+                        # connects turn that into McpAuthRequiredError and suspend
                         # auto-reconnect), even though the shared store may
                         # already hold the sibling's fresh token. So before the
                         # 401 reaches the SDK, recover under the refresh lock —
@@ -6099,6 +6174,18 @@ def _make_refresh_coordinating_provider(
 
             outcome: RefreshOutcome | None = None
             try:
+                # A 401 for a request sent with the old token after the early
+                # budget detached its exchange (an issuer that revokes old access
+                # at rotation): that exchange still owns the lock below, possibly
+                # longer than the lock wait. Await IT first, so the re-read
+                # adopts its rotation instead of the 401 reaching the SDK's
+                # authorization branch on a healthy grant (#3337).
+                await _await_detached_persist(self._refresh_coord_server_url)
+                if self._is_leaving():
+                    # That wait can outlast a teardown that began meanwhile; the
+                    # refresh arm below must not POST from a leaving session.
+                    self._strip_in_memory_refresh_token(self.context)
+                    return None
                 async with _oauth_refresh_lock(self._refresh_coord_server_url) as lock:
                     stored = await self.context.storage.get_tokens()
                     current = self.context.current_tokens

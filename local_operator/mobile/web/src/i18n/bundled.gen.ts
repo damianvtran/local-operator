@@ -239,6 +239,16 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
       "relay.chrome.spend.title": "Spend & context",
     },
   },
+  "relay.composer": {
+    "en": {
+      "relay.composer.action.connecting": "Connecting",
+      "relay.composer.action.send": "send",
+      "relay.composer.action.steer": "steer",
+      "relay.composer.action.stop": "stop",
+      "relay.composer.action.stop_agent": "stop the agent",
+      "relay.composer.action.stopping": "stopping",
+    },
+  },
   "relay.health": {
     "en": {
       "relay.health.dropped_detail": "Your computer can't reach this session right now and keeps trying. Until it does, a send fails straight away and your text stays in the message box.",
@@ -249,6 +259,15 @@ export const BUNDLED_OWNED: Readonly<Record<string, Readonly<Record<string,
       "relay.health.quiet_detail": "This session on your computer has stopped responding \u2014 it may be busy or stuck. A send can show a failure and still arrive once it catches up. Retrying won't send it twice.",
       "relay.health.reconnecting": "Reconnecting",
       "relay.health.reconnecting_detail": "This phone lost its connection to your computer and keeps trying. The session may still be running there; sending may fail until the connection is back.",
+    },
+  },
+  "relay.highlights": {
+    "en": {
+      "relay.highlights.withheld.line": "{count, plural, one {# file not shown} other {# files not shown}}: {reasons}",
+      "relay.highlights.withheld.reason.missing": "file no longer exists",
+      "relay.highlights.withheld.reason.outside": "outside allowed locations",
+      "relay.highlights.withheld.reason.sensitive": "sensitive file",
+      "relay.highlights.withheld.reason.too_large": "too large to preview",
     },
   },
   "relay.library": {

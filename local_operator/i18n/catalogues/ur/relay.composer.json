@@ -1,0 +1,8 @@
+{
+  "relay.composer.action.send": "بھیجیں",
+  "relay.composer.action.steer": "ہدایت دیں",
+  "relay.composer.action.stop": "روکیں",
+  "relay.composer.action.stopping": "روکا جا رہا ہے",
+  "relay.composer.action.connecting": "جڑ رہا ہے",
+  "relay.composer.action.stop_agent": "ایجنٹ کو روکیں"
+}

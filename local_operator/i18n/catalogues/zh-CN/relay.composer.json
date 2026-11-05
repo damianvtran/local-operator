@@ -1,0 +1,8 @@
+{
+  "relay.composer.action.send": "发送",
+  "relay.composer.action.steer": "引导",
+  "relay.composer.action.stop": "停止",
+  "relay.composer.action.stopping": "正在停止",
+  "relay.composer.action.connecting": "正在连接",
+  "relay.composer.action.stop_agent": "停止智能体"
+}

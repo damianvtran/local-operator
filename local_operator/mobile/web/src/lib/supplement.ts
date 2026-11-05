@@ -120,7 +120,19 @@ export type SupplementSound = {
 	title: string;
 	/** Seconds, from the record that wrote it; `0` when it stated none. */
 	durationS: number;
+	/** `"file"` for audio the turn WROTE to disk (stored into the attachment
+	    store by the runtime, so it plays like a generated sound); `""` for a
+	    generated sound. Informational: the same player renders both. */
+	origin: string;
+	/** The file's display path for a written sound (never absolute); `""`. */
+	path: string;
 };
+
+/** Why a pinned or answer-named file was not shown (core `SupplementWithheld`). */
+export type SupplementWithheldReason = "outside" | "sensitive" | "missing" | "too-large";
+
+/** One refused deliverable: its NAME only (the row never carries the path). */
+export type SupplementWithheld = { name: string; reason: SupplementWithheldReason };
 
 /**
  * One anchor's newest beat, as the relay's projection carries it (the live
@@ -144,6 +156,13 @@ export type SupplementBeat = {
 	 * never an empty player row.
 	 */
 	sounds: SupplementSound[];
+	/**
+	 * Files the agent pinned or the answer named that the server refused, with
+	 * `withheldMore` counting the row's own cut. Rendered as ONE quiet line so a
+	 * refusal is never silent. `[]`/`0` from an older runtime.
+	 */
+	withheld: SupplementWithheld[];
+	withheldMore: number;
 	error: string;
 	/**
 	 * The typed cause of a provider-terminal failure (`provider_<kind>`, the
@@ -221,7 +240,26 @@ function soundFrom(value: unknown): SupplementSound | null {
 		mime: typeof sound.mime === "string" ? sound.mime : "audio/mpeg",
 		title: typeof sound.title === "string" ? sound.title : "",
 		durationS: finiteNumber(sound.duration_s) ?? 0,
+		origin: typeof sound.origin === "string" ? sound.origin : "",
+		path: typeof sound.path === "string" ? sound.path : "",
 	};
+}
+
+const WITHHELD_REASONS: ReadonlySet<string> = new Set(["outside", "sensitive", "missing", "too-large"]);
+
+/** The `withheld[]` array; an entry with no name or an unknown reason is dropped. */
+export function withheldFrom(value: unknown): SupplementWithheld[] {
+	if (!Array.isArray(value)) return [];
+	const out: SupplementWithheld[] = [];
+	for (const item of value) {
+		if (!item || typeof item !== "object") continue;
+		const raw = item as Record<string, unknown>;
+		const name = typeof raw.name === "string" ? raw.name : "";
+		const reason = typeof raw.reason === "string" ? raw.reason : "";
+		if (!name || !WITHHELD_REASONS.has(reason)) continue;
+		out.push({ name, reason: reason as SupplementWithheldReason });
+	}
+	return out;
 }
 
 /**
@@ -282,6 +320,13 @@ export function beatFromWire(value: unknown): SupplementBeat | null {
 		more,
 		components: componentsFrom(raw.components),
 		sounds: soundsFrom(raw.sounds),
+		withheld: withheldFrom(raw.withheld),
+		withheldMore:
+			typeof raw.withheld_more === "number" &&
+			Number.isInteger(raw.withheld_more) &&
+			raw.withheld_more >= 0
+				? raw.withheld_more
+				: 0,
 		error: typeof raw.error === "string" ? raw.error.slice(0, ERROR_MSG_MAX_CHARS) : "",
 		cause: typeof raw.cause === "string" ? raw.cause.slice(0, CAUSE_MAX_CHARS) : "",
 		dismissed: raw.dismissed === true,
@@ -406,7 +451,12 @@ export function supplementDisposition(
 		return "nothing";
 	}
 	if (state === "done") {
-		return beat.files.length || beat.components.length || beat.sounds.length
+		/* A withheld-only row is content: the notice IS the point of it, and
+		   painting nothing would make the refusal silent again. */
+		return beat.files.length ||
+			beat.components.length ||
+			beat.sounds.length ||
+			beat.withheld.length
 			? "block"
 			: "nothing";
 	}
@@ -947,7 +997,10 @@ export function planComponentMounts(
  * and v1 has no download path (native's N5 note: "Preview" for text/image;
  * Share is phase 2).
  */
-export type SupplementFileClass = "text" | "image" | "pdf" | "other";
+export type SupplementFileClass = "text" | "image" | "video" | "pdf" | "other";
+
+/** Served by the relay file route as video (`daemon._SUPPLEMENT_FILE_TYPES`). */
+const VIDEO_SUFFIXES = new Set([".mp4", ".webm", ".mov"]);
 
 const TEXT_SUFFIXES = new Set([".txt", ".log", ".md", ".markdown", ".csv", ".tsv", ".json"]);
 const IMAGE_SUFFIXES = new Set([
@@ -967,6 +1020,7 @@ export function supplementFileClass(path: string): SupplementFileClass {
 	const suffix = dot >= 0 ? path.slice(dot).toLowerCase() : "";
 	if (TEXT_SUFFIXES.has(suffix)) return "text";
 	if (IMAGE_SUFFIXES.has(suffix)) return "image";
+	if (VIDEO_SUFFIXES.has(suffix)) return "video";
 	if (suffix === ".pdf") return "pdf";
 	return "other";
 }
